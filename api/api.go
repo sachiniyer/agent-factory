@@ -24,26 +24,48 @@ import (
 // daemon→disk read path (listSessions, getSessionByTitle, whoamiSession,
 // getSessionByTitleInScope) routes through so the "remote reads never fall back
 // to disk" contract cannot be silently reintroduced at a new read site (#1679,
-// #1681). On daemon success it returns (data, false, nil). On error it returns:
-//   - remote target: (nil, false, err) — surface the real error; a remote daemon
+// #1681). On daemon success it returns (data, skipped, false, nil), where
+// `skipped` carries repos the daemon dropped at startup due to a corrupted
+// instances.json (#603) — the wire-side incompleteness channel the caller uses
+// to refuse or caveat rather than silently serving a partial list as complete
+// (#730's principle extended to the wire surface #1029 PR 2 introduced). On
+// error it returns:
+//   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
 //     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
-//   - local target:  (nil, true, err)  — the caller runs its own disk scan.
+//   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the
 // fallBackToDisk flag before touching disk. This keeps each caller's exact local
 // disk-fallback behavior (diskListSessions / diskWhoami / findInstanceByTitle,
 // including their distinct not-found and corrupt-repo errors) while centralizing
 // the one decision that must never regress: whether disk may be read at all.
-func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, fallBackToDisk bool, err error) {
-	data, err = snapshotViaDaemon(req)
+func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
+	data, skipped, err = snapshotViaDaemon(req)
 	if err == nil {
-		return data, false, nil
+		return data, skipped, false, nil
 	}
 	if apiclient.IsRemoteTarget() {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return nil, true, err
+	return nil, nil, true, err
+}
+
+// skippedRepoIDs extracts the repo IDs from a Snapshot's skipped set, or nil when
+// none were skipped. The IDs are what list/get/whoami surface in their
+// corruption-aware refuse/caveat errors, mirroring the disk-fallback path
+// (diskListSessions / findInstanceByTitle / diskWhoami) so a daemon-up read and
+// a daemon-down read produce the same user-visible signal for the same on-disk
+// corruption.
+func skippedRepoIDs(skipped []daemon.SkippedRepo) []string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		ids = append(ids, s.RepoID)
+	}
+	return ids
 }
 
 // Shared flags

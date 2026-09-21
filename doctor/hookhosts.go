@@ -451,7 +451,8 @@ func daemonSessionInventory() ([]session.InstanceData, error) {
 	// removed.
 	ctx, cancel := context.WithTimeout(context.Background(), hookHostInventoryTimeout)
 	defer cancel()
-	return client.SnapshotCtx(ctx, daemon.SnapshotRequest{})
+	inst, _, err := client.SnapshotCtx(ctx, daemon.SnapshotRequest{})
+	return inst, err
 }
 
 // hookHostInventoryTimeout bounds the daemon read above. Generous: the answer is

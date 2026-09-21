@@ -68,6 +68,78 @@ type SnapshotResponse struct {
 	// state, and additive/gob- and JSON-compatible with older peers that ignore
 	// the field.
 	DeliveryAlarms []DeliveryAlarm `json:"delivery_alarms,omitempty"`
+	// SkippedRepos names repos whose instances.json was corrupted and dropped at
+	// daemon startup (#603), so a snapshot served after the drop carries the
+	// incompleteness to clients instead of silently substituting a partial
+	// session list as the complete answer. The daemon intentionally skips a
+	// corrupted per-repo file at startup (logging a WARNING) rather than aborting
+	// and orphaning every live session; this field is the wire-side channel that
+	// WARNING never had — added when the CLI's list/get/whoami reads were rewired
+	// onto the Snapshot RPC (#1029 PR 2), so a CLI user decoding this response
+	// can tell "repo has no sessions" apart from "the daemon dropped this repo's
+	// sessions at startup" the same way the disk-fallback path already could
+	// (#730). Empty (omitted) when no repo was skipped, and additive/gob- and
+	// JSON-compatible with older peers that ignore the field.
+	//
+	// Scoped to the request's RepoID by the handler, mirroring Instances, so a
+	// repo-scoped read only reports a skip that is relevant to that scope. Withheld
+	// from a sandbox caller: a repo ID is operator identity the sandbox projection
+	// already withholds (sandboxSafeInstanceData drops Path/Worktree/TmuxName), and
+	// the skip set is named for the operator reading stdout, not the agent reading
+	// its own row.
+	//
+	// Lifecycle: seeded from the startup refresh (refreshDaemonInstances with
+	// existing==nil) and unchanged by the polling path. A repo that becomes
+	// corrupted mid-life keeps its prior in-memory rows via re-hydration, so its
+	// sessions remain in the snapshot and it is correctly NOT reported as skipped;
+	// a mid-life repair likewise does not auto-clear a startup skip until the
+	// daemon restarts and re-runs startup. See
+	// daemon.daemon.go::refreshDaemonInstances for the skip lifecycle.
+	SkippedRepos []SkippedRepo `json:"skipped_repos,omitempty"`
+}
+
+// SkippedRepo names one repo the daemon could not load sessions for at startup,
+// so the Snapshot RPC can report it to clients rather than silently serving a
+// truncated list. See SnapshotResponse.SkippedRepos.
+type SkippedRepo struct {
+	RepoID string `json:"repo_id"`
+	// Reason is a stable machine-readable code for why the repo was skipped.
+	// Today the only value is SkippedRepoReasonCorruptedInstancesJSON.
+	Reason string `json:"reason,omitempty"`
+}
+
+// SkippedRepoReasonCorruptedInstancesJSON is the reason carried for a repo whose
+// instances.json failed to parse at daemon startup (#603).
+const SkippedRepoReasonCorruptedInstancesJSON = "corrupted-instances-json"
+
+// SkippedRepos returns the repos dropped at daemon startup due to a corrupted
+// instances.json (#603), scoped to repoID (all repos when empty). It is the wire
+// surface the Snapshot RPC carries so a CLI list/get/whoami can refuse or caveat
+// rather than silently serving a partial list as complete (#730's principle
+// extended to the wire surface #1029 PR 2 introduced).
+//
+// Seeded from the most recent startup refresh and unchanged by polling: a repo
+// that becomes corrupted mid-life keeps its prior in-memory rows via
+// re-hydration, so its sessions remain in the snapshot and it is correctly NOT
+// reported as skipped; a mid-life repair also does not auto-clear a startup skip
+// until the daemon restarts and re-runs startup. See
+// daemon.go::refreshDaemonInstances for the skip lifecycle.
+func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if repoID == "" {
+		if len(m.skippedRepos) == 0 {
+			return nil
+		}
+		return append([]SkippedRepo(nil), m.skippedRepos...)
+	}
+	var out []SkippedRepo
+	for _, s := range m.skippedRepos {
+		if s.RepoID == repoID {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // DeliveryAlarm is one watch task whose event delivery to TargetSession has
@@ -163,9 +235,15 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	operationClockMS := operationClockMilliseconds()
 	instances := s.manager.Snapshot(req.RepoID)
 	alarms := s.deliveryAlarms(req.RepoID)
+	skipped := s.manager.SkippedRepos(req.RepoID)
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
 		instances = onlyOwnedBySandbox(instances, owner)
 		alarms = nil
+		// A repo ID is operator identity a sandbox must not learn — the
+		// sandboxSafeInstanceData projection already withholds Path/Worktree/
+		// TmuxName for the same reason, and the skip set is named for the
+		// operator reading stdout, not the agent reading its own row (#3065).
+		skipped = nil
 	}
 	instances, err := FilterSnapshotInstances(req, instances)
 	if err != nil {
@@ -173,6 +251,7 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	}
 	resp.Instances = instances
 	resp.DeliveryAlarms = alarms
+	resp.SkippedRepos = skipped
 	if s.manager.lifecycle != nil {
 		resp.BootID = s.manager.lifecycle.snapshot().bootID
 	}

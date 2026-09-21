@@ -477,9 +477,13 @@ func runFleetWatch() error {
 // listSessionsInScope reads every session the daemon reports, falling back to a
 // scoped disk scan when no daemon is reachable — the same read path and the same
 // fallback rule the single-title form uses, so the two cannot disagree about what
-// "in scope" means.
+// "in scope" means. When the daemon dropped a repo at startup due to a corrupted
+// instances.json (#603), it refuses naming the dropped repos rather than silently
+// serving a partial fleet, mirroring listSessionsRequest (#730's loud corrupt-file
+// contract extended to the wire surface #1029 PR 2 introduced); the watch cleanly
+// exits on the error so a driver learns the fleet view is incomplete.
 func listSessionsInScope(repoID string) ([]session.InstanceData, watchSource, error) {
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
 	if err != nil {
 		// A remote target has no local disk to fall back to; surfacing the daemon's
 		// error beats masking it as an empty fleet, which would look like "nothing
@@ -492,6 +496,9 @@ func listSessionsInScope(repoID string) ([]session.InstanceData, watchSource, er
 			return nil, watchSourceNone, err
 		}
 		return data, watchSourceDisk, nil
+	}
+	if repoIDs := skippedRepoIDs(skipped); len(repoIDs) > 0 {
+		return nil, watchSourceNone, corruptedReposError(repoIDs)
 	}
 	return data, watchSourceDaemon, nil
 }

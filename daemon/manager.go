@@ -130,6 +130,12 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
+	// skippedRepos names repos whose instances.json was corrupted and dropped at
+	// daemon startup (#603), seeded by restoreInstances and unchanged by the
+	// polling refresh. The Snapshot RPC reads it to carry the drop to clients
+	// instead of silently serving a partial list as complete (#730's principle
+	// extended to the wire surface #1029 PR 2 introduced). Guarded by m.mu.
+	skippedRepos []SkippedRepo
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before
@@ -800,7 +806,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, skipped, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -821,6 +827,11 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
+	// instances.json was corrupted and dropped at startup. A full restart always
+	// re-runs this path with existing==nil, so a repaired-and-restarted daemon
+	// recomputes the set from scratch (#603 closed over the wire).
+	m.skippedRepos = skipped
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	// Re-park every on_complete obligation the previous generation left durable
 	// on its rows (#4162): the completion edge cannot re-fire, so without this a
