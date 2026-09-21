@@ -823,25 +823,30 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 // enqueue crosses. `sanitizeUTF8` — a no-op on valid UTF-8 — drops invalid
 // bytes here so every record (not just the live arm's) is well-formed.
 //
-// The discard keys on the rendered prompt's deliverability, not on the raw
-// line: `deliverWatchEventWithOptions` rejects an event before any send when
-// `strings.TrimSpace(prompt) == ""` (daemon/watcher.go:915), so enrolling a
-// line whose rendered prompt trims to "" parks a queue head every replay
-// rejects, blocking later valid events until retention or overflow removes
-// it. Rendering through the task's template (`renderedWatchPrompt`) makes the
-// boundary rule match that pre-flight. A line of only invalid bytes such as
-// "\xff" sanitizes to "" and a default (empty) prompt renders to "", so it is
-// discarded; but an empty line whose template is "Triage: {{line}}" renders
-// to the nonempty "Triage: " and is kept — it would deliver, and a raw
-// `line == ""` check wrongly dropped it. The render also covers the regression
-// sanitizeUTF8 introduced for a whitespace-only line (e.g. "\xff " -> " ")
-// under a default prompt: the raw check `line == ""` keeps it, yet the trimmed
-// render is "" and it would park a stuck head. `tailBuffer.add` is a no-op on
-// blank lines, so the failure tail shows nothing for a discarded blank.
+// The discard keys on the rendered prompt's deliverability, not the raw line:
+// deliverWatchEventWithOptions rejects before any send when
+// strings.TrimSpace(prompt) == "" (its empty-prompt pre-flight), so enrolling
+// such a line parks a head every replay rejects, blocking later events. Only a
+// trims-blank line can render empty, so the loadTasks render is gated to the
+// rare blank case instead of paid on every event — the stop-drain arm
+// (persistRemainingLimitEvents -> emit -> here) would otherwise hold a
+// shutdown per line on a wedged task-store lock. The render must be dependable
+// to discard: a transient loadTasks failure or a gone task leaves the template
+// unknown, so fail OPEN (retain) and let the drainer retry once the store
+// recovers, rather than equating unknown with the default prompt and
+// permanently dropping a recoverable event. A discard is a loss (neither
+// delivered nor retained), so it is counted through recordEventDrop like every
+// other lost event, never silently; tailBuffer.add is a no-op on blank lines,
+// so the failure tail shows nothing for a discarded blank.
 func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
 	line = sanitizeUTF8(line)
-	if strings.TrimSpace(w.sup.renderedWatchPrompt(w.taskID, line)) == "" {
-		return
+	if strings.TrimSpace(line) == "" {
+		if render, ok := w.sup.renderedWatchPrompt(w.taskID, line); ok && strings.TrimSpace(render) == "" {
+			if dropped, logIt := w.recordEventDrop(); logIt {
+				log.WarningLog.Printf("watch task %s: dropped event whose rendered prompt is empty; it cannot be delivered or retained (%d dropped so far)", w.taskID, dropped)
+			}
+			return
+		}
 	}
 	tail.add(line)
 	if w.queue == nil {
@@ -913,7 +918,7 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	}
 	prompt := task.RenderWatchPrompt(t.Prompt, line)
 	if strings.TrimSpace(prompt) == "" {
-		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q)", line))
+		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q): %w", line, errEmptyPrompt))
 	}
 	status, promptRetained, err := deliverTaskPromptOutcome(t, prompt, true)
 	if err != nil {

@@ -75,6 +75,18 @@ var errTargetLimitReached = errors.New("target session is parked at a usage limi
 // over-refunding breaks the guarantee.
 var errNotAttempted = errors.New("delivery not attempted")
 
+// errEmptyPrompt classifies the specific pre-flight failure deliverWatchEventWithOptions
+// returns when the rendered prompt trims to "". A pre-flight failure is normally
+// retryable, and the drainer's #1128 discipline never permanently gives up on one;
+// but an empty render is STABLE as long as the task's prompt stays thus (it is the
+// task's source-of-truth, not a transient outage — a store failure dies on the
+// load-task pre-flight as a different, marker-carrying notAttempted that does NOT
+// wrap this sentinel), so a head that fails this way would re-render empty on
+// every retry and block all later events forever. The drain loop keys off this
+// sentinel to advance that specifically undeliverable head rather than retry it,
+// mirroring the enqueue-time discard in enqueueEvent.
+var errEmptyPrompt = errors.New("empty watch prompt")
+
 // notAttempted tags err as a pre-flight failure that provably delivered nothing,
 // and GUARANTEES the resulting message carries notDeliveredMarker so the tag
 // survives the net/rpc flattening described below. It is otherwise TRANSPARENT —

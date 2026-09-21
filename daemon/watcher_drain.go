@@ -260,6 +260,36 @@ func (w *taskWatcher) drainLoop() {
 			if errors.Is(err, errNotAttempted) {
 				w.releaseEventSlot()
 			}
+			// An empty rendered prompt is a STABLE undeliverable head, not an
+			// outage: the prompt is the task's source-of-truth (a transient
+			// store failure dies on the load-task pre-flight — a different
+			// errNotAttempted that does NOT wrap errEmptyPrompt and still
+			// retries). The enqueue-time discard only saw the prompt then, so a
+			// prompt edit to the default between enqueue and replay can park a
+			// head here that re-renders empty on every retry and blocks all
+			// later events. Advance it — counting the loss through
+			// recordEventDrop so dropped_events cannot miss it — instead of
+			// retrying the same empty render forever. This is the one
+			// give-up the stable-empty case earns; other failures keep the
+			// never-permanent-give-up discipline (#1128).
+			if errors.Is(err, errEmptyPrompt) {
+				advanced, aerr := w.queue.advance(cursor)
+				if aerr != nil {
+					log.ErrorLog.Printf("watch task %s: failed to advance the event queue past an empty-prompt head; replay parked until the next reload: %v", w.taskID, aerr)
+					w.stopDraining()
+					return
+				}
+				if !advanced {
+					// A concurrent head move made this drainer's cursor stale;
+					// the event is still in the queue — re-peek rather than
+					// double-counting a drop.
+					continue
+				}
+				if dropped, logIt := w.recordEventDrop(); logIt {
+					log.WarningLog.Printf("watch task %s: dropped queued event whose rendered prompt is empty; permanently undeliverable, advancing the head (%d dropped so far)", w.taskID, dropped)
+				}
+				continue
+			}
 			log.WarningLog.Printf("watch task %s: replay delivery failed (%d event(s) pending); retrying in %s: %v", w.taskID, w.queue.pendingCount(), backoff, err)
 			if !w.sleepStopAware(backoff) {
 				w.stopDraining()
