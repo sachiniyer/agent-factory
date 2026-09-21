@@ -22,8 +22,14 @@ type AccountLaunchProof struct {
 }
 
 // accountLaunchProofEnvVar carries the launcher's proof OUT OF BAND, through
-// the pane environment, so a repository-controlled shell command re-invoking af
-// under AccountExecMarker cannot supply it.
+// the pane environment. A shell re-invoking af can WRITE the variable just as
+// easily as it could append an argv element, so a value read from the env var
+// alone is not evidence af authored this invocation. The shim therefore ALSO
+// re-derives what af's launcher would have produced (AccountLaunchProofResolver
+// below) and refuses an env-supplied proof that does not match it: an env var
+// the child can read is also an env var the child's parent shell can write, so
+// a plaintext token in the environment cannot carry that evidence (#3123, #4731
+// review).
 //
 // The marker argv is fully forgeable: a program_overrides value can re-invoke af
 // as `af __af-session-env-exec-account <agent> <count> <account> <command>` and
@@ -32,21 +38,58 @@ type AccountLaunchProof struct {
 // (session/tmux) installs this variable in the account-scoped pane's tmux
 // session environment; the pane child inherits it, the shim reads it before
 // exec, and FilterForCommand strips it again so it never reaches the agent or a
-// subshell. A repository-authored re-invocation runs in an UNSCOPED outer pane,
-// whose environment never received this variable, so it arrives without a proof
-// and applyAccountScope refuses — the #3051 fail-closed property, applied to
-// provenance rather than to the account name.
+// subshell. The re-derivation, not the env var, is what an overwriting shell
+// cannot reproduce.
 //
 // The value is not secret: TrustedExecutable and GeneratedArgs are already
-// visible in the pane command a launcher wrote. What this channel adds is the
-// AFFIRMATION that af's own launcher produced them, which an argv claim can no
-// longer counterfeit (#3123 review). base64 wrap keeps the JSON clear of any
-// quoting concern at the tmux/env boundary.
+// visible in the pane command a launcher wrote. base64 wrap keeps the JSON
+// clear of any quoting concern at the tmux/env boundary.
 const accountLaunchProofEnvVar = "__AF_ACCOUNT_LAUNCH_PROOF"
 
 // errAccountLaunchProofAbsent is the sentinel a missing/empty proof resolves to,
 // so the shim can name the cause without echoing any value.
 var errAccountLaunchProofAbsent = errors.New("launcher account launch proof is absent")
+
+// errAccountLaunchProofMismatch is the sentinel returned when the env-supplied
+// proof does not match what af's launcher would have produced for this
+// invocation. Naming the cause lets the caller surface "the proof channel was
+// overwritten" without echoing any value the attacker wrote into the env.
+var errAccountLaunchProofMismatch = errors.New("launcher account launch proof does not match what af would have produced for this invocation")
+
+// AccountLaunchProofResolver re-derives the launch proof the launcher would
+// have produced for an account-scoped pane whose command is `command`, the same
+// way the launcher derives it in session/launch_program.go — by resolving the
+// operator's config from the pane's working directory and feeding base+final to
+// GenerateAccountLaunchProof. The shim uses it to refuse an env-supplied proof
+// that an overwriting shell wrote into the env var (#3123, #4731 review): the
+// env value is forgeable by a same-uid re-invocation, a config re-derivation is
+// not, because nothing the attacker runs in the pane has write access to the
+// resolved-operator-config the resolver reads.
+//
+// It returns (proof, nil) when a derivation is available for this (agent,
+// command) pair, or (zero, err) when it cannot decide. A nil resolver short-
+// circuits the matcher: the shim falls back to the env-supplied proof alone,
+// which is the form this hook replaced and the form tests exercise directly.
+// main.go wires the production resolver; tests install their own.
+var AccountLaunchProofResolver func(agent, account, command string) (AccountLaunchProof, error)
+
+// accountLaunchProofsMatch reports whether two proofs describe the same
+// launcher-authored invocation. Slices are compared positionally and by
+// length, never as values the caller could reorder.
+func accountLaunchProofsMatch(a, b AccountLaunchProof) bool {
+	if a.TrustedExecutable != b.TrustedExecutable {
+		return false
+	}
+	if len(a.GeneratedArgs) != len(b.GeneratedArgs) {
+		return false
+	}
+	for i := range a.GeneratedArgs {
+		if a.GeneratedArgs[i] != b.GeneratedArgs[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // AccountLaunchProofEnvEntry encodes proof as a NAME=VALUE environment entry for
 // the account-scoped pane's session environment. It always emits an entry,
