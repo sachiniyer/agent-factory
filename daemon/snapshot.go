@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -133,6 +134,16 @@ const SkippedRepoReasonCorruptedInstancesJSON = "corrupted-instances-json"
 func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.skippedReposScopedLocked(repoID)
+}
+
+// skippedReposScopedLocked returns a defensive copy of m.skippedRepos scoped to
+// repoID (all repos when empty). The caller MUST hold m.mu: it is the read side
+// shared by SkippedRepos (the public wrapper that locks for the standalone
+// read) and SnapshotWithSkipped (which calls it inside its own single lock
+// acquisition so the instance pointers and the skip set are sampled from the
+// same manager generation).
+func (m *Manager) skippedReposScopedLocked(repoID string) []SkippedRepo {
 	if repoID == "" {
 		if len(m.skippedRepos) == 0 {
 			return nil
@@ -146,6 +157,85 @@ func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 		}
 	}
 	return out
+}
+
+// SnapshotWithSkipped returns the authoritative instance projection together
+// with the startup-skipped repo set, both scoped to repoID (all repos when
+// empty) and captured under ONE acquisition of m.mu so the two projections
+// cannot disagree across a polling refresh.
+//
+// The instance serialization that follows still happens OUTSIDE m.mu — the
+// pointers/pending values are collected under the lock and serialized after
+// it — so a slow per-instance ToInstanceData does not block a concurrent
+// mutation. Only the snapshot of POINTERS and the copied skip set are taken
+// under the lock, exactly what Manager.Snapshot already did for the instance
+// half, extended here to read the skip set under the same acquisition.
+//
+// The single-lock read closes the race separate Snapshot and SkippedRepos
+// calls leave open: between Snapshot releasing m.mu and SkippedRepos
+// re-acquiring it, a polling refresh can repair a startup-skipped repo —
+// loading its now-parseable rows into m.instances and trimming the now-stale
+// skip set — so the response would carry the OLD, INCOMPLETE instance list
+// with the NEW, CLEARED skip set, and 'sessions list' would again report the
+// repaired repo as silently empty instead of refusing the not-yet-complete
+// snapshot (#603 over the wire). Reading both under one lock means a refresh
+// is fully before or fully after this snapshot, never wedged in between.
+// See daemon.go::refreshLocked and retainStillSkipped for the skip lifecycle.
+//
+// Manager.Snapshot delegates here and discards the skip set; the Snapshot RPC
+// handler in this file uses the joint return so SnapshotResponse carries
+// projections sampled from the same generation.
+func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []SkippedRepo) {
+	m.mu.Lock()
+	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
+	for key := range m.instances {
+		if repoID != "" {
+			rid, _ := splitDaemonInstanceKey(key)
+			if rid != repoID {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
+	for key := range m.pendingCreates {
+		if _, settled := m.instances[key]; settled {
+			continue
+		}
+		if repoID != "" {
+			rid, _ := splitDaemonInstanceKey(key)
+			if rid != repoID {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	type snapshotEntry struct {
+		instance *session.Instance
+		pending  session.InstanceData
+	}
+	entries := make([]snapshotEntry, 0, len(keys))
+	for _, key := range keys {
+		if inst := m.instances[key]; inst != nil {
+			entries = append(entries, snapshotEntry{instance: inst})
+			continue
+		}
+		if pending, ok := m.pendingCreates[key]; ok {
+			entries = append(entries, snapshotEntry{pending: pending})
+		}
+	}
+	skipped := m.skippedReposScopedLocked(repoID)
+	m.mu.Unlock()
+
+	data := make([]session.InstanceData, 0, len(entries))
+	for _, entry := range entries {
+		projected := entry.pending
+		if entry.instance != nil {
+			projected = entry.instance.ToInstanceData()
+		}
+		data = append(data, projected)
+	}
+	return data, skipped
 }
 
 // retainStillSkipped returns the subset of prev that fresh still reports as
@@ -264,9 +354,14 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// Sample before the rows so reconciliation delay is measured against the
 	// projection returned with this response.
 	operationClockMS := operationClockMilliseconds()
-	instances := s.manager.Snapshot(req.RepoID)
+	// Read instances AND the skip set in ONE acquisition of m.mu, not as
+	// separate Snapshot+SkippedRepos calls, so a polling refresh that repairs a
+	// startup-skipped repo between the two cannot leave the response carrying
+	// the old, incomplete instance list with the new, cleared skip set — a
+	// 'sessions list' would then report the repaired repo as silently empty
+	// instead of refusing the not-yet-complete snapshot (#603 over the wire).
+	instances, skipped := s.manager.SnapshotWithSkipped(req.RepoID)
 	alarms := s.deliveryAlarms(req.RepoID)
-	skipped := s.manager.SkippedRepos(req.RepoID)
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
 		instances = onlyOwnedBySandbox(instances, owner)
 		alarms = nil

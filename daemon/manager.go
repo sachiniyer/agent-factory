@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 	stdlog "log"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -902,56 +901,14 @@ func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
 // are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
 // not repaint on map-iteration jitter. Each operation lock is probed without
 // waiting after its row is serialized; a free lock is released immediately.
+//
+// This is the instance-only view; the Snapshot RPC handler reads it together
+// with the skip set via SnapshotWithSkipped (see snapshot.go), which captures
+// both under one acquisition of m.mu so a polling refresh cannot leave the
+// response carrying the old instance list with a cleared skip set.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
-	m.mu.Lock()
-	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for key := range m.instances {
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	for key := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	type snapshotEntry struct {
-		instance *session.Instance
-		pending  session.InstanceData
-	}
-	entries := make([]snapshotEntry, 0, len(keys))
-	for _, key := range keys {
-		if inst := m.instances[key]; inst != nil {
-			entries = append(entries, snapshotEntry{instance: inst})
-			continue
-		}
-		if pending, ok := m.pendingCreates[key]; ok {
-			entries = append(entries, snapshotEntry{pending: pending})
-		}
-	}
-	m.mu.Unlock()
-
-	data := make([]session.InstanceData, 0, len(entries))
-	for _, entry := range entries {
-		projected := entry.pending
-		if entry.instance != nil {
-			projected = entry.instance.ToInstanceData()
-		}
-		data = append(data, projected)
-	}
-	return data
+	instances, _ := m.SnapshotWithSkipped(repoID)
+	return instances
 }
 
 // startLockForRepo returns the per-repo lock serializing session/tab creation
