@@ -545,7 +545,32 @@ func ResolveProjectSelector(selector string) (Project, error) {
 		return Project{}, fmt.Errorf("%q is not a registered project and is not inside a git repository: %w", selector, err)
 	}
 	for _, p := range projects {
-		if sameProjectPath(p.Root, binding.root) {
+		if !sameProjectPath(p.Root, binding.root) {
+			continue
+		}
+		// The marker is the registry's identity evidence; a last-known path
+		// is not proof when another checkout can replace it in place. The
+		// daemon's session resolver (projectForRoot) is marker-first, so the
+		// CLI write path must reconcile the same way RegisterProject already
+		// does — otherwise the two routes can name different project IDs for
+		// the same workspace root and a personal override is written to a
+		// file the daemon never reads there.
+		checkoutID, markerExists, err := readCheckoutID(binding.checkoutMarkerPath)
+		if err != nil {
+			return Project{}, err
+		}
+		switch {
+		case !markerExists:
+			return Project{}, fmt.Errorf(
+				"path %s is already the last-known root of project %s, but this checkout has no checkout marker — "+
+					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+				binding.root, p.ID, p.ID, binding.root)
+		case checkoutID != p.CheckoutID:
+			return Project{}, fmt.Errorf(
+				"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+				binding.root, p.ID, checkoutID, p.CheckoutID, p.ID, binding.root)
+		default:
 			return p, nil
 		}
 	}

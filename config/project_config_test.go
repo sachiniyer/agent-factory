@@ -308,6 +308,133 @@ func TestResolveProjectSelectorRejectsCopiedCheckoutMarker(t *testing.T) {
 	require.Equal(t, project.ID, exact.ID)
 }
 
+// TestResolveProjectSelectorRejectsReplacedMarkerAtRegisteredRoot pins the fix
+// for the CLI/daemon resolution split: #3361 made the daemon's projectForRoot
+// marker-first while ResolveProjectSelector stayed path-first. When a
+// registered path's checkout marker is replaced by another project's marker,
+// the CLI write path must refuse with a rebind instruction rather than
+// silently write a personal override the daemon never applies there.
+func TestResolveProjectSelectorRejectsReplacedMarkerAtRegisteredRoot(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	barRoot := initProjectRegistryRepo(t, filepath.Join(base, "bar"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	bar, err := RegisterProject(barRoot)
+	require.NoError(t, err)
+	require.NotEqual(t, foo.ID, bar.ID)
+	require.NotEqual(t, foo.CheckoutID, bar.CheckoutID)
+
+	// Give bar a real personal override so the daemon's marker-first resolver
+	// would otherwise load it for a session at /foo.
+	_, err = SetProjectConfigValue(bar.ID, "default_program", "codex")
+	require.NoError(t, err)
+	barPersonalPath, err := ProjectConfigTomlPath(bar.ID)
+	require.NoError(t, err)
+	barBefore, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	fooPersonalPath, err := ProjectConfigTomlPath(foo.ID)
+	require.NoError(t, err)
+
+	// Replace foo's marker with bar's at foo's registered root.
+	markerName, err := checkoutMarkerName()
+	require.NoError(t, err)
+	barMarker, err := os.ReadFile(filepath.Join(barRoot, ".git", checkoutMarkerDirName, markerName))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(fooRoot, ".git", checkoutMarkerDirName, markerName), barMarker, 0o644))
+
+	// The daemon's marker-first resolver now names bar for /foo — the
+	// disagreement the bug report documents.
+	viaMarker, found, err := projectForRoot(fooRoot)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, bar.ID, viaMarker.ID, "daemon resolver: marker-first returns bar")
+
+	// The CLI write path must now refuse instead of returning foo by path
+	// alone, reconciling with the registry's RegisterProject contract.
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has marker "+bar.CheckoutID+" instead of "+foo.CheckoutID)
+	assert.Contains(t, err.Error(), "run `af projects rebind "+foo.ID+" ")
+
+	// SetProjectConfigValue goes through ResolveProjectSelector, so it must
+	// surface the same refusal and write neither project's personal file.
+	_, err = SetProjectConfigValue(fooRoot, "default_program", "codex")
+	require.Error(t, err)
+	_, fooStatErr := os.Stat(fooPersonalPath)
+	assert.ErrorIs(t, fooStatErr, os.ErrNotExist,
+		"the refused write must not create foo's personal file")
+	barAfter, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	assert.Equal(t, barBefore, barAfter, "the refused write must not touch bar's personal file")
+
+	// UnsetProjectConfigValue is wired through ResolveProjectSelector too, so
+	// it must refuse for the same root.
+	_, err = UnsetProjectConfigValue(fooRoot, "default_program")
+	require.Error(t, err)
+	barAfter2, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	assert.Equal(t, barBefore, barAfter2, "the refused unset must not touch bar's personal file")
+}
+
+// TestResolveProjectSelectorRejectsAbsentMarkerAtRegisteredRoot pins the
+// marker-absent half of the fix: a re-clone at the registered path leaves no
+// checkout marker, and the CLI write path must refuse with a rebind
+// instruction rather than write an override the daemon's marker-first
+// resolver (which returns not-found) never reads there.
+func TestResolveProjectSelectorRejectsAbsentMarkerAtRegisteredRoot(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	// Set up an existing personal file via the id selector (which bypasses
+	// marker validation by design) so the refused path-selector write can be
+	// checked for "no mutation".
+	_, err = SetProjectConfigValue(foo.ID, "default_program", "codex")
+	require.NoError(t, err)
+	fooPersonalPath, err := ProjectConfigTomlPath(foo.ID)
+	require.NoError(t, err)
+	fooBefore, err := os.ReadFile(fooPersonalPath)
+	require.NoError(t, err)
+
+	// Delete the marker — a fresh `git clone` at /foo would leave no
+	// af-authored marker.
+	markerName, err := checkoutMarkerName()
+	require.NoError(t, err)
+	markerPath := filepath.Join(fooRoot, ".git", checkoutMarkerDirName, markerName)
+	require.NoError(t, os.Remove(markerPath))
+
+	// The daemon's marker-first resolver returns not-found.
+	_, found, err := projectForRoot(fooRoot)
+	require.NoError(t, err)
+	assert.False(t, found, "daemon resolver: marker absent means /foo is no longer recognized")
+
+	// The CLI write path must refuse instead of returning foo by path alone.
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has no checkout marker")
+	assert.Contains(t, err.Error(), "run `af projects rebind "+foo.ID+" ")
+
+	// SetProjectConfigValue and UnsetProjectConfigValue go through
+	// ResolveProjectSelector, so both must refuse and leave the file unchanged.
+	_, err = SetProjectConfigValue(fooRoot, "branch_prefix", "feat/")
+	require.Error(t, err)
+	fooAfterSet, err := os.ReadFile(fooPersonalPath)
+	require.NoError(t, err)
+	assert.Equal(t, fooBefore, fooAfterSet, "the refused set must leave foo's personal file unchanged")
+
+	_, err = UnsetProjectConfigValue(fooRoot, "default_program")
+	require.Error(t, err)
+	fooAfterUnset, err := os.ReadFile(fooPersonalPath)
+	require.NoError(t, err)
+	assert.Equal(t, fooBefore, fooAfterUnset, "the refused unset must leave foo's personal file unchanged")
+}
+
 func TestResolveProjectSelectorUnknownID(t *testing.T) {
 	registeredTestProject(t)
 	_, err := ResolveProjectSelector("prj_ffffffffffffffffffffffffffffffff")
