@@ -72,6 +72,52 @@ func TestResolveSkillTarget_DistinguishesUnscopedFromUnresolvable(t *testing.T) 
 	require.Empty(t, foreign.root)
 }
 
+// The durable selection namespace is the comparand, not the recorded enum
+// (#4430 review round 5): a handoff-scoped session whose stored Program is
+// aider but whose account was selected in codex's registry — because the aider
+// override resolved to codex — is running codex, and its skill belongs under
+// codex/work. Comparing the enum instead would leave the redirected session
+// permanently skill-less, and a stale pin is the case that must still refuse.
+func TestResolveSkillTarget_UsesThePinnedAccountNamespace(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	dir := registerAccount(t, "codex", "work")
+
+	// Redirected record: enum aider, pinned namespace codex, launch command
+	// codex — the skill resolves under the pin's registry.
+	redirected := resolveSkillTarget(
+		&Instance{Program: "aider", Account: "work", accountAgent: "codex"}, "codex")
+	require.Equal(t, skillTarget{root: dir}, redirected,
+		"the pin's namespace, not the enum, is the skill's account registry")
+
+	// A pin that disagrees with the command being launched still refuses: the
+	// drift refusal will stop that launch, and until it does af writes nothing.
+	stale := resolveSkillTarget(
+		&Instance{Program: "aider", Account: "work", accountAgent: "claude"}, "codex")
+	require.True(t, stale.unresolved,
+		"a claude pin must not write into codex's registry")
+}
+
+// The swap-side caller passes the SAME namespace the account was selected in:
+// `program_overrides.aider = "codex"` with `--to aider --account work` selects
+// codex/work, and the frozen launch command is codex — so the skill target must
+// resolve there rather than comparing codex against the requested enum.
+func TestResolveSkillTargetForAccount_RedirectedSwapResolvesTheSelectedNamespace(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	dir := registerAccount(t, "codex", "work")
+
+	target := resolveSkillTargetForAccount("codex", "codex", "work")
+	require.Equal(t, skillTarget{root: dir}, target,
+		"a redirect-selected account still receives the af skill")
+
+	// And the guard it replaces: a namespace that is not the launch's agent
+	// still refuses, because writing there would seed an account the launched
+	// agent never reads.
+	target = resolveSkillTargetForAccount("codex", "aider", "work")
+	require.True(t, target.unresolved)
+}
+
 // A handoff is the path that reaches the foreign-namespace case in production.
 //
 // PrepareAgentSwap freezes the TARGET agent's command and runs injectSystemPrompt

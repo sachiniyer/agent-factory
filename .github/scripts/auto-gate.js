@@ -1,4 +1,5 @@
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
+const { goSourcesEquivalent, patchTouchesOnlyCommentLines } = require("./go-inert.js");
 
 // GitHub renders one GitHub App actor under several logins depending on the
 // surface being read: the detail app has been observed as `app/detail-app` on a
@@ -40,6 +41,10 @@ const SELF_APPROVING_AUTHORS = new Set(["sachiniyer"]);
 const TRUNK_MERGE_AUTHOR = "trunk-io";
 const TRUNK_MERGE_BRANCH_PREFIX = "trunk-merge/";
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
+// The most gated files one evaluation will read blobs for to prove them
+// comment-only (#4477). The proof costs two reads per file on every
+// evaluation, so past this the files simply stay gated.
+const COMMENT_ONLY_PROOF_FILE_LIMIT = 20;
 // The label a maintainer applies to stop this gate on one pull request (#4576).
 //
 // Before #4576 a maintainer's only stop lever was converting the PR to a draft,
@@ -746,6 +751,46 @@ function isDefinitiveRateLimitResponse(error) {
   return Boolean(error?.response) && isRateLimitError(error);
 }
 
+// The rate-limit answer for a WRAPPED error. retryFailure preserves the
+// transport error on `cause` but strips its headers and GraphQL name, so
+// isRateLimitError alone can miss the failure it wraps; the retry-exhausted
+// message ("could not invalidate aggregate …: API rate limit exceeded for
+// installation") is itself the record. Walking the chain covers both (#4461).
+function isRateLimitFailure(error) {
+  for (let current = error; current; current = current.cause) {
+    if (isRateLimitError(current)) {
+      return true;
+    }
+    if (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(current?.message || "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A sentence naming the throttle window when the failure carries it, so an
+// UNKNOWN verdict can say when evaluation is worth retrying (#4461).
+function rateLimitResetSentence(error) {
+  for (let current = error; current; current = current.cause) {
+    if (!isRateLimitFailure(current)) {
+      continue;
+    }
+    const headers = githubErrorHeaders(current);
+    const resetSeconds = Number(headers["x-ratelimit-reset"]);
+    if (Number.isFinite(resetSeconds) && resetSeconds > 0) {
+      return ` GitHub reports the rate limit resets at ${new Date(resetSeconds * 1000).toISOString()}.`;
+    }
+    const retryAfter = Number(headers["retry-after"]);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+      return ` GitHub asks for a retry in ${retryAfter}s.`;
+    }
+  }
+  if (isRateLimitFailure(error)) {
+    return " Retry once the GitHub API rate-limit window resets.";
+  }
+  return "";
+}
+
 function retryDelayMilliseconds(error, fallback) {
   if (!isRateLimitError(error)) {
     return fallback;
@@ -924,15 +969,9 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // a merge that CHANGES workflow definitions may be re-raising a stale set —
   // most sharply when it adds a push-gated workflow, which cannot be in the list
   // the running copy holds.
-  const workflowsChanged = files.some((path) => path.startsWith(".github/workflows/"));
-  // A `_test.go` file is not compiled into the shipped binary, so it cannot
-  // change what a user sees — and the label this gate demands is a claim that
-  // someone drove the TUI and looked. #3601's only file under these prefixes was
-  // `ui/config_pane_test.go`, and the lane had to run a play-test to satisfy a
-  // gate for a diff with nothing to look at. The subtraction is per FILE, not
-  // per PR: a production file under any prefix still requires the label, and so
-  // does a diff that changes a test and a production file together.
-  const touchesTui = files.some(isGatedTuiPath);
+  const workflowsChanged = files
+    .flatMap(pullRequestFilePaths)
+    .some((path) => path.startsWith(".github/workflows/"));
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   // The branch a head with no PR Validation run may have one dispatched on
@@ -1045,6 +1084,25 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...codex.notes);
 
+  // A `_test.go` file is not compiled into the shipped binary, so it cannot
+  // change what a user sees — and the label this gate demands is a claim that
+  // someone drove the TUI and looked. #3601's only file under these prefixes was
+  // `ui/config_pane_test.go`, and the lane had to run a play-test to satisfy a
+  // gate for a diff with nothing to look at. A production file whose change is
+  // provably comment-only is the same category by the same argument (#4477).
+  // The subtraction is per FILE, not per PR: a production file with a real
+  // change under any prefix still requires the label, and so does a diff that
+  // changes a test and a production file together.
+  const tui = await gatedTuiChanges({ github, context, pr, files, subject });
+  const touchesTui = tui.gated.length > 0;
+  if (tui.commentOnly.length > 0) {
+    notes.push(
+      `TUI path gate: ${tui.commentOnly.join(", ")} changed only in comments, which no play-test can see`,
+    );
+  }
+  if (tui.proofError) {
+    notes.push(`TUI path gate: comment-only proof failed, so those files stay gated: ${tui.proofError}`);
+  }
   if (touchesTui && !labels.has("play-tested")) {
     reasons.push("PR touches visible TUI/pane paths and is missing the play-tested label");
   } else if (touchesTui) {
@@ -1978,17 +2036,46 @@ function resolveAggregateHeads({ context, targets = [] }) {
   return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))];
 }
 
+// The conclusion every non-passing fixed-aggregate write carries: the WAITING
+// invalidation marker and the UNKNOWN could-not-evaluate verdict alike.
+//
+// It is `failure` because the aggregate is a REQUIRED check, and GitHub documents
+// "Successful check statuses are `success`, `skipped`, and `neutral`"
+// (troubleshooting-required-status-checks). A neutral UNKNOWN therefore does not
+// block the ruleset, a manual `gh pr merge`, or any merger that defers to it —
+// it would turn "Auto Gate could not look" into a merge nobody evaluated (#4461).
+// What distinguishes UNKNOWN from a defect verdict is its title and summary.
+const AGGREGATE_NOT_PASSING = "failure";
+const REQUIRED_CHECK_SATISFYING_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
+
+// Whether a fixed-aggregate check run, as a write returned it, leaves its commit
+// unmergeable: anything but a completed run whose conclusion GitHub counts as
+// satisfying a required check. Null — no write landed — is not non-passing: it
+// proves nothing about what the newest generation says.
+function isNonPassingAggregate(check) {
+  if (!check) {
+    return false;
+  }
+  if (check.status !== "completed") {
+    return true;
+  }
+  return !REQUIRED_CHECK_SATISFYING_CONCLUSIONS.has(String(check.conclusion || "").toLowerCase());
+}
+
 async function invalidateAggregateDecision({ github, context, core, headSha }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for Auto Gate aggregate invalidation: ${headSha}`);
   }
   const decision = {
-    // Create a new failure before any API-dependent reads. If target resolution,
-    // association lookup, or evaluation fails, the newest fixed check is already
-    // non-green and the prior PASS cannot remain authoritative.
+    // Make the newest fixed check non-green before any API-dependent reads. If
+    // target resolution, association lookup, or evaluation fails, the prior
+    // PASS cannot remain authoritative. The conclusion is AGGREGATE_NOT_PASSING,
+    // never neutral: GitHub counts a neutral required check as satisfied, so a
+    // neutral marker would leave the commit mergeable (#4461). The title is
+    // what says "waiting", not a verdict about the code.
     status: "completed",
-    conclusion: "failure",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
       title: AGGREGATE_WAITING_TITLE,
       summary:
@@ -2026,20 +2113,36 @@ async function blockAggregateEvaluation({
   headSha,
   checkRunId,
   reason,
+  cause,
 }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for blocked Auto Gate aggregate: ${headSha}`);
   }
   const detail = String(reason || "required GitHub read failed").replace(/^BLOCKED:\s*/i, "");
+  // The reset detail rides the error where one exists; where only the reason
+  // string survives (a cross-job env, an evaluate() summary) the message itself
+  // is the record that the throttle was the cause.
+  const resetClause =
+    rateLimitResetSentence(cause) ||
+    (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(detail)
+      ? " Retry once the GitHub API rate-limit window resets."
+      : "");
   const summary =
-    `${detail}. Auto Gate did not infer an empty PR set or any PR state from the failed read; ` +
-    "this commit remains blocked until a complete evaluation succeeds.";
+    `${detail}. Auto Gate did not evaluate this commit and published no verdict about it: ` +
+    "it did not infer an empty PR set or any PR state from the failed read, and no " +
+    "previously reached decision for an exact (PR, head) pair was consumed. This commit " +
+    `remains blocked until a complete evaluation succeeds.${resetClause}`;
   const decision = {
+    // A could-not-evaluate state is not a defect verdict, and the UNKNOWN title
+    // and summary are what say so (#4461). The conclusion cannot: GitHub counts
+    // neutral and skipped required checks as satisfied, so the only completed
+    // conclusions that keep an unevaluated commit unmergeable in every consumer
+    // are the failing ones. See AGGREGATE_NOT_PASSING.
     status: "completed",
-    conclusion: "failure",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
-      title: "BLOCKED: Auto Gate could not complete a required GitHub read",
+      title: "UNKNOWN: Auto Gate could not evaluate this commit",
       summary,
     },
   };
@@ -2052,7 +2155,7 @@ async function blockAggregateEvaluation({
     decision,
     checkRunId,
   });
-  core.notice(`BLOCKED: ${detail}`);
+  core.notice(`UNKNOWN: ${detail}`);
   return {
     ok: false,
     headSha: sha,
@@ -2091,6 +2194,7 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
       headSha: sha,
       checkRunId: invalidated.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   return {
@@ -2243,6 +2347,7 @@ async function reportAggregateDecision({
       headSha,
       checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   if (checkRunId) {
@@ -2492,6 +2597,7 @@ async function processAggregateHead({
         headSha: pending.headSha,
         checkRunId: pending.checkRunId,
         reason: formatError(error),
+        cause: error,
       });
       return { state: "evaluation-error", pending, aggregate };
     }
@@ -2563,6 +2669,7 @@ async function processAggregateHead({
       headSha: pending.headSha,
       checkRunId: pending.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
     return { state: "evaluation-error", pending, aggregate: blocked };
   }
@@ -2695,6 +2802,7 @@ async function processAggregateHead({
           headSha: pending.headSha,
           checkRunId: invalidated.checkRunId,
           reason: formatError(error),
+          cause: error,
         });
         return { state: "evaluation-error", pending, aggregate: blocked, invalidated };
       }
@@ -5404,6 +5512,153 @@ function isGatedTuiPath(path) {
   return !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
 
+// The gated entries of one commit's complete tree, keyed by path. A truncated or
+// malformed listing throws: a snapshot that may be missing entries proves nothing.
+async function readGatedTuiTree({ github, context, sha, role, subject }) {
+  const { owner, repo } = context.repo;
+  const commit = await retryRead(`could not read ${role} commit ${sha}`, () =>
+    github.rest.repos.getCommit({ owner, repo, ref: sha }), subject);
+  const treeSha = normalizeHeadSha(commit?.data?.commit?.tree?.sha);
+  if (!treeSha) throw new Error(`${role} commit ${sha} has no tree SHA`);
+  const response = await retryRead(`could not read ${role} tree for ${sha}`, () =>
+    github.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: "1" }), subject);
+  const data = response?.data;
+  if (data?.truncated !== false || !Array.isArray(data.tree)) {
+    throw new Error(`${role} tree for ${sha} is incomplete`);
+  }
+  const entries = new Map();
+  for (const entry of data.tree) {
+    const entrySha = normalizeHeadSha(entry.sha);
+    if (typeof entry.path !== "string" || !entrySha ||
+        !["tree", "blob", "commit"].includes(entry.type) || !entry.mode) {
+      throw new Error(`${role} tree for ${sha} has an invalid entry`);
+    }
+    if (entry.type !== "tree" && isGatedTuiPath(entry.path)) {
+      entries.set(entry.path, { type: entry.type, mode: entry.mode, sha: entrySha });
+    }
+  }
+  return entries;
+}
+
+function sameTreeEntry(left, right) {
+  return left?.type === right?.type && left?.mode === right?.mode && left?.sha === right?.sha;
+}
+
+// A blob's text, or null. The response is trusted only as far as it hashes to
+// the blob that was asked for, and only as valid UTF-8 — which is what Go
+// requires of a source file anyway. Every failure is null rather than a throw:
+// the only caller turns null into "keep the gate", which is the safe way to be
+// wrong, and an unreadable blob must not take the whole evaluation down (#4484).
+async function readGoSource({ github, context, sha, subject }) {
+  const { owner, repo } = context.repo;
+  try {
+    const response = await retryRead(`could not read blob ${sha}`, () =>
+      github.rest.git.getBlob({ owner, repo, file_sha: sha }), subject);
+    const data = response?.data;
+    if (data?.encoding !== "base64" || typeof data.content !== "string") return null;
+    const bytes = Buffer.from(data.content, "base64");
+    const actual = createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
+    if (actual !== sha) return null;
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+// Whether every change provably leaves the Go toolchain's input unchanged — see
+// go-inert.js for what that proof does and does not accept. Only a regular `.go`
+// blob present on both sides with the same mode can qualify; an add, a delete, a
+// symlink or a mode change never does. Those are checked for every file before
+// any blob is read, and the reads are sequential and stop at the first failure,
+// so a real code change costs at most one pair of them.
+async function everyGoChangeIsInert({ github, context, changes, subject }) {
+  if (changes.length === 0 || changes.length > COMMENT_ONLY_PROOF_FILE_LIMIT) return false;
+  const eligible = ({ path, before, after }) =>
+    path.endsWith(".go") && before?.type === "blob" && after?.type === "blob" &&
+    before.mode === after.mode && ["100644", "100755"].includes(before.mode) &&
+    before.sha !== after.sha;
+  if (!changes.every(eligible)) return false;
+  for (const { before, after } of changes) {
+    const [beforeSource, afterSource] = await Promise.all([
+      readGoSource({ github, context, sha: before.sha, subject }),
+      readGoSource({ github, context, sha: after.sha, subject }),
+    ]);
+    if (!goSourcesEquivalent(beforeSource, afterSource)) return false;
+  }
+  return true;
+}
+
+// Which paths keep this PR under the TUI path gate, and which gated files were
+// subtracted because their change is provably comment-only (#4477).
+//
+// A file is a candidate only when it is a modified `.go` file (not an add,
+// delete or rename) whose patch touches nothing but whole-line comments. That
+// filter is free — listFiles already carries the patch — and it is only a filter:
+// a hunk cannot prove inertness, because it cannot see whether its lines sit
+// inside a raw string whose backtick is further up the file. The proof reads
+// both complete files, at the merge base and at the head, which is the pair the
+// patch describes. The ruleset requires a PR to be up to date before it merges,
+// so at merge time that merge base IS master, and the head tree is what lands.
+//
+// Every doubt keeps the gate: a patch GitHub did not send, too many candidates,
+// a head blob that is not the one listFiles described, or any read that fails.
+// And once one file is gated for a real change, nothing is read at all — the
+// label is required either way.
+async function gatedTuiChanges({ github, context, pr, files, subject }) {
+  const gated = [];
+  const candidates = [];
+  for (const file of files) {
+    const paths = pullRequestFilePaths(file).filter(isGatedTuiPath);
+    if (paths.length === 0) continue;
+    if (file.status === "modified" && paths.length === 1 && paths[0] === file.filename &&
+        file.filename.endsWith(".go") && normalizeHeadSha(file.sha) &&
+        patchTouchesOnlyCommentLines(file.patch)) {
+      candidates.push(file);
+    } else {
+      gated.push(...paths);
+    }
+  }
+  const result = { gated, commentOnly: [], proofError: null };
+  if (candidates.length === 0) return result;
+  let proven = false;
+  if (gated.length === 0 && candidates.length <= COMMENT_ONLY_PROOF_FILE_LIMIT) {
+    try {
+      const { owner, repo } = context.repo;
+      const comparison = await retryRead(`could not find the merge base of PR #${pr.number}`, () =>
+        github.rest.repos.compareCommitsWithBasehead({
+          owner,
+          repo,
+          basehead: `${pr.baseRefName}...${pr.headRefOid}`,
+          per_page: 1,
+        }), subject);
+      const mergeBase = normalizeHeadSha(comparison?.data?.merge_base_commit?.sha);
+      if (!mergeBase) throw new Error(`no merge base for ${pr.baseRefName}...${pr.headRefOid}`);
+      const base = await readGatedTuiTree({ github, context, sha: mergeBase, role: "merge-base", subject });
+      const head = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "head", subject });
+      proven =
+        candidates.every((file) => head.get(file.filename)?.sha === normalizeHeadSha(file.sha)) &&
+        (await everyGoChangeIsInert({
+          github,
+          context,
+          subject,
+          changes: candidates.map((file) => ({
+            path: file.filename,
+            before: base.get(file.filename),
+            after: head.get(file.filename),
+          })),
+        }));
+    } catch (error) {
+      result.proofError = error.message || String(error);
+    }
+  }
+  if (proven) {
+    result.commentOnly = candidates.map((file) => file.filename);
+  } else {
+    gated.push(...candidates.map((file) => file.filename));
+  }
+  return result;
+}
+
 // Like a prose review verdict, the attestation names its commit explicitly.
 // The latest recognized attestation wins; a label alone cannot identify tested code.
 async function evaluatePlayTest({ github, context, pr, comments, subject }) {
@@ -5430,33 +5685,9 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
     // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
     // diverge and compare's file list can truncate. Tree equality covers adds,
     // deletes, renames, modes and merge conflict resolutions as well as edits.
-    const snapshot = async (sha) => {
-      const { owner, repo } = context.repo;
-      const commit = await retryRead(`could not read play-tested commit ${sha}`, () =>
-        github.rest.repos.getCommit({ owner, repo, ref: sha }), subject);
-      const treeSha = normalizeHeadSha(commit?.data?.commit?.tree?.sha);
-      if (!treeSha) throw new Error(`play-tested commit ${sha} has no tree SHA`);
-      const response = await retryRead(`could not read play-tested tree for ${sha}`, () =>
-        github.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: "1" }), subject);
-      const data = response?.data;
-      if (data?.truncated !== false || !Array.isArray(data.tree)) {
-        throw new Error(`play-tested tree for ${sha} is incomplete`);
-      }
-      const entries = [];
-      for (const entry of data.tree) {
-        if (typeof entry.path !== "string" || !normalizeHeadSha(entry.sha) ||
-            !["tree", "blob", "commit"].includes(entry.type) || !entry.mode) {
-          throw new Error(`play-tested tree for ${sha} has an invalid entry`);
-        }
-        if (entry.type !== "tree" && isGatedTuiPath(entry.path)) {
-          entries.push(JSON.stringify([entry.path, entry.type, entry.mode, entry.sha]));
-        }
-      }
-      return JSON.stringify(entries.sort());
-    };
     let tested;
     try {
-      tested = await snapshot(testedSha);
+      tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
     } catch (error) {
       // A well-formed SHA naming no commit is a bad attestation — user input
       // with its own blocking reason, not a gate-read failure (#4484).
@@ -5469,17 +5700,38 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
       }
       throw error;
     }
-    const current = await snapshot(pr.headRefOid);
-    if (tested !== current) {
-      return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
+    const current = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "play-tested", subject });
+    const changed = [...new Set([...tested.keys(), ...current.keys()])]
+      .filter((path) => !sameTreeEntry(tested.get(path), current.get(path)))
+      .sort();
+    if (changed.length > 0) {
+      // A follow-up that only rewords comments leaves the tested program intact,
+      // so it keeps the evidence (#4477). Any path that is added, removed, or
+      // not provably comment-only still makes the attestation stale.
+      const commentOnly = await everyGoChangeIsInert({
+        github,
+        context,
+        subject,
+        changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
+      });
+      if (!commentOnly) {
+        return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
+      }
+      return {
+        ok: true,
+        message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
+          `(gated paths changed only in comments: ${changed.join(", ")})`,
+      };
     }
   }
   return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
 }
 
+// The raw pulls.listFiles entries: the TUI path gate needs each file's status,
+// blob and patch, not just its name.
 async function listPullRequestFiles({ github, context, number, subject = null }) {
   const { owner, repo } = context.repo;
-  const files = await retryRead(
+  return retryRead(
     `could not list files for PR #${number}`,
     () =>
       github.paginate(github.rest.pulls.listFiles, {
@@ -5490,17 +5742,18 @@ async function listPullRequestFiles({ github, context, number, subject = null })
       }),
     subject,
   );
-  // A rename touches BOTH paths, and the API reports the old one only as
-  // `previous_filename`. Keeping just `filename` loses the fact that a file was
-  // REMOVED from where it used to be, which every path predicate below reads as
-  // "nothing there changed" — sharpest for the TUI gate, where renaming
-  // `ui/pane.go` to `ui/pane_test.go` takes a production file out of the shipped
-  // binary while leaving one path that ends in `_test.go`.
-  return files.flatMap((file) =>
-    file.previous_filename && file.previous_filename !== file.filename
-      ? [file.filename, file.previous_filename]
-      : [file.filename],
-  );
+}
+
+// A rename touches BOTH paths, and the API reports the old one only as
+// `previous_filename`. Keeping just `filename` loses the fact that a file was
+// REMOVED from where it used to be, which every path predicate reads as
+// "nothing there changed" — sharpest for the TUI gate, where renaming
+// `ui/pane.go` to `ui/pane_test.go` takes a production file out of the shipped
+// binary while leaving one path that ends in `_test.go`.
+function pullRequestFilePaths(file) {
+  return file.previous_filename && file.previous_filename !== file.filename
+    ? [file.filename, file.previous_filename]
+    : [file.filename];
 }
 
 // A required check PR Validation reports: Build or Lint, from GitHub Actions or
@@ -7416,6 +7669,8 @@ module.exports = {
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,
+  isNonPassingAggregate,
+  isRateLimitFailure,
   isReadFailure,
   merge,
   processAggregateHead,
@@ -7479,5 +7734,6 @@ module.exports = {
     codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,
     reviewedCommitMatchesHead,
+    gatedTuiChanges,
   },
 };

@@ -63,6 +63,7 @@ the label as present and writes nothing, so it does not loop.
 ## Play-test evidence
 
 A PR touching production files under `app/`, `ui/`, or `session/tmux/`
+(other than the comment-only changes described below)
 requires the `play-tested` label and a comment from an account in the gate's
 `ALLOWED_AUTHORS` set. After testing, start the comment with this exact line,
 using the full 40-character SHA of the commit actually tested:
@@ -82,7 +83,8 @@ An attestation for the current head passes directly. For an older commit, the
 gate compares complete Git tree snapshots of the tested commit and current
 head, restricted to the same gated paths and excluding `_test.go` files.
 Evidence survives a master merge or rebase when those files are unchanged.
-Content, path, or file-mode changes require another play-test and a new comment;
+Content, path, or file-mode changes require another play-test and a new comment,
+except a comment-only change to a `.go` file (below);
 merge shape alone cannot exempt a conflict resolution. A gated file edited and
 then reverted to its original content inside the window keeps the attestation:
 the comparison is over bytes, so the tested bytes are the current bytes. Missing
@@ -95,6 +97,34 @@ they do not suppress the manual path's independent review blockers.
 This uses snapshot equality rather than the compare API's merge-base diff,
 which can omit differences between rebased heads and truncate its file list.
 The decision names both the tested SHA and the head it covers.
+
+### Comment-only changes
+
+A change that only rewords comments leaves nothing for a play-test to see, so it
+neither requires the label nor makes an earlier attestation stale (#4477). The
+gate treats a file that way only when it can prove the change is comment-only:
+
+- The file is a `.go` file present on both sides with the same regular file
+  mode. An added, removed, or renamed file, a mode change, a symlink, and any
+  file that is not Go stay gated.
+- Both complete files are read, and they must be the same once ordinary comments
+  are removed and whitespace is normalized, with newlines still counted. A diff
+  alone cannot prove this: a `//` line inside a raw string literal is string
+  content, and that string's opening backtick can be any distance above the
+  hunk. The logic is in `.github/scripts/go-inert.js`.
+- A comment that tools read is kept in the comparison, not removed: any `//`
+  comment not followed by a space or tab (`//go:build`, `//go:embed`,
+  `//line`, `//nolint`, commented-out code), `// +build`, `// go:`, an import
+  comment, and every `/* */` comment. A file that imports `"C"` is never
+  comment-only, because the comments above that import are C source.
+- For the label, the pair compared is the merge base and the PR head, and the
+  gate reads the files only when every added or removed line in GitHub's patch
+  is blank or a whole-line comment. So an edited trailing comment still requires
+  the label. For an attestation, the pair is the tested commit and the head.
+- If the gate cannot finish the proof (a failed read, a blob that does not
+  match its SHA, more than 20 candidate files, a patch GitHub did not send), the
+  file stays gated. The decision notes say which files were treated as
+  comment-only.
 
 ## Shared heads
 
@@ -389,10 +419,10 @@ from availability ordering as well as verdict selection. A maintained summary
 is status, never an unrecognised outage response. The repository outage record
 uses the same corroboration rule for current and superseded commits, with
 commit dates, PR creation, force-push history and recorded head announcements
-supplying historical freshness floors. Only merge accounting requires the merged head specifically.
-Recovery uses the row's own time, never the summary edit time, and cannot be
-earlier than the corroborating artifact. A later artifact therefore cannot
-backdate a recovery or erase an earlier degraded merge.
+supplying historical freshness floors. Recovery uses the row's own time, never
+the summary edit time, and cannot be earlier than the corroborating artifact. A
+later artifact therefore cannot backdate a recovery or erase an earlier degraded
+merge.
 
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
