@@ -96,8 +96,8 @@ type SnapshotResponse struct {
 	// a repo that becomes corrupted mid-life keeps its prior in-memory rows via
 	// re-hydration, so its sessions remain in the snapshot and it is correctly
 	// NOT reported as skipped until the daemon restarts and re-runs startup. See
-	// daemon.daemon.go::refreshDaemonInstances/retainStillSkipped for the skip
-	// lifecycle.
+	// daemon.daemon.go::refreshDaemonInstances and
+	// snapshot.go::retainStillSkipped for the skip lifecycle.
 	SkippedRepos []SkippedRepo `json:"skipped_repos,omitempty"`
 }
 
@@ -128,7 +128,8 @@ const SkippedRepoReasonCorruptedInstancesJSON = "corrupted-instances-json"
 // NOT reported as skipped until the daemon restarts and re-runs startup. A
 // previously-skipped repo whose instances.json now parses falls out of the
 // set so list/get/whoami stop refusing the now-complete snapshot. See
-// daemon.go::refreshDaemonInstances/retainStillSkipped for the skip lifecycle.
+// daemon.go::refreshDaemonInstances and retainStillSkipped below for the skip
+// lifecycle.
 func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -141,6 +142,31 @@ func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 	var out []SkippedRepo
 	for _, s := range m.skippedRepos {
 		if s.RepoID == repoID {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// retainStillSkipped returns the subset of prev that fresh still reports as
+// corrupted. The polling refresh uses it so a startup skip set shrinks as repos
+// are repaired (#603 closed over the wire) — a previously-skipped repo whose
+// instances.json now parses drops out — without ever GAINING a mid-life
+// corrupted repo: those keep their re-hydrated in-memory rows and stay out of
+// the skip set until the daemon restarts and re-runs startup. Both prev and
+// fresh carry SkippedRepoReasonCorruptedInstancesJSON, so the prev entry is
+// preserved verbatim.
+func retainStillSkipped(prev, fresh []SkippedRepo) []SkippedRepo {
+	if len(prev) == 0 {
+		return nil
+	}
+	freshByID := make(map[string]bool, len(fresh))
+	for _, s := range fresh {
+		freshByID[s.RepoID] = true
+	}
+	var out []SkippedRepo
+	for _, s := range prev {
+		if freshByID[s.RepoID] {
 			out = append(out, s)
 		}
 	}

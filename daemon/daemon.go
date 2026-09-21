@@ -627,31 +627,6 @@ func (m *Manager) refreshLocked() error {
 	return nil
 }
 
-// retainStillSkipped returns the subset of prev that fresh still reports as
-// corrupted. The polling refresh uses it so a startup skip set shrinks as repos
-// are repaired (#603 closed over the wire) — a previously-skipped repo whose
-// instances.json now parses drops out — without ever GAINING a mid-life
-// corrupted repo: those keep their re-hydrated in-memory rows and stay out of
-// the skip set until the daemon restarts and re-runs startup. Both prev and
-// fresh carry SkippedRepoReasonCorruptedInstancesJSON, so the prev entry is
-// preserved verbatim.
-func retainStillSkipped(prev, fresh []SkippedRepo) []SkippedRepo {
-	if len(prev) == 0 {
-		return nil
-	}
-	freshByID := make(map[string]bool, len(fresh))
-	for _, s := range fresh {
-		freshByID[s.RepoID] = true
-	}
-	var out []SkippedRepo
-	for _, s := range prev {
-		if freshByID[s.RepoID] {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 func daemonInstanceKey(repoID, title string) string {
 	return repoID + "\x00" + title
 }
