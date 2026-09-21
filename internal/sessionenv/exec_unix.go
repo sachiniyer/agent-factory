@@ -170,6 +170,21 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 			if err != nil {
 				return fmt.Errorf("account-scoped launch refused: %w", err)
 			}
+			// The env var is writable by the same shell that re-invokes af, so a
+			// decoded value alone is not evidence af's launcher produced it. Re-derive
+			// what the launcher would have produced from the pane's resolved
+			// operator config and refuse a mismatch: an attacker who overwrites the
+			// env var with their own TrustedExecutable cannot also overwrite what
+			// the resolver reads (#3123, #4731 review). A missing resolver — e.g.
+			// in tests that drive the shim directly without wiring main.go — keeps
+			// the historical standalone-env behaviour so the existing
+			// proof-channel regression witnesses still hold.
+			if AccountLaunchProofResolver != nil {
+				expected, resolveErr := AccountLaunchProofResolver(agent, account, args[len(args)-1])
+				if resolveErr == nil && !accountLaunchProofsMatch(proof, expected) {
+					return fmt.Errorf("account-scoped launch refused: %w", errAccountLaunchProofMismatch)
+				}
+			}
 		}
 	}
 	// Compared against the REMAINING room, never `offset+count`: a maximum-sized

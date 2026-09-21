@@ -1,8 +1,11 @@
 package session
 
 import (
+	"os"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -50,4 +53,60 @@ func setLaunchProgram(ts *tmux.TmuxSession, final string, proof sessionenv.Accou
 	// ONE call, so the two are written under one lock. Adjacent setters would still
 	// let a concurrent launch observe a torn pair (#3083 review).
 	ts.SetLaunchProgram(final, proof)
+}
+
+// ResolveAccountLaunchProof re-derives the launch proof af's launcher would
+// have produced for an account-scoped pane whose command is `command`. The
+// exec shim cannot trust the env var alone — the same shell that re-invokes af
+// under the marker can also write the env var — so main.go wires this as
+// sessionenv.AccountLaunchProofResolver, and the shim refuses an env-supplied
+// proof that does not match what this derivation returns (#3123, #4731 review).
+//
+// It mirrors resolveLaunchProgramForInstance: the operator's config is resolved
+// from the pane's working directory (the launcher wrote the proof from the
+// same i.Path-based resolution), base is ResolveProgram, trustBase is
+// builtInProgramOverride, and base+command+trustBase feed accountLaunchProof.
+// The command is the pane's actual command (the launcher already completed
+// prepareLaunchConversation/injectSystemPrompt before recording it), so the
+// derivation reproduces the launcher's inputs verbatim and the two match on a
+// legitimate launch.
+//
+// A resolution failure returns (zero, err): the shim treats that as "no
+// derivation available" and falls back to the env proof alone, so a pane that
+// cannot reach its config does not broaden the refusal — the resolver is a
+// SECONDARY gate, not a replacement for the env channel.
+func ResolveAccountLaunchProof(agent, account, command string) (sessionenv.AccountLaunchProof, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return sessionenv.AccountLaunchProof{}, err
+	}
+	resolved := resolveResolvedConfigForPath(cwd)
+	if resolved == nil {
+		return sessionenv.AccountLaunchProof{}, nil
+	}
+	base := config.ResolveProgram(&resolved.Config, agent)
+	trustBase := builtInProgramOverride(resolved, agent, base)
+	return accountLaunchProof(base, command, trustBase), nil
+}
+
+// resolveResolvedConfigForPath is resolveResolvedConfigForInstance without the
+// Instance dependency, so the exec shim can run the same resolution from the
+// pane's own working directory (which the launcher set with new-session -c to
+// the worktree path). Same two layers — repo then global — and same warning on
+// a resolve that did not answer, so the resolver and the launcher cannot drift
+// apart on which config a pane saw.
+func resolveResolvedConfigForPath(path string) *config.ResolvedConfig {
+	if repo, err := config.RepoFromPath(path); err == nil {
+		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
+			return resolved
+		} else {
+			log.WarningLog.Printf("failed to resolve repo config when deriving account launch proof for path %q: %v", path, rerr)
+		}
+	}
+	resolved, err := config.ResolveGlobalConfig()
+	if err != nil {
+		log.WarningLog.Printf("failed to load config when deriving account launch proof for path %q: %v", path, err)
+		return nil
+	}
+	return resolved
 }
