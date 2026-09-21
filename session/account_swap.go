@@ -27,10 +27,11 @@ type accountSwapLaunchPlan struct {
 	proof               sessionenv.AccountLaunchProof
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot
-	// agent and manual are the admission's own arguments, kept so a failed
-	// conversation carry can rebuild this plan as a fresh one.
-	agent  string
-	manual bool
+	// agent, crossAgent, and manual are the admission's own arguments, kept so
+	// a failed conversation carry can rebuild this plan as a fresh one.
+	agent      string
+	crossAgent bool
+	manual     bool
 	// carry is the same-agent conversation copy this plan resumes (#4367);
 	// carryFallback says why a carry that applied launches fresh instead.
 	carry         *conversationCarry
@@ -75,6 +76,30 @@ func (i *Instance) AccountSelection() (account string, auto bool) {
 	return i.Account, i.accountAutoSelected
 }
 
+// AccountAgent reports the agent namespace the pinned account was selected in —
+// durable evidence that a program_overrides edit after the pin cannot move
+// (#4430 review round 4). "" when the session is ambient.
+func (i *Instance) AccountAgent() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.accountNamespaceLocked()
+}
+
+// accountNamespaceLocked answers which agent's registry Account was selected
+// under. The durable field wins; a record older than it falls back to the
+// requested program's enum — the only namespace its selection could have used,
+// since the redirected-account handoff that separates label from enum is newer
+// than the field. Caller holds i.mu.
+func (i *Instance) accountNamespaceLocked() string {
+	if i.Account == "" {
+		return ""
+	}
+	if i.accountAgent != "" {
+		return i.accountAgent
+	}
+	return sessionenv.AgentForCommand(i.Program)
+}
+
 func cloneAccountSwapData(data *AccountSwapData) *AccountSwapData {
 	if data == nil {
 		return nil
@@ -107,34 +132,62 @@ func (i *Instance) SupportsAutomaticAccountSwap() bool {
 // account creation remains supported, but a crash-safe automatic reprovision
 // needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
-	return i.validateAccountSwap(name, "", false, true)
+	return i.validateAccountSwap(name, "", false, false, true)
 }
 
-// ValidateManualAccountSwap uses the same launch proof with an operator-selected identity.
-func (i *Instance) ValidateManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true, true)
+// ManualAccountSwapProgram decides which program a manual account swap
+// launches: agent's own command for a cross-agent handoff, the recorded
+// program otherwise. The daemon asks it once, at admission, and hands the same
+// crossAgent to ValidateManualAccountSwap and SelectAccountForHandoff so the
+// frozen launch and the record cannot disagree.
+//
+// "Same agent" is HandoffTargetIsCurrent, the same-target guard's predicate:
+// with program_overrides.aider = "codex" running a codex pane, `--to codex`
+// whose own override resolves to aider is CROSS-agent, while `--to aider` is
+// the same-agent account change despite the enum differing from Program.
+//
+// accountOnly (no --to) is same-agent by construction and skips the predicate.
+// Its agent is the running IDENTITY, not an enum whose override produced the
+// pane, so resolving it through its own override answers a question nobody
+// asked: with program_overrides.claude = "codex" and program_overrides.codex =
+// "gemini", a claude-configured codex pane would read "codex" as a gemini
+// launch and turn `--account work` into a cross-agent handoff (#4430 review).
+// Resolution does config I/O, so this must not run under i.mu.
+func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool) {
+	program = i.AgentProgram()
+	agent = strings.TrimSpace(agent)
+	if accountOnly || agent == "" ||
+		HandoffTargetIsCurrent(i.CurrentAgentName(), agent, handoffEffectiveAgent(i, agent), program) {
+		return program, false
+	}
+	return agent, true
+}
+
+// ValidateManualAccountSwap uses the same launch proof with an operator-selected
+// identity. agent names the handoff target; crossAgent is
+// ManualAccountSwapProgram's decision for it.
+func (i *Instance) ValidateManualAccountSwap(name, agent string, crossAgent bool) error {
+	return i.validateAccountSwap(name, agent, crossAgent, true, true)
 }
 
 // CheckManualAccountSwap performs the manual launch proof without recording a
 // launch plan. The daemon uses it before a project-lock identity probe so an
 // independent domain refusal can remain visible; a successful check grants no
 // authority to mutate and is repeated under the proven policy lock.
-func (i *Instance) CheckManualAccountSwap(name, agent string) error {
-	return i.validateAccountSwap(name, agent, true, false)
+func (i *Instance) CheckManualAccountSwap(name, agent string, crossAgent bool) error {
+	return i.validateAccountSwap(name, agent, crossAgent, true, false)
 }
 
-func (i *Instance) validateAccountSwap(name, agent string, manual, recordLaunch bool) error {
-	return i.validateAccountSwapPlan(name, agent, manual, recordLaunch, "")
+func (i *Instance) validateAccountSwap(name, agent string, crossAgent, manual, recordLaunch bool) error {
+	return i.validateAccountSwapPlan(name, agent, crossAgent, manual, recordLaunch, "")
 }
 
 // validateAccountSwapPlan is validateAccountSwap with a carry failure this
 // attempt already hit: a non-empty carryFailure plans a fresh conversation
 // whose notice repeats it.
-func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLaunch bool, carryFailure string) error {
+func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manual, recordLaunch bool, carryFailure string) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
-	program := i.Program
-	path := i.Path
 	current := i.Account
 	auto := i.accountAutoSelected
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
@@ -163,12 +216,55 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLau
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
 	resolution := resolveLaunchProgramForInstance(i)
-	crossAgent := agent != "" && agent != i.CurrentAgentName()
+	// A cross-agent swap resolves the target enum's own command and namespace;
+	// a same-agent one keeps the recorded program. With program_overrides.aider
+	// = "codex" running a codex pane, `--to codex` whose override resolves to
+	// aider IS cross-agent, while `--to aider` — and an account-only request,
+	// whose agent is the running identity rather than an enum — is not (#4430
+	// review).
 	if crossAgent {
-		program = agent
 		resolved := resolveResolvedConfigForInstance(i)
 		resolution.command = resolveProgramForAgent(i, agent)
 		resolution.trustBase = builtInProgramOverride(resolved, agent, resolution.command)
+	} else {
+		// A same-agent or account-only swap promises to keep the agent that is
+		// RUNNING — which is the command that positively established this pane,
+		// not the stored enum re-resolved under today's overrides. With
+		// program_overrides.claude = "codex" at launch and a later edit to
+		// "gemini", a fresh resolution would launch gemini while the swap still
+		// claims same-agent (#4430 review round 6). The recorded runtime is not
+		// a built-in declaration, so trustBase resets with the command. A
+		// committed transaction retrying post-restart may have no runtime
+		// record left, but its pane still runs the command the checkpoint
+		// launched — that evidence outranks a fresh resolution too.
+		established := i.RuntimeProgram()
+		if established == "" {
+			established = i.ResolvedPaneProgram()
+		}
+		switch {
+		case pending != nil && pending.To == name && pending.Program != "":
+			// The committed transaction froze the incoming command at commit.
+			// A restart can reach this retry while the pane still runs the
+			// OUTGOING agent — the checkpoint precedes the replacement — so
+			// the established evidence is the predecessor's and must not win
+			// (#4430 review round 7).
+			resolution = launchProgramResolution{command: pending.Program}
+		case pending != nil && pending.To == name && pending.AccountAgent != "" &&
+			tmux.DetectAgentFromCommand(established) != pending.AccountAgent:
+			// A pending record written before Program existed: the committed
+			// namespace disagrees with the surviving runtime evidence, so that
+			// evidence is the predecessor's. Re-resolve the enum the commit
+			// recorded in the handoff ledger; the drift check below still
+			// refuses if configuration has since moved it off the committed
+			// namespace.
+			if target := i.PendingAccountSwapTarget(); target != "" {
+				resolved := resolveResolvedConfigForInstance(i)
+				resolution.command = resolveProgramForAgent(i, target)
+				resolution.trustBase = builtInProgramOverride(resolved, target, resolution.command)
+			}
+		case established != "":
+			resolution = launchProgramResolution{command: established}
+		}
 	}
 	resolvedProgram := resolution.command
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
@@ -201,11 +297,45 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLau
 		}
 		launchProgram, conversation = planLaunchConversation(conversationID, resolvedProgram)
 	}
+	// A swap selects the account in the namespace of the command it will
+	// actually launch, not the enum the session was created under: a session
+	// recorded as claude whose override resolves to codex is RUNNING codex,
+	// and the account must come from the registry the launch's agent reads
+	// (#4430 review). resolvedProgram is that frozen command — resolved above
+	// from the same config — so no second resolution can disagree with it.
+	// The committed manual transaction is the one caller whose account
+	// namespace is a matter of record rather than resolution: the swap
+	// already moved this session to name inside pending.AccountAgent's
+	// registry, so its retry must resolve there even when program_overrides
+	// have since moved the enum's resolution. The same namespace feeds the
+	// skill target below: a redirect that selects codex's registry must write
+	// the af skill under codex's account root, and the resolved-namespace
+	// answer is what resolveSkillTargetForAccount compares the launch's
+	// detected agent against (#4430 review round 5).
+	accountNamespace := sessionenv.AgentForCommand(resolvedProgram)
+	if pending != nil && pending.To == name {
+		// A committed transaction's namespace is a matter of record, never a
+		// fresh resolution: the commit already moved this session into name's
+		// registry, and program_overrides may have moved since — re-resolving
+		// could select a same-named account in another agent's registry that
+		// the drift check then accepts because command and account agree with
+		// each other instead of with the commit (#4430 review round 6). The
+		// manual transaction records its namespace on the pending data; the
+		// automatic one's record is the durable pin the commit itself
+		// installed on the instance.
+		accountNamespace = pending.AccountAgent
+		if accountNamespace == "" {
+			accountNamespace = i.AccountAgent()
+		}
+		if accountNamespace == "" {
+			accountNamespace = sessionenv.AgentForCommand(resolvedProgram)
+		}
+	}
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
 	launchProgram = injectSystemPrompt(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, program, name))
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name))
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
@@ -223,7 +353,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLau
 	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
-	accountScope, err := resolveAccountForProvision(path, program, name)
+	accountScope, err := selectAccountInNamespace(accountNamespace, name)
 	if err != nil {
 		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
 	}
@@ -313,7 +443,8 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, manual, recordLau
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
 		account: name, base: resolvedProgram, program: launchProgram,
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
-		agent: agent, manual: manual, carry: carry, carryFallback: carryFallback,
+		agent: agent, crossAgent: crossAgent, manual: manual,
+		carry: carry, carryFallback: carryFallback,
 	}
 	return nil
 }
@@ -389,10 +520,10 @@ func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversat
 func (i *Instance) selectAccount(from, name string, automatic bool) (AgentConversationData, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.selectAccountLocked(from, name, automatic)
+	return i.selectAccountLocked(from, name, "", automatic)
 }
 
-func (i *Instance) selectAccountLocked(from, name string, automatic bool) (AgentConversationData, error) {
+func (i *Instance) selectAccountLocked(from, name, accountAgent string, automatic bool) (AgentConversationData, error) {
 	if i.inFlightOp != OpRespawning {
 		return AgentConversationData{}, fmt.Errorf("selecting account for %q requires the limit-resume fence", i.Title)
 	}
@@ -405,6 +536,25 @@ func (i *Instance) selectAccountLocked(from, name string, automatic bool) (Agent
 	// can put that process's account-local conversation back into the live slot.
 	i.agentRuntimeGeneration++
 	i.clearAgentModelChangeLocked()
+	// The namespace the account was selected in is the agent of the frozen
+	// launch command — the same resolution the registry's Selected answered.
+	// Recording it keeps the pin stable when a program_overrides edit between
+	// commit and a later respawn resolves the recorded Program differently
+	// (#4430 review round 4). The caller-supplied value is the same answer the
+	// locked admission proved; the frozen plan wins when both exist because it
+	// is what will actually launch.
+	if plan := i.accountSwapLaunch; plan != nil && plan.account == name {
+		if agent := sessionenv.AgentForCommand(plan.base); agent != "" {
+			accountAgent = agent
+		}
+	}
+	if accountAgent == "" {
+		accountAgent = i.accountNamespaceLocked()
+	}
+	if i.accountAgent != accountAgent {
+		i.accountAgent = accountAgent
+		i.touchLocked()
+	}
 	if i.Account != name {
 		i.Account = name
 		i.touchLocked()
@@ -415,6 +565,12 @@ func (i *Instance) selectAccountLocked(from, name string, automatic bool) (Agent
 	}
 	pending := &AccountSwapData{From: from, To: name}
 	if plan := i.accountSwapLaunch; plan != nil && plan.account == name {
+		// The committed incoming command is a matter of record too: a restart
+		// between this checkpoint and the replacement's first launch leaves
+		// pane/runtime evidence describing the OUTGOING agent, and a retry
+		// that froze that command would fail the drift check against the
+		// committed namespace forever (#4430 review round 7).
+		pending.Program = plan.base
 		switch {
 		case plan.carry != nil:
 			pending.CarriedConversationID = plan.carry.id
@@ -432,7 +588,9 @@ func (i *Instance) selectAccountLocked(from, name string, automatic bool) (Agent
 // RestoreAccountSelectionUnderResumeFence rolls back an in-memory selection
 // whose durable checkpoint failed. The stopped old runtime is not restarted;
 // the next scheduler pass retries from the still-durable previous identity.
-func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto bool, conversation AgentConversationData) error {
+// accountAgent is the previous selection's namespace — captured beside the
+// account name at admission, so the rollback restores the same pin (#4430).
+func (i *Instance) RestoreAccountSelectionUnderResumeFence(name, accountAgent string, auto bool, conversation AgentConversationData) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
@@ -440,6 +598,10 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	}
 	if i.Account != name {
 		i.Account = name
+		i.touchLocked()
+	}
+	if i.accountAgent != accountAgent {
+		i.accountAgent = accountAgent
 		i.touchLocked()
 	}
 	if i.accountAutoSelected != auto {
@@ -584,14 +746,41 @@ func (i *Instance) ValidateAccountSwapReplacementPanes() error {
 // this restores tmux's launch metadata and promotes a durable injected Claude
 // id, or a carried conversation, before the pending marker can be cleared.
 func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
+	// The incoming agent is the resolved command's, not i.Program's enum: a
+	// program_overrides redirect records the requested target while launching
+	// the overridden command, and the live-pane answer a stopped swap lacks
+	// falls back to that enum (#4430 review round 3). Resolved before the
+	// instance lock — program resolution does config I/O. Inside the lock the
+	// durable selection records win: they are the answers the committed
+	// transaction actually froze, which re-resolution can only approximate once
+	// the configuration has moved.
+	resolvedAgent := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
 	i.mu.Lock()
 	account := i.Account
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
+	// Namespace preference order, most durable first: the selection record
+	// (i.accountAgent) is the commit-time answer no config flip or restart can
+	// move; a committed manual swap's AccountAgent predates it on records
+	// written between the two fields; the pane's frozen program only survives
+	// until an attach rewrites its metadata from CURRENT config; and the
+	// pre-lock re-resolution is the legacy fallback for records older than all
+	// of them (#4430 review round 4).
+	agent := resolvedAgent
+	if ts := i.tmuxLocked(); ts != nil {
+		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
+			agent = frozen
+		}
+	}
+	if pending != nil && pending.AccountAgent != "" {
+		agent = pending.AccountAgent
+	}
+	if i.accountAgent != "" {
+		agent = i.accountAgent
+	}
 	if pending == nil || account != pending.To {
 		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)
 	}
-	agent := i.currentAgentNameLocked()
 	if pending.CarriedConversationID != "" {
 		if err := i.synchronizeCarriedConversationLocked(agent, pending.CarriedConversationID); err != nil {
 			i.mu.Unlock()

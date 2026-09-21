@@ -22,6 +22,7 @@ import type { CreateSessionInput, DirectoryListing } from "./api.js";
 import {
   type AccountChoice,
   accountAgentFor,
+  accountAgentSupported,
   accountChoices,
   accountDefaultFor,
   accountNotice,
@@ -441,6 +442,7 @@ export function newSessionModal(
 export function handoffModal(
   sessionTitle: string,
   currentAgent: string,
+  recordedProgram: string,
   callbacks: {
     onSubmit: (target: string, account?: string) => void;
     loadAccounts?: () => Promise<AccountsResponse>;
@@ -459,24 +461,62 @@ export function handoffModal(
   let accounts: AccountsResponse = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent: string): boolean => agent === currentAgent || !!callbacks.currentAccount;
+  // A scoped session needs a named account only for a target that can carry
+  // one; a target outside the daemon's roster drops the scope instead (#4428).
+  // The capability question is judged on the command the target LAUNCHES — the
+  // daemon's resolved_agents, not the enum — so codex→aider drops the scope
+  // rather than demanding an account no Aider registry could honor (#4430
+  // review). A registry that failed to load cannot prove a target unscopable,
+  // so it is treated as requiring one — the daemon refuses the carry either way.
+  const resolvedAgent = (agent: string): string => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent: string): boolean => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  // "The current agent" is judged on resolved identity, not enum name: with
+  // program_overrides.aider = "codex" running a codex pane, the aider ENUM is
+  // the same-agent target (its command resolves to the running codex) while
+  // the codex enum — resolving to aider — is a cross-agent handoff the
+  // daemon's resolved-identity guard permits (#4430 review). A target whose
+  // command is not a provable agent invocation resolves to "", and then only
+  // the RECORDED enum decides sameness — currentAgent is token-scanned from
+  // the running command, and a wrapper's arguments can name a different agent
+  // entirely (`./collect codex` under aider's enum), which would offer the
+  // session's own override as a handoff that kills and restarts it (#4430
+  // review round 6). HandoffTargetIsCurrent does the same on the daemon.
+  const isCurrentAgent = (agent: string): boolean =>
+    handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
+  const requiresAccount = (agent: string): boolean =>
+    isCurrentAgent(agent) || (!!callbacks.currentAccount && scopableTarget(agent));
   let accountRows: ReturnType<typeof handoffAccountChoices> = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = (): void => {
-    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target)
+      ? (resolved !== target
+          ? `${target} launches ${resolved}, which cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`
+          : `${target} cannot carry an account — the "${callbacks.currentAccount}" scope is dropped on handoff.`)
+      : (resolved !== "" && resolved !== target
+          ? `${target} launches ${resolved} — the account must be a ${resolved} account. `
+          : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || (requiresAccount(agentSelect.value) && !accountSelect.value);
   };
   const refreshAccounts = (): void => {
     const agent = agentSelect.value;
-    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    // Account rows come from the RESOLVED namespace, not the requested enum:
+    // the daemon registers --account against the resolved command's agent, so
+    // an `aider` target redirected to `codex` is honestly served by codex's
+    // registry — hiding those rows made the target unreachable even though the
+    // daemon accepts the handoff (#4430 review round 3). An empty resolution
+    // (a command af cannot prove is an agent) matches no rows.
+    const choices = handoffAccountChoices(accounts, resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : "");
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[agent];
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
     const selected = choices.find((choice) => choice.value === fallback && choice.logged_in)
       ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : undefined);
     accountSelect.value = selected?.value ?? "";
@@ -501,11 +541,29 @@ export function handoffModal(
   // leave a same-agent row with an empty account picker selected.
   const refreshAgentChoices = (): void => {
     if (catalogChoices === null || !accountsLoaded) return;
-    const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, agent,
-      agent === currentAgent ? callbacks.currentAccount : "").length > 0;
-    const choices = catalogChoices.filter(choice => !callbacks.currentAccount || hasAccount(choice.value));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
-      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    const hasAccount = (agent: string): boolean => handoffAccountChoices(accounts, resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : "").length > 0;
+    // The same-agent row spells the account change through the enum whose
+    // resolved command IS the running agent — usually currentAgent's own
+    // enum, but an override pointing its name elsewhere (the codex enum
+    // resolving to aider while aider launches the codex pane) makes a
+    // different enum the same-agent target (#4430 review). handoffSameAgentTarget
+    // declines the row entirely when the daemon's resolved_agents proves no
+    // enum still resolves to the runtime — overrides moved after launch — so
+    // the label cannot promise an account-only swap the daemon would honor as
+    // a cross-agent handoff (#4430 review round 7).
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map(choice => choice.value), currentAgent, recordedProgram,
+      accounts.resolved_agents);
+    // A scoped session keeps every target it can honestly reach: an agent with
+    // a registered account to name, or one KNOWN to have no account support,
+    // which drops the scope rather than needing it (#4428). A target whose
+    // resolved command af cannot classify ("") is not offered — the daemon
+    // refuses the drop on an unproven answer, so the row could only error
+    // (#4430 review, D1).
+    const choices = catalogChoices.filter(choice => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || (resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value))));
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
     renderChoices(choices);
@@ -530,7 +588,11 @@ export function handoffModal(
   void callbacks
     .loadPrograms()
     .then((catalog) => {
-      catalogChoices = handoffAgentChoices(catalog, currentAgent);
+      // The current agent is NOT excluded here: "same agent" is a resolved-
+      // identity question refreshAgentChoices answers per render — an enum
+      // whose name equals currentAgent can still resolve to a different
+      // agent and must stay offerable (#4430 review).
+      catalogChoices = handoffAgentChoices(catalog, "");
       refreshAgentChoices();
     })
     .catch(() => {
@@ -571,6 +633,48 @@ export function handoffModal(
 
   queueMicrotask(() => agentSelect.focus());
   return handle;
+}
+
+/**
+ * Is `target` the agent this session already runs? Mirrors the daemon's
+ * HandoffTargetIsCurrent: a provable resolved command decides; an opaque one
+ * (resolved "") falls back to the RECORDED enum, because the token-scanned
+ * current identity can name a different agent than the enum when a wrapper's
+ * arguments spoof one — `./collect codex` under aider's enum means `--to aider`
+ * relaunches that same wrapper (#4430 review round 6).
+ */
+export function handoffTargetIsCurrent(
+  currentAgent: string,
+  target: string,
+  resolved: string,
+  recordedProgram: string,
+): boolean {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
+}
+
+/**
+ * Which catalog enum spells this session's "same agent, another account"
+ * target — the enum whose resolved command IS the running agent. When
+ * resolvedAgents was reported and no enum resolves to the runtime, there is
+ * no honest spelling: configuration moved after launch (a live codex pane
+ * whose codex enum now resolves to gemini), and falling back to the bare
+ * currentAgent would send `to=<enum>` — a CROSS-agent handoff labeled
+ * "another account" (#4430 review round 7). The bare-name fallback serves
+ * only older daemons whose wire carried no resolved_agents at all.
+ */
+export function handoffSameAgentTarget(
+  catalogValues: string[],
+  currentAgent: string,
+  recordedProgram: string,
+  resolvedAgents: Record<string, string> | undefined,
+): string | undefined {
+  const matched = catalogValues.find((value) =>
+    handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== undefined) return matched;
+  return resolvedAgents === undefined ? currentAgent : undefined;
 }
 
 export interface DeletionWorkspace {
