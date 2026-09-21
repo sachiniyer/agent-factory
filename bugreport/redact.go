@@ -532,6 +532,12 @@ var sensitiveJSONKeys = map[string]bool{
 	// still awaiting delivery" survives for triage while the two labels and the
 	// resumable conversation id inside it do not.
 	"limit_account": true, "pending_account_swap": true,
+	// account_agent is the namespace the account label was selected in (#4430).
+	// The typed path keeps it only when it is one of af's agent names and marks
+	// anything else; this path cannot make that distinction, so it always
+	// masks — a record the typed decode rejected must not publish a value the
+	// accepted record would have hidden (#4703's account_scope parity rule).
+	"account_agent": true,
 	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
 	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
 	// bundle in a form the closing text scrub cannot recognize as a path, a home

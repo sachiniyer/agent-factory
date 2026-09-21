@@ -108,12 +108,13 @@ func TestRedactInstancesFallbackRedactsAccountSwapLabels(t *testing.T) {
 		"id":"leg-1","status":"legacy-string-status","program":"claude",
 		"runtime_program":"/home/siyer/.local/bin/claude --dangerously-skip-permissions",
 		"limit_agent":"codex","limit_account":"acme-prod",
+		"account_agent":"acme-internal-agent",
 		"pending_account_swap":{"from":"acme-prod","to":"acme-staging","conversation_id":"8f466d20-784b"},
 		"account_limit_observations":[{"agent":"claude","account":"acme-prod"}]
 	}]`)
 	out := string(r.redactInstancesJSON(raw))
 	for _, leaked := range []string{
-		"acme-prod", "acme-staging", "8f466d20-784b",
+		"acme-prod", "acme-staging", "8f466d20-784b", "acme-internal-agent",
 		"/home/siyer/.local/bin/claude", "--dangerously-skip-permissions",
 	} {
 		if strings.Contains(out, leaked) {
