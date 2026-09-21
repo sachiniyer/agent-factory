@@ -269,26 +269,42 @@ func TestRedactAccessTokenURLRawQueryOverlapAfterEqualToLiteralKey(t *testing.T)
 // TestRedactAccessTokenURLKeepsOverlapFreeFormControls /
 // TestRedactAccessTokenURLOverlapCaseInsensitive — applies to opaque too, even
 // though no current in-repo production caller happens to route an opaque URL
-// through it):
+// through it; userinfo is included because the same component-wide contract
+// applies to it too — url.URL.User is a parser-proven field that url.URL.String
+// re-emits through Userinfo.String, so a co-located %HH-overlapped
+// access_token=<secret> plus a later literal access_token=<value> in the
+// username or password leaks through the same decoded-single-anchor path the
+// other components did, and the raw scan mirrors it):
 //  1. Co-located overlap+literal in one component (query / path / fragment /
-//     opaque), one case per %ac / %Aa / %AC hex variant — the trailing literal
-//     drives the decoded pass; the un-gated raw scan then catches the overlap.
-//     For path/fragment the decoded pass rewrites u.Path/u.Fragment and clears
-//     u.RawPath/u.RawFragment, so EscapedPath/EscapedFragment re-encode the
-//     overlap's decoded byte through the canonical uppercase %XX, and the
-//     raw-scan output carries that canonical form regardless of the input
-//     hex case. (Decoded byte 0xAC, from "%ac" or "%AC", encodes as "%AC";
-//     byte 0xAA, from "%Aa", encodes as "%AA".) Opaque carries no Raw* twin:
-//     url.URL.String prints u.Opaque verbatim, so its raw-scan output
-//     preserves the input hex case byte-for-byte.
+//     opaque / userinfo), one case per %ac / %Aa / %AC hex variant — the
+//     trailing literal drives the decoded pass; the un-gated raw scan then
+//     catches the overlap. For path/fragment the decoded pass rewrites
+//     u.Path/u.Fragment and clears u.RawPath/u.RawFragment, so
+//     EscapedPath/EscapedFragment re-encode the overlap's decoded byte
+//     through the canonical uppercase %XX, and the raw-scan output carries
+//     that canonical form regardless of the input hex case. (Decoded byte
+//     0xAC, from "%ac" or "%AC", encodes as "%AC"; byte 0xAA, from "%Aa",
+//     encodes as "%AA".) Opaque carries no Raw* twin: url.URL.String prints
+//     u.Opaque verbatim, so its raw-scan output preserves the input hex case
+//     byte-for-byte. Userinfo stores the DECODED name/password (url.Parse
+//     already percent-decoded them) and Userinfo.String re-encodes through
+//     encodeUserinfo, so userinfo mirrors the path family's canonical
+//     uppercase %XX re-encode. The password sub-variant keeps the username
+//     untouched and parks the overlap in the password to also exercise the
+//     single ":" user/password separator — the only structural terminator in
+//     Userinfo.String's grammar (a literal ":" in either field is escaped as
+//     %3A, so the first ":" in the serialized form is always the
+//     separator): an access_token= span in the name ends at ":" (or at the
+//     end of the string when there is no password), and one in the password
+//     — the trailing field — runs to the end of the string.
 //  2. Over-redaction guard cases — coincidental `access_token=` substrings in
-//     non-access_token field values (path / fragment / opaque shapes), with a
-//     trailing `/seg` segment in some cases. These have NO overlap; the
-//     decoded pass already redacts a tail-from-the-coincidental-access_token=
-//     span, and the raw scan re-runs over the REDACTED marker. The exact-want
-//     assertion pins that the un-gated raw scan is idempotent (no extra
-//     redaction, no value corruption, no escape normalisation) — the output
-//     byte-for-byte equals what the gate would have produced.
+//     non-access_token field values (path / fragment / opaque / userinfo
+//     shapes), with a trailing `/seg` segment in some cases. These have NO
+//     overlap; the decoded pass already redacts a tail-from-the-coincidental-
+//     access_token= span, and the raw scan re-runs over the REDACTED marker.
+//     The exact-want assertion pins that the un-gated raw scan is idempotent
+//     (no extra redaction, no value corruption, no escape normalisation) —
+//     the output byte-for-byte equals what the gate would have produced.
 //  3. Benign cases with no access_token key/value/overlap at all — the URL is
 //     returned unchanged, pinning the #4161 no-normalization contract for
 //     unmatched shapes.
@@ -380,6 +396,39 @@ func TestRedactAccessTokenURLRedactsOverlapAndLiteralInOneComponent(t *testing.T
 			raw:       "data:%ACcess_token=" + overlapSecret + "access_token=" + literalValue,
 			wantExact: "data:%ACcess_token=REDACTED",
 		},
+		// --- Co-located overlap + literal in one component (userinfo family) ---
+		// Userinfo stores the DECODED name/password (url.Parse already
+		// percent-decoded them) and Userinfo.String re-encodes them through
+		// encodeUserinfo, so the userinfo family mirrors the path family
+		// above: the overlap's decoded byte (0xAC from "%ac" / "%AC", 0xAA
+		// from "%Aa") re-encodes through the canonical uppercase %XX. The
+		// password sub-variant keeps the username untouched and parks the
+		// overlap in the password to also exercise the single ":"
+		// user/password separator — the only structural terminator in
+		// Userinfo.String's grammar (a literal ":" in either field is
+		// escaped as %3A, so the first ":" in the serialized form is always
+		// the separator): the overlap's value runs to the end of the
+		// serialized string, since the password is the trailing field.
+		{
+			name:      "co-located/userinfo/lower-hex",
+			raw:       "http://%access_token=" + overlapSecret + "access_token=" + literalValue + "@h/",
+			wantExact: "http://%ACcess_token=REDACTED@h/",
+		},
+		{
+			name:      "co-located/userinfo/mixed-hex",
+			raw:       "http://%Aaccess_token=" + overlapSecret + "access_token=" + literalValue + "@h/",
+			wantExact: "http://%AAccess_token=REDACTED@h/",
+		},
+		{
+			name:      "co-located/userinfo/upper-hex",
+			raw:       "http://%ACcess_token=" + overlapSecret + "access_token=" + literalValue + "@h/",
+			wantExact: "http://%ACcess_token=REDACTED@h/",
+		},
+		{
+			name:      "co-located/userinfo-password/lower-hex",
+			raw:       "http://user:%access_token=" + overlapSecret + "access_token=" + literalValue + "@h/",
+			wantExact: "http://user:%ACcess_token=REDACTED@h/",
+		},
 		// Over-redaction guards. Coincidental `access_token=` in a
 		// non-access_token field value; the decoded pass already redacts the
 		// tail-from-the-coincidental-access_token= span. The un-gated raw
@@ -420,6 +469,23 @@ func TestRedactAccessTokenURLRedactsOverlapAndLiteralInOneComponent(t *testing.T
 			raw:       "data:%access_token=INNOCENTvalaccess_token=REAL;base64",
 			wantExact: "data:%access_token=REDACTED",
 		},
+		// Userinfo over-redact guards. The decoded pass already redacts the
+		// tail-from-the-coincidental-access_token= span (extending to the end
+		// of the username when there is no password, or to the end of the
+		// serialized userinfo in the password case, since the password is
+		// the trailing field). The un-gated raw scan re-runs over the
+		// REDACTED marker, so the output byte-for-byte matches what a gate
+		// would have produced.
+		{
+			name:      "over-redact/userinfo/coincidental-at-end",
+			raw:       "http://key=access_token=INNOCENTval@h/",
+			wantExact: "http://key=access_token=REDACTED@h/",
+		},
+		{
+			name:      "over-redact/userinfo-password/coincidental-and-trailing-literal",
+			raw:       "http://user:key=access_token=INNOCENTvalaccess_token=REAL@h/",
+			wantExact: "http://user:key=access_token=REDACTED@h/",
+		},
 		// Benign: no access_token key/value/overlap at all. The URL is
 		// returned unchanged (#4161 no-normalization contract for unmatched
 		// shapes).
@@ -437,6 +503,11 @@ func TestRedactAccessTokenURLRedactsOverlapAndLiteralInOneComponent(t *testing.T
 			name:      "benign/opaque/no-access-token",
 			raw:       "data:seg/other=val/x",
 			wantExact: "data:seg/other=val/x",
+		},
+		{
+			name:      "benign/userinfo/no-access-token",
+			raw:       "http://key=val@h/x",
+			wantExact: "http://key=val@h/x",
 		},
 	}
 	for _, tc := range cases {
