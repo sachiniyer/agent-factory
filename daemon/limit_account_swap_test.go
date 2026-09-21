@@ -1335,14 +1335,18 @@ func TestAccountSwapOpportunity_MakesNoDecisionWhenTheResolvedAgentDiffers(t *te
 	require.Equal(t, "work", agreed.to)
 }
 
-// A redirected manual handoff settles in a shape the configured/live check
-// alone calls drift: `--to aider --account work` with aider resolving to codex
-// leaves Program=aider while the running agent and the durable accountAgent pin
-// are both codex. The pin was committed under the lock, so when it names the
-// live agent's registry the wall — filed under that same live agent — may scan
-// its candidates (#4430 review round 8). An UNPINNED mismatch stays refused by
-// the test above, and a pin that disagrees with the live agent stays refused
-// here: rotating either registry would spend an account the pin never named.
+// A redirected handoff settles in a shape the configured/live check alone
+// calls drift: a session whose account was auto-selected under codex and whose
+// program is later redirected `--to aider` with aider resolving to codex keeps
+// Program=aider while the running agent and the durable accountAgent pin are
+// both codex. The pin was committed under the lock, so when it names the live
+// agent's registry the wall — filed under that same live agent — may scan its
+// candidates (#4430 review round 8). The account must be auto-selected:
+// SelectAccountCandidates refuses a manually chosen identity before this code
+// runs, so the redirected scheduler-owned account is the reachable shape. An
+// UNPINNED mismatch stays refused by the test above, and a pin that disagrees
+// with the live agent stays refused here: rotating either registry would spend
+// an account the pin never named.
 func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *testing.T) {
 	base := nowFunc()
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "keep going", base.Add(time.Hour))
@@ -1356,12 +1360,12 @@ func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *
 	manager.Config().LimitAccountCandidates = []string{"work2"}
 
 	// Settled redirected state: requested enum aider, running agent codex,
-	// durable pin codex — then re-mark the wall so its identity and account
-	// observation are filed under codex/work rather than the fixture's
-	// claude/no-account.
+	// durable pin codex, scheduler-owned account — then re-mark the wall so
+	// its identity and account observation are filed under codex/work rather
+	// than the fixture's claude/no-account.
 	inst.Program = tmux.ProgramAider
 	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
-	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, false, nil)
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, true, nil)
 	inst.ClearLimitReached()
 	inst.SetLimitReached(base.Add(time.Hour))
 
@@ -1374,7 +1378,7 @@ func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *
 
 	// A pin that disagrees with the live agent is contradiction, not proof:
 	// same fixture, pin filed under claude — still no swap.
-	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramClaude, false, nil)
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramClaude, true, nil)
 	drifted, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
 	require.NoError(t, err)
 	require.Nil(t, drifted, "a pin naming a different registry than the live agent must still refuse")
