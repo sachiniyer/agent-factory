@@ -82,12 +82,55 @@ func TestResolveAccountLaunchProof_BareRepoWorktreeReadsIdentityRoot(t *testing.
 	// is recovered from the pane's own git context, not carried by the
 	// launcher, so it stays outside the forgeable-env channel the re-derivation
 	// defends.
-	paneResolved := resolveResolvedConfigForPath(worktree)
+	paneResolved, err := resolveResolvedConfigForPath(worktree)
+	require.NoError(t, err)
 	require.NotNil(t, paneResolved)
-	bareResolved := resolveResolvedConfigForPath(bare)
+	bareResolved, err := resolveResolvedConfigForPath(bare)
+	require.NoError(t, err)
 	require.NotNil(t, bareResolved)
 	assert.Equal(t, bareResolved.DefaultProgram, paneResolved.DefaultProgram,
 		"a bare-repo worktree pane and the bare launcher must read the same operator config and derive the same proof")
 	assert.Equal(t, "claude", paneResolved.DefaultProgram,
 		"the worktree's checked-in override must not reach a pane that resolves from the identity root")
+}
+
+// Regression for the malformed-config attack surface of Codex P1 on
+// 4302e0e7 (session/launch_program.go:90): a same-uid child of the agent — the
+// same threat that can re-invoke af under the marker — can also corrupt the
+// operator's config file. When both the repo and global config layers then fail
+// to resolve (e.g. an unparseable config.toml), ResolveAccountLaunchProof must
+// propagate the underlying error so the shim REFUSES the launch rather than
+// returning (zero, nil). The prior code converted the unreachable config into a
+// successful zero proof, which a child matched by submitting an empty
+// __AF_ACCOUNT_LAUNCH_PROOF and then let /bin/sh resolve an attacker-controlled
+// agent from PATH while applyAccountScope injected the selected account
+// credentials. The resolver must fail closed.
+func TestResolveAccountLaunchProof_RefusesLaunchOnUnreachableConfig(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// A non-empty, unparseable config.toml forces LoadConfig to error loudly
+	// (#734 — defaults are NOT substituted for a present-but-broken file),
+	// and home is not a git repo so RepoFromPath fails on it. The global
+	// layer — the only fallback after the repo branch — is therefore the
+	// only path resolution takes, and it errors instead of substituting
+	// defaults from a config the operator never wrote.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, config.TomlConfigFileName),
+		[]byte("default_program = \"claude\"\npost_worktree_commands = [\n"), 0o644))
+
+	t.Chdir(home)
+
+	// resolveResolvedConfigForPath surfaces the underlying resolution error
+	// instead of returning (nil, nil).
+	resolved, err := resolveResolvedConfigForPath(home)
+	require.Error(t, err, "an unreachable operator config must propagate an error, not a silent zero proof")
+	require.Nil(t, resolved)
+
+	// ResolveAccountLaunchProof propagates that error so the shim refuses
+	// the launch rather than treating the unreachable config as a zero
+	// proof an attacker-supplied empty env var could match.
+	proof, err := ResolveAccountLaunchProof("claude", "work", "claude")
+	require.Error(t, err, "an unreachable operator config must refuse the scope, not produce a zero proof")
+	require.Empty(t, proof, "a refused derivation must not hand back a usable proof")
 }
