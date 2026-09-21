@@ -581,7 +581,31 @@ func ResolveProjectSelector(selector string) (Project, error) {
 				if !sameProjectIdentity(checkoutID, binding.relativeRoot, owner.CheckoutID, owner.RelativeRoot) {
 					continue
 				}
-				if !projectRootUsesGitCommonDir(owner.Root, binding.gitCommonDir) {
+				// projectRootUsesGitCommonDir suppresses resolution errors, so
+				// its false return conflates two cases: the owner's root
+				// resolves to a different git common directory (the marker is
+				// a private cp -R copy, safe to remove), and the owner's root
+				// cannot be resolved at all (removed, renamed, or temporarily
+				// wedged while other linked worktrees of that owner still share
+				// this checkout's git common directory). In the second case
+				// the marker at this binding's path may still be the owner's
+				// own shared registry marker — deleting it on the
+				// "copied marker" remedy would break identity resolution for
+				// every remaining worktree and leave the owner's record
+				// referencing a checkout ID the marker no longer carries.
+				// Resolve the owner's binding explicitly and treat the
+				// unresolvable case as unknown: refuse deletion advice rather
+				// than call the marker private.
+				ownerBinding, ownerErr := resolveProjectBinding(owner.Root)
+				if ownerErr != nil {
+					return Project{}, fmt.Errorf(
+						"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+							"the marker belongs to project %s, whose registered root %s could not be resolved (%s); "+
+							"the marker may still be shared with this checkout through a linked worktree, so af will not recommend removing it — "+
+							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
+						binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, ownerErr, owner.ID, owner.ID)
+				}
+				if !sameProjectPath(ownerBinding.gitCommonDir, binding.gitCommonDir) {
 					continue
 				}
 				return Project{}, fmt.Errorf(
