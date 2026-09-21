@@ -785,6 +785,124 @@ func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *t
 	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
 }
 
+// The legacy folder-trust wording ("Do you trust the files in this folder?")
+// is anchored on its unique question AND its picker row (the
+// claudeTrustSelectionGlyph "❯" on the Yes option) being the LAST non-blank
+// content on screen, the same footer-is-last discipline the MCP branch uses.
+// This handler runs on the daemon's continuous poll against ARBITRARY agent
+// output, and Enter typed into a working composer cannot be taken back. Output
+// that quotes the legacy wording — including this repo's own source (where the
+// phrase appears verbatim in start.go and this file's docstrings), and issue
+// text — must inject nothing, however long it stays on screen. The legacy
+// branch was the last trust predicate in this file that matched on a single
+// bare phrase; this test is the quote-negative test that was missing for it
+// (every sibling branch already has one).
+func TestCheckAndHandleTrustPrompt_QuotedLegacyFolderTrustDialogInjectsNothing(t *testing.T) {
+	legacyPhrase := "Do you trust the files in this folder?"
+	pickerRow := "❯ Yes  No"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The phrase quoted above the agent's composer — the shape every
+			// live pane has, and the exact shape the MCP and reworded branches
+			// refuse. The picker row is NOT last (the composer is below it),
+			// so the legacy branch must refuse too.
+			name: "quoted above the agent's composer",
+			content: "I remember when Claude asked: \"" + legacyPhrase + "\"\n" +
+				"That prompt is gone now.\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here            │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase in agent prose with content painted below it — the
+			// composer's own input box is below the quoted line.
+			name: "quoted with trailing prose and composer",
+			content: "I read in the docs: \"" + legacyPhrase + "\"\n" +
+				"That is what af used to type Enter into.\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ > Type your message here            │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// The phrase appears verbatim with no picker chrome at all — the
+			// shape of a code review or explanation that mentions the dialog.
+			name: "phrase in agent prose without chrome",
+			content: "The bug report quotes the dialog: \"" + legacyPhrase + "\"\n" +
+				"That is no longer a string af should treat as a prompt.\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase above the legacy picker row but with another row painted
+			// below it — a quoted dialog whose transcript continues underneath.
+			// The picker row is NOT last, so the predicate must refuse.
+			name: "picker row with trailing content painted below it",
+			content: legacyPhrase + "\n" +
+				pickerRow + "\n" +
+				"That is the end of the dialog af used to tap Enter on.\n" +
+				"? for shortcuts\n",
+		},
+		{
+			// The phrase above the agent's own composer that happens to use the
+			// selection glyph in its input box. The composer row IS the last
+			// non-blank line, but it is the composer — its label does not begin
+			// with "Yes", so the picker check fails.
+			name: "phrase above the composer whose input box carries the composer cursor",
+			content: "I quoted \"" + legacyPhrase + "\" in my reply\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yes, I will fix that now         │\n" +
+				"╰────────────────────────────────────╯\n" +
+				"? for shortcuts\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.False(t, handled,
+				"a pane that merely quotes the legacy phrase is not a live modal; af must not report one in the way")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the legacy dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL legacy dialog —
+// the picker row last, nothing painted below it — still fires Enter, so the
+// guard does not stop af answering a genuine launch gate. The legacy dialog's
+// affirmative option's preselection is "Yes", so a bare Enter accepts it, the
+// same way the MCP branch taps Enter on Claude Code's MCP preselection.
+func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t *testing.T) {
+	legacyModal := "Do you trust the files in this folder?\n❯ Yes  No"
+
+	for _, tt := range []struct{ name, content string }{
+		{"legacy modal with Yes preselected, picker last", legacyModal},
+		{
+			// The legacy picker row may carry a numeric ordinal on the selected
+			// option ("❯ 1. Yes  2. No"); claudeTrustRowOf strips the ordinal so
+			// the row reduces to "Yes  2. No" and the picker check still fires.
+			name:    "legacy modal with numeric ordinal on the selected row",
+			content: "Do you trust the files in this folder?\n❯ 1. Yes  2. No",
+		},
+		{
+			// The legacy modal may render inside a box frame; the box-drawing
+			// chrome is stripped by claudeTrustRowOf, so the picker row still
+			// reduces to the same selected Yes row.
+			name: "legacy modal framed in a box",
+			content: "╭────────────────────────────────────╮\n" +
+				"│ Do you trust the files in this folder?│\n" +
+				"│ ❯ Yes  No                            │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
+			require.True(t, handled, "the live legacy modal is in the way")
+			require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
+				"the real legacy modal keeps the historical Enter tap on Claude Code's preselection")
+		})
+	}
+}
+
 // The MCP-server trust prompt is anchored on its unique question AND the
 // modal's "Enter to confirm" footer being the LAST non-blank content on screen,
 // the same footer-is-last discipline the folder-trust branch applies. Output

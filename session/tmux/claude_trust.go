@@ -530,6 +530,59 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 	return true
 }
 
+// claudeLegacyTrustPickerIsLast reports whether the legacy folder-trust dialog's
+// picker row — the `claudeTrustSelectionGlyph` ("❯") on its Yes option — is the
+// LAST non-blank content in the pane. A live legacy modal ends on its picker; a
+// quoted mention of the legacy wording always has the agent's composer or
+// further output painted below it, so the picker is not last.
+//
+// This is the same footer-is-last discipline claudeMCPTrustFooterIsLast applies
+// to the MCP branch, ported to the legacy dialog whose only structural anchor
+// is its selected Yes row. The hidden-cursor oracle the codex branch uses is
+// NOT available here — Claude Code hides the terminal cursor in BOTH the modal
+// and its ordinary composer (claude_trust.go:32-36), so cursor visibility cannot
+// tell the two apart; structural position is the only discriminator.
+//
+// Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
+// are stripped before the glyph and the option label are matched, letting a
+// framed and an unframed legacy modal reduce to the same picker row. The row's
+// `selected` flag is the glyph; the row's `label` is the option text behind it.
+// Requiring `selected` AND a `Yes` label mirrors the reworded branch's
+// question-plus-affirmative-label co-occurrence requirement; requiring that row
+// to be LAST mirrors the MCP branch's footer-is-last requirement. A quoted
+// mention of "Do you trust the files in this folder?" with the composer painted
+// below it (or any later output, e.g. a diff of this very file, which contains
+// the phrase verbatim) fails the last-row check, satisfying
+// start.go:421-422 — "a prose mention of one phrase must never inject Enter
+// into a working agent."
+func claudeLegacyTrustPickerIsLast(content string) bool {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+
+	// Find the last non-blank row, the same scan claudeMCPTrustFooterIsLast
+	// applies. The picker row is the END of a live legacy modal, the way the
+	// "Enter to confirm" footer is the end of an MCP one.
+	lastIdx := -1
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].blank {
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx < 0 {
+		return false
+	}
+	// The last non-blank row must be the picker's selected Yes row. claudeTrustRowOf
+	// already strips the `claudeTrustSelectionGlyph` into `selected` and the
+	// numeric ordinal off the label, so a "❯ 1. Yes  2. No" row and a "❯ Yes  No"
+	// row both reduce to `selected=true`, `label` beginning "Yes".
+	row := rows[lastIdx]
+	return row.selected && strings.HasPrefix(strings.ToLower(row.label), "yes")
+}
+
 // parseClaudeFolderTrustDialog locates the cursor row and the affirmative row.
 //
 // Both must be unambiguous and both must belong to the same block of adjacent
@@ -650,10 +703,11 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 		// The MCP-server trust prompt, or the legacy folder-trust wording.
 		// Neither renders a row af can locate by label and neither is what
 		// regressed in 2.1.257, so both keep the historical Enter tap on
-		// whatever Claude Code preselected. The MCP branch is structurally
-		// guarded at the predicate (claudeMCPTrustFooterIsLast) so only a live
-		// modal — footer last — reaches this Enter; the legacy wording stays
-		// a bare substring match.
+		// whatever Claude Code preselected. Both are structurally guarded at
+		// the predicate — claudeMCPTrustFooterIsLast for the MCP branch,
+		// claudeLegacyTrustPickerIsLast for the legacy branch — so only a live
+		// modal (footer/picker last) reaches this Enter; quoted output with the
+		// composer painted below it never reaches this branch.
 		if err := t.TapEnter(); err != nil {
 			log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
 			return true

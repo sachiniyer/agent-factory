@@ -536,8 +536,14 @@ func reverseVideoURLSubject(line string) bool {
 // co-occur with a dialog-chrome marker only the real modal renders ("Yes, I
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
-// old wording is a self-contained, dialog-specific string and stays matched
-// as-is.
+// old wording ("Do you trust the files in this folder?") is anchored the same
+// way: its question must co-occur with the picker row the legacy modal renders
+// (the `claudeTrustSelectionGlyph` "❯" on the Yes option), and that row must be
+// the LAST non-blank content in the pane. The phrase alone is the same hazard
+// the MCP branch's footer-is-last rule refuses — af's own source contains the
+// legacy phrase verbatim (line 571 below, and the docstring above), so a
+// visible rendering of this file's contents (a diff, a review reply, pasted
+// release notes) carries it too.
 //
 // The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
 // 1. Yes ... Enter to confirm") is anchored on its unique question "do you
@@ -551,7 +557,9 @@ func reverseVideoURLSubject(line string) bool {
 // further output is painted below it. Requiring the footer at the END is
 // strictly stronger than requiring it anywhere in the content: a working
 // agent paints its composer beneath its output, so a quoted dialog has
-// something after it and a live one does not.
+// something after it and a live one does not. The legacy branch's
+// claudeLegacyTrustPickerIsLast applies the identical discipline to the
+// legacy dialog's picker row.
 func claudeTrustPromptPresent(content string) bool {
 	lower := strings.ToLower(content)
 
@@ -566,9 +574,18 @@ func claudeTrustPromptPresent(content string) bool {
 	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
 		claudeMCPTrustFooterIsLast(content)
 
-	return reworded ||
-		mcpDialog ||
-		strings.Contains(content, "Do you trust the files in this folder?")
+	// Legacy folder-trust dialog ("Do you trust the files in this folder?")
+	// — anchored on its unique question AND the modal's picker row
+	// (selection glyph on the Yes option) being the LAST non-blank content on
+	// screen, the same footer-is-last discipline the MCP branch uses. af's own
+	// source contains the legacy phrase verbatim (this function's docstring and
+	// the literal below), so a quoted mention with the working composer painted
+	// below it must not fire — start.go:421-422, "a prose mention of one phrase
+	// must never inject Enter into a working agent."
+	legacy := strings.Contains(content, "Do you trust the files in this folder?") &&
+		claudeLegacyTrustPickerIsLast(content)
+
+	return reworded || mcpDialog || legacy
 }
 
 // RestoreResult says whether RestoreWithResult reattached to the persisted
