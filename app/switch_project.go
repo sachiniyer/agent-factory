@@ -634,6 +634,15 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			m.closePaneWindow(p)
 		}
 		m.store.ResetInstances()
+		// ResetInstances drops every row but leaves their *session.Instance
+		// pointers behind as keys in m.adoptedSnapshotOps. In an active-project
+		// switch the next snapshot (scoped to the new repoID) calls pruneTo, but
+		// here the re-scope clears m.repoID into registry mode, where
+		// handleSnapshot deliberately skips reconcileSnapshot — the only path
+		// that calls pruneTo (#3005). Prune explicitly so entries for the
+		// deleted project's rows do not pin them in memory indefinitely while
+		// the TUI stays in registry mode.
+		m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
 		m.initialPaneOpened = false
 		m.hasLastTUIViewState = false
 		m.repoID = ""
