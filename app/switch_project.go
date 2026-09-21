@@ -586,6 +586,21 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 // separate attached TUI reflects it on its next launch, matching how every other
 // daemon-side config and registry write is picked up) and refreshes the Projects
 // section so the now-empty project leaves the list immediately.
+//
+// When the deleted project was the active one, it ALSO tears the running TUI out
+// of that scope and drops it into registry mode. The daemon has just archived
+// every live session of m.repoID and removed the registry entry; without a
+// re-scope the TUI stays pinned to the deleted identity — open panes keep
+// rendering against a stale m.repoID whose tmux the archive step already tore
+// down, and refreshSidebarProjects re-derives the deleted project as an
+// Active row with SessionCount 0 via the unconditional active-root pre-seed in
+// buildProjectListFromCounted. Mirroring switchProject's teardown (close panes,
+// reset the projection, clear m.repoID/m.repoRoot, reset the sidebar project
+// name, drop the per-project hooks/program/tasks) lets the TUI fall cleanly
+// into the NoRegisteredProjectWorkspace / empty-rail state a fresh launch
+// outside a repo would see; switchProject is the only other writer to those
+// fields, so a re-scope here is the symmetric recovery for an in-session
+// action that removed the active identity from under the TUI.
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
@@ -598,7 +613,60 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			}
 		}
 	}
+	// Re-scope when the deleted project was the active one. Evaluated before
+	// any scope mutation and captured in rescoped because the teardown below
+	// clears m.repoID, so a second read of `msg.repoID == m.repoID` after it
+	// would silently invert.
+	rescoped := msg.repoID == m.repoID
+	if rescoped {
+		// Persist the OUTGOING project's pane/selection state under its
+		// still-current repoID before any scope field changes, exactly as
+		// switchProject does. writeTUIViewState is a no-op once m.repoID is
+		// empty, so the order is load-bearing.
+		m.flushTUIViewStateBestEffort()
+		// Close every open pane (releasing its live termpane attachment) so no
+		// pane from the deleted project keeps rendering against the stale
+		// scope. The daemon's archive step already tore down the tmux sessions
+		// backing those panes, so the pane windows were dead attachments
+		// regardless — closing their windows matches switchProject and stops
+		// the tab-pane watcher from lingering in its "Session lost" fallback.
+		for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
+			m.closePaneWindow(p)
+		}
+		m.store.ResetInstances()
+		m.initialPaneOpened = false
+		m.hasLastTUIViewState = false
+		m.repoID = ""
+		m.repoRoot = ""
+		m.sidebar.SetProjectName("")
+		// The in-repo config, hooks, and program are scoped to the deleted
+		// project; clear them so nothing from it leaks into the registry-mode
+		// TUI (#1686/#2138). The global default_program is what a project that
+		// expresses no preference — and registry mode — resolve to, exactly
+		// as newHome and switchProject's failure branch set it.
+		m.store.SetHookCount(0)
+		m.hooksPane.SetCommands(nil)
+		if m.appConfig != nil {
+			m.program = m.appConfig.DefaultProgram
+		}
+		// Tasks are per-project and LoadTasksForCurrentRepo needs a cwd repo,
+		// so with no active project the automations strip is empty — not
+		// errored — until a project is selected, matching the empty session
+		// rail. Reset (not Set) so a held edit against the deleted project's
+		// list does not follow the user into registry mode.
+		m.store.SetTasks(nil)
+		m.automations.TaskPane().ResetTasks(nil)
+	}
 	m.refreshSidebarProjects()
+	if rescoped {
+		// Re-home focus on the tree (the rail is now empty — a focused pane
+		// region just vanished with the closed panes) and re-solve the grid so
+		// the cleared project rows and closed pane regions stop reserving
+		// space. Runs after refreshSidebarProjects so the grid sizes against
+		// the new, scope-cleared project list, matching switchProject's order.
+		m.focusTreeForNav()
+		m.relayout()
+	}
 	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
 	if committedWarning {
 		return m, tea.Batch(success, m.handleError(msg.err))
