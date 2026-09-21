@@ -126,6 +126,12 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			t.recordPendingCodexSafetySelection()
 			return true
 		default:
+			// The picker closed itself after af's navigation but before its
+			// confirming Enter, so the recorded navigation keys are abandoned.
+			// Drop them now: a later safety picker inside the attribution
+			// window would otherwise accumulate onto this unconfirmed record
+			// and a death reading would fold keys from two separate pickers.
+			t.resetAbandonedCodexSafetyKeystroke()
 			state.clearSelectionVerification()
 			if model != "" {
 				state.observeModel(model)
@@ -202,6 +208,12 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 				t.recordPendingCodexSafetySelection()
 				return true
 			}
+			// The picker closed itself after af's navigation but before its
+			// confirming Enter, so the recorded navigation keys are abandoned.
+			// Drop them now: a later safety picker inside the attribution
+			// window would otherwise accumulate onto this unconfirmed record
+			// and a death reading would fold keys from two separate pickers.
+			t.resetAbandonedCodexSafetyKeystroke()
 			state.clearSelectionVerification()
 			if current := codexStatusLineModel(selectedContent); current != "" {
 				state.observeModel(current)
@@ -242,6 +254,25 @@ func (t *TmuxSession) resetCompletedCodexSafetyKeystroke() {
 	t.dialogInputMu.Lock()
 	defer t.dialogInputMu.Unlock()
 	if t.dialogInput.dialog == codexSafetyDialogName && t.dialogInput.confirmed() {
+		t.dialogInput = dialogKeystroke{}
+	}
+}
+
+// resetAbandonedCodexSafetyKeystroke drops a pending (unconfirmed) Codex
+// safety-check navigation record the moment af has positive evidence the
+// picker closed before its confirming Enter. The two closure paths are the
+// only callers, reached only after a navigation key has been recorded, so a
+// pane that dies before the picker closes still reads as "still navigating ...
+// confirmed nothing". Two safety pickers share the safety dialog name, and
+// noteDialogKeystroke accumulates same-dialog keys inside the 30-second
+// attribution window, so without this clear the next safety picker's
+// navigation appends onto the abandoned one and a death on the new picker
+// attributes keys from two separate interactions — the same cross-instance
+// fold resetCompletedCodexSafetyKeystroke closes for the enter-confirmed side.
+func (t *TmuxSession) resetAbandonedCodexSafetyKeystroke() {
+	t.dialogInputMu.Lock()
+	defer t.dialogInputMu.Unlock()
+	if t.dialogInput.dialog == codexSafetyDialogName && !t.dialogInput.confirmed() {
 		t.dialogInput = dialogKeystroke{}
 	}
 }
