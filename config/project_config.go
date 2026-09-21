@@ -586,32 +586,32 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			// the other registration stale. Resolve other.Root explicitly
 			// and refuse the rebind advice when that resolution fails, so an
 			// unresolvable shared owner is not read as absent.
+			// resolveProjectBinding uses context.Background(), so a root
+			// whose .git file points at a wedged or unavailable mount never
+			// returns: `af config --project <path> set/unset` would hang on
+			// that root even though the registration cannot share this
+			// checkout's marker when the checkout is private. Classify the
+			// current checkout before probing any unrelated root — a private
+			// main checkout whose <root>/.git is its own with no linked
+			// worktrees git has spawned cannot share the marker at
+			// <binding.gitCommonDir>/af/... with any other registration: the
+			// path is this checkout's alone, so the fall-through rebind advice
+			// is the only reachable outcome and the scan is skipped outright.
+			// Otherwise probe each other registered root and fail closed when
+			// one that could share this directory cannot be resolved — the
+			// same two predicates the retained-marker branch above uses to
+			// decide the marker could be shared.
+			checkoutMarkerCouldBeShared := sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) ||
+				mainCheckoutHasLinkedWorktrees(binding.gitCommonDir)
 			for _, other := range projects {
 				if sameProjectPath(other.Root, binding.root) {
 					continue
 				}
+				if !checkoutMarkerCouldBeShared {
+					continue
+				}
 				otherBinding, otherErr := resolveProjectBinding(other.Root)
 				if otherErr != nil {
-					// An unresolvable other root is only ownership evidence
-					// when this binding can actually share its marker with it.
-					// A private main checkout whose <root>/.git is its own with
-					// no linked worktrees git has spawned cannot share the
-					// marker at <binding.gitCommonDir>/af/... with any other
-					// registration: the path is this checkout's alone, so a
-					// completely unrelated stale registration (removed,
-					// renamed, or on an unavailable mount) must not block the
-					// rebind recovery that writes a new, private marker. Only
-					// fail closed when this binding is itself a linked
-					// worktree, or a main checkout that has spawned linked
-					// worktrees of its own — the same two predicates the
-					// retained-marker branch above uses to decide the marker
-					// could be shared. Otherwise continue scanning; the
-					// remaining roots are the real ownership test, and the
-					// fall-through rebind advice stays reachable.
-					if !sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) &&
-						!mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) {
-						continue
-					}
 					return Project{}, fmt.Errorf(
 						"path %s is already the last-known root of project %s, but this checkout has no checkout marker; "+
 							"another registered root %s (project %s) could not be resolved (%s) and may share this checkout's git directory; "+
