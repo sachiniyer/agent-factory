@@ -728,6 +728,115 @@ func TestResolveProjectSelectorRejectsSharedLinkedWorktreeMarkerOwnerReplaced(t 
 	assert.Equal(t, barBefore, barAfter, "the refused write must not touch bar's personal file")
 }
 
+// TestResolveProjectSelectorRejectsSharedLinkedWorktreeMarkerOwnerReplacedWithRetainedMarker
+// pins the retained-marker half of the resolvable-replacement case. Like the
+// resolvable-replacement case, the marker at /foo's binding path is bar's own
+// shared marker through the bare, and bar's recorded root has been replaced by
+// a fresh repository that resolves to a different git common directory — but
+// here the replacement RETAINED bar's checkout marker, so the new owner-marker
+// check passes (ownerBinding carries owner.CheckoutID). Matching
+// owner.CheckoutID cannot distinguish which of the two duplicated markers is
+// the copy: the marker at /foo is in the bare's shared directory (this checkout
+// is a linked worktree), so it may be bar's own shared marker rather than a
+// private cp -R copy. af must refuse without recommending deletion, instead
+// of falling through to the "remove the copied checkout marker" remedy.
+func TestResolveProjectSelectorRejectsSharedLinkedWorktreeMarkerOwnerReplacedWithRetainedMarker(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--quiet", "--allow-empty", "-m", "initial")
+	bare := filepath.Join(base, "backing.git")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	// Register bar at a linked worktree of the bare: a worktree of a bare
+	// repo resolves binding.root to the worktree path and
+	// binding.gitCommonDir to the bare, so the marker the bare shares is
+	// bar's registry marker.
+	barRoot := filepath.Join(base, "bar")
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", barRoot)
+	bar, err := RegisterProject(barRoot)
+	require.NoError(t, err)
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	require.NotEqual(t, foo.ID, bar.ID)
+	require.NotEqual(t, foo.CheckoutID, bar.CheckoutID)
+
+	// Give bar a real personal override so the refused write can be checked
+	// for "no mutation".
+	_, err = SetProjectConfigValue(bar.ID, "default_program", "codex")
+	require.NoError(t, err)
+	barPersonalPath, err := ProjectConfigTomlPath(bar.ID)
+	require.NoError(t, err)
+	barBefore, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	fooPersonalPath, err := ProjectConfigTomlPath(foo.ID)
+	require.NoError(t, err)
+
+	// Replace foo's registered root with another linked worktree of the
+	// same bare. /foo's new binding.root stays /foo (a linked worktree),
+	// binding.gitCommonDir is the bare, and binding.checkoutMarkerPath is
+	// the same shared marker file bar's registration wrote, so it carries
+	// bar's checkout ID (not foo's).
+	require.NoError(t, os.RemoveAll(fooRoot))
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", fooRoot)
+	binding, err := resolveProjectBinding(fooRoot)
+	require.NoError(t, err)
+	require.True(t, sharedWorktreeCommonDir(binding.root, binding.gitCommonDir),
+		"/foo is a linked worktree whose git common directory is the shared bare")
+	markerID, _, err := readCheckoutID(binding.checkoutMarkerPath)
+	require.NoError(t, err)
+	require.Equal(t, bar.CheckoutID, markerID,
+		"the marker at /foo's binding path is bar's own shared record marker")
+
+	// Replace bar's registered root with a fresh main checkout that RETAINS
+	// bar's checkout marker: resolveProjectBinding(bar.Root) succeeds and
+	// returns a different git common directory than the bare (the
+	// resolvable-replacement case), and ownerBinding.checkoutMarkerPath
+	// carries bar.CheckoutID — so the new owner-marker check passes. Without
+	// the linked-worktree guard, matching bar.CheckoutID would fall through
+	// to the "remove the copied checkout marker" remedy even though /foo's
+	// marker is in the bare's shared directory and may be bar's own.
+	require.NoError(t, os.RemoveAll(barRoot))
+	initProjectRegistryRepo(t, barRoot)
+	ownerBinding, err := resolveProjectBinding(bar.Root)
+	require.NoError(t, err, "bar's replaced root must resolve (the retained-marker case)")
+	require.False(t, sameProjectPath(ownerBinding.gitCommonDir, binding.gitCommonDir),
+		"bar's replaced root must resolve to a different git common directory than /foo's bare")
+	// Write bar's checkout id into the replaced root's marker slot so the
+	// owner-marker check matches (retained-marker shape).
+	require.NoError(t, os.MkdirAll(filepath.Dir(ownerBinding.checkoutMarkerPath), 0o755))
+	require.NoError(t, os.WriteFile(ownerBinding.checkoutMarkerPath, []byte(bar.CheckoutID), 0o644))
+	retainedID, retainedExists, err := readCheckoutID(ownerBinding.checkoutMarkerPath)
+	require.NoError(t, err)
+	require.True(t, retainedExists, "bar's replaced root retains a matching marker")
+	require.Equal(t, bar.CheckoutID, retainedID)
+
+	// The CLI write path must refuse instead of recommending deletion of the
+	// still-shared marker: matching bar.CheckoutID cannot tell which of the
+	// two duplicated markers is the copy, and /foo's lives in the bare's
+	// shared directory.
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has marker "+bar.CheckoutID+" instead of "+foo.CheckoutID)
+	assert.Contains(t, err.Error(), "linked worktree")
+	assert.Contains(t, err.Error(), bar.ID)
+	assert.NotContains(t, err.Error(), "remove the copied checkout marker")
+
+	// The write path goes through ResolveProjectSelector, so it must
+	// surface the same refusal and touch neither project's personal file.
+	_, err = SetProjectConfigValue(fooRoot, "default_program", "codex")
+	require.Error(t, err)
+	_, fooStatErr := os.Stat(fooPersonalPath)
+	assert.ErrorIs(t, fooStatErr, os.ErrNotExist,
+		"the refused write must not create foo's personal file")
+	barAfter, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	assert.Equal(t, barBefore, barAfter, "the refused write must not touch bar's personal file")
+}
+
 func TestResolveProjectSelectorUnknownID(t *testing.T) {
 	registeredTestProject(t)
 	_, err := ResolveProjectSelector("prj_ffffffffffffffffffffffffffffffff")
