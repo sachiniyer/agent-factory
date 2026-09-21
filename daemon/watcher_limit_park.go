@@ -142,8 +142,24 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 // and logged once with the lines the run tail still holds. A stop returns
 // without the failure summary that would otherwise print that tail (#4226
 // review).
+//
+// The blank-line prompt render is cached for the whole drain: a blank drained
+// line needs the rendered prompt to decide keep-vs-discard at the durable-queue
+// boundary (enqueueEventRendered in daemon/watcher_prompt_render.go), and a
+// wedged tasks-file lock can hold each loadTasks up to SchemaMigrationLockTimeout.
+// Without the cache, a pipeful of blank/invalid-only lines would re-acquire the
+// lock once per line and could delay shutdown by roughly that timeout times the
+// number of blank lines; one load bounds the whole drain to a single window.
+// The load is lazy — paid only when the drain actually meets a blank line — so
+// a stop drain of purely non-blank lines remains lock-free, exactly as before.
 func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBuffer) {
-	emit := func(line string) { w.enqueueEvent(line, tail, true) }
+	var render renderWatchPromptFunc
+	emit := func(line string) {
+		if strings.TrimSpace(sanitizeUTF8(line)) == "" && render == nil {
+			render = w.sup.cachedRenderWatchPrompt()
+		}
+		w.enqueueEventRendered(line, tail, true, render)
+	}
 	if w.queue != nil && w.queue.loadFailedFresh() {
 		lost := 0
 		emit = func(line string) {
@@ -165,9 +181,9 @@ func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBu
 		case errors.Is(err, bufio.ErrBufferFull):
 			// Same truncation shape as consumeLines: the raw chunk can split a
 			// multi-byte UTF-8 rune at the byte cap or hold other invalid UTF-8,
-			// and emit -> enqueueEvent -> json.Marshal would persist it as
-			// U+FFFD (#863 class, exposed by #1129, #4655). Make the line valid
-			// UTF-8 first.
+			// and emit -> enqueueEventRendered -> json.Marshal would persist it
+			// as U+FFFD (#863 class, exposed by #1129, #4655). Make the line
+			// valid UTF-8 first.
 			line := sanitizeUTF8(string(chunk))
 			discarded := 0
 			var tailErr error

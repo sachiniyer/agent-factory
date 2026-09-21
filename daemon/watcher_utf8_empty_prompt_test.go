@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -279,4 +281,76 @@ func droppedCount(w *taskWatcher) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.dropped
+}
+
+// TestPersistRemainingLimitEventsCachesTaskLoadAcrossBlankLines pins the
+// stop-drain caching of the boundary render: persistRemainingLimitEvents loads
+// the task store ONCE for the whole drain and reuses that snapshot for every
+// drained blank line, rather than re-acquiring the tasks.json flock per blank
+// event. Production task.LoadTasks blocks up to SchemaMigrationLockTimeout on a
+// wedged lock; without the cache, a finite stdout pipe of N blank/invalid-only
+// lines could delay a shutdown or task reload by N × that timeout. The test
+// feeds a pipeful of distinct blank lines (`""`, `" "`, `"\t"`) and asserts
+// loadTasks fired exactly once across all of them. The chosen prompt
+// (Triage: {{line}}) renders to a non-empty trim on every blank input, so the
+// cached render is actually consulted (the discard path does NOT fire) and
+// every drained blank line is retained — pinning that the cache is on the
+// render the boundary uses, not on a silent short-circuit.
+func TestPersistRemainingLimitEventsCachesTaskLoadAcrossBlankLines(t *testing.T) {
+	const taskID = "stopcach01"
+	var loads int
+	s := newWatcherSupervisor()
+	s.loadTasks = func() ([]task.Task, error) {
+		loads++
+		return []task.Task{{ID: taskID, Prompt: "Triage: {{line}}", Enabled: true}}, nil
+	}
+	s.recordDrops = func(string, int, time.Time) error { return nil }
+	queue := newEventQueue(t.TempDir(), taskID)
+	stopCh := make(chan struct{})
+	close(stopCh)
+	w := &taskWatcher{taskID: taskID, sup: s, queue: queue, stopCh: stopCh}
+
+	// Four distinct blank lines (sanitize then TrimSpace all == ""); each
+	// reaches the boundary render, and the cached render is bound to a single
+	// loadTasks snapshot.
+	br := bufio.NewReaderSize(strings.NewReader("\n \n\t\n\n"), maxWatchLineBytes)
+	w.persistRemainingLimitEvents(br, &tailBuffer{})
+
+	if loads != 1 {
+		t.Fatalf("loadTasks called %d time(s) for a stop drain of 4 blank lines, want exactly 1 (the render is cached across the whole stop drain so a wedged tasks-file lock can hold shutdown by at most one SchemaMigrationLockTimeout window, not one per blank)", loads)
+	}
+	if got := queue.pendingCount(); got != 4 {
+		t.Fatalf("pendingCount = %d after stop drain of 4 blank lines, want 4 (Triage: {{line}} renders non-empty for blank input, so the cached render is consulted and retains every drained blank rather than short-circuiting the discard)", got)
+	}
+}
+
+// TestPersistRemainingLimitEventsCacheIsLazyForNonBlankDrains pins the lazy
+// side of the stop-drain cache: a stop drain of purely non-blank lines never
+// reaches the boundary render (sanitizeTrim sees non-blank), so the cached
+// loadTasks must NOT fire at all — the drain stays lock-free exactly as it did
+// before the cache landed. The slow lock-wait the cache bounds is paid only
+// for drains that actually need it; non-blank pipes are unchanged.
+func TestPersistRemainingLimitEventsCacheIsLazyForNonBlankDrains(t *testing.T) {
+	const taskID = "stopcach02"
+	var loads int
+	s := newWatcherSupervisor()
+	s.loadTasks = func() ([]task.Task, error) {
+		loads++
+		return []task.Task{{ID: taskID, Prompt: "event: {{line}}", Enabled: true}}, nil
+	}
+	s.recordDrops = func(string, int, time.Time) error { return nil }
+	queue := newEventQueue(t.TempDir(), taskID)
+	stopCh := make(chan struct{})
+	close(stopCh)
+	w := &taskWatcher{taskID: taskID, sup: s, queue: queue, stopCh: stopCh}
+
+	br := bufio.NewReaderSize(strings.NewReader("prefetched-one\nprefetched-two\npartial"), maxWatchLineBytes)
+	w.persistRemainingLimitEvents(br, &tailBuffer{})
+
+	if loads != 0 {
+		t.Fatalf("loadTasks called %d time(s) for a stop drain of non-blank lines, want 0 (the cache loads lazily only when a blank line is encountered; a non-blank drain stays lock-free)", loads)
+	}
+	if got := queue.pendingCount(); got != 2 {
+		t.Fatalf("pendingCount = %d after stop drain of two non-blank lines, want 2 (the two newline-terminated lines persist; the partial trailing chunk is not an event)", got)
+	}
 }

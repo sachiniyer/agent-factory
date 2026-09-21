@@ -804,72 +804,16 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	}
 }
 
-// enqueueEvent appends the line to the durable backlog and wakes the drainer.
-// The line also lands in the run's failure tail — it did not become a
-// delivered event this run (#797). With no durable queue, or when the append
-// fails WITHOUT retaining the record, the event is neither delivered nor held
-// and is counted through recordEventDrop, whatever delivery outcome sent it
-// here — a usage-limit park, an attached target, a concurrency park, or a
-// genuine failure. An error is not proof of loss: a close/flush or cap fault
-// can follow a landed record, so retention decides.
-//
-// The live arm (`consumeLines -> handleEvent -> enqueueEvent`) reaches here
-// already `sanitizeUTF8`'d at the call site (daemon/watcher.go:642), but the
-// stop-drain arm (`persistRemainingLimitEvents -> emit -> enqueueEvent` in
-// daemon/watcher_limit_park.go) feeds the raw line straight in. The durable
-// record persists via `json.Marshal(queuedEvent{Line: line})`, whose
-// encoding/json rewrites invalid UTF-8 as U+FFFD (#863 class, exposed by
-// #1129, #4655), so this is the shared durable-queue boundary every durable
-// enqueue crosses. `sanitizeUTF8` — a no-op on valid UTF-8 — drops invalid
-// bytes here so every record (not just the live arm's) is well-formed.
-//
-// The discard keys on the rendered prompt's deliverability, not the raw line:
-// deliverWatchEventWithOptions rejects before any send when
-// strings.TrimSpace(prompt) == "" (its empty-prompt pre-flight), so enrolling
-// such a line parks a head every replay rejects, blocking later events. Only a
-// trims-blank line can render empty, so the loadTasks render is gated to the
-// rare blank case instead of paid on every event — the stop-drain arm
-// (persistRemainingLimitEvents -> emit -> here) would otherwise hold a
-// shutdown per line on a wedged task-store lock. The render must be dependable
-// to discard: a transient loadTasks failure or a gone task leaves the template
-// unknown, so fail OPEN (retain) and let the drainer retry once the store
-// recovers, rather than equating unknown with the default prompt and
-// permanently dropping a recoverable event. A discard is a loss (neither
-// delivered nor retained), so it is counted through recordEventDrop like every
-// other lost event, never silently; tailBuffer.add is a no-op on blank lines,
-// so the failure tail shows nothing for a discarded blank.
+// enqueueEvent is the live-arm entry to the durable-queue boundary. The
+// contract and implementation live in enqueueEventRendered
+// (daemon/watcher_prompt_render.go); this wrapper supplies the supervisor's
+// per-call renderedWatchPrompt so a live render reflects the freshest prompt
+// edit. The stop-drain arm (persistRemainingLimitEvents in
+// daemon/watcher_limit_park.go) calls enqueueEventRendered directly with a
+// cachedRenderWatchPrompt so a finite pipe of blank lines pays for one
+// task-store load across the whole drain rather than one per blank line.
 func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
-	line = sanitizeUTF8(line)
-	if strings.TrimSpace(line) == "" {
-		if render, ok := w.sup.renderedWatchPrompt(w.taskID, line); ok && strings.TrimSpace(render) == "" {
-			if dropped, logIt := w.recordEventDrop(); logIt {
-				log.WarningLog.Printf("watch task %s: dropped event whose rendered prompt is empty; it cannot be delivered or retained (%d dropped so far)", w.taskID, dropped)
-			}
-			return
-		}
-	}
-	tail.add(line)
-	if w.queue == nil {
-		if dropped, logIt := w.recordEventDrop(); logIt {
-			log.WarningLog.Printf("watch task %s: undelivered event cannot be retained; durable event queue unavailable (%d dropped so far)", w.taskID, dropped)
-		}
-		return
-	}
-	statusRecorded := len(parkedStatusRecorded) > 0 && parkedStatusRecorded[0]
-	retained, err := w.queue.enqueueWithParkedStatus(line, limitParked, statusRecorded)
-	if err != nil {
-		if retained {
-			// The record is in the backlog despite the degraded write; it will
-			// replay, so it is no loss — but the drainer still needs waking.
-			log.ErrorLog.Printf("watch task %s: queued event for replay, but the queue reported a degraded append: %v", w.taskID, err)
-			w.ensureDrainer()
-			return
-		}
-		log.ErrorLog.Printf("watch task %s: failed to queue event for replay; dropping it: %v", w.taskID, err)
-		w.recordEventDrop()
-		return
-	}
-	w.ensureDrainer()
+	w.enqueueEventRendered(line, tail, limitParked, w.sup.renderedWatchPrompt, parkedStatusRecorded...)
 }
 
 // ensureDrainer starts the drain goroutine unless one is live or a stop is in
