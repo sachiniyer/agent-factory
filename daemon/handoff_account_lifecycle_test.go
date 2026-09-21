@@ -46,8 +46,8 @@ func TestHandoffAccountRestartRefreshPreservesHealthyCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
 	require.NoError(t, inst.BeginManualAccountSwap())
-	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude"))
-	_, err = inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	require.NoError(t, inst.ValidateManualAccountSwap("personal", "claude", false))
+	_, err = inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	require.NoError(t, m.persistSettlement(repo, daemonInstanceKey(repo, inst.Title), inst))
 	saved := persistedInstanceByTitle(t, repo, inst.Title)
@@ -126,11 +126,19 @@ func TestHandoffAccountHealthyPendingSwapRetainsResumeBackoff(t *testing.T) {
 	inst.ClearLimitReached()
 	m.cfg.LimitAutoResume = false
 	require.NoError(t, inst.BeginManualAccountSwap())
-	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	inst.EndLimitResume()
 	// A replacement pane exists, but preflight cannot repair the incomplete pane set.
+	// The unproven command must ride EVERY record the retry consults: the stored
+	// enum, the pane evidence, and — consulted first — the incoming command the
+	// commit froze into the pending transaction (#4430 review rounds 6-7).
 	inst.Program = "unrecognized-wrapper"
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "unrecognized-wrapper"))
+	inst.ReconcileAccountHandoffSnapshot("personal", "claude", false, &session.AccountSwapData{
+		From: "work", To: "personal", Manual: true, Mission: "continue",
+		AccountAgent: "claude", Program: "unrecognized-wrapper",
+	})
 	key := stableSessionKey(repo, inst)
 	m.ResumeLimitedSessions()
 	require.Equal(t, session.LiveRunning, inst.GetLiveness())
@@ -150,7 +158,7 @@ func TestHandoffAccountCommittedCustomCommandUsesAgentNamespace(t *testing.T) {
 	inst.Program = "claude --model opus"
 	inst.ClearLimitReached()
 	require.NoError(t, inst.BeginManualAccountSwap())
-	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", session.HandoffReasonManual, "tip", "continue")
+	_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	inst.EndLimitResume()
 	swap := committedAccountSwap(inst)

@@ -66,6 +66,10 @@ func TestResumeLimitedSessions_UnusableCandidatesFallBackWhenResetDue(t *testing
 	writeLimitAccountCandidates(t, "limit_account_candidates = [\"broken\", \"work\"]\n"+
 		"[program_overrides]\nclaude = \"claude --continue\"\n")
 	manager.Config().LimitAccountCandidates = []string{"broken", "work"}
+	// The pane runs the resolved scoped command — an account swap re-validates
+	// the established runtime, and `claude --continue` pins a conversation the
+	// swap cannot prove (#4430 review round 6).
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "claude --continue"))
 
 	manager.ResumeLimitedSessions()
 
@@ -94,6 +98,9 @@ func TestResumeLimitedSessions_CandidateBackoffCannotDelayOrdinaryDeadline(t *te
 	writeLimitAccountCandidates(t, "limit_account_candidates = [\"broken\"]\n"+
 		"[program_overrides]\nclaude = \"claude --continue\"\n")
 	manager.Config().LimitAccountCandidates = []string{"broken"}
+	// Same fixture contract: the pane carries the resolved scoped command so
+	// the candidate's identity proof fails on the conversation pin.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "claude --continue"))
 
 	// The immediate swap attempt fails preflight and arms the 10-second base
 	// backoff, while the independent ordinary reset deadline is only 5 seconds
@@ -134,6 +141,9 @@ func TestResumeLimitedSessions_FixedRetryFallbackKeepsConfiguredCadence(t *testi
 	writeLimitAccountCandidates(t, "limit_account_candidates = [\"broken\"]\n"+
 		"[program_overrides]\nclaude = \"claude --continue\"\n")
 	manager.Config().LimitAccountCandidates = []string{"broken"}
+	// Same fixture contract: the pane carries the resolved scoped command so
+	// the candidate's identity proof fails on the conversation pin.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "claude --continue"))
 
 	// Candidate preflight fails immediately. When the independent fixed fallback
 	// becomes due, that same refusal yields to an ordinary resume.
