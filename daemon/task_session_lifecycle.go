@@ -612,15 +612,64 @@ func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
 }
 
 // installOwedTaskLifecycleNotify wires the adoption discharge to disk: a
-// delivery clears the marker inside NoteAdoptionDelivery's critical section and
-// then fires this callback after unlocking, so the user's veto survives a
-// restart landing between the two. The callback is in-memory, so it must be
-// re-installed on every marked row a generation materializes — filing does it
-// for live sessions and armOwedTaskLifecyclesLocked does it for restored ones.
+// delivery clears the marker inside NoteAdoptionDelivery's critical section
+// and then fires this callback after unlocking. The callback is the DURABLE
+// half of the discharge, and it returns any persist error so NoteAdoptionDelivery
+// can refuse the PTY write rather than proceed on top of a durable marker the
+// failed write left set. The in-memory retry settleOwed offers is NOT taken
+// here: that retry is drained by the next poll, so a unclean exit before it
+// loses the discharge while leaving the durable marker set, and the
+// agent-server path has no other durable adoption signal. The caller's
+// re-attempted delivery is the retry instead. The callback is in-memory, so it
+// must be re-installed on every marked row a generation materializes — filing
+// does it for live sessions and armOwedTaskLifecyclesLocked does it for
+// restored ones.
 func (m *Manager) installOwedTaskLifecycleNotify(repoID string, instance *session.Instance) {
-	instance.SetOwedOnCompleteNotify(func(i *session.Instance) {
-		m.persistOwedTaskLifecycle(repoID, i)
+	instance.SetOwedOnCompleteNotify(func(i *session.Instance) error {
+		return m.persistOwedTaskLifecycleDischarge(repoID, i)
 	})
+}
+
+// persistOwedTaskLifecycleDischarge is the synchronous, caller-blocking variant
+// of persistOwedTaskLifecycle, used by the adoption-discharge notify. It writes
+// the discharge — the current in-memory row, whose owedOnComplete the delivery
+// has just cleared — and returns any persist error so NoteAdoptionDelivery can
+// propagate it and refuse the PTY write. The agent-server path's only durable
+// adoption signal must land before the caller proceeds, or be honest about not
+// landing; an in-memory-only retry drained by the next poll is exactly the
+// backstop this path has no durable replacement for.
+//
+// Unlike persistOwedTaskLifecycle it does NOT record a settleOwed retry. That
+// retry is a whole-row write of live memory drained by the next poll, so it
+// races the in-memory marker restore NoteAdoptionDelivery performs on this
+// call's failure (the retry would read the restored marker and write it back to
+// disk), and even without that race its in-memory-only bookkeeping is the loss
+// vector the bug exists to close. The retry is the caller's instead: the
+// refused delivery returns an error, the user re-attempts it, and
+// NoteAdoptionDelivery re-runs this write. A unclean exit before that
+// re-attempt loses the in-memory marker and leaves the durable marker set, but
+// the PTY write never landed, so the durable state ("marker set, no churn") is
+// honest — the narrow sub-window the bug report distinguishes from the
+// work-losing one this fixes.
+func (m *Manager) persistOwedTaskLifecycleDischarge(repoID string, instance *session.Instance) error {
+	key := daemonInstanceKey(repoID, instance.Title)
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	if err != nil {
+		return fmt.Errorf("the on_complete discharge for session %q could not be written to disk (the caller's delivery is refused; re-attempt it once the write can land): %w",
+			instance.Title, err)
+	}
+	return nil
 }
 
 // persistOwedTaskLifecycle checkpoints a marker change, but only while THIS

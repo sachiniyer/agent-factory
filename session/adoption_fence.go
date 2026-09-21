@@ -90,9 +90,14 @@ import (
 //
 // The count itself stays in-memory: a restart resets it to zero, so adoption
 // evidence after a restart instead comes from the durable obligation —
-// owedOnComplete, cleared by a delivery in this same critical section — and
+// owedOnComplete, cleared by a delivery's durable discharge (the notify's
+// persist, which NoteAdoptionDelivery blocks on before returning nil) — and
 // from the durable pane-churn watermark for input that reaches no agent-server
-// entry point (#4162).
+// entry point (#4162). The durable clear is NOT in the in-memory critical
+// section: it is the notify's responsibility and runs after i.mu is released,
+// so NoteAdoptionDelivery must not return nil until that persist has landed,
+// or a unclean exit before the in-memory retry poll re-arms a teardown the
+// adoption already vetoed.
 
 // ErrAdoptionFenced refuses a PTY write to a session whose teardown has already
 // claimed it. It is returned to the writer — a browser terminal frame, a TUI
@@ -121,10 +126,24 @@ type adoptionFence struct {
 //
 // A delivery also discharges a pending on_complete obligation: prompting a
 // finished task session IS the adoption the marker exists to defer to. The
-// clear happens in the same critical section as the count bump, so the
-// teardown's under-fence read of either sees this delivery; the notify then
-// runs AFTER the lock is released — it performs storage I/O and must not hold
-// i.mu, let alone re-enter it.
+// in-memory clear happens in the same critical section as the count bump, so
+// the teardown's under-fence read of either sees this delivery; the DURABLE
+// clear is the notify's responsibility and runs AFTER the lock is released — it
+// performs storage I/O and must not hold i.mu, let alone re-enter it.
+//
+// Because the durable clear is the agent-server path's ONLY durable adoption
+// signal (the pane-churn watermark is explicitly disclaimed for input that
+// reaches an agent-server entry point), NoteAdoptionDelivery does NOT return
+// nil until the notify's persist has landed. A best-effort notify whose retry
+// lives only in memory would let a unclean exit before the next poll lose the
+// discharge while leaving the durable marker set, re-arming a teardown that
+// reaps a session the user just adopted. So the notify returns any persist
+// error and this call propagates it: on failure the in-memory marker is
+// restored so the caller's refused delivery does not leave the in-memory state
+// half-discharged, and a re-attempted delivery re-runs the durable clear. The
+// caller — SendPromptWithStatus/InputTab/Input — must NOT write to the PTY
+// when this returns an error; the PTY write on top of an unset durable marker
+// is exactly the work-losing window.
 func (i *Instance) NoteAdoptionDelivery() error {
 	i.mu.Lock()
 	if i.adoption.closed {
@@ -132,15 +151,35 @@ func (i *Instance) NoteAdoptionDelivery() error {
 		return ErrAdoptionFenced
 	}
 	i.adoption.deliveries++
-	var notify func(*Instance)
+	var notify func(*Instance) error
+	var marker *PendingOnCompleteData
 	if i.owedOnComplete != nil {
+		marker = i.owedOnComplete
 		i.owedOnComplete = nil
 		notify = i.owedOnCompleteNotify
 	}
 	i.touchLocked()
 	i.mu.Unlock()
 	if notify != nil {
-		notify(i)
+		if err := notify(i); err != nil {
+			// The durable discharge did not land. Restore the in-memory
+			// marker so a re-attempted delivery re-runs the durable clear
+			// rather than proceeding on top of a durable marker the failed
+			// write left set. The delivery count stays bumped: the user's
+			// intent to adopt stands, and it is the in-memory stand-down
+			// signal a concurrent teardown would read through the fence
+			// even before the discharge retries. The notify did not record
+			// an in-memory settleOwed retry — that retry would race this
+			// restore and write the restored marker back — so the only
+			// re-attempt is the caller's, which re-enters this function.
+			i.mu.Lock()
+			if i.owedOnComplete == nil {
+				i.owedOnComplete = marker
+			}
+			i.touchLocked()
+			i.mu.Unlock()
+			return err
+		}
 	}
 	return nil
 }
@@ -266,9 +305,12 @@ func (i *Instance) FileOwedOnCompleteIfNotDischarged(marker *PendingOnCompleteDa
 
 // SetOwedOnCompleteNotify installs the callback invoked (outside i.mu) when a
 // delivery discharges the obligation — the daemon's hook for making an
-// adoption durable before the process can lose it. Not persisted itself: the
-// daemon re-installs it wherever a marked row materializes.
-func (i *Instance) SetOwedOnCompleteNotify(notify func(*Instance)) {
+// adoption durable before the process can lose it. The callback returns any
+// persist error so NoteAdoptionDelivery can propagate it and refuse the PTY
+// write rather than proceed on top of a discharge that did not land. Not
+// persisted itself: the daemon re-installs it wherever a marked row
+// materializes.
+func (i *Instance) SetOwedOnCompleteNotify(notify func(*Instance) error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.owedOnCompleteNotify = notify
