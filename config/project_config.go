@@ -564,12 +564,13 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			return Project{}, fmt.Errorf(
 				"path %s is already the last-known root of project %s, but this checkout has no checkout marker — "+
 					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
-				binding.root, p.ID, p.ID, binding.root)
+				binding.root, p.ID, p.ID, ShellQuotePath(binding.root))
 		case checkoutID != p.CheckoutID:
 			return Project{}, fmt.Errorf(
 				"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
-					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
-				binding.root, p.ID, checkoutID, p.CheckoutID, p.ID, binding.root)
+					"the marker belongs to another registered project, so `af projects rebind` would reject it; "+
+					"remove the copied checkout marker at %s, then run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+				binding.root, p.ID, checkoutID, p.CheckoutID, binding.checkoutMarkerPath, p.ID, ShellQuotePath(binding.root))
 		default:
 			return p, nil
 		}

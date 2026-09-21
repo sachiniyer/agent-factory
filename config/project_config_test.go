@@ -358,7 +358,13 @@ func TestResolveProjectSelectorRejectsReplacedMarkerAtRegisteredRoot(t *testing.
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
 	assert.Contains(t, err.Error(), "has marker "+bar.CheckoutID+" instead of "+foo.CheckoutID)
-	assert.Contains(t, err.Error(), "run `af projects rebind "+foo.ID+" ")
+	// The marker belongs to bar, so a naive `af projects rebind foo foo-root`
+	// would be rejected by RebindProject (the marker is claimed by another
+	// record); the error must tell the user to remove the copied marker first.
+	assert.Contains(t, err.Error(), "remove the copied checkout marker at ")
+	// The recovery command must quote the path so a path with whitespace or
+	// shell metacharacters pastes as one argument.
+	assert.Contains(t, err.Error(), "run `af projects rebind "+foo.ID+" "+ShellQuotePath(fooRoot)+"`")
 
 	// SetProjectConfigValue goes through ResolveProjectSelector, so it must
 	// surface the same refusal and write neither project's personal file.
@@ -418,7 +424,7 @@ func TestResolveProjectSelectorRejectsAbsentMarkerAtRegisteredRoot(t *testing.T)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
 	assert.Contains(t, err.Error(), "has no checkout marker")
-	assert.Contains(t, err.Error(), "run `af projects rebind "+foo.ID+" ")
+	assert.Contains(t, err.Error(), "run `af projects rebind "+foo.ID+" "+ShellQuotePath(fooRoot)+"`")
 
 	// SetProjectConfigValue and UnsetProjectConfigValue go through
 	// ResolveProjectSelector, so both must refuse and leave the file unchanged.
