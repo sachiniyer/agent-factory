@@ -606,6 +606,38 @@ func ResolveProjectSelector(selector string) (Project, error) {
 						binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, ownerErr, owner.ID, owner.ID)
 				}
 				if !sameProjectPath(ownerBinding.gitCommonDir, binding.gitCommonDir) {
+					// The owner's recorded root resolves to a different git
+					// common directory than this checkout. Before treating the
+					// marker at binding.checkoutMarkerPath as a private cp -R
+					// copy (safe to remove), prove the owner's recorded root
+					// still carries its recorded marker: the recorded root is
+					// only last-known, and if another repository has replaced
+					// it (a fresh clone, a new project registered over it, or
+					// its marker stripped), the marker at this checkout may
+					// still be the owner's own shared marker through a linked
+					// worktree sharing binding's git common directory. Deleting
+					// it would break identity resolution for every remaining
+					// worktree sharing that directory and leave the owner's
+					// record stale. A common-directory mismatch justifies
+					// deletion only after the owner root has proven its own
+					// marker; otherwise treat ownership as unknown and refuse
+					// deletion rather than call the marker private.
+					ownerMarkerID, ownerMarkerExists, ownerMarkerErr := readCheckoutID(ownerBinding.checkoutMarkerPath)
+					if ownerMarkerErr != nil {
+						return Project{}, ownerMarkerErr
+					}
+					if !ownerMarkerExists || ownerMarkerID != owner.CheckoutID {
+						return Project{}, fmt.Errorf(
+							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+								"the marker belongs to project %s, whose registered root %s now resolves to a different git directory and no longer carries project %s's checkout marker; "+
+								"the marker at this checkout may still be project %s's own shared marker through a linked worktree, so af will not recommend removing it — "+
+								"move this checkout to a path that does not share its git directory, or remove the linked worktree from project %s",
+							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, owner.ID, owner.ID, owner.ID)
+					}
+					// The owner's recorded root still carries its marker, so
+					// the marker at binding.checkoutMarkerPath is a private
+					// cp -R copy on a private .git; fall through to the
+					// deletion remedy.
 					continue
 				}
 				return Project{}, fmt.Errorf(

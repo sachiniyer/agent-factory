@@ -624,6 +624,110 @@ func TestResolveProjectSelectorRejectsSharedLinkedWorktreeMarkerOwnerUnresolvabl
 	assert.Equal(t, barBefore, barAfter, "the refused write must not touch bar's personal file")
 }
 
+// TestResolveProjectSelectorRejectsSharedLinkedWorktreeMarkerOwnerReplaced
+// pins the resolvable-replacement half of the claimed-marker case. Like the
+// unresolvable-owner case, the marker at /foo's binding path is still bar's
+// own shared marker through the bare — but here bar's recorded root has been
+// replaced by another valid repository rather than removed.
+// resolveProjectBinding(bar.Root) succeeds (no error) and returns a different
+// git common directory, so the unresolvable-owner guard does not fire; without
+// this fix the common-directory mismatch fell through to the "remove the
+// copied checkout marker" remedy, recommending the user delete a marker that
+// may still be bar's own shared registry marker. The recorded root is only
+// last-known, so a common-directory mismatch justifies deletion only after
+// the owner root has proven its recorded marker; af must refuse without
+// naming the marker private or recommending its deletion, naming the owner
+// whose recorded root no longer carries its marker.
+func TestResolveProjectSelectorRejectsSharedLinkedWorktreeMarkerOwnerReplaced(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--quiet", "--allow-empty", "-m", "initial")
+	bare := filepath.Join(base, "backing.git")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	// Register bar at a linked worktree of the bare: a worktree of a bare
+	// repo resolves binding.root to the worktree path and
+	// binding.gitCommonDir to the bare, so the marker the bare shares is
+	// bar's registry marker.
+	barRoot := filepath.Join(base, "bar")
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", barRoot)
+	bar, err := RegisterProject(barRoot)
+	require.NoError(t, err)
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	require.NotEqual(t, foo.ID, bar.ID)
+	require.NotEqual(t, foo.CheckoutID, bar.CheckoutID)
+
+	// Give bar a real personal override so the refused write can be checked
+	// for "no mutation".
+	_, err = SetProjectConfigValue(bar.ID, "default_program", "codex")
+	require.NoError(t, err)
+	barPersonalPath, err := ProjectConfigTomlPath(bar.ID)
+	require.NoError(t, err)
+	barBefore, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	fooPersonalPath, err := ProjectConfigTomlPath(foo.ID)
+	require.NoError(t, err)
+
+	// Replace foo's registered root with another linked worktree of the
+	// same bare. /foo's new binding.checkoutMarkerPath is the same shared
+	// marker file bar's registration wrote, so it carries bar's checkout
+	// ID (not foo's).
+	require.NoError(t, os.RemoveAll(fooRoot))
+	runProjectRegistryGit(t, base, "--git-dir", bare, "worktree", "add", "--quiet", "--detach", fooRoot)
+	binding, err := resolveProjectBinding(fooRoot)
+	require.NoError(t, err)
+	markerID, _, err := readCheckoutID(binding.checkoutMarkerPath)
+	require.NoError(t, err)
+	require.Equal(t, bar.CheckoutID, markerID,
+		"the marker at /foo's binding path is bar's own record marker")
+
+	// Replace bar's registered root with a fresh independent repository so
+	// the owner root resolves successfully to a different git common
+	// directory (the "replaced marker owner" case): the unresolvable-owner
+	// guard does not fire, and without this fix the common-directory
+	// mismatch fell through to the remove-the-copied-marker remedy. The
+	// fresh repo has no agent-factory marker, so its marker slot no longer
+	// carries bar's recorded checkout id — the recorded root is no longer
+	// authoritative and the marker at /foo may still be bar's own shared
+	// marker through this checkout's bare.
+	require.NoError(t, os.RemoveAll(barRoot))
+	initProjectRegistryRepo(t, barRoot)
+	ownerBinding, err := resolveProjectBinding(bar.Root)
+	require.NoError(t, err, "bar's replaced root must resolve (the resolvable-replacement case)")
+	require.False(t, sameProjectPath(ownerBinding.gitCommonDir, binding.gitCommonDir),
+		"bar's replaced root must resolve to a different git common directory than /foo's bare")
+	ownerMarkerID, ownerMarkerExists, err := readCheckoutID(ownerBinding.checkoutMarkerPath)
+	require.NoError(t, err)
+	require.False(t, ownerMarkerExists,
+		"bar's replaced root carries no agent-factory marker")
+	require.Empty(t, ownerMarkerID)
+
+	// The CLI write path must refuse instead of recommending deletion of the
+	// still-shared marker, naming bar's id and the replaced root.
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has marker "+bar.CheckoutID+" instead of "+foo.CheckoutID)
+	assert.Contains(t, err.Error(), "no longer carries project "+bar.ID+"'s checkout marker")
+	assert.Contains(t, err.Error(), bar.ID)
+	assert.NotContains(t, err.Error(), "remove the copied checkout marker")
+
+	// The write path goes through ResolveProjectSelector, so it must
+	// surface the same refusal and touch neither project's personal file.
+	_, err = SetProjectConfigValue(fooRoot, "default_program", "codex")
+	require.Error(t, err)
+	_, fooStatErr := os.Stat(fooPersonalPath)
+	assert.ErrorIs(t, fooStatErr, os.ErrNotExist,
+		"the refused write must not create foo's personal file")
+	barAfter, err := os.ReadFile(barPersonalPath)
+	require.NoError(t, err)
+	assert.Equal(t, barBefore, barAfter, "the refused write must not touch bar's personal file")
+}
+
 func TestResolveProjectSelectorUnknownID(t *testing.T) {
 	registeredTestProject(t)
 	_, err := ResolveProjectSelector("prj_ffffffffffffffffffffffffffffffff")
