@@ -200,7 +200,7 @@ func (w *taskWatcher) drainLoop() {
 			return
 		}
 		if err != nil {
-			w.recordDeliveryResult(time.Now(), err)
+			w.recordDeliveryResultUnlessEmptyPrompt(time.Now(), err)
 			if errors.Is(err, errTargetLimitReached) {
 				// A known limit park is not an outage and delivered nothing. Retain
 				// the head past ordinary age/cap eviction, refund this attempt's rate

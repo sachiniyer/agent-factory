@@ -755,7 +755,7 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	}
 
 	err := w.sup.deliver(w.taskID, line, watchDeliveryOptions{})
-	w.recordDeliveryResult(time.Now(), err)
+	w.recordDeliveryResultUnlessEmptyPrompt(time.Now(), err)
 	if err != nil {
 		limitParked := false
 		parkedStatusRecorded := false

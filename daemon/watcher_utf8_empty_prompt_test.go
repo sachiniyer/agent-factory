@@ -199,6 +199,81 @@ func TestDrainRetriesGenericNotAttempted(t *testing.T) {
 	}
 }
 
+// TestHandleEventEmptyPromptDoesNotStampAlarmRun pins the live-side half of the
+// alarm discipline: a blank line under the default prompt renders empty, so
+// deliver returns errEmptyPrompt and handleEvent must not record it through
+// recordDeliveryResult as a delivery failure — otherwise a watcher whose only
+// events are blank/sanitized-to-empty lines alarms after three minutes on an
+// empty queue with nothing left to retry. enqueueEvent's boundary discard
+// (TestEnqueueEventDiscardCountsDropRecorded) disposes of the event; the
+// alarm-side guard keeps the failure run clear.
+func TestHandleEventEmptyPromptDoesNotStampAlarmRun(t *testing.T) {
+	s := newWatcherSupervisor()
+	s.recordDrops = func(string, int, time.Time) error { return nil }
+	s.loadTasks = staticTasks(task.Task{ID: "alarm-live01", Prompt: "", Enabled: true})
+	s.deliver = func(_ string, line string, _ watchDeliveryOptions) error {
+		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q): %w", line, errEmptyPrompt))
+	}
+	queue := newEventQueue(t.TempDir(), "alarm-live01")
+	stopCh := make(chan struct{})
+	w := &taskWatcher{taskID: "alarm-live01", sup: s, queue: queue, stopCh: stopCh, draining: true}
+
+	w.handleEvent("", &tailBuffer{})
+
+	if d := droppedCount(w); d != 1 {
+		t.Fatalf("dropped = %d, want 1 (the blank line is discarded at the queue boundary)", d)
+	}
+	if queue.pendingCount() != 0 {
+		t.Fatalf("pendingCount = %d, want 0 (the discarded blank line is not enqueued)", queue.pendingCount())
+	}
+	w.mu.Lock()
+	since, count := w.deliverFailSince, w.deliverFailCount
+	w.mu.Unlock()
+	if !since.IsZero() || count != 0 {
+		t.Fatalf("errEmptyPrompt stamped a delivery-failure run: since=%v count=%d (an intentional drop must not alarm)", since, count)
+	}
+}
+
+// TestDrainEmptyPromptDoesNotStampAlarmRun pins the drain-side half of the
+// alarm discipline (the advance itself is pinned by
+// TestDrainAdvancesEmptyPromptHead): an errEmptyPrompt replay result is an
+// intentional non-delivery (the rendered prompt trims to ""), not a pipeline
+// outage, so the drain loop must not record it through recordDeliveryResult —
+// otherwise a watcher whose queue head renders empty alarms after three
+// minutes even though the head was advanced and nothing is left to retry.
+func TestDrainEmptyPromptDoesNotStampAlarmRun(t *testing.T) {
+	s := newWatcherSupervisor()
+	s.drainBaseBackoff = 20 * time.Millisecond
+	s.drainMaxBackoff = 100 * time.Millisecond
+	s.queueMaxAge = 0
+	s.recordDrops = func(string, int, time.Time) error { return nil }
+	s.deliver = func(_ string, line string, _ watchDeliveryOptions) error {
+		return notAttempted(fmt.Errorf("event rendered an empty prompt (line %q): %w", line, errEmptyPrompt))
+	}
+	queue := newEventQueue(t.TempDir(), "alarm-drain01")
+	if err := queue.enqueue("head-being-replayed"); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	stopCh := make(chan struct{})
+	w := &taskWatcher{taskID: "alarm-drain01", sup: s, queue: queue, stopCh: stopCh, draining: true}
+	w.wg.Add(1)
+	go w.drainLoop()
+	waitUntil(t, 2*time.Second, "empty-prompt head to be advanced", func() bool {
+		return queue.pendingCount() == 0
+	})
+	close(stopCh)
+	w.wg.Wait()
+	if d := droppedCount(w); d != 1 {
+		t.Fatalf("dropped = %d, want 1 (the advanced empty-prompt head is one lost event)", d)
+	}
+	w.mu.Lock()
+	since, count := w.deliverFailSince, w.deliverFailCount
+	w.mu.Unlock()
+	if !since.IsZero() || count != 0 {
+		t.Fatalf("errEmptyPrompt stamped a delivery-failure run: since=%v count=%d (an intentional drop must not alarm)", since, count)
+	}
+}
+
 // droppedCount reads w.dropped under its lock for the discard-accounting tests.
 func droppedCount(w *taskWatcher) int {
 	w.mu.Lock()

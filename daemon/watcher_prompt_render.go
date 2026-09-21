@@ -1,6 +1,11 @@
 package daemon
 
-import "github.com/sachiniyer/agent-factory/task"
+import (
+	"errors"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/task"
+)
 
 // renderedWatchPrompt returns line rendered through taskID's watch-prompt
 // template plus whether that render is dependable, mirroring the pre-flight
@@ -37,4 +42,23 @@ func (s *watcherSupervisor) renderedWatchPrompt(taskID, line string) (string, bo
 		}
 	}
 	return line, false
+}
+
+// recordDeliveryResultUnlessEmptyPrompt folds a delivery attempt's outcome
+// into the watcher's alarm state unless the attempt died on errEmptyPrompt, an
+// intentional non-delivery (the rendered prompt trims to "") that
+// enqueueEvent's boundary discard (daemon/watcher.go) or drainLoop's head
+// advance (daemon/watcher_drain.go) removes. errEmptyPrompt is not a pipeline
+// failure, so feeding it to recordDeliveryResult would stamp a delivery-failure
+// run that alarms after three minutes on an empty queue with nothing left to
+// retry — the same shape of non-failure errTargetBusy, errAtConcurrencyLimit,
+// and errTargetLimitReached are classified as inside recordDeliveryResult
+// (delivery_alarm.go). Skipping the call leaves a prior genuine failure's run
+// in place, so a real outage is not masked by a stray blank line; a later
+// genuine failure re-stamps the run.
+func (w *taskWatcher) recordDeliveryResultUnlessEmptyPrompt(now time.Time, err error) {
+	if errors.Is(err, errEmptyPrompt) {
+		return
+	}
+	w.recordDeliveryResult(now, err)
 }
