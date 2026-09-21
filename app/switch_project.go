@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
@@ -664,7 +665,27 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		// rail. Reset (not Set) so a held edit against the deleted project's
 		// list does not follow the user into registry mode.
 		m.store.SetTasks(nil)
-		m.automations.TaskPane().ResetTasks(nil)
+		sp := m.automations.TaskPane()
+		sp.ResetTasks(nil)
+		// ResetTasks clears the backing list but leaves a held create/edit
+		// form's `creating` and `hasFocus` set; the form captured its editPath
+		// at EnterCreateMode time (from m.repoRoot), so a draft submitted
+		// AFTER the rescope clears m.repoID would persist a task pinned to
+		// the deleted project's path and its scheduler entry could recreate
+		// sessions for it. SetFocus(false) cancels the form (clears creating/
+		// editing/pendingCreate/pendingTrigger), matching the intent the
+		// comment above already claims. The hooks overlay's save target is
+		// m.repoRoot — already empty here — so a held hook add/edit would
+		// either error or land in the wrong place; close it the same way.
+		sp.SetFocus(false)
+		m.hooksPane.SetFocus(false)
+		// State overlays scoped to the deleted project (stateTasks/stateHooks)
+		// keep their overlay rendered against the cleared identity once
+		// m.repoID is empty. Close them so neither the task create form nor
+		// the hooks editor stays pinned to a project the user just removed.
+		if m.state == stateTasks || m.state == stateHooks {
+			m.state = stateDefault
+		}
 	}
 	m.refreshSidebarProjects()
 	if rescoped {
@@ -675,6 +696,17 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		// the new, scope-cleared project list, matching switchProject's order.
 		m.focusTreeForNav()
 		m.relayout()
+		// The Sessions tree is empty after the rescope, so focus on its rail
+		// leaves `j`/`k` and Enter inert. When other projects remain, land
+		// focus on the Projects section instead — the only directly
+		// actionable region in registry mode — matching newHome's
+		// registry-mode initialization. Ring.Focus refuse to leave the
+		// Projects region hidden (the grid hides it for <=1 row), so this is
+		// a no-op when the section is not visible.
+		if m.projects.HasProjects() {
+			m.ring.Focus(layout.RegionProjects)
+			m.syncFocus()
+		}
 	}
 	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
 	if committedWarning {
