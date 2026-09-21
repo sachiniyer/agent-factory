@@ -708,10 +708,12 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	if tasks, err := task.LoadTasksForKnownRepo(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
-		m.automations.TaskPane().SetTasks(nil)
+		m.automations.TaskPane().ResetTasks(nil)
 	} else {
 		m.store.SetTasks(tasks)
-		m.automations.TaskPane().SetTasks(tasks)
+		// Reset, not reconcile: an edit held against the outgoing project's
+		// list must not follow the user into this one.
+		m.automations.TaskPane().ResetTasks(tasks)
 	}
 
 	m.restoreTUIViewStateOnLaunch()

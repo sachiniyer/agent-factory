@@ -511,6 +511,11 @@ var sensitiveJSONKeys = map[string]bool{
 	//     (kind_name/status_name/liveness_name) and branch_name are DIFFERENT
 	//     keys, matched exactly, so they still survive.
 	//   - account is the user-chosen credential-account label.
+	//   - account_scope is the per-tab account label redactTabData blanks
+	//     (the same fact InstanceData.Account is redacted for, under the #4506
+	//     process-tab-restore feature). The registry text sweep only reaches
+	//     labels still in r.accounts, so a renamed/retired account label in a
+	//     record that fails the typed decode leaks here without this entry.
 	//   - program and runtime_program are arbitrary command lines. Program was
 	//     listed as structural here until #3588 established it is not;
 	//     runtime_program is the override-resolved form of the same value.
@@ -518,7 +523,7 @@ var sensitiveJSONKeys = map[string]bool{
 	//     names titles and worktrees; the typed path scrubs it, and scrubbing
 	//     needs the typed record's titles.
 	"alternate_path": true, "archive_warning": true,
-	"name": true, "account": true, "program": true, "runtime_program": true, "error": true,
+	"name": true, "account": true, "account_scope": true, "program": true, "runtime_program": true, "error": true,
 	// The usage-limit swap's account labels (#3127), mirrored here for the reason
 	// every entry above is: a record the typed decode REJECTS must never be less
 	// private than one it accepts. "account" already covers the label nested in
