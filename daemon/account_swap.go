@@ -216,14 +216,25 @@ func accountSwapAgent(instance *session.Instance) string {
 	if live == "" {
 		live = configured
 	}
-	if configured != "" && live != configured {
-		return ""
-	}
-	// A pinned account names the registry it was selected in (#4430 round 4):
-	// when the live agent no longer matches that durable namespace — an
-	// override edit repointing the recorded program — rotating either registry
-	// would spend an account the pin never named, so no swap applies.
-	if pinned := instance.AccountAgent(); pinned != "" && pinned != live {
+	// A pinned account names the registry it was selected in (#4430 round 4),
+	// and when it matches the live agent it settles the configured/live
+	// disagreement rather than adding to it: a redirected manual handoff such
+	// as `--to aider --account work` with aider resolving to codex SUPPORTS a
+	// settled record whose enum is aider while the running agent and the
+	// durable pin are both codex. The pin is proof that state was committed
+	// under the lock, so the limit filed under the live agent's namespace may
+	// scan that registry's candidates.
+	if pinned := instance.AccountAgent(); pinned != "" {
+		// When the live agent no longer matches the durable namespace — an
+		// override edit repointing the recorded program — rotating either
+		// registry would spend an account the pin never named, so no swap
+		// applies.
+		if pinned != live {
+			return ""
+		}
+	} else if configured != "" && live != configured {
+		// No pin to prove the mismatch was committed: an unpinned live/configured
+		// disagreement remains ambiguous drift (#3082/#3108) and yields no swap.
 		return ""
 	}
 	if _, supported := sessionenv.SupportsAccounts(live); !supported {

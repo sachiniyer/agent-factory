@@ -1334,3 +1334,48 @@ func TestAccountSwapOpportunity_MakesNoDecisionWhenTheResolvedAgentDiffers(t *te
 	require.NotNil(t, agreed, "the fixture must be able to produce a swap, or the nil above proves nothing")
 	require.Equal(t, "work", agreed.to)
 }
+
+// A redirected manual handoff settles in a shape the configured/live check
+// alone calls drift: `--to aider --account work` with aider resolving to codex
+// leaves Program=aider while the running agent and the durable accountAgent pin
+// are both codex. The pin was committed under the lock, so when it names the
+// live agent's registry the wall — filed under that same live agent — may scan
+// its candidates (#4430 review round 8). An UNPINNED mismatch stays refused by
+// the test above, and a pin that disagrees with the live agent stays refused
+// here: rotating either registry would spend an account the pin never named.
+func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *testing.T) {
+	base := nowFunc()
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "keep going", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	for _, name := range []string{"work", "work2"} {
+		_, err = agentaccount.Register(home, tmux.ProgramCodex, name)
+		require.NoError(t, err)
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work2\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work2"}
+
+	// Settled redirected state: requested enum aider, running agent codex,
+	// durable pin codex — then re-mark the wall so its identity and account
+	// observation are filed under codex/work rather than the fixture's
+	// claude/no-account.
+	inst.Program = tmux.ProgramAider
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, false, nil)
+	inst.ClearLimitReached()
+	inst.SetLimitReached(base.Add(time.Hour))
+
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.NotNil(t, swap,
+		"a pin matching the live agent proves the redirect was committed; the codex registry must be scanned")
+	require.Equal(t, tmux.ProgramCodex, swap.agent)
+	require.Equal(t, "work2", swap.to)
+
+	// A pin that disagrees with the live agent is contradiction, not proof:
+	// same fixture, pin filed under claude — still no swap.
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramClaude, false, nil)
+	drifted, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.Nil(t, drifted, "a pin naming a different registry than the live agent must still refuse")
+}
