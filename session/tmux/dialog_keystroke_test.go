@@ -189,3 +189,132 @@ func TestSessionGoneError_NavigationWithoutConfirmationIsNotAnAnsweredDialog(t *
 	require.Contains(t, answered, "Down Enter")
 	require.Contains(t, answered, "to choose")
 }
+
+// Regression for the codex_safety.go half of #3579's retrofit (commit ac8bcc78).
+// af sends Down/Up into the Codex safety-check picker to reach "Keep waiting"
+// and only then sends Enter. The retrofit recorded only the Enter, leaving the
+// pre-existing navigation block unrecorded — so a death during navigation read
+// as an anonymous startup death (fresh dialogInput) or as a death answered by
+// a stale prior dialog inside the 30s window (notably Codex update), and a
+// death after Enter under-reported the keys af actually sent. The fix records
+// the navigation keys immediately after the send, mirroring claude_trust.go
+// and codex_update.go. These tests pin the diagnostic over the same-dialog
+// accumulation the contract already supports.
+
+// TestSessionGoneError_CodexSafetyNavigationOnlyIsNotAnAnsweredDialog pins the
+// navigation-only bail-out: a death between af's Down on the safety picker and
+// its confirming Enter must read as navigation (not answering) and must name
+// the safety dialog and the row af was moving toward.
+func TestSessionGoneError_CodexSafetyNavigationOnlyIsNotAnAnsweredDialog(t *testing.T) {
+	session := newTmuxSession(toTmuxName("safety-nav", ""), ProgramCodex, NewMockPtyFactory(t), cmd_test.MockCmdExec{})
+	session.noteDialogKeystroke(codexSafetyDialogName, codexSafetyWaitLabel, "Down")
+
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone,
+		"the added wording must not break the sentinel callers tear sessions down on")
+	message := err.Error()
+	require.Contains(t, message, "still navigating",
+		"a navigation-only death must read as af still working on the dialog")
+	require.Contains(t, message, "confirmed nothing",
+		"without the confirming Enter, af chose nothing")
+	require.Contains(t, message, "Down", "the navigation key af sent must be named")
+	require.Contains(t, message, codexSafetyDialogName, "the diagnostic must name the safety dialog af was navigating")
+	require.Contains(t, message, codexSafetyWaitLabel, "the diagnostic must name the row af was moving toward")
+	require.NotContains(t, message, "answered its",
+		"af had not answered the dialog; it had only navigated the safety picker")
+	require.NotContains(t, message, "to choose",
+		"af chose nothing without the confirming Enter")
+}
+
+// TestSessionGoneError_CodexSafetyEnterAccumulatesNavigationKeys pins the
+// happy path: the confirming Enter is appended to — not recorded in place of —
+// the navigation keys, so a death after Enter names the full key sequence af
+// sent, satisfying the "names all of them" contract from dialog_keystroke.go.
+func TestSessionGoneError_CodexSafetyEnterAccumulatesNavigationKeys(t *testing.T) {
+	session := newTmuxSession(toTmuxName("safety-enter", ""), ProgramCodex, NewMockPtyFactory(t), cmd_test.MockCmdExec{})
+	// Mirror the fix: record navigation immediately after the successful send.
+	session.noteDialogKeystroke(codexSafetyDialogName, codexSafetyWaitLabel, "Down")
+	// Mirror codex_safety.go: the subsequent Enter accumulates on the same dialog.
+	session.noteDialogKeystroke(codexSafetyDialogName, codexSafetyWaitLabel, "Enter")
+
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone)
+	message := err.Error()
+	require.Contains(t, message, "answered its",
+		"the confirming Enter makes this an answered dialog")
+	require.Contains(t, message, codexSafetyDialogName)
+	require.Contains(t, message, "Down Enter",
+		"the navigation keys must accumulate alongside the confirming Enter so the diagnostic names all keys af sent")
+	require.Contains(t, message, "to choose",
+		"the confirming Enter turns the navigation into a chosen option")
+	require.Contains(t, message, codexSafetyWaitLabel)
+}
+
+// TestSessionGoneError_CodexSafetyNavigationOverwritesStaleCrossDialogRecord
+// pins failure mode A2: a stale cross-dialog record (in practice Codex update
+// dismissed shortly before the safety picker appeared, inside the 30s window)
+// must be overwritten the instant af records the safety navigation, so a
+// navigation-only death is attributed to the safety dialog af was actually
+// working on, not misattributed to the prior Codex update dialog.
+// noteDialogKeystroke resets dialogInput when the dialog name differs, which is
+// the property the fix leans on to repair A2.
+func TestSessionGoneError_CodexSafetyNavigationOverwritesStaleCrossDialogRecord(t *testing.T) {
+	session := newTmuxSession(toTmuxName("safety-stale", ""), ProgramCodex, NewMockPtyFactory(t), cmd_test.MockCmdExec{})
+	// Seed the stale record the launch-time Codex update picker leaves behind
+	// when it was dismissed shortly before the safety picker appeared, inside
+	// the 30s attribution window.
+	session.noteDialogKeystroke(codexUpdateDialogName, codexUpdateSkipLabel, "Down", "Enter")
+	// af navigates the safety picker. With the fix this is recorded, and
+	// because the dialog name differs from the stale record, noteDialogKeystroke
+	// resets dialogInput before appending — the prior Codex update record is gone.
+	session.noteDialogKeystroke(codexSafetyDialogName, codexSafetyWaitLabel, "Down")
+
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone)
+	message := err.Error()
+	require.Contains(t, message, codexSafetyDialogName,
+		"the safety navigation record must overwrite the stale prior-dialog record and name the dialog af was actually working on")
+	require.NotContains(t, message, codexUpdateDialogName,
+		"the stale Codex update record must not be misattributed to a safety-picker death")
+	require.Contains(t, message, "still navigating",
+		"a navigation-only death reads as navigation, not as answering")
+	require.Contains(t, message, "Down")
+}
+
+// TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic is the
+// end-to-end guard against the same regression recurring: it drives the real
+// CheckAndHandleTrustPrompt through the safety picker the way the daemon's
+// Snapshot poll does, and asserts the recorded dialog keystroke carries BOTH
+// the navigation key and the Enter — i.e. the fix actually calls
+// noteDialogKeystroke from inside the handler on the navigation block, not
+// only on the confirming Enter. Without the fix the record carries only Enter.
+func TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic(t *testing.T) {
+	const normalPane = `• Working
+
+  gpt-5.6-sol max · ~/agent-factory`
+	session, commands := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexSafetyBufferingDialog,
+		codexSafetyBufferingKeepWaitingSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(), "a normal Codex pane is not a modal")
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the safety-buffering picker must be handled")
+	require.Equal(t, []string{
+		"tmux send-keys -t =af_trust: Down",
+		"tmux send-keys -t =af_trust: Enter",
+	}, sentKeystrokes(*commands), "navigate to the label, then accept; proves both keys were sent to the pane")
+
+	// The dialog-input record is what sessionGoneError would read if a later
+	// tmux read discovered the pane gone. Assert it carries the full sequence.
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af just answered the safety picker; there must be a recent keystroke")
+	require.Equal(t, codexSafetyDialogName, record.dialog,
+		"the recorded dialog must be the safety-check, not a stale prior dialog")
+	require.Equal(t, codexSafetyWaitLabel, record.choice,
+		"the recorded choice must be the row af navigated to and accepted")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys,
+		"both the navigation key and the confirming Enter must be recorded, mirroring the sibling dialogs")
+}

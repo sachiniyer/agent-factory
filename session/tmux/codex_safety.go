@@ -173,6 +173,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			log.ErrorLog.Printf("could not navigate Codex additional safety checks for session %q: %v", t.sanitizedName, err)
 			return true
 		}
+		t.noteDialogKeystroke(codexSafetyDialogName, dialog.targetLabel, keys...)
 		state.beginSelectionVerification(dialog.targetLabel)
 
 		// Selection is a terminal UI state, not a numbered form value. Read
