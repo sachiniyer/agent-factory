@@ -531,30 +531,31 @@ func claudeMCPTrustFooterIsLast(content string) bool {
 }
 
 // claudeLegacyTrustPickerIsLast reports whether the legacy folder-trust dialog's
-// picker row — the `claudeTrustSelectionGlyph` ("❯") on its Yes option — is the
-// LAST non-blank content in the pane. A live legacy modal ends on its picker; a
-// quoted mention of the legacy wording always has the agent's composer or
-// further output painted below it, so the picker is not last.
+// picker — the `claudeTrustSelectionGlyph` ("❯") on its Yes option, with the No
+// option alongside it — is the LAST non-blank content in the pane. A live
+// legacy modal ends on its picker; a quoted mention always has the agent's
+// composer or further output painted below it, so the picker is not last. This
+// is the same footer-is-last discipline claudeMCPTrustFooterIsLast applies to
+// the MCP branch. The hidden-cursor oracle the codex branch uses is NOT
+// available here (claude_trust.go:32-36), so structural position is the only
+// discriminator.
 //
-// This is the same footer-is-last discipline claudeMCPTrustFooterIsLast applies
-// to the MCP branch, ported to the legacy dialog whose only structural anchor
-// is its selected Yes row. The hidden-cursor oracle the codex branch uses is
-// NOT available here — Claude Code hides the terminal cursor in BOTH the modal
-// and its ordinary composer (claude_trust.go:32-36), so cursor visibility cannot
-// tell the two apart; structural position is the only discriminator.
+// The legacy picker renders in two layouts, both of which must be accepted:
+//   - a single selected row carrying both options inline ("❯ Yes  No" /
+//     "❯ 1. Yes  2. No"); the last non-blank row IS the selected Yes row.
+//   - a stacked pair with the selected Yes row immediately above the unselected
+//     No row ("❯ 1. Yes" / "  2. No"); the No row is the last non-blank content.
+//     task/runner_test.go:60 pins this stacked layout as a known Claude trust
+//     shape, so the dismissal must recognise it too — otherwise readiness
+//     succeeds but DismissTrustPrompt treats the pane as dialog-free and
+//     delivers the initial prompt into the live modal.
 //
-// Rows are parsed with claudeTrustRowOf so box-drawing chrome and ANSI styling
-// are stripped before the glyph and the option label are matched, letting a
-// framed and an unframed legacy modal reduce to the same picker row. The row's
-// `selected` flag is the glyph; the row's `label` is the option text behind it.
-// Requiring `selected` AND a `Yes` label mirrors the reworded branch's
-// question-plus-affirmative-label co-occurrence requirement; requiring that row
-// to be LAST mirrors the MCP branch's footer-is-last requirement. A quoted
-// mention of "Do you trust the files in this folder?" with the composer painted
-// below it (or any later output, e.g. a diff of this very file, which contains
-// the phrase verbatim) fails the last-row check, satisfying
-// start.go:421-422 — "a prose mention of one phrase must never inject Enter
-// into a working agent."
+// claudeLegacySingleRowYes is what tells a real picker from a Claude composer
+// sharing the ❯ glyph whose draft merely begins with "Yes" ("Yes, I will fix
+// that", "Yesterday ..."): the composer draft does not reproduce the Yes/No
+// option pair. A quoted mention with the composer painted below it fails the
+// last-row check (start.go:421-422 — "a prose mention of one phrase must never
+// inject Enter into a working agent").
 func claudeLegacyTrustPickerIsLast(content string) bool {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	rows := make([]claudeTrustRow, len(lines))
@@ -562,9 +563,9 @@ func claudeLegacyTrustPickerIsLast(content string) bool {
 		rows[i] = claudeTrustRowOf(line)
 	}
 
-	// Find the last non-blank row, the same scan claudeMCPTrustFooterIsLast
-	// applies. The picker row is the END of a live legacy modal, the way the
-	// "Enter to confirm" footer is the end of an MCP one.
+	// The picker row — or its No option, in the stacked layout — is the END
+	// of a live legacy modal, the way the "Enter to confirm" footer ends an
+	// MCP one.
 	lastIdx := -1
 	for i := len(rows) - 1; i >= 0; i-- {
 		if !rows[i].blank {
@@ -575,12 +576,108 @@ func claudeLegacyTrustPickerIsLast(content string) bool {
 	if lastIdx < 0 {
 		return false
 	}
-	// The last non-blank row must be the picker's selected Yes row. claudeTrustRowOf
-	// already strips the `claudeTrustSelectionGlyph` into `selected` and the
-	// numeric ordinal off the label, so a "❯ 1. Yes  2. No" row and a "❯ Yes  No"
-	// row both reduce to `selected=true`, `label` beginning "Yes".
-	row := rows[lastIdx]
-	return row.selected && strings.HasPrefix(strings.ToLower(row.label), "yes")
+	last := rows[lastIdx]
+	// Single-row picker: claudeTrustRowOf has stripped the ❯ glyph and the
+	// leading ordinal, so the selected row's label is the two options inline
+	// ("Yes  No" / "Yes  2. No"). claudeLegacySingleRowYes rejects a composer
+	// whose draft merely begins with "Yes" (no No option on the row).
+	if last.selected && claudeLegacySingleRowYes(last.label) {
+		return true
+	}
+	// Stacked picker: the selected Yes row is immediately above the unselected
+	// No row, so the No row is the last non-blank content. claudeTrustRowOf
+	// strips the "2. " ordinal off the No row ("No") and the "1. " ordinal off
+	// the row above ("Yes"); the two must be adjacent, per the stacked layout
+	// task/runner_test.go:60 pins.
+	if claudeLegacyNoRow(last.label) && lastIdx > 0 {
+		prev := rows[lastIdx-1]
+		if !prev.blank && prev.selected && strings.ToLower(prev.label) == "yes" {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeLegacySingleRowYes reports whether label is the selected Yes row of a
+// single-row legacy picker, where both options sit on one row after
+// claudeTrustRowOf has stripped the ❯ glyph and the leading ordinal:
+// "Yes  No" or "Yes  2. No" (the No option may carry its own "N. " ordinal,
+// which is not the leading ordinal and is not stripped). A Claude composer
+// whose draft merely begins with "Yes" — "Yes, I will fix that",
+// "Yesterday ..." — shares the ❯ glyph but does not reproduce the Yes/No
+// option pair, so it does not match. That is what tells a live picker from a
+// working composer (start.go:421-422); before this check a bare prefix test
+// accepted any label beginning with "yes" and could inject Enter into a
+// composer whose draft happened to start there.
+func claudeLegacySingleRowYes(label string) bool {
+	fields := strings.Fields(strings.ToLower(label))
+	switch len(fields) {
+	case 2:
+		return fields[0] == "yes" && fields[1] == "no"
+	case 3:
+		return fields[0] == "yes" && claudeLegacyPickerOrdinal(fields[1]) && fields[2] == "no"
+	}
+	return false
+}
+
+// claudeLegacyPickerOrdinal reports whether s is a "N." ordinal token ("1.",
+// "2.", ...) the legacy picker renders on the option it did not preselect and
+// that claudeTrustRowOf therefore leaves on the label.
+func claudeLegacyPickerOrdinal(s string) bool {
+	if len(s) < 2 || s[len(s)-1] != '.' {
+		return false
+	}
+	for _, r := range s[:len(s)-1] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// claudeLegacyNoRow reports whether label is the unselected No option row of a
+// stacked legacy picker, i.e. exactly "No" after claudeTrustRowOf has stripped
+// the leading "2. " ordinal. The stacked No row carries no ❯ glyph (only the
+// selected Yes row does), so its label is just the option text.
+func claudeLegacyNoRow(label string) bool {
+	return strings.ToLower(label) == "no"
+}
+
+// claudeLegacyDialogPartiallyRendered reports whether the pane shows the legacy
+// folder-trust dialog in a state consistent with Claude Code still painting it:
+// the question "Do you trust the files in this folder?" is on screen but its
+// picker row has not been painted yet, so the question itself is the LAST
+// non-blank content. This is the fail-closed partial-render path the MCP branch
+// already has (claudeMCPDialogPartiallyRendered) ported to the legacy dialog
+// whose only structural anchor is its question.
+//
+// Without it, the conjunction in claudeTrustPromptPresent returns false for
+// this intermediate frame (the question is present but the picker is not last)
+// and CheckAndHandleTrustPrompt would fall through to "no dialog", handing the
+// pane to task.DismissTrustPrompt as dialog-free and delivering the user's
+// initial prompt into the still-rendering trust modal. The previous phrase-only
+// condition kept this frame blocked; this restores that hold without
+// re-introducing the quote-injection bug: a quoted mention always has the
+// composer or further output painted below the question, so the question is
+// not its last row, and a pane whose last content is the bare question is not
+// a working composer af could deliver a prompt into.
+func claudeLegacyDialogPartiallyRendered(content string) bool {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+	lastIdx := -1
+	for i := len(rows) - 1; i >= 0; i-- {
+		if !rows[i].blank {
+			lastIdx = i
+			break
+		}
+	}
+	if lastIdx < 0 {
+		return false
+	}
+	return strings.Contains(rows[lastIdx].label, "Do you trust the files in this folder?")
 }
 
 // parseClaudeFolderTrustDialog locates the cursor row and the affirmative row.

@@ -855,6 +855,44 @@ func TestCheckAndHandleTrustPrompt_QuotedLegacyFolderTrustDialogInjectsNothing(t
 				"╰────────────────────────────────────╯\n" +
 				"? for shortcuts\n",
 		},
+		{
+			// The composer IS the last visible content (no "? for shortcuts"
+			// below it) and its draft begins with "Yes". The composer shares
+			// the ❯ glyph with the picker, so a bare "label begins with yes"
+			// test would mark this row as the picker and submit the draft with
+			// Enter. The picker check must match the legacy option-row shape —
+			// the Yes AND No options together — not any label beginning with
+			// "yes". The draft does not reproduce the No option, so the
+			// predicate refuses and no Enter is injected.
+			name: "composer draft beginning with Yes is the last visible content",
+			content: "I was asked: \"" + legacyPhrase + "\"\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yes, I will fix that now         │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// Same cross-dialog hazard with a draft beginning "Yesterday": a
+			// prefix test accepts it because HasPrefix(lower, "yes") is true.
+			// The picker check requires the Yes/No option pair, so the prose
+			// draft is refused.
+			name: "composer draft beginning with Yesterday is the last visible content",
+			content: "I was asked: \"" + legacyPhrase + "\"\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yesterday I finished that task   │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
+		{
+			// A composer draft that is exactly "Yes" — the row that a bare
+			// selected-and-prefix test could not tell from the stacked
+			// picker's selected Yes row. The picker check requires the No
+			// option alongside it, and a single "Yes" row has no No, so the
+			// predicate refuses.
+			name: "composer draft that is exactly Yes is the last visible content",
+			content: "I was asked: \"" + legacyPhrase + "\"\n" +
+				"╭────────────────────────────────────╮\n" +
+				"│ ❯ Yes                              │\n" +
+				"╰────────────────────────────────────╯\n",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := pollStaticPane(t, tt.content, 4)
@@ -893,12 +931,67 @@ func TestCheckAndHandleTrustPrompt_RealLegacyFolderTrustDialogStillFiresEnter(t 
 				"│ ❯ Yes  No                            │\n" +
 				"╰────────────────────────────────────╯\n",
 		},
+		{
+			// The legacy picker may stack its options on separate rows, with
+			// the selected Yes row immediately above the unselected No row.
+			// task/runner_test.go:60 records this stacked layout as a known
+			// Claude trust shape, so the dismissal must recognise it too —
+			// otherwise readiness succeeds but DismissTrustPrompt treats the
+			// pane as dialog-free and delivers the initial prompt into the
+			// live modal. The No row is the last non-blank content; the row
+			// immediately above it is the selected Yes row, so the picker
+			// check fires.
+			name:    "legacy modal with options stacked on separate rows",
+			content: "Do you trust the files in this folder?\n❯ 1. Yes\n  2. No",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
 			require.True(t, handled, "the live legacy modal is in the way")
 			require.Equal(t, []string{"Enter"}, injectedKeyNames(sentKeystrokes(cmds)),
 				"the real legacy modal keeps the historical Enter tap on Claude Code's preselection")
+		})
+	}
+}
+
+// Claude Code paints the legacy folder-trust dialog top-to-bottom: the
+// question first, then the picker row. A capture taken between the question
+// and the picker shows a partially rendered dialog. This capture must block
+// (return true) — "I could not confirm the dialog structure" and "the pane is
+// dialog-free" are different answers and must not map to the same return value,
+// the same fail-closed partial-render path the MCP branch has. Without it, the
+// conjunction in claudeTrustPromptPresent returns false for this frame (the
+// question is present but the picker is not last) and task.DismissTrustPrompt
+// would deliver the user's initial prompt into the still-rendering trust
+// modal — the previous phrase-only condition kept this frame blocked, and the
+// partial-render hold restores that without re-introducing the quote-injection
+// bug.
+func TestCheckAndHandleTrustPrompt_PartiallyRenderedLegacyFolderDialogBlocks(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{
+			// Question painted, picker row not yet rendered. The question is
+			// the last non-blank content, so the partial-render hold fires.
+			name:    "question only, picker not yet painted",
+			content: "Do you trust the files in this folder?\n\n\n\n",
+		},
+		{
+			// Same partial state with a single trailing newline — the
+			// question is still the last non-blank row.
+			name:    "question only with one trailing newline",
+			content: "Do you trust the files in this folder?\n",
+		},
+		{
+			// The bare question with nothing after it at all.
+			name:    "question only, no trailing newline",
+			content: "Do you trust the files in this folder?",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled,
+				"a partially rendered legacy dialog must block; reporting false lets the caller paste into it")
+			require.Empty(t, sentKeystrokes(cmds),
+				"a partially rendered dialog must not receive a key; got %v", cmds)
 		})
 	}
 }

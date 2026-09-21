@@ -347,6 +347,19 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPDialogPartiallyRendered(content) {
 			return true
 		}
+		// The legacy folder-trust dialog is not atomic either: Claude Code
+		// paints its question before its picker row, so a capture taken
+		// mid-paint shows the question without the picker. The conjunction in
+		// claudeTrustPromptPresent requires the picker to be last, so it
+		// returns false for this frame. Without this guard, that false would
+		// fall through to "no dialog" and task.DismissTrustPrompt would deliver
+		// the user's prompt into the still-rendering trust modal. Same
+		// fail-closed hold as the MCP branch above: the question being the
+		// last content is enough to block; the picker being last is what
+		// authorises the Enter.
+		if claudeLegacyDialogPartiallyRendered(content) {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
@@ -537,9 +550,10 @@ func reverseVideoURLSubject(line string) bool {
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
 // old wording ("Do you trust the files in this folder?") is anchored the same
-// way: its question must co-occur with the picker row the legacy modal renders
-// (the `claudeTrustSelectionGlyph` "❯" on the Yes option), and that row must be
-// the LAST non-blank content in the pane. The phrase alone is the same hazard
+// way: its question must co-occur with the legacy modal's picker — the
+// `claudeTrustSelectionGlyph` "❯" on its Yes option, with the No option
+// alongside it (on one row or stacked) — and that picker must be the LAST
+// non-blank content in the pane. The phrase alone is the same hazard
 // the MCP branch's footer-is-last rule refuses — af's own source contains the
 // legacy phrase verbatim (line 571 below, and the docstring above), so a
 // visible rendering of this file's contents (a diff, a review reply, pasted
