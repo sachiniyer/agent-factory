@@ -67,10 +67,16 @@ var errAccountLaunchProofMismatch = errors.New("launcher account launch proof do
 // resolved-operator-config the resolver reads.
 //
 // It returns (proof, nil) when a derivation is available for this (agent,
-// command) pair, or (zero, err) when it cannot decide. A nil resolver short-
-// circuits the matcher: the shim falls back to the env-supplied proof alone,
-// which is the form this hook replaced and the form tests exercise directly.
-// main.go wires the production resolver; tests install their own.
+// command) pair, or (zero, err) when it cannot decide. The shim treats any
+// resolver error as a REFUSAL — a repository-controlled parent can
+// deliberately make re-derivation fail (e.g. by removing the pane's CWD from
+// a sibling shell), and a forged env var is then the only "proof" left, so
+// bypassing the cross-check on a resolver error re-opens the forgeable-env
+// channel this gate closed (#4731 review, Codex P1 on f903b934). A nil
+// resolver short-circuits the matcher: the shim falls back to the
+// env-supplied proof alone, which is the form this hook replaced and the
+// form tests exercise directly. main.go wires the production resolver;
+// tests install their own.
 var AccountLaunchProofResolver func(agent, account, command string) (AccountLaunchProof, error)
 
 // accountLaunchProofsMatch reports whether two proofs describe the same
