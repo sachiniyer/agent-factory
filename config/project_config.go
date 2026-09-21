@@ -690,6 +690,31 @@ func ResolveProjectSelector(selector string) (Project, error) {
 							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
 						binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, ownerErr, owner.ID, owner.ID)
 				}
+				// resolveProjectBinding resolves git through ancestor
+				// fallback: when owner.Root used to be a nested repository
+				// under binding.root whose nested .git directory was
+				// removed (leaving the directory present), git -C owner.Root
+				// resolves the enclosing repository and returns its root and
+				// common directory. The marker checks below would then treat
+				// the unrelated ancestor as the owner: its common directory
+				// may coincide with binding's, so the linked-worktree refusal
+				// at the fall-through below would fire with a misleading
+				// "shared through its git directory" message naming a worktree
+				// this checkout is not, and the deletion-advice branch would
+				// probe the ancestor's marker rather than the owner's. Require
+				// ownerBinding.root to still name owner.Root before using the
+				// binding, the same exact-root guard the absent-marker scan
+				// uses at lines 637-639; an owner root that resolves to a
+				// different root is treated as unknown, and the deletion
+				// advice is refused.
+				if !sameProjectPath(ownerBinding.root, owner.Root) {
+					return Project{}, fmt.Errorf(
+						"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+							"the marker belongs to project %s, whose registered root %s no longer resolves to itself (now resolves to %s) and may be a stale nested registration whose git directory was removed; "+
+							"the marker at this checkout may still be project %s's own shared marker, so af will not recommend removing it — "+
+							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
+						binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, ownerBinding.root, owner.ID, owner.ID, owner.ID)
+				}
 				if !sameProjectPath(ownerBinding.gitCommonDir, binding.gitCommonDir) {
 					// The owner's recorded root resolves to a different git
 					// common directory than this checkout. Before treating the
@@ -888,12 +913,20 @@ func mainCheckoutHasLinkedWorktrees(commonDir string) bool {
 		// may still be in use by active worktrees.
 		return !errors.Is(err, os.ErrNotExist)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return true
-		}
-	}
-	return false
+	// Conservatively treat any entry in <commonDir>/worktrees as evidence
+	// of sharing rather than trust DirEntry.IsDir alone. Directory
+	// enumeration on some filesystems (notably NFS and FUSE) reports the
+	// unknown entry type for entries it could not classify; IsDir is then
+	// false even when the entry is a directory, so a main checkout that
+	// actually spawned linked worktrees could be miscounted as private
+	// and the copied-marker remedy would tell the user to delete a marker
+	// still shared by those worktrees. Any entry — a real linked
+	// worktree's directory, a stray file, or an indeterminate-type entry
+	// — proves the shared common directory backs more than this single
+	// private checkout, so fail closed and let the caller refuse the
+	// deletion advice rather than recommend removing a marker that may
+	// still be in use by active linked worktrees.
+	return len(entries) > 0
 }
 
 // registeredProjectProofRaceHookForTest, when non-nil, runs at the top of
