@@ -612,20 +612,33 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			// target IS commonDir (so sharedWorktreeCommonDir rejects it)
 			// and there need not be a <commonDir>/worktrees subdir.
 			// Classify the direct-gitdir-file case as possibly-shared too,
-			// so the scan still runs. The remaining shared-checkout scan
-			// is per-root git resolution, so bound each probe the way the
-			// daemon's scan does (projectForWorkspaceContext): the same
+			// so the scan still runs. A directory-shaped <root>/.git is
+			// not by itself proof the marker is private either: two
+			// checkouts whose <root>/.git are bind-mounted (or
+			// duplicate-mounted) onto the same external directory share
+			// the marker, and each .git reads as an ordinary directory with
+			// no worktrees metadata, so the four shape-based predicates
+			// all miss it. anotherRootSharesGitDir performs the same
+			// inode-identical check the scan loop's sameProjectPath does,
+			// but as a fast stat-only sweep of registered roots so the
+			// predicate can keep the per-root git probe reachable without
+			// paying a per-root git invocation when no inode matches. The
+			// remaining shared-checkout scan is per-root git resolution,
+			// so bound each probe the way the daemon's scan does
+			// (projectForWorkspaceContext): the same
 			// registeredProjectScanTimeout bounds the probe of each other
 			// root, so a wedged unrelated registration no longer hangs af
 			// even when the scan is reachable. Otherwise probe each other
 			// registered root and fail closed when one that could share
 			// this directory cannot be resolved — the same two predicates
 			// the retained-marker branch uses, plus the
-			// symlinked-<root>/.git and direct-gitdir-file cases above.
+			// symlinked-<root>/.git, direct-gitdir-file, and
+			// bind-mounted-directory cases above.
 			checkoutMarkerCouldBeShared := sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) ||
 				mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) ||
 				gitDirAtRootIsSymlink(binding.root) ||
-				gitDirAtRootPointsAtCommonDir(binding.root, binding.gitCommonDir)
+				gitDirAtRootPointsAtCommonDir(binding.root, binding.gitCommonDir) ||
+				anotherRootSharesGitDir(binding, projects)
 			scanCtx, scanCancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
 			defer scanCancel()
 			for _, other := range projects {

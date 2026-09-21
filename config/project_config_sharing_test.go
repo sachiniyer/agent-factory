@@ -549,3 +549,162 @@ func TestResolveProjectSelectorCopiedRepoWorktreeMetadataDoesNotRefuseDeletion(t
 	require.NoError(t, err)
 	assert.Equal(t, fooBefore, fooAfter, "the refused write must not touch foo's personal file")
 }
+
+// TestWorktreeEntryBacklinkStateResolvesRelativeGitDirFromWorktreeDir pins
+// the relative-gitdir resolution. When a linked worktree uses git's
+// documented worktree.useRelativePaths mode, the `gitdir:` value in its
+// <root>/.git file is relative to the directory CONTAINING that file (the
+// worktree root), not to the .git file path itself. Joining it to
+// worktreePath (the .git file path) would construct
+// `<worktreeRoot>/.git/<relative-target>` and a live backlink would read as
+// stale, letting the missing-marker path recommend a rebind or the
+// claimed-marker path recommend deletion even though the marker is
+// shared. The fix resolves relative `gitdir:` values against
+// filepath.Dir(worktreePath) so the round trip closes back onto the entry.
+func TestWorktreeEntryBacklinkStateResolvesRelativeGitDirFromWorktreeDir(t *testing.T) {
+	base := t.TempDir()
+	// Construct the linked-worktree metadata shape manually so the test
+	// does not depend on git CLI's ability to write relative paths on
+	// every platform.
+	commonDir := filepath.Join(base, "common.git")
+	worktreesDir := filepath.Join(commonDir, "worktrees")
+	entryName := "wt-name"
+	entryDir := filepath.Join(worktreesDir, entryName)
+	require.NoError(t, os.MkdirAll(entryDir, 0o755))
+	worktreeRoot := filepath.Join(base, "wt-root")
+	require.NoError(t, os.MkdirAll(worktreeRoot, 0o755))
+	worktreeGitFile := filepath.Join(worktreeRoot, ".git")
+	// Entry's gitdir file records the worktree's .git file path. git
+	// writes an absolute path here in the relative-gitdir mode.
+	require.NoError(t, os.WriteFile(filepath.Join(entryDir, "gitdir"), []byte(worktreeGitFile), 0o644))
+	// The worktree's .git file's `gitdir:` value is RELATIVE to the
+	// directory containing the .git file (worktreeRoot). When joined to
+	// filepath.Dir(worktreeGitFile) it resolves to the entry directory,
+	// producing a live backlink; joining it to worktreeGitFile directly
+	// would yield `<worktreeRoot>/.git/<relative>` and read the live
+	// backlink as stale.
+	rel, err := filepath.Rel(worktreeRoot, entryDir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(worktreeGitFile, []byte("gitdir: "+filepath.ToSlash(rel)), 0o644))
+
+	state := worktreeEntryBacklinkState(worktreesDir, entryName)
+	assert.Equal(t, worktreeBacklinkLive, state,
+		"a relative gitdir in the worktree's .git must resolve against the worktree ROOT (Dir(worktreePath)), not the .git file path")
+}
+
+// TestWorktreeEntryBacklinkStateHoldsLockedWorktreeWithAbsentTarget pins
+// the locked-worktree behavior. When `git worktree lock` keeps an
+// administrative entry on a removable or temporarily unavailable
+// filesystem, the recorded worktree's <root>/.git legitimately returns
+// ENOENT while disconnected. Classifying that as stale lets the
+// missing-marker path recommend a rebind that takes over the shared
+// marker, or the claimed-marker path recommend deleting the marker the
+// worktree needs when it returns. Treat the absent target as
+// INDETERMINATE in the locked case so the caller fails closed; without a
+// lock marker, an absent target is still a removed worktree, and the
+// entry is stale.
+func TestWorktreeEntryBacklinkStateHoldsLockedWorktreeWithAbsentTarget(t *testing.T) {
+	base := t.TempDir()
+	commonDir := filepath.Join(base, "common.git")
+	worktreesDir := filepath.Join(commonDir, "worktrees")
+	entryName := "wt-name"
+	entryDir := filepath.Join(worktreesDir, entryName)
+	require.NoError(t, os.MkdirAll(entryDir, 0o755))
+	missingWorktreeGit := filepath.Join(base, "missing-wt", ".git")
+	require.NoError(t, os.WriteFile(filepath.Join(entryDir, "gitdir"), []byte(missingWorktreeGit), 0o644))
+
+	assert.Equal(t, worktreeBacklinkStale, worktreeEntryBacklinkState(worktreesDir, entryName),
+		"without a lock marker, a worktree whose .git is gone is stale (the worktree was removed)")
+
+	require.NoError(t, os.WriteFile(filepath.Join(entryDir, "locked"), []byte("reason: removable fs"), 0o644))
+	assert.Equal(t, worktreeBacklinkIndeterminate, worktreeEntryBacklinkState(worktreesDir, entryName),
+		"with a lock marker, an absent worktree .git on a removable FS must read indeterminate so recovery does not rebind or delete the shared marker")
+}
+
+// TestWorktreeEntryBacklinkStateFlagsReplacementGitDirAsStale pins the
+// replacement-.git-directory behavior. When a fresh main checkout takes the
+// linked-worktree's old path, the copied/stale gitdir entry points at that
+// checkout's .git DIRECTORY. os.ReadFile of a directory returns EISDIR on
+// Linux, which the prior code classified as INDETERMINATE; fail-closed in
+// this shape makes the claimed-marker recovery refuse safe marker removal
+// indefinitely. The fix Lstats the target first and classifies a directory
+// as a replaced, stale backlink so the recovery can proceed.
+func TestWorktreeEntryBacklinkStateFlagsReplacementGitDirAsStale(t *testing.T) {
+	base := t.TempDir()
+	commonDir := filepath.Join(base, "common.git")
+	worktreesDir := filepath.Join(commonDir, "worktrees")
+	entryName := "wt-name"
+	entryDir := filepath.Join(worktreesDir, entryName)
+	require.NoError(t, os.MkdirAll(entryDir, 0o755))
+	replacementRoot := filepath.Join(base, "fresh-main")
+	replacementGitDir := filepath.Join(replacementRoot, ".git")
+	require.NoError(t, os.MkdirAll(replacementGitDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(entryDir, "gitdir"), []byte(replacementGitDir), 0o644))
+
+	assert.Equal(t, worktreeBacklinkStale, worktreeEntryBacklinkState(worktreesDir, entryName),
+		"a recorded worktree path that now resolves to a .git directory is a replaced linked-worktree entry, not an indeterminate one")
+}
+
+// TestAnotherRootSharesGitDirDetectsBindMountAlias pins the new bind-mount
+// predicate. Two checkouts whose <root>/.git are the same filesystem object
+// (a bind mount or a duplicate mount at distinct paths) share the marker at
+// the shared git common directory even though each .git reads as an ordinary
+// directory with no worktrees metadata. Without the predicate the four
+// shape-based predicates all read false and the missing-marker scan is
+// skipped, recommending a rebind that silently steals the other
+// registration's marker. The predicate compares <root>/.git inodes with
+// os.SameFile the same way the scan loop's sameProjectPath does, but as a
+// fast stat-only sweep so the per-root git probe stays reachable.
+//
+// A real bind mount would require CAP_SYS_ADMIN; this test simulates the
+// inode-identical case with a symlink from /bar/.git to /foo/.git.
+// os.Stat follows the symlink so /bar/.git and /foo/.git stat as the same
+// file (same dev+ino), which is the case os.SameFile answers yes to and the
+// shape-based predicates — which examine binding.root only, not other
+// roots — all miss.
+func TestAnotherRootSharesGitDirDetectsBindMountAlias(t *testing.T) {
+	base := t.TempDir()
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	fooBinding, err := resolveProjectBinding(fooRoot)
+	require.NoError(t, err)
+
+	// /bar's .git is a symlink to /foo/.git: os.Stat follows the symlink so
+	// /bar/.git and /foo/.git stat as the same file (same dev+ino).
+	barRoot := filepath.Join(base, "bar")
+	require.NoError(t, os.MkdirAll(barRoot, 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(fooRoot, ".git"), filepath.Join(barRoot, ".git")))
+
+	// The symlink at /bar makes /bar ineligible for a real RegisterProject
+	// (git would follow the link and resolve /bar as /foo's repo), so
+	// inject a synthetic projects slice that names only /bar's root.
+	projects := []Project{
+		{Root: fooRoot, ID: "prj_foo_placeholder", CheckoutID: "chk_foo_placeholder"},
+		{Root: barRoot, ID: "prj_bar_placeholder", CheckoutID: "chk_bar_placeholder"},
+	}
+	assert.True(t, anotherRootSharesGitDir(fooBinding, projects),
+		"anotherRootSharesGitDir must detect a <root>/.git inode that matches binding's via os.SameFile")
+
+	// A separate unrelated /baz with its own .git directory must NOT
+	// match /foo/.git's inode, so a plain main checkout with no other
+	// registration sharing its .git reads as private.
+	bazRoot := initProjectRegistryRepo(t, filepath.Join(base, "baz"))
+	projects = []Project{
+		{Root: fooRoot, ID: "prj_foo_placeholder", CheckoutID: "chk_foo_placeholder"},
+		{Root: bazRoot, ID: "prj_baz_placeholder", CheckoutID: "chk_baz_placeholder"},
+	}
+	assert.False(t, anotherRootSharesGitDir(fooBinding, projects),
+		"a separate unrelated /baz/.git directory must not match binding's <root>/.git inode")
+
+	// A registered root whose .git no longer stat()s is skipped, so the
+	// predicate does not fail a private checkout's recovery when an
+	// unrelated registration has gone stale (matching the existing
+	// absent-marker scan that skips unresolvable unrelated private roots).
+	goneRoot := filepath.Join(base, "gone")
+	require.NoError(t, os.MkdirAll(goneRoot, 0o755))
+	projects = []Project{
+		{Root: fooRoot, ID: "prj_foo_placeholder", CheckoutID: "chk_foo_placeholder"},
+		{Root: goneRoot, ID: "prj_gone_placeholder", CheckoutID: "chk_gone_placeholder"},
+	}
+	assert.False(t, anotherRootSharesGitDir(fooBinding, projects),
+		"a registered root with no .git is skipped, not fail-closed — the absent-marker scan loop owns the fail-closed probe")
+}

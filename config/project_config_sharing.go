@@ -241,17 +241,40 @@ func worktreeEntryBacklinkState(worktreesDir, name string) worktreeBacklinkResul
 	if !filepath.IsAbs(worktreePath) {
 		worktreePath = filepath.Join(entryDir, worktreePath)
 	}
+	// If the worktree's <root>/.git path is now a DIRECTORY, a fresh main
+	// checkout has reused the linked-worktree's old path — the original
+	// linked worktree is gone, and replacing it is a stale backlink, not
+	// indeterminate. ReadFile below would return EISDIR on most Unix, which
+	// the not-exist guard before it would not catch; checking IsDir here
+	// keeps the claimed-marker recovery from refusing safe marker removal
+	// indefinitely.
+	if info, statErr := os.Lstat(worktreePath); statErr == nil && info.IsDir() {
+		return worktreeBacklinkStale
+	}
 	data, err := os.ReadFile(worktreePath)
 	if err != nil {
 		// The worktree's .git file is gone: the worktree was removed, so
-		// the entry is stale metadata left behind. Read past missing as
-		// "stale" so the entry no longer blocks the deletion advice; any
-		// other read error is indeterminate.
+		// the entry is stale metadata left behind — UNLESS the entry is
+		// git-locked. git worktree lock deliberately keeps an
+		// administrative entry from being pruned while the worktree lives
+		// on a removable or temporarily unavailable filesystem, and the
+		// recorded .git path legitimately returns ENOENT while that
+		// filesystem is disconnected; the worktree will return when the
+		// mount does, and treating it as stale lets the missing-marker
+		// path recommend a rebind that takes over the shared marker, or
+		// the claimed-marker path recommend deleting the marker needed
+		// when the worktree returns. Treat a missing LOCKED-worktree
+		// target as indeterminate rather than stale; any other read
+		// error is indeterminate the way the not-exist branch above is.
 		if errors.Is(err, os.ErrNotExist) {
+			if _, lerr := os.Stat(filepath.Join(entryDir, "locked")); lerr == nil {
+				return worktreeBacklinkIndeterminate
+			}
 			return worktreeBacklinkStale
 		}
 		return worktreeBacklinkIndeterminate
 	}
+
 	line := strings.TrimSpace(string(data))
 	const prefix = "gitdir: "
 	if !strings.HasPrefix(line, prefix) {
@@ -263,7 +286,14 @@ func worktreeEntryBacklinkState(worktreesDir, name string) worktreeBacklinkResul
 	}
 	target := filepath.Clean(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(worktreePath, target)
+		// git's documented worktree.useRelativePaths mode writes a
+		// relative `gitdir:` value in the worktree's <root>/.git file, and
+		// it is relative to the directory CONTAINING that file (the
+		// worktree root), not to the .git file path. Joining it to
+		// worktreePath (a file path) would construct
+		// `<worktreeRoot>/.git/<relative-target>` and a live backlink
+		// would read as stale, so resolve against filepath.Dir(worktreePath).
+		target = filepath.Join(filepath.Dir(worktreePath), target)
 	}
 	if resolved, err := filepath.EvalSymlinks(target); err == nil {
 		target = resolved
@@ -276,6 +306,48 @@ func worktreeEntryBacklinkState(worktreesDir, name string) worktreeBacklinkResul
 		return worktreeBacklinkLive
 	}
 	return worktreeBacklinkStale
+}
+
+// anotherRootSharesGitDir reports whether another registered root's
+// <root>/.git is the same filesystem object as binding.root's <root>/.git —
+// a bind mount or duplicate mount exposes the same git common directory at
+// two distinct <root>/.git paths, each appearing to be an ordinary
+// directory, with no <commonDir>/worktrees metadata and no symlink to spot.
+// sharedWorktreeCommonDir, mainCheckoutHasLinkedWorktrees,
+// gitDirAtRootIsSymlink, and gitDirAtRootPointsAtCommonDir all read false in
+// that shape, so a directory-shaped <root>/.git cannot by itself prove the
+// marker private; the absent-marker scan would skip the registry probe, the
+// suggested rebind would write a new marker into the shared directory, and
+// the reattribute would silently steal the other registration. Detect
+// sharing the way the scan loop's sameProjectPath does — by os.SameFile,
+// the inode-identical check — but as a fast stat-only scan of registered
+// roots so the predicate can keep the registry probe reachable without
+// paying a per-root git invocation when no other root shares the object.
+//
+// A registered root whose <root>/.git no longer stat()s (removed, or on a
+// wedged mount) is skipped, not fail-closed: this predicate is a
+// cheap scan of the registered roots only, and a transiently unresolvable
+// root is exactly the case the scan loop below needs to fail closed on after
+// the predicate keeps it reachable — turning loss into refusal here would
+// duplicate the same hang the existing probe-bound guard protects.
+func anotherRootSharesGitDir(binding projectBinding, projects []Project) bool {
+	bindingInfo, err := os.Stat(filepath.Join(binding.root, ".git"))
+	if err != nil {
+		return false
+	}
+	for _, other := range projects {
+		if sameProjectPath(other.Root, binding.root) {
+			continue
+		}
+		otherInfo, err := os.Stat(filepath.Join(other.Root, ".git"))
+		if err != nil {
+			continue
+		}
+		if os.SameFile(bindingInfo, otherInfo) {
+			return true
+		}
+	}
+	return false
 }
 
 // symlinkedRootMarkerRefusal is the claimed-marker branch's refusal for a
