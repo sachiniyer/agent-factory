@@ -1206,7 +1206,10 @@ export async function reapConfigAssistant(token: string): Promise<void> {
 export async function listAccounts(token: string, repoPath = ""): Promise<AccountsResponse> {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af<AccountsResponse>("ListAccounts", body, token);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  // resolved_agents must pass through untouched: the handoff pickers classify
+  // targets by the agent the resolved command launches, and dropping the map
+  // here would silently return them to enum semantics (#4430 review round 5).
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

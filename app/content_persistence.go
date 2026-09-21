@@ -51,7 +51,8 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 // the edit so the user can retry from where they left off.
 //
 // Task-save failures retain edited values and the dirty field-level patch for
-// retry. The sidebar still reloads committed data; the editor remains the draft.
+// retry. Both panes still reload: the sidebar shows committed data, and the
+// TaskPane reconciles with it around the retained draft (#4487).
 func (m *home) saveContentPaneState() error {
 	// Accumulate failures across both panes so a hooks error and a task error
 	// can never clobber one another (#1001).
@@ -137,13 +138,14 @@ func (m *home) saveContentPaneState() error {
 		}
 	}
 	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
-	// (#934): whatever actually committed, both panes now show it.
+	// (#934): whatever actually committed, both panes now show it. The TaskPane
+	// reload is unconditional because SetTasks keeps the drafts of failed edits
+	// (#4487); skipping it while one was retained hid a task whose deletion
+	// failed alongside it (#4257).
 	tasks, err := task.LoadTasksForCurrentRepo()
 	if err == nil {
 		m.store.SetTasks(tasks)
-		if !failedEdit {
-			sp.SetTasks(tasks)
-		}
+		sp.SetTasks(tasks)
 		// The task count feeds the rail's automations-section height (#1126);
 		// reflow so an add/delete grows or shrinks the section immediately.
 		m.relayout()
