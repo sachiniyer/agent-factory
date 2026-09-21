@@ -35,10 +35,13 @@ type autoAccountSwap struct {
 	// accountAgent is the registry namespace the swap's account name resolves
 	// in — the agent the launch command resolves to, which a program_overrides
 	// redirect can set apart from the requested target enum held in agent
-	// (#4430 review round 2). Empty on the auto and committed paths, where
-	// agent already IS the resolved/live agent; the manual handoff sets it
-	// explicitly so `program_overrides.aider = "codex"` resolves the account in
-	// codex's registry while program resolution still reads aider's override.
+	// (#4430 review round 2). Empty on the auto path, where agent already IS
+	// the resolved/live agent; a committed swap restores it from the durable
+	// pin so a restart under changed overrides cannot relabel the transaction
+	// with the new config's agent (#4430 review round 8). The manual handoff
+	// sets it explicitly so `program_overrides.aider = "codex"` resolves the
+	// account in codex's registry while program resolution still reads
+	// aider's override.
 	accountAgent string
 	// accountOnly records that the manual request named no --to: its agent is
 	// the running identity, not an enum whose override produced the pane, so it
@@ -161,6 +164,15 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 		if accountAgent == "" {
 			accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, agent)
 		}
+	} else if pinned := instance.AccountAgent(); pinned != "" {
+		// An automatic transaction's registry is the same durable pin: the
+		// commit wrote it, and a restart under changed program_overrides can
+		// leave pane metadata (CurrentAgentName) naming the NEW config's agent
+		// while the committed accounts still live in the pinned namespace.
+		// Recovery launches the frozen program under the pin, so the notice
+		// and completion log must name it too (#4430 review round 8).
+		agent = pinned
+		accountAgent = pinned
 	}
 	if !pending || (!currentAuto && !manual) || strings.TrimSpace(to) == "" || current != to {
 		return nil

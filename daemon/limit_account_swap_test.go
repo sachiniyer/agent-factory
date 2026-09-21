@@ -1383,3 +1383,27 @@ func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *
 	require.NoError(t, err)
 	require.Nil(t, drifted, "a pin naming a different registry than the live agent must still refuse")
 }
+
+// A committed AUTOMATIC swap restored after a restart under changed
+// program_overrides faces the same evidence problem the manual path was fixed
+// for: attach rewrites pane metadata to the new config's answer, so
+// CurrentAgentName can name an agent the transaction was never committed
+// under. Recovery launches the frozen program under the durable pin, and the
+// notice and completion log must name that same registry — the namespace both
+// accounts were actually selected in (#4430 review round 8).
+func TestCommittedAccountSwap_AutomaticSwapNamesTheDurableNamespace(t *testing.T) {
+	_, _, inst, _ := newAutoResumeManager(t, "", true, "continue", nowFunc().Add(time.Hour))
+	// The scheduler committed work under codex; the restart's rewritten pane
+	// metadata now answers gemini.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramGemini))
+	require.True(t, inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, true,
+		&session.AccountSwapData{From: "old", To: "work"}))
+	inst.ClearLimitReached()
+
+	swap := committedAccountSwap(inst)
+	require.NotNil(t, swap, "the committed transaction is owed its completion notice")
+	require.Equal(t, tmux.ProgramCodex, swap.accountNamespace(),
+		"the incoming identity must be labeled with the registry it was selected in")
+	require.Equal(t, tmux.ProgramCodex, swap.agent,
+		"the outgoing identity lived in the same committed namespace, not the drifted pane agent")
+}
