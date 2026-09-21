@@ -588,21 +588,36 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			// unresolvable shared owner is not read as absent.
 			// resolveProjectBinding uses context.Background(), so a root
 			// whose .git file points at a wedged or unavailable mount never
-			// returns: `af config --project <path> set/unset` would hang on
-			// that root even though the registration cannot share this
-			// checkout's marker when the checkout is private. Classify the
-			// current checkout before probing any unrelated root — a private
-			// main checkout whose <root>/.git is its own with no linked
-			// worktrees git has spawned cannot share the marker at
-			// <binding.gitCommonDir>/af/... with any other registration: the
-			// path is this checkout's alone, so the fall-through rebind advice
-			// is the only reachable outcome and the scan is skipped outright.
-			// Otherwise probe each other registered root and fail closed when
-			// one that could share this directory cannot be resolved — the
-			// same two predicates the retained-marker branch above uses to
-			// decide the marker could be shared.
+			// returns and `af config --project <path> set/unset` would hang
+			// on it. Classify the current checkout before probing any
+			// unrelated root: a private main checkout whose <root>/.git is
+			// its own with no linked worktrees git has spawned cannot share
+			// the marker at <binding.gitCommonDir>/af/... with any other
+			// registration — the path is this checkout's alone, so the
+			// fall-through rebind advice is the only outcome and the scan
+			// is skipped outright. A <root>/.git that is a SYMLINK to an
+			// external git directory is another sharing shape both
+			// predicates miss (os.Stat follows the symlink and reads it as
+			// a plain directory, and the canonicalized target need not have
+			// a <commonDir>/worktrees subdir), yet another registered
+			// checkout whose <root>/.git points at the same target shares
+			// the marker — classify the symlinked-<root>/.git case as
+			// possibly-shared so the scan still runs. The remaining
+			// shared-checkout scan is per-root git resolution, so bound
+			// each probe the way the daemon's scan does
+			// (projectForWorkspaceContext): the same
+			// registeredProjectScanTimeout bounds the probe of each other
+			// root, so a wedged unrelated registration no longer hangs af
+			// even when the scan is reachable. Otherwise probe each other
+			// registered root and fail closed when one that could share
+			// this directory cannot be resolved — the same two predicates
+			// the retained-marker branch uses, plus the
+			// symlinked-<root>/.git case above.
 			checkoutMarkerCouldBeShared := sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) ||
-				mainCheckoutHasLinkedWorktrees(binding.gitCommonDir)
+				mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) ||
+				gitDirAtRootIsSymlink(binding.root)
+			scanCtx, scanCancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+			defer scanCancel()
 			for _, other := range projects {
 				if sameProjectPath(other.Root, binding.root) {
 					continue
@@ -610,7 +625,7 @@ func ResolveProjectSelector(selector string) (Project, error) {
 				if !checkoutMarkerCouldBeShared {
 					continue
 				}
-				otherBinding, otherErr := resolveProjectBinding(other.Root)
+				otherBinding, otherErr := resolveProjectBindingContext(scanCtx, other.Root)
 				if otherErr != nil {
 					return Project{}, fmt.Errorf(
 						"path %s is already the last-known root of project %s, but this checkout has no checkout marker; "+
@@ -662,10 +677,20 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			// carries. Detect this before recommending deletion: in the
 			// shared case the checkout cannot replace p without disrupting
 			// the owner, so af refuses rather than call the marker copied.
+			//
+			// Track whether any registered owner claims the marker's checkout
+			// identity: a marker no record claims is a normal state after
+			// `af projects remove` (DeregisterProject leaves the marker
+			// behind), and a direct rebind reuses that durable id without
+			// collision (RebindProject rejects only when another record
+			// claims the identity). Telling the user to delete it first
+			// would needlessly destroy that identity.
+			matchedRegisteredOwner := false
 			for _, owner := range projects {
 				if !sameProjectIdentity(checkoutID, binding.relativeRoot, owner.CheckoutID, owner.RelativeRoot) {
 					continue
 				}
+				matchedRegisteredOwner = true
 				// projectRootUsesGitCommonDir suppresses resolution errors, so
 				// its false return conflates two cases: the owner's root
 				// resolves to a different git common directory (the marker is
@@ -811,11 +836,18 @@ func ResolveProjectSelector(selector string) (Project, error) {
 						"this checkout cannot replace %s without disrupting project %s — move it to a path that does not share the directory, or remove the linked worktree from project %s",
 					binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, p.ID, owner.ID, owner.ID)
 			}
+			if matchedRegisteredOwner {
+				return Project{}, fmt.Errorf(
+					"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+						"the marker belongs to another registered project, so `af projects rebind` would reject it; "+
+						"remove the copied checkout marker at %s, then run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+					binding.root, p.ID, checkoutID, p.CheckoutID, binding.checkoutMarkerPath, p.ID, ShellQuotePath(binding.root))
+			}
 			return Project{}, fmt.Errorf(
 				"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
-					"the marker belongs to another registered project, so `af projects rebind` would reject it; "+
-					"remove the copied checkout marker at %s, then run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
-				binding.root, p.ID, checkoutID, p.CheckoutID, binding.checkoutMarkerPath, p.ID, ShellQuotePath(binding.root))
+					"no registered project claims this checkout marker (it is typically a marker `af projects remove` left behind); "+
+					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+				binding.root, p.ID, checkoutID, p.CheckoutID, p.ID, ShellQuotePath(binding.root))
 		default:
 			return p, nil
 		}
@@ -836,6 +868,27 @@ func ResolveProjectSelector(selector string) (Project, error) {
 	}
 	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects add %s` first, then set per-project config",
 		binding.root, selector)
+}
+
+// gitDirAtRootIsSymlink reports whether <root>/.git is a symbolic link rather
+// than a directory or a regular gitdir file. sharedWorktreeCommonDir calls
+// os.Stat, which follows the symlink, so a <root>/.git that points at an
+// external git common directory another registered checkout may also point
+// at reads as a plain directory and the marker at <commonDir>/af/... is
+// neither a linked-worktree marker (git did not spawn this checkout through
+// `git worktree`) nor one shared through a `<commonDir>/worktrees` subdir.
+// The two predicates the absent-marker scan uses to decide the marker could
+// be shared therefore both return false and the scan is skipped, even though
+// another registered checkout whose <root>/.git points at the same target
+// shares the marker through the canonicalized common directory. Treat a
+// symlinked <root>/.git as evidence that the common directory may be shared
+// with another registration, so the scan runs.
+func gitDirAtRootIsSymlink(root string) bool {
+	info, err := os.Lstat(filepath.Join(root, ".git"))
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink != 0
 }
 
 // sharedWorktreeCommonDir reports whether commonDir is the git common
