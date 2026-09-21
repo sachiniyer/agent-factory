@@ -812,7 +812,28 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 // here — a usage-limit park, an attached target, a concurrency park, or a
 // genuine failure. An error is not proof of loss: a close/flush or cap fault
 // can follow a landed record, so retention decides.
+//
+// The live arm (`consumeLines -> handleEvent -> enqueueEvent`) reaches here
+// already `sanitizeUTF8`'d at the call site (daemon/watcher.go:642), but the
+// stop-drain arm (`persistRemainingLimitEvents -> emit -> enqueueEvent` in
+// daemon/watcher_limit_park.go) feeds the raw line straight in. The durable
+// record persists via `json.Marshal(queuedEvent{Line: line})`, whose
+// encoding/json rewrites invalid UTF-8 as U+FFFD (#863 class, exposed by
+// #1129, #4655), so this is the shared durable-queue boundary every durable
+// enqueue crosses. `sanitizeUTF8` — a no-op on valid UTF-8 — drops invalid
+// bytes here so every record (not just the live arm's) is well-formed. A line
+// reduced to "" (for example a normal-arm line of only invalid bytes such as
+// "\xff") is undeliverable: the rendered prompt collapses to "" and
+// `deliverWatchEventWithOptions` rejects that as empty before any send, yet
+// enqueueing it would park a permanently undeliverable head that later valid
+// events block behind until retention or overflow removes it. Discard it
+// rather than enroll a permanently undeliverable event; `tailBuffer.add` is
+// also a no-op on blank lines, so the failure tail shows nothing for it.
 func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
+	line = sanitizeUTF8(line)
+	if line == "" {
+		return
+	}
 	tail.add(line)
 	if w.queue == nil {
 		if dropped, logIt := w.recordEventDrop(); logIt {

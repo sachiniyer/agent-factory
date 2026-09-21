@@ -226,3 +226,67 @@ func TestConsumeLinesNormalArmValidUTF8DurableUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestConsumeLinesNormalArmLatin1EmptyLineDiscarded is the regression test for
+// the second Codex inline concern on the sanitize call at daemon/watcher.go:642:
+// a normal-arm line of only invalid bytes (for example "\xff\n") collapses to ""
+// under sanitizeUTF8. Without an explicit discard, handleEvent would still
+// invoke deliverWatchEventWithOptions on the empty line — the rendered prompt
+// collapses to "" too, delivery fails as an empty prompt before any send, and
+// handleEvent enqueues the empty line through enqueueEvent. The drainer then
+// re-renders the same empty head forever, never dequeuing it, and every later
+// valid event stays blocked behind it until retention or overflow removes the
+// head. The durable-queue boundary in enqueueEvent now discards the empty
+// result rather than enrolling a permanently undeliverable event, so a
+// subsequent valid line lands at the queue head unblocked.
+func TestConsumeLinesNormalArmLatin1EmptyLineDiscarded(t *testing.T) {
+	// "\xff\n" sanitizes to "" (the only byte is invalid UTF-8) under the
+	// normal (err == nil) arm of consumeLines; "valid-ascii-line\n" takes the
+	// same arm and must remain durable-enqueueable behind the discarded empty
+	// result. Before the boundary discard, the queue would persist a
+	// `{"line":""}` head record plus a `valid-ascii-line` record parked behind
+	// it. After the discard, only the valid record remains.
+	payload := []byte("\xff\nvalid-ascii-line\n")
+	payloadFile := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(payloadFile, payload, 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	dir := t.TempDir()
+	const taskID = "latin1empty01"
+	script := "cat " + payloadFile + "; exit 0"
+	s, rec := newTestSupervisor(t, staticTasks(watchTask(taskID, script, dir)))
+	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetBusy })
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "watcher to finish", func() bool {
+		return len(rec.statusesSnapshot()) > 0
+	})
+
+	queueDir, _ := s.queueDir()
+	queuePath := filepath.Join(queueDir, taskID+".jsonl")
+	data, err := os.ReadFile(queuePath)
+	if err != nil {
+		t.Fatalf("read queue file %s: %v", queuePath, err)
+	}
+
+	recordLines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(recordLines) != 1 || recordLines[0] == "" {
+		t.Fatalf("expected exactly 1 non-blank queued record in %s (the all-invalid \\xff line is discarded at the durable-queue boundary), got %d: %q", queuePath, len(recordLines), recordLines)
+	}
+	var ev queuedEvent
+	if err := json.Unmarshal([]byte(recordLines[0]), &ev); err != nil {
+		t.Fatalf("unmarshal queue record: %v", err)
+	}
+	if ev.Line != "valid-ascii-line" {
+		t.Fatalf("persisted Line = %q, want %q (the all-invalid \\xff line was sanitized to empty and discarded; this valid record must be the queue head, not blocked behind a permanently undeliverable empty record)", ev.Line, "valid-ascii-line")
+	}
+	if strings.ContainsRune(ev.Line, '\ufffd') {
+		t.Fatalf("persisted queue Line contains U+FFFD: %q", ev.Line)
+	}
+	if !utf8.ValidString(ev.Line) {
+		t.Fatalf("persisted queue Line is not valid UTF-8: %q", ev.Line)
+	}
+}
