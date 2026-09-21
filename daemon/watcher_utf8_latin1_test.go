@@ -299,7 +299,7 @@ func TestConsumeLinesNormalArmLatin1EmptyLineDiscarded(t *testing.T) {
 // renders an empty line with a templated prompt such as "Triage: {{line}}"
 // as the nonempty "Triage: " (task/task.go:316-323, pinned at
 // task/task_test.go:755), and deliverWatchEventWithOptions's pre-flight only
-// rejects `strings.TrimSpace(prompt) == ""` (daemon/watcher.go:906), so the
+// rejects `strings.TrimSpace(prompt) == ""` (daemon/watcher.go:915), so the
 // queued replay WOULD deliver. The boundary discard now keys on the rendered
 // prompt, so an empty line whose template stays nonempty is kept and durably
 // enqueued rather than silently dropped at the queue edge; only an empty line
@@ -365,7 +365,7 @@ func TestConsumeLinesSanitizedEmptyLineEnqueuedForTemplatedPrompt(t *testing.T) 
 // (empty) prompt task.RenderWatchPrompt returns the line itself, so the
 // rendered prompt is " " and `strings.TrimSpace(prompt) == ""` is true —
 // deliverWatchEventWithOptions rejects it as an empty prompt before any send
-// (daemon/watcher.go:906), the drainer re-renders the same head forever, and
+// (daemon/watcher.go:915), the drainer re-renders the same head forever, and
 // later valid events stay blocked behind it until retention or overflow
 // removes it. The boundary discard now keys on the rendered prompt's trimmed
 // emptiness, so a whitespace-only line under the default prompt is discarded
