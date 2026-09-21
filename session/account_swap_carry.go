@@ -431,7 +431,7 @@ func (i *Instance) carryOrReplan(plan *accountSwapLaunchPlan) (string, error) {
 	reason := carryFailureReason(copyErr)
 	log.WarningLog.Printf("account swap for %q could not carry %s conversation %s into account %q, so the replacement starts a fresh conversation: %v",
 		i.Title, plan.carry.agent, plan.carry.id, plan.account, copyErr)
-	if err := i.validateAccountSwapPlan(plan.account, plan.agent, plan.manual, true, reason); err != nil {
+	if err := i.validateAccountSwapPlan(plan.account, plan.agent, plan.crossAgent, plan.manual, true, reason); err != nil {
 		return reason, fmt.Errorf("account swap for %q could not carry its conversation (%s), and a fresh conversation could not be prepared either: %w",
 			i.Title, reason, err)
 	}
@@ -645,7 +645,7 @@ func (i *Instance) AbandonCarriedConversationAfterFailedLaunch(account string) e
 	}
 	log.WarningLog.Printf("account swap for %q launched carried conversation %s under account %q and must launch again; starting a fresh conversation instead",
 		i.Title, id, account)
-	if err := i.validateAccountSwapPlan(account, "", false, true, abandonedCarryReason); err != nil {
+	if err := i.validateAccountSwapPlan(account, "", false, false, true, abandonedCarryReason); err != nil {
 		return fmt.Errorf("account swap for %q could not prepare a fresh conversation after its carried launch failed: %w", i.Title, err)
 	}
 	return i.demotePendingAccountSwapCarry(account, abandonedCarryReason)

@@ -710,7 +710,7 @@ func TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission(t *te
 		inst.Path, worktree, inst.Title, "live-codex-branch", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+	inst.ReconcileAccountHandoffSnapshot("work", "codex", true, &session.AccountSwapData{
 		To:                      "work",
 		CarryFallback:           "af had no recorded codex conversation id for the previous session",
 		ReplacementPanesStarted: true,
@@ -753,7 +753,7 @@ func TestResumeFromLimit_LiveStartedCodexSwapWithUnprovableWorkingDirStillDelive
 		inst.Path, worktree, inst.Title, "unprovable-codex-branch", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+	inst.ReconcileAccountHandoffSnapshot("work", "codex", true, &session.AccountSwapData{
 		To:                      "work",
 		CarryFallback:           "af had no recorded codex conversation id for the previous session",
 		ReplacementPanesStarted: true,
@@ -1294,9 +1294,9 @@ func TestAccountSwapOpportunity_UsesThePollsFrozenGlobalConfig(t *testing.T) {
 // resolved to codex by program_overrides records its wall in the CODEX
 // namespace. Deriving candidates from i.Program would scan the claude namespace
 // — where that observation does not exist — find every claude account
-// "unlimited", and hand each one to a preflight that resolveAccountForProvision
-// refuses as agent drift (#3082/#3108). No wrong identity is ever selected, but
-// the scan is wasted and its refusal names the wrong thing.
+// "unlimited", and hand each one to a picker that refuses the drifted
+// session's candidates as agent drift (#3082/#3108). No wrong identity is ever
+// selected, but the scan is wasted and its refusal names the wrong thing.
 //
 // The second half is the anti-vacuity witness, and it is not optional: with the
 // same fixture, same accounts and same candidate list, only the agent
@@ -1333,4 +1333,77 @@ func TestAccountSwapOpportunity_MakesNoDecisionWhenTheResolvedAgentDiffers(t *te
 	require.NoError(t, err)
 	require.NotNil(t, agreed, "the fixture must be able to produce a swap, or the nil above proves nothing")
 	require.Equal(t, "work", agreed.to)
+}
+
+// A redirected handoff settles in a shape the configured/live check alone
+// calls drift: a session whose account was auto-selected under codex and whose
+// program is later redirected `--to aider` with aider resolving to codex keeps
+// Program=aider while the running agent and the durable accountAgent pin are
+// both codex. The pin was committed under the lock, so when it names the live
+// agent's registry the wall — filed under that same live agent — may scan its
+// candidates (#4430 review round 8). The account must be auto-selected:
+// SelectAccountCandidates refuses a manually chosen identity before this code
+// runs, so the redirected scheduler-owned account is the reachable shape. An
+// UNPINNED mismatch stays refused by the test above, and a pin that disagrees
+// with the live agent stays refused here: rotating either registry would spend
+// an account the pin never named.
+func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *testing.T) {
+	base := nowFunc()
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "keep going", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	for _, name := range []string{"work", "work2"} {
+		_, err = agentaccount.Register(home, tmux.ProgramCodex, name)
+		require.NoError(t, err)
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work2\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work2"}
+
+	// Settled redirected state: requested enum aider, running agent codex,
+	// durable pin codex, scheduler-owned account — then re-mark the wall so
+	// its identity and account observation are filed under codex/work rather
+	// than the fixture's claude/no-account.
+	inst.Program = tmux.ProgramAider
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, true, nil)
+	inst.ClearLimitReached()
+	inst.SetLimitReached(base.Add(time.Hour))
+
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.NotNil(t, swap,
+		"a pin matching the live agent proves the redirect was committed; the codex registry must be scanned")
+	require.Equal(t, tmux.ProgramCodex, swap.agent)
+	require.Equal(t, "work2", swap.to)
+
+	// A pin that disagrees with the live agent is contradiction, not proof:
+	// same fixture, pin filed under claude — still no swap.
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramClaude, true, nil)
+	drifted, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.Nil(t, drifted, "a pin naming a different registry than the live agent must still refuse")
+}
+
+// A committed AUTOMATIC swap restored after a restart under changed
+// program_overrides faces the same evidence problem the manual path was fixed
+// for: attach rewrites pane metadata to the new config's answer, so
+// CurrentAgentName can name an agent the transaction was never committed
+// under. Recovery launches the frozen program under the durable pin, and the
+// notice and completion log must name that same registry — the namespace both
+// accounts were actually selected in (#4430 review round 8).
+func TestCommittedAccountSwap_AutomaticSwapNamesTheDurableNamespace(t *testing.T) {
+	_, _, inst, _ := newAutoResumeManager(t, "", true, "continue", nowFunc().Add(time.Hour))
+	// The scheduler committed work under codex; the restart's rewritten pane
+	// metadata now answers gemini.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramGemini))
+	require.True(t, inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, true,
+		&session.AccountSwapData{From: "old", To: "work"}))
+	inst.ClearLimitReached()
+
+	swap := committedAccountSwap(inst)
+	require.NotNil(t, swap, "the committed transaction is owed its completion notice")
+	require.Equal(t, tmux.ProgramCodex, swap.accountNamespace(),
+		"the incoming identity must be labeled with the registry it was selected in")
+	require.Equal(t, tmux.ProgramCodex, swap.agent,
+		"the outgoing identity lived in the same committed namespace, not the drifted pane agent")
 }
