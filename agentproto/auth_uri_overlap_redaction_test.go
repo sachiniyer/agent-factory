@@ -263,25 +263,32 @@ func TestRedactAccessTokenURLRawQueryOverlapAfterEqualToLiteralKey(t *testing.T)
 // span selector matched the trailing literal.
 //
 // Cases (mutated from #4663's existing overlap cross-product and component
-// tests, all production-reachable; opaque is excluded because no in-repo
-// caller passes an opaque URL through RedactAccessTokenURL):
-//  1. Co-located overlap+literal in one component (query / path / fragment),
-//     one case per %ac / %Aa / %AC hex variant — the trailing literal drives
-//     the decoded pass; the un-gated raw scan then catches the overlap. For
-//     path/fragment the decoded pass rewrites u.Path/u.Fragment and clears
+// tests, all production-reachable; opaque is included because the function's
+// component-wide contract — and the existing opaque-URL coverage in
+// TestRedactAccessTokenURLRedactsOverlapComponent /
+// TestRedactAccessTokenURLKeepsOverlapFreeFormControls /
+// TestRedactAccessTokenURLOverlapCaseInsensitive — applies to opaque too, even
+// though no current in-repo production caller happens to route an opaque URL
+// through it):
+//  1. Co-located overlap+literal in one component (query / path / fragment /
+//     opaque), one case per %ac / %Aa / %AC hex variant — the trailing literal
+//     drives the decoded pass; the un-gated raw scan then catches the overlap.
+//     For path/fragment the decoded pass rewrites u.Path/u.Fragment and clears
 //     u.RawPath/u.RawFragment, so EscapedPath/EscapedFragment re-encode the
 //     overlap's decoded byte through the canonical uppercase %XX, and the
 //     raw-scan output carries that canonical form regardless of the input
 //     hex case. (Decoded byte 0xAC, from "%ac" or "%AC", encodes as "%AC";
-//     byte 0xAA, from "%Aa", encodes as "%AA".)
+//     byte 0xAA, from "%Aa", encodes as "%AA".) Opaque carries no Raw* twin:
+//     url.URL.String prints u.Opaque verbatim, so its raw-scan output
+//     preserves the input hex case byte-for-byte.
 //  2. Over-redaction guard cases — coincidental `access_token=` substrings in
-//     non-access_token field values (path / fragment shapes), with a trailing
-//     `/seg` segment in some cases. These have NO overlap; the decoded pass
-//     already redacts a tail-from-the-coincidental-access_token= span, and the
-//     raw scan re-runs over the REDACTED marker. The exact-want assertion pins
-//     that the un-gated raw scan is idempotent (no extra redaction, no value
-//     corruption, no escape normalisation) — the output byte-for-byte equals
-//     what the gate would have produced.
+//     non-access_token field values (path / fragment / opaque shapes), with a
+//     trailing `/seg` segment in some cases. These have NO overlap; the
+//     decoded pass already redacts a tail-from-the-coincidental-access_token=
+//     span, and the raw scan re-runs over the REDACTED marker. The exact-want
+//     assertion pins that the un-gated raw scan is idempotent (no extra
+//     redaction, no value corruption, no escape normalisation) — the output
+//     byte-for-byte equals what the gate would have produced.
 //  3. Benign cases with no access_token key/value/overlap at all — the URL is
 //     returned unchanged, pinning the #4161 no-normalization contract for
 //     unmatched shapes.
@@ -353,6 +360,26 @@ func TestRedactAccessTokenURLRedactsOverlapAndLiteralInOneComponent(t *testing.T
 			raw:       "http://h/p#%ACcess_token=" + overlapSecret + "access_token=" + literalValue,
 			wantExact: "http://h/p#%ACcess_token=REDACTED",
 		},
+		// --- Co-located overlap + literal in one component (opaque family) ---
+		// Opaque carries no Raw* twin: url.URL.String prints u.Opaque verbatim,
+		// so the raw-scan output preserves the overlap's input hex case
+		// byte-for-byte (no Escaped*-style canonical re-encode, unlike
+		// path/fragment).
+		{
+			name:      "co-located/opaque/lower-hex",
+			raw:       "data:%access_token=" + overlapSecret + "access_token=" + literalValue,
+			wantExact: "data:%access_token=REDACTED",
+		},
+		{
+			name:      "co-located/opaque/mixed-hex",
+			raw:       "data:%Aaccess_token=" + overlapSecret + "access_token=" + literalValue,
+			wantExact: "data:%Aaccess_token=REDACTED",
+		},
+		{
+			name:      "co-located/opaque/upper-hex",
+			raw:       "data:%ACcess_token=" + overlapSecret + "access_token=" + literalValue,
+			wantExact: "data:%ACcess_token=REDACTED",
+		},
 		// Over-redaction guards. Coincidental `access_token=` in a
 		// non-access_token field value; the decoded pass already redacts the
 		// tail-from-the-coincidental-access_token= span. The un-gated raw
@@ -383,6 +410,16 @@ func TestRedactAccessTokenURLRedactsOverlapAndLiteralInOneComponent(t *testing.T
 			raw:       "http://h/p#key=access_token=INNOCENTvalaccess_token=REAL",
 			wantExact: "http://h/p#key=access_token=REDACTED",
 		},
+		{
+			name:      "over-redact/opaque/coincidental-at-end",
+			raw:       "data:key=access_token=INNOCENTval",
+			wantExact: "data:key=access_token=REDACTED",
+		},
+		{
+			name:      "over-redact/opaque/coincidental-and-trailing-literal",
+			raw:       "data:%access_token=INNOCENTvalaccess_token=REAL;base64",
+			wantExact: "data:%access_token=REDACTED",
+		},
 		// Benign: no access_token key/value/overlap at all. The URL is
 		// returned unchanged (#4161 no-normalization contract for unmatched
 		// shapes).
@@ -395,6 +432,11 @@ func TestRedactAccessTokenURLRedactsOverlapAndLiteralInOneComponent(t *testing.T
 			name:      "benign/fragment/no-access-token",
 			raw:       "http://h/p#seg/other=val",
 			wantExact: "http://h/p#seg/other=val",
+		},
+		{
+			name:      "benign/opaque/no-access-token",
+			raw:       "data:seg/other=val/x",
+			wantExact: "data:seg/other=val/x",
 		},
 	}
 	for _, tc := range cases {
@@ -470,6 +512,16 @@ func TestRedactAccessTokenURLCoLocatedOverlapCaseInsensitive(t *testing.T) {
 			name:      "fragment/uppercase-needle",
 			raw:       "http://h/p#%ACCESS_TOKEN=" + overlapSecret + "access_token=" + literalValue,
 			wantExact: "http://h/p#%ACCESS_TOKEN=REDACTED",
+		},
+		{
+			// Opaque: fully uppercase overlap word. Opaque carries no Raw*
+			// twin, so url.URL.String prints u.Opaque verbatim and the
+			// input hex case is preserved byte-for-byte in the redacted
+			// output (no Escaped*-style canonical re-encode, unlike the
+			// path family above).
+			name:      "opaque/uppercase-needle",
+			raw:       "data:%ACCESS_TOKEN=" + overlapSecret + "access_token=" + literalValue,
+			wantExact: "data:%ACCESS_TOKEN=REDACTED",
 		},
 	}
 	for _, tc := range cases {

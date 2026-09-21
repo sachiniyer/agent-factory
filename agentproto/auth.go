@@ -80,9 +80,20 @@ func redactAccessTokenComponents(u *url.URL) {
 	} else if redacted, found := redactPercentEncodedAccessTokenText(u.Opaque, false); found {
 		// Source mapping keeps every non-sensitive escape in its original form.
 		u.Opaque = redacted
-	} else if rawRedacted, found := redactRawAccessTokenValue(u.Opaque, "/;?#"); found {
-		// Opaque carries no Raw* twin: url.URL.String prints it verbatim, so the
-		// redacted raw is the field's new serialization, no unescape needed.
+	}
+	// Mirror the Path/Fragment branches below: scan u.Opaque (the bytes
+	// url.URL.String will print — Opaque carries no Raw* twin, so this is the
+	// decoded-pass output verbatim, not an Escaped* re-encoding) for an
+	// access_token= overlap the decoded view cannot see, exactly as documented
+	// there. Run unconditionally rather than gating on the decoded sweep
+	// missing: a co-located opaque component can carry both a %HH-overlapped
+	// access_token=<secret> and a later literal access_token=<value>, where
+	// the single-anchor decoded sweep anchors at the trailing literal and a
+	// gate would short-circuit this raw scan for the whole component. The
+	// decoded pass's redacted span is the literal REDACTED marker, which
+	// contains no access_token= needle, so idempotency (not a code-path gate)
+	// keeps this from reprocessing a span the decoded sweep already redacted.
+	if rawRedacted, found := redactRawAccessTokenValue(u.Opaque, "/;?#"); found {
 		u.Opaque = rawRedacted
 	}
 	u.Host = RedactAccessTokenText(u.Host)
