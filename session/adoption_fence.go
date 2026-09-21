@@ -97,7 +97,12 @@ import (
 // section: it is the notify's responsibility and runs after i.mu is released,
 // so NoteAdoptionDelivery must not return nil until that persist has landed,
 // or a unclean exit before the in-memory retry poll re-arms a teardown the
-// adoption already vetoed.
+// adoption already vetoed. Concurrent deliveries serialize through that
+// in-flight discharge: the first caller to clear owedOnComplete installs a
+// discharge future on i.discharge before releasing i.mu, and a second caller
+// arriving while its notify is still running waits on that future instead of
+// proceeding past nil owedOnComplete to a PTY write the durable marker would
+// survive.
 
 // ErrAdoptionFenced refuses a PTY write to a session whose teardown has already
 // claimed it. It is returned to the writer — a browser terminal frame, a TUI
@@ -116,6 +121,31 @@ type adoptionFence struct {
 	atRunEnd uint64
 	// closed refuses further deliveries while a teardown holds this session.
 	closed bool
+}
+
+// adoptionDischarge is the in-flight durable discharge of owedOnComplete that a
+// single NoteAdoptionDelivery caller drives and any concurrent callers wait on
+// and share. The first caller to take the marker clears it in memory, installs
+// the future on Instance.discharge under i.mu, releases i.mu, and runs the
+// notify. A second caller arriving while the first is still parked in the
+// notify has no in-memory marker to take — the first already cleared it —
+// so without the future it would proceed past nil owedOnComplete to its own
+// PTY write; the durable marker that first caller's persist is about to leave
+// set on a failed write would then survive an unclean exit and re-arm a
+// teardown that destroys the second caller's work. Sharing the discharge makes
+// the second caller wait for the first's persist result instead: on success
+// both may write (the marker is durably cleared once for both); on failure
+// both are refused so no PTY write lands on top of a durable marker the
+// failed write left set.
+//
+// Set on Instance.discharge under i.mu by the discharging caller before it
+// releases i.mu, and released (err assigned, done closed, the field cleared)
+// under i.mu by that same caller once the notify returns. The discharged
+// future's done channel is the synchronization barrier: an err write before
+// close is visible to every waiter after the receive.
+type adoptionDischarge struct {
+	done chan struct{}
+	err  error
 }
 
 // NoteAdoptionDelivery records that a delivery is about to be written to this
@@ -144,6 +174,20 @@ type adoptionFence struct {
 // caller — SendPromptWithStatus/InputTab/Input — must NOT write to the PTY
 // when this returns an error; the PTY write on top of an unset durable marker
 // is exactly the work-losing window.
+//
+// Two callers racing into a marked session serialize through that durable
+// discharge via i.discharge: the first to take i.mu clears the marker in
+// memory, installs the discharge, releases i.mu, and runs the notify; a
+// second caller arriving while the notify is in flight finds no in-memory
+// marker to clear (the first already cleared it) and the discharge in
+// progress, so it waits on the discharge's result rather than proceeding to
+// its own PTY write. The durable clear is one and the same for both: on
+// success both may write (the marker is durably gone, once, by the first);
+// on failure both are refused so no PTY write lands on top of a durable
+// marker the failed persist left set — without the shared discharge a second
+// caller that bypassed the in-flight clear would, on the first's persist
+// failure, write its bytes onto a pane the re-armed teardown would reap,
+// losing the second caller's work even though its own delivery succeeded.
 func (i *Instance) NoteAdoptionDelivery() error {
 	i.mu.Lock()
 	if i.adoption.closed {
@@ -151,12 +195,29 @@ func (i *Instance) NoteAdoptionDelivery() error {
 		return ErrAdoptionFenced
 	}
 	i.adoption.deliveries++
+	// A durable discharge is already in flight from a concurrent delivery:
+	// share its result instead of proceeding to the PTY write. The in-memory
+	// marker is gone (the discharging caller took it) and the durable marker
+	// is what the discharging caller's persist is about to clear or leave
+	// set; this caller's bytes depend on the same durable verdict, so wait
+	// on the future and return its result. The count stays bumped: the
+	// discharging caller's count and this caller's are both delivered before
+	// either returns, so the teardown reads both through the fence.
+	if i.discharge != nil {
+		wait := i.discharge
+		i.mu.Unlock()
+		<-wait.done
+		return wait.err
+	}
 	var notify func(*Instance) error
 	var marker *PendingOnCompleteData
+	var discharge *adoptionDischarge
 	if i.owedOnComplete != nil {
 		marker = i.owedOnComplete
 		i.owedOnComplete = nil
 		notify = i.owedOnCompleteNotify
+		discharge = &adoptionDischarge{done: make(chan struct{})}
+		i.discharge = discharge
 	}
 	i.touchLocked()
 	i.mu.Unlock()
@@ -170,16 +231,37 @@ func (i *Instance) NoteAdoptionDelivery() error {
 			// signal a concurrent teardown would read through the fence
 			// even before the discharge retries. The notify did not record
 			// an in-memory settleOwed retry — that retry would race this
-			// restore and write the restored marker back — so the only
+			// restore and write the restored marker back to disk — so the only
 			// re-attempt is the caller's, which re-enters this function.
+			//
+			// Release any concurrent caller parked on this discharge's future
+			// with the same error so its PTY write is also refused: the
+			// durable marker this persist just failed to clear is the same
+			// durable veto that would have reaped its panes after a restart.
 			i.mu.Lock()
 			if i.owedOnComplete == nil {
 				i.owedOnComplete = marker
+			}
+			if i.discharge == discharge {
+				discharge.err = err
+				close(discharge.done)
+				i.discharge = nil
 			}
 			i.touchLocked()
 			i.mu.Unlock()
 			return err
 		}
+		// The durable discharge landed. Release any concurrent caller parked
+		// on the future with nil so its PTY write may proceed: the marker is
+		// durably gone for both, once, by this notify.
+		i.mu.Lock()
+		if i.discharge == discharge {
+			close(discharge.done)
+			i.discharge = nil
+		}
+		i.touchLocked()
+		i.mu.Unlock()
+		return nil
 	}
 	return nil
 }

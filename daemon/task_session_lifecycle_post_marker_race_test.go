@@ -424,3 +424,161 @@ func TestTaskSessionLifecycle_PostMarkerDischargePersistFailureRefusesBrowserTer
 	assert.NotContains(t, rows[0], "pending_on_complete",
 		"the re-attempted discharge is durable — no marker survives")
 }
+
+// TestTaskSessionLifecycle_PostMarkerConcurrentDeliverySharesDischargeResult
+// is the concurrent half of the post-marker race: the durable-clear PR closes
+// the single-caller window (a delivery that returned nil before the discharge
+// persist had landed) but leaves a second one when TWO callers hit a marked
+// session at once. The first caller to take i.mu clears owedOnComplete in
+// memory, installs the discharge future, releases i.mu, and starts the notify;
+// a second caller arriving while that notify is still in flight finds no
+// in-memory marker to take (the first already cleared it). Without a shared
+// discharge it would proceed past nil owedOnComplete to its own PTY write, and
+// the durable marker the first caller's persist just failed to clear would
+// survive an unclean exit and re-arm a teardown that destroys the second
+// caller's work — the same work-losing half the single-caller fix closes, on
+// the second caller instead.
+//
+// The discharge-in-flight state on i.discharge lets the second caller share
+// the first's durable verdict: it captures the future under i.mu, releases
+// the lock, and parks on the future's done channel. On success both may
+// write (the marker is durably gone, once, by the first); on failure both
+// are refused so no PTY write lands on top of the surviving durable marker.
+// This test gates the first caller's persist so the second caller enters
+// while it is still in flight, then releases the gate with a failure and
+// asserts both calls exit with the shared discharge error, no PTY write
+// landed, and the durable marker survives — and that a re-attempt once the
+// persist can land clears it durable-ly.
+func TestTaskSessionLifecycle_PostMarkerConcurrentDeliverySharesDischargeResult(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	endRunOnIdleEdge(t, inst)
+
+	// File the durable marker and install the discharge notify exactly as the
+	// completion edge does, without launching the lifecycle worker.
+	manager.fileOwedTaskLifecycle(repo.ID, inst)
+	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
+	require.Equal(t, uint64(0), inst.AdoptionDeliveries(),
+		"precondition: nothing has been delivered yet")
+
+	// Gate the discharge persist so the first caller is parked inside the
+	// notify while a second concurrent caller takes i.mu. By the time the
+	// gate fires the discharger has already released i.mu and cleared
+	// owedOnComplete in memory, so the second caller finds no marker to
+	// clear — and, with the fix, parks on the in-flight discharge future rather
+	// than proceeding to its own PTY write on top of the durable marker the
+	// first is about to fail to clear.
+	persistStarted := make(chan struct{})
+	persistBlocked := make(chan error, 1)
+	prev := testHookPersistInstanceData
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "nightly" && data.TaskID != "" && data.PendingOnComplete == nil {
+			select {
+			case <-persistStarted:
+				return errors.New("injected discharge persist failure (disk error)")
+			default:
+				close(persistStarted)
+				return <-persistBlocked
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+
+	// First caller: takes i.mu, sees the marker, clears it in memory, installs
+	// the discharge future, releases i.mu, and blocks inside the persist hook
+	// on the gate above. Its notify is the only path through the hook on this
+	// run — the second caller shares the future and never calls notify itself.
+	firstErr := make(chan error, 1)
+	go func() { firstErr <- inst.NoteAdoptionDelivery() }()
+	<-persistStarted
+
+	// Second caller: arrives while the first is still parked in the persist
+	// hook. It takes i.mu, bumps the delivery count, finds nil owedOnComplete,
+	// captures the in-flight discharge future, releases i.mu, and parks on
+	// the future's done channel — instead of returning nil and writing its
+	// bytes to the PTY on top of the durable marker the first is failing to
+	// discharge.
+	secondErr := make(chan error, 1)
+	go func() { secondErr <- inst.NoteAdoptionDelivery() }()
+
+	// Both callers must have bumped the count before either returns: the
+	// first inside its i.mu section, the second inside its own — even though
+	// the second parks on the future, the count bump happens under i.mu
+	// before it parks. require.Eventually waits for the second to have made
+	// it through i.mu and parked on the future; without the shared-future
+	// fix the second caller would have returned nil and the durable marker
+	// would have survived its PTY write.
+	require.Eventually(t, func() bool {
+		return inst.AdoptionDeliveries() == 2
+	}, 5*time.Second, 25*time.Millisecond,
+		"both concurrent deliveries must bump the count before either returns; the second parks on the in-flight discharge future rather than bypassing it")
+
+	// Release the discharge gate with a persist failure. The first caller's
+	// notify returns the error; the first caller restores the in-memory
+	// marker, closes the discharge future with the same error, and returns
+	// it. The second caller's <-wait.done unblocks; it sees the shared error
+	// and returns it — its PTY write never happens.
+	persistBlocked <- errors.New("injected discharge persist failure (disk error)")
+	first := <-firstErr
+	second := <-secondErr
+
+	require.Error(t, first, "the discharger's failed persist refuses its delivery")
+	require.Error(t, second,
+		"a concurrent delivery must share the in-flight discharge error rather than bypass it to its own PTY write on top of the surviving durable marker")
+	assert.Contains(t, second.Error(), "discharge for session",
+		"the second caller's refusal is the shared discharge failure, not the adoption fence")
+
+	// Both callers' delivery counts stay bumped even though neither PTY write
+	// landed: the in-memory count is the stand-down signal a concurrent
+	// teardown would read through the fence even before either re-attempts.
+	require.Equal(t, uint64(2), inst.AdoptionDeliveries(),
+		"both concurrent deliveries bumped the count even though neither PTY write landed")
+
+	// The in-memory marker is restored by the discharging caller so a
+	// re-attempt of either re-runs the durable clear instead of proceeding.
+	require.NotNil(t, inst.OwedOnComplete(),
+		"the in-memory marker is restored so a re-attempt re-runs the durable clear")
+
+	// The durable marker survives the failed discharge.
+	raw, err := config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	var rows []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.Contains(t, rows[0], "pending_on_complete",
+		"the discharge did not persist — the durable marker survives the failed concurrent discharge")
+
+	// No settleOwed retry was recorded: the discharge path's only retry is the
+	// caller's, shared here just as it is in the single-caller case.
+	manager.mu.Lock()
+	assert.Empty(t, manager.settleOwed, "the discharge path records no in-memory retry even when its result is shared")
+	manager.mu.Unlock()
+
+	// Once the persist can land, a re-attempt succeeds and clears the durable
+	// marker.
+	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
+	require.NoError(t, inst.NoteAdoptionDelivery(),
+		"a re-attempted delivery must succeed once the discharge persist can land")
+	require.Nil(t, inst.OwedOnComplete(),
+		"the in-memory marker is cleared after the retry's durable discharge")
+	require.Equal(t, uint64(3), inst.AdoptionDeliveries(),
+		"the retry advances the count a third time")
+
+	raw, err = config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	rows = nil
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.NotContains(t, rows[0], "pending_on_complete",
+		"the re-attempted discharge is durable — no marker survives")
+}
