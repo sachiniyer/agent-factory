@@ -588,7 +588,7 @@ func (m *Manager) fileOwedTaskLifecycle(repoID string, instance *session.Instanc
 		TaskID:  instance.TaskID,
 		FiledAt: nowFunc(),
 	}) {
-		m.persistOwedTaskLifecycle(repoID, instance)
+		_ = m.persistOwedTaskLifecycle(repoID, instance)
 	}
 }
 
@@ -607,8 +607,11 @@ func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
 	if inst.OwedOnComplete() == nil {
 		return
 	}
+	marker := inst.OwedOnComplete()
 	inst.SetOwedOnComplete(nil)
-	m.persistOwedTaskLifecycle(repoID, inst)
+	if err := m.persistOwedTaskLifecycle(repoID, inst); err != nil {
+		inst.SetOwedOnComplete(marker)
+	}
 }
 
 // installOwedTaskLifecycleNotify wires the adoption discharge to disk: a
@@ -679,7 +682,7 @@ func (m *Manager) persistOwedTaskLifecycleDischarge(repoID string, instance *ses
 // re-check must sit inside the same repo-ordered critical section as the write
 // or it reopens exactly the window it exists to close — so this holds the repo
 // lock across both and reuses persistSettlement's write and retry bookkeeping.
-func (m *Manager) persistOwedTaskLifecycle(repoID string, instance *session.Instance) {
+func (m *Manager) persistOwedTaskLifecycle(repoID string, instance *session.Instance) error {
 	key := daemonInstanceKey(repoID, instance.Title)
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
@@ -688,7 +691,7 @@ func (m *Manager) persistOwedTaskLifecycle(repoID string, instance *session.Inst
 	registered := m.instances[key] == instance
 	m.mu.Unlock()
 	if !registered {
-		return
+		return nil
 	}
 	data := instance.ToInstanceData()
 	err := persistInstanceData(repoID, data)
@@ -699,6 +702,7 @@ func (m *Manager) persistOwedTaskLifecycle(repoID string, instance *session.Inst
 			"(the daemon retries it on its poll; an unclean exit before it lands would lose it): %v",
 			instance.Title, err)
 	}
+	return err
 }
 
 // armOwedTaskLifecyclesLocked is the restart half of the contract: every

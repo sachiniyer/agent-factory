@@ -216,8 +216,10 @@ func (i *Instance) NoteAdoptionDelivery() error {
 		marker = i.owedOnComplete
 		i.owedOnComplete = nil
 		notify = i.owedOnCompleteNotify
-		discharge = &adoptionDischarge{done: make(chan struct{})}
-		i.discharge = discharge
+		if notify != nil {
+			discharge = &adoptionDischarge{done: make(chan struct{})}
+			i.discharge = discharge
+		}
 	}
 	i.touchLocked()
 	i.mu.Unlock()
