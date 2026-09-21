@@ -566,6 +566,31 @@ func ResolveProjectSelector(selector string) (Project, error) {
 					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
 				binding.root, p.ID, p.ID, ShellQuotePath(binding.root))
 		case checkoutID != p.CheckoutID:
+			// The marker at binding.checkoutMarkerPath belongs to another
+			// registered project. When this checkout is a linked worktree of
+			// that project, the binding's git common directory matches the
+			// owner's — so the marker is the owner's own registry-record
+			// marker, not a copied one (cp -R) at a private .git. Removing it
+			// would delete it for every one of the owner's worktrees sharing
+			// that common directory, and a rebind here would leave the
+			// owner's record referencing a checkout ID the marker no longer
+			// carries. Detect this before recommending deletion: in the
+			// shared case the checkout cannot replace p without disrupting
+			// the owner, so af refuses rather than call the marker copied.
+			for _, owner := range projects {
+				if !sameProjectIdentity(checkoutID, binding.relativeRoot, owner.CheckoutID, owner.RelativeRoot) {
+					continue
+				}
+				if !projectRootUsesGitCommonDir(owner.Root, binding.gitCommonDir) {
+					continue
+				}
+				return Project{}, fmt.Errorf(
+					"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+						"the marker belongs to project %s and is shared with this checkout through its git directory (a linked worktree); "+
+						"removing it would delete it for every checkout sharing that directory and a rebind here would leave project %s's registry record stale; "+
+						"this checkout cannot replace %s without disrupting project %s — move it to a path that does not share the directory, or remove the linked worktree from project %s",
+					binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, p.ID, owner.ID, owner.ID)
+			}
 			return Project{}, fmt.Errorf(
 				"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
 					"the marker belongs to another registered project, so `af projects rebind` would reject it; "+
