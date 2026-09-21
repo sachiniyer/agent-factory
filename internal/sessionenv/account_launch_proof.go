@@ -1,6 +1,8 @@
 package sessionenv
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -17,6 +19,74 @@ import (
 type AccountLaunchProof struct {
 	TrustedExecutable string
 	GeneratedArgs     []string
+}
+
+// accountLaunchProofEnvVar carries the launcher's proof OUT OF BAND, through
+// the pane environment, so a repository-controlled shell command re-invoking af
+// under AccountExecMarker cannot supply it.
+//
+// The marker argv is fully forgeable: a program_overrides value can re-invoke af
+// as `af __af-session-env-exec-account <agent> <count> <account> <command>` and
+// name any TrustedExecutable it likes, because nothing in that argv proves af
+// authored it. The proof therefore no longer rides in argv at all. The launcher
+// (session/tmux) installs this variable in the account-scoped pane's tmux
+// session environment; the pane child inherits it, the shim reads it before
+// exec, and FilterForCommand strips it again so it never reaches the agent or a
+// subshell. A repository-authored re-invocation runs in an UNSCOPED outer pane,
+// whose environment never received this variable, so it arrives without a proof
+// and applyAccountScope refuses — the #3051 fail-closed property, applied to
+// provenance rather than to the account name.
+//
+// The value is not secret: TrustedExecutable and GeneratedArgs are already
+// visible in the pane command a launcher wrote. What this channel adds is the
+// AFFIRMATION that af's own launcher produced them, which an argv claim can no
+// longer counterfeit (#3123 review). base64 wrap keeps the JSON clear of any
+// quoting concern at the tmux/env boundary.
+const accountLaunchProofEnvVar = "__AF_ACCOUNT_LAUNCH_PROOF"
+
+// errAccountLaunchProofAbsent is the sentinel a missing/empty proof resolves to,
+// so the shim can name the cause without echoing any value.
+var errAccountLaunchProofAbsent = errors.New("launcher account launch proof is absent")
+
+// AccountLaunchProofEnvEntry encodes proof as a NAME=VALUE environment entry for
+// the account-scoped pane's session environment. It always emits an entry,
+// including for an empty proof (a bare agent command), because the shim must
+// distinguish "launcher set the proof, and it describes a bare invocation" from
+// "no launcher was here at all". Returns "" only on an internal encode failure.
+func AccountLaunchProofEnvEntry(proof AccountLaunchProof) (string, error) {
+	data, err := json.Marshal(accountLaunchProofWire{
+		TrustedExecutable: proof.TrustedExecutable,
+		GeneratedArgs:     proof.GeneratedArgs,
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode account launch proof: %w", err)
+	}
+	return accountLaunchProofEnvVar + "=" + base64.StdEncoding.EncodeToString(data), nil
+}
+
+// decodeAccountLaunchProofEnv is the shim-side counterpart. An empty value
+// means the variable was not set by the launcher, which the caller treats as a
+// refusal rather than as a bare-invocation proof. Anything that fails to
+// round-trip is also a refusal: the credential boundary fails closed, and a
+// forged value is not evidence that af authored it.
+func decodeAccountLaunchProofEnv(value string) (AccountLaunchProof, error) {
+	if value == "" {
+		return AccountLaunchProof{}, errAccountLaunchProofAbsent
+	}
+	data, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	var wire accountLaunchProofWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	return AccountLaunchProof{TrustedExecutable: wire.TrustedExecutable, GeneratedArgs: wire.GeneratedArgs}, nil
+}
+
+type accountLaunchProofWire struct {
+	TrustedExecutable string   `json:"t"`
+	GeneratedArgs     []string `json:"g,omitempty"`
 }
 
 type accountCommandValidationError struct {

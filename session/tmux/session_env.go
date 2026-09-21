@@ -234,7 +234,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		if accountEnvironmentOnly {
 			wrapped, err = sessionenv.WrapAccountEnvironmentCommand(executable, accountAgent, account, extra, program)
 		} else {
-			wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
+			wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, extra, program)
 		}
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
@@ -275,6 +275,26 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		// Selected roots belong to this tmux session, not the client environment:
 		// a fresh server copies its first client's environment globally.
 		sessionEnv = append(selectedEnv, loginEnv...)
+		// Carry the launch proof out of band so the account-scoped pane's exec
+		// shim can confirm af authored this command's executable and generated
+		// words. It rides in the session environment (new-session -e) and never
+		// in argv, because a repository-controlled program_overrides value can
+		// re-invoke af under AccountExecMarker with a forged argv — the one
+		// property argv cannot give a re-invocation is the launcher's
+		// affirmation that it wrote the proof. Environment-only sibling panes do
+		// not run the agent executable, so they need no proof; their shim strips
+		// this name via FilterForCommand and never reads it (#3123 review, #3051).
+		// It goes to the session, not the client environment, so a fresh server's
+		// global snapshot never records it for other sessions.
+		if !accountEnvironmentOnly {
+			proofEntry, proofErr := sessionenv.AccountLaunchProofEnvEntry(proof)
+			if proofErr != nil {
+				return "", nil, nil, nil, "", proofErr
+			}
+			if proofEntry != "" {
+				sessionEnv = append(sessionEnv, proofEntry)
+			}
+		}
 		// Keep every removed name in update-environment so an existing server
 		// explicitly unsets stale identities and startup hooks before new-session.
 		importNames = appendMissingEnvironmentNames(importNames, boundaryNames)
