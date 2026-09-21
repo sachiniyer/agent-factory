@@ -393,7 +393,12 @@ func runBroadcast(prompt string) error {
 			})
 			continue
 		}
-		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
+		// Carry the enumerated row's stable ID: the target list was materialized
+		// before this loop, so a same-title replacement between enumeration and
+		// this dispatch must fail rather than inherit the prompt (#2358's class,
+		// inside one command). A pre-ID record sends "" and the daemon resolves
+		// by title as before.
+		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{ID: t.ID, Title: t.Title, RepoID: t.RepoID, Prompt: prompt})
 		if err != nil {
 			result.Failed++
 			result.Results = append(result.Results, broadcastTarget{

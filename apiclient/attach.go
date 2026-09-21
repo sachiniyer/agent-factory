@@ -56,7 +56,8 @@ var (
 var attachDrainTimeout = 2 * time.Second
 
 // AttachStream opens a full-screen interactive attach to tab `tab` of the session
-// (title, optional repoID) over the WS PTY stream and returns a channel closed
+// (idOrTitle, optional repoID — the same address contract as DialStream) over
+// the WS PTY stream and returns a channel closed
 // when the user detaches (Ctrl-<detach-key>) or the pane exits. It puts the real
 // terminal into raw mode, proxies stdin→INPUT / PTY_OUT→stdout / SIGWINCH→RESIZE,
 // and restores the terminal on exit. The signature matches the attach seam
@@ -73,8 +74,8 @@ var attachDrainTimeout = 2 * time.Second
 // rooted at Background), so this is a documented property rather than a live
 // exit path — but it is why terminal hand-back is armed against signals instead:
 // see terminalHandback.
-func (c *Client) AttachStream(ctx context.Context, title, repoID, tabID string, tab int) (chan struct{}, error) {
-	sc, err := c.DialStream(ctx, title, repoID, tabID, tab, 0) // 0 = live tail
+func (c *Client) AttachStream(ctx context.Context, idOrTitle, repoID, tabID string, tab int) (chan struct{}, error) {
+	sc, err := c.DialStream(ctx, idOrTitle, repoID, tabID, tab, 0) // 0 = live tail
 	if err != nil {
 		return nil, err
 	}

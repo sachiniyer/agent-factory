@@ -53,17 +53,18 @@ func (m *home) newTabPaneSource() ui.PreviewSource {
 // emulator's Event model. Keeping the codec here means ui/termpane depends on
 // neither the websocket library nor agentproto — only its own Stream interface.
 
-// streamDialer builds the termpane.Dialer for one pane's (session title, repoID,
-// tab). The returned dialer opens a fresh apiclient WS subscription starting at
+// streamDialer builds the termpane.Dialer for one pane's (idOrTitle,
+// scopeRepoID, tab) — see streamAddress for the session-axis contract. The
+// returned dialer opens a fresh apiclient WS subscription starting at
 // the requested replay cursor; the termpane run loop calls it on connect and on
 // every reconnect.
-func streamDialer(title, repoID, tabID string, tab int) termpane.Dialer {
+func streamDialer(idOrTitle, scopeRepoID, tabID string, tab int) termpane.Dialer {
 	return func(ctx context.Context, since uint64) (termpane.Stream, error) {
 		c, err := apiclient.NewTargeted()
 		if err != nil {
 			return nil, err
 		}
-		sc, err := c.DialStream(ctx, title, repoID, tabID, tab, since)
+		sc, err := c.DialStream(ctx, idOrTitle, scopeRepoID, tabID, tab, since)
 		if err != nil {
 			return nil, err
 		}
