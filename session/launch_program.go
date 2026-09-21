@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -76,18 +77,24 @@ func setLaunchProgram(ts *tmux.TmuxSession, final string, proof sessionenv.Accou
 // repository-controlled parent can deliberately make os.Getwd fail (e.g. by
 // removing the pane's CWD from a sibling shell), and a forged env var would
 // then be the only "proof" left, so the cross-check must not be bypassed on
-// a derivation error (#4731 review, Codex P1 on f903b934). A derivation that
-// succeeds with a zero proof (no reachable operator config) is fed to the
-// matcher unchanged; the resolver remains a SECONDARY gate, not a
-// replacement for the env channel.
+// a derivation error (#4731 review, Codex P1 on f903b934). The same applies
+// when BOTH the repo and global config layers fail to resolve — e.g. after a
+// same-uid child makes config.toml malformed: resolveResolvedConfigForPath
+// returns the underlying error instead of converting the unreachable config
+// into a successful zero proof, which a child could then match by submitting
+// an empty env proof and let /bin/sh resolve an attacker-controlled agent
+// from PATH (#4731 review, Codex P1 on 4302e0e7). A derivation that succeeds
+// with a zero proof (a reachable operator config that produced no
+// TrustedExecutable for this command) is fed to the matcher unchanged; the
+// resolver remains a SECONDARY gate, not a replacement for the env channel.
 func ResolveAccountLaunchProof(agent, account, command string) (sessionenv.AccountLaunchProof, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return sessionenv.AccountLaunchProof{}, err
 	}
-	resolved := resolveResolvedConfigForPath(cwd)
-	if resolved == nil {
-		return sessionenv.AccountLaunchProof{}, nil
+	resolved, err := resolveResolvedConfigForPath(cwd)
+	if err != nil {
+		return sessionenv.AccountLaunchProof{}, err
 	}
 	base := config.ResolveProgram(&resolved.Config, agent)
 	trustBase := builtInProgramOverride(resolved, agent, base)
@@ -100,6 +107,17 @@ func ResolveAccountLaunchProof(agent, account, command string) (sessionenv.Accou
 // the worktree path). Same two layers — repo then global — and same warning on
 // a resolve that did not answer, so the resolver and the launcher cannot drift
 // apart on which config a pane saw.
+//
+// Unlike resolveResolvedConfigForInstance (the launcher side, which keeps a
+// best-effort nil on a resolution miss and falls through to the default program),
+// this is the SHIM side that defends a credential boundary: it returns the
+// underlying error when BOTH layers fail to resolve, so ResolveAccountLaunchProof
+// propagates it and the shim REFUSES the launch rather than treating an
+// unreachable operator config as a successful zero proof (#4731 review, Codex
+// P1 on 4302e0e7). A same-uid child that can corrupt or remove config files
+// the operator's process reads cannot also reproduce what the launcher would
+// have produced from a valid config, so a derivation that fails to decide
+// must fail closed.
 //
 // The launcher resolves from Instance.Path, which RepoFromPath always maps to
 // the repository's identity root: for an ordinary repo the workspace root IS
@@ -114,7 +132,7 @@ func ResolveAccountLaunchProof(agent, account, command string) (sessionenv.Accou
 // identity root is recovered from the pane's own git context, not from anything
 // the launcher carried, so it stays outside the forgeable-env channel the
 // re-derivation exists to defend.
-func resolveResolvedConfigForPath(path string) *config.ResolvedConfig {
+func resolveResolvedConfigForPath(path string) (*config.ResolvedConfig, error) {
 	repo, err := config.RepoFromPath(path)
 	if err == nil {
 		configRepo := repo
@@ -124,7 +142,7 @@ func resolveResolvedConfigForPath(path string) *config.ResolvedConfig {
 			}
 		}
 		if resolved, rerr := config.ResolveConfigForRepo(configRepo); rerr == nil {
-			return resolved
+			return resolved, nil
 		} else {
 			log.WarningLog.Printf("failed to resolve repo config when deriving account launch proof for path %q: %v", path, rerr)
 		}
@@ -132,7 +150,7 @@ func resolveResolvedConfigForPath(path string) *config.ResolvedConfig {
 	resolved, err := config.ResolveGlobalConfig()
 	if err != nil {
 		log.WarningLog.Printf("failed to load config when deriving account launch proof for path %q: %v", path, err)
-		return nil
+		return nil, fmt.Errorf("resolve operator config for account launch proof at path %q: %w", path, err)
 	}
-	return resolved
+	return resolved, nil
 }
