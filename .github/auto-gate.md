@@ -442,10 +442,10 @@ from availability ordering as well as verdict selection. A maintained summary
 is status, never an unrecognised outage response. The repository outage record
 uses the same corroboration rule for current and superseded commits, with
 commit dates, PR creation, force-push history and recorded head announcements
-supplying historical freshness floors. Only merge accounting requires the merged head specifically.
-Recovery uses the row's own time, never the summary edit time, and cannot be
-earlier than the corroborating artifact. A later artifact therefore cannot
-backdate a recovery or erase an earlier degraded merge.
+supplying historical freshness floors. Recovery uses the row's own time, never
+the summary edit time, and cannot be earlier than the corroborating artifact. A
+later artifact therefore cannot backdate a recovery or erase an earlier degraded
+merge.
 
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review

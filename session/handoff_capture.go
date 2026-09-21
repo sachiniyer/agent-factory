@@ -24,7 +24,15 @@ func (p AgentSwapPlan) CaptureAfterStop() error {
 // Program already names the target. Update the rollback token too, so a later
 // launch failure can still remove precisely this transaction's ledger entry.
 func (i *Instance) CaptureHandoffBrief(swap *HandoffSwap, override string) (MissionBrief, error) {
-	brief := i.BuildMissionBrief(swap.To, override, swap.Reason)
+	// The brief's To is the effective agent — the one the resolved command
+	// launches — so Render's same-agent check is judged on the same value
+	// admission was. An unclassifiable command has no effective answer; the
+	// enum is still the honest display label there.
+	to := swap.effectiveTo
+	if to == "" {
+		to = swap.To
+	}
+	brief := i.BuildMissionBrief(to, override, swap.Reason)
 	brief.From = swap.From.Agent
 	i.mu.Lock()
 	defer i.mu.Unlock()
