@@ -695,6 +695,11 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		if agent := d.PendingAccountSwap.AccountAgent; agent != "" && !tmux.IsSupportedProgram(agent) {
 			d.PendingAccountSwap.AccountAgent = redactedMarker
 		}
+		// Program is the incoming launch command frozen at commit (#4430 round
+		// 7) — a user-supplied command line, the same class as Program and
+		// RuntimeProgram above, so it takes their trade: reduced to the agent
+		// it runs, which is the only fact triage needs from it.
+		d.PendingAccountSwap.Program = redactProgram(d.PendingAccountSwap.Program)
 		// The account a carried conversation was copied from (#4367) is the
 		// same user-picked label as From. Empty means the ambient identity and
 		// stays empty, so redaction never invents an account.
