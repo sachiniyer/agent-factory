@@ -625,7 +625,11 @@ func instanceTitleExistsInScope(repoID, title string) (bool, error) {
 
 // scopedInstance is a persisted session paired with the repo ID it belongs to,
 // which the broadcast delivery path needs to address the daemon SendPrompt RPC.
+// ID is the row's stable identity: the broadcast enumerates its targets before
+// dispatching, so the send must carry it or a killed-and-recreated row could
+// inherit a prompt meant for the session the user actually listed.
 type scopedInstance struct {
+	ID     string
 	RepoID string
 	Title  string
 	Status session.Status
@@ -642,7 +646,7 @@ func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
 	}
 	out := make([]scopedInstance, 0, len(instances))
 	for i := range instances {
-		out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+		out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 	}
 	return out, nil
 }
@@ -676,7 +680,7 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 			continue
 		}
 		for i := range instances {
-			out = append(out, scopedInstance{RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
+			out = append(out, scopedInstance{ID: instances[i].ID, RepoID: repoID, Title: instances[i].Title, Status: instances[i].Status})
 		}
 	}
 	return out, corrupted, nil

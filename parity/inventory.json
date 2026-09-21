@@ -1478,7 +1478,7 @@
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_action_target.go:24-158 \u2014 one captured sessionActionTarget builds every retained-intent session request (kill/archive/restore, limit retry, handoff, tab create/close, attach poll pause/resume) as {ID,Title,RepoID}; audited: no app/ or ui/ site constructs a session-targeting request without ID"
+        "pointer": "app/session_action_target.go \u2014 captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths \u2014 the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) \u2014 sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
       },
       "web": {
         "status": "yes",
@@ -1486,11 +1486,11 @@
       },
       "cli": {
         "status": "partial",
-        "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id"
+        "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id; `send-prompt --all` carries each enumerated row's id through dispatch (scopedInstance.ID -> daemon.SendPromptRequest.ID, api/sessions_sendprompt.go)"
       },
       "verdict": "deliberate",
       "issue": "#2358",
-      "notes": "#2358 closed as delivered and the action-by-action audit this row reserved is now done. TUI: every session-targeting request it constructs flows through sessionActionTarget \u2014 captured at intent (handle_actions.go:174,344,407,504,878; handle_handoff.go:110; handle_tabs.go:46,105,202,268; restore_confirm.go:53; live_termpane.go:302) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest \u2014 a continuous READ bound to the visible row, so a same-title replacement simply shows the row the user is now looking at (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path; TaskRepoID/TaskOrigin are gob-only). The CLI remains deliberately {title,repo_id}-scoped: a one-shot command resolves its target from its own arguments inside a single dispatch, so there is no retained boundary for a stable id to protect; `sessions archive --self` is the sole exception and sends the resolved row's id because the caller's identity cannot come from the arguments (deriving it from the recorded workspace path was unsound for a worktree-less row \u2014 under #3358 that path is not even a spelling of the id the row is pinned under, api/scope.go sessionRepoID). The six cli `id` field declarations that named this row a gap were stale beside the identical `ok` reasoning already accepted on RestoreSession/ResumeFromLimit/HandoffSession; they are now `ok` on the same grounds. A user-facing --id selector would be a new CLI contract, not this capability."
+      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget \u2014 captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope \u2014 the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace \u2014 for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest \u2014 a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped \u2014 they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect \u2014 and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
     },
     {
       "id": "worktree.hooks.edit",
@@ -2057,13 +2057,7 @@
           }
         }
       },
-      "SendPromptRequest": {
-        "cli": {
-          "id": {
-            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
-          }
-        }
-      },
+      "SendPromptRequest": {},
       "DeliverPromptRequest": {
         "cli": {
           "defer_while_attached": {

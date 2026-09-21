@@ -878,9 +878,13 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 	target := captureSessionActionTarget(instance, repoID)
 	attach := func() (chan struct{}, error) {
 		// Address the attach by the tab's stable id (#1738) so a reorder/close can't
-		// misroute the full-screen stream; empty falls back to the ordinal.
+		// misroute the full-screen stream; empty falls back to the ordinal. The
+		// session axis is addressed the same way — by stable id when the record
+		// has one — so a same-title replacement between keypress and dial does
+		// not receive the user's keystrokes.
 		tabID, _ := instance.TabIDAt(tabIdx)
-		return attachStreamFn(context.Background(), instance.Title, repoID, tabID, tabIdx)
+		idOrTitle, scopeRepoID := streamAddress(instance, repoID)
+		return attachStreamFn(context.Background(), idOrTitle, scopeRepoID, tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {

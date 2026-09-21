@@ -306,3 +306,104 @@ func silenceCLIOutput(t *testing.T) {
 		devnull.Close()
 	})
 }
+
+// TestSessionsSendPrompt_BroadcastCarriesStableID is the enumerate-then-dispatch
+// regression guard for the broadcast's retained boundary: the target list is
+// materialized BEFORE the dispatch loop, so each SendPromptRequest must carry
+// the persisted row's stable ID, or a killed-and-recreated same-title session
+// could inherit a prompt aimed at the row that was actually enumerated. Both
+// enumeration paths are exercised — the --repo-scoped loader and the
+// --all-repos aggregate — because they build scopedInstance separately and a
+// fix in one silently leaves the other broadcasting by title.
+func TestSessionsSendPrompt_BroadcastCarriesStableID(t *testing.T) {
+	tmp := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmp)
+	resetBroadcastFlags(t)
+
+	repoRoot := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoRoot, 0755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if out, err := exec.Command("git", "-C", repoRoot, "init").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	otherRepoID := "repo-other-synthetic"
+	if otherRepoID == repo.ID {
+		t.Fatalf("test setup: synthetic repo ID collided with real repo ID")
+	}
+
+	rawA, err := json.Marshal([]session.InstanceData{
+		{ID: "id-alpha", Title: "alpha", Status: session.Running},
+		{ID: "id-beta", Title: "beta", Status: session.Ready},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo A: %v", err)
+	}
+	rawB, err := json.Marshal([]session.InstanceData{
+		{ID: "id-gamma", Title: "gamma", Status: session.Running},
+	})
+	if err != nil {
+		t.Fatalf("marshal repo B: %v", err)
+	}
+	if err := config.SaveRepoInstances(repo.ID, rawA); err != nil {
+		t.Fatalf("save repo A: %v", err)
+	}
+	if err := config.SaveRepoInstances(otherRepoID, rawB); err != nil {
+		t.Fatalf("save repo B: %v", err)
+	}
+
+	wantIDByTitle := map[string]string{"alpha": "id-alpha", "beta": "id-beta", "gamma": "id-gamma"}
+	gotIDs := map[string]string{}
+	gotRepoIDs := map[string]string{}
+	prevSend := sendPromptViaDaemon
+	sendPromptViaDaemon = func(req daemon.SendPromptRequest) (session.PromptDeliveryStatus, error) {
+		gotIDs[req.Title] = req.ID
+		gotRepoIDs[req.Title] = req.RepoID
+		return session.PromptDelivered, nil
+	}
+	defer func() { sendPromptViaDaemon = prevSend }()
+
+	repoFlag = repoRoot
+	res, err := runBroadcastCmd(t, []string{"scoped"})
+	if err != nil {
+		t.Fatalf("repo-scoped broadcast returned error: %v", err)
+	}
+	if res.Delivered != 2 {
+		t.Fatalf("repo-scoped delivered = %d, want 2", res.Delivered)
+	}
+	for _, title := range []string{"alpha", "beta"} {
+		if gotIDs[title] != wantIDByTitle[title] {
+			t.Fatalf("repo-scoped request for %q carried ID %q, want %q — a same-title replacement could inherit the prompt", title, gotIDs[title], wantIDByTitle[title])
+		}
+		if gotRepoIDs[title] != repo.ID {
+			t.Fatalf("repo-scoped request for %q carried repo %q, want %q", title, gotRepoIDs[title], repo.ID)
+		}
+	}
+	if _, leaked := gotIDs["gamma"]; leaked {
+		t.Fatalf("repo-scoped broadcast leaked into other repo's session gamma")
+	}
+
+	gotIDs = map[string]string{}
+	gotRepoIDs = map[string]string{}
+	repoFlag = "" // --repo and --all-repos are mutually exclusive
+	sendPromptAllReposFlag = true
+	res, err = runBroadcastCmd(t, []string{"all hands"})
+	if err != nil {
+		t.Fatalf("--all-repos broadcast returned error: %v", err)
+	}
+	if res.Delivered != 3 {
+		t.Fatalf("--all-repos delivered = %d, want 3", res.Delivered)
+	}
+	for _, title := range []string{"alpha", "beta", "gamma"} {
+		if gotIDs[title] != wantIDByTitle[title] {
+			t.Fatalf("all-repos request for %q carried ID %q, want %q", title, gotIDs[title], wantIDByTitle[title])
+		}
+	}
+	if gotRepoIDs["gamma"] != otherRepoID {
+		t.Fatalf("gamma request carried repo %q, want %q", gotRepoIDs["gamma"], otherRepoID)
+	}
+}
