@@ -167,6 +167,17 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		state.notified = true
 	}
 
+	// A second safety-check picker can appear inside the 30s attribution
+	// window while the prior picker's record still carries its own Enter.
+	// noteDialogKeystroke tells dialogs apart by name alone, and two safety
+	// pickers share that name, so without dropping the completed prior record
+	// here the new picker's navigation would append to it and a later death
+	// would read the prior Enter as af answering the new picker. af is proven
+	// to be starting a fresh picker at this point: the early returns above for
+	// the model-check and pending-selection branches have already been taken,
+	// so state.selectionTarget was empty coming in.
+	t.resetCompletedCodexSafetyKeystroke()
+
 	keys := navigationKeys(dialog.selectedIndex, dialog.targetIndex)
 	if len(keys) > 0 {
 		if err := t.tapPromptKeys(keys...); err != nil {
@@ -216,6 +227,23 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	state.verificationPolls = 0
 	state.awaitingModelCheck = true
 	return true
+}
+
+// resetCompletedCodexSafetyKeystroke drops any prior Codex safety-check record
+// af already confirmed with Enter, so a second safety-check picker appearing
+// inside the dialog-death attribution window starts a fresh record instead of
+// accumulating onto the completed one. The safety dialog is the only one af
+// answers that can recur within the window, and noteDialogKeystroke tells
+// dialogs apart by name alone — two safety pickers share that name, so without
+// this a death during the new picker's selection-verification capture finds the
+// prior Enter via confirmed() and reads as af having answered the new picker,
+// misattributing keys from two separate interactions.
+func (t *TmuxSession) resetCompletedCodexSafetyKeystroke() {
+	t.dialogInputMu.Lock()
+	defer t.dialogInputMu.Unlock()
+	if t.dialogInput.dialog == codexSafetyDialogName && t.dialogInput.confirmed() {
+		t.dialogInput = dialogKeystroke{}
+	}
 }
 
 // codexPickerProvenClosed reports POSITIVE evidence that Codex's modal

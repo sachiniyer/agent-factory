@@ -281,6 +281,82 @@ func TestSessionGoneError_CodexSafetyNavigationOverwritesStaleCrossDialogRecord(
 	require.Contains(t, message, "Down")
 }
 
+// TestSessionGoneError_CodexSafetySecondPickerResetsCompletedPriorRecord pins the
+// #4740 review follow-up: two Codex safety-check pickers share the same
+// user-facing dialog name, so noteDialogKeystroke's accumulate-same-dialog rule
+// would otherwise fold a second picker's navigation onto the prior picker's
+// completed (Enter-confirmed) record. A death during the new picker's
+// selection-verification capture would then find the prior Enter via
+// confirmed() and read as af having answered the new picker, misattributing
+// keys from two separate interactions. The handler drops the completed prior
+// record before recording navigation for the new one.
+func TestSessionGoneError_CodexSafetySecondPickerResetsCompletedPriorRecord(t *testing.T) {
+	session := newTmuxSession(toTmuxName("safety-second", ""), ProgramCodex, NewMockPtyFactory(t), cmd_test.MockCmdExec{})
+	// Seed the completed record the first safety picker leaves behind when af
+	// answered it (Down + Enter) shortly before the second picker appears,
+	// inside the 30s attribution window.
+	session.noteDialogKeystroke(codexSafetyDialogName, codexSafetyWaitLabel, "Down", "Enter")
+	// The handler recognizes a second picker is starting and drops the completed
+	// prior record before recording the new navigation.
+	session.resetCompletedCodexSafetyKeystroke()
+	session.noteDialogKeystroke(codexSafetyDialogName, codexSafetyWaitLabel, "Down")
+
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af was navigating the second picker; there must be a recent keystroke")
+	require.Equal(t, []string{"Down"}, record.keys,
+		"the second picker's navigation must start a fresh record, not accumulate onto the prior completed picker's Down Enter")
+	require.False(t, record.confirmed(),
+		"the prior picker's Enter must not survive into the new picker's record")
+
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone)
+	message := err.Error()
+	require.Contains(t, message, "still navigating",
+		"a navigation-only death on the second picker must read as navigation, not as af having answered it")
+	require.NotContains(t, message, "Down Enter",
+		"the prior picker's Enter must not be misattributed to a death on the new picker")
+}
+
+// TestHandleCodexSafetyBuffering_SecondPickerResetsPriorCompletedRecord is the
+// end-to-end guard for the #4740 review follow-up: it drives the real
+// CheckAndHandleTrustPrompt through two safety pickers the way the daemon's
+// Snapshot poll does, and asserts the recorded dialog keystroke after the
+// second picker carries only the second picker's keys — not the accumulated
+// keys of both. Without the reset, the second picker's navigation appends to
+// the first picker's completed (Down Enter) record and a later death reads the
+// first picker's Enter as af answering the second.
+func TestHandleCodexSafetyBuffering_SecondPickerResetsPriorCompletedRecord(t *testing.T) {
+	const normalPane = `• Working
+
+  gpt-5.6-sol max · ~/agent-factory`
+	session, _ := runTrustPromptSequence(t, ProgramCodex,
+		normalPane,
+		codexSafetyBufferingDialog,
+		codexSafetyBufferingKeepWaitingSelected,
+		normalPane,
+		codexSafetyBufferingDialog,
+		codexSafetyBufferingKeepWaitingSelected,
+		normalPane,
+	)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(), "a normal Codex pane is not a modal")
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the first safety picker must be handled")
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the first picker's model verification observes; it does not inject another key")
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the second safety picker must be handled")
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the second picker's model verification observes; it does not inject another key")
+
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af just answered the second safety picker; there must be a recent keystroke")
+	require.Equal(t, codexSafetyDialogName, record.dialog,
+		"the recorded dialog must be the safety-check, not a stale prior dialog")
+	require.Equal(t, codexSafetyWaitLabel, record.choice,
+		"the recorded choice must be the row af navigated to and accepted on the second picker")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys,
+		"the second picker's record must carry only its own keys, not the accumulated keys of both pickers")
+}
+
 // TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic is the
 // end-to-end guard against the same regression recurring: it drives the real
 // CheckAndHandleTrustPrompt through the safety picker the way the daemon's
