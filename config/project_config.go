@@ -561,6 +561,29 @@ func ResolveProjectSelector(selector string) (Project, error) {
 		}
 		switch {
 		case !markerExists:
+			// The absent marker is shared with every worktree that uses this
+			// binding's git common directory. When another registered root
+			// resolves to that same directory, RebindProject's ensureCheckoutID
+			// would write p's new marker into it (project_registry.go:293-303
+			// only rejects records whose CheckoutID matches the new one), so
+			// the suggested rebind reattributes every worktree sharing that
+			// directory to p while leaving the original owner's record stale —
+			// the same takeover the replaced-marker branch below guards
+			// against. Refuse the rebind advice and name the other project
+			// rather than recommend a takeover through a directory this
+			// checkout does not privately own.
+			for _, other := range projects {
+				if sameProjectPath(other.Root, binding.root) {
+					continue
+				}
+				if projectRootUsesGitCommonDir(other.Root, binding.gitCommonDir) {
+					return Project{}, fmt.Errorf(
+						"path %s is already the last-known root of project %s, but this checkout has no checkout marker and shares its git directory with project %s's registered root %s; "+
+							"rebinding project %s here would write a new marker into that shared directory and reattribute every worktree it shares with while leaving project %s's registration stale; "+
+							"move this checkout to a path that does not share its git directory, or remove the linked worktree from project %s",
+						binding.root, p.ID, other.ID, other.Root, p.ID, other.ID, other.ID)
+				}
+			}
 			return Project{}, fmt.Errorf(
 				"path %s is already the last-known root of project %s, but this checkout has no checkout marker — "+
 					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
@@ -646,12 +669,13 @@ func ResolveProjectSelector(selector string) (Project, error) {
 					// break identity resolution for every worktree sharing
 					// binding.gitCommonDir, and matching owner.CheckoutID cannot
 					// distinguish which of the two duplicated markers is the copy.
-					// Only a MAIN checkout's marker is provably private: its git
-					// common directory is its own <root>/.git inside the root. A
-					// LINKED WORKTREE's marker lives in the bare's shared common
+					// A LINKED WORKTREE's marker lives in the bare's shared common
 					// directory, so when this checkout is a linked worktree refuse
 					// deletion rather than fall through to the copied-marker
-					// remedy.
+					// remedy. A MAIN checkout that has spawned linked worktrees of
+					// its own shares its <root>/.git the same way, so the same
+					// refusal applies; the mainCheckoutHasLinkedWorktrees guard
+					// below catches that.
 					if sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) {
 						return Project{}, fmt.Errorf(
 							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
@@ -662,10 +686,35 @@ func ResolveProjectSelector(selector string) (Project, error) {
 								"move this checkout to a path that does not share its git directory, or remove the linked worktree from project %s",
 							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, owner.Root, owner.ID, owner.ID)
 					}
+					// sharedWorktreeCommonDir only catches the linked-worktree
+					// side of a shared marker: a MAIN checkout's <root>/.git lives
+					// inside the root, so the predicate returns false even when
+					// that .git has spawned linked worktrees of its own. git stores
+					// every linked worktree it creates under <commonDir>/worktrees,
+					// so a non-empty worktrees directory proves this main's git
+					// common directory backs more than this single checkout, and
+					// the marker here is no more private than the linked-worktree
+					// case above. Matching owner.CheckoutID cannot tell which of
+					// the two duplicated markers is the copy in that shape, and
+					// recommending removal would break identity resolution for
+					// every worktree git has spawned from this main. Refuse the
+					// deletion advice and name the shared directory, the same
+					// remedy as the linked-worktree case.
+					if mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) {
+						return Project{}, fmt.Errorf(
+							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+								"the marker belongs to project %s, and project %s's registered root %s still carries a matching marker, "+
+								"but this checkout is a main working tree that has spawned linked worktrees sharing its git directory, "+
+								"and the marker here may be project %s's own shared marker rather than a private copy; "+
+								"af cannot tell which marker is the copy, so it will not recommend removing this one — "+
+								"move this checkout to a path that does not share its git directory, or remove the linked worktrees this main has spawned",
+							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, owner.Root, owner.ID)
+					}
 					// The owner's recorded root still carries its marker and this
 					// checkout is a main checkout whose git common directory is its
-					// own <root>/.git, so the marker at binding.checkoutMarkerPath
-					// is a private cp -R copy; fall through to the deletion remedy.
+					// own <root>/.git with no linked worktrees sharing it, so the
+					// marker at binding.checkoutMarkerPath is a private cp -R
+					// copy; fall through to the deletion remedy.
 					continue
 				}
 				return Project{}, fmt.Errorf(
@@ -705,16 +754,41 @@ func ResolveProjectSelector(selector string) (Project, error) {
 // sharedWorktreeCommonDir reports whether commonDir is the git common
 // directory of a LINKED WORKTREE — the bare's shared dir, which lives outside
 // the worktree root and is shared by every worktree on that bare — rather than
-// a MAIN checkout's private <root>/.git, which lives inside the root. A main
-// checkout's marker at commonDir is private to that checkout; a linked
-// worktree's marker is shared, so deleting it would delete it for every
-// worktree sharing the bare.
+// a MAIN checkout's <root>/.git, which lives inside the root. A linked
+// worktree's marker at commonDir is shared with every checkout on that bare.
+// A main checkout's marker IS private to that checkout only when it has not
+// spawned linked worktrees of its own; mainCheckoutHasLinkedWorktrees guards
+// the remaining case, so this predicate alone is not proof that the marker
+// here is private.
 func sharedWorktreeCommonDir(root, commonDir string) bool {
 	rel, err := filepath.Rel(root, commonDir)
 	if err != nil {
 		return true
 	}
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// mainCheckoutHasLinkedWorktrees reports whether a MAIN checkout's
+// <root>/.git common directory — which sharedWorktreeCommonDir classifies as
+// INSIDE the root and so returns false — is nonetheless shared by linked
+// worktrees git has spawned from it. git stores each linked worktree it
+// creates under <commonDir>/worktrees/<name>, so a non-empty worktrees
+// directory proves this main's git common directory backs more than this
+// single checkout, and the marker at commonDir is shared with every such
+// worktree. Deleting it would break identity resolution for them — the same
+// hole sharedWorktreeCommonDir guards the deletion advice against on the
+// linked-worktree side.
+func mainCheckoutHasLinkedWorktrees(commonDir string) bool {
+	entries, err := os.ReadDir(filepath.Join(commonDir, "worktrees"))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // registeredProjectProofRaceHookForTest, when non-nil, runs at the top of
