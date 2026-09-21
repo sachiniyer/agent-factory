@@ -123,7 +123,7 @@ func TestAccountSwapPromptStatesTheConversationOutcome(t *testing.T) {
 func TestResumeFromLimitAbandonsACarryWhoseLaunchDidNotSurvive(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", false, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "work")
-	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+	inst.ReconcileAccountHandoffSnapshot("work", "claude", true, &session.AccountSwapData{
 		To:                    "work",
 		CarriedConversationID: carryHandoffConversationID,
 		CarriedLaunchStarted:  true,

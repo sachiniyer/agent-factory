@@ -2148,7 +2148,7 @@ function doHandoff(): void {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
