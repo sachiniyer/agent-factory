@@ -592,12 +592,50 @@ func ResolveProjectSelector(selector string) (Project, error) {
 				}
 				otherBinding, otherErr := resolveProjectBinding(other.Root)
 				if otherErr != nil {
+					// An unresolvable other root is only ownership evidence
+					// when this binding can actually share its marker with it.
+					// A private main checkout whose <root>/.git is its own with
+					// no linked worktrees git has spawned cannot share the
+					// marker at <binding.gitCommonDir>/af/... with any other
+					// registration: the path is this checkout's alone, so a
+					// completely unrelated stale registration (removed,
+					// renamed, or on an unavailable mount) must not block the
+					// rebind recovery that writes a new, private marker. Only
+					// fail closed when this binding is itself a linked
+					// worktree, or a main checkout that has spawned linked
+					// worktrees of its own — the same two predicates the
+					// retained-marker branch above uses to decide the marker
+					// could be shared. Otherwise continue scanning; the
+					// remaining roots are the real ownership test, and the
+					// fall-through rebind advice stays reachable.
+					if !sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) &&
+						!mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) {
+						continue
+					}
 					return Project{}, fmt.Errorf(
 						"path %s is already the last-known root of project %s, but this checkout has no checkout marker; "+
 							"another registered root %s (project %s) could not be resolved (%s) and may share this checkout's git directory; "+
 							"if it does, rebinding project %s here would write a new marker into that shared directory and reattribute every worktree it shares with while leaving project %s's registration stale; "+
 							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
 						binding.root, p.ID, other.Root, other.ID, otherErr, p.ID, other.ID, other.ID, other.ID)
+				}
+				// resolveProjectBinding resolves git through ancestor
+				// fallback: when other.Root used to be a nested repository
+				// under this checkout's root and its nested .git directory
+				// was removed (leaving the directory present), git -C
+				// other.Root resolves the enclosing repository — which may
+				// be binding.root — and returns that enclosing repo's common
+				// directory. The common-directory comparison below would
+				// then match binding's and falsely name the stale nested
+				// registration as a shared owner, blocking the rebind
+				// recovery even though no linked worktree exists. Require
+				// otherBinding.root to still name other.Root before treating
+				// its common directory as ownership evidence, the same
+				// exact-root guard ResolveRegisteredProjectRepo uses to keep
+				// a nested registration's personal config from leaking to
+				// an enclosing ancestor.
+				if !sameProjectPath(otherBinding.root, other.Root) {
+					continue
 				}
 				if !sameProjectPath(otherBinding.gitCommonDir, binding.gitCommonDir) {
 					continue

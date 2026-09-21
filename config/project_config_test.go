@@ -1086,6 +1086,133 @@ func TestResolveProjectSelectorRejectsMissingMarkerSharedCommonDirOwnerUnresolva
 		"the unresolvable shared owner must not allow the rebind advice that steals bar's checkout")
 }
 
+// TestResolveProjectSelectorMissingMarkerSkipsUnresolvableUnrelatedProjectForPrivateCheckout
+// pins the private-checkout half of the absent-marker scan. When the marker at
+// the current checkout is missing and an unrelated registered root no longer
+// resolves, the prior code unconditionally returned an error naming that
+// unresolvable root and so blocked the rebind recovery — even when this
+// checkout's <root>/.git is private and therefore cannot share its marker
+// location with any registration. With the fix the unresolvable unrelated
+// root is only fail-closed when this binding could actually use a shared
+// common directory (a linked worktree, or a main checkout that has spawned
+// linked worktrees of its own); for a private main checkout the scan skips the
+// unresolvable root and the rebind advice stays reachable.
+func TestResolveProjectSelectorMissingMarkerSkipsUnresolvableUnrelatedProjectForPrivateCheckout(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	barRoot := initProjectRegistryRepo(t, filepath.Join(base, "bar"))
+	bar, err := RegisterProject(barRoot)
+	require.NoError(t, err)
+	require.NotEqual(t, foo.ID, bar.ID)
+	require.NotEqual(t, foo.CheckoutID, bar.CheckoutID)
+
+	binding, err := resolveProjectBinding(fooRoot)
+	require.NoError(t, err)
+	require.False(t, sharedWorktreeCommonDir(binding.root, binding.gitCommonDir),
+		"/foo is a plain main checkout whose <root>/.git lives inside the root")
+	require.False(t, mainCheckoutHasLinkedWorktrees(binding.gitCommonDir),
+		"/foo has not spawned linked worktrees, so its marker is private")
+
+	// Remove foo's marker so the CLI write path takes the !markerExists
+	// branch and scans the registry for another root that might share this
+	// checkout's git directory.
+	require.NoError(t, os.Remove(binding.checkoutMarkerPath))
+
+	// Remove bar's registered root so its binding fails to resolve. With a
+	// private .git at /foo, bar cannot share this checkout's marker, so an
+	// unrelated stale registration must not block the rebind recovery for
+	// foo.
+	require.NoError(t, os.RemoveAll(barRoot))
+	_, ownerUnresolvableErr := resolveProjectBinding(barRoot)
+	require.Error(t, ownerUnresolvableErr,
+		"bar's root should no longer resolve after removal")
+
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has no checkout marker")
+	assert.Contains(t, err.Error(), "af projects rebind",
+		"a private checkout with one unrelated stale registration must still reach the rebind recovery")
+	assert.NotContains(t, err.Error(), "could not be resolved",
+		"the unrelated unresolvable root must not block the rebind recovery for a private checkout")
+	assert.NotContains(t, err.Error(), bar.ID,
+		"the unrelated unresolvable root must not be named when the marker is private")
+
+	// The write path goes through ResolveProjectSelector, so it must surface
+	// the same rebind recovery and succeed in writing foo's personal file
+	// would-be target only after the rebind advice notes a different action;
+	// here the write is still refused (no rebind has run), so it must not
+	// touch bar's personal file.
+	fooPersonalPath, err := ProjectConfigTomlPath(foo.ID)
+	require.NoError(t, err)
+	_, err = SetProjectConfigValue(fooRoot, "default_program", "codex")
+	require.Error(t, err, "the CLI write path still refuses until the user rebinds")
+	_, fooStatErr := os.Stat(fooPersonalPath)
+	assert.ErrorIs(t, fooStatErr, os.ErrNotExist,
+		"the refused write must not create foo's personal file")
+}
+
+// TestResolveProjectSelectorMissingMarkerSkipsAncestorFallbackNestedRegistration
+// pins the exact-root guard in the absent-marker scan. When another
+// registered project used to be a nested repository under this checkout's root
+// and its nested .git directory was removed (leaving the directory present),
+// resolveProjectBinding resolves the enclosing repository through git's
+// ancestor fallback and returns this checkout's own git common directory. The
+// prior code then falsely named the stale nested registration as a shared
+// owner and blocked the rebind recovery, even though no linked worktree
+// exists. With the fix the scan requires otherBinding.root to still name
+// other.Root before treating its common directory as ownership evidence — the
+// same exact-root guard ResolveRegisteredProjectRepo uses against nesting —
+// so the rebind advice stays reachable.
+func TestResolveProjectSelectorMissingMarkerSkipsAncestorFallbackNestedRegistration(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	fooRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo"))
+	foo, err := RegisterProject(fooRoot)
+	require.NoError(t, err)
+	// Register a nested repo under /foo's root so the nested registration's
+	// recorded root resolves through git's ancestor fallback once its .git
+	// is removed.
+	nestedRoot := initProjectRegistryRepo(t, filepath.Join(base, "foo", "nested"))
+	nested, err := RegisterProject(nestedRoot)
+	require.NoError(t, err)
+	require.NotEqual(t, foo.ID, nested.ID)
+
+	binding, err := resolveProjectBinding(fooRoot)
+	require.NoError(t, err)
+	require.False(t, sharedWorktreeCommonDir(binding.root, binding.gitCommonDir),
+		"/foo is a plain main checkout whose <root>/.git lives inside the root")
+	require.False(t, mainCheckoutHasLinkedWorktrees(binding.gitCommonDir),
+		"/foo has not spawned linked worktrees, so its marker is private")
+
+	// Strip the nested .git directory only — its root directory stays
+	// present, so git -C /foo/nested now resolves the enclosing /foo
+	// repository through ancestor fallback.
+	require.NoError(t, os.RemoveAll(filepath.Join(nestedRoot, ".git")))
+	nestedBinding, err := resolveProjectBinding(nestedRoot)
+	require.NoError(t, err, "the enclosing /foo repo keeps nested resolvable as a path")
+	require.False(t, sameProjectPath(nestedBinding.root, nestedRoot),
+		"the nested .git is gone, so resolveProjectBinding must return the enclosing /foo root, not nested's recorded root")
+	require.True(t, sameProjectPath(nestedBinding.root, binding.root),
+		"the enclosing repo resolveProjectBinding now returns is /foo, whose common directory /foo shares")
+
+	// Remove foo's marker so the CLI write path takes the !markerExists
+	// branch and scans the registry, hitting the nested registration.
+	require.NoError(t, os.Remove(binding.checkoutMarkerPath))
+
+	_, err = ResolveProjectSelector(fooRoot)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is already the last-known root of project "+foo.ID)
+	assert.Contains(t, err.Error(), "has no checkout marker")
+	assert.Contains(t, err.Error(), "af projects rebind",
+		"the stale nested registration resolved through ancestor fallback must not block the rebind recovery")
+	assert.NotContains(t, err.Error(), "shares its git directory with project "+nested.ID,
+		"a nested registration resolved through ancestor fallback is not ownership evidence for the shared directory")
+}
+
 // TestSharedWorktreeCommonDirRejectsSeparateGitDir pins the metadata-based
 // fix to the linked-worktree predicate. Directory containment alone reads a
 // `git init --separate-git-dir` checkout (and a submodule alike) as a linked
