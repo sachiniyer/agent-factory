@@ -686,6 +686,19 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			// claims the identity). Telling the user to delete it first
 			// would needlessly destroy that identity.
 			matchedRegisteredOwner := false
+			// The owner probe here used to call resolveProjectBinding
+			// directly, which uses context.Background() internally. When
+			// the owner's recorded root has its git metadata on a wedged
+			// or unavailable mount, that probe never returned and
+			// `af config --project <path> set/unset` hung on this branch
+			// instead of producing the fail-closed refusal below. The
+			// absent-marker scan above already bounds each per-root probe
+			// to registeredProjectScanTimeout the same way
+			// projectForWorkspaceContext bounds the daemon's scan; bound
+			// this probe the same way so an unavailable owner fails
+			// closed within that deadline rather than hanging the CLI.
+			ownerScanCtx, ownerScanCancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+			defer ownerScanCancel()
 			for _, owner := range projects {
 				if !sameProjectIdentity(checkoutID, binding.relativeRoot, owner.CheckoutID, owner.RelativeRoot) {
 					continue
@@ -706,7 +719,7 @@ func ResolveProjectSelector(selector string) (Project, error) {
 				// Resolve the owner's binding explicitly and treat the
 				// unresolvable case as unknown: refuse deletion advice rather
 				// than call the marker private.
-				ownerBinding, ownerErr := resolveProjectBinding(owner.Root)
+				ownerBinding, ownerErr := resolveProjectBindingContext(ownerScanCtx, owner.Root)
 				if ownerErr != nil {
 					return Project{}, fmt.Errorf(
 						"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
@@ -821,6 +834,31 @@ func ResolveProjectSelector(selector string) (Project, error) {
 								"af cannot tell which marker is the copy, so it will not recommend removing this one — "+
 								"move this checkout to a path that does not share its git directory, or remove the linked worktrees this main has spawned",
 							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, owner.Root, owner.ID)
+					}
+					// sharedWorktreeCommonDir and mainCheckoutHasLinkedWorktrees
+					// both miss a <root>/.git that is a SYMLINK to an external
+					// git directory: os.Stat follows the symlink and reads it as
+					// a plain directory (so the linked-worktree predicate
+					// returns false), and the canonicalized target need not
+					// carry a <commonDir>/worktrees subdir (so the
+					// main-with-worktrees predicate returns false too). Another
+					// registered checkout whose <root>/.git points at the same
+					// external directory shares the marker at
+					// binding.checkoutMarkerPath, so the marker here may be the
+					// owner's own shared marker rather than a private cp -R
+					// copy. Apply the same gitDirAtRootIsSymlink guard the
+					// absent-marker scan uses and refuse the deletion advice,
+					// so a symlinked-<root>/.git is never read as a private
+					// marker that the deletion remedy could silently steal.
+					if gitDirAtRootIsSymlink(binding.root) {
+						return Project{}, fmt.Errorf(
+							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+								"the marker belongs to project %s, and project %s's registered root %s still carries a matching marker, "+
+								"but this checkout's <root>/.git is a symlink to an external git directory another registered checkout may share, "+
+								"and the marker here may be project %s's own shared marker rather than a private copy; "+
+								"af cannot tell which marker is the copy, so it will not recommend removing this one — "+
+								"move this checkout to a path that does not share its git directory, or restore project %s's root so its own .git is private",
+							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, owner.Root, owner.ID, owner.ID)
 					}
 					// The owner's recorded root still carries its marker and this
 					// checkout is a main checkout whose git common directory is its
