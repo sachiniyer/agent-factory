@@ -597,6 +597,17 @@ func (m *Manager) fileOwedTaskLifecycle(repoID string, instance *session.Instanc
 // not own, and it is a no-op when the row or the marker is already gone — a
 // killed session's row delete IS the discharge, and a delivery can beat a late
 // drain to the same decision.
+//
+// The in-memory clear installs an in-flight discharge future in the same
+// critical section that takes the marker, so a concurrent NoteAdoptionDelivery
+// arriving while the durable clear is still in flight parks on that future
+// instead of proceeding past a nil marker to a PTY write a failed persist would
+// leave on top of a durable marker the restart re-arms — the stand-down
+// analogue of the future NoteAdoptionDelivery installs for its own notify.
+// CompleteAdoptionDischarge closes the future with the persist result: on
+// success a parked delivery may proceed (the marker is durably gone); on
+// failure it is refused (the durable marker survived) and the in-memory marker
+// is restored for a re-attempt.
 func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
 	m.mu.Lock()
 	inst := m.instances[daemonInstanceKey(repoID, title)]
@@ -604,14 +615,12 @@ func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
 	if inst == nil || inst.ID != sessionID {
 		return
 	}
-	if inst.OwedOnComplete() == nil {
+	marker, discharge := inst.TakeOwedOnCompleteForDischarge()
+	if marker == nil {
 		return
 	}
-	marker := inst.OwedOnComplete()
-	inst.SetOwedOnComplete(nil)
-	if err := m.persistOwedTaskLifecycle(repoID, inst); err != nil {
-		inst.SetOwedOnComplete(marker)
-	}
+	err := m.persistOwedTaskLifecycle(repoID, inst)
+	inst.CompleteAdoptionDischarge(discharge, marker, err)
 }
 
 // installOwedTaskLifecycleNotify wires the adoption discharge to disk: a
