@@ -100,9 +100,30 @@ func ResolveAccountLaunchProof(agent, account, command string) (sessionenv.Accou
 // the worktree path). Same two layers — repo then global — and same warning on
 // a resolve that did not answer, so the resolver and the launcher cannot drift
 // apart on which config a pane saw.
+//
+// The launcher resolves from Instance.Path, which RepoFromPath always maps to
+// the repository's identity root: for an ordinary repo the workspace root IS
+// the identity root, but a bare repository's Instance.Path is the bare directory
+// (the identity root, which has no checked-out files), while this pane's cwd is
+// a linked worktree whose RepoFromPath keeps the worktree as Root and the bare
+// dir as IdentityRoot. Re-resolving from the worktree would read a checked-in
+// program_overrides the launcher never saw, derive a different proof, and
+// refuse every otherwise-valid launch, so when the cwd's workspace root is not
+// its identity root the resolution is re-anchored to the identity root the
+// launcher used (#review, Codex P2 on 458eb57 — launch_program.go:88). The
+// identity root is recovered from the pane's own git context, not from anything
+// the launcher carried, so it stays outside the forgeable-env channel the
+// re-derivation exists to defend.
 func resolveResolvedConfigForPath(path string) *config.ResolvedConfig {
-	if repo, err := config.RepoFromPath(path); err == nil {
-		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
+	repo, err := config.RepoFromPath(path)
+	if err == nil {
+		configRepo := repo
+		if identity := repo.IdentityPath(); identity != "" && identity != repo.Root {
+			if idRepo, idErr := config.RepoFromPath(identity); idErr == nil {
+				configRepo = idRepo
+			}
+		}
+		if resolved, rerr := config.ResolveConfigForRepo(configRepo); rerr == nil {
 			return resolved
 		} else {
 			log.WarningLog.Printf("failed to resolve repo config when deriving account launch proof for path %q: %v", path, rerr)

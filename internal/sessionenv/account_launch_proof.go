@@ -102,10 +102,20 @@ func accountLaunchProofsMatch(a, b AccountLaunchProof) bool {
 // including for an empty proof (a bare agent command), because the shim must
 // distinguish "launcher set the proof, and it describes a bare invocation" from
 // "no launcher was here at all". Returns "" only on an internal encode failure.
+//
+// Each string field is base64-wrapped BEFORE it enters the JSON envelope so the
+// wire format preserves the arbitrary non-NUL bytes Unix executable and path
+// strings may carry. encoding/json replaces invalid UTF-8 in a Go string with
+// U+FFFD, so a TrustedExecutable or generated path containing such a byte would
+// decode to a different string than the resolver derived byte-for-byte, and
+// accountLaunchProofsMatch would then reject an otherwise-valid account-scoped
+// launch (#review, Codex P2 on 458eb57 — account_launch_proof.go:109). Base64
+// keeps the envelope ASCII for the tmux/env boundary and round-trips the raw
+// bytes, so the decoded proof compares byte-exact against the resolver's.
 func AccountLaunchProofEnvEntry(proof AccountLaunchProof) (string, error) {
 	data, err := json.Marshal(accountLaunchProofWire{
-		TrustedExecutable: proof.TrustedExecutable,
-		GeneratedArgs:     proof.GeneratedArgs,
+		TrustedExecutable: encodeLaunchProofField(proof.TrustedExecutable),
+		GeneratedArgs:     encodeLaunchProofArgs(proof.GeneratedArgs),
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode account launch proof: %w", err)
@@ -130,7 +140,56 @@ func decodeAccountLaunchProofEnv(value string) (AccountLaunchProof, error) {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
 	}
-	return AccountLaunchProof{TrustedExecutable: wire.TrustedExecutable, GeneratedArgs: wire.GeneratedArgs}, nil
+	trusted, err := decodeLaunchProofField(wire.TrustedExecutable)
+	if err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	args, err := decodeLaunchProofArgs(wire.GeneratedArgs)
+	if err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	return AccountLaunchProof{TrustedExecutable: trusted, GeneratedArgs: args}, nil
+}
+
+// encodeLaunchProofField base64-wraps the raw bytes of s for the JSON wire
+// format; decodeLaunchProofField is the inverse. The envelope cannot carry the
+// strings directly — see AccountLaunchProofEnvEntry.
+func encodeLaunchProofField(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+func decodeLaunchProofField(s string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func encodeLaunchProofArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = encodeLaunchProofField(a)
+	}
+	return out
+}
+
+func decodeLaunchProofArgs(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(args))
+	for i, a := range args {
+		decoded, err := decodeLaunchProofField(a)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = decoded
+	}
+	return out, nil
 }
 
 type accountLaunchProofWire struct {

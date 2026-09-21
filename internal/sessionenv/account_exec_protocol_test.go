@@ -189,3 +189,35 @@ func TestAccountExecProtocol_RefusesAnOverflowingCount(t *testing.T) {
 		}, "a malformed count must return the generic refusal, never panic (count %s)", count)
 	}
 }
+
+// Regression witness for byte-preservation in the launch-proof wire format:
+// Unix executable and generated path strings may carry arbitrary non-NUL bytes
+// (a filesystem path is not required to be valid UTF-8). encoding/json replaces
+// invalid UTF-8 in a Go string with U+FFFD, so a TrustedExecutable or generated
+// path containing such a byte would decode to a different string than the
+// resolver derived byte-for-byte, and accountLaunchProofsMatch would then
+// reject an otherwise-valid account-scoped launch (#review, Codex P2 on
+// 458eb57 — account_launch_proof.go:109). The envelope base64-wraps each
+// field's raw bytes before JSON-marshaling, so the round-trip is byte-exact and
+// the matcher compares the same strings the resolver produced.
+func TestAccountExecProtocol_WirePreservesNonUTF8Bytes(t *testing.T) {
+	// 0xe9 and 0xff are invalid-UTF-8 lead/continuation bytes that the JSON
+	// encoder would otherwise replace with U+FFFD.
+	proof := AccountLaunchProof{
+		TrustedExecutable: "/opt/caf\xe9claude",
+		GeneratedArgs:     []string{"--plugin-dir", "/plugins/\xffdir", "--flag\xf0"},
+	}
+
+	entry, err := AccountLaunchProofEnvEntry(proof)
+	require.NoError(t, err)
+	name, value, ok := strings.Cut(entry, "=")
+	require.True(t, ok)
+	t.Setenv(name, value)
+
+	decoded, err := decodeAccountLaunchProofEnv(value)
+	require.NoError(t, err, "a non-UTF-8 proof must round-trip the wire format")
+	require.Equal(t, proof, decoded,
+		"the decoded proof must be byte-identical to the original so accountLaunchProofsMatch compares the resolver's derivation exactly")
+	require.True(t, accountLaunchProofsMatch(proof, decoded),
+		"the matcher must agree on a byte-exact round-trip")
+}
