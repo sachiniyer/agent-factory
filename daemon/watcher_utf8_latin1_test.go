@@ -290,3 +290,138 @@ func TestConsumeLinesNormalArmLatin1EmptyLineDiscarded(t *testing.T) {
 		t.Fatalf("persisted queue Line is not valid UTF-8: %q", ev.Line)
 	}
 }
+
+// TestConsumeLinesSanitizedEmptyLineEnqueuedForTemplatedPrompt pins the third
+// Codex inline concern on the durable-queue-boundary discard: a normal-arm
+// line of only invalid bytes ("\xff\n") sanitizes to "" (the only byte is
+// invalid UTF-8). A raw `line == ""` discard would drop it unconditionally,
+// but an empty line is not universally undeliverable — task.RenderWatchPrompt
+// renders an empty line with a templated prompt such as "Triage: {{line}}"
+// as the nonempty "Triage: " (task/task.go:316-323, pinned at
+// task/task_test.go:755), and deliverWatchEventWithOptions's pre-flight only
+// rejects `strings.TrimSpace(prompt) == ""` (daemon/watcher.go:906), so the
+// queued replay WOULD deliver. The boundary discard now keys on the rendered
+// prompt, so an empty line whose template stays nonempty is kept and durably
+// enqueued rather than silently dropped at the queue edge; only an empty line
+// whose render trims to "" (the default-prompt case) is discarded.
+func TestConsumeLinesSanitizedEmptyLineEnqueuedForTemplatedPrompt(t *testing.T) {
+	// "\xff\n" sanitizes to "" under consumeLines' normal (err == nil) arm.
+	// The templated prompt "Triage: {{line}}" renders it to "Triage: " — a
+	// nonempty (after TrimSpace) prompt — so the boundary keeps the event
+	// and the queue holds a single {"line":""} record the drainer can replay.
+	payload := []byte("\xff\n")
+	payloadFile := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(payloadFile, payload, 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	dir := t.TempDir()
+	const taskID = "latin1tmpl03"
+	script := "cat " + payloadFile + "; exit 0"
+	templated := watchTask(taskID, script, dir)
+	templated.Prompt = "Triage: {{line}}"
+	s, rec := newTestSupervisor(t, staticTasks(templated))
+	// Force every delivery to defer (errTargetBusy) so handleEvent takes the
+	// delivery-failure arm and the empty line reaches enqueueEvent for the
+	// boundary discard to consider, rather than being delivered once and
+	// leaving no queue record to assert on.
+	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetBusy })
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "watcher to finish", func() bool {
+		return len(rec.statusesSnapshot()) > 0
+	})
+
+	queueDir, _ := s.queueDir()
+	queuePath := filepath.Join(queueDir, taskID+".jsonl")
+	data, err := os.ReadFile(queuePath)
+	if err != nil {
+		t.Fatalf("read queue file %s: %v", queuePath, err)
+	}
+
+	recordLines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(recordLines) != 1 || recordLines[0] == "" {
+		t.Fatalf("expected exactly 1 non-blank queued record in %s (the all-invalid \\xff line sanitizes to \"\" but the \"Triage: {{line}}\" template renders it nonempty and keeps it), got %d: %q", queuePath, len(recordLines), recordLines)
+	}
+	var ev queuedEvent
+	if err := json.Unmarshal([]byte(recordLines[0]), &ev); err != nil {
+		t.Fatalf("unmarshal queue record: %v", err)
+	}
+	if ev.Line != "" {
+		t.Fatalf("persisted Line = %q, want %q (the all-invalid \\xff line sanitizes to empty; \"Triage: {{line}}\" renders it to \"Triage: \", so the boundary must keep the empty record rather than discard it)", ev.Line, "")
+	}
+	if strings.ContainsRune(ev.Line, '\ufffd') {
+		t.Fatalf("persisted queue Line contains U+FFFD: %q", ev.Line)
+	}
+}
+
+// TestConsumeLinesSanitizedWhitespaceOnlyDiscardedForDefaultPrompt pins the
+// fourth Codex inline concern on the durable-queue-boundary discard: a
+// normal-arm line such as "\xff \n" sanitizes to a nonempty but
+// whitespace-only " " (the invalid byte is dropped, the space remains). The
+// raw `line == ""` check keeps this whitespace-only line, but under a default
+// (empty) prompt task.RenderWatchPrompt returns the line itself, so the
+// rendered prompt is " " and `strings.TrimSpace(prompt) == ""` is true —
+// deliverWatchEventWithOptions rejects it as an empty prompt before any send
+// (daemon/watcher.go:906), the drainer re-renders the same head forever, and
+// later valid events stay blocked behind it until retention or overflow
+// removes it. The boundary discard now keys on the rendered prompt's trimmed
+// emptiness, so a whitespace-only line under the default prompt is discarded
+// at the queue edge and a later valid line lands at the queue head unblocked.
+// "\xff " (rather than "\xff") is the exact regression shape: before this PR
+// the invalid byte made the line nonblank to the pre-flight check, so this
+// is a new stuck-head failure mode the sanitization introduced.
+func TestConsumeLinesSanitizedWhitespaceOnlyDiscardedForDefaultPrompt(t *testing.T) {
+	// "\xff \n" sanitizes to " " under the normal (err == nil) arm; under a
+	// default (empty) prompt the rendered prompt trims to "" and the boundary
+	// discards it. "valid-ascii-line\n" takes the same arm and must remain
+	// durable-enqueueable behind the discarded whitespace-only result.
+	// Before the rendered-prompt discard, the queue would persist a
+	// `{"line":" "}` head record plus a `valid-ascii-line` record parked
+	// behind it. After the discard, only the valid record remains.
+	payload := []byte("\xff \nvalid-ascii-line\n")
+	payloadFile := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(payloadFile, payload, 0644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	dir := t.TempDir()
+	const taskID = "latin1ws04"
+	script := "cat " + payloadFile + "; exit 0"
+	s, rec := newTestSupervisor(t, staticTasks(watchTask(taskID, script, dir)))
+	s.deliver = adaptWatchDelivery(func(string, string) error { return errTargetBusy })
+
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "watcher to finish", func() bool {
+		return len(rec.statusesSnapshot()) > 0
+	})
+
+	queueDir, _ := s.queueDir()
+	queuePath := filepath.Join(queueDir, taskID+".jsonl")
+	data, err := os.ReadFile(queuePath)
+	if err != nil {
+		t.Fatalf("read queue file %s: %v", queuePath, err)
+	}
+
+	recordLines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(recordLines) != 1 || recordLines[0] == "" {
+		t.Fatalf("expected exactly 1 non-blank queued record in %s (the whitespace-only \\xff line is discarded at the durable-queue boundary because its default-prompt render trims to \"\"), got %d: %q", queuePath, len(recordLines), recordLines)
+	}
+	var ev queuedEvent
+	if err := json.Unmarshal([]byte(recordLines[0]), &ev); err != nil {
+		t.Fatalf("unmarshal queue record: %v", err)
+	}
+	if ev.Line != "valid-ascii-line" {
+		t.Fatalf("persisted Line = %q, want %q (the whitespace-only \\xff line was sanitized to \" \" and discarded because its default-prompt render trims to \"\"; this valid record must be the queue head, not blocked behind a permanently undeliverable whitespace-only record)", ev.Line, "valid-ascii-line")
+	}
+	if strings.ContainsRune(ev.Line, '\ufffd') {
+		t.Fatalf("persisted queue Line contains U+FFFD: %q", ev.Line)
+	}
+	if !utf8.ValidString(ev.Line) {
+		t.Fatalf("persisted queue Line is not valid UTF-8: %q", ev.Line)
+	}
+}

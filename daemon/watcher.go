@@ -181,6 +181,35 @@ func newWatcherSupervisorWithEventsPerMinute(eventsPerMinute int) *watcherSuperv
 	}
 }
 
+// renderedWatchPrompt returns line rendered through taskID's watch-prompt
+// template, mirroring the pre-flight `strings.TrimSpace(prompt) == ""` rule
+// deliverWatchEventWithOptions applies before any send (daemon/watcher.go:906),
+// so the durable-queue boundary can decide deliverability with the same
+// yardstick the drainer's replay will. The supervisor's loader is the same
+// source deliverWatchEventWithOptions reloads per event, so a prompt edit
+// between enqueue and replay is reflected at whichever arm reads it last;
+// whichever arm first sees a trimspace-empty render drops the event, and the
+// survivor behaves identically. A loader that is unset (supervisor built by
+// a focused test) or fails, or a task deleted between scheduling and this
+// enqueue, has no template to render through: return the raw line and let the
+// caller's blankness check fall back to the raw line, which never false-keeps
+// a blank line.
+func (s *watcherSupervisor) renderedWatchPrompt(taskID, line string) string {
+	if s.loadTasks == nil {
+		return line
+	}
+	tasks, err := s.loadTasks()
+	if err != nil {
+		return line
+	}
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			return task.RenderWatchPrompt(tasks[i].Prompt, line)
+		}
+	}
+	return line
+}
+
 // Stop terminates every watcher: SIGTERM to each process group, group SIGKILL
 // after the grace. Blocks until all watcher goroutines have returned.
 func (s *watcherSupervisor) Stop() {
@@ -821,17 +850,26 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 // encoding/json rewrites invalid UTF-8 as U+FFFD (#863 class, exposed by
 // #1129, #4655), so this is the shared durable-queue boundary every durable
 // enqueue crosses. `sanitizeUTF8` — a no-op on valid UTF-8 — drops invalid
-// bytes here so every record (not just the live arm's) is well-formed. A line
-// reduced to "" (for example a normal-arm line of only invalid bytes such as
-// "\xff") is undeliverable: the rendered prompt collapses to "" and
-// `deliverWatchEventWithOptions` rejects that as empty before any send, yet
-// enqueueing it would park a permanently undeliverable head that later valid
-// events block behind until retention or overflow removes it. Discard it
-// rather than enroll a permanently undeliverable event; `tailBuffer.add` is
-// also a no-op on blank lines, so the failure tail shows nothing for it.
+// bytes here so every record (not just the live arm's) is well-formed.
+//
+// The discard keys on the rendered prompt's deliverability, not on the raw
+// line: `deliverWatchEventWithOptions` rejects an event before any send when
+// `strings.TrimSpace(prompt) == ""` (daemon/watcher.go:906), so enrolling a
+// line whose rendered prompt trims to "" parks a queue head every replay
+// rejects, blocking later valid events until retention or overflow removes
+// it. Rendering through the task's template (`renderedWatchPrompt`) makes the
+// boundary rule match that pre-flight. A line of only invalid bytes such as
+// "\xff" sanitizes to "" and a default (empty) prompt renders to "", so it is
+// discarded; but an empty line whose template is "Triage: {{line}}" renders
+// to the nonempty "Triage: " and is kept — it would deliver, and a raw
+// `line == ""` check wrongly dropped it. The render also covers the regression
+// sanitizeUTF8 introduced for a whitespace-only line (e.g. "\xff " -> " ")
+// under a default prompt: the raw check `line == ""` keeps it, yet the trimmed
+// render is "" and it would park a stuck head. `tailBuffer.add` is a no-op on
+// blank lines, so the failure tail shows nothing for a discarded blank.
 func (w *taskWatcher) enqueueEvent(line string, tail *tailBuffer, limitParked bool, parkedStatusRecorded ...bool) {
 	line = sanitizeUTF8(line)
-	if line == "" {
+	if strings.TrimSpace(w.sup.renderedWatchPrompt(w.taskID, line)) == "" {
 		return
 	}
 	tail.add(line)
