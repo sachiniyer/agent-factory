@@ -89,12 +89,15 @@ type SnapshotResponse struct {
 	// its own row.
 	//
 	// Lifecycle: seeded from the startup refresh (refreshDaemonInstances with
-	// existing==nil) and unchanged by the polling path. A repo that becomes
-	// corrupted mid-life keeps its prior in-memory rows via re-hydration, so its
-	// sessions remain in the snapshot and it is correctly NOT reported as skipped;
-	// a mid-life repair likewise does not auto-clear a startup skip until the
-	// daemon restarts and re-runs startup. See
-	// daemon.daemon.go::refreshDaemonInstances for the skip lifecycle.
+	// existing==nil) and trimmed by the polling path to drop repaired repos — a
+	// previously-skipped repo whose instances.json now parses falls out of the
+	// set so list/get/whoami stop refusing the now-complete snapshot without
+	// waiting for a daemon restart. It never gains a mid-life-corrupted repo:
+	// a repo that becomes corrupted mid-life keeps its prior in-memory rows via
+	// re-hydration, so its sessions remain in the snapshot and it is correctly
+	// NOT reported as skipped until the daemon restarts and re-runs startup. See
+	// daemon.daemon.go::refreshDaemonInstances/retainStillSkipped for the skip
+	// lifecycle.
 	SkippedRepos []SkippedRepo `json:"skipped_repos,omitempty"`
 }
 
@@ -118,12 +121,14 @@ const SkippedRepoReasonCorruptedInstancesJSON = "corrupted-instances-json"
 // rather than silently serving a partial list as complete (#730's principle
 // extended to the wire surface #1029 PR 2 introduced).
 //
-// Seeded from the most recent startup refresh and unchanged by polling: a repo
+// Seeded from the most recent startup refresh and trimmed by the polling path
+// to drop repaired repos, but never gains a mid-life-corrupted one: a repo
 // that becomes corrupted mid-life keeps its prior in-memory rows via
-// re-hydration, so its sessions remain in the snapshot and it is correctly NOT
-// reported as skipped; a mid-life repair also does not auto-clear a startup skip
-// until the daemon restarts and re-runs startup. See
-// daemon.go::refreshDaemonInstances for the skip lifecycle.
+// re-hydration, so its sessions remain in the snapshot and it is correctly
+// NOT reported as skipped until the daemon restarts and re-runs startup. A
+// previously-skipped repo whose instances.json now parses falls out of the
+// set so list/get/whoami stop refusing the now-complete snapshot. See
+// daemon.go::refreshDaemonInstances/retainStillSkipped for the skip lifecycle.
 func (m *Manager) SkippedRepos(repoID string) []SkippedRepo {
 	m.mu.Lock()
 	defer m.mu.Unlock()

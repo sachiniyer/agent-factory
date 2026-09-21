@@ -148,3 +148,108 @@ func skippedRepoIDs(skipped []SkippedRepo) []string {
 	}
 	return ids
 }
+
+// TestManager_RefreshLocked_DropsRepairedRepoFromSkipSet pins the "clear
+// repaired repos" lifecycle: a repo dropped at startup (corrupt-r) is removed
+// from m.skippedRepos on the first polling refresh that parses its now-repaired
+// instances.json, so list/get/whoami stop refusing the now-complete snapshot
+// without waiting for a daemon restart (#603 closed over the wire).
+func TestManager_RefreshLocked_DropsRepairedRepoFromSkipSet(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	_ = captureWarnings(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "ok"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
+	seedCorruptedRepo(t, "corrupt-r")
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	// Repair corrupt-r by overwriting its instances.json with a parseable file;
+	// the next polling refresh must drop it from m.skippedRepos and re-materialize
+	// its session so the snapshot is complete again.
+	repairedJSON, err := json.Marshal([]session.InstanceData{{Title: "repaired"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("corrupt-r", repairedJSON))
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
+		"startup must seed the skip set with the corrupted repo")
+	require.NoError(t, m.refreshLocked(), "a polling refresh of a repaired repo must not error")
+	require.Empty(t, m.skippedRepos, "a repaired repo drops out of the skip set on the next poll")
+	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "repaired")],
+		"the repaired repo's session must re-materialize on the poll")
+	require.NotNil(t, m.instances[daemonInstanceKey("valid-r", "ok")],
+		"the unrelated healthy repo survives the poll")
+}
+
+// TestManager_RefreshLocked_KeepsStillCorruptedRepoInSkipSet pins the other
+// half of the lifecycle: a startup-skipped repo whose instances.json is STILL
+// unreadable stays in m.skippedRepos across the polling refresh (so a
+// long-running daemon keeps reporting the drop), and its prior-in-memory
+// rows — there were none at startup — stay absent.
+func TestManager_RefreshLocked_KeepsStillCorruptedRepoInSkipSet(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	_ = captureWarnings(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "ok"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
+	seedCorruptedRepo(t, "corrupt-r")
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
+		"startup must seed the skip set with the corrupted repo")
+	require.NoError(t, m.refreshLocked(), "a polling refresh of a still-corrupted repo must not error")
+	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
+		"a still-corrupted repo STAYS in the skip set across the poll")
+	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "anything")],
+		"a still-corrupted repo contributes no rows (there were none at startup to re-hydrate)")
+	require.NotNil(t, m.instances[daemonInstanceKey("valid-r", "ok")],
+		"the unrelated healthy repo survives the poll")
+}
+
+// TestManager_RefreshLocked_DoesNotAddMidlifeCorruptionToSkipSet pins the
+// "startup-only" guarantee the reviewer asked us to preserve: a repo that
+// newly corrupts MID-LIFE (was healthy at startup, now unreadable on a poll)
+// is NOT added to m.skippedRepos, because the polling refresh re-hydrates its
+// prior in-memory rows so its sessions stay in the snapshot — only a restart
+// re-runs startup and would report it. Mid-life corruption must stay invisible
+// to the skip set.
+func TestManager_RefreshLocked_DoesNotAddMidlifeCorruptionToSkipSet(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	_ = captureWarnings(t)
+
+	liveJSON, err := json.Marshal([]session.InstanceData{{Title: "a-sess"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("repo-a", liveJSON))
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	m.mu.Lock()
+	require.Empty(t, m.skippedRepos, "a clean startup seeds no skipped repos")
+	require.NotNil(t, m.instances[daemonInstanceKey("repo-a", "a-sess")],
+		"the healthy repo's session loads at startup")
+	m.mu.Unlock()
+
+	// Corrupt repo-a's instances.json MID-LIFE, after the daemon is already up.
+	seedCorruptedRepo(t, "repo-a")
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	require.NoError(t, m.refreshLocked(), "a polling refresh after mid-life corruption must not error")
+	require.Empty(t, m.skippedRepos,
+		"a mid-life-corrupted repo is NOT added to the skip set (its rows are re-hydrated, so the snapshot is whole)")
+	require.NotNil(t, m.instances[daemonInstanceKey("repo-a", "a-sess")],
+		"the prior in-memory instance is re-hydrated, so the running session is not silently abandoned")
+}

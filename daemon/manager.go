@@ -131,10 +131,12 @@ type Manager struct {
 	storage      *session.Storage
 	instances    map[string]*session.Instance
 	// skippedRepos names repos whose instances.json was corrupted and dropped at
-	// daemon startup (#603), seeded by restoreInstances and unchanged by the
-	// polling refresh. The Snapshot RPC reads it to carry the drop to clients
-	// instead of silently serving a partial list as complete (#730's principle
-	// extended to the wire surface #1029 PR 2 introduced). Guarded by m.mu.
+	// daemon startup (#603), seeded by restoreInstances and trimmed by the
+	// polling refresh to drop repaired repos without ever adding a
+	// mid-life-corrupted one. The Snapshot RPC reads it to carry the drop to
+	// clients instead of silently serving a partial list as complete (#730's
+	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
+	// m.mu.
 	skippedRepos []SkippedRepo
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
