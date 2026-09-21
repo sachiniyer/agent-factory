@@ -147,3 +147,29 @@ func TestFailedActionCompletionDoesNotClearSameTitleReplacementOperation(t *test
 		})
 	}
 }
+
+// The interactive WS stream is the other retained-intent path that used to
+// address sessions by title: the pane's dialer and the deferred full-screen
+// attach both outlive the moment the user picked the row, so they must carry
+// the stable id the /v1/sessions/{idOrTitle}/stream resolver already supports
+// — unscoped (empty repo) so the id namespace applies, never repo-scoped where
+// a non-empty repo_id would re-select title addressing.
+func TestStreamAddress_AddressesSessionByStableIDWhenPresent(t *testing.T) {
+	inst := newKillableInstance(t, "worker")
+	require.NotEmpty(t, inst.ID, "test instance should carry a minted stable ID")
+
+	idOrTitle, scopeRepoID := streamAddress(inst, "repo-123")
+	require.Equal(t, inst.ID, idOrTitle,
+		"a session with a stable ID must stream-address by it, not by title")
+	require.Empty(t, scopeRepoID,
+		"id-addressed streams must leave the repo scope empty so the daemon resolves the id namespace")
+}
+
+func TestStreamAddress_LegacyRecordKeepsRepoScopedTitle(t *testing.T) {
+	legacy := &session.Instance{Title: "legacy-row"} // pre-#1195 record: no ID
+
+	idOrTitle, scopeRepoID := streamAddress(legacy, "repo-123")
+	require.Equal(t, "legacy-row", idOrTitle)
+	require.Equal(t, "repo-123", scopeRepoID,
+		"a title-addressed stream keeps its repo scope so same-title rows in other repos are not confused")
+}

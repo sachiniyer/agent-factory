@@ -81,7 +81,7 @@ func TestAttachInstanceTab_RoutesEverySessionToStream(t *testing.T) {
 			require.Equal(t, int32(1), streamCalls.Load(),
 				"attach must dial the daemon's WS PTY stream exactly once — the sole "+
 					"byte source for local and remote sessions alike (#1837)")
-			require.Equal(t, inst.Title, gotTitle, "the stream must target the captured instance (#716)")
+			require.Equal(t, inst.ID, gotTitle, "the stream must target the captured instance by stable id (#716)")
 			require.Equal(t, tc.wantTabIdx, gotTabIdx, "the stream must target the captured tab (#716)")
 		})
 	}
