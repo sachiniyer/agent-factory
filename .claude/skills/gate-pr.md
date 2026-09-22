@@ -418,10 +418,10 @@ it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
 
-**The `$allowed` list in both jq snippets below must match `ALLOWED_AUTHORS` in
+**Every `$allowed` list in this skill must match `ALLOWED_AUTHORS` in
 `.github/scripts/auto-gate.js` exactly.** There is no mechanical derivation —
-the two copies are maintained by hand. Whenever `ALLOWED_AUTHORS` changes in the
-script, update both occurrences here in lockstep; a copy that disagrees with the
+they are kept in sync by hand. Whenever `ALLOWED_AUTHORS` changes in the
+script, update every occurrence here in lockstep; a copy that disagrees with the
 real predicate produces confident wrong answers and is worse than no copy.
 
 **A thread's location is not part of the test (#3689).** GitHub nulls `line`
