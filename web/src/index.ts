@@ -98,7 +98,6 @@ import { registerServiceWorker } from "./serviceworker.js";
 import {
   bootStampTheme,
   connectionAttemptMayCommit,
-  hasConnectedToken,
   persistThemeChoice,
   refreshThemeMode,
   stampTheme,
