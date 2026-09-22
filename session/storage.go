@@ -212,6 +212,13 @@ type InstanceData struct {
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
+	// AccountAgent is the agent namespace Account was selected in (#4430). It is
+	// durable because program_overrides can later resolve Program's enum to a
+	// different agent's command: re-deriving the namespace from that new command
+	// would look the same label up in another agent's registry. Empty on records
+	// older than the field — their selections could only have used the Program
+	// enum's namespace, which is the reader-side fallback.
+	AccountAgent string `json:"account_agent,omitempty"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving

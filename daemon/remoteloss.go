@@ -468,36 +468,19 @@ func aliveWithin(as session.AgentServer, timeout time.Duration) livenessProbe {
 	}
 }
 
-// noteAliveObservation records that a poll got an ANSWER out of this session's
-// runtime — the daemon's only positive proof of life.
+// noteAliveObservationLocked is the gate-protected core of an alive observation:
+// only the runtime that currently owns the daemonInstanceKey slot earns the
+// increment, in the SAME critical section. RefreshStatuses snapshots instances
+// and releases m.mu for the slow probe, so a probe that began before a kill can
+// land after forgetSessionRuntimeStateLocked deleted this entry — and an ungated
+// increment recreates it, leaking exactly the entry #3031 exists to remove.
 //
-// The Lost-restore loop clears a session's failure history only when this counter
-// has advanced past the value captured at its last respawn. That is what makes
-// "confirmed alive" an observation rather than a clock (#1917 round 6): a fixed
-// settle window is wrong at both ends — a daemon_poll_interval longer than the
-// window means a runtime that died instantly is only SEEN Lost after it expires
-// (so its history is wrongly cleared and the backoff never arms), and the 60s
-// remoteLostGracePeriod means an unanswerable remote stays non-Lost long past any
-// short window. Counting answers is immune to both, and scales with whatever the
-// poll interval and grace actually are.
-func (m *Manager) noteAliveObservation(repoID string, instance *session.Instance) {
-	// Gated on the instance still being the tracked one, in the SAME critical
-	// section as the increment. RefreshStatuses snapshots instances and releases
-	// m.mu for the slow probe, so a probe that began before a kill can land after
-	// forgetSessionRuntimeStateLocked deleted this entry — and an ungated
-	// increment recreates it, leaking exactly the entry #3031 exists to remove.
-	//
-	// The check is pointer identity against m.instances, NOT presence of the
-	// observation key: the two maps do not share a key space. m.instances is keyed
-	// by daemonInstanceKey (repoID\x00title) while aliveObservations is keyed by
-	// stableSessionKey, which is the stable instance ID whenever one is set — so
-	// `m.instances[key]` would miss on every ID-bearing session and silently stop
-	// recording the observations the restore-confirmation depends on.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.noteAliveObservationLocked(repoID, instance)
-}
-
+// The check is pointer identity against m.instances, NOT presence of the
+// observation key: the two maps do not share a key space. m.instances is keyed
+// by daemonInstanceKey (repoID\x00title) while aliveObservations is keyed by
+// stableSessionKey, which is the stable instance ID whenever one is set — so
+// `m.instances[key]` would miss on every ID-bearing session and silently stop
+// recording the observations the restore-confirmation depends on.
 func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.Instance) bool {
 	if m.instances[daemonInstanceKey(repoID, instance.Title)] != instance {
 		return false
@@ -506,9 +489,22 @@ func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.In
 	return true
 }
 
-// noteAliveObservationAtGeneration is the poll-owned form. It validates the
-// runtime generation inside Manager.mu so a predecessor answer cannot land
-// after a replacement snapshots this counter as its confirmation boundary.
+// noteAliveObservationAtGeneration is the poll-owned form of an alive observation.
+// It validates the runtime generation inside Manager.mu so a predecessor answer
+// cannot land after a replacement snapshots this counter as its confirmation
+// boundary.
+//
+// An alive observation records that a poll got an ANSWER out of this session's
+// runtime — the daemon's only positive proof of life. The Lost-restore loop
+// clears a session's failure history only when this counter has advanced past the
+// value captured at its last respawn. That is what makes "confirmed alive" an
+// observation rather than a clock (#1917 round 6): a fixed settle window is wrong
+// at both ends — a daemon_poll_interval longer than the window means a runtime
+// that died instantly is only SEEN Lost after it expires (so its history is
+// wrongly cleared and the backoff never arms), and the 60s remoteLostGracePeriod
+// means an unanswerable remote stays non-Lost long past any short window. Counting
+// answers is immune to both, and scales with whatever the poll interval and grace
+// actually are.
 func (m *Manager) noteAliveObservationAtGeneration(
 	repoID string,
 	instance *session.Instance,

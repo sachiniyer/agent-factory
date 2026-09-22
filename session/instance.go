@@ -181,6 +181,14 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
+	// accountAgent is the agent namespace Account was selected in. It must be
+	// durable rather than re-derived at refresh time: a program_overrides edit
+	// after the pin can resolve the recorded Program to a different agent's
+	// command, and re-deriving from that new command would silently reinterpret
+	// the same label in another agent's registry (#4430 review). Empty only when
+	// Account is ambient or the record predates the field — those selections
+	// could only have used the Program enum's namespace.
+	accountAgent string
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.

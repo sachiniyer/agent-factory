@@ -2744,11 +2744,15 @@ test("exhausted aggregate invalidation prevents the transaction from merging", a
       targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
       mergeEnabled: true,
     }),
-    /could not invalidate aggregate .* after ambiguous create failure \(fetch failed\) after 3 attempts/,
+    /could not invalidate aggregate .* after ambiguous create failure \(fetch failed\) after 4 attempts/,
   );
 
   assert.equal(github.checkCreateAttempts, 1);
-  assert.equal(github.checkListReads, 3);
+  // Four settle-window polls for the marker, then the one read that asks what
+  // the head publishes (#4763). It finds no aggregate generation at all, which
+  // proves nothing about mergeability — so this stays a rejection.
+  assert.equal(github.checkListReads, 5);
+  assert.deepEqual(github.updatedChecks, []);
   assert.equal(github.mergedWith, null);
   assert.equal(github.operations.includes("merge"), false);
 });
@@ -3192,6 +3196,266 @@ test("a non-rate-limit apply-gate transaction error still fails the run", async 
   const { error } = await runApplyGateStep({ github });
 
   assert.ok(error, "a real write defect must still be loud");
+});
+
+// #4763. `checks.create` for the lane's own invalidation answered HTTP 503, the
+// marker reconcile gave up ~1.25s later, and the exhaustion escaped
+// processAggregateHead unhandled — a red Auto Gate run on master for a transient
+// GitHub fault, the class #3396/#3808/#4461 each closed one instance of.
+//
+// The fixtures below are the incident's shape: the create is REJECTED (it never
+// lands, so no reconcile window of any length can find it), and the head already
+// carries the WAITING marker the pre-lane invalidate job published for this same
+// event — which is what makes the commit provably unmergeable without this
+// transaction's write.
+function serverError503() {
+  const error = new Error("Server Error");
+  error.status = 503;
+  error.response = { status: 503, headers: {}, data: { message: "Server Error" } };
+  return error;
+}
+
+function publishedAggregate({ id = 777, conclusion = "failure", title }) {
+  return {
+    ...checkRun({
+      id,
+      name: "Auto Gate decision",
+      externalId: aggregateExternalId(HEAD_SHA),
+      conclusion,
+    }),
+    output: { title },
+  };
+}
+
+const PRE_LANE_WAITING_TITLE = "WAITING: refreshing every PR/head decision at this commit";
+
+test("a 503 on the lane's invalidation create leaves the fenced head UNKNOWN instead of reddening the run (#4763)", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+  });
+  const warnings = [];
+
+  const { error } = await runApplyGateStep({
+    github,
+    core: { warning: (message) => warnings.push(String(message)) },
+  });
+
+  assert.equal(error, null, "a transient GitHub 5xx on a head that is already non-passing is not a defect");
+  assert.equal(github.checkCreateAttempts, 1, "the ambiguous POST is reconciled, never replayed");
+  assert.deepEqual(github.createdChecks, [], "the rejected create landed nothing");
+
+  // The exact terminal state #4461 uses for a could-not-evaluate transient: a
+  // FAILING conclusion titled UNKNOWN, written by idempotent update onto the
+  // generation the read proved is the newest one — not a second POST.
+  assert.equal(github.updatedChecks.length, 1);
+  const verdict = github.updatedChecks[0];
+  assert.equal(verdict.check_run_id, 777);
+  assert.equal(verdict.status, "completed");
+  assert.equal(verdict.conclusion, "failure");
+  assert.match(verdict.output.title, /^UNKNOWN: Auto Gate could not evaluate/);
+  assert.match(
+    verdict.output.summary,
+    /could not invalidate aggregate .* after ambiguous create failure \(Server Error\)/,
+  );
+  assertNoAggregateWriteSatisfiesTheRuleset(github, "a transient must never round to a satisfied required check");
+
+  // Without a generation of its own the transaction owns nothing to publish on,
+  // so it must stop: no evaluation, no per-PR decision, no merge.
+  assert.equal(github.graphqlReadsByNumber[1465] ?? 0, 0, "no PR was evaluated");
+  assert.equal(github.mergedWith, null);
+  assert.match(warnings.join("\n"), /could not confirm its invalidation[\s\S]*503/);
+});
+
+test("a 503 on the invalidation create still fails the run when a PASS is the newest generation (#4763)", async () => {
+  // The fail-closed boundary, and the control for the test above: same fault,
+  // but nothing non-passing stands on the head. The PASS is still what the
+  // ruleset reads and this transaction could not replace it, so a green run
+  // would be the only signal and it would say nothing happened (#4461).
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      publishedAggregate({
+        conclusion: "success",
+        title: "PASS: every open master PR at this commit passes Auto Gate",
+      }),
+    ],
+    checkCreateErrors: [serverError503()],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.ok(error, "a stale PASS with a green run is a silent merge-through");
+  assert.equal(error.name, "AutoGateCheckWriteError");
+  assert.equal(error.status, 503);
+  assert.match(error.message, /could not invalidate aggregate .* after ambiguous create failure \(Server Error\)/);
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.deepEqual(github.createdChecks, []);
+  assert.deepEqual(github.updatedChecks, [], "a generation this lane does not own is never rewritten off a PASS");
+  assert.equal(github.mergedWith, null);
+});
+
+test("a satisfied-but-not-success newest generation is as stale a PASS as success is (#4763)", async () => {
+  // GitHub counts neutral and skipped required checks as satisfied. The proof
+  // that the head is unmergeable has to read those the way the ruleset does.
+  // Concurrent only because each case sits out the whole settle window and the
+  // two share nothing.
+  await Promise.all(
+    ["neutral", "skipped"].map(async (conclusion) => {
+      const github = fakeGateGithub({
+        checkRuns: [...happyCheckRuns(), publishedAggregate({ conclusion, title: "legacy" })],
+        checkCreateErrors: [serverError503()],
+      });
+
+      await assert.rejects(
+        autoGate.processAggregateHead({
+          github,
+          context: fakeContext(),
+          core: fakeCore(),
+          headSha: HEAD_SHA,
+          targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+          mergeEnabled: true,
+        }),
+        /could not invalidate aggregate .* after ambiguous create failure \(Server Error\)/,
+        `${conclusion} satisfies the ruleset, so the run must stay loud`,
+      );
+      assert.deepEqual(github.updatedChecks, []);
+    }),
+  );
+});
+
+test("an invalidation create that lands after the read-retry window is adopted, not abandoned (#4763)", async () => {
+  // The other sub-case: GitHub answered 503 but the create LANDED, and check-run
+  // listing lagged past the old 1.25s / three-poll reconcile. Hidden for exactly
+  // the three listings the old window made, visible on the next.
+  const github = fakeGateGithub({ checkCreateAcceptedErrors: [serverError503()] });
+  const realPaginate = github.paginate;
+  let listings = 0;
+  github.paginate = async (fn, options) => {
+    const runs = await realPaginate(fn, options);
+    if (fn.name !== "listForRef") {
+      return runs;
+    }
+    listings += 1;
+    return listings <= 3
+      ? runs.filter((run) => !run.output?.text?.includes("auto-gate-check-create:"))
+      : runs;
+  };
+
+  const invalidated = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(listings, 4, "the fixture must have hidden the create for the whole old window");
+  assert.equal(invalidated.writeState, "created");
+  assert.equal(invalidated.checkRunId, 10000, "the transaction owns the generation its one POST created");
+  assert.equal(github.checkCreateAttempts, 1, "the ambiguous write must not be replayed");
+});
+
+test("the pre-lane step defers an unconfirmed invalidation create to the lane after its own retry (#4763)", async () => {
+  // The real error, not a hand-built look-alike: the step's partition reads
+  // flags the helper sets, so the helper has to be what sets them.
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      publishedAggregate({
+        conclusion: "success",
+        title: "PASS: every open master PR at this commit passes Auto Gate",
+      }),
+    ],
+    checkCreateErrors: [serverError503()],
+  });
+  let unconfirmed = null;
+  try {
+    await autoGate.invalidateAggregateDecision({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+    });
+  } catch (error) {
+    unconfirmed = error;
+  }
+  assert.ok(unconfirmed, "invalidateAggregateDecision itself stays loud — the pre-lane retry depends on the throw");
+  assert.equal(autoGate.isUnconfirmedCheckCreate(unconfirmed), true);
+  assert.equal(autoGate.isReadFailure(unconfirmed), true, "what gave up is the read-back of the create");
+  assert.equal(unconfirmed.status, 503);
+  assert.match(unconfirmed.message, /after ambiguous create failure \(Server Error\) after 4 attempts/);
+
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [{ head_sha: HEAD_SHA }],
+    invalidateResults: { [HEAD_SHA]: [unconfirmed, unconfirmed] },
+  });
+
+  assert.deepEqual(run.attempts, [HEAD_SHA, HEAD_SHA], "the fencing re-POST is still attempted first");
+  assert.equal(run.error, null, "a GitHub 5xx window is not a defect-red job failure");
+  assert.deepEqual(
+    JSON.parse(run.outputs.invalidated_heads).map((head) => head.head_sha),
+    [HEAD_SHA],
+    "the deferred head enters the lane, which retries the invalidation and proves the head non-passing or fails",
+  );
+});
+
+test("a 5xx that also refuses the UNKNOWN write still ends clean on a proven non-passing head (#4763)", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+    checkUpdateErrors: Array.from({ length: 10 }, () => serverError503()),
+  });
+  const warnings = [];
+
+  const { error } = await runApplyGateStep({
+    github,
+    core: { warning: (message) => warnings.push(String(message)) },
+  });
+
+  assert.equal(error, null, "the read already proved the head unmergeable; the title is a courtesy");
+  assert.ok(github.checkUpdateAttempts > 0, "the UNKNOWN write was attempted and refused");
+  assert.deepEqual(github.updatedChecks, []);
+  assert.deepEqual(github.createdChecks, []);
+  assert.match(warnings.join("\n"), /could not retitle/);
+  assert.equal(github.mergedWith, null);
+});
+
+test("a non-transient refusal of the UNKNOWN write after an unconfirmed invalidation stays loud (#4763)", async () => {
+  const forbidden = new Error("Resource not accessible by integration");
+  forbidden.status = 403;
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+    checkUpdateErrors: [forbidden],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.ok(error, "a permission regression on check writes must not pass as infrastructure noise");
+  assert.match(error.message, /Resource not accessible by integration/);
+});
+
+test("an unconfirmed invalidation on a resolver read-failure head keeps the resolver's reason (#4763)", async () => {
+  // The lane's other entry: target resolution already failed upstream, so the
+  // lane invalidates and publishes that failure without evaluating anything.
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+  });
+
+  const { error } = await runApplyGateStep({
+    github,
+    readFailure: "BLOCKED: could not resolve the event's pull requests after 3 attempts: fetch failed",
+  });
+
+  assert.equal(error, null);
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].check_run_id, 777);
+  assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(github.updatedChecks[0].output.title, /^UNKNOWN:/);
+  assert.match(github.updatedChecks[0].output.summary, /could not resolve the event's pull requests/);
+  assert.equal(github.mergedWith, null);
 });
 
 test("an older transaction cannot overwrite a newer invalidation generation", async () => {

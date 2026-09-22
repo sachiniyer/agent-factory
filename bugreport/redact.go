@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/redactspan"
 	"github.com/sachiniyer/agent-factory/internal/redactx"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -536,6 +537,12 @@ var sensitiveJSONKeys = map[string]bool{
 	// still awaiting delivery" survives for triage while the two labels and the
 	// resumable conversation id inside it do not.
 	"limit_account": true, "pending_account_swap": true,
+	// account_agent is the namespace the account label was selected in (#4430).
+	// The typed path keeps it only when it is one of af's agent names and marks
+	// anything else; this path cannot make that distinction, so it always
+	// masks — a record the typed decode rejected must not publish a value the
+	// accepted record would have hidden (#4703's account_scope parity rule).
+	"account_agent": true,
 	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
 	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
 	// bundle in a form the closing text scrub cannot recognize as a path, a home
@@ -663,6 +670,13 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.Account != "" {
 		d.Account = redactedMarker
 	}
+	// AccountAgent is the namespace Account was selected in (#4430 round 4).
+	// af only writes the credential-boundary agent enum there — the same value
+	// PendingAccountSwap.AccountAgent keeps — so it stays legible next to the
+	// marker; anything else did not come from af and is marked like a label.
+	if agent := d.AccountAgent; agent != "" && !tmux.IsSupportedProgram(agent) {
+		d.AccountAgent = redactedMarker
+	}
 	// Every other account LABEL in the row takes Account's trade, for Account's
 	// reason: they are the same user-picked strings, reached through the
 	// usage-limit swap (#3127) rather than through `--account`, and a bundle that
@@ -685,6 +699,18 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		if d.PendingAccountSwap.To != "" {
 			d.PendingAccountSwap.To = redactedMarker
 		}
+		// AccountAgent names the registry To was selected in (#4430). af only
+		// writes the credential-boundary agent enum there, and that enum is what
+		// makes the redacted pair legible; any other value did not come from af
+		// and is marked like the labels.
+		if agent := d.PendingAccountSwap.AccountAgent; agent != "" && !tmux.IsSupportedProgram(agent) {
+			d.PendingAccountSwap.AccountAgent = redactedMarker
+		}
+		// Program is the incoming launch command frozen at commit (#4430 round
+		// 7) — a user-supplied command line, the same class as Program and
+		// RuntimeProgram above, so it takes their trade: reduced to the agent
+		// it runs, which is the only fact triage needs from it.
+		d.PendingAccountSwap.Program = redactProgram(d.PendingAccountSwap.Program)
 		// The account a carried conversation was copied from (#4367) is the
 		// same user-picked label as From. Empty means the ambient identity and
 		// stays empty, so redaction never invents an account.
