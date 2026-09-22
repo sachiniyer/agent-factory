@@ -613,7 +613,7 @@ If an agent reworded its banner, override the detection regex per agent with
 ```toml
 [limit_patterns]
 claude = "Claude usage limit reached\\."
-codex  = "You've hit your usage limit"
+codex  = "You['’]ve hit your usage limit"
 ```
 
 Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`,
