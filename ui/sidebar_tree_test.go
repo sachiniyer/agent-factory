@@ -220,6 +220,41 @@ func TestSidebarTreeCollapseSurvivesDownFromInstanceRow(t *testing.T) {
 	assert.False(t, sel.IsTab)
 }
 
+// TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab pins the second half
+// of the regression the inline review flagged: when an explicitly collapsed
+// instance carries a NONZERO active tab, a Down whose target is the same
+// instance's tabs cannot land (the tab rows are folded away), so it must be a
+// consumed no-op BEFORE SetActiveTab — otherwise selectTabStop resets the
+// active tab to 0, silently retargeting the preview pane while the fold
+// visually persists. The sibling test above uses the default active tab (0),
+// which a spurious SetActiveTab(0) cannot distinguish from "unchanged"; this
+// one uses tab 1 so the reset is observable.
+func TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab(t *testing.T) {
+	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s), "instance 0 auto-expanded")
+
+	// Drive the active tab to the (nonzero) terminal tab, then fold instance 0
+	// in place from its row.
+	s.proj.SetActiveTab(1)
+	require.Equal(t, 1, s.proj.ActiveTab(), "active tab is the terminal tab before collapse")
+	s.CollapseSection()
+	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Equal(t, 0, tabRowCount(s))
+	require.False(t, s.GetSelection().IsTab, "collapse leaves the cursor on the instance row")
+
+	// A same-instance Down is a consumed no-op: the fold and cursor survive…
+	s.Down()
+	assert.Equal(t, 0, tabRowCount(s), "folded tabs stay hidden after Down")
+	assert.False(t, s.GetSelection().IsTab, "cursor does not dive into folded tabs")
+	assert.Equal(t, "t-00", s.treeCollapsed, "explicit collapse survives same-instance Down")
+	sel := s.GetSelection()
+	assert.Equal(t, 0, sel.ItemIndex)
+	assert.False(t, sel.IsTab)
+	// …and the store's active tab is NOT reset to 0.
+	assert.Equal(t, 1, s.proj.ActiveTab(), "active tab preserved when same-instance Down is a no-op")
+}
+
 // TestSidebarTreeCollapseClearsOnCrossInstanceSelect pins that the fix did
 // not weaken the documented cross-instance clear: moving the selection to a
 // different instance still clears treeCollapsed so every newly selected

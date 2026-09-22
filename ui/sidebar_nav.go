@@ -428,6 +428,19 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 	// this guard, turning a single Down off the collapsed row into an
 	// unconditional re-expand.
 	prev := s.proj.GetSelectedInstance()
+	// When the target tab belongs to the SAME instance the cursor already
+	// rests on AND that instance is explicitly collapsed (h/←), the rebuilt
+	// list omits its tab rows, so the loop below could not land and would
+	// return false — but only after SetActiveTab reset the active tab to tab
+	// 0, silently retargeting the preview pane while the fold visually
+	// persists, and the false return makes moveVerticalNavStop fall through
+	// to expand the Archived section. Treat the move as a consumed no-op
+	// before any store mutation: the fold, active tab and cursor are
+	// unchanged. liveTabStops() emits these stops regardless of treeCollapsed,
+	// so this guard is reached on a normal cross-row Down, not a stale one.
+	if prev != nil && prev.Title == inst.Title && s.treeCollapsed == inst.Title {
+		return true
+	}
 	s.proj.SetSelectedInstance(inst)
 	s.proj.SetActiveTab(stop.tabIndex)
 	if prev == nil || prev.Title != inst.Title {
