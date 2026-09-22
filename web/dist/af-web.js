@@ -18843,6 +18843,12 @@ function doRemoveTask(task) {
       if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
+      if (isMutationCommittedError(error)) {
+        if (modal === handle) closeModal();
+        refreshTasks();
+        surfaceTabError(error);
+        return;
+      }
       handle.setBusy(false);
       handle.setError(errorText(error));
     });
