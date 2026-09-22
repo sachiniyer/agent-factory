@@ -455,6 +455,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		// carry would claim its conversation was lost (#4430 review round 5).
 		brief := instance.BuildMissionBrief(scheduled.accountNamespace(), scheduled.promptOverride, scheduled.reason)
 		brief.Conversation = instance.PreparedAccountSwapConversation()
+		brief.CrossAgent = scheduled.crossAgent
 		scheduled.headSHA = brief.Work.HeadSHA
 		scheduled.mission = brief.Render()
 		handoff, err = instance.SelectAccountForHandoff(scheduled.from, scheduled.to, scheduled.agent, scheduled.accountNamespace(), scheduled.crossAgent, scheduled.reason, scheduled.headSHA, scheduled.mission)
