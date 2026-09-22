@@ -299,8 +299,9 @@ How it behaves:
   releases a slot: the agent has gone idle and the session is sitting healthy. It is not
   a background sweep over old sessions, which matters because "a task session whose run
   has finished" stays true forever — including for a session you have since adopted and
-  are working in yourself. Once a run's completion has passed, that session is never
-  revisited.
+  are working in yourself. The completion edge fires once; if a restart drops a
+  teardown mid-flight, the next daemon generation re-drives only the obligation the
+  edge already filed — never a sweep that reconsiders completed sessions.
 - **A session you took over is yours.** If you prompt a finished run's session, the work
   is not the task's, and no policy applies to it.
 - **A session created outside a task is never touched**, whatever the tasks in that
