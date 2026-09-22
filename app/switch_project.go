@@ -29,6 +29,16 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	projects, registryDegraded := m.buildProjectList()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
+	if isRemoteTarget() {
+		// The picker's registry rows come from the LOCAL config.ListProjects
+		// and its path input resolves on THIS filesystem, but a rebind would
+		// land on the REMOTE daemon's registry — where the prj_ id likely
+		// does not exist, or worse, names a different record. Observation and
+		// mutation must come from the same daemon (#3626's rule); until the
+		// switcher reads the remote registry too, rebind stays local-only and
+		// the remote repair is `af projects rebind` on the daemon host.
+		m.projectPickerOverlay.SetRebindDenied("local registry — `af projects rebind` on daemon host")
+	}
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject

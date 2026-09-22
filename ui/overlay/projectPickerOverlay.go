@@ -82,6 +82,21 @@ type ProjectPickerOverlay struct {
 	// consumes it, the same once-only contract as addRequested.
 	rebindRequested bool
 	rebindTarget    Project
+	// rebindPending is true from the moment TakeRebindRequest hands a request
+	// off until the caller answers it — SetRebindError on a rejection, and on
+	// success the picker closes so nothing clears it. It makes the form inert
+	// while the daemon decides: at most one rebind is in flight per picker, a
+	// second Enter cannot race a second mutation, and the answer the user
+	// sees (inline error or success) is always the one for the path still on
+	// screen.
+	rebindPending bool
+	// rebindDeny, when non-empty, refuses rebind before it can submit — the
+	// refusal IS the message, pre-shown on entry and re-shown on Enter. The
+	// caller sets it when the targeted daemon is remote: the picker's prj_…
+	// ids come from the LOCAL config.ListProjects and the path resolves on
+	// the client, so a remote rebind would fail on the remote's registry —
+	// or worse, move a remote record that happens to share the id.
+	rebindDeny string
 
 	// degraded marks a failed project-registry read (#3298): the rows still
 	// render from the other discovery sources, but every registered
@@ -174,12 +189,29 @@ func (p *ProjectPickerOverlay) TakeRebindRequest() (Project, string, bool) {
 		return Project{}, "", false
 	}
 	p.rebindRequested = false
+	// The request is now in flight: the form goes inert until the caller
+	// answers (rejection → SetRebindError re-arms it; success closes the
+	// picker), so at most one rebind per picker can be pending and a second
+	// Enter cannot race a second mutation.
+	p.rebindPending = true
 	return p.rebindTarget, strings.TrimSpace(p.rebindInput), true
 }
 
 // SetRebindError shows an inline error under the rebind-mode input and keeps
 // the overlay open so the user can correct the path.
-func (p *ProjectPickerOverlay) SetRebindError(msg string) { p.rebindErr = msg }
+func (p *ProjectPickerOverlay) SetRebindError(msg string) {
+	// The in-flight request answered with a rejection: re-arm the form so the
+	// user can correct the path and resubmit.
+	p.rebindPending = false
+	p.rebindErr = msg
+}
+
+// SetRebindDenied refuses rebind before it can submit, carrying the refusal
+// message (shown on entry and re-shown on Enter). The caller sets it when a
+// rebind could not act on the same daemon host the picker's records and the
+// typed path resolve against — a remote target, where both halves come from
+// the CLIENT but the mutation would land on the remote registry.
+func (p *ProjectPickerOverlay) SetRebindDenied(msg string) { p.rebindDeny = msg }
 
 // HandleKeyPress processes input. Returns true if the overlay should close.
 func (p *ProjectPickerOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
@@ -204,7 +236,9 @@ func (p *ProjectPickerOverlay) handleListKey(msg tea.KeyMsg) bool {
 			p.rebinding = true
 			p.rebindTarget = proj
 			p.rebindInput = ""
-			p.rebindErr = ""
+			// Pre-show the caller's refusal when rebind cannot run at all
+			// (a remote target) — "" under the normal local path.
+			p.rebindErr = p.rebindDeny
 		}
 		return false
 	}
@@ -264,6 +298,12 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 }
 
 func (p *ProjectPickerOverlay) handleRebindKey(msg tea.KeyMsg) bool {
+	if p.rebindPending {
+		// The daemon is deciding: submission AND editing are inert so a second
+		// Enter cannot race a second mutation, and the answer that lands is
+		// unambiguously the one for the path still on screen.
+		return false
+	}
 	switch msg.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		// Back out of rebind mode to the list rather than closing the picker.
@@ -272,6 +312,12 @@ func (p *ProjectPickerOverlay) handleRebindKey(msg tea.KeyMsg) bool {
 		p.rebindErr = ""
 		return false
 	case tea.KeyEnter:
+		if p.rebindDeny != "" {
+			// Rebind cannot run at all (a remote target): re-show the refusal
+			// rather than produce a request that would reach the wrong host.
+			p.rebindErr = p.rebindDeny
+			return false
+		}
 		if strings.TrimSpace(p.rebindInput) != "" {
 			p.rebindRequested = true
 		}
@@ -346,7 +392,12 @@ func (p *ProjectPickerOverlay) Render() string {
 			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.rebindErr), cw))
 		}
 		lines = append(lines, "")
+		// While the daemon decides, the inert form says so — a bare "enter
+		// rebind" hint would invite the second Enter that must not dispatch.
 		hint := "enter rebind · esc back"
+		if p.rebindPending {
+			hint = "rebinding…"
+		}
 		lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))
 		return finishRender(style, fit, textRect, lines)
 	}

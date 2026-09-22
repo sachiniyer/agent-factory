@@ -360,3 +360,87 @@ func TestProjectPickerStaysWithinMaxHeight(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectPickerRebindPendingIsInert pins the single-flight property Codex
+// flagged on #4789: after Enter hands a request to the caller, the daemon may
+// be slow to answer — the form must not let a second Enter (or edits that
+// change what the on-screen path appears to be) race a second mutation. While
+// pending, every key is inert; a rejection (SetRebindError) re-arms the form,
+// and the path the user corrects is the one that was actually submitted.
+func TestProjectPickerRebindPendingIsInert(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_p1", MissingPath: true},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/first/path")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	target, path, ok := p.TakeRebindRequest()
+	if !ok || path != "/first/path" || target.RegistryID != "prj_p1" {
+		t.Fatalf("TakeRebindRequest = (%+v, %q, %v), want the registry row + typed path", target, path, ok)
+	}
+
+	// The daemon is still deciding: a second Enter must NOT submit again, and
+	// edits must not change the input the pending answer refers to.
+	typeRunes(p, "/second/path")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, _, ok := p.TakeRebindRequest(); ok {
+		t.Fatalf("a second rebind submitted while the first was still in flight")
+	}
+	if p.rebindInput != "/first/path" {
+		t.Fatalf("pending edits must be inert: input drifted to %q", p.rebindInput)
+	}
+	// Esc is inert while pending too — leaving the mode mid-flight could
+	// re-arm `b` and admit a second request.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if !p.rebinding {
+		t.Fatalf("Esc must not leave rebind mode while a request is pending")
+	}
+	// The pending hint replaces "enter rebind" so nothing invites the second
+	// submission.
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "rebinding") {
+		t.Fatalf("a pending rebind should say it is in flight; got:\n%s", out)
+	}
+
+	// A rejection re-arms the form on the submitted path — the user corrects
+	// what was actually sent.
+	p.SetRebindError("path is already bound to another project")
+	typeRunes(p, "-fixed")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	_, path, ok = p.TakeRebindRequest()
+	if !ok || path != "/first/path-fixed" {
+		t.Fatalf("after a rejection the corrected path should resubmit; got (%q, %v)", path, ok)
+	}
+}
+
+// TestProjectPickerRebindDeniedRefuses pins the remote-target refusal Codex
+// flagged on #4789: when the caller marks rebind unavailable (a remote
+// daemon — the picker's prj_ ids and the path both resolve on the CLIENT but
+// the mutation would land on the remote's registry), `b` still enters the
+// mode so the refusal is visible, and Enter never produces a request.
+func TestProjectPickerRebindDeniedRefuses(t *testing.T) {
+	const deny = "local registry — `af projects rebind` on daemon host"
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_p2", MissingPath: true},
+	}, "")
+	p.SetRebindDenied(deny)
+
+	p.HandleKeyPress(keyRune('b'))
+	if !p.rebinding {
+		t.Fatalf("b should still enter rebind mode so the refusal is visible")
+	}
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "af projects rebind") {
+		t.Fatalf("the refusal should render on entry; got:\n%s", out)
+	}
+
+	typeRunes(p, "/any/path")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, _, ok := p.TakeRebindRequest(); ok {
+		t.Fatalf("a denied rebind must never produce a request")
+	}
+	if p.rebindErr != deny {
+		t.Fatalf("Enter should re-show the refusal, got %q", p.rebindErr)
+	}
+}
