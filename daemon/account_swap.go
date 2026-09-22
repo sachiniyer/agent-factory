@@ -827,8 +827,16 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 		// A manual handoff may already have rewritten Program to a different
 		// agent. Its retained observations still name the outgoing namespace;
 		// do not reinterpret the old live limit under the incoming one.
-		if !manual && sessionenv.AgentForCommand(other.AgentProgram()) == agent {
-			if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
+		//
+		// Key the live wall on the agent it was filed under (LimitIdentity), not
+		// the configured enum: setLimitReachedLocked records against
+		// currentAgentNameLocked(), which honors program_overrides and so can
+		// differ from AgentProgram. The durable loops below already key on
+		// observation.Agent; matching that axis keeps the (Agent, Account)
+		// composite-key invariant from AccountLimitObservationData intact.
+		if !manual {
+			liveAgent, account, limitedNow := other.LimitIdentity()
+			if limitedNow && liveAgent == agent && strings.TrimSpace(account) != "" {
 				resetAt, hasReset := other.LimitResetAt()
 				if !hasReset || now.Before(resetAt.Add(limitResumeGrace)) {
 					limitedSet[account] = struct{}{}
