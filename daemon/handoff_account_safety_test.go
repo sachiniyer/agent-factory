@@ -41,7 +41,7 @@ func TestHandoffAccountMissingTargetRefusesBeforeTeardown(t *testing.T) {
 			require.ErrorContains(t, err, "launch preflight")
 			require.False(t, isMutationCommitted(err))
 			require.Equal(t, "codex", inst.AgentProgram())
-			require.Empty(t, inst.Handoffs())
+			require.Empty(t, inst.Tabs[0].Handoffs)
 			require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
 			_, respawns, prompts := backend.snapshot()
 			require.Zero(t, respawns)
@@ -270,7 +270,7 @@ func TestHandoffScopedSessionRefusesCrossAgentProgramOverride(t *testing.T) {
 	account, _ := inst.AccountSelection()
 	require.Equal(t, "work", account,
 		"a refused handoff leaves the recorded scope untouched")
-	require.Empty(t, inst.Handoffs())
+	require.Empty(t, inst.Tabs[0].Handoffs)
 	_, respawns, prompts := backend.snapshot()
 	require.Zero(t, respawns)
 	require.Empty(t, prompts)
@@ -302,7 +302,7 @@ func TestHandoffScopedSessionDescopesCrossAgentProgramOverride(t *testing.T) {
 	require.Empty(t, resp.ToAccount)
 	account, _ := inst.AccountSelection()
 	require.Empty(t, account, "the record dropped the scope — aider has no namespace for it")
-	handoffs := inst.Handoffs()
+	handoffs := inst.Tabs[0].Handoffs
 	require.Len(t, handoffs, 1)
 	require.Equal(t, "work", handoffs[0].FromAccount)
 	_, _, prompts := backend.snapshot()
@@ -332,7 +332,7 @@ func TestHandoffScopedSessionRefusesUnclassifiableTarget(t *testing.T) {
 	require.Contains(t, err.Error(), "cannot classify")
 	account, _ := inst.AccountSelection()
 	require.Equal(t, "work", account, "a refused handoff never touches the scope")
-	require.Empty(t, inst.Handoffs(), "a refused handoff records nothing")
+	require.Empty(t, inst.Tabs[0].Handoffs, "a refused handoff records nothing")
 	_, _, prompts := backend.snapshot()
 	require.Empty(t, prompts, "a refused handoff delivers no mission")
 }
@@ -422,7 +422,7 @@ func TestHandoffScopedSessionDescopeRefusesPendingTabCleanup(t *testing.T) {
 	account, _ := inst.AccountSelection()
 	require.Equal(t, "work", account,
 		"a refused handoff leaves the recorded scope untouched")
-	require.Empty(t, inst.Handoffs())
+	require.Empty(t, inst.Tabs[0].Handoffs)
 	_, respawns, prompts := backend.snapshot()
 	require.Zero(t, respawns)
 	require.Empty(t, prompts)

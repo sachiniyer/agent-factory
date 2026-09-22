@@ -23,7 +23,7 @@ func TestHandoffAccountCheckpointFailureLeavesRecoverableOldIdentity(t *testing.
 	require.Positive(t, failed())
 	require.Equal(t, session.LiveLost, inst.GetLiveness(), "the stopped old runtime must never be reported healthy")
 	require.Equal(t, "work", inst.Account)
-	require.Empty(t, inst.Handoffs())
+	require.Empty(t, inst.Tabs[0].Handoffs)
 	require.Equal(t, session.OpNone, inst.GetInFlightOp())
 	require.Contains(t, m.settleOwed, stableSessionKey(repo, inst))
 	heal()
