@@ -438,7 +438,7 @@ the parsed reset time.
 ```toml
 [limit_patterns]
 claude = "Claude usage limit reached\\."
-codex  = "You've hit your usage limit"
+codex  = "You['’]ve hit your usage limit"
 ```
 
 - Keys must be a supported agent enum (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`).
