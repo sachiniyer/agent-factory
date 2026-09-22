@@ -57,11 +57,15 @@ func TestArchiveTeardown_RevalidationFailureSelfHeals_OutOfBand(t *testing.T) {
 	claim, err := gw.ClaimRelocationSource()
 	require.NoError(t, err)
 
-	// Mutate the worktree identity out-of-band: remove and recreate the directory
-	// so it gets a new inode. RevalidateRelocationClaim will see the new identity,
-	// find it does not match the claim's recorded identity, and self-heal via
+	// Mutate the worktree identity out-of-band: rename the original directory
+	// aside (keeping its inode allocated — RemoveAll+Mkdir can reuse the same
+	// inode on filesystems like overlayfs, which would let revalidation match the
+	// recorded identity and skip the heal) and create a fresh replacement so it
+	// gets a new inode. RevalidateRelocationClaim will see the new identity, find
+	// it does not match the claim's recorded identity, and self-heal via
 	// recordStaleClaimLocked (installs ClaimStale, releases the active claim).
-	require.NoError(t, os.RemoveAll(source))
+	mutatedAside := filepath.Join(root, "worktree-mutated-aside")
+	require.NoError(t, os.Rename(source, mutatedAside))
 	require.NoError(t, os.Mkdir(source, 0o755))
 
 	// Panes confirmed dead so the flow reaches RevalidateRelocationClaim. No
