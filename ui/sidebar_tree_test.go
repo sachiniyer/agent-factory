@@ -187,6 +187,57 @@ func TestSidebarTreeExplicitCollapseExpand(t *testing.T) {
 	assert.Equal(t, 2, tabRowCount(s), "re-selecting auto-expands; explicit collapse does not persist")
 }
 
+// TestSidebarTreeCollapseSurvivesDownFromInstanceRow pins the
+// c4757da9 regression: a single Down off an explicitly-collapsed (h/←)
+// instance row must NOT clear treeCollapsed and re-expand the SAME instance
+// into its own tab 0. The field's doc states it is "Cleared when the selection
+// moves to a different instance"; a Down that targets the same instance's
+// tabs is not a cross-instance move, so the fold must persist and the cursor
+// must stay on the instance row (not dive into hidden tabs). Pre-fix the
+// unconditional s.treeCollapsed = "" in selectTabStop reverted the collapse.
+func TestSidebarTreeCollapseSurvivesDownFromInstanceRow(t *testing.T) {
+	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s), "instance 0 auto-expanded")
+
+	// h/← from instance 0's own row folds its tab children in place.
+	s.CollapseSection()
+	require.Equal(t, 0, tabRowCount(s))
+	require.Equal(t, "t-00", s.treeCollapsed)
+	sel := s.GetSelection()
+	require.False(t, sel.IsTab, "collapse leaves the cursor on the instance row")
+
+	// A single Down press must not undo the fold. The pre-fix code
+	// unconditionally cleared treeCollapsed in selectTabStop and dove into
+	// tab 0 of the SAME instance.
+	s.Down()
+	assert.Equal(t, 0, tabRowCount(s), "folded tabs stay hidden after Down")
+	assert.False(t, s.GetSelection().IsTab, "cursor does not dive into folded tabs")
+	assert.Equal(t, "t-00", s.treeCollapsed, "explicit collapse survives same-instance Down")
+	// The cursor stays on instance 0's row.
+	sel = s.GetSelection()
+	assert.Equal(t, 0, sel.ItemIndex)
+	assert.False(t, sel.IsTab)
+}
+
+// TestSidebarTreeCollapseClearsOnCrossInstanceSelect pins that the fix did
+// not weaken the documented cross-instance clear: moving the selection to a
+// different instance still clears treeCollapsed so every newly selected
+// instance starts auto-expanded (collapse-by-default applies to non-selected
+// instances).
+func TestSidebarTreeCollapseClearsOnCrossInstanceSelect(t *testing.T) {
+	s := newTreeSidebar(t, 3)
+	s.SetSelectedInstance(0)
+	s.CollapseSection()
+	require.Equal(t, "t-00", s.treeCollapsed)
+	require.Equal(t, 0, tabRowCount(s))
+
+	s.SetSelectedInstance(1) // different instance
+	assert.Equal(t, 1, s.GetSelection().ItemIndex)
+	assert.Equal(t, "", s.treeCollapsed, "cleared — a different instance is selected")
+	assert.Equal(t, 2, tabRowCount(s), "new instance auto-expands")
+}
+
 // TestSidebarTreeTabCursorDrivesActiveTab pins the selection tab dimension:
 // landing the cursor on a tab row sets the store's active tab (which is what
 // retargets the content pane), and GetSelectedInstance still resolves the

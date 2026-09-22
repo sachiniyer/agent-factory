@@ -419,9 +419,20 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 		return false
 	}
 
+	// Capture the previously selected instance BEFORE SetSelectedInstance
+	// mutates it: an explicit h/← collapse (treeCollapsed) must survive a
+	// same-instance move (e.g. Down off the collapsed row). Only a cross-
+	// instance move clears the override so every newly selected instance
+	// starts auto-expanded — mirroring the guard pushSelection already
+	// carries. c4757da9 routed Down/Up through selectTabStop and dropped
+	// this guard, turning a single Down off the collapsed row into an
+	// unconditional re-expand.
+	prev := s.proj.GetSelectedInstance()
 	s.proj.SetSelectedInstance(inst)
 	s.proj.SetActiveTab(stop.tabIndex)
-	s.treeCollapsed = ""
+	if prev == nil || prev.Title != inst.Title {
+		s.treeCollapsed = ""
+	}
 	for i, sec := range s.sections {
 		if sec.Kind == SectionInstances {
 			s.sections[i].Expanded = true
