@@ -532,20 +532,20 @@
       "id": "project.rebind",
       "title": "Rebind a stable project identity to a replacement checkout",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/overlay/projectPickerOverlay.go rebind mode (b on a registry-backed row) → app/switch_project.go handleRebindProject → rebindProjectThroughDaemon (apiclient RebindProject)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/ui.ts renderProjectSwitch footer 'Rebind…' + 'checkout missing' row marker → web/src/modals.ts rebindProjectModal → web/src/api.ts rebindProject (POST /v1/RebindProject)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsRebindCmd"
+        "pointer": "api/projects.go projectsRebindCmd (af projects rebind) → daemon RebindProject RPC"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#2216",
-      "notes": "The CLI exposes the explicit repair required after a reclone. TUI/web status and repair actions remain part of the later #2216 project-identity integration."
+      "notes": "Rebind is now daemon-backed like register (#2456): POST /v1/RebindProject + the gob control-socket method wrap config.RebindProject (the single writer, #960) and publish projects.changed, so all three surfaces share one mutation path. The CLI resolves its path arg against the caller's cwd before sending — the same contract as `af projects add`. The TUI offers it in the project picker: registry-backed rows carry their prj_ id, a row whose path_exists is false shows a 'missing' marker, and `b` opens a path-prompt mode whose daemon rejection is corrected inline (mirroring the add flow). The web switcher keeps full registry records in state, marks a missing checkout on the row, and offers 'Rebind…' in the menu footer for the selected registered project via rebindProjectModal (same host-path field + directory browser as add-project). The stable prj_ id, checkout-marker checks, and ownership refusal all live in config.RebindProject — no surface reimplements them."
     },
     {
       "id": "project.switch",
@@ -1611,6 +1611,7 @@
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
+      "POST /v1/RebindProject": "project.rebind",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1643,6 +1644,7 @@
       "fixed:cancel": "session.create",
       "fixed:change program": "session.create.opt.program",
       "fixed:delete project": "project.delete",
+      "fixed:rebind project": "project.rebind",
       "fixed:focus": "tui.navigation",
       "fixed:focus prev": "tui.navigation",
       "fixed:initial prompt": "session.create.opt.prompt",
@@ -1699,6 +1701,7 @@
       "ListTasks": "task.list",
       "PauseStatusPoll": "-",
       "RegisterProject": "project.add",
+      "RebindProject": "project.rebind",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",

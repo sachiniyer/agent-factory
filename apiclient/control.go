@@ -357,3 +357,15 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 	}
 	return resp.Project, nil
 }
+
+// RebindProject moves a registered project's stable identity to the checkout at
+// path through the daemon — the single writer (#960) — which resolves the path
+// on its own filesystem, refuses a root another project owns, and publishes
+// projects.changed. HTTP twin of RebindProject.
+func (c *Client) RebindProject(id, path string) (config.Project, error) {
+	var resp daemon.RebindProjectResponse
+	if err := c.call("RebindProject", daemon.RebindProjectRequest{ID: id, Path: path}, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}

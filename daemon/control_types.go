@@ -310,16 +310,41 @@ type RegisterProjectRequest struct {
 // #2456's UI slices land it shows as an empty row in that daemon's project
 // switcher until a session is created into it.
 //
-// Scope caveat for a REMOTE daemon: `af projects list` and `af projects rebind`
-// still run in-process against the CLIENT's local registry, so they will not see
-// a project that `add` just wrote to the daemon's registry. For the common
-// local daemon the two registries are the same store, so it round-trips as
-// expected. Routing list/rebind through the daemon too is the follow-up needed
-// for full remote parity (#2491).
+// Scope caveat for a REMOTE daemon: `af projects list` still runs in-process
+// against the CLIENT's local registry, so it will not see a project that `add`
+// or `rebind` just wrote to the daemon's registry. For the common local daemon
+// the two registries are the same store, so it round-trips as expected. Routing
+// list through the daemon too is the follow-up needed for full remote parity
+// (#2491).
 //
 // OK is always true on a nil error (a redundant flag kept for wire symmetry with
 // the other project RPCs).
 type RegisterProjectResponse struct {
+	OK      bool           `json:"ok"`
+	Project config.Project `json:"project"`
+}
+
+// RebindProjectRequest asks the daemon to move a registered project's stable
+// identity (ID, a prj_… registry id) to the checkout at Path — the repair after
+// the checkout it names was moved or recloned elsewhere (`af projects rebind`,
+// the #2355 registry's explicit rebind).
+//
+// Path names a directory on the DAEMON's filesystem, under the same rule as
+// RegisterProjectRequest.Path: absolute or ~-prefixed, because the daemon has no
+// access to the caller's working directory. The CLI resolves its argument
+// against the user's cwd before sending (api/projects.go); the web only ever
+// supplies daemon-host paths.
+type RebindProjectRequest struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
+// RebindProjectResponse carries the re-bound durable identity: the same ID,
+// its new Root, and the RepoID the replacement checkout resolved to (a real→real
+// transition — config.RebindProject never writes an invented id back).
+//
+// OK is always true on a nil error (wire symmetry with the other project RPCs).
+type RebindProjectResponse struct {
 	OK      bool           `json:"ok"`
 	Project config.Project `json:"project"`
 }

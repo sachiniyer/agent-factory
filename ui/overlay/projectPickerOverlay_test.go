@@ -214,6 +214,100 @@ func TestProjectPickerRenderShowsCountsAndNavHint(t *testing.T) {
 	}
 }
 
+func TestProjectPickerRebindFlow(t *testing.T) {
+	// A registry-backed row (RegistryID set) is what `b` rebinds; a session-
+	// derived row has no registration to move.
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "moved", Root: "/old/moved", RegistryID: "prj_aaa", MissingPath: true},
+		{Name: "derived", Root: "/repos/derived"},
+	}, "")
+	if p.selectedIdx != 0 {
+		t.Fatalf("cursor should start on the first row, got %d", p.selectedIdx)
+	}
+
+	// b on the registry row enters rebind mode; the hint names the project.
+	if closed := p.HandleKeyPress(keyRune('b')); closed {
+		t.Fatalf("entering rebind mode must not close the overlay")
+	}
+	if !p.rebinding {
+		t.Fatalf("b on a registry-backed row should enter rebind mode")
+	}
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "moved") {
+		t.Fatalf("rebind mode should name the target project; got:\n%s", out)
+	}
+
+	// Type a replacement path; Enter submits it for the caller once.
+	typeRunes(p, "/new/moved")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	target, path, ok := p.TakeRebindRequest()
+	if !ok || path != "/new/moved" || target.RegistryID != "prj_aaa" {
+		t.Fatalf("TakeRebindRequest = (%+v, %q, %v), want the registry row + typed path", target, path, ok)
+	}
+	if _, _, ok := p.TakeRebindRequest(); ok {
+		t.Fatalf("TakeRebindRequest should only fire once")
+	}
+}
+
+func TestProjectPickerRebindOnlyOnRegistryRows(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "derived", Root: "/repos/derived"}, // no RegistryID: session-derived
+		{Name: "registered", Root: "/repos/registered", RegistryID: "prj_bbb"},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	if p.rebinding {
+		t.Fatalf("b on a session-derived row must not enter rebind mode — there is no registration to move")
+	}
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('b'))
+	if !p.rebinding {
+		t.Fatalf("b on the registry-backed row should enter rebind mode")
+	}
+	// Esc returns to the list without submitting, like add mode.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if p.rebinding {
+		t.Fatalf("Esc should leave rebind mode")
+	}
+}
+
+func TestProjectPickerRebindErrorKeepsOpen(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_ccc", MissingPath: true},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/bad")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	p.TakeRebindRequest()
+	p.SetRebindError("path is already bound to another project")
+	p.SetMaxSize(80, 24)
+	if out := renderedText(p.Render()); !strings.Contains(out, "already bound") {
+		t.Fatalf("rebind error should render inline; got:\n%s", out)
+	}
+	// While rebinding, the highlighted row is withheld so a destructive
+	// shortcut (D) cannot fire against it mid-edit.
+	if _, ok := p.HighlightedProject(); ok {
+		t.Fatalf("HighlightedProject must be empty while the rebind input is active")
+	}
+}
+
+func TestProjectPickerMissingPathMarker(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "here", Root: "/repos/here", RegistryID: "prj_ddd"},
+		{Name: "gone", Root: "/old/gone", RegistryID: "prj_eee", MissingPath: true},
+	}, "")
+	p.SetMaxSize(80, 24)
+	out := renderedText(p.Render())
+	if !strings.Contains(out, "missing") {
+		t.Fatalf("a registry row whose checkout is gone must say so; got:\n%s", out)
+	}
+	// The rebind verb is advertised on the registry row's hint.
+	p.HandleKeyPress(keyRune('j'))
+	out = renderedText(p.Render())
+	if !strings.Contains(out, "rebind") {
+		t.Fatalf("the hint should advertise b rebind on a registry-backed row; got:\n%s", out)
+	}
+}
+
 // selectedProjectForTest returns the row under the cursor as a Project without
 // requiring submission, for assertions on the initial highlight.
 func (p *ProjectPickerOverlay) selectedProjectForTest() (Project, bool) {

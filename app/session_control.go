@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -228,6 +229,21 @@ var registerProjectThroughDaemon = func(path string) error {
 		_, e := c.RegisterProject(path)
 		return e
 	})
+}
+
+// rebindProjectThroughDaemon routes the TUI's rebind-project verb — the picker's
+// `b` — through the daemon (the single writer): config.RebindProject moves the
+// registration's stable id to the replacement checkout, refusing a path another
+// project owns, and publishes projects.changed. A package var so the app test
+// suite can stub it without dialing a real daemon.
+var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	var project config.Project
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		project, e = c.RebindProject(projectID, path)
+		return e
+	})
+	return project, err
 }
 
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)

@@ -74,6 +74,17 @@ type projectAddedMsg struct {
 	err  error
 }
 
+// projectReboundMsg reports completion of an async rebind-project (the picker's
+// `b` verb). Unlike add, the picker stays open while the daemon answers so a
+// rejection can be corrected inline; root is the NEW root the registration now
+// points at.
+type projectReboundMsg struct {
+	projectID string
+	name      string
+	root      string
+	err       error
+}
+
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async
 // archive / restore (#1028). On success the row's new status arrives via the
 // next daemon Snapshot reconcile (which re-partitions it into / out of the

@@ -181,6 +181,13 @@ const (
 	// outside this modal form.
 	KeySetAccount
 	KeyEditAccount
+
+	// KeyRebindProject rebinds a registered project's stable identity to a
+	// replacement checkout inside the project picker (b): the repair when the
+	// checkout a registration names was moved or recloned elsewhere
+	// (`af projects rebind`, made reachable without leaving the TUI). Fixed:
+	// it is a picker-internal verb like D, not a global binding.
+	KeyRebindProject
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -266,6 +273,7 @@ var specs = []spec{
 	{name: KeyManageAutomations, keys: []string{"enter"}, desc: "manage"},
 	{name: KeySwitchProjectRow, keys: []string{"enter"}, desc: "switch"},
 	{name: KeyDeleteProject, keys: []string{"D"}, desc: "delete project"},
+	{name: KeyRebindProject, keys: []string{"b"}, desc: "rebind project"},
 	{name: KeyOpenPane, configKey: "open_pane", keys: []string{"s"}, desc: "open pane", dispatch: true},
 	{name: KeySplitPane, configKey: "split_pane", keys: []string{"S"}, desc: "split pane", dispatch: true},
 	{name: KeyHidePane, configKey: "hide_pane", keys: []string{"x"}, desc: "hide pane", dispatch: true},

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -28,6 +30,15 @@ type Project struct {
 	// confirmation must state the real archived-vs-torn-down split before the
 	// user consents. Derived from the same cross-repo snapshot as SessionCount.
 	InPlaceCount int
+	// RegistryID is the durable registry id (prj_…) of the registration behind
+	// this row, empty when no registry record claims it. It is what makes `b`
+	// (rebind) meaningful: rebind moves a REGISTRATION's stable identity, so
+	// the verb is offered only on registry-backed rows.
+	RegistryID string
+	// MissingPath marks a registry-backed row whose recorded root the registry
+	// reports absent (path_exists=false) — the checkout moved or was recloned,
+	// which is exactly what rebind repairs.
+	MissingPath bool
 }
 
 // ProjectPickerOverlay is the project switcher (#1461). It navigates like the
@@ -59,6 +70,18 @@ type ProjectPickerOverlay struct {
 	// TakeAddRequest consumes it. Kept separate from submitted so the caller can
 	// reject an invalid path (SetAddError) and keep the overlay open.
 	addRequested bool
+
+	// rebinding is true while the rebind-path input is active: like add mode,
+	// but the request repairs an EXISTING registration — TakeRebindRequest
+	// hands back the row so the caller can send its RegistryID — rather than
+	// creating one.
+	rebinding   bool
+	rebindInput string
+	rebindErr   string
+	// rebindRequested carries a submitted rebind-mode path; TakeRebindRequest
+	// consumes it, the same once-only contract as addRequested.
+	rebindRequested bool
+	rebindTarget    Project
 
 	// degraded marks a failed project-registry read (#3298): the rows still
 	// render from the other discovery sources, but every registered
@@ -109,9 +132,10 @@ func (p *ProjectPickerOverlay) SelectedProject() (Project, bool) {
 }
 
 // HighlightedProject names the existing row under the cursor, excluding the
-// add-project field so typing a path never dispatches a destructive shortcut.
+// add-project and rebind-path fields so typing a path never dispatches a
+// destructive shortcut.
 func (p *ProjectPickerOverlay) HighlightedProject() (Project, bool) {
-	if !p.adding && p.selectedIdx >= 0 && p.selectedIdx < len(p.all) {
+	if !p.adding && !p.rebinding && p.selectedIdx >= 0 && p.selectedIdx < len(p.all) {
 		return p.all[p.selectedIdx], true
 	}
 	return Project{}, false
@@ -140,10 +164,30 @@ func (p *ProjectPickerOverlay) TakeAddRequest() (string, bool) {
 // overlay open so the user can correct the path.
 func (p *ProjectPickerOverlay) SetAddError(msg string) { p.addErr = msg }
 
+// TakeRebindRequest returns a submitted rebind-mode request once — the row it
+// was opened on (whose RegistryID is what the daemon rebinds) and the entered
+// replacement path — clearing the pending flag so the caller sends it exactly
+// once. The caller rebinds through the daemon on success, or calls
+// SetRebindError to surface an inline error and keep the overlay open.
+func (p *ProjectPickerOverlay) TakeRebindRequest() (Project, string, bool) {
+	if !p.rebindRequested {
+		return Project{}, "", false
+	}
+	p.rebindRequested = false
+	return p.rebindTarget, strings.TrimSpace(p.rebindInput), true
+}
+
+// SetRebindError shows an inline error under the rebind-mode input and keeps
+// the overlay open so the user can correct the path.
+func (p *ProjectPickerOverlay) SetRebindError(msg string) { p.rebindErr = msg }
+
 // HandleKeyPress processes input. Returns true if the overlay should close.
 func (p *ProjectPickerOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	if p.adding {
 		return p.handleAddKey(msg)
+	}
+	if p.rebinding {
+		return p.handleRebindKey(msg)
 	}
 	return p.handleListKey(msg)
 }
@@ -152,6 +196,18 @@ func (p *ProjectPickerOverlay) handleListKey(msg tea.KeyMsg) bool {
 	// The picker navigates like the instances rail: up/k and down/j move the
 	// cursor over the full list (clamped, no wrap), Enter switches, Esc cancels.
 	// There is no search — any other key (typed letters, etc.) is ignored.
+	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyRebindProject]) {
+		// b enters rebind mode, but only on a registry-backed row: the request
+		// repairs a registration's stable identity, and a session-derived row
+		// has none to move.
+		if proj, ok := p.HighlightedProject(); ok && proj.RegistryID != "" {
+			p.rebinding = true
+			p.rebindTarget = proj
+			p.rebindInput = ""
+			p.rebindErr = ""
+		}
+		return false
+	}
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		p.canceled = true
@@ -207,6 +263,35 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 	return false
 }
 
+func (p *ProjectPickerOverlay) handleRebindKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		// Back out of rebind mode to the list rather than closing the picker.
+		p.rebinding = false
+		p.rebindInput = ""
+		p.rebindErr = ""
+		return false
+	case tea.KeyEnter:
+		if strings.TrimSpace(p.rebindInput) != "" {
+			p.rebindRequested = true
+		}
+		return false
+	case tea.KeyBackspace:
+		if len(p.rebindInput) > 0 {
+			runes := []rune(p.rebindInput)
+			p.rebindInput = string(runes[:len(runes)-1])
+			p.rebindErr = ""
+		}
+	case tea.KeySpace:
+		p.rebindInput += " "
+		p.rebindErr = ""
+	case tea.KeyRunes:
+		p.rebindInput += string(msg.Runes)
+		p.rebindErr = ""
+	}
+	return false
+}
+
 // Render renders the project picker overlay.
 func (p *ProjectPickerOverlay) Render() string {
 	t := ui.CurrentTheme()
@@ -253,6 +338,19 @@ func (p *ProjectPickerOverlay) Render() string {
 		return finishRender(style, fit, textRect, lines)
 	}
 
+	if p.rebinding {
+		lines = append(lines, truncateOverlayLine(normalStyle.Render(
+			fmt.Sprintf("New checkout path for %s:", p.rebindTarget.Name)), cw))
+		lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.rebindInput)+ui.InputCaret(), cw))
+		if p.rebindErr != "" {
+			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.rebindErr), cw))
+		}
+		lines = append(lines, "")
+		hint := "enter rebind · esc back"
+		lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))
+		return finishRender(style, fit, textRect, lines)
+	}
+
 	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
 	// degraded notice when present) and window the navigable rows into what
 	// remains.
@@ -276,8 +374,18 @@ func (p *ProjectPickerOverlay) Render() string {
 
 	lines = append(lines, "")
 	hint := "j/k select · enter add · esc cancel"
-	if _, ok := p.HighlightedProject(); ok {
+	registryRow := false
+	if proj, ok := p.HighlightedProject(); ok {
 		hint = "j/k select · enter switch · D delete · esc cancel"
+		registryRow = proj.RegistryID != ""
+		if registryRow {
+			hint = "j/k select · enter switch · D delete · b rebind · esc cancel"
+		}
+	}
+	if layout.Cells(hint) > cw && registryRow {
+		// A registry row's longer hint shrinks by dropping the prose, keeping the
+		// verbs the row actually offers (an unadvertised verb is unreachable).
+		hint = "j/k · enter · D delete · b rebind · esc"
 	}
 	if layout.Cells(hint) > cw {
 		hint = "j/k · enter · esc"
@@ -300,10 +408,16 @@ func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, coun
 	}
 	proj := p.all[i]
 	count := countStyle.Render(fmt.Sprintf(" (%d)", proj.SessionCount))
-	if selected {
-		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount))
+	// A registered row whose checkout is gone says so — the `b` verb this flag
+	// gates is the repair for exactly that state.
+	missing := ""
+	if proj.MissingPath {
+		missing = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(" · missing")
 	}
-	return "    " + normalStyle.Render(proj.Name) + count
+	if selected {
+		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount)) + missing
+	}
+	return "    " + normalStyle.Render(proj.Name) + count + missing
 }
 
 // finishRender sizes the style box and joins the content lines, matching the

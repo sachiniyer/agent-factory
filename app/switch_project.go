@@ -197,6 +197,13 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// so a registered project on a stalled or missing checkout keeps its own
 	// row instead of vanishing or borrowing an ancestor's.
 	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	// registryRecordByRow maps each registry record to the row id the union
+	// below assigns it — the resolved repo id when Git proves the recorded
+	// root, else the reconciled recorded identity (the same split the union
+	// makes). It is what lets a row carry the record's prj_… id — what `b`
+	// rebinds — and its path_exists flag, so the picker can offer rebind only
+	// where there is a registration to move and flag a checkout that is gone.
+	registryRecordByRow := make(map[string]config.Project, len(registeredProjects))
 	// recordedIdentities remembers which identity each registry row lent to a
 	// path, so the root_agents union below can ask rather than re-hash.
 	recordedIdentities := make(map[string]string, len(registeredProjects))
@@ -237,6 +244,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// path registration resolved (#2110's rule — macOS `/var` ->
 		// `/private/var` makes the two unequal every time).
 		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
+		registryRecordByRow[resolved.id] = project
 		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
@@ -304,6 +312,12 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		}
 		return projects[i].Root < projects[j].Root
 	})
+	for i := range projects {
+		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
+			projects[i].RegistryID = rec.ID
+			projects[i].MissingPath = !rec.PathExists
+		}
+	}
 	return projects, registryDegraded, probeBudgets
 }
 
@@ -389,6 +403,12 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddProject(path)
 	}
 
+	// Rebind submit: the overlay stays open while the daemon answers so a
+	// rejection is corrected inline, mirroring the add flow's error handling.
+	if proj, path, ok := m.projectPickerOverlay.TakeRebindRequest(); ok {
+		return m.handleRebindProject(proj, path)
+	}
+
 	if !shouldClose {
 		return m, nil
 	}
@@ -465,6 +485,54 @@ func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.refreshSidebarProjects()
 	return m, nil
+}
+
+// handleRebindProject dispatches the picker's `b` verb: rebind a registered
+// project's stable id to the checkout at the entered path. The user-typed path
+// is resolved against the TUI's filesystem — this process shares the user's
+// machine, so ResolveUserPath is correct here exactly as in handleAddProject —
+// and the daemon performs the registry write off the event loop, mirroring
+// addProjectCmd. The picker stays open until the answer lands: a rejection
+// (not a git repo, path owned by another project) is corrected inline via
+// SetRebindError, a success closes and refreshes.
+func (m *home) handleRebindProject(proj overlay.Project, path string) (tea.Model, tea.Cmd) {
+	abs, err := config.ResolveUserPath(path)
+	if err != nil {
+		m.projectPickerOverlay.SetRebindError(fmt.Sprintf("cannot resolve path: %s", path))
+		return m, nil
+	}
+	return m, m.rebindProjectCmd(proj, abs)
+}
+
+// rebindProjectCmd rebinds a registered project through the daemon — the single
+// writer (#960) — off the event loop, mirroring addProjectCmd/deleteProjectCmd.
+func (m *home) rebindProjectCmd(proj overlay.Project, path string) tea.Cmd {
+	return func() tea.Msg {
+		project, err := rebindProjectThroughDaemon(proj.RegistryID, path)
+		root := project.Root
+		if root == "" {
+			root = path
+		}
+		return projectReboundMsg{projectID: proj.RegistryID, name: proj.Name, root: root, err: err}
+	}
+}
+
+// handleProjectRebound finalizes an async rebind. A rejection is fed back into
+// the still-open picker so the user can correct the path; when the picker has
+// been dismissed in the meantime the error goes to the error box instead. On
+// success the picker closes and the Projects section refreshes — the row's root
+// and name changed, and a `missing` marker clears.
+func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		if m.projectPickerOverlay != nil && m.state == stateSwitchProject {
+			m.projectPickerOverlay.SetRebindError(msg.err.Error())
+			return m, nil
+		}
+		return m, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err))
+	}
+	m.closeProjectPicker()
+	m.refreshSidebarProjects()
+	return m, m.showTransientMessage(fmt.Sprintf("Rebound project '%s' to %s", msg.name, msg.root))
 }
 
 // sessionWord pluralizes "session" for the delete-project copy.

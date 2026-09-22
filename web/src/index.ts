@@ -28,6 +28,8 @@ import {
   createVSCodeTab,
   deleteProject,
   registerProject,
+  rebindProject,
+  type RegisteredProject,
   errorText,
   fetchSessionSnapshot,
   killSession,
@@ -71,6 +73,7 @@ import {
   handoffModal,
   type ModalHandle,
   newSessionModal,
+  rebindProjectModal,
   removeTaskModal,
 } from "./modals.js";
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
@@ -428,7 +431,7 @@ async function connect(candidate: string): Promise<void> {
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -465,15 +468,22 @@ async function connect(candidate: string): Promise<void> {
   }
 }
 
-/** Fetches the daemon's registered-project roots for the #2456 union, degrading to
- *  none on a transport failure (like the tasks fetch): the union is additive, so a
+/** The roots of the daemon's registered projects — the #2456 union input the
+ *  derived project lists consume (projectSummaries / pickerProjects /
+ *  reconcileProject take roots; the registry's identity fields are what state
+ *  keeps the RECORDS for, so a stale registration can be rebound). */
+function projectRoots(projects: RegisteredProject[]): string[] {
+  return projects.map((p) => p.root);
+}
+
+/** Fetches the daemon's registered-project records for the #2456 union, degrading
+ *  to none on a transport failure (like the tasks fetch): the union is additive, so a
  *  missing registry just means the derived-from-sessions list until the next
- *  projects.changed resync. Maps the registry records to their roots — the only field
- *  the switcher/picker union consumes. */
-async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[]; error: string }> {
+ *  projects.changed resync. The records — not just their roots — are kept: a
+ *  registration's id + path_exists are what the rebind affordance needs. */
+async function fetchRegisteredProjects(tok: string): Promise<{ projects: RegisteredProject[]; error: string }> {
   try {
-    const projects = (await listProjects(tok)).map((p) => p.root);
-    return { projects, error: "" };
+    return { projects: await listProjects(tok), error: "" };
   } catch (e) {
     return { projects: [], error: errorText(e) };
   }
@@ -863,7 +873,7 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -1184,6 +1194,54 @@ function openAddProject(): void {
         void registerProject(path, tok)
           .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** Opens the rebind-project modal (`af projects rebind`, made reachable from the
+ *  switcher): the repair when the checkout a registration names was moved or
+ *  recloned — the stable project id survives, only where it points changes. Same
+ *  host-path field + directory browser as add-project; the daemon's rejection
+ *  (unknown id, not a git repo, a root another project owns) is shown inline and
+ *  the modal stays open to correct. On success the daemon's projects.changed
+ *  refetches the registry and the row's root/missing marker update. */
+function openRebindProject(projectId: string, label: string): void {
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path: string) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void rebindProject(projectId, path, tok)
+          .then(() => { if (modal === m) closeModal(); })
+          .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              // The rebind may have landed even though the reply was lost — the
+              // committed-warning path mirrors deleteProject's.
+              if (modal === m) closeModal();
+              refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });
@@ -1882,7 +1940,7 @@ const tasksRefetcher = createFencedRefetcher({
       tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      store.get().registeredProjects,
+      projectRoots(store.get().registeredProjects),
     );
     store.set({ tasks, selectedProject, tasksError: "" });
   },
@@ -1926,15 +1984,14 @@ const projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
   commit: (projects) => {
-    const registeredProjects = projects.map((p) => p.root);
     const selectedProject = reconcileProject(
       store.get().sessions,
       store.get().tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      registeredProjects,
+      projectRoots(projects),
     );
-    store.set({ registeredProjects, selectedProject, projectsError: "" });
+    store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
   },
   onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });
@@ -1964,7 +2021,7 @@ function openAddTask(): void {
   // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
   // the currently-scoped project — adding a task targets ITS repo, and is never
   // blocked by the absence of a session.
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -2012,7 +2069,7 @@ function openAddTask(): void {
  *  must appear at this exact call site. The unused trigger is cleared to "" — safe on
  *  the HTTP/JSON path, which (unlike the CLI's gob socket) never elides "" to nil. */
 function openEditTask(task: TaskData): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -2296,6 +2353,7 @@ const actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
   setTheme,
 };
 
@@ -2471,7 +2529,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects,
+    projectRoots(store.get().registeredProjects),
   );
   let selectedId = pickSelection(sessions, prevSel);
   // Drop a selection that no longer belongs to the scoped project, so the terminal

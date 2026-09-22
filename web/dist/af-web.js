@@ -6688,6 +6688,10 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
+async function rebindProject(id, path, token2) {
+  const resp = await af("RebindProject", { id, path }, token2);
+  return resp.project;
+}
 async function listProjects(token2) {
   const resp = await af("ListProjects", {}, token2);
   return resp.projects ?? [];
@@ -11612,11 +11616,28 @@ function confirmDeleteProjectModal(opts) {
   return handle;
 }
 function addProjectModal(callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
+  return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
+    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    ...callbacks
+  });
+}
+function rebindProjectModal(opts) {
+  const { projectLabel: projectLabel2, ...shared } = opts;
+  return checkoutPathModal({
+    title: `Rebind project ${projectLabel2}`,
+    confirmLabel: "Rebind",
+    hint: "Enter the checkout this project should track now \u2014 an absolute repo path on the daemon host (~ works).",
+    ...shared
+  });
+}
+function checkoutPathModal(opts) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
+    onCancel: opts.onCancel
   });
   const pathInput = h("input", {
     type: "text",
@@ -11625,7 +11646,7 @@ function addProjectModal(callbacks) {
     autocomplete: "off"
   });
   pathInput.setAttribute("aria-label", "Repository path");
-  const { loadDirectory, errorText: errorText2 } = callbacks;
+  const { loadDirectory, errorText: errorText2 } = opts;
   let picker = null;
   if (loadDirectory && errorText2) {
     picker = directoryPicker({
@@ -11651,7 +11672,7 @@ function addProjectModal(callbacks) {
     h(
       "p",
       { class: "af-modal-hint" },
-      "Enter an absolute repo path on the daemon host (~ works)."
+      opts.hint
     )
   );
   pathInput.addEventListener("input", () => handle.setError(null));
@@ -11663,7 +11684,7 @@ function addProjectModal(callbacks) {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(path);
+    opts.onSubmit(path);
   });
   queueMicrotask(() => {
     if (picker) {
@@ -16491,7 +16512,7 @@ var AppShell = class {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   renderProjectSwitch(state) {
-    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root));
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     this.projectSwitchBtn.disabled = false;
@@ -16500,7 +16521,8 @@ var AppShell = class {
       children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
     }
     for (const p of summaries) {
-      children.push(this.projectItem(p, p.root === current));
+      const record = state.registeredProjects.find((r) => r.root === p.root);
+      children.push(this.projectItem(p, p.root === current, record));
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
@@ -16515,9 +16537,25 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
+      if (currentRecord) {
+        const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
+        rebind.dataset.projectFocus = "rebind";
+        rebind.setAttribute(
+          "title",
+          `Point ${currentSummary.name} at a different checkout \u2014 the repair after it was moved or recloned`
+        );
+        rebind.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.appControls.dismiss();
+          this.actions.rebindProject(currentRecord.id, currentSummary.name);
+        });
+        footChildren.push(rebind);
+      }
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       del.dataset.projectFocus = "delete";
-      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      const isRegistered = currentRecord !== void 0;
       if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
@@ -16544,8 +16582,11 @@ var AppShell = class {
   }
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
-   *  switches the active project and closes the menu. */
-  projectItem(p, current) {
+   *  switches the active project and closes the menu. `record` is the registry
+   *  registration behind the row, when there is one — a registration whose
+   *  recorded root is gone (path_exists=false) is marked missing, the state the
+   *  footer Rebind action repairs. */
+  projectItem(p, current, record) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
@@ -16555,7 +16596,11 @@ var AppShell = class {
       h("span", { class: "af-project-item-name" }, p.name),
       h("span", { class: "af-project-item-path" }, p.path)
     );
-    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    const meta = h(
+      "span",
+      { class: "af-project-item-meta" },
+      ...record && !record.path_exists ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` \xB7 ${projectMeta(p)}`] : [projectMeta(p)]
+    );
     const item = h("button", { type: "button", class: cls }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
@@ -17746,7 +17791,7 @@ async function connect(candidate) {
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -17785,10 +17830,12 @@ async function connect(candidate) {
     requestResync();
   }
 }
+function projectRoots(projects) {
+  return projects.map((p) => p.root);
+}
 async function fetchRegisteredProjects(tok) {
   try {
-    const projects = (await listProjects(tok)).map((p) => p.root);
-    return { projects, error: "" };
+    return { projects: await listProjects(tok), error: "" };
   } catch (e) {
     return { projects: [], error: errorText(e) };
   }
@@ -18039,7 +18086,7 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -18286,6 +18333,43 @@ function openAddProject() {
         void registerProject(path, tok).then(() => {
           if (modal === m) closeModal();
         }).catch((e) => {
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
+function openRebindProject(projectId, label) {
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path) => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void rebindProject(projectId, path, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            if (modal === m) closeModal();
+            refreshRegisteredProjects();
+            surfaceTabError(e);
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -18639,7 +18723,7 @@ var tasksRefetcher = createFencedRefetcher({
       tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      store.get().registeredProjects
+      projectRoots(store.get().registeredProjects)
     );
     store.set({ tasks, selectedProject, tasksError: "" });
   },
@@ -18661,15 +18745,14 @@ var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
   commit: (projects) => {
-    const registeredProjects = projects.map((p) => p.root);
     const selectedProject = reconcileProject(
       store.get().sessions,
       store.get().tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      registeredProjects
+      projectRoots(projects)
     );
-    store.set({ registeredProjects, selectedProject, projectsError: "" });
+    store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
   },
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
@@ -18686,7 +18769,7 @@ function requestProjectsResync() {
   }, 150);
 }
 function openAddTask() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -18717,7 +18800,7 @@ function openAddTask() {
   );
 }
 function openEditTask(task) {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -18934,6 +19017,7 @@ var actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
   setTheme
 };
 function syncSplit(state) {
@@ -19024,7 +19108,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects
+    projectRoots(store.get().registeredProjects)
   );
   let selectedId = pickSelection(sessions, prevSel);
   if (selectedId) {
