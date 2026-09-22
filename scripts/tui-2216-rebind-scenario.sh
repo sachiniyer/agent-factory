@@ -36,6 +36,12 @@ git -C "$A" config user.name t
 git -C "$A" commit -q --allow-empty -m initial
 mkdir -p "$NOGIT"
 
+# Give the sandbox daemon an HTTP listener BEFORE it first starts (the first
+# af command below auto-ensures it), so the remote-target leg can point the
+# TUI at a LIVE daemon — a dead URL never gets the TUI past its connect
+# spinner, and the refusal has to be observed on a daemon that answers.
+printf '\n[network]\nlisten_addr = "127.0.0.1:9477"\nrequire_token = false\n' >> "$AGENT_FACTORY_HOME/config.toml"
+
 echo "=== registering proj-a ==="
 "$af" projects add "$A"
 pid="$("$af" projects list | grep -o '"id": "[^"]*"' | head -1 | cut -d'"' -f4)"
@@ -82,12 +88,15 @@ af_wait_gone 'New checkout path' "$AF_DRIVER_TIMEOUT" 'rebind prompt closed' || 
 af_send b
 af_wait_for 'New checkout path' "$AF_DRIVER_TIMEOUT" 'rebind prompt reopened' || exit 1
 
-# 6. Submit the replacement checkout: the picker closes, the transient toast
-#    confirms, and the registry record moved under the SAME stable id.
+# 6. Submit the replacement checkout — and double-Enter on top of it. Pending
+#    is marked in the same Update that hands the request off, so the second
+#    Enter (and any edits) is inert: at most one rebind is in flight. On a
+#    local daemon the answer lands in milliseconds, so the freeze window is
+#    brief — the unit test carries the property; this drives the gesture.
 af_send_literal "$MOVED"
-af_send Enter
+af_send Enter Enter
 af_wait_for 'Rebound project' "$AF_DRIVER_TIMEOUT" 'rebind success toast' || { af_capture; exit 1; }
-echo "assert OK: success toast"
+echo "assert OK: success toast (double-Enter produced one request)"
 
 newroot="$("$af" projects list | grep -o '"root": "[^"]*"' | head -1 | cut -d'"' -f4)"
 newid="$("$af" projects list | grep -o '"id": "[^"]*"' | head -1 | cut -d'"' -f4)"
@@ -95,4 +104,31 @@ echo "=== after rebind: id=$newid root=$newroot ==="
 [ "$newid" = "$pid" ] || { echo "FAIL: the stable id changed ($pid -> $newid)" >&2; exit 1; }
 [ "$newroot" = "$MOVED" ] || { echo "FAIL: root is $newroot, want $MOVED" >&2; exit 1; }
 
-echo "PASS: project picker rebind — missing marker, inline rejection, stable id moved to the replacement checkout"
+# 7. Remote target: point the TUI at the sandbox daemon's HTTP listener via
+#    AF_DAEMON_URL — a LIVE daemon that answers, so the TUI boots for real and
+#    remote mode is decided exactly as for a remote host. The picker's rows
+#    still come from the LOCAL registry (the exact mismatch the refusal guards:
+#    this record's id DOES exist there — the worst case, where an unguarded
+#    rebind would mutate it), and `b` must refuse with the actionable message
+#    rather than send a client-side id + path.
+af_quit 2>/dev/null || true
+export AF_DRIVER_LAUNCH_ENV="AF_DAEMON_URL=http://127.0.0.1:9477"
+af_boot || { echo "FAIL: remote-mode boot" >&2; exit 1; }
+af_send C-p
+af_wait_for 'Switch project' "$AF_DRIVER_TIMEOUT" 'project picker overlay (remote)' || { af_capture; exit 1; }
+
+# Cursor onto the (still registry-backed, still local) proj-a row.
+af_send k k k
+i=0
+until af_capture | grep -qE '▸.*proj-a'; do
+    i=$((i + 1))
+    [ "$i" -gt 10 ] && { echo "FAIL: remote picker never reached the proj-a row" >&2; af_capture; exit 1; }
+    af_send j
+    sleep "$AF_DRIVER_POLL"
+done
+af_send b
+af_wait_for 'local registry' "$AF_DRIVER_TIMEOUT" 'remote rebind refusal' || { af_capture; exit 1; }
+af_assert_screen 'af projects rebind' || { af_capture; exit 1; }
+echo "assert OK: remote target refuses rebind with the actionable message"
+
+echo "PASS: project picker rebind — missing marker, inline rejection, stable-id move, single-flight, remote refusal"
