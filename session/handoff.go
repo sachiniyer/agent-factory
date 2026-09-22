@@ -71,6 +71,12 @@ type HandoffSwap struct {
 	previousAccount      string
 	previousAccountAgent string
 	previousAuto         bool
+	// crossAgent is admission's verdict on whether this swap changed the agent,
+	// threaded to the mission brief so Render honors it instead of re-deriving
+	// sameness from From == To. A program_overrides redirect can make the two
+	// coincide for a cross-agent handoff, which would otherwise collapse the
+	// brief onto the same-agent branch (#4430 review).
+	crossAgent bool
 	// effectiveTo is the agent the target's resolved command actually launches,
 	// which program_overrides can set apart from the requested enum recorded in
 	// To. Mission briefs render sameness against it; the enum stays the ledger
@@ -436,6 +442,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 		previousAccount:      i.Account,
 		previousAccountAgent: i.accountAgent,
 		previousAuto:         i.accountAutoSelected,
+		crossAgent:           crossAgent,
 		effectiveTo:          effectiveAgent,
 	}
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
