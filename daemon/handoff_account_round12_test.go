@@ -228,7 +228,7 @@ func TestHandoffSession_ScopeDecisionByTargetCapability(t *testing.T) {
 			t.Fatalf("AccountSelection = (%q, %v) after the swap, want the scope dropped — "+
 				"aider has no account namespace for the name to resolve in", account, auto)
 		}
-		handoffs := inst.Handoffs()
+		handoffs := inst.Tabs[0].Handoffs
 		require.Len(t, handoffs, 1)
 		require.Equal(t, "work", handoffs[0].FromAccount)
 		require.Empty(t, handoffs[0].ToAccount)

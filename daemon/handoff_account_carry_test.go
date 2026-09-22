@@ -71,7 +71,7 @@ func TestHandoffAccountCarriesTheSameAgentConversation(t *testing.T) {
 	conv := inst.AgentConversation()
 	require.Equal(t, carryHandoffConversationID, conv.ID, "the replacement resumes the same conversation id")
 	require.Equal(t, session.ConversationCaptureCarried, conv.CaptureKind)
-	handoffs := inst.Handoffs()
+	handoffs := inst.Tabs[0].Handoffs
 	require.Len(t, handoffs, 1)
 	require.Equal(t, carryHandoffConversationID, handoffs[0].From.ID,
 		"the ledger keeps the outgoing conversation for provenance and return trips")

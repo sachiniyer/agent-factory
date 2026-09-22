@@ -23,7 +23,7 @@ func TestHandoffAccountPreservesCustomProgram(t *testing.T) {
 	require.Equal(t, "claude", entry.To)
 	require.Equal(t, "work", entry.FromAccount)
 	require.Equal(t, "personal", entry.ToAccount)
-	require.Len(t, inst.Handoffs(), 1)
+	require.Len(t, inst.Tabs[0].Handoffs, 1)
 	require.NoError(t, inst.RevertHandoff(entry))
 	require.Equal(t, "claude --model opus", inst.AgentProgram())
 }

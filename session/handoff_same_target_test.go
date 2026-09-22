@@ -82,7 +82,7 @@ func TestValidateHandoffTarget_OpaqueOverrideKeepsTheSameTargetGuard(t *testing.
 	require.ErrorContains(t, err, "already running claude",
 		"the state mutation must refuse what the guard refuses")
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
-	require.Empty(t, inst.Handoffs(), "a refused self-handoff must not reach the ledger")
+	require.Empty(t, inst.Tabs[0].Handoffs, "a refused self-handoff must not reach the ledger")
 
 	// The fallback decides sameness only: every other target stays reachable,
 	// including one whose own override is just as opaque.

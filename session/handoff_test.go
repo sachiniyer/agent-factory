@@ -80,7 +80,7 @@ func TestSwapAgentProgram_RewritesProgramAndRecordsLedger(t *testing.T) {
 		t.Fatalf("Tab.Conversation = %+v, want cleared so the incoming agent starts its own", conv)
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 1 {
 		t.Fatalf("ledger has %d entries, want 1", len(ledger))
 	}
@@ -99,7 +99,7 @@ func TestSwapAgentProgram_AppendsRatherThanReplaces(t *testing.T) {
 		t.Fatalf("second swap: %v", err)
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 2 {
 		t.Fatalf("ledger has %d entries, want 2 — the ledger is append-only history, not a single slot", len(ledger))
 	}
@@ -142,7 +142,7 @@ func TestSwapAgentProgram_RejectsArchivedSessionWithoutMutatingRecord(t *testing
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after refusal, want %q", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("archived refusal wrote %d handoff records, want 0", len(ledger))
 	}
 }
@@ -164,7 +164,7 @@ func TestRevertHandoff_RestoresProgramAndConversation(t *testing.T) {
 	if conv := inst.AgentConversation(); conv.ID != "conv-outgoing-42" {
 		t.Fatalf("Conversation = %+v after revert, want the outgoing conversation restored", conv)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("ledger has %d entries after revert, want 0 — a swap that never happened must not be recorded", len(ledger))
 	}
 }
@@ -205,7 +205,7 @@ func TestRevertHandoff_RefusesWhenNotTheLastEntry(t *testing.T) {
 	if err := inst.RevertHandoff(stale); err == nil {
 		t.Fatal("reverting a non-trailing entry succeeded; that would truncate a later swap's record")
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 2 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 2 {
 		t.Fatalf("ledger has %d entries, want both retained after a refused revert", len(ledger))
 	}
 }

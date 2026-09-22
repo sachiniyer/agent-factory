@@ -101,18 +101,6 @@ func (i *Instance) AgentProgram() string {
 	return i.Program
 }
 
-// Handoffs returns a copy of the agent tab's handoff ledger, oldest first.
-func (i *Instance) Handoffs() []AgentHandoff {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	if len(i.Tabs) == 0 || len(i.Tabs[0].Handoffs) == 0 {
-		return nil
-	}
-	out := make([]AgentHandoff, len(i.Tabs[0].Handoffs))
-	copy(out, i.Tabs[0].Handoffs)
-	return out
-}
-
 // LastHandoff returns the most recent ledger entry, if any.
 func (i *Instance) LastHandoff() (AgentHandoff, bool) {
 	i.mu.RLock()
