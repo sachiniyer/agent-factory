@@ -1407,3 +1407,79 @@ func TestCommittedAccountSwap_AutomaticSwapNamesTheDurableNamespace(t *testing.T
 	require.Equal(t, tmux.ProgramCodex, swap.agent,
 		"the outgoing identity lived in the same committed namespace, not the drifted pane agent")
 }
+
+// TestLimitedAccountsForSwap_LeakAcrossConfiguredResolvedDivergence is the
+// regression guard for the live-wall sibling loop in limitedAccountsForSwap: it
+// keyed on each sibling's CONFIGURED enum (AgentProgram) while a live wall is
+// filed under the RESOLVED agent (currentAgentNameLocked, honoring
+// program_overrides). A divergent sibling (configured claude, running codex)
+// leaked its codex wall into claude's limitedSet; the fix keys on
+// LimitIdentity's agent. Exercises the divergent-sibling live-wall path the
+// existing self-divergence and manual=true tests do not cover.
+func TestLimitedAccountsForSwap_LeakAcrossConfiguredResolvedDivergence(t *testing.T) {
+	base := nowFunc()
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+
+	// Sibling B: stored Program="claude" (configured enum the buggy loop keyed
+	// on), pane runs codex (resolved agent the wall is filed under), account
+	// scoped to "work".
+	bBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	b := registerStarted(t, m, repoID, inst.Path, "drifted", bBackend, true, session.Running)
+	b.Program = tmux.ProgramClaude
+	b.Account = "work"
+	b.SetTmuxSession(tmux.NewTmuxSession(b.Title, tmux.ProgramCodex))
+	b.SetLimitReached(base.Add(time.Hour))
+
+	// Pin the divergence the bug hinges on.
+	require.Equal(t, tmux.ProgramClaude, b.AgentProgram())
+	wallAgent, wallAccount, wallLive := b.LimitIdentity()
+	require.True(t, wallLive)
+	require.Equal(t, tmux.ProgramCodex, wallAgent)
+	require.Equal(t, "work", wallAccount)
+
+	// B's wall lives under codex, so "work" must NOT appear in the claude
+	// namespace's limited set (the durable loops already keyed on codex and
+	// skipped; with the fix the live-wall loop agrees).
+	limited, err := m.limitedAccountsForSwap(tmux.ProgramClaude, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.NotContains(t, limited, "work",
+		"a sibling wall filed under codex must not leak into the claude namespace")
+
+	// Anti-vacuity: the codex namespace, where the wall was actually filed,
+	// still sees "work" as limited, so the absence above is the keying fix.
+	limited, err = m.limitedAccountsForSwap(tmux.ProgramCodex, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.Contains(t, limited, "work")
+}
+
+// TestLimitedAccountsForSwap_SameNamespaceSiblingWallIsStillLimited is the
+// anti-vacuity companion: a sibling whose configured AND resolved agent both
+// match the scanned namespace must still exclude the account, proving the
+// resolved-key filter does not over-correct into ignoring a genuine
+// same-namespace wall.
+func TestLimitedAccountsForSwap_SameNamespaceSiblingWallIsStillLimited(t *testing.T) {
+	base := nowFunc()
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+
+	bBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	b := registerStarted(t, m, repoID, inst.Path, "claude-walled", bBackend, true, session.Running)
+	b.Program = tmux.ProgramClaude
+	b.Account = "work"
+	b.SetTmuxSession(tmux.NewTmuxSession(b.Title, tmux.ProgramClaude))
+	b.SetLimitReached(base.Add(time.Hour))
+
+	require.Equal(t, tmux.ProgramClaude, b.AgentProgram())
+	wallAgent, _, wallLive := b.LimitIdentity()
+	require.True(t, wallLive)
+	require.Equal(t, tmux.ProgramClaude, wallAgent)
+
+	limited, err := m.limitedAccountsForSwap(tmux.ProgramClaude, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.Contains(t, limited, "work",
+		"a sibling wall filed under claude must still limit claude's work account")
+
+	// And it does not leak into the codex namespace it has nothing to do with.
+	limited, err = m.limitedAccountsForSwap(tmux.ProgramCodex, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.NotContains(t, limited, "work")
+}

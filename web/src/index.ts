@@ -2192,7 +2192,16 @@ function doRemoveTask(task: TaskData): void {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => { if (modal === handle) closeModal(); return refreshTasks(); })
-      .catch((error) => { handle.setBusy(false); handle.setError(errorText(error)); });
+      .catch((error) => {
+        if (isMutationCommittedError(error)) {
+          if (modal === handle) closeModal();
+          refreshTasks();
+          surfaceTabError(error);
+          return;
+        }
+        handle.setBusy(false);
+        handle.setError(errorText(error));
+      });
   }, closeModal));
 }
 
