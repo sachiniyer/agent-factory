@@ -195,7 +195,7 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, evaluation *
 	return nil, false
 }
 
-func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
@@ -205,7 +205,7 @@ func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case "--":
 			return words[1:], false
 		case "-h", "--help", "-V", "--version":
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -237,7 +237,7 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, evaluation *e
 		case option == "--":
 			return words[1:], false
 		case option == "--help" || option == "--version":
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -686,7 +686,7 @@ options:
 			name, value, attached := strings.Cut(option[2:], "=")
 			switch name {
 			case "help", "version":
-				if shadowedOperandTailMutates(words[1:], names, memo) {
+				if shadowedOperandTailMutates(words[1:], names, evaluation) {
 					return nil, true
 				}
 				return words[1:], false

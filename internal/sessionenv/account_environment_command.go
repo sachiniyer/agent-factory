@@ -292,7 +292,7 @@ func unwrapAccountCommand(
 			}
 		case isAccountCommandName(words[0], "setsid"):
 			var unsafe bool
-			words, unsafe = unwrapSetsid(words[1:], names, memo)
+			words, unsafe = unwrapSetsid(words[1:], names, evaluation)
 			if unsafe {
 				return nil, true
 			}
