@@ -342,12 +342,10 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if sp.HasPendingCreate() {
 		// Submitting the create form sets pendingCreate without releasing
 		// focus, so the save-on-close branch above doesn't run.
-		// handleTaskCreate writes the new task to disk and then reloads
-		// every task via SetTasks, which clears the dirty flag and any
-		// unsaved toggle/edit/delete. Flush those changes first so the
-		// reload picks them up (#578). If that flush fails, surface it and
-		// skip the create: the pending toggle/edit didn't persist, so we
-		// don't want handleTaskCreate's reload to silently discard it (#934).
+		// Flush unsaved toggles/edits/deletes first so they land with the
+		// create (#578). If that flush fails, surface it and leave the
+		// create unsubmitted with its input kept (#934); the failed change
+		// itself survives the flush's reload as a held draft (#4487).
 		if err := m.saveContentPaneState(); err != nil {
 			sp.RestoreCreateMode()
 			return m, m.showRecovery("Cannot save task", "Your input is retained. "+err.Error(), "Press any key to return to the form.", err)

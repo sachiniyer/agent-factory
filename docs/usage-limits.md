@@ -131,7 +131,7 @@ always the same for a whole repository. `default_accounts` says it once — per
 agent, and most usefully per project:
 
 ```bash
-af projects register ~/work/monorepo                            # once
+af projects add ~/work/monorepo                                 # once
 af config set default_accounts.codex work --project ~/work/monorepo
 af config set default_accounts.codex personal --project ~/side/hobby
 ```
@@ -225,7 +225,26 @@ An explicit `--account` selects a pinned identity: an existing pin moves to the
 chosen account, and an ambient session becomes pinned to that account. For an
 ambient session, `--to <agent>` without `--account` keeps the replacement ambient.
 A session already scoped to an account must specify a target account when
-changing agents; omitting it does not bypass the pin.
+changing to an agent whose resolved command supports accounts (claude, codex,
+gemini as shipped); omitting it does not bypass the pin. Handing it to a target
+whose resolved command has no account support drops the scope instead, and the
+response reports the drop on `from_account`. Capability follows the resolved
+command rather than the enum, so `program_overrides` moves a target between the
+two cases: `aider` redirected to `codex` requires a codex account, and `codex`
+redirected to `aider` drops the scope. A third case refuses outright: a target
+whose resolved command af cannot classify as an agent at all (a wrapper such
+as `npx codex` may launch an account-capable agent underneath) can neither be
+proven to carry the scope nor proven safe to drop it, so the handoff refuses
+rather than destroy a durable pin on an unproven answer — point the override
+at a literal agent command to make it classifiable. Because a scope drop
+restarts only the agent pane, a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep running
+under the dropped account's environment.
+
+A scope drop is one-way: the session records the dropped name on the handoff's
+`from_account` and runs ambient from there, but a later handoff back to an
+account-capable agent does not restore it — name the account again with
+`--account`.
 
 The session keeps its worktree and branch, and the new conversation receives the
 handoff brief. See [Hand off to another account](#hand-off-to-another-account)
@@ -370,15 +389,15 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
 - **Visible in the session.** The first prompt after replacement names the old
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process
-  pane before committing the new identity, then restores them with the selected
-  account environment. A claude or codex agent keeps its conversation: af copies
-  the transcript into the new account's home before committing the new identity,
-  and the replacement resumes it. The copy stays in the new account's home, and
-  the provider replays that history under the new account, so an automatic
-  rotation moves the conversation's content to the candidate account as well as
-  the work. If the conversation cannot be carried, the agent starts a fresh
-  conversation, and the notice it receives says why. Other agents start a fresh
-  provider conversation. New
+  pane before committing the new identity, then restores the agent and shell
+  panes with the selected account environment. A claude or codex agent keeps
+  its conversation: af copies the transcript into the new account's home before
+  committing the new identity, and the replacement resumes it. The copy stays in
+  the new account's home, and the provider replays that history under the new
+  account, so an automatic rotation moves the conversation's content to the
+  candidate account as well as the work. If the conversation cannot be carried,
+  the agent starts a fresh conversation, and the notice it receives says why.
+  Other agents start a fresh provider conversation. New
   account-scoped terminal tabs remain interactive but skip shell startup files,
   because an rc file can otherwise replace the selected identity after af has
   established it. A resolved command that explicitly pins `--continue`,
@@ -594,7 +613,7 @@ If an agent reworded its banner, override the detection regex per agent with
 ```toml
 [limit_patterns]
 claude = "Claude usage limit reached\\."
-codex  = "You've hit your usage limit"
+codex  = "You['’]ve hit your usage limit"
 ```
 
 Keys must be a supported agent (`claude`, `codex`, `aider`, `gemini`, `amp`,

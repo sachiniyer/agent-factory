@@ -2148,7 +2148,7 @@ function doHandoff(): void {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
@@ -2192,7 +2192,16 @@ function doRemoveTask(task: TaskData): void {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => { if (modal === handle) closeModal(); return refreshTasks(); })
-      .catch((error) => { handle.setBusy(false); handle.setError(errorText(error)); });
+      .catch((error) => {
+        if (isMutationCommittedError(error)) {
+          if (modal === handle) closeModal();
+          refreshTasks();
+          surfaceTabError(error);
+          return;
+        }
+        handle.setBusy(false);
+        handle.setError(errorText(error));
+      });
   }, closeModal));
 }
 

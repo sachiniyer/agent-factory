@@ -1264,12 +1264,13 @@ accumulate silently on a machine running agent-factory:
     os.Remove rather than a recursive delete, so a directory that has gained
     anything since the scan fails instead of being swept up with it
   - directories af's own test harness left under the temp dir when a test run
-    ended before its cleanup (af-test-home-*, af-tmux-pkg-*, af-tmux-*). --fix
-    removes one only when it holds nothing but that run's log or tmux sockets
-    nobody answers on, has not changed for a week, and no live process has a
-    file open in it, names it, or works inside it — entry by entry with
-    os.Remove, never a recursive delete. Anything else in one is reported, and a
-    tmux server still answering in one is named rather than stopped
+    ended before its cleanup (af-test-home-*, af-test-user-home-*,
+    af-tmux-pkg-*, af-tmux-*, ...). --fix removes one only when it holds
+    nothing but that run's leftover harness content, has not changed for a
+    week, and no live process has a file open in it, names it, or works
+    inside it — entry by entry with os.Remove, never a recursive delete.
+    Anything else in one is reported, and a tmux server still answering in
+    one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -1837,6 +1838,21 @@ Use --account to choose a registered account. Omit --to to keep the same
 agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
+
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
 
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. A different agent starts a fresh conversation and is

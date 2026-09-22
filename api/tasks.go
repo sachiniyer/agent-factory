@@ -651,7 +651,7 @@ var tasksUpdateCmd = &cobra.Command{
 			// here, so the whitespace is intent rather than a slip. Resolving a
 			// trimmed spelling would make such a repository unreachable — or
 			// worse, silently rebind the task to a different repository that
-			// happens to answer to the trimmed name. `af projects register`
+			// happens to answer to the trimmed name. `af projects add`
 			// passes its path argument through untrimmed for the same reason;
 			// the TUI editor trims because a text field offers no quoting with
 			// which to express the intent.

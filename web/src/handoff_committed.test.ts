@@ -28,7 +28,7 @@ test("a committed account handoff closes the stale modal and surfaces a confirme
       worktree: { repo_path: "/work/repo" },
     }),
     canHandoff: () => true,
-    handoffModal: (_title: string, _agent: string, callbacks: { onSubmit(to: string, account?: string): void }) => {
+    handoffModal: (_title: string, _agent: string, _recorded: string, callbacks: { onSubmit(to: string, account?: string): void }) => {
       submit = callbacks.onSubmit;
       return modalHandle;
     },
