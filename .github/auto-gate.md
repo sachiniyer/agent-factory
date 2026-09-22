@@ -519,6 +519,19 @@ This preserves generation ownership checks immediately before PASS and merge,
 including write retries. Runner availability and API failures still apply;
 concurrency adds no wait here.
 
+One exception: an invalidation GitHub's API could not complete — a rate limit
+(#4461), or a create answered with a 5xx whose marker never became listable
+(#4763) — is retried once and then deferred into the lane, which retries the
+invalidation itself. A check-run create is never replayed on an ambiguous
+failure; it is reconciled by its marker over a seven-second window. If the
+lane's own create is still unconfirmed after that, the lane reads the newest
+published generation of the fixed aggregate. When that generation is already
+non-passing, the transaction stops without evaluating, retitles it `UNKNOWN`
+(concluded `failure`, never `neutral`, which the ruleset counts as satisfied),
+and the run does not fail. When it satisfies the ruleset, is absent, or cannot
+be read, the run fails: a stale PASS may still be what the ruleset enforces, and
+nothing replaced it.
+
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR
 number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or
