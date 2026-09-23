@@ -18,6 +18,12 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if err := m.saveContentPaneState(); err != nil {
 		return m, m.handleError(err)
 	}
+	// The save may have dropped a draft whose task was deleted (#4798). Its
+	// notice is otherwise raised by the next snapshot poll, which never comes
+	// once af exits, so show it now and let the next quit key go through.
+	if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
+		return m, m.showTransientMessage(notice)
+	}
 	m.flushTUIViewStateBestEffort()
 
 	// No instances.json write on quit: the daemon is the sole writer (#960 PR 4)
@@ -104,6 +110,15 @@ func (m *home) saveContentPaneState() error {
 	// harmless no-op the daemon still validates.
 	for _, edit := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
+			if updateProvedTaskDeleted(err, edit.ID) {
+				// Another writer deleted the task (`af tasks remove`), so no
+				// retry can ever land this edit; retaining it retried the save
+				// and reported "not found" on every close (#4798). Drop it and
+				// let the snapshot poll raise the pane's notice naming it.
+				log.InfoLog.Printf("discarding unsaved edit to deleted task %q: %v", edit.ID, err)
+				sp.DiscardDeletedDraft(edit.ID)
+				continue
+			}
 			if apiclient.IsMutationCommitted(err) {
 				// The task write landed; only the daemon's schedule refresh
 				// failed. Keep surfacing that failure, but advance this task's
@@ -156,6 +171,23 @@ func (m *home) saveContentPaneState() error {
 		m.recovery = &recoveryNotice{"Cannot save task", "Your changes are retained. " + saveErr.Error(), "Press any key to continue."}
 	}
 	return saveErr
+}
+
+// updateProvedTaskDeleted reports whether a failed task update positively says
+// the task does not exist. Only the daemon's own answer counts: an unconfirmed
+// HTTP response (a proxy's 404 standing in for a lost reply), an unserved
+// route, or a transport failure says nothing about the task, and a committed
+// mutation proves the opposite. Anything short of a positive answer keeps the
+// draft and reports the failure as before (#4798).
+func updateProvedTaskDeleted(err error, id string) bool {
+	var unconfirmed *apiclient.UnconfirmedHTTPResponseError
+	var notServed *apiclient.RouteNotServedError
+	var transport *apiclient.TransportError
+	if errors.As(err, &unconfirmed) || errors.As(err, &notServed) || errors.As(err, &transport) ||
+		apiclient.IsMutationCommitted(err) {
+		return false
+	}
+	return task.IsNotFound(err, id)
 }
 
 // saveInRepoPostWorktreeCommandsFn is indirected so TUI tests can force a
