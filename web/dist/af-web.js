@@ -7723,6 +7723,7 @@ var ConfigPane = class {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
+    const entriesAreNew = this.lastEntries !== entries;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7738,6 +7739,9 @@ var ConfigPane = class {
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
+    }
+    if (entriesAreNew && this.explainKey !== null) {
+      this.requestExplain(this.explainKey);
     }
     this.rerenderKeepingUserState();
   }
@@ -7949,8 +7953,17 @@ var ConfigPane = class {
     this.explainBusy = true;
     const generation = ++this.explainGeneration;
     this.rerenderKeepingUserState();
+    this.requestExplain(key, generation);
+  }
+  /** Fetches one key's trace into the open disclosure. update() calls this
+   *  without a generation when fresh manifest rows arrive (the trace re-resolves
+   *  in place); toggleExplain passes its own so a second open supersedes the
+   *  first. The settle check is the same either way: the answer paints only if
+   *  it is still the newest request for the row still open. */
+  requestExplain(key, generation) {
+    const gen = generation ?? ++this.explainGeneration;
     void this.actions.explain(key).then((outcome) => {
-      if (generation !== this.explainGeneration || this.explainKey !== key) {
+      if (gen !== this.explainGeneration || this.explainKey !== key) {
         return;
       }
       this.explainBusy = false;

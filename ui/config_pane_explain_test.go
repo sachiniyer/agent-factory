@@ -138,6 +138,33 @@ func TestConfigPaneExplainIsANoOpOnARowWithNoKey(t *testing.T) {
 	}
 }
 
+func TestConfigPaneExplainStripsControlBytesFromRenderedValues(t *testing.T) {
+	// A free-form value (on_archive_command) holds whatever TOML expressed —
+	// including \u001B escapes that, rendered verbatim, would emit screen clears
+	// or OSC writes into the TUI. The trace must render what the value IS, not
+	// what it does (the list's truncateConfigPreview strip+flatten, minus the
+	// truncation).
+	c := newTestConfigPane(t)
+	c.explain = func(string) (*config.ResolvedValue, error) {
+		v := explainFixture()
+		v.Value = "echo \x1b[2Jdone\n\twith: control"
+		v.Candidates[1].Value = v.Value
+		v.Candidates[1].Path = "/tmp/evil \x1b]8;;http://x\x07path"
+		return v, nil
+	}
+	selectKey(t, c, "default_program")
+	pressKey(c, "e")
+
+	out := c.String()
+	if strings.Contains(out, "\x1b[2J") || strings.Contains(out, "\x1b]8") {
+		t.Fatalf("the explain view must not emit the value's escape bytes:\n%q", out)
+	}
+	// The printable text survives — one line of it, whitespace flattened.
+	if !strings.Contains(out, "echo done  with: control") {
+		t.Fatalf("stripping must keep the value's printable text:\n%s", out)
+	}
+}
+
 func TestConfigPaneClosingDropsAnOpenExplanation(t *testing.T) {
 	c := newTestConfigPane(t)
 	c.explain = func(string) (*config.ResolvedValue, error) { return explainFixture(), nil }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/sachiniyer/agent-factory/config"
 )
 
@@ -99,9 +100,9 @@ func (c *ConfigPane) renderExplainView() string {
 func (c *ConfigPane) wrappedExplainLines(v config.ResolvedValue) []string {
 	var logical []string
 	logical = append(logical,
-		fmt.Sprintf("%s = %s", v.Key, config.FormatExplainValue(v.Value)))
+		fmt.Sprintf("%s = %s", v.Key, explainSafe(config.FormatExplainValue(v.Value))))
 	if v.Default != "" {
-		logical = append(logical, "default: "+v.Default)
+		logical = append(logical, "default: "+explainSafe(v.Default))
 	}
 	logical = append(logical, "policy: "+v.Merge+" · "+strings.Join(v.Precedence, " < "), "")
 	for _, cand := range v.Candidates {
@@ -112,11 +113,11 @@ func (c *ConfigPane) wrappedExplainLines(v config.ResolvedValue) []string {
 		logical = append(logical, cand.Layer+": "+result)
 		value := "—"
 		if cand.Present {
-			value = config.FormatExplainValue(cand.Value)
+			value = explainSafe(config.FormatExplainValue(cand.Value))
 		}
 		location := "compiled default"
 		if cand.Path != "" {
-			location = cand.Path + ":" + cand.KeyPath
+			location = explainSafe(cand.Path) + ":" + explainSafe(cand.KeyPath)
 		}
 		logical = append(logical, "    "+value+" · "+location)
 	}
@@ -133,9 +134,9 @@ func (c *ConfigPane) wrappedExplainLines(v config.ResolvedValue) []string {
 			origin := v.Origins[leaf]
 			location := "compiled default"
 			if origin.Path != "" {
-				location = origin.Path + ":" + origin.KeyPath
+				location = explainSafe(origin.Path) + ":" + explainSafe(origin.KeyPath)
 			}
-			logical = append(logical, "  "+leaf+": "+origin.Layer+" · "+location)
+			logical = append(logical, "  "+explainSafe(leaf)+": "+origin.Layer+" · "+location)
 		}
 	}
 
@@ -145,4 +146,15 @@ func (c *ConfigPane) wrappedExplainLines(v config.ResolvedValue) []string {
 		lines = append(lines, strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n")...)
 	}
 	return lines
+}
+
+// explainSafe renders file-sourced text (values, paths, key paths) safe for
+// the compositor — the same strip+flatten pair the list's truncateConfigPreview
+// applies, without its truncation: the explain view exists to show the whole
+// value, wrapped. What it cannot afford to pass through is what a value can
+// DO: a free-form key like on_archive_command holds whatever TOML expressed,
+// including \u001B escapes that Lip Gloss would emit verbatim — screen clears,
+// cursor moves, OSC writes from inside the trace.
+func explainSafe(s string) string {
+	return flattenToOneLine(xansi.Strip(s))
 }

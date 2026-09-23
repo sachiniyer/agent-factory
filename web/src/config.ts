@@ -338,9 +338,12 @@ export class ConfigPane {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
-    // Captured before `lastStatus` is overwritten below: it is the EDGE that
-    // `shouldCloseSavedField` gates on, and by then the level would look unchanged.
+    // Captured before `lastStatus`/`lastEntries` are overwritten below: the
+    // status edge is what `shouldCloseSavedField` gates on (by then the level
+    // would look unchanged), and the entries edge is what decides whether an
+    // open explanation must re-resolve (see below).
     const statusIsNew = status !== this.lastStatus;
+    const entriesAreNew = this.lastEntries !== entries;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status
       && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
@@ -358,6 +361,17 @@ export class ConfigPane {
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
+    }
+    // An open trace describes the manifest it was fetched from. A refresh that
+    // carries NEW entries — a save landing, a hand-edit, an `af config set`
+    // elsewhere — has already moved the row's effective value; leaving the old
+    // ResolvedValue painted under it would show provenance for a value the row
+    // no longer reports. Re-resolve in place rather than close the disclosure:
+    // the generation guard drops the answer if the user has since opened
+    // another row or closed this one, so the refetch is free of the race it
+    // could otherwise lose.
+    if (entriesAreNew && this.explainKey !== null) {
+      this.requestExplain(this.explainKey);
     }
     this.rerenderKeepingUserState();
   }
@@ -625,10 +639,20 @@ export class ConfigPane {
     this.explainBusy = true;
     const generation = ++this.explainGeneration;
     this.rerenderKeepingUserState();
+    this.requestExplain(key, generation);
+  }
+
+  /** Fetches one key's trace into the open disclosure. update() calls this
+   *  without a generation when fresh manifest rows arrive (the trace re-resolves
+   *  in place); toggleExplain passes its own so a second open supersedes the
+   *  first. The settle check is the same either way: the answer paints only if
+   *  it is still the newest request for the row still open. */
+  private requestExplain(key: string, generation?: number): void {
+    const gen = generation ?? ++this.explainGeneration;
     void this.actions.explain(key).then((outcome) => {
       // A stale answer must not paint over a newer open: the user may have
       // explained another key — or closed this one — while the fetch flew.
-      if (generation !== this.explainGeneration || this.explainKey !== key) {
+      if (gen !== this.explainGeneration || this.explainKey !== key) {
         return;
       }
       this.explainBusy = false;
