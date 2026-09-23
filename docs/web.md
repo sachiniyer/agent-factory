@@ -550,7 +550,8 @@ What to know before turning it on:
   hostname into a network-reachable capability, and one that leaks through a log, a
   screenshot, or browser history stops being usable only from this machine. Editor
   tabs are withheld entirely while the listener is network-bound, and the daemon
-  warns at start. Keep it on loopback unless you have a reason not to.
+  warns at start, and `af config set` and the TUI and web config panes warn on
+  every exposed save. Keep it on loopback unless you have a reason not to.
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 
