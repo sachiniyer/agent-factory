@@ -18,6 +18,7 @@ import (
 // signal while still filling pane_dead_time. A whitespace split collapsed the
 // empty field and read the timestamp as the exit status.
 func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
+	shrinkPaneStatusWait(t)
 	gone := exitedProcess(t).PID
 	uncollected := uncollectedProcess(t)
 	for _, tc := range []struct {
@@ -39,7 +40,8 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 		// tmux reports nothing about the root: the pane pid decides.
 		{name: "unreported, root gone", pid: gone, wantDead: true},
 		{name: "unreported, root running", pid: os.Getpid()},
-		// tmux has not collected the root yet: it has still finished.
+		// tmux has not collected the root yet, and does not within the wait:
+		// it has still finished.
 		{name: "unreported, root exited but uncollected", pid: uncollected, wantDead: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,6 +55,43 @@ func TestProbePaneExitKeepsAnEmptyStatusUnknown(t *testing.T) {
 			assert.True(t, at.Equal(tc.wantAt), "at = %v, want %v", at, tc.wantAt)
 		})
 	}
+}
+
+// #4682: tmux marks a pane dead when its terminal closes, which can come before
+// it collects the root and fills pane_dead_status. A probe in that window must
+// wait for the status rather than record a plain exit as unknown: a process
+// tab's immediate-failure check and its durable exit record both read it.
+func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
+	uncollected := uncollectedProcess(t)
+	reads := 0
+	before := heldPaneExec(uncollected, "", "", "", nil)
+	after := heldPaneExec(uncollected, "7", "", "1726000000", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-pending", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: before.RunFunc,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			reads++
+			if reads < 3 {
+				return before.OutputFunc(c)
+			}
+			return after.OutputFunc(c)
+		},
+	})
+	dead, status, statusKnown, at, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.True(t, statusKnown, "the probe answered before tmux reported the status")
+	require.Equal(t, 7, status)
+	require.True(t, at.Equal(time.Unix(1726000000, 0)), "at = %v", at)
+	require.Equal(t, 3, reads)
+}
+
+// shrinkPaneStatusWait bounds ProbePaneExit's wait for an uncollected root, so a
+// fixture whose root tmux never collects gives up quickly.
+func shrinkPaneStatusWait(t *testing.T) {
+	t.Helper()
+	old := paneStatusWait
+	paneStatusWait = 100 * time.Millisecond
+	t.Cleanup(func() { paneStatusWait = old })
 }
 
 // A live pane is answered live whatever the other fields hold.
