@@ -719,7 +719,7 @@ func writeDaemonPIDFile() error {
 	if err != nil {
 		return err
 	}
-	return withDaemonPIDLock(path, func() error {
+	return withDaemonPIDLock(path, time.Time{}, func() error {
 		return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
 	})
 }
@@ -845,10 +845,10 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		// Proven to serve this home: signal it below.
 	case daemonForeign:
 		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
-		removePIDFileIfStillNames(pidFile, pid)
+		removePIDFileIfStillNames(pidFile, pid, deadline)
 		return false, nil
 	default: // daemonUnverifiable — inconclusive; neither signal nor orphan a live daemon.
-		if reclaimDeadUnverifiablePIDFile(pidFile, pid) {
+		if reclaimDeadUnverifiablePIDFile(pidFile, pid, deadline) {
 			return false, nil
 		}
 		return false, fmt.Errorf("PID %d could not be bound to this home (uid, AGENT_FACTORY_HOME, or path unresolved); not signaling and leaving the PID file in place", pid)

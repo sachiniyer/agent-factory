@@ -947,7 +947,7 @@ func TestRemovePIDFileIfStillNames_KeepsReplacementFile(t *testing.T) {
 		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
 			t.Fatalf("write stale PID file: %v", err)
 		}
-		removePIDFileIfStillNames(pidFile, stale)
+		removePIDFileIfStillNames(pidFile, stale, time.Time{})
 		if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 			t.Fatalf("expected stale PID file naming %d to be removed, stat err=%v", stale, err)
 		}
@@ -964,7 +964,7 @@ func TestRemovePIDFileIfStillNames_KeepsReplacementFile(t *testing.T) {
 		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", fresh)), 0600); err != nil {
 			t.Fatalf("write replacement PID file: %v", err)
 		}
-		removePIDFileIfStillNames(pidFile, stale)
+		removePIDFileIfStillNames(pidFile, stale, time.Time{})
 		data, err := os.ReadFile(pidFile)
 		if err != nil {
 			t.Fatalf("replacement PID file was removed; a newly-started daemon's handle is lost: %v", err)
@@ -976,7 +976,7 @@ func TestRemovePIDFileIfStillNames_KeepsReplacementFile(t *testing.T) {
 
 	t.Run("missing file is a no-op", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "daemon.pid")
-		removePIDFileIfStillNames(missing, 99999)
+		removePIDFileIfStillNames(missing, 99999, time.Time{})
 		if _, err := os.Stat(missing); !os.IsNotExist(err) {
 			t.Fatalf("removePIDFileIfStillNames created or touched %q, stat err=%v", missing, err)
 		}
@@ -1012,7 +1012,7 @@ func TestRemovePIDFileIfStillNames_CoordinatesWithWriterLock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		removePIDFileIfStillNames(pidFile, stale)
+		removePIDFileIfStillNames(pidFile, stale, time.Time{})
 		close(done)
 	}()
 

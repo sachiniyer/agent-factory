@@ -45,6 +45,17 @@ import (
 func sigtermFallback() (ShutdownResult, error) {
 	pid, source, scanned, err := locateDaemonPID()
 	if err != nil {
+		if scanned > 0 {
+			// An ambiguity (multiple same-home `--daemon` candidates) or
+			// another scan failure that left foreign/unverifiable daemons in
+			// the scan (counted in `scanned`). The error already names the
+			// same-home PIDs to kill by hand; do NOT append the blanket
+			// `pkill -f -- '--daemon'` here — that command has no home or PID
+			// constraint, so following it would kill exactly the foreign-home
+			// daemons the home filter refused to touch, plus any unrelated
+			// process carrying "--daemon".
+			return ShutdownFailed, err
+		}
 		return ShutdownFailed, fmt.Errorf(
 			"sigterm fallback failed: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			err,
@@ -169,6 +180,12 @@ func readPIDFromFile() (int, bool) {
 	return pid, true
 }
 
+// daemonPIDLockPoll is the cadence a nonblocking PID-file lock acquisition
+// retries at when a deadline bounds the wait. Package var so tests can
+// shorten it; production keeps it short so a deadline-bounded stop does not
+// spend its whole budget asleep between attempts.
+var daemonPIDLockPoll = 20 * time.Millisecond
+
 // withDaemonPIDLock runs fn while holding an exclusive flock on a sidecar lock
 // file next to the daemon PID file. writeDaemonPIDFile writes daemon.pid with an
 // atomic temp-then-rename, and removePIDFileIfStillNames reads it and
@@ -183,17 +200,48 @@ func readPIDFromFile() (int, bool) {
 // so a crashed daemon never strands it. The lock file is left in place and
 // re-opened by later callers, the way the rest of the codebase's sidecar .lock
 // files are.
-func withDaemonPIDLock(pidFile string, fn func() error) error {
+//
+// deadline bounds the acquisition: zero blocks indefinitely (the
+// writeDaemonPIDFile startup contract, and StopDaemon, which carries no caller
+// deadline); a non-zero deadline makes the acquisition nonblocking and
+// deadline-aware, so a deadline-bounded stopDaemonUntil that reaches
+// foreign-PID cleanup while another writer holds daemon.pid.lock does not
+// block past its admission deadline. The lock is abandoned (the removal is
+// best-effort anyway) rather than waiting indefinitely on a suspended writer or
+// a stalled filesystem.
+func withDaemonPIDLock(pidFile string, deadline time.Time, fn func() error) error {
 	lock, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("open daemon PID lock: %w", err)
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock daemon PID file: %w", err)
+	if !acquireDaemonPIDLock(lock, deadline) {
+		return errors.New("daemon PID lock held by another writer")
 	}
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
 	return fn()
+}
+
+// acquireDaemonPIDLock takes an exclusive flock on lock, blocking indefinitely
+// when deadline is zero and otherwise polling a nonblocking acquire at
+// daemonPIDLockPoll against deadline. Returns false (without the lock) when
+// the deadline expires, so the caller can abandon best-effort cleanup rather
+// than exceed a bounded stop/restart contract.
+func acquireDaemonPIDLock(lock *os.File, deadline time.Time) bool {
+	if deadline.IsZero() {
+		return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX) == nil
+	}
+	for {
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return true
+		}
+		if admissionDeadlineExpired(deadline) {
+			return false
+		}
+		if !waitUntilAdmissionDeadline(deadline, daemonPIDLockPoll) {
+			return false
+		}
+	}
 }
 
 // removePIDFileIfStillNames unlinks pidFile only when it still records pid.
@@ -208,8 +256,13 @@ func withDaemonPIDLock(pidFile string, fn func() error) error {
 // atomic rewrite cannot interleave: leave a freshly-written valid file to its
 // owner, and treat the unreadable/malformed case the same way rather than
 // unlinking a file whose current contents we did not establish (#4793).
-func removePIDFileIfStillNames(pidFile string, pid int) {
-	if err := withDaemonPIDLock(pidFile, func() error {
+//
+// deadline propagates the caller's admission deadline to the lock acquisition
+// (see withDaemonPIDLock): a deadline-bounded stopDaemonUntil does not block
+// indefinitely on a contended lock. On a deadline the cleanup is abandoned
+// (best-effort, logged) rather than waiting past the stop/restart budget.
+func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
+	if err := withDaemonPIDLock(pidFile, deadline, func() error {
 		data, err := os.ReadFile(pidFile)
 		if err != nil {
 			// Already gone (or unreadable) — nothing to remove; a missing file
@@ -258,11 +311,13 @@ func removePIDFileIfStillNames(pidFile string, pid int) {
 // liveness test the rest of stopDaemonUntil polls with; the exit it detects is
 // the narrow window between the signal-0 probe upstream and this recheck. Lives
 // in sigterm_fallback.go to keep daemon.go under the file-length lint limit
-// (#1145), the same reason removePIDFileIfStillNames lives here.
-func reclaimDeadUnverifiablePIDFile(pidFile string, pid int) bool {
+// (#1145), the same reason removePIDFileIfStillNames lives here. deadline is the
+// caller's admission deadline, propagated to the PID-file lock the reclaim
+// takes so a deadline-bounded stop does not block on a contended lock.
+func reclaimDeadUnverifiablePIDFile(pidFile string, pid int, deadline time.Time) bool {
 	if !pidLooksAlive(pid) {
 		log.InfoLog.Printf("PID %d could not be bound to this home (unresolved) but has since exited; removing stale PID file", pid)
-		removePIDFileIfStillNames(pidFile, pid)
+		removePIDFileIfStillNames(pidFile, pid, deadline)
 		return true
 	}
 	return false
@@ -427,15 +482,22 @@ func classifyDaemonHome(pid int) daemonScope {
 			env = filepath.Join(daemonHome, strings.TrimPrefix(strings.TrimPrefix(env, "~"), "/"))
 		}
 	}
-	gotHome, err := config.ConfigDirFor(env)
-	if err != nil {
-		// The daemon holds an AGENT_FACTORY_HOME we cannot resolve. The
-		// "~user" form is rejected here; an unresolvable home is not "not
-		// ours" — say so instead of guessing.
-		log.WarningLog.Printf("sigterm fallback: cannot resolve AGENT_FACTORY_HOME=%q for daemon pid %d: %v", env, pid, err)
+	// env is now expanded in the DAEMON's frame. Resolve it here rather than
+	// routing it through config.ConfigDirFor: when the daemon's own HOME is
+	// itself "~"-prefixed (HOME=~/x, with no AGENT_FACTORY_HOME, the block
+	// above leaves env="~/x/.agent-factory"), config.ConfigDirFor would expand
+	// that leading "~" against the CALLER's $HOME — making a daemon that
+	// actually serves <its cwd>/~/x/.agent-factory compare equal to the
+	// caller's home and be marked ours on a stale PID file (the #4793 hazard
+	// via a "~"-prefixed daemon HOME). A "~user" form config.ConfigDirFor
+	// rejects stays unverifiable; every other spelling (absolute,
+	// "~"-prefixed, or relative) is resolved relative to the daemon's own cwd
+	// by resolveHomeInDaemonFrame the way the daemon's own file ops resolved
+	// it.
+	if strings.HasPrefix(env, "~") && env != "~" && !strings.HasPrefix(env, "~/") {
 		return daemonUnverifiable
 	}
-	gotHome, ok = resolveHomeInDaemonFrame(pid, gotHome)
+	gotHome, ok := resolveHomeInDaemonFrame(pid, env)
 	if !ok {
 		return daemonUnverifiable
 	}
