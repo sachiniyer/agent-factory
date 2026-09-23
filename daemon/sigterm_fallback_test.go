@@ -353,10 +353,24 @@ func TestSigtermFallback_DeadPID(t *testing.T) {
 // previously untestable without real host daemons (#793): with no usable PID
 // file and a scan returning several candidates, the fallback must refuse to
 // guess, returning ShutdownFailed with an error naming every candidate PID.
+//
+// The home-scoped scan counts only THIS home's proven daemons, so the
+// candidates must both be proven-ours for the guard to fire: two live `af
+// --daemon` fakes serving THIS home. The singleton lock makes two same-home
+// daemons unreachable in production, but the guard's contract — refuse to
+// guess between proven-ours PIDs rather than signal an arbitrary one — must
+// hold anyway, and is the only branch the count-greater-than-one case still
+// guards now that foreign/unverifiable scan results are filtered out.
 func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	stubDaemonScan(t, []int{11111, 22222}, nil)
+
+	a := spawnFakeDaemonWithHome(t, home)
+	b := spawnFakeDaemonWithHome(t, home)
+	stubDaemonScan(t, []int{a, b}, nil)
 
 	result, err := sigtermFallback()
 	if result != ShutdownFailed {
@@ -369,9 +383,9 @@ func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
 	if !strings.Contains(msg, "ambiguous") {
 		t.Errorf("sigtermFallback error %q missing 'ambiguous'", msg)
 	}
-	for _, pid := range []string{"11111", "22222"} {
-		if !strings.Contains(msg, pid) {
-			t.Errorf("sigtermFallback error %q missing candidate pid %s", msg, pid)
+	for _, pid := range []int{a, b} {
+		if !strings.Contains(msg, strconv.Itoa(pid)) {
+			t.Errorf("sigtermFallback error %q missing candidate pid %d", msg, pid)
 		}
 	}
 }
@@ -578,12 +592,16 @@ func TestPidBelongsToThisHome(t *testing.T) {
 // for the stale-PID-recycle bypass: the caller's daemon.pid is stale and its
 // PID has been recycled by ANOTHER home's live `af --daemon` (a different
 // AGENT_FACTORY_HOME). The PID-file fast path in locateDaemonPID used to accept
-// that PID on a cmdline-only match and SIGTERM it BEFORE the pgrep ambiguity
-// guard ever ran — killing the wrong home's daemon and reporting
-// ShutdownViaSIGTERM (success) against it. With the home binding
-// (pidBelongsToThisHome), the fast path must reject the foreign PID and fall
-// through to the pgrep scan, where the ambiguity guard surfaces a safe
-// ShutdownFailed rather than killing anything.
+// that PID on a cmdline-only match and SIGTERM it BEFORE the pgrep scan ever
+// ran — killing the wrong home's daemon and reporting ShutdownViaSIGTERM
+// (success) against it. With the home binding (pidBelongsToThisHome), the fast
+// path rejects the foreign PID and falls through to the pgrep scan.
+//
+// The scan is then scoped by home too, so a foreign daemon alive alongside THIS
+// home's own no longer makes the fallback wrongly "ambiguous": filtering to
+// this home's proven daemons leaves exactly the one correct target, which is
+// signalled. The foreign home's daemon is left untouched — the cross-home
+// safety property — and this home's own stale daemon is reclaimed.
 //
 // This mirrors the real-world trigger (two different homes, the stale int
 // lands on the other home's daemon) rather than a same-home two-daemon setup:
@@ -597,8 +615,8 @@ func TestSigtermFallback_PIDFileForeignHomeNotKilled(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	// The caller's own stale pre-#501 daemon: a live `af --daemon` serving
-	// THIS home. A host-wide pgrep would find it alongside the foreign one
-	// below, which is what forces the ambiguity guard to refuse.
+	// THIS home. Once the stale PID file is rejected, the home-scoped scan
+	// reclaims this one correct target.
 	ours := spawnFakeDaemonWithHome(t, home)
 
 	// The OTHER home's daemon: a live `af --daemon` serving a different
@@ -614,33 +632,43 @@ func TestSigtermFallback_PIDFileForeignHomeNotKilled(t *testing.T) {
 	}
 
 	// Stub the host-wide scan the way a real pgrep would answer: BOTH `af
-	// --daemon` processes are visible. The ambiguity guard must refuse to
-	// guess, surfacing ShutdownFailed + "ambiguous" — never killing either.
+	// --daemon` processes are visible. The home binding on the fast path
+	// rejects the foreign PID file; the home-scoped scan keeps only OURS, so
+	// the fallback reclaims the one correct target instead of refusing
+	// (pre-fix) as "ambiguous" between a foreign and our daemon.
 	stubDaemonScan(t, []int{foreign, ours}, nil)
 
 	result, err := sigtermFallback()
-	if result != ShutdownFailed {
-		t.Fatalf("sigtermFallback returned %v for a stale PID file pointing at a foreign home's daemon, "+
-			"want ShutdownFailed (safe ambiguity failure, not a wrong-kill success)", result)
+	if err != nil {
+		t.Fatalf("sigtermFallback: %v", err)
 	}
-	if err == nil {
-		t.Fatalf("sigtermFallback returned nil error; expected the 'ambiguous' recovery error")
-	}
-	if !strings.Contains(err.Error(), "ambiguous") {
-		t.Errorf("sigtermFallback error %q missing 'ambiguous'", err.Error())
+	if result != ShutdownViaSIGTERM {
+		t.Fatalf("sigtermFallback returned %v for a stale foreign PID file with this home's own daemon live, "+
+			"want ShutdownViaSIGTERM (the home-scoped scan reclaims THIS home's daemon)", result)
 	}
 
 	// The foreign home's daemon MUST still be alive — the whole point of the
-	// fix is that the fallback did not SIGTERM the wrong process.
+	// fix is that the stale PID file did not get it SIGTERM'd.
 	if !pidLooksAlive(foreign) {
 		t.Fatalf("foreign home's daemon pid=%d (serving %q) was killed by sigtermFallback run against %q; "+
 			"the stale PID file bypassed the home binding", foreign, otherHome, home)
 	}
-	// And the caller's own stale daemon was not signaled either — the
-	// ambiguity guard refused to guess between the two it found.
-	if !pidLooksAlive(ours) {
-		t.Fatalf("this home's daemon pid=%d was killed by sigtermFallback; the ambiguity guard "+
-			"should have refused to guess between the two candidates", ours)
+	// This home's own stale daemon WAS reclaimed — the home-scoped scan turned
+	// the old false "ambiguous" refusal into the correct single target.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidLooksAlive(ours) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if pidLooksAlive(ours) {
+		t.Fatalf("this home's daemon pid=%d was not reclaimed by sigtermFallback; the home-scoped scan "+
+			"should have signalled the one proven-ours candidate", ours)
+	}
+	// The stale PID file is cleaned up on the success path.
+	if _, err := os.Stat(filepath.Join(home, "daemon.pid")); !os.IsNotExist(err) {
+		t.Errorf("expected stale PID file to be removed after sigtermFallback, stat err=%v", err)
 	}
 }
 
@@ -739,5 +767,141 @@ func TestSigtermFallback_PIDFileOwnHomeStillKills(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "daemon.pid")); !os.IsNotExist(err) {
 		t.Errorf("expected PID file to be removed after sigtermFallback, stat err=%v", err)
+	}
+}
+
+// spawnFakeDaemonIn is the cwd- and binary-path-flexible variant of
+// spawnFakeDaemonWithHome (stopall_test.go): it places the fake daemon's binary
+// in binDir and starts it with its working directory set to cwd. Both axes are
+// load-bearing for the home-binding classifier's two recorded-PID corrections:
+// a RELATIVE AGENT_FACTORY_HOME must be resolved against the DAEMON's own cwd
+// (not ours), and a binary living under /tmp/Test* must not be excluded as a
+// Go test binary — and proving either requires controlling exactly those two
+// axes that spawnFakeDaemonWithHome pins for the reset tests.
+func spawnFakeDaemonIn(t *testing.T, home, binDir, cwd string) int {
+	t.Helper()
+	argv0 := filepath.Join(binDir, "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	env := []string{"PATH=" + os.Getenv("PATH")}
+	if home != "" {
+		env = append(env, "AGENT_FACTORY_HOME="+home)
+	}
+	cmd.Env = env
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, pid, argv0)
+	return pid
+}
+
+// TestSigtermFallback_ScanForeignOnlyNotKilled pins the pgrep-scan half of the
+// cross-home fix. With no PID file and a host-wide scan that returns a SINGLE
+// candidate serving ANOTHER home, the pre-fix pgrep branch returned that lone
+// PID for signalAndWait and SIGTERM'd exactly the unrelated process the home
+// binding is meant to protect (a foreign or unverifiable daemon that happens
+// to be the only --daemon process on the box, e.g. its environ is unreadable or
+// the intended daemon exited before the scan). locateDaemonPID must now
+// reclassify every scanned candidate by uid and AGENT_FACTORY_HOME before
+// selecting a signal target, so a single foreign match yields a safe
+// ShutdownFailed and nothing is signalled.
+func TestSigtermFallback_ScanForeignOnlyNotKilled(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// The only scan match serves a DIFFERENT home. Before the home-scoped
+	// scan, this single foreign result was signalled unconditionally.
+	otherHome := testguard.SocketTempDir(t)
+	foreign := spawnFakeDaemonWithHome(t, otherHome)
+	stubDaemonScan(t, []int{foreign}, nil)
+
+	result, err := sigtermFallback()
+	if result != ShutdownFailed {
+		t.Fatalf("sigtermFallback returned %v for a single foreign scan result, want ShutdownFailed "+
+			"(a foreign daemon must never be the signal target)", result)
+	}
+	if err == nil {
+		t.Fatalf("sigtermFallback returned nil error; expected the recovery hint")
+	}
+	if !pidLooksAlive(foreign) {
+		t.Fatalf("foreign home's daemon pid=%d (serving %q) was killed by sigtermFallback run against %q; "+
+			"a single foreign scan result must not be signalled", foreign, otherHome, home)
+	}
+}
+
+// TestPidBelongsToThisHome_TestBinaryNotExcluded pins the recorded-PID
+// classifier's deliberate split from the host-scan heuristic. A daemon whose
+// executable lives under /tmp/Test* (the shape `go test`-spawned binaries take
+// via t.TempDir) serving THIS home IS ours to stop: a PID FILE names a real
+// daemon, so the isTestBinaryArgs filter that keeps test fakes out of the
+// host-wide scan must NOT be applied to it. Reusing verifyScopedDaemon for the
+// PID-file path (which applies that heuristic) classified this binary foreign,
+// deleted its live PID file, and left the daemon running — failing open.
+// classifyDaemonHome now skips that heuristic, so it is bound to this home.
+func TestPidBelongsToThisHome_TestBinaryNotExcluded(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// Binary placed under t.TempDir(), whose paths start with /tmp/Test…
+	// (isTestBinaryArgs's trigger). spawnFakeDaemonWithHome deliberately uses
+	// a dir outside /tmp/Test* (fakeBinDir) so isTestBinaryArgs does not fire;
+	// here we WANT it to fire against the host-scan heuristic to prove the
+	// recorded-PID path no longer applies it.
+	binDir := t.TempDir()
+	pid := spawnFakeDaemonIn(t, home, binDir, "")
+
+	if !pidBelongsToThisHome(pid) {
+		t.Errorf("daemon serving this home (%q) with a /tmp/Test* binary was not bound to this home; "+
+			"want true — the recorded-PID classifier must not exclude a legitimate daemon as a Go "+
+			"test binary (isTestBinaryArgs stays on host-wide scans only)", home)
+	}
+}
+
+// TestPidBelongsToThisHome_RelativeHomeResolvedAgainstDaemonCwd pins the
+// recorded-PID classifier's frame for a RELATIVE AGENT_FACTORY_HOME. Two
+// daemons launched with the same relative value ("rel") from DIFFERENT
+// directories serve different homes; resolving both against the CALLER's cwd
+// (verifyScopedDaemon's canonicalDir) labelled the foreign one "ours" and let a
+// stale PID file signal it. classifyDaemonHome now resolves a relative home
+// against the DAEMON's own working directory, so the daemon sharing the
+// caller's cwd is ours and the one launched from elsewhere is foreign.
+func TestPidBelongsToThisHome_RelativeHomeResolvedAgainstDaemonCwd(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	// The caller is on a RELATIVE home; our wantHome resolves against OUR cwd.
+	callerCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get caller cwd: %v", err)
+	}
+	t.Setenv("AGENT_FACTORY_HOME", "rel")
+
+	// Binary outside /tmp/Test* so isTestBinaryArgs never fires and the test
+	// isolates the cwd-frame variable.
+	ours := spawnFakeDaemonIn(t, "rel", fakeBinDir(t), callerCwd)
+	if !pidBelongsToThisHome(ours) {
+		t.Errorf("daemon with AGENT_FACTORY_HOME=rel launched from the caller's cwd (%q) not bound to "+
+			"this home; want true (its resolved home is the caller's)", callerCwd)
+	}
+
+	otherCwd := t.TempDir()
+	foreign := spawnFakeDaemonIn(t, "rel", fakeBinDir(t), otherCwd)
+	if pidBelongsToThisHome(foreign) {
+		t.Errorf("daemon with AGENT_FACTORY_HOME=rel launched from a different cwd (%q) was bound to "+
+			"this home; want false — a relative home must be resolved against the DAEMON's cwd, not "+
+			"the caller's (resolving both against ours labels a foreign daemon 'ours')", otherCwd)
 	}
 }

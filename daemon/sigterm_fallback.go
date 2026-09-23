@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -94,16 +96,32 @@ func locateDaemonPID() (int, string, error) {
 		}
 		return 0, "", fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
 	}
-	switch len(pids) {
+	// Reclassify every scanned candidate by uid and AGENT_FACTORY_HOME before
+	// selecting a signal target. The pgrep scan returns every `--daemon`
+	// process on the host, so a single result that serves ANOTHER home (or
+	// whose home is unverifiable) would otherwise be signalled — exactly the
+	// unrelated process the PID-file binding just rejected, whenever it was
+	// the only scan match. Filtering to this home's proven daemons also turns
+	// the old false "ambiguous" refusal into the correct single target when
+	// other homes' daemons are alive alongside ours (#4793). The PID-file fast
+	// path above and this scan path now both require the home binding, so the
+	// two agree on what is signalled (#1004).
+	scoped := make([]int, 0, len(pids))
+	for _, pid := range pids {
+		if pidBelongsToThisHome(pid) {
+			scoped = append(scoped, pid)
+		}
+	}
+	switch len(scoped) {
 	case 0:
-		return 0, fmt.Sprintf("%s, pgrep: no matches", pidFileSource), nil
+		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, len(pids)), nil
 	case 1:
-		return pids[0], "pgrep", nil
+		return scoped[0], "pgrep", nil
 	default:
 		return 0, "", fmt.Errorf(
-			"sigterm fallback: ambiguous, found %d `--daemon` processes (%s) — "+
+			"sigterm fallback: ambiguous, found %d `--daemon` processes for this home (%s) — "+
 				"kill the right one manually then re-run `af upgrade`",
-			len(pids), formatPIDList(pids),
+			len(scoped), formatPIDList(scoped),
 		)
 	}
 }
@@ -161,53 +179,133 @@ func pidLooksAlive(pid int) bool {
 
 // pidBelongsToThisHome reports whether the process at pid is an agent-factory
 // daemon serving THIS process's AGENT_FACTORY_HOME. It is the home-binding half
-// of the PID-file trust decision: cmdline alone (isAgentFactoryDaemon) cannot
-// distinguish an `af --daemon` of THIS home from one of another home, and a
-// stale daemon.pid whose PID the kernel recycled onto a DIFFERENT home's
-// `af --daemon` passes the cmdline check while serving someone else's control
-// socket. Signaling it would kill an unrelated daemon — possibly another user's
-// on a shared host — so every path that reads daemon.pid and signals the PID it
-// names must require this in addition to the cmdline match.
+// of the trust decision a PID-file candidate must pass before it is signalled:
+// cmdline alone (isAgentFactoryDaemon) cannot distinguish an `af --daemon` of
+// THIS home from one of another home, and a stale daemon.pid whose PID the
+// kernel recycled onto a DIFFERENT home's `af --daemon` passes the cmdline check
+// while serving someone else's control socket. Signaling it would kill an
+// unrelated daemon — possibly another user's on a shared host — so every path
+// that reads daemon.pid and signals the PID it names must require this in
+// addition to the cmdline match.
 //
-// It reuses verifyScopedDaemon, the same uid + AGENT_FACTORY_HOME binding
-// `af reset`'s orphan scan relies on (#1919), so the two PID-validation paths
-// StopDaemon and locateDaemonPID share agree (#1004) and the cross-home hazard
-// the unit operations already gate on (#1916) is gated on the PID-signal path
-// too. "Unverifiable" (a foreign or withheld environ) is NOT ours: callers fall
-// through to the pgrep ambiguity guard rather than trusting a PID they could
-// not bind — guessing "ours" here is exactly the bug.
-//
-// Callers that only need the trust decision use this bool helper; StopDaemon
-// uses classifyDaemonHome instead, because it must act differently on a
-// PROVEN-foreign PID (stale PID file, fall back) and an INCONCLUSIVE one (do
-// not signal AND do not delete the PID file — deleting it on an inconclusive
-// binding orphans the live daemon the file names). See stopDaemonUntil.
+// It is a thin bool over classifyDaemonHome, the classifier StopDaemon and the
+// pgrep scan path share so the two PID-validation paths agree on what "ours"
+// means (#1004). "Unverifiable" (a uid, environ, or path that could not be
+// established) is NOT ours: a PID that cannot be bound to this home is never
+// trusted — guessing "ours" is exactly the bug. Callers that must act
+// differently on a PROVEN-foreign PID and an INCONCLUSIVE one use
+// classifyDaemonHome directly; see stopDaemonUntil.
 func pidBelongsToThisHome(pid int) bool {
 	return classifyDaemonHome(pid) == daemonOurs
 }
 
-// classifyDaemonHome is the tri-state form of pidBelongsToThisHome, surfacing
-// the inconclusive case (daemonUnverifiable) the bool helper collapses.
-// StopDaemon reads daemon.pid and then decides whether to signal the PID it
-// names: proving the PID is another home's daemon (daemonForeign) lets it treat
-// the file as stale, but a PID whose home binding is merely inconclusive
-// (daemonUnverifiable — a uid that could not be read, a foreign or withheld
-// environ, an unresolvable AGENT_FACTORY_HOME) is neither safe to signal (it may
-// be another home's daemon — the #4793 hazard) nor safe to delete the PID file
-// over (that orphans the live daemon the file names, and every later recovery
-// loses its handle to it). StopDaemon therefore needs the scope, not just the
-// trust decision; locateDaemonPID only needs the trust decision, so it keeps
-// the bool helper and the two paths still agree on what "ours" means (#1004).
+// classifyDaemonHome decides whether the process at pid is a daemon serving
+// THIS process's AGENT_FACTORY_HOME, surfacing the inconclusive case
+// (daemonUnverifiable) the bool helper collapses. StopDaemon reads daemon.pid
+// and then decides whether to signal the PID it names: proving the PID is
+// another home's daemon (daemonForeign) lets it treat the file as stale, but a
+// PID whose home binding is merely inconclusive (daemonUnverifiable — a uid
+// that could not be read, a foreign or withheld environ, an unresolvable
+// AGENT_FACTORY_HOME) is neither safe to signal (it may be another home's
+// daemon — the #4793 hazard) nor safe to delete the PID file over (that
+// orphans the live daemon the file names, and every later recovery loses its
+// handle to it). StopDaemon therefore needs the scope, not just the trust
+// decision; locateDaemonPID only needs the trust decision, so it keeps the bool
+// helper and the two paths still agree on what "ours" means (#1004).
+//
+// It is the classifier for a PID an explicit caller RECORDED — daemon.pid for
+// StopDaemon, or a single pgrep result for the SIGTERM fallback — so it is tuned
+// for that, not for the host-wide scan af reset's verifyScopedDaemon serves. It
+// differs from verifyScopedDaemon in the two ways following a recorded PID
+// demands:
+//
+//   - It does NOT apply isTestBinaryArgs. That heuristic keeps `go test`-spawned
+//     fakes out of a HOST-WIDE scan, where a test binary is indistinguishable
+//     from a real daemon by argv alone. A PID FILE was written by a real daemon,
+//     so a binary under /tmp/go-build* or /tmp/Test* — an uncached
+//     `go run . --daemon` or a source build placed in a temp dir — is a
+//     legitimate target here, not a test fake. Applying the heuristic would
+//     classify it foreign, delete its live PID file, and leave it running —
+//     failing open on an inconclusive binding. The host-wide scan keeps the
+//     heuristic (pgrepDaemonCandidates); this recorded-PID path does not.
+//
+//   - It resolves a RELATIVE AGENT_FACTORY_HOME against the DAEMON's working
+//     directory, not ours. Two daemons launched from different directories with
+//     the same relative value serve different homes; resolving both against the
+//     caller's cwd would label a foreign one "ours" and let a stale PID file
+//     signal it — the cross-home hazard #4793 is about. This mirrors
+//     daemonProcessHome in doctor/skew.go: a home is spelled in the frame of the
+//     process that set it. A relative home whose cwd cannot be read is
+//     unresolvable (daemonUnverifiable), never resolved against ours.
+//
+// af reset's orphan scan deliberately keeps verifyScopedDaemon; a recorded PID
+// and a host-wide discovery carry different evidence and warrant different
+// policy.
 func classifyDaemonHome(pid int) daemonScope {
-	configDir, err := config.GetConfigDir()
+	wantConfigDir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnverifiable
 	}
-	wantHome, err := canonicalDir(configDir)
+	wantHome, err := canonicalDir(wantConfigDir)
 	if err != nil {
 		return daemonUnverifiable
 	}
-	return verifyScopedDaemon(pid, os.Getuid(), wantHome)
+	// Re-read argv rather than trusting the recorded PID: a PID is a reusable
+	// kernel handle, so the process it names may have exited and its number
+	// been recycled onto an unrelated process since the file was written.
+	if !isAgentFactoryDaemon(pid) {
+		return daemonForeign
+	}
+	owner, ok := processUID(pid)
+	if !ok {
+		return daemonUnverifiable
+	}
+	if owner != os.Getuid() {
+		return daemonForeign
+	}
+	env, readable := daemonHomeEnv(pid)
+	if !readable {
+		return daemonUnverifiable
+	}
+	gotHome, err := config.ConfigDirFor(env)
+	if err != nil {
+		// The daemon holds an AGENT_FACTORY_HOME we cannot resolve. The
+		// "~user" form is rejected here; an unresolvable home is not "not
+		// ours" — say so instead of guessing.
+		log.WarningLog.Printf("sigterm fallback: cannot resolve AGENT_FACTORY_HOME=%q for daemon pid %d: %v", env, pid, err)
+		return daemonUnverifiable
+	}
+	gotHome, ok = resolveHomeInDaemonFrame(pid, gotHome)
+	if !ok {
+		return daemonUnverifiable
+	}
+	got, err := canonicalDir(gotHome)
+	if err != nil {
+		return daemonUnverifiable
+	}
+	if got != wantHome {
+		return daemonForeign
+	}
+	return daemonOurs
+}
+
+// resolveHomeInDaemonFrame absolutizes a daemon's (possibly relative) home
+// against the DAEMON's own working directory rather than the caller's. An
+// absolute home is returned unchanged; a relative one is joined to the cwd
+// proctree.WorkingDir reports for pid; a relative one whose cwd cannot be read
+// is reported unresolvable — resolving it against ours instead would make two
+// daemons with the same relative value but different launch directories compare
+// equal, the cross-home hazard #4793 turns on. See daemonProcessHome in
+// doctor/skew.go for the same frame decision.
+func resolveHomeInDaemonFrame(pid int, home string) (string, bool) {
+	if filepath.IsAbs(home) {
+		return home, true
+	}
+	cwd, ok := proctree.WorkingDir(pid)
+	if !ok || cwd == "" {
+		return "", false
+	}
+	return filepath.Join(cwd, home), true
 }
 
 // scanDaemonCandidatesFn is the process-scan entry point used by
