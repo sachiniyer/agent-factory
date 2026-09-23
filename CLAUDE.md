@@ -202,7 +202,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `session/git/` — git worktree operations, GitHub integration
 - `session/tmux/` — tmux PTY integration
 - `config/` — configuration and state management
-- `api/` — `af sessions`/`tasks`/`projects`/`api` command implementations (the REST/JSON API they call is served by `daemon/`)
+- `api/` — `af sessions`/`tasks`/`projects`/`api` command implementations (mixed transports: `apiclient` HTTP, the `daemon/` control client, and direct `config` access depending on the operation)
 - `apiproto/` — API envelope types and marker interfaces (leaf package, no daemon/client imports)
 - `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
 - `agentproto/` — WebSocket wire protocol for PTY stream and events
