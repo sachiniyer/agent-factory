@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -105,27 +106,62 @@ func sigtermFallback() (ShutdownResult, error) {
 // candidates the host scan surfaced (0 when no scan ran, e.g. no PID file and
 // pgrep unavailable). On failure to locate a PID, returns (0, source, scanned,
 // nil) where source describes the suspected PID source for diagnostics (e.g.
-// "pid-file pid=N stale, pgrep: no matches for this home" or "no pid-file,
+// "pid-file pid=N foreign, pgrep: no matches for this home" or "no pid-file,
 // pgrep unavailable") and scanned is the number of foreign/unverifiable
-// candidates that were found and deliberately left untouched. An error is
-// returned only for hard failures (ambiguous pgrep results, pgrep itself
-// failing to execute).
+// candidates that were found and deliberately left untouched — including a
+// PID-file entry the home binding rejected as a live foreign or unverifiable
+// daemon, counted even when the scan finds nothing or does not run, so
+// sigtermFallback does not recommend a blanket pkill that would kill it. An
+// error is returned only for hard failures (ambiguous pgrep results, pgrep
+// itself failing to execute).
 func locateDaemonPID() (int, string, int, error) {
 	pidFileSource := "no pid-file"
+	// rejectedPIDFilePID is the PID a daemon.pid entry named when it was a
+	// LIVE `af --daemon` the home binding PROVED serves another home
+	// (daemonForeign) or could not bind (daemonUnverifiable). It is a
+	// `--daemon` process this filter deliberately refused to signal, and a
+	// blanket `pkill -f -- '--daemon'` (no home or PID constraint) would kill
+	// it; counting it toward `scanned` even when the subsequent pgrep scan
+	// finds nothing — or does not run, because pgrep is unavailable or errors
+	// — keeps sigtermFallback from recommending that blanket pkill against
+	// the very process the PID-file binding just refused to touch. A dead
+	// or non-daemon PID-file entry is plain stale (no live foreign daemon
+	// for a blanket pkill to hit), so it counts as 0.
+	rejectedPIDFilePID := 0
 	if pid, ok := readPIDFromFile(); ok {
-		if pidLooksAlive(pid) && isAgentFactoryDaemon(pid) && pidBelongsToThisHome(pid) {
-			return pid, "pid-file", 0, nil
+		switch {
+		case !pidLooksAlive(pid) || !isAgentFactoryDaemon(pid):
+			log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead or not a daemon; falling back to pgrep", pid)
+			pidFileSource = fmt.Sprintf("pid-file pid=%d stale", pid)
+		default:
+			switch classifyDaemonHome(pid) {
+			case daemonOurs:
+				return pid, "pid-file", 0, nil
+			case daemonForeign:
+				log.InfoLog.Printf("sigterm fallback: PID file pid=%d is a live daemon serving ANOTHER home; not signalling; falling back to pgrep", pid)
+				pidFileSource = fmt.Sprintf("pid-file pid=%d foreign", pid)
+				rejectedPIDFilePID = pid
+			default: // daemonUnverifiable
+				log.InfoLog.Printf("sigterm fallback: PID file pid=%d is a live daemon whose home could not be bound; not signalling; falling back to pgrep", pid)
+				pidFileSource = fmt.Sprintf("pid-file pid=%d unverifiable", pid)
+				rejectedPIDFilePID = pid
+			}
 		}
-		log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead, non-daemon, or not this home's daemon; falling back to pgrep", pid)
-		pidFileSource = fmt.Sprintf("pid-file pid=%d stale", pid)
 	}
 
 	pids, err := scanDaemonCandidatesFn()
 	if err != nil {
-		if errors.Is(err, errPgrepUnavailable) {
-			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), 0, nil
+		// Preserve a rejected PID-file candidate as an untouched count even
+		// when no scan ran, so sigtermFallback does not fall back to a
+		// blanket pkill that would kill it.
+		scanned := 0
+		if rejectedPIDFilePID != 0 {
+			scanned = 1
 		}
-		return 0, "", 0, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
+		if errors.Is(err, errPgrepUnavailable) {
+			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), scanned, nil
+		}
+		return 0, "", scanned, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
 	}
 	// Reclassify every scanned candidate by uid and AGENT_FACTORY_HOME before
 	// selecting a signal target. The pgrep scan returns every `--daemon`
@@ -146,10 +182,16 @@ func locateDaemonPID() (int, string, int, error) {
 	switch len(scoped) {
 	case 0:
 		// Every scanned `--daemon` serves another home or is unverifiable, and
-		// was deliberately NOT signalled. This is surfaced to the caller as
-		// `scanned` so it can stop short of recommending a blanket pkill that
-		// would kill exactly these foreign daemons.
-		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, len(pids)), len(pids), nil
+		// was deliberately NOT signalled. A rejected PID-file candidate is one
+		// more such process even when pgrep found nothing, so it is folded into
+		// `scanned` (without double-counting when pgrep also surfaced it) and
+		// surfaced to the caller, which can then stop short of recommending a
+		// blanket pkill that would kill exactly these foreign daemons.
+		scanned := len(pids)
+		if rejectedPIDFilePID != 0 && !slices.Contains(pids, rejectedPIDFilePID) {
+			scanned++
+		}
+		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, scanned), scanned, nil
 	case 1:
 		return scoped[0], "pgrep", len(pids), nil
 	default:
@@ -468,8 +510,20 @@ func classifyDaemonHome(pid int) daemonScope {
 	// the empty-env and tilde forms). Mirror daemonProcessHome in
 	// doctor/skew.go: derive both from the daemon's HOME read out of its
 	// environ, and treat an unreadable or absent HOME as unverifiable rather
-	// than guessing ours. A "~user" form config.ConfigDirFor rejects is left
-	// to fall through to that rejection below.
+	// than guessing ours.
+	//
+	// derivedFromDaemonHome records that `env` was rebuilt here from the
+	// DAEMON's own $HOME. When the daemon's HOME is itself "~user"-prefixed
+	// (HOME=~alice with no AGENT_FACTORY_HOME leaves env="~alice/.agent-factory";
+	// or AGENT_FACTORY_HOME=~/state under HOME=~alice leaves "~alice/state"),
+	// the rebuilt path carries a leading "~user" that came from the daemon's
+	// valid HOME — a value the daemon's own file ops treated as a cwd-relative
+	// path, not a home expansion. That prefix is NOT the raw
+	// AGENT_FACTORY_HOME="~user" config.ConfigDirFor rejects; it is left for
+	// resolveHomeInDaemonFrame to resolve against the daemon's cwd the way the
+	// daemon did, and only a "~user" that came from a RAW AGENT_FACTORY_HOME
+	// stays unverifiable (the rejection below gates on !derivedFromDaemonHome).
+	derivedFromDaemonHome := false
 	if env == "" || env == "~" || strings.HasPrefix(env, "~/") {
 		daemonHome, status := proctree.LookupEnv(pid, "HOME")
 		if status != proctree.EnvFound || daemonHome == "" {
@@ -481,6 +535,7 @@ func classifyDaemonHome(pid int) daemonScope {
 		default: // "~" or "~/..."
 			env = filepath.Join(daemonHome, strings.TrimPrefix(strings.TrimPrefix(env, "~"), "/"))
 		}
+		derivedFromDaemonHome = true
 	}
 	// env is now expanded in the DAEMON's frame. Resolve it here rather than
 	// routing it through config.ConfigDirFor: when the daemon's own HOME is
@@ -489,12 +544,14 @@ func classifyDaemonHome(pid int) daemonScope {
 	// that leading "~" against the CALLER's $HOME — making a daemon that
 	// actually serves <its cwd>/~/x/.agent-factory compare equal to the
 	// caller's home and be marked ours on a stale PID file (the #4793 hazard
-	// via a "~"-prefixed daemon HOME). A "~user" form config.ConfigDirFor
-	// rejects stays unverifiable; every other spelling (absolute,
-	// "~"-prefixed, or relative) is resolved relative to the daemon's own cwd
-	// by resolveHomeInDaemonFrame the way the daemon's own file ops resolved
-	// it.
-	if strings.HasPrefix(env, "~") && env != "~" && !strings.HasPrefix(env, "~/") {
+	// via a "~"-prefixed daemon HOME). A RAW "~user" form config.ConfigDirFor
+	// rejects (AGENT_FACTORY_HOME="~user", NOT derived from the daemon's HOME)
+	// stays unverifiable; a "~user" prefix derived from the daemon's HOME
+	// above is already expanded in the daemon's frame and falls through.
+	// Every other spelling (absolute, "~"-prefixed, or relative) is resolved
+	// relative to the daemon's own cwd by resolveHomeInDaemonFrame the way the
+	// daemon's own file ops resolved it.
+	if !derivedFromDaemonHome && strings.HasPrefix(env, "~") && env != "~" && !strings.HasPrefix(env, "~/") {
 		return daemonUnverifiable
 	}
 	gotHome, ok := resolveHomeInDaemonFrame(pid, env)

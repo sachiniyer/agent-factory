@@ -707,9 +707,89 @@ func TestSigtermFallback_PIDFileForeignHomeFallsThroughEmptyScan(t *testing.T) {
 	if !strings.Contains(err.Error(), strconv.Itoa(foreign)) {
 		t.Errorf("sigtermFallback error %q missing the stale PID-file pid=%d source", err.Error(), foreign)
 	}
+	// The recovery hint must NOT recommend the blanket `pkill -f -- '--daemon'`:
+	// the PID-file binding just refused to signal this foreign daemon, and that
+	// command has no home or PID constraint, so following it would kill exactly
+	// the foreign daemon that was left untouched. The rejected PID-file
+	// candidate is counted toward `scanned` even though the scan was empty, so
+	// sigtermFallback reports the candidates left untouched instead.
+	if strings.Contains(err.Error(), "pkill -f -- '--daemon'") {
+		t.Errorf("sigtermFallback error %q recommends a blanket `pkill -f -- '--daemon'` after a rejected "+
+			"foreign PID-file candidate and an empty scan; following it would kill the very foreign daemon the "+
+			"home binding refused to touch", err.Error())
+	}
+	if !strings.Contains(err.Error(), "left untouched") {
+		t.Errorf("sigtermFallback error %q does not name the rejected foreign PID-file candidate as left "+
+			"untouched; the user has no way to tell refusing-to-signal from a host with no daemons", err.Error())
+	}
 	if !pidLooksAlive(foreign) {
 		t.Fatalf("foreign home's daemon pid=%d was killed by sigtermFallback; the home binding should have "+
 			"rejected the PID-file candidate and the empty scan should have signalled nothing", foreign)
+	}
+}
+
+// TestSigtermFallback_PIDFileForeignHomeFallsThroughNoScan pins the "likewise
+// when pgrep is unavailable or errors" half of the rejected-PID-file-candidate
+// count: when the PID file is rejected as foreign and the subsequent scan does
+// not run (pgrep unavailable) or fails, locateDaemonPID still surfaces the
+// rejected candidate toward `scanned` so sigtermFallback does NOT fall back to
+// the blanket `pkill -f -- '--daemon'` that would kill it. Pre-fix those paths
+// returned scanned=0, so sigtermFallback recommended the blanket pkill against
+// the foreign daemon the PID-file binding just refused to touch.
+func TestSigtermFallback_PIDFileForeignHomeFallsThroughNoScan(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	cases := []struct {
+		name    string
+		scanErr error
+	}{
+		{"pgrepUnavailable", errPgrepUnavailable},
+		{"pgrepError", errors.New("pgrep failed: boom")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			home := testguard.SocketTempDir(t)
+			t.Setenv("AGENT_FACTORY_HOME", home)
+
+			otherHome := testguard.SocketTempDir(t)
+			foreign := spawnFakeDaemonWithHome(t, otherHome)
+
+			if err := os.WriteFile(filepath.Join(home, "daemon.pid"),
+				[]byte(strconv.Itoa(foreign)), 0600); err != nil {
+				t.Fatalf("write PID file: %v", err)
+			}
+
+			// The scan does not run (pgrep unavailable) or fails outright, on
+			// top of the rejected foreign PID-file candidate.
+			stubDaemonScan(t, nil, c.scanErr)
+
+			result, err := sigtermFallback()
+			if result != ShutdownFailed {
+				t.Fatalf("sigtermFallback returned %v, want ShutdownFailed (foreign PID rejected, scan did not run)", result)
+			}
+			if err == nil {
+				t.Fatalf("sigtermFallback returned nil error; expected the recovery hint")
+			}
+			// Having refused to signal the foreign daemon, the recovery hint
+			// must NOT recommend the blanket `pkill -f -- '--daemon'`: that
+			// command has no home or PID constraint and would kill exactly the
+			// foreign daemon the home filter left untouched. The rejected
+			// PID-file candidate is counted toward `scanned` even though no
+			// scan ran, so sigtermFallback surfaces it instead.
+			if strings.Contains(err.Error(), "pkill -f -- '--daemon'") {
+				t.Errorf("sigtermFallback error %q recommends a blanket `pkill -f -- '--daemon'` after a rejected "+
+					"foreign PID-file candidate and a scan that did not run; following it would kill the very "+
+					"foreign daemon the home binding refused to touch", err.Error())
+			}
+			if !strings.Contains(err.Error(), strconv.Itoa(foreign)) {
+				t.Errorf("sigtermFallback error %q missing the rejected PID-file pid=%d source", err.Error(), foreign)
+			}
+			if !pidLooksAlive(foreign) {
+				t.Fatalf("foreign home's daemon pid=%d was killed by sigtermFallback; the home binding should have "+
+					"rejected the PID-file candidate and the scan that did not run should have signalled nothing", foreign)
+			}
+		})
 	}
 }
 
@@ -1059,5 +1139,58 @@ func TestPidBelongsToThisHome_TildeHomeResolvedAgainstDaemonHome(t *testing.T) {
 	if scope := classifyDaemonHome(foreign); scope != daemonForeign {
 		t.Errorf("tilde-home daemon with HOME=%q classified %v; want daemonForeign — the tilde must "+
 			"expand against the DAEMON's HOME, not the caller's ($HOME=%q)", otherHome, scope, callerHome)
+	}
+}
+
+// TestPidBelongsToThisHome_TildeUserHomeDerivedFromDaemonHome pins the
+// recorded-PID classifier's handling of a leading "~user" that came from the
+// DAEMON's own $HOME. A daemon launched with no AGENT_FACTORY_HOME under a
+// "$HOME=~alice" — a value os.UserHomeDir returns literally — resolves the
+// DEFAULT home as a cwd-relative "~alice/.agent-factory" the way its own file
+// ops did; classifyDaemonHome derives exactly that path from the daemon's HOME,
+// but the unconditional "~user" rejection used to mark this legitimate matching
+// daemon daemonUnverifiable — so StopDaemon and the SIGTERM fallback refused to
+// stop this home's own daemon. The rejection now applies only to a "~user" that
+// came from a RAW AGENT_FACTORY_HOME="~user" (which config.ConfigDirFor rejects);
+// a "~user" derived from the daemon's HOME is resolved against the daemon's cwd.
+func TestPidBelongsToThisHome_TildeUserHomeDerivedFromDaemonHome(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	// Put the CALLER on the DEFAULT home under a "~user" HOME: with
+	// AGENT_FACTORY_HOME unset, config.ConfigDirFor("") joins os.UserHomeDir()
+	// (the literal "~alice") + ".agent-factory", and canonicalDir absolutizes
+	// the relative "~alice/.agent-factory" against the caller's cwd — so the
+	// caller's wantHome is <cwd>/~alice/.agent-factory.
+	t.Setenv("AGENT_FACTORY_HOME", "")
+	t.Setenv("HOME", "~alice")
+
+	// A default-home daemon under the SAME "~alice" HOME, launched from the
+	// caller's cwd (inherited), serves the same <cwd>/~alice/.agent-factory
+	// and IS ours. Pre-fix the rebuilt "~alice/.agent-factory" tripped the
+	// "~user" rejection and this classified daemonUnverifiable instead.
+	ours := spawnFakeDaemonWithDefaultHome(t, "~alice")
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Errorf("default-home daemon with HOME=~alice (same as caller) classified %v; want daemonOurs — "+
+			"a ~user prefix derived from the daemon's HOME must be resolved against its cwd, not rejected", scope)
+	}
+
+	// A default-home daemon under a DIFFERENT "~user" HOME serves
+	// <cwd>/~bob/.agent-factory, which is foreign to the caller's ~alice home.
+	foreign := spawnFakeDaemonWithDefaultHome(t, "~bob")
+	if scope := classifyDaemonHome(foreign); scope != daemonForeign {
+		t.Errorf("default-home daemon with HOME=~bob classified %v; want daemonForeign", scope)
+	}
+
+	// A RAW AGENT_FACTORY_HOME="~user" is the invalid tilde form
+	// config.ConfigDirFor rejects; it must stay daemonUnverifiable even though
+	// a derived-from-HOME ~user no longer is — the fix relieves the rejection
+	// only for a prefix that came from the daemon's HOME, not a raw
+	// AGENT_FACTORY_HOME.
+	rawHome := t.TempDir()
+	raw := spawnFakeDaemonWithTildeHome(t, "~user", rawHome)
+	if scope := classifyDaemonHome(raw); scope != daemonUnverifiable {
+		t.Errorf("raw AGENT_FACTORY_HOME=~user classified %v; want daemonUnverifiable — a raw ~user "+
+			"AGENT_FACTORY_HOME stays rejected", scope)
 	}
 }
