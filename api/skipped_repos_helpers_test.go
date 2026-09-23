@@ -29,3 +29,10 @@ func TestSkippedRepoReasonUnreadableWireValue(t *testing.T) {
 		t.Fatalf("daemon reason %q != wire value %q", daemon.SkippedRepoReasonUnreadableInstancesJSON, unreadableReasonOnTheWire)
 	}
 }
+
+// TestSkippedRepoReasonNewerSchemaWireValue is the newer-schema counterpart.
+func TestSkippedRepoReasonNewerSchemaWireValue(t *testing.T) {
+	if daemon.SkippedRepoReasonNewerSchemaInstancesJSON != "newer-schema-instances-json" {
+		t.Fatalf("daemon reason %q drifted from the wire value", daemon.SkippedRepoReasonNewerSchemaInstancesJSON)
+	}
+}

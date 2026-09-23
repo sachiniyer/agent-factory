@@ -26,21 +26,24 @@ import (
 // root anyway.
 func stageUnreadableRepoForRefresh(t *testing.T, repoID string) (lift func()) {
 	t.Helper()
+	return stageRepoReadErrorForRefresh(t, repoID, fmt.Errorf("failed to read repo instances: %w", fs.ErrPermission))
+}
+
+// stageRepoReadErrorForRefresh is stageUnreadableRepoForRefresh with the
+// loader error chosen by the caller.
+func stageRepoReadErrorForRefresh(t *testing.T, repoID string, readErr error) (lift func()) {
+	t.Helper()
 	prev := loadAllRepoInstancesForRefresh
 	staged := true
-	loadAllRepoInstancesForRefresh = func() (map[string]json.RawMessage, []config.RepoInstancesSkip, error) {
-		all, skips, err := prev()
+	loadAllRepoInstancesForRefresh = func() (map[string]json.RawMessage, []config.RepoInstancesSkip, map[string]bool, error) {
+		all, skips, missing, err := prev()
 		if err != nil || !staged {
-			return all, skips, err
+			return all, skips, missing, err
 		}
 		delete(all, repoID)
 		path, _ := config.RepoInstancesPath(repoID)
-		skips = append(skips, config.RepoInstancesSkip{
-			RepoID: repoID,
-			Path:   path,
-			Err:    fmt.Errorf("failed to read repo instances: %w", fs.ErrPermission),
-		})
-		return all, skips, nil
+		skips = append(skips, config.RepoInstancesSkip{RepoID: repoID, Path: path, Err: readErr})
+		return all, skips, missing, nil
 	}
 	t.Cleanup(func() { loadAllRepoInstancesForRefresh = prev })
 	return func() { staged = false }
@@ -123,6 +126,52 @@ func TestManager_RefreshLocked_KeepsSkippedRepoWhoseDirectoryVanished(t *testing
 	require.NoError(t, m.refreshLocked())
 	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}, m.skippedRepos,
 		"a vanished repo was not re-read, so it keeps its startup entry")
+}
+
+// TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileWasDeleted is the
+// directory case's sibling (Codex on #4812). The loader turns a missing
+// instances.json into "[]", which looks exactly like a file that was read and
+// held no sessions. Nothing was read, so the repo must stay skipped.
+func TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileWasDeleted(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	_ = captureWarnings(t)
+
+	seedCorruptedRepo(t, "corrupt-r")
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	path, err := config.RepoInstancesPath("corrupt-r")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+	_, statErr := os.Stat(filepath.Dir(path))
+	require.NoError(t, statErr, "fixture: the repo directory must remain, only the file goes")
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	require.NoError(t, m.refreshLocked())
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}, m.skippedRepos,
+		"a deleted file was not re-read, so it keeps its startup entry")
+}
+
+// TestRefreshDaemonInstances_ReportsNewerSchemaRepoWithItsOwnReason: a file a
+// newer af wrote needs an upgrade, not a permissions check, so it carries its
+// own reason for the client's remedy (Codex on #4812).
+func TestRefreshDaemonInstances_ReportsNewerSchemaRepoWithItsOwnReason(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	_ = captureWarnings(t)
+
+	require.NoError(t, config.SaveRepoInstances("newer-r", json.RawMessage("[]")))
+	path, err := config.RepoInstancesPath("newer-r")
+	require.NoError(t, err)
+	stageRepoReadErrorForRefresh(t, "newer-r", &config.UnsupportedSchemaVersionError{
+		StoreName: config.InstancesFileName, Path: path, FileVersion: 99, SupportedVersion: config.InstancesSchemaVersion,
+	})
+
+	_, _, skipped, _, err := refreshDaemonInstances(nil)
+	require.NoError(t, err)
+	require.Equal(t, []SkippedRepo{{RepoID: "newer-r", Reason: SkippedRepoReasonNewerSchemaInstancesJSON}}, skipped)
 }
 
 // TestRefreshDaemonInstances_ReportsUnreadableRepo pins the loader half: a repo

@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -108,8 +110,9 @@ type SnapshotResponse struct {
 type SkippedRepo struct {
 	RepoID string `json:"repo_id"`
 	// Reason is a stable machine-readable code for why the repo was skipped:
-	// SkippedRepoReasonCorruptedInstancesJSON or
-	// SkippedRepoReasonUnreadableInstancesJSON. A client treats an empty or
+	// SkippedRepoReasonCorruptedInstancesJSON,
+	// SkippedRepoReasonUnreadableInstancesJSON or
+	// SkippedRepoReasonNewerSchemaInstancesJSON. A client treats an empty or
 	// unknown value as corrupted, which is all an older daemon ever sent.
 	Reason string `json:"reason,omitempty"`
 }
@@ -119,11 +122,27 @@ type SkippedRepo struct {
 const SkippedRepoReasonCorruptedInstancesJSON = "corrupted-instances-json"
 
 // SkippedRepoReasonUnreadableInstancesJSON is the reason carried for a repo
-// whose instances.json could not be read at all — a permission, I/O or
-// newer-schema failure rather than bad JSON (#4783). It is kept apart from the
-// corrupted reason because the remedy differs: an unreadable file needs its
-// access restored, not its JSON repaired.
+// whose instances.json could not be read at all — a permission or I/O failure
+// rather than bad JSON (#4783). It is kept apart from the corrupted reason
+// because the remedy differs: an unreadable file needs its access restored, not
+// its JSON repaired.
 const SkippedRepoReasonUnreadableInstancesJSON = "unreadable-instances-json"
+
+// SkippedRepoReasonNewerSchemaInstancesJSON is the reason carried for a repo
+// whose instances.json was written by a newer af in a schema this daemon does
+// not understand (#4783). Its remedy is to upgrade, and the file must not be
+// touched: deleting or "repairing" it discards sessions this binary cannot see.
+const SkippedRepoReasonNewerSchemaInstancesJSON = "newer-schema-instances-json"
+
+// skippedRepoReasonForReadError names the reason for a repo the loader could
+// not read, so the client can give the remedy that fits the failure.
+func skippedRepoReasonForReadError(err error) string {
+	var newer *config.UnsupportedSchemaVersionError
+	if errors.As(err, &newer) {
+		return SkippedRepoReasonNewerSchemaInstancesJSON
+	}
+	return SkippedRepoReasonUnreadableInstancesJSON
+}
 
 // SkippedRepos returns the repos dropped at daemon startup due to a corrupted
 // instances.json (#603), scoped to repoID (all repos when empty). It is the wire

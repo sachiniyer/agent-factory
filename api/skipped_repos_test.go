@@ -123,3 +123,24 @@ func TestListSessions_DaemonUpUnknownReasonReadsAsCorrupted(t *testing.T) {
 		t.Fatalf("empty and unknown reasons read as corrupted, got: %v", err)
 	}
 }
+
+// TestListSessions_DaemonUpNewerSchemaSkipSaysUpgrade: a file a newer af wrote
+// needs an upgrade. The permissions remedy would send the operator the wrong
+// way, and "fix the JSON" would have them edit a file this binary cannot read
+// (Codex on #4812).
+func TestListSessions_DaemonUpNewerSchemaSkipSaysUpgrade(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	corruptStub(t, nil, []daemon.SkippedRepo{{RepoID: "newer-repo", Reason: "newer-schema-instances-json"}})
+
+	_, err := listSessions("")
+	if err == nil {
+		t.Fatal("list must refuse, got nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "newer-repo") || !strings.Contains(msg, "written by a newer af") || !strings.Contains(msg, "Upgrade af") {
+		t.Fatalf("must name the repo and say to upgrade, got: %s", msg)
+	}
+	if strings.Contains(msg, "corrupt") || strings.Contains(msg, "fix the JSON") || strings.Contains(msg, "permissions") {
+		t.Fatalf("must not give the corrupted or unreadable remedy, got: %s", msg)
+	}
+}

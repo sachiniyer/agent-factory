@@ -46,8 +46,10 @@ var persistLegacyInstanceID = persistInstanceData
 // truncated snapshot as complete again (#4783). A package-level variable so a
 // test can stage a read failure the file system cannot stage deterministically:
 // a persistently unreadable file already aborts the refresh in the migrator,
-// so the reachable shape is a file that reads there and fails here.
-var loadAllRepoInstancesForRefresh = config.LoadAllRepoInstancesReportingSkipDetails
+// so the reachable shape is a file that reads there and fails here. It also
+// reports repos whose instances.json is missing, which load as "[]" but were
+// not read, so they must not count as re-read either.
+var loadAllRepoInstancesForRefresh = config.LoadAllRepoInstancesReportingMissing
 
 // refreshLocked rebuilds the manager's instance map from disk under m.mu. A
 // marked on_complete row that re-materializes here re-arms its owed teardown,

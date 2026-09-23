@@ -452,7 +452,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
 		return existing, nil, nil, nil, err
 	}
-	allInstances, unreadable, err := loadAllRepoInstancesForRefresh()
+	allInstances, unreadable, missing, err := loadAllRepoInstancesForRefresh()
 	if err != nil {
 		return existing, nil, nil, nil, err
 	}
@@ -477,13 +477,15 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	unreadableRepos := make(map[string]bool, len(unreadable))
 	for _, skip := range unreadable {
 		log.WarningLog.Printf("daemon skipping repo %s: unreadable instances.json: %s", skip.RepoID, skip)
-		skipped = append(skipped, SkippedRepo{RepoID: skip.RepoID, Reason: SkippedRepoReasonUnreadableInstancesJSON})
+		skipped = append(skipped, SkippedRepo{RepoID: skip.RepoID, Reason: skippedRepoReasonForReadError(skip.Err)})
 		unreadableRepos[skip.RepoID] = true
 	}
 	reread := make(map[string]bool, len(allInstances))
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
-			reread[repoID] = true
+			// A missing file loads as "[]" too, but nothing was read, so it
+			// clears nothing (#4783).
+			reread[repoID] = !missing[repoID]
 			continue
 		}
 
