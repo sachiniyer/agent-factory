@@ -931,3 +931,54 @@ func TestStopDaemon_UnverifiableHomePIDFileIsNotSignaledAndNotOrphaned(t *testin
 			"not a license to kill a PID that may be another home's daemon", unverifiable)
 	}
 }
+
+// TestRemovePIDFileIfStillNames_KeepsReplacementFile pins the TOCTOU narrowing on
+// StopDaemon's foreign-PID removal. stopDaemonUntil read a stale foreign PID
+// and proved the process it names serves another home; in the window between
+// that read and the unlink, a same-home daemon may have started and atomically
+// rewritten daemon.pid with its own PID. The removal must re-read and leave that
+// valid replacement in place — otherwise the new daemon is live but no longer
+// discoverable by StopDaemon, the untracked-daemon state the PID file exists to
+// prevent. The genuine stale case (file unchanged) is still removed.
+func TestRemovePIDFileIfStillNames_KeepsReplacementFile(t *testing.T) {
+	t.Run("unchanged stale PID file is removed", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "daemon.pid")
+		const stale = 99999
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+			t.Fatalf("write stale PID file: %v", err)
+		}
+		removePIDFileIfStillNames(pidFile, stale)
+		if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+			t.Fatalf("expected stale PID file naming %d to be removed, stat err=%v", stale, err)
+		}
+	})
+
+	t.Run("replacement PID file is kept", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "daemon.pid")
+		const stale, fresh = 99999, 88888
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+			t.Fatalf("write stale PID file: %v", err)
+		}
+		// A newly-started same-home daemon rewrote daemon.pid with its own PID
+		// after stopDaemonUntil read the stale foreign one (atomic write).
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", fresh)), 0600); err != nil {
+			t.Fatalf("write replacement PID file: %v", err)
+		}
+		removePIDFileIfStillNames(pidFile, stale)
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Fatalf("replacement PID file was removed; a newly-started daemon's handle is lost: %v", err)
+		}
+		if got := strings.TrimSpace(string(data)); got != fmt.Sprintf("%d", fresh) {
+			t.Fatalf("PID file = %q, want the replacement %d preserved", got, fresh)
+		}
+	})
+
+	t.Run("missing file is a no-op", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "daemon.pid")
+		removePIDFileIfStillNames(missing, 99999)
+		if _, err := os.Stat(missing); !os.IsNotExist(err) {
+			t.Fatalf("removePIDFileIfStillNames created or touched %q, stat err=%v", missing, err)
+		}
+	})
+}

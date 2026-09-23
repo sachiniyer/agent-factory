@@ -905,3 +905,72 @@ func TestPidBelongsToThisHome_RelativeHomeResolvedAgainstDaemonCwd(t *testing.T)
 			"the caller's (resolving both against ours labels a foreign daemon 'ours')", otherCwd)
 	}
 }
+
+// spawnFakeDaemonWithDefaultHome starts a fake `af --daemon` with NO
+// AGENT_FACTORY_HOME (so it resolves the DEFAULT home) and HOME set to homeEnv,
+// the frame the default is resolved in. The recorded-PID classifier must derive
+// a default-home daemon's home from ITS OWN $HOME, not the caller's: two
+// same-UID daemons that both unset AGENT_FACTORY_HOME but were launched under
+// different HOME dirs serve different homes, and resolving either against the
+// caller's $HOME makes the foreign one compare equal to ours (the #4793 hazard
+// via the empty-env form). HOME is the only env the default-home resolution
+// reads, so it is the only env the spawn pins beyond PATH.
+func spawnFakeDaemonWithDefaultHome(t *testing.T, homeEnv string) int {
+	t.Helper()
+	argv0 := filepath.Join(fakeBinDir(t), "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + homeEnv,
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, pid, argv0)
+	return pid
+}
+
+// TestPidBelongsToThisHome_DefaultHomeResolvedFromDaemonHome pins the
+// recorded-PID classifier's frame for the DEFAULT home (no AGENT_FACTORY_HOME).
+// The default home a daemon resolved is <ITS OWN $HOME>/.agent-factory, not
+// <ours>; classifyDaemonHome previously routed the unset case through
+// config.ConfigDirFor(""), which resolves the default against the CALLER's
+// $HOME (os.UserHomeDir), so a same-UID daemon launched under a different HOME
+// was labelled ours and could be signalled on a stale PID file or lone pgrep
+// result. It now derives the default from the DAEMON's HOME, so a default-home
+// daemon under a foreign HOME is foreign, and one under the caller's HOME is
+// ours.
+func TestPidBelongsToThisHome_DefaultHomeResolvedFromDaemonHome(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	// Put the CALLER on the DEFAULT home: unset AGENT_FACTORY_HOME and pin HOME
+	// to a temp dir so os.UserHomeDir resolves there and the caller's home is
+	// callerHome/.agent-factory.
+	callerHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", "")
+	t.Setenv("HOME", callerHome)
+
+	// A same-UID default-home daemon launched under a DIFFERENT HOME serves
+	// otherHome/.agent-factory. Pre-fix this compared equal to the caller's
+	// default (both resolved against the caller's $HOME) and was signalled;
+	// post-fix it is foreign.
+	otherHome := t.TempDir()
+	foreign := spawnFakeDaemonWithDefaultHome(t, otherHome)
+	if scope := classifyDaemonHome(foreign); scope != daemonForeign {
+		t.Errorf("default-home daemon with HOME=%q classified %v; want daemonForeign — the default "+
+			"home must be resolved from the DAEMON's HOME, not the caller's ($HOME=%q)", otherHome, scope, callerHome)
+	}
+
+	// A default-home daemon launched under the CALLER's HOME serves the same
+	// home and IS ours — the fix must not turn the matching case into a refusal.
+	ours := spawnFakeDaemonWithDefaultHome(t, callerHome)
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Errorf("default-home daemon with HOME=%q (the caller's) classified %v; want daemonOurs", callerHome, scope)
+	}
+}

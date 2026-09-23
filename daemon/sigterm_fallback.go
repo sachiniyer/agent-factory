@@ -145,6 +145,39 @@ func readPIDFromFile() (int, bool) {
 	return pid, true
 }
 
+// removePIDFileIfStillNames unlinks pidFile only when it still records pid.
+// stopDaemonUntil read a stale foreign PID and proved the process it names is
+// not this home's daemon; in the window between that read and this unlink a
+// same-home daemon may have started and atomically rewritten daemon.pid with
+// its own PID. Removing the file unconditionally would delete that valid
+// replacement and recreate the untracked-daemon state the PID file exists to
+// prevent — the new daemon would be live but no longer discoverable by
+// StopDaemon. Re-read and compare first; leave a freshly-written valid file to
+// its owner, and treat the unreadable/malformed case the same way rather than
+// unlinking a file whose current contents we did not establish (#4793).
+func removePIDFileIfStillNames(pidFile string, pid int) {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		// Already gone (or unreadable) — nothing to remove; a missing file is
+		// the desired end state, and a permission error is no worse than the
+		// previous unconditional os.Remove would have been.
+		return
+	}
+	var current int
+	if _, err := fmt.Sscanf(string(data), "%d", &current); err != nil {
+		// Malformed, and therefore not the foreign PID we read. A
+		// newly-started daemon writes a valid PID, so this is neither the
+		// stale file we own nor safe to claim — leave it for the next caller.
+		return
+	}
+	if current != pid {
+		return // a new daemon has written its own PID; keep the file
+	}
+	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+		log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
+	}
+}
+
 // pidLooksAlive returns true when signal 0 to pid succeeds AND the kernel
 // still has user-space state for the process (cmdline is non-empty). The
 // cmdline check is the cheap Linux-side way to filter out zombies: once a
@@ -216,7 +249,7 @@ func pidBelongsToThisHome(pid int) bool {
 // It is the classifier for a PID an explicit caller RECORDED — daemon.pid for
 // StopDaemon, or a single pgrep result for the SIGTERM fallback — so it is tuned
 // for that, not for the host-wide scan af reset's verifyScopedDaemon serves. It
-// differs from verifyScopedDaemon in the two ways following a recorded PID
+// differs from verifyScopedDaemon in the three ways following a recorded PID
 // demands:
 //
 //   - It does NOT apply isTestBinaryArgs. That heuristic keeps `go test`-spawned
@@ -237,6 +270,14 @@ func pidBelongsToThisHome(pid int) bool {
 //     daemonProcessHome in doctor/skew.go: a home is spelled in the frame of the
 //     process that set it. A relative home whose cwd cannot be read is
 //     unresolvable (daemonUnverifiable), never resolved against ours.
+//
+//   - It resolves the DEFAULT home (no AGENT_FACTORY_HOME) from the DAEMON's
+//     own $HOME, not ours. config.ConfigDirFor("") resolves the default against
+//     the caller's $HOME, so a same-UID daemon launched under a different HOME
+//     would otherwise be labelled ours and signalled on a stale PID file — the
+//     #4793 hazard via the empty-env form. An unreadable or absent HOME is
+//     daemonUnverifiable, never resolved against ours. This too mirrors
+//     daemonProcessHome in doctor/skew.go.
 //
 // af reset's orphan scan deliberately keeps verifyScopedDaemon; a recorded PID
 // and a host-wide discovery carry different evidence and warrant different
@@ -266,6 +307,24 @@ func classifyDaemonHome(pid int) daemonScope {
 	env, readable := daemonHomeEnv(pid)
 	if !readable {
 		return daemonUnverifiable
+	}
+	if env == "" {
+		// AGENT_FACTORY_HOME is genuinely UNSET, so this daemon resolved the
+		// DEFAULT home from ITS OWN $HOME (os.UserHomeDir at the daemon's
+		// exec), not ours. config.ConfigDirFor("") resolves the default
+		// against the CALLER's $HOME, so a same-UID daemon launched under a
+		// different HOME would resolve to OUR default, compare equal to
+		// wantHome, and be marked ours — letting a stale PID file or lone
+		// pgrep result signal a daemon serving another home (the #4793
+		// hazard via the empty-env form). Mirror daemonProcessHome in
+		// doctor/skew.go: derive the default from the daemon's HOME read
+		// out of its environ, and treat an unreadable or absent HOME as
+		// unverifiable rather than guessing ours.
+		daemonHome, status := proctree.LookupEnv(pid, "HOME")
+		if status != proctree.EnvFound || daemonHome == "" {
+			return daemonUnverifiable
+		}
+		env = filepath.Join(daemonHome, ".agent-factory")
 	}
 	gotHome, err := config.ConfigDirFor(env)
 	if err != nil {
