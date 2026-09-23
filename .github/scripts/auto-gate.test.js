@@ -12579,12 +12579,30 @@ const PLACEMENT_RUNS_4799 = [
 async function refuseWithPlacement({ runs, owned, listError = null, checkRun = null }) {
   const github = fakeGateGithub({});
   github.rest.pulls.get = async () => ({ data: { merged: false, merge_commit_sha: null } });
-  github.paginate = async () => [];
   const reads = [];
+  // Newest first and paged, like GitHub: the placement is among the EARLIEST
+  // runs, so on a busy head it is on the last page, not the first.
+  const newestFirst = [...runs].sort((a, b) => Number(b.check_suite_id) - Number(a.check_suite_id));
   github.rest.actions.listWorkflowRunsForRepo = async (options) => {
     reads.push(options);
     if (listError) throw listError;
-    return { data: { total_count: runs.length, workflow_runs: runs } };
+    const perPage = options.per_page || 30;
+    const page = options.page || 1;
+    return {
+      data: {
+        total_count: runs.length,
+        workflow_runs: newestFirst.slice((page - 1) * perPage, page * perPage),
+      },
+    };
+  };
+  github.paginate = async (method, options) => {
+    if (method !== github.rest.actions.listWorkflowRunsForRepo) return [];
+    const all = [];
+    for (let page = 1; ; page += 1) {
+      const { data } = await method({ ...options, page });
+      all.push(...data.workflow_runs);
+      if (data.workflow_runs.length < options.per_page) return all;
+    }
   };
   github.rest.checks.get = async (options) => {
     reads.push(options);
@@ -12624,6 +12642,27 @@ test("a refusal names a superseded aggregate placement instead of propagation (#
     [HEAD_SHA],
     "the runs are read for the refused head, once",
   );
+});
+
+test("the placement is found past the first page of a busy head's runs (#4802)", async () => {
+  // Codex on #4805: a head with more than 100 runs pushes its earliest suite,
+  // the placement, off page one. 150 later comment-driven runs of another
+  // workflow put it on page two; a single read would find no placement and fall
+  // back to the propagation wording.
+  const busy = [
+    ...PLACEMENT_RUNS_4799,
+    ...Array.from({ length: 150 }, (_, index) => ({
+      id: 36000000000 + index,
+      name: "PR Validation",
+      workflow_id: 3,
+      event: "workflow_dispatch",
+      check_suite_id: 97200000000 + index,
+    })),
+  ];
+  const { resolved, reads } = await refuseWithPlacement({ runs: busy, owned: OWNED_4799 });
+  assert.deepEqual(reads.map((read) => read.page), [1, 2]);
+  assert.match(resolved.message, /check suite 97106034523 \(Auto Gate · pull_request_target\)/);
+  assert.match(resolved.message, /97106156964 \(pull_request_target\), 97113140377 \(pull_request_target\)/);
 });
 
 test("a placement with no newer head-event suite keeps the unproven wording (#4802)", async () => {

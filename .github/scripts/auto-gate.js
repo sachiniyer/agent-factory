@@ -4139,13 +4139,16 @@ async function describeSupersededPlacement({ github, owner, repo, headSha, owned
       return null;
     }
   }
-  const listed = await github.rest.actions.listWorkflowRunsForRepo({
+  // Every page: the listing is newest first and the placement is one of the
+  // head's EARLIEST runs, so a busy head (#4799 had ~40 Auto Gate runs) pushes
+  // it past page one, where a single read would miss it and say nothing.
+  const listed = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
     owner,
     repo,
     head_sha: headSha,
     per_page: 100,
   });
-  const runs = listed?.data?.workflow_runs || [];
+  const runs = Array.isArray(listed) ? listed : listed?.workflow_runs || [];
   const placement = runs.find((run) => Number(run?.check_suite_id) === suiteId);
   if (!placement) {
     return null;
