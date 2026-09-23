@@ -7969,7 +7969,9 @@ var ConfigPane = class {
       this.explainBusy = false;
       if (outcome.ok) {
         this.explainResp = outcome.resp;
+        this.explainError = "";
       } else {
+        this.explainResp = null;
         this.explainError = outcome.error;
       }
       this.rerenderKeepingUserState();

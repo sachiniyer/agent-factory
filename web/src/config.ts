@@ -656,9 +656,14 @@ export class ConfigPane {
         return;
       }
       this.explainBusy = false;
+      // Exclusive: the body renders the error first, so a stale one would mask
+      // a fresh trace — and a stale trace would do the same to a fresh error.
+      // Whichever this newest answer is, it is the only one still standing.
       if (outcome.ok) {
         this.explainResp = outcome.resp;
+        this.explainError = "";
       } else {
+        this.explainResp = null;
         this.explainError = outcome.error;
       }
       this.rerenderKeepingUserState();
