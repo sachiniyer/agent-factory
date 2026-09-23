@@ -44,6 +44,24 @@ func startHeldPane(t *testing.T, name, command string) {
 	}, 5*time.Second, 20*time.Millisecond, "the pane never died")
 }
 
+// paneStatusDiagnosis says why a probe of a held dead pane had no exit status.
+// startHeldPane waits only for pane_dead, which tmux sets when the terminal
+// closes, possibly before it collects the root (#4682); the probe itself waits
+// for the status. A status tmux reports now means it collected the root only
+// after the probe gave up; none at all means this tmux does not report it.
+func paneStatusDiagnosis(t *testing.T, name string) string {
+	t.Helper()
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
+	switch status := strings.TrimSpace(string(out)); {
+	case err != nil:
+		return fmt.Sprintf("the pane could not be re-read: %v", err)
+	case status != "":
+		return fmt.Sprintf("tmux reported status %s only after the probe's %s wait", status, paneStatusWait)
+	default:
+		return "tmux still reports none: it never collected the root, or does not report pane_dead_status"
+	}
+}
+
 func requireSessionGone(t *testing.T, name string) {
 	t.Helper()
 	require.Error(t, exec.Command("tmux", "has-session", "-t", exactTarget(name)).Run(),
@@ -61,7 +79,7 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 	dead, status, statusKnown, at, known := s.ProbePaneExit()
 	require.True(t, known)
 	require.True(t, dead)
-	require.True(t, statusKnown)
+	require.True(t, statusKnown, "no exit status for `exit 7`: %s", paneStatusDiagnosis(t, name))
 	require.Equal(t, 7, status)
 	require.False(t, at.Before(before), "death time %v predates the pane", at)
 
