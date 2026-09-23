@@ -2,9 +2,11 @@ package api
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -267,5 +269,82 @@ func TestListSessionsInScope_DaemonUpRefusesOnSkipped(t *testing.T) {
 	}
 	if src != watchSourceNone {
 		t.Fatalf("source must be none on refuse, got %v", src)
+	}
+}
+
+// --- actionable refusal text (path + repair hint) ----------------------
+
+// TestCorruptedReposErrorNamesFullPathAndRepairHint pins the ask in #4742
+// (Captain Claude): the list/watch refusal must name each instances.json by its
+// full path — resolved through the same home resolver the store uses, not a
+// hard-coded ~/.agent-factory — and carry a one-line repair hint. An operator
+// hitting `af sessions list` exiting non-zero needs a file to fix and a step to
+// follow, not an opaque repo id and a "until it is repaired" with no path.
+func TestCorruptedReposErrorNamesFullPathAndRepairHint(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir: %v", err)
+	}
+
+	err = corruptedReposError([]string{skippedTestRepo})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, filepath.Join(home, "instances", skippedTestRepo, "instances.json")) {
+		t.Fatalf("error must name the full instances.json path under the resolved home, got: %s", msg)
+	}
+	if !strings.Contains(msg, "corrupted instances.json") {
+		t.Fatalf("error must still explain the cause, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Stop the af daemon") || !strings.Contains(msg, "start the daemon") {
+		t.Fatalf("error must tell the operator to stop then start the daemon, got: %s", msg)
+	}
+	if !strings.Contains(msg, "af keeps no backup") {
+		t.Fatalf("error must say af keeps no backup of these files, got: %s", msg)
+	}
+}
+
+// TestCorruptedReposSuffixNamesFullPathAndRepairHint is the get/whoami miss
+// counterpart: a caveat miss names the same full path and repair hint, so a
+// hidden session is reported with something actionable (#4742).
+func TestCorruptedReposSuffixNamesFullPathAndRepairHint(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir: %v", err)
+	}
+
+	msg := corruptedReposSuffix([]string{skippedTestRepo})
+	if !strings.Contains(msg, filepath.Join(home, "instances", skippedTestRepo, "instances.json")) {
+		t.Fatalf("suffix must name the full instances.json path under the resolved home, got: %s", msg)
+	}
+	if !strings.Contains(msg, "may be hiding it") {
+		t.Fatalf("suffix must still read as a miss caveat, got: %s", msg)
+	}
+	if !strings.Contains(msg, "af keeps no backup") {
+		t.Fatalf("suffix must carry the repair hint, got: %s", msg)
+	}
+}
+
+// TestCorruptedReposErrorSortsAndNamesEachPath pins that multiple corrupted repos
+// are each named by their own path in a stable (repo-id) order, so the message
+// is not a single concatenated blob an operator has to parse.
+func TestCorruptedReposErrorSortsAndNamesEachPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir: %v", err)
+	}
+
+	msg := corruptedReposError([]string{"zeta-repo", "alpha-repo"}).Error()
+	first := filepath.Join(home, "instances", "alpha-repo", "instances.json")
+	second := filepath.Join(home, "instances", "zeta-repo", "instances.json")
+	if !strings.Contains(msg, first) || !strings.Contains(msg, second) {
+		t.Fatalf("error must name each repo's full path, got: %s", msg)
+	}
+	if strings.Index(msg, first) > strings.Index(msg, second) {
+		t.Fatalf("error must list repos in sorted repo-id order (alpha before zeta), got: %s", msg)
 	}
 }
