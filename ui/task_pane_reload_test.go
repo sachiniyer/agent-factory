@@ -153,36 +153,6 @@ func TestTaskPaneReloadKeepsOpenEditFormBoundToItsTask(t *testing.T) {
 		"the other writer's prompt must not be overwritten by the form's stale copy (#1700)")
 }
 
-// A task deleted on disk while the user holds an edit to it stays visible after
-// the loaded rows, so the draft is not dropped silently; deleting it discards
-// the draft and the next reload lets it go.
-func TestTaskPaneReloadKeepsDraftOfTaskGoneFromDisk(t *testing.T) {
-	s := NewTaskPane()
-	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p")})
-	s.SetFocus(true)
-	require.True(t, s.HandleKeyPress(keyRunes("x")))
-
-	disk := load(reloadTask("b", "p"), reloadTask("c", "p"))
-	s.SetTasks(disk())
-
-	require.Equal(t, []string{"b", "c", "a"}, paneIDs(s),
-		"loaded rows keep disk order, so a rail index still names the same task")
-	assert.False(t, s.tasks[2].Enabled, "the draft must survive")
-	selected, ok := s.SelectedTask()
-	require.True(t, ok)
-	assert.Equal(t, "a", selected.ID, "the cursor must follow the task it was on")
-
-	require.True(t, s.HandleKeyPress(keyRunes("D")))
-	assert.Equal(t, []string{"b", "c"}, paneIDs(s))
-	assert.Empty(t, s.ConsumeDirty(), "a deleted draft is not also saved")
-	deleted := s.ConsumeDeleted()
-	require.Len(t, deleted, 1, "discarding the draft is an ordinary deletion")
-	assert.Equal(t, "a", deleted[0].ID)
-	s.SetTasks(disk())
-	assert.Equal(t, []string{"b", "c"}, paneIDs(s))
-	assert.False(t, s.IsDirty())
-}
-
 // The cursor follows its task when a reload inserts a row above it, so the
 // next key acts on the task the user is looking at.
 func TestTaskPaneReloadCursorFollowsTask(t *testing.T) {

@@ -128,8 +128,12 @@ type TaskPane struct {
 	// the whole task — means a save of one field can never clobber a field
 	// another writer changed out-of-band while the editor was open (#1700).
 	originals map[string]task.Task
-	deleted   []task.Task
-	hasFocus  bool
+	// discardedDrafts names the drafts SetTasks dropped because their task was
+	// deleted out from under them (#4798), until the app takes them as one
+	// notice with TakeDiscardedDraftNotice.
+	discardedDrafts []string
+	deleted         []task.Task
+	hasFocus        bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.

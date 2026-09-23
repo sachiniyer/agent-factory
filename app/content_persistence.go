@@ -102,23 +102,34 @@ func (m *home) saveContentPaneState() error {
 	// open — the #1700 clobber, of which #1213's whole-task guard was only a
 	// partial fix. A patch that turns out empty (edited then reverted) is a
 	// harmless no-op the daemon still validates.
+	//
+	// A failed edit's error is held until the reload below: if that reload shows
+	// the task was deleted, the pane drops the draft and raises its own notice,
+	// so reporting "not found" as well would contradict it (#4798).
+	type failedTaskEdit struct {
+		id  string
+		err error
+	}
+	var failedEdits []failedTaskEdit
 	for _, edit := range sp.ConsumeDirty() {
 		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
+			log.ErrorLog.Printf("failed to update task: %v", err)
+			wrapped := fmt.Errorf("failed to save task %q: %w", edit.ID, err)
 			if apiclient.IsMutationCommitted(err) {
 				// The task write landed; only the daemon's schedule refresh
 				// failed. Keep surfacing that failure, but advance this task's
 				// baseline so a later edit is diffed against durable state.
 				sp.AcknowledgeSavedEdit(edit.ID)
+				saveErr = errors.Join(saveErr, wrapped)
 			} else {
 				sp.RestoreFailedEdit(edit.ID)
-				failedEdit = true
+				failedEdits = append(failedEdits, failedTaskEdit{edit.ID, wrapped})
 			}
-			log.ErrorLog.Printf("failed to update task: %v", err)
-			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save task %q: %w", edit.ID, err))
 			continue
 		}
 		sp.AcknowledgeSavedEdit(edit.ID)
 	}
+	var deleteErr error
 	for _, tsk := range sp.ConsumeDeleted() {
 		// tsk is the record as the pane displayed it; pin its project binding
 		// so a delete authorized under this project cannot land on a task
@@ -129,12 +140,12 @@ func (m *home) saveContentPaneState() error {
 				// it. Keep the schedule failure visible without telling the user
 				// to retry a deletion that already happened.
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
-				saveErr = errors.Join(saveErr, fmt.Errorf(
+				deleteErr = errors.Join(deleteErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
-			saveErr = errors.Join(saveErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("failed to remove task %q: %w", tsk.Name, err))
 		}
 	}
 	// Reload BOTH panes from disk so the TaskPane and sidebar can never diverge
@@ -149,7 +160,18 @@ func (m *home) saveContentPaneState() error {
 		// The task count feeds the rail's automations-section height (#1126);
 		// reflow so an add/delete grows or shrinks the section immediately.
 		m.relayout()
-	} else {
+	}
+	// Only an edit the pane still holds failed in a way the user can act on;
+	// one whose draft the reload dropped is reported by the snapshot poll's
+	// discarded-draft notice instead.
+	for _, f := range failedEdits {
+		if sp.HasUnsavedEdit(f.id) {
+			saveErr = errors.Join(saveErr, f.err)
+			failedEdit = true
+		}
+	}
+	saveErr = errors.Join(saveErr, deleteErr)
+	if err != nil {
 		saveErr = errors.Join(saveErr, fmt.Errorf("failed to reload tasks after save: %w", err))
 	}
 	if failedEdit {
