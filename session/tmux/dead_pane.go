@@ -201,16 +201,27 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 // the field, or a root tmux did not collect within paneStatusWait leaves it
 // unknown.
 func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, at time.Time, known bool) {
+	exit, uncollected := t.readPaneExit(tmuxCommandTimeout)
+	// Every re-read is bounded by what is left of the wait, so a tmux that
+	// stalls mid-wait cannot hold the caller for a whole command timeout.
 	deadline := time.Now().Add(paneStatusWait)
 	pause := 5 * time.Millisecond
-	for {
-		exit, uncollected := t.readPaneExit()
-		if !uncollected || !time.Now().Before(deadline) {
-			return exit.dead, exit.status, exit.statusKnown, exit.at, exit.known
-		}
+	for uncollected {
 		time.Sleep(pause)
 		pause = min(2*pause, 50*time.Millisecond)
+		budget := time.Until(deadline)
+		if budget <= 0 {
+			break
+		}
+		next, stillUncollected := t.readPaneExit(budget)
+		if !next.dead {
+			// The root's exit is already established; a re-read that cannot
+			// confirm it (tmux failed, the session went away) must not undo it.
+			break
+		}
+		exit, uncollected = next, stillUncollected
 	}
+	return exit.dead, exit.status, exit.statusKnown, exit.at, exit.known
 }
 
 // paneStatusWait bounds how long ProbePaneExit waits for tmux to collect a pane
@@ -226,11 +237,11 @@ type paneExit struct {
 	at                       time.Time
 }
 
-// readPaneExit reads the pane once. uncollected reports a pane whose root has
-// exited but that tmux has not collected, so it has reported nothing about how
-// the root ended yet.
-func (t *TmuxSession) readPaneExit() (exit paneExit, uncollected bool) {
-	ctx, cancel := tmuxTimeoutContext()
+// readPaneExit reads the pane once, within budget. uncollected reports a pane
+// whose root has exited but that tmux has not collected, so it has reported
+// nothing about how the root ended yet.
+func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncollected bool) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
 	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneExitFormat)
 	if err != nil {

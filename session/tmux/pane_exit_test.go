@@ -85,6 +85,66 @@ func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 	require.Equal(t, 3, reads)
 }
 
+// Once a read has established that the root exited, a re-read that cannot
+// answer (tmux failed, the session went away) must not turn the finished command
+// back into an unknown one: tab creation and restore would leave it unstamped.
+func TestProbePaneExitKeepsTheExitWhenARereadFails(t *testing.T) {
+	uncollected := uncollectedProcess(t)
+	reads := 0
+	before := heldPaneExec(uncollected, "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-reread-fails", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: before.RunFunc,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			reads++
+			if reads == 1 {
+				return before.OutputFunc(c)
+			}
+			return nil, errors.New("no server running")
+		},
+	})
+	dead, _, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known, "a failed re-read discarded an exit the first read established")
+	require.True(t, dead)
+	require.False(t, statusKnown)
+	require.Equal(t, 2, reads)
+}
+
+// A tmux that stalls while the probe waits for the status must be bounded by
+// what is left of paneStatusWait, not by a fresh tmuxCommandTimeout per read.
+// The stalled read is a real process under the probe's own context, so only
+// that context can end it.
+func TestProbePaneExitBoundsAStalledRereadByTheWait(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	sleepPath, err := exec.LookPath("sleep")
+	require.NoError(t, err)
+	uncollected := uncollectedProcess(t)
+	reads := 0
+	before := heldPaneExec(uncollected, "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-reread-stalls", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: before.RunFunc,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			reads++
+			if reads == 1 {
+				return before.OutputFunc(c)
+			}
+			c.Path, c.Args = sleepPath, []string{"sleep", "300"}
+			return c.Output()
+		},
+	})
+	type answer struct{ dead, known bool }
+	done := make(chan answer, 1)
+	go func() {
+		dead, _, _, _, known := ts.ProbePaneExit()
+		done <- answer{dead, known}
+	}()
+	select {
+	case got := <-done:
+		require.Equal(t, answer{dead: true, known: true}, got)
+	case <-time.After(tmuxCommandTimeout):
+		t.Fatalf("a stalled re-read held the probe for a whole %s command timeout", tmuxCommandTimeout)
+	}
+}
+
 // shrinkPaneStatusWait bounds ProbePaneExit's wait for an uncollected root, so a
 // fixture whose root tmux never collects gives up quickly.
 func shrinkPaneStatusWait(t *testing.T) {
