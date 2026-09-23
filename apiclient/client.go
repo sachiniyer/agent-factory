@@ -4,7 +4,9 @@
 // SAME daemon core over a DIFFERENT transport and, by decoding the shared
 // `{data,error}` envelope back into the SAME request/response structs the RPC
 // client uses, it returns byte-identical results — without the TUI or CLI ever
-// touching the wire shape.
+// touching the HTTP envelope shape. The streaming path is the exception: the
+// TUI drives the WebSocket protocol itself (app/live_stream.go, over
+// agentproto) through the raw connection DialStream exposes.
 //
 // The client covers the operations the TUI and CLI drive today — snapshot
 // reads, session/tab/task lifecycle writes, config get/set, and streaming
