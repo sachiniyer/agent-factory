@@ -832,19 +832,20 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		return false, nil
 	}
 
-	// Bind the PID to THIS home before signaling. The cmdline check above cannot
-	// tell an `af --daemon` of this home from one of another AGENT_FACTORY_HOME, so
-	// a stale daemon.pid whose PID the kernel recycled onto another home's
-	// `af --daemon` would pass it while serving someone else's control socket.
-	// Signaling that PID kills an unrelated daemon — possibly another user's on a
-	// shared host — so require the same uid + home binding the reset path relies
-	// on (#1919). The two PID-validation paths must agree (#1004). When the home
-	// cannot be established (a foreign or withheld environ) we do not guess:
-	// treat the PID file as stale and fall back to other discovery.
-	if !pidBelongsToThisHome(pid) {
+	// Bind the PID to THIS home before signaling (#4793, #1919, #1004). The
+	// cmdline check above cannot tell this home's `af --daemon` from another
+	// home's. A PROVEN-foreign PID is a stale PID file; an INCONCLUSIVE binding
+	// (daemonUnverifiable) is neither safe to signal nor safe to orphan by
+	// deleting the PID file over it — leave the file and surface why.
+	switch scope := classifyDaemonHome(pid); scope {
+	case daemonOurs:
+		// Proven to serve this home: signal it below.
+	case daemonForeign:
 		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
 		_ = os.Remove(pidFile)
 		return false, nil
+	default: // daemonUnverifiable — inconclusive: do not signal, do not delete the PID file.
+		return false, fmt.Errorf("PID %d could not be bound to this home (uid, AGENT_FACTORY_HOME, or path unresolved); not signaling and leaving the PID file in place", pid)
 	}
 
 	// Send SIGTERM so the daemon's signal handler can SaveInstances() before

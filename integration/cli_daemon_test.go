@@ -317,7 +317,22 @@ func buildBinary(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	repoRoot := filepath.Dir(filepath.Dir(file))
-	bin := filepath.Join(t.TempDir(), "af")
+	// StopDaemon's PID-file reclaim path now binds the candidate to THIS home
+	// (pidBelongsToThisHome, reusing verifyScopedDaemon), which classifies any
+	// argv under /tmp/Test* or /tmp/go-build* as a Go test binary and refuses to
+	// reclaim it as this home's daemon. t.TempDir() names paths under /tmp/Test*,
+	// so a daemon built there is rejected the moment the harness removes its
+	// live socket and re-ensures a daemon
+	// (TestDaemonLifecycleRecoversFromStaleSocketAndDeadDaemon). Build the binary
+	// into a temp dir that does NOT trip that filter — the same trick
+	// daemon/stopall_test.go's fakeBinDir uses to keep its fake daemons out of
+	// /tmp/Test*.
+	binDir, err := os.MkdirTemp("", "af-integration-bin")
+	if err != nil {
+		t.Fatalf("make bin dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(binDir) })
+	bin := filepath.Join(binDir, "af")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", bin, repoRoot)

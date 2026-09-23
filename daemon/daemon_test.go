@@ -870,3 +870,64 @@ func TestStopDaemon_ForeignHomePIDFileNotKilled(t *testing.T) {
 		t.Fatalf("expected stale PID file to be removed, stat err = %v", err)
 	}
 }
+
+// TestStopDaemon_UnverifiableHomePIDFileIsNotSignaledAndNotOrphaned is the
+// inconclusive-binding companion to TestStopDaemon_ForeignHomePIDFileNotKilled.
+// A stale daemon.pid in THIS home points at a live `af --daemon` whose
+// AGENT_FACTORY_HOME the caller cannot RESOLVE: "~other" is a "~user" form
+// config.ConfigDirFor rejects, so verifyScopedDaemon classifies the candidate
+// daemonUnverifiable rather than daemonForeign. StopDaemon must fail closed on
+// the kill — do not SIGTERM a PID that might be another home's daemon (#4793) —
+// but it must NOT fail open by deleting the PID file: that orphans the live
+// daemon the file names, and every later recovery loses its handle to it. So it
+// leaves the PID file in place, returns stopped=false with an error that tells
+// the caller why, and leaves the candidate daemon untouched. The two
+// PID-validation paths must still agree (#1004): locateDaemonPID falls through
+// to the pgrep ambiguity guard on the same inconclusive binding.
+func TestStopDaemon_UnverifiableHomePIDFileIsNotSignaledAndNotOrphaned(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	// A candidate whose AGENT_FACTORY_HOME the caller cannot resolve: "~other"
+	// is a "~user" form config.ConfigDirFor rejects, so the home binding is
+	// inconclusive (daemonUnverifiable), the case the bool pidBelongsToThisHome
+	// collapses into "not ours". Its binary lives outside /tmp/Test* (fakeBinDir),
+	// so it is not rejected as a Go test binary before the home check runs.
+	const unresolvableHome = "~other"
+	unverifiable := spawnFakeDaemonWithHome(t, unresolvableHome)
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", unverifiable)), 0600); err != nil {
+		t.Fatalf("failed to write PID file: %v", err)
+	}
+
+	stopped, err := StopDaemon()
+	if err == nil {
+		t.Fatalf("StopDaemon returned nil error for an unresolvable home binding; expected to be told "+
+			"why it could not bind pid=%d", unverifiable)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for an unverifiable-home pid=%d; expected false "+
+			"(no signal on an inconclusive binding)", unverifiable)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d", unverifiable)) {
+		t.Errorf("StopDaemon error %q does not name the unverifiable pid=%d", err.Error(), unverifiable)
+	}
+
+	// The PID file MUST still be there — deleting it on an inconclusive binding
+	// orphans the live daemon the file names.
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("StopDaemon removed the PID file on an inconclusive binding; the live daemon pid=%d is "+
+			"now orphaned from its handle: %v", unverifiable, err)
+	}
+
+	// The candidate daemon MUST still be alive — StopDaemon did not signal a
+	// PID it could not prove to bind to this home.
+	if !pidLooksAlive(unverifiable) {
+		t.Fatalf("StopDaemon signaled the unverifiable-home daemon pid=%d; an inconclusive binding is "+
+			"not a license to kill a PID that may be another home's daemon", unverifiable)
+	}
+}

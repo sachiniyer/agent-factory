@@ -176,16 +176,38 @@ func pidLooksAlive(pid int) bool {
 // too. "Unverifiable" (a foreign or withheld environ) is NOT ours: callers fall
 // through to the pgrep ambiguity guard rather than trusting a PID they could
 // not bind — guessing "ours" here is exactly the bug.
+//
+// Callers that only need the trust decision use this bool helper; StopDaemon
+// uses classifyDaemonHome instead, because it must act differently on a
+// PROVEN-foreign PID (stale PID file, fall back) and an INCONCLUSIVE one (do
+// not signal AND do not delete the PID file — deleting it on an inconclusive
+// binding orphans the live daemon the file names). See stopDaemonUntil.
 func pidBelongsToThisHome(pid int) bool {
+	return classifyDaemonHome(pid) == daemonOurs
+}
+
+// classifyDaemonHome is the tri-state form of pidBelongsToThisHome, surfacing
+// the inconclusive case (daemonUnverifiable) the bool helper collapses.
+// StopDaemon reads daemon.pid and then decides whether to signal the PID it
+// names: proving the PID is another home's daemon (daemonForeign) lets it treat
+// the file as stale, but a PID whose home binding is merely inconclusive
+// (daemonUnverifiable — a uid that could not be read, a foreign or withheld
+// environ, an unresolvable AGENT_FACTORY_HOME) is neither safe to signal (it may
+// be another home's daemon — the #4793 hazard) nor safe to delete the PID file
+// over (that orphans the live daemon the file names, and every later recovery
+// loses its handle to it). StopDaemon therefore needs the scope, not just the
+// trust decision; locateDaemonPID only needs the trust decision, so it keeps
+// the bool helper and the two paths still agree on what "ours" means (#1004).
+func classifyDaemonHome(pid int) daemonScope {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
-		return false
+		return daemonUnverifiable
 	}
 	wantHome, err := canonicalDir(configDir)
 	if err != nil {
-		return false
+		return daemonUnverifiable
 	}
-	return verifyScopedDaemon(pid, os.Getuid(), wantHome) == daemonOurs
+	return verifyScopedDaemon(pid, os.Getuid(), wantHome)
 }
 
 // scanDaemonCandidatesFn is the process-scan entry point used by
