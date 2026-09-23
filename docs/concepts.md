@@ -59,7 +59,9 @@ It also keeps sessions alive across process death and reboots, runs the
 scheduler, handles usage-limit parking and resume, and serves the web client. It
 starts on demand — a bare `af` launch starts it (the TUI on its first control
 call, plus a background ensure when an enabled task exists), and commands that
-talk to the daemon ensure a local one is running; install its autostart unit once to
+talk to the daemon ensure a local one is running (read-only listings like
+`af sessions list` fall back to disk instead of spawning); install its
+autostart unit once to
 keep tasks firing across logouts:
 
 ```bash

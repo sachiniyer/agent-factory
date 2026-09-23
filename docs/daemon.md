@@ -62,8 +62,10 @@ paragraph because it's why `af` doesn't corrupt itself:
 The daemon starts **on demand**: a bare `af` launch starts it — the TUI
 ensures it on its first control call, and the launch also kicks a background
 ensure when an enabled task exists so cron schedules are evaluated promptly.
-`af` commands that talk to the daemon ensure a local one when they run, so for
-interactive use you usually don't have to think about it at all.
+`af` commands that need a live daemon ensure a local one is running when they
+execute (read-only listings like `af sessions list` deliberately do not spawn
+one — they fall back to disk). For interactive use you usually don't have to
+think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:

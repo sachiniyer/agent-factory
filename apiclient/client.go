@@ -11,7 +11,7 @@
 // attach — a subset of the HTTP route catalog, not all of it (SendPrompt and
 // the tab rename/reorder routes have no wrapper yet, for example). The TUI
 // sends its control calls over it (app/session_control.go's withDaemonHTTP);
-// the CLI's `af sessions`/`tasks`/`projects` trees in api/ call it too. The
+// the CLI's `af sessions` and `af tasks` trees in api/ call it too. The
 // envelope is NOT redefined here — the client decodes the exact bytes
 // daemon/httpserver.go writes via apiproto.WriteEnvelope, which is what
 // guarantees parity.
