@@ -107,14 +107,23 @@ type SnapshotResponse struct {
 // truncated list. See SnapshotResponse.SkippedRepos.
 type SkippedRepo struct {
 	RepoID string `json:"repo_id"`
-	// Reason is a stable machine-readable code for why the repo was skipped.
-	// Today the only value is SkippedRepoReasonCorruptedInstancesJSON.
+	// Reason is a stable machine-readable code for why the repo was skipped:
+	// SkippedRepoReasonCorruptedInstancesJSON or
+	// SkippedRepoReasonUnreadableInstancesJSON. A client treats an empty or
+	// unknown value as corrupted, which is all an older daemon ever sent.
 	Reason string `json:"reason,omitempty"`
 }
 
 // SkippedRepoReasonCorruptedInstancesJSON is the reason carried for a repo whose
 // instances.json failed to parse at daemon startup (#603).
 const SkippedRepoReasonCorruptedInstancesJSON = "corrupted-instances-json"
+
+// SkippedRepoReasonUnreadableInstancesJSON is the reason carried for a repo
+// whose instances.json could not be read at all — a permission, I/O or
+// newer-schema failure rather than bad JSON (#4783). It is kept apart from the
+// corrupted reason because the remedy differs: an unreadable file needs its
+// access restored, not its JSON repaired.
+const SkippedRepoReasonUnreadableInstancesJSON = "unreadable-instances-json"
 
 // SkippedRepos returns the repos dropped at daemon startup due to a corrupted
 // instances.json (#603), scoped to repoID (all repos when empty). It is the wire
@@ -238,25 +247,35 @@ func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []
 	return data, skipped
 }
 
-// retainStillSkipped returns the subset of prev that fresh still reports as
-// corrupted. The polling refresh uses it so a startup skip set shrinks as repos
-// are repaired (#603 closed over the wire) — a previously-skipped repo whose
-// instances.json now parses drops out — without ever GAINING a mid-life
-// corrupted repo: those keep their re-hydrated in-memory rows and stay out of
-// the skip set until the daemon restarts and re-runs startup. Both prev and
-// fresh carry SkippedRepoReasonCorruptedInstancesJSON, so the prev entry is
-// preserved verbatim.
-func retainStillSkipped(prev, fresh []SkippedRepo) []SkippedRepo {
+// retainStillSkipped returns the part of the startup skip set prev that this
+// refresh has NOT proven repaired. The polling refresh uses it so the set
+// shrinks as repos are repaired (#603 closed over the wire) without ever
+// GAINING a repo that fails mid-life: those keep their re-hydrated in-memory
+// rows and stay out of the skip set until the daemon restarts and re-runs
+// startup.
+//
+// Leaving the set takes positive evidence: the repo is in reread, meaning this
+// refresh read AND parsed its instances.json. Absence from fresh is not enough
+// (#4783). A repo can be missing from fresh because the loader could not read
+// it, or because its directory is gone, and neither is a repair; treating the
+// omission as one served a truncated snapshot as complete again. A repo fresh
+// still reports is kept with fresh's entry, so the reason tracks the file's
+// current state (a startup-corrupt file that is now unreadable says so).
+func retainStillSkipped(prev, fresh []SkippedRepo, reread map[string]bool) []SkippedRepo {
 	if len(prev) == 0 {
 		return nil
 	}
-	freshByID := make(map[string]bool, len(fresh))
+	freshByID := make(map[string]SkippedRepo, len(fresh))
 	for _, s := range fresh {
-		freshByID[s.RepoID] = true
+		freshByID[s.RepoID] = s
 	}
 	var out []SkippedRepo
 	for _, s := range prev {
-		if freshByID[s.RepoID] {
+		if f, ok := freshByID[s.RepoID]; ok {
+			out = append(out, f)
+			continue
+		}
+		if !reread[s.RepoID] {
 			out = append(out, s)
 		}
 	}

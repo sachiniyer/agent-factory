@@ -44,7 +44,7 @@ func TestRefreshDaemonInstances_ReportsSkippedRepos(t *testing.T) {
 	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
 	seedCorruptedRepo(t, "corrupt-r")
 
-	_, _, skipped, err := refreshDaemonInstances(nil)
+	_, _, skipped, _, err := refreshDaemonInstances(nil)
 	require.NoError(t, err, "startup must not fail on a corrupted repo (#603)")
 
 	var ids []string

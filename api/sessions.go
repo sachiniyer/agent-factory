@@ -89,8 +89,8 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
 	data, skipped, fallBack, err := snapshotRead(req)
 	if err == nil {
-		if repoIDs := skippedRepoIDs(skipped); len(repoIDs) > 0 {
-			return nil, corruptedReposError(repoIDs)
+		if len(skipped) > 0 {
+			return nil, skippedReposError(skipped)
 		}
 		return daemon.FilterSnapshotInstances(req, data)
 	}
@@ -164,8 +164,8 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 		// returns errTitleNotFound; a miss with a corrupted repo that may be
 		// hiding the title caveats naming the dropped repos instead, so a hidden
 		// session is not reported as a clean not-found (#730, #603 over the wire).
-		if repoIDs := skippedRepoIDs(skipped); len(repoIDs) > 0 {
-			return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(repoIDs))
+		if len(skipped) > 0 {
+			return nil, "", fmt.Errorf("session %q not found; %s", title, skippedReposSuffix(skipped))
 		}
 		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}
@@ -198,8 +198,8 @@ func whoamiSession(tmuxName string) (*session.InstanceData, error) {
 		// The absence claim caveats when the daemon dropped a repo at startup —
 		// a corrupted file may be hiding the matching session — mirroring
 		// diskWhoami's not-found-with-corruption behavior.
-		if repoIDs := skippedRepoIDs(skipped); len(repoIDs) > 0 {
-			return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, corruptedReposSuffix(repoIDs))
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, skippedReposSuffix(skipped))
 		}
 		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
 	}
