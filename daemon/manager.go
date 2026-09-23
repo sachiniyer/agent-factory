@@ -129,10 +129,10 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
-	// skippedRepos names repos whose instances.json was corrupted and dropped at
-	// daemon startup (#603), seeded by restoreInstances and trimmed by the
-	// polling refresh to drop repaired repos without ever adding a
-	// mid-life-corrupted one. The Snapshot RPC reads it to carry the drop to
+	// skippedRepos names repos whose instances.json was corrupted or unreadable
+	// and dropped at daemon startup (#603, #4783), seeded by restoreInstances and
+	// trimmed by the polling refresh — only once it re-reads a repo successfully
+	// — without ever adding one that fails mid-life. The Snapshot RPC reads it to carry the drop to
 	// clients instead of silently serving a partial list as complete (#730's
 	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
 	// m.mu.
@@ -807,7 +807,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, skipped, err := refreshDaemonInstances(nil)
+	instances, ghosts, skipped, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}

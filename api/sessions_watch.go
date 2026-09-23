@@ -195,8 +195,8 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, stri
 		// Miss within the scope. The daemon reports only this repo's drop
 		// (SkippedRepos is scoped to RepoID), so a non-empty set means THIS repo
 		// was dropped at startup and may be hiding the title.
-		if repoIDs := skippedRepoIDs(skipped); len(repoIDs) > 0 {
-			return nil, "", corruptedReposError(repoIDs)
+		if len(skipped) > 0 {
+			return nil, "", skippedReposError(skipped)
 		}
 		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}

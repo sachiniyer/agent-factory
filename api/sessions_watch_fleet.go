@@ -497,8 +497,8 @@ func listSessionsInScope(repoID string) ([]session.InstanceData, watchSource, er
 		}
 		return data, watchSourceDisk, nil
 	}
-	if repoIDs := skippedRepoIDs(skipped); len(repoIDs) > 0 {
-		return nil, watchSourceNone, corruptedReposError(repoIDs)
+	if len(skipped) > 0 {
+		return nil, watchSourceNone, skippedReposError(skipped)
 	}
 	return data, watchSourceDaemon, nil
 }

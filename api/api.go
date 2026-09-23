@@ -51,23 +51,6 @@ func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skip
 	return nil, nil, true, err
 }
 
-// skippedRepoIDs extracts the repo IDs from a Snapshot's skipped set, or nil when
-// none were skipped. The IDs are what list/get/whoami surface in their
-// corruption-aware refuse/caveat errors, mirroring the disk-fallback path
-// (diskListSessions / findInstanceByTitle / diskWhoami) so a daemon-up read and
-// a daemon-down read produce the same user-visible signal for the same on-disk
-// corruption.
-func skippedRepoIDs(skipped []daemon.SkippedRepo) []string {
-	if len(skipped) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(skipped))
-	for _, s := range skipped {
-		ids = append(ids, s.RepoID)
-	}
-	return ids
-}
-
 // Shared flags
 var (
 	repoFlag string
