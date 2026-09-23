@@ -712,13 +712,16 @@ func daemonPIDFilePath() (string, error) {
 // It REFUSES a symlinked path (#3672). The PID file is af's own liveness
 // bookkeeping at a path af chose, written on start and deleted on teardown, so
 // a link there is neither af's to write through nor af's to replace — the same
-// answer the bearer token and the autostart unit take.
+// answer the bearer token and the autostart unit take. It takes the PID-file
+// lock (withDaemonPIDLock) so a stop's read-compare-unlink can't interleave.
 func writeDaemonPIDFile() error {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	return withDaemonPIDLock(path, func() error {
+		return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	})
 }
 
 // removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
@@ -844,7 +847,10 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
 		removePIDFileIfStillNames(pidFile, pid)
 		return false, nil
-	default: // daemonUnverifiable — inconclusive: do not signal, do not delete the PID file.
+	default: // daemonUnverifiable — inconclusive; neither signal nor orphan a live daemon.
+		if reclaimDeadUnverifiablePIDFile(pidFile, pid) {
+			return false, nil
+		}
 		return false, fmt.Errorf("PID %d could not be bound to this home (uid, AGENT_FACTORY_HOME, or path unresolved); not signaling and leaving the PID file in place", pid)
 	}
 

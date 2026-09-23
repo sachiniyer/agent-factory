@@ -982,3 +982,64 @@ func TestRemovePIDFileIfStillNames_KeepsReplacementFile(t *testing.T) {
 		}
 	})
 }
+
+// TestRemovePIDFileIfStillNames_CoordinatesWithWriterLock pins the lock the
+// stale-PID removal takes against the daemon PID-file writer. The removal's
+// read-compare-unlink must NOT interleave with a same-home daemon's atomic
+// temp-then-rename; if it did, the unlink could delete a freshly-written
+// replacement PID file and orphan the new daemon. With the writer holding the
+// PID-file lock (the same lock writeDaemonPIDFile takes), the removal blocks
+// until the writer releases, and only then unlinks the still-stale file. The
+// lock is a sidecar flock (daemon.pid.lock), so holding it from an independent
+// file description must stall removePIDFileIfStillNames exactly as a real
+// concurrent write would.
+func TestRemovePIDFileIfStillNames_CoordinatesWithWriterLock(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "daemon.pid")
+	const stale = 13579
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+		t.Fatalf("write stale PID file: %v", err)
+	}
+
+	// Simulate a same-home daemon's writer holding the PID-file lock.
+	held, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		removePIDFileIfStillNames(pidFile, stale)
+		close(done)
+	}()
+
+	// While the writer holds the lock, the removal must not return and must
+	// not unlink the file.
+	select {
+	case <-done:
+		t.Fatalf("removePIDFileIfStillNames removed the PID file while the writer held the lock; the removal is not coordinated with the PID-file writer")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("PID file removed while the writer lock was held: %v", err)
+	}
+
+	// Releasing the writer's lock lets the removal proceed and unlink the
+	// still-stale file.
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	held.Close()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("removePIDFileIfStillNames did not complete after the writer lock was released")
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("expected the stale PID file to be removed once the writer lock was released, stat err=%v", err)
+	}
+}

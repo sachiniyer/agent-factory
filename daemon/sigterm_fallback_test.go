@@ -833,6 +833,20 @@ func TestSigtermFallback_ScanForeignOnlyNotKilled(t *testing.T) {
 	if err == nil {
 		t.Fatalf("sigtermFallback returned nil error; expected the recovery hint")
 	}
+	// Having deliberately refused to signal the foreign daemon, the recovery
+	// hint must NOT tell the user to run a blanket `pkill -f -- '--daemon'`:
+	// that command has no home or PID constraint, so it would kill exactly the
+	// foreign daemon this filter left untouched, plus any unrelated process
+	// carrying "--daemon". The message must say so plainly instead.
+	if strings.Contains(err.Error(), "pkill -f -- '--daemon'") {
+		t.Errorf("sigtermFallback error %q recommends a blanket `pkill -f -- '--daemon'` after the scan "+
+			"found only foreign/unverifiable daemons; following it would kill exactly the daemons the "+
+			"home filter refused to touch", err.Error())
+	}
+	if !strings.Contains(err.Error(), "left untouched") {
+		t.Errorf("sigtermFallback error %q does not name the foreign/unverifiable candidates that were "+
+			"left untouched, so the user has no way to tell refusing-to-signal from a host with no daemons", err.Error())
+	}
 	if !pidLooksAlive(foreign) {
 		t.Fatalf("foreign home's daemon pid=%d (serving %q) was killed by sigtermFallback run against %q; "+
 			"a single foreign scan result must not be signalled", foreign, otherHome, home)
@@ -972,5 +986,78 @@ func TestPidBelongsToThisHome_DefaultHomeResolvedFromDaemonHome(t *testing.T) {
 	ours := spawnFakeDaemonWithDefaultHome(t, callerHome)
 	if scope := classifyDaemonHome(ours); scope != daemonOurs {
 		t.Errorf("default-home daemon with HOME=%q (the caller's) classified %v; want daemonOurs", callerHome, scope)
+	}
+}
+
+// spawnFakeDaemonWithTildeHome starts a fake `af --daemon` with BOTH an
+// explicit (tilde-spelled) AGENT_FACTORY_HOME and a pinned HOME, the frame a
+// tilde home is expanded in (config's ExpandTilde reads os.UserHomeDir, i.e.
+// the process's $HOME). The recorded-PID classifier must expand a
+// "~"/"~/" home against the DAEMON's own $HOME, not the caller's: two same-UID
+// daemons launched with the same AGENT_FACTORY_HOME=~/state under different
+// HOME values serve different homes, and expanding both against the caller's
+// $HOME makes the foreign one compare equal to ours (the #4793 hazard via the
+// tilde form). HOME and AGENT_FACTORY_HOME are the only env the tilde
+// resolution reads, so they are the only env the spawn pins beyond PATH.
+func spawnFakeDaemonWithTildeHome(t *testing.T, afHome, homeEnv string) int {
+	t.Helper()
+	argv0 := filepath.Join(fakeBinDir(t), "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + homeEnv,
+		"AGENT_FACTORY_HOME=" + afHome,
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, pid, argv0)
+	return pid
+}
+
+// TestPidBelongsToThisHome_TildeHomeResolvedAgainstDaemonHome pins the
+// recorded-PID classifier's frame for a TILDE AGENT_FACTORY_HOME. A
+// "~/afhome" spelling expands against the DAEMON's own $HOME at the daemon's
+// exec, but config.ConfigDirFor("~/afhome") expands it against the CALLER's
+// $HOME (os.UserHomeDir). classifyDaemonHome previously routed the tilde form
+// straight to ConfigDirFor, so two same-UID daemons launched with the same
+// "~/afhome" under different HOME values both resolved to the caller's home
+// and compared equal — the foreign one was labelled ours and could be
+// signalled on a stale PID file or lone pgrep result. It now expands the tilde
+// against the daemon's HOME, so a tilde-home daemon under a foreign HOME is
+// foreign, and one under the caller's HOME is ours.
+func TestPidBelongsToThisHome_TildeHomeResolvedAgainstDaemonHome(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	// Put the CALLER on a tilde home: AGENT_FACTORY_HOME=~/afhome expands
+	// against the caller's HOME (callerHome), so wantHome = callerHome/afhome.
+	callerHome := t.TempDir()
+	t.Setenv("HOME", callerHome)
+	t.Setenv("AGENT_FACTORY_HOME", "~/afhome")
+
+	// A same-UID daemon launched with the SAME tilde spelling under the CALLER's
+	// HOME serves the same directory and IS ours — the fix must not turn the
+	// matching case into a refusal.
+	ours := spawnFakeDaemonWithTildeHome(t, "~/afhome", callerHome)
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Errorf("tilde-home daemon with HOME=%q (the caller's) classified %v; want daemonOurs", callerHome, scope)
+	}
+
+	// A same-UID daemon launched with the SAME tilde spelling but under a
+	// DIFFERENT HOME serves otherHome/afhome. Pre-fix ConfigDirFor expanded the
+	// tilde against the CALLER's HOME for both, so this compared equal to
+	// wantHome and was signalled on a stale PID file; post-fix the tilde is
+	// expanded against the DAEMON's HOME, so it is foreign.
+	otherHome := t.TempDir()
+	foreign := spawnFakeDaemonWithTildeHome(t, "~/afhome", otherHome)
+	if scope := classifyDaemonHome(foreign); scope != daemonForeign {
+		t.Errorf("tilde-home daemon with HOME=%q classified %v; want daemonForeign — the tilde must "+
+			"expand against the DAEMON's HOME, not the caller's ($HOME=%q)", otherHome, scope, callerHome)
 	}
 }

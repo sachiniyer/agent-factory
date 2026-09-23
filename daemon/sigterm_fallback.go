@@ -43,7 +43,7 @@ import (
 // ShutdownNoDaemon here would contradict the established state and silently
 // leave the stale daemon running (#553).
 func sigtermFallback() (ShutdownResult, error) {
-	pid, source, err := locateDaemonPID()
+	pid, source, scanned, err := locateDaemonPID()
 	if err != nil {
 		return ShutdownFailed, fmt.Errorf(
 			"sigterm fallback failed: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
@@ -51,6 +51,22 @@ func sigtermFallback() (ShutdownResult, error) {
 		)
 	}
 	if pid == 0 {
+		if scanned > 0 {
+			// Every `--daemon` candidate the host scan found serves ANOTHER
+			// home or could not be bound, and this filter deliberately refused
+			// to signal any of them. Do NOT recommend a blanket
+			// `pkill -f -- '--daemon'` here: that command has no home or PID
+			// constraint, so following it would kill exactly the foreign-home
+			// daemons this filtering refused to touch, plus any unrelated
+			// process carrying "--daemon". The daemon serving THIS home must
+			// be stopped by its PID, not a host-wide pattern.
+			return ShutdownFailed, fmt.Errorf(
+				"sigterm fallback: daemon is running on the control socket but no PID candidate was found for this home (%s); "+
+					"%d `--daemon` process(es) were left untouched because they serve another home or could not be bound — "+
+					"stop the daemon serving this home by its PID, then retry `af upgrade`",
+				source, scanned,
+			)
+		}
 		return ShutdownFailed, fmt.Errorf(
 			"sigterm fallback: daemon is running on the control socket but no PID candidate was found (%s); "+
 				"run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
@@ -73,17 +89,21 @@ func sigtermFallback() (ShutdownResult, error) {
 	return ShutdownViaSIGTERM, nil
 }
 
-// locateDaemonPID returns the PID of the running daemon to signal and the
-// source it was found in ("pid-file" or "pgrep") on success. On failure to
-// locate a PID, returns (0, source, nil) where source describes the suspected
-// PID source for diagnostics (e.g. "pid-file pid=N stale, pgrep: no matches"
-// or "no pid-file, pgrep unavailable"). An error is returned only for hard
-// failures (ambiguous pgrep results, pgrep itself failing to execute).
-func locateDaemonPID() (int, string, error) {
+// locateDaemonPID returns the PID of the running daemon to signal, the source
+// it was found in ("pid-file" or "pgrep"), and the count of `--daemon`
+// candidates the host scan surfaced (0 when no scan ran, e.g. no PID file and
+// pgrep unavailable). On failure to locate a PID, returns (0, source, scanned,
+// nil) where source describes the suspected PID source for diagnostics (e.g.
+// "pid-file pid=N stale, pgrep: no matches for this home" or "no pid-file,
+// pgrep unavailable") and scanned is the number of foreign/unverifiable
+// candidates that were found and deliberately left untouched. An error is
+// returned only for hard failures (ambiguous pgrep results, pgrep itself
+// failing to execute).
+func locateDaemonPID() (int, string, int, error) {
 	pidFileSource := "no pid-file"
 	if pid, ok := readPIDFromFile(); ok {
 		if pidLooksAlive(pid) && isAgentFactoryDaemon(pid) && pidBelongsToThisHome(pid) {
-			return pid, "pid-file", nil
+			return pid, "pid-file", 0, nil
 		}
 		log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead, non-daemon, or not this home's daemon; falling back to pgrep", pid)
 		pidFileSource = fmt.Sprintf("pid-file pid=%d stale", pid)
@@ -92,9 +112,9 @@ func locateDaemonPID() (int, string, error) {
 	pids, err := scanDaemonCandidatesFn()
 	if err != nil {
 		if errors.Is(err, errPgrepUnavailable) {
-			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), nil
+			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), 0, nil
 		}
-		return 0, "", fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
+		return 0, "", 0, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
 	}
 	// Reclassify every scanned candidate by uid and AGENT_FACTORY_HOME before
 	// selecting a signal target. The pgrep scan returns every `--daemon`
@@ -114,11 +134,15 @@ func locateDaemonPID() (int, string, error) {
 	}
 	switch len(scoped) {
 	case 0:
-		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, len(pids)), nil
+		// Every scanned `--daemon` serves another home or is unverifiable, and
+		// was deliberately NOT signalled. This is surfaced to the caller as
+		// `scanned` so it can stop short of recommending a blanket pkill that
+		// would kill exactly these foreign daemons.
+		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, len(pids)), len(pids), nil
 	case 1:
-		return scoped[0], "pgrep", nil
+		return scoped[0], "pgrep", len(pids), nil
 	default:
-		return 0, "", fmt.Errorf(
+		return 0, "", len(pids), fmt.Errorf(
 			"sigterm fallback: ambiguous, found %d `--daemon` processes for this home (%s) — "+
 				"kill the right one manually then re-run `af upgrade`",
 			len(scoped), formatPIDList(scoped),
@@ -145,6 +169,33 @@ func readPIDFromFile() (int, bool) {
 	return pid, true
 }
 
+// withDaemonPIDLock runs fn while holding an exclusive flock on a sidecar lock
+// file next to the daemon PID file. writeDaemonPIDFile writes daemon.pid with an
+// atomic temp-then-rename, and removePIDFileIfStillNames reads it and
+// conditionally unlinks it; without coordination, a same-home daemon's atomic
+// rename can land in the window between the removal's re-read and its unlink
+// and have its freshly-written PID file deleted — orphaning the new daemon the
+// way the unconditional unlink the removal replaced once did. A flock on the
+// PID file itself does not help: the atomic rename changes daemon.pid's inode
+// out from under any flock held on it, so a SEPARATE lock file is what the
+// writer and the remover both hold to serialize read-compare-unlink against
+// temp-then-rename. The lock is released by the kernel when the holder exits,
+// so a crashed daemon never strands it. The lock file is left in place and
+// re-opened by later callers, the way the rest of the codebase's sidecar .lock
+// files are.
+func withDaemonPIDLock(pidFile string, fn func() error) error {
+	lock, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("open daemon PID lock: %w", err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock daemon PID file: %w", err)
+	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	return fn()
+}
+
 // removePIDFileIfStillNames unlinks pidFile only when it still records pid.
 // stopDaemonUntil read a stale foreign PID and proved the process it names is
 // not this home's daemon; in the window between that read and this unlink a
@@ -152,30 +203,69 @@ func readPIDFromFile() (int, bool) {
 // its own PID. Removing the file unconditionally would delete that valid
 // replacement and recreate the untracked-daemon state the PID file exists to
 // prevent — the new daemon would be live but no longer discoverable by
-// StopDaemon. Re-read and compare first; leave a freshly-written valid file to
-// its owner, and treat the unreadable/malformed case the same way rather than
+// StopDaemon. Re-read and compare first under the writer's lock (see
+// withDaemonPIDLock) so the compare-and-unlink and a same-home daemon's
+// atomic rewrite cannot interleave: leave a freshly-written valid file to its
+// owner, and treat the unreadable/malformed case the same way rather than
 // unlinking a file whose current contents we did not establish (#4793).
 func removePIDFileIfStillNames(pidFile string, pid int) {
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		// Already gone (or unreadable) — nothing to remove; a missing file is
-		// the desired end state, and a permission error is no worse than the
-		// previous unconditional os.Remove would have been.
-		return
+	if err := withDaemonPIDLock(pidFile, func() error {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			// Already gone (or unreadable) — nothing to remove; a missing file
+			// is the desired end state, and a permission error is no worse than
+			// the previous unconditional os.Remove would have been.
+			return nil
+		}
+		var current int
+		if _, err := fmt.Sscanf(string(data), "%d", &current); err != nil {
+			// Malformed, and therefore not the foreign PID we read. A
+			// newly-started daemon writes a valid PID, so this is neither the
+			// stale file we own nor safe to claim — leave it for the next
+			// caller.
+			return nil
+		}
+		if current != pid {
+			return nil // a new daemon has written its own PID; keep the file
+		}
+		if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+			log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
+		}
+		return nil
+	}); err != nil {
+		log.WarningLog.Printf("sigterm fallback: could not coordinate removal of stale PID file %q: %v", pidFile, err)
 	}
-	var current int
-	if _, err := fmt.Sscanf(string(data), "%d", &current); err != nil {
-		// Malformed, and therefore not the foreign PID we read. A
-		// newly-started daemon writes a valid PID, so this is neither the
-		// stale file we own nor safe to claim — leave it for the next caller.
-		return
+}
+
+// reclaimDeadUnverifiablePIDFile handles the one TOCTOU the inconclusive
+// binding leaves in stopDaemonUntil. classifyDaemonHome returns daemonUnverifiable
+// when it cannot establish the candidate's uid or AGENT_FACTORY_HOME — a state
+// stopDaemonUntil treats as "neither signal nor orphan": do not SIGTERM a PID
+// that may be another home's daemon (#4793), and do not delete the PID file over
+// it. But "unverifiable" can also be a TRANSIENT race rather than a real
+// verdict: the recorded daemon passed the signal-0 and argv checks, then exited
+// WHILE classifyDaemonHome was reading its uid or environ, which surfaces as
+// unverifiable. If the PID is now dead there is nothing left to protect, so the
+// stale PID file is reclaimed the way the earlier dead-PID checks do — removed
+// only if it still names this PID (removePIDFileIfStillNames), so a same-home
+// daemon that started in the interim is not orphaned — and the caller reports
+// nothing to stop, letting a stop/restart or handoff proceed cleanly instead
+// of failing against a process that no longer exists.
+//
+// Returns true when the PID is dead and the file was reclaimed (caller returns
+// stopped=false, nil); false when the PID is still alive and the inconclusive
+// verdict stands (caller surfaces the binding error). pidLooksAlive is the same
+// liveness test the rest of stopDaemonUntil polls with; the exit it detects is
+// the narrow window between the signal-0 probe upstream and this recheck. Lives
+// in sigterm_fallback.go to keep daemon.go under the file-length lint limit
+// (#1145), the same reason removePIDFileIfStillNames lives here.
+func reclaimDeadUnverifiablePIDFile(pidFile string, pid int) bool {
+	if !pidLooksAlive(pid) {
+		log.InfoLog.Printf("PID %d could not be bound to this home (unresolved) but has since exited; removing stale PID file", pid)
+		removePIDFileIfStillNames(pidFile, pid)
+		return true
 	}
-	if current != pid {
-		return // a new daemon has written its own PID; keep the file
-	}
-	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
-	}
+	return false
 }
 
 // pidLooksAlive returns true when signal 0 to pid succeeds AND the kernel
@@ -271,13 +361,17 @@ func pidBelongsToThisHome(pid int) bool {
 //     process that set it. A relative home whose cwd cannot be read is
 //     unresolvable (daemonUnverifiable), never resolved against ours.
 //
-//   - It resolves the DEFAULT home (no AGENT_FACTORY_HOME) from the DAEMON's
-//     own $HOME, not ours. config.ConfigDirFor("") resolves the default against
-//     the caller's $HOME, so a same-UID daemon launched under a different HOME
-//     would otherwise be labelled ours and signalled on a stale PID file — the
-//     #4793 hazard via the empty-env form. An unreadable or absent HOME is
-//     daemonUnverifiable, never resolved against ours. This too mirrors
-//     daemonProcessHome in doctor/skew.go.
+//   - It resolves the DEFAULT home (no AGENT_FACTORY_HOME) and a TILDE home
+//     ("~" or "~/...") from the DAEMON's own $HOME, not ours. config.ConfigDirFor
+//     resolves both the empty ("") and tilde ("~/state") forms against
+//     os.UserHomeDir — the CALLER's $HOME — so a same-UID daemon launched under
+//     a different HOME, or two daemons sharing a "~/state" spelling under
+//     different HOME values, would both resolve to the caller's home, compare
+//     equal, and be signalled on a stale PID file: the #4793 hazard via the
+//     empty-env and tilde forms. Both are derived from the daemon's HOME read
+//     out of its environ; an unreadable or absent HOME is daemonUnverifiable,
+//     never resolved against ours; a "~user" form config.ConfigDirFor rejects
+//     stays unverifiable. This too mirrors daemonProcessHome in doctor/skew.go.
 //
 // af reset's orphan scan deliberately keeps verifyScopedDaemon; a recorded PID
 // and a host-wide discovery carry different evidence and warrant different
@@ -308,23 +402,30 @@ func classifyDaemonHome(pid int) daemonScope {
 	if !readable {
 		return daemonUnverifiable
 	}
-	if env == "" {
-		// AGENT_FACTORY_HOME is genuinely UNSET, so this daemon resolved the
-		// DEFAULT home from ITS OWN $HOME (os.UserHomeDir at the daemon's
-		// exec), not ours. config.ConfigDirFor("") resolves the default
-		// against the CALLER's $HOME, so a same-UID daemon launched under a
-		// different HOME would resolve to OUR default, compare equal to
-		// wantHome, and be marked ours — letting a stale PID file or lone
-		// pgrep result signal a daemon serving another home (the #4793
-		// hazard via the empty-env form). Mirror daemonProcessHome in
-		// doctor/skew.go: derive the default from the daemon's HOME read
-		// out of its environ, and treat an unreadable or absent HOME as
-		// unverifiable rather than guessing ours.
+	// Resolve a DEFAULT home (no AGENT_FACTORY_HOME) and a TILDE home ("~" or
+	// "~/...") against the DAEMON's own $HOME, not ours. config.ConfigDirFor
+	// expands both the empty ("") and tilde ("~/state") forms through
+	// os.UserHomeDir — the CALLER's $HOME — so a same-UID daemon launched under
+	// a different HOME, or two daemons sharing a "~/state" spelling under
+	// different HOME values, would both resolve to the caller's home, compare
+	// equal to wantHome, and be marked ours — letting a stale PID file or lone
+	// pgrep result signal a daemon serving another home (the #4793 hazard via
+	// the empty-env and tilde forms). Mirror daemonProcessHome in
+	// doctor/skew.go: derive both from the daemon's HOME read out of its
+	// environ, and treat an unreadable or absent HOME as unverifiable rather
+	// than guessing ours. A "~user" form config.ConfigDirFor rejects is left
+	// to fall through to that rejection below.
+	if env == "" || env == "~" || strings.HasPrefix(env, "~/") {
 		daemonHome, status := proctree.LookupEnv(pid, "HOME")
 		if status != proctree.EnvFound || daemonHome == "" {
 			return daemonUnverifiable
 		}
-		env = filepath.Join(daemonHome, ".agent-factory")
+		switch {
+		case env == "":
+			env = filepath.Join(daemonHome, ".agent-factory")
+		default: // "~" or "~/..."
+			env = filepath.Join(daemonHome, strings.TrimPrefix(strings.TrimPrefix(env, "~"), "/"))
+		}
 	}
 	gotHome, err := config.ConfigDirFor(env)
 	if err != nil {
