@@ -536,7 +536,10 @@ blocked on:
 
 Handing off is **reversible**. Each agent's conversation history is stored per
 directory, so the outgoing agent's thread is still in the worktree — hand back
-to it once its limit resets and it picks up its own conversation.
+to it once its limit resets and it picks up its own conversation. A scope drop
+is one-way, so name the dropped account again with `--account` on the way back —
+without it the returned agent runs ambient and does not resume that account's
+conversation (see [Account-scoped handoff](#account-scoped-handoff)).
 
 There is no automatic handoff. A swap changes which agent is editing your
 branch, so it is always something you ask for.
