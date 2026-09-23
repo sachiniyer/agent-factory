@@ -193,7 +193,8 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 
 ## Project Structure
 
-- `main.go` — entry point, CLI commands via Cobra
+- `main.go` — entry point (version fallback, internal exec hooks); the Cobra tree is built in `commands/`
+- `commands/` — Cobra CLI commands (the `sessions`/`tasks`/`projects`/`api` trees live in `api/`)
 - `app/` — main TUI application (bubbletea)
 - `ui/` — terminal UI components (sidebar, overlays, panes)
 - `keys/` — key binding definitions
@@ -201,13 +202,13 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `session/git/` — git worktree operations, GitHub integration
 - `session/tmux/` — tmux PTY integration
 - `config/` — configuration and state management
-- `api/` — REST/JSON API for sessions and tasks
+- `api/` — `af sessions`/`tasks`/`projects`/`api` command implementations (the REST/JSON API they call is served by `daemon/`)
 - `apiproto/` — API envelope types and marker interfaces (leaf package, no daemon/client imports)
 - `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
 - `agentproto/` — WebSocket wire protocol for PTY stream and events
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
-- `cmd/` — CLI command utilities
+- `cmd/` — `exec.Cmd` `Executor` seam (test injection; nothing to do with CLI commands)
 - `log/` — logging
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations

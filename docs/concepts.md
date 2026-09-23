@@ -57,7 +57,8 @@ closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
 scheduler, handles usage-limit parking and resume, and serves the web client. It
-starts on demand when there is work to host; install its autostart unit once to
+starts on demand — the TUI starts it when you open `af`, and any `af` run
+starts it when an enabled task exists; install its autostart unit once to
 keep tasks firing across logouts:
 
 ```bash
