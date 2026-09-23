@@ -642,6 +642,7 @@ it per `af sessions create`:
 | `hook` | The remote-hook backend — a bring-your-own provisioner driven by the `[remote_hooks]` scripts. In the TUI's creation form, press `ctrl+r` to open the backend picker and select `hook`. |
 | `docker` | Run the workspace + agent in a container started from `[docker].image`. |
 | `ssh` | Run the workspace + agent on `[ssh].host` over ssh. |
+| `sandbox` | Run the workspace + agent on whatever the operator's global `sandbox.ssh` command reaches — a free-form ssh line for jump hosts, `ProxyCommand`, bastions. `sandbox.ssh` is global-only (it executes on the daemon host), so a repo can select `backend = "sandbox"` but cannot dictate the command. |
 
 ```toml
 backend = "docker"
