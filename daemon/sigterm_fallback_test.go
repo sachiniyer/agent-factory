@@ -1194,3 +1194,134 @@ func TestPidBelongsToThisHome_TildeUserHomeDerivedFromDaemonHome(t *testing.T) {
 			"AGENT_FACTORY_HOME stays rejected", scope)
 	}
 }
+
+// TestSameProcessRoot_SameFrameIsTrue pins the common-case precondition for the
+// cross-namespace guard added to classifyDaemonHome: a process in the CALLER's
+// own filesystem frame (its own pid, and a child it spawned into the same
+// namespace) shares the caller's root, so the guard does not regress the
+// everyday same-namespace classification. procRootFor's default reads the
+// kernel's /proc/<pid>/root symlink, so this is the real path, not the seam.
+func TestSameProcessRoot_SameFrameIsTrue(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	if !sameProcessRoot(os.Getpid()) {
+		t.Errorf("sameProcessRoot(self) = false; want true — the caller shares its own root")
+	}
+	ours := spawnFakeDaemonWithHome(t, testguard.SocketTempDir(t))
+	if !sameProcessRoot(ours) {
+		t.Errorf("sameProcessRoot(child pid=%d) = false; want true — a child the test spawned shares "+
+			"the caller's mount namespace, so the guard must not reject the common same-frame case", ours)
+	}
+}
+
+// TestClassifyDaemonHome_ForeignMountNamespaceUnverifiable pins the cross-
+// namespace half of the home binding (the P1 the latest review raised): an
+// absolute AGENT_FACTORY_HOME such as /state is interpreted in the CANDIDATE's
+// filesystem frame (its root / mount namespace), but classifyDaemonHome
+// resolves it through the CALLER's frame (canonicalDir), so a same-UID daemon
+// in a container, chroot, or different mount namespace whose /state is a
+// different directory than the caller's /state would compare equal and be
+// classified daemonOurs — signalled through a stale PID file or lone pgrep
+// result. classifyDaemonHome now fails closed (daemonUnverifiable) when the
+// candidate's root is not the caller's, or cannot be established. CI runners
+// cannot create a distinct mount namespace unprivileged, so procRootFor is
+// the seam: the test injects a candidate root that differs from the caller's
+// and asserts the same daemon stays daemonOurs when the frames match.
+func TestClassifyDaemonHome_ForeignMountNamespaceUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// A same-frame daemon serving this home is bound by default; the guard
+	// must not regress this, and the assertion guards against a guard that
+	// always rejects (which would also "fix" the bug for the wrong reason).
+	ours := spawnFakeDaemonWithHome(t, home)
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Fatalf("same-frame daemon serving this home classified %v; want daemonOurs", scope)
+	}
+
+	// A candidate whose root resolves to a different path than the caller's
+	// (a container/chroot/mount namespace). The absolute home now lives in a
+	// frame the caller cannot resolve, so the textual comparison is
+	// untrustworthy and the classifier must fail closed rather than guess ours
+	// and signal a cross-namespace daemon.
+	selfRoot, ok := procRootFor(os.Getpid())
+	if !ok {
+		t.Fatalf("could not read the caller's /proc/self/root to set up the cross-frame stub")
+	}
+	orig := procRootFor
+	procRootFor = func(p int) (string, bool) {
+		if p == ours {
+			return filepath.Join(selfRoot, "foreign-mount-ns-root"), true
+		}
+		return orig(p)
+	}
+	t.Cleanup(func() { procRootFor = orig })
+	if scope := classifyDaemonHome(ours); scope != daemonUnverifiable {
+		t.Errorf("cross-namespace daemon classified %v; want daemonUnverifiable — an absolute home "+
+			"resolved in the candidate's frame must not compare equal to the caller's when the "+
+			"filesystem roots differ", scope)
+	}
+	// Restoring the real reader re-classifies the same daemon as ours, so the
+	// unverifiable verdict above came from the frame guard, not a side effect
+	// of the daemon exiting or losing its env between the two calls.
+	procRootFor = orig
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Errorf("same-frame daemon re-classified %v after restoring the real reader; want daemonOurs — "+
+			"the cross-frame unverifiable verdict must come from the frame guard, not the daemon "+
+			"having exited or lost its env", scope)
+	}
+}
+
+// TestWriteDaemonPIDFile_BoundedLockAcquisition pins the bounded startup write:
+// if another writer holds the sidecar PID-file lock when RunDaemon reaches
+// writeDaemonPIDFile (which happens AFTER the control socket is bound and the
+// per-home singleton lock is acquired), the write must NOT block indefinitely
+// on a suspended or stalled holder. The write is best-effort, so a contended
+// lock within the startup budget is abandoned (returning the lock-held error
+// RunDaemon already logs) rather than wedging socket-bound startup forever;
+// no PID file is written, and readers fall back to the pgrep scan.
+// daemonPIDLockStartupBudget is shortened so the test is fast.
+func TestWriteDaemonPIDFile_BoundedLockAcquisition(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// Simulate a writer holding the PID-file lock when RunDaemon reaches the
+	// PID-file write.
+	pidFile := filepath.Join(home, "daemon.pid")
+	held, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+	defer held.Close()
+
+	orig := daemonPIDLockStartupBudget
+	daemonPIDLockStartupBudget = 50 * time.Millisecond
+	t.Cleanup(func() { daemonPIDLockStartupBudget = orig })
+
+	start := time.Now()
+	err = writeDaemonPIDFile()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("writeDaemonPIDFile succeeded while another writer held the lock; the lock is not being taken")
+	}
+	// A bounded acquisition abandons within ~budget (plus the polling cadence
+	// and scheduling); an unbounded one blocks forever. Assert an upper bound
+	// well below the production budget so a regression to the old indefinite
+	// wait fails fast.
+	if elapsed > time.Second {
+		t.Fatalf("writeDaemonPIDFile blocked for %s waiting on a contended lock; the startup "+
+			"acquisition is not bounded", elapsed)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("a PID file was written despite the lock being held (stat err=%v); the abandoned "+
+			"write must not leave a file behind", err)
+	}
+}

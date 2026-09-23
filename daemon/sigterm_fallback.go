@@ -88,6 +88,21 @@ func sigtermFallback() (ShutdownResult, error) {
 
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
 	if err := signalAndWait(pid); err != nil {
+		if scanned > 1 {
+			// locateDaemonPID returned this proven-ours PID alongside one or
+			// more foreign/unverifiable `--daemon` candidates (counted in
+			// `scanned`). The blanket `pkill -f -- '--daemon'` the host-wide
+			// hint below recommends matches on the full command line with no
+			// home or PID constraint, so following it would signal exactly
+			// those foreign daemons the home filter refused to touch, plus any
+			// unrelated process carrying "--daemon". Carry the scoped recovery
+			// the other branches already use: stop the daemon serving THIS
+			// home by its PID, not a host-wide pattern.
+			return ShutdownFailed, fmt.Errorf(
+				"sigterm fallback for daemon pid %d: %w; %d other `--daemon` process(es) were left untouched because they serve another home or could not be bound — stop the daemon serving this home by its PID, then retry `af upgrade`",
+				pid, err, scanned-1,
+			)
+		}
 		return ShutdownFailed, fmt.Errorf(
 			"sigterm fallback for daemon pid %d: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			pid, err,
@@ -228,6 +243,21 @@ func readPIDFromFile() (int, bool) {
 // spend its whole budget asleep between attempts.
 var daemonPIDLockPoll = 20 * time.Millisecond
 
+// daemonPIDLockStartupBudget bounds how long writeDaemonPIDFile waits on the
+// sidecar PID-file lock. RunDaemon reaches the PID-file write AFTER it has
+// bound the control socket and acquired the per-home singleton lock, so a
+// suspended or stalled writer holding daemon.pid.lock would otherwise block
+// startup indefinitely: clients could Ping a daemon whose setup never
+// advances past the PID-file write, while later launches are excluded by the
+// home lock. The write is already best-effort (RunDaemon logs the failure and
+// proceeds; the deferred removal only runs on success, and readers fall back
+// to the pgrep scan when no PID file exists), so a lock this budget cannot
+// acquire is abandoned rather than waited on. Package var so tests can
+// shorten it; production keeps it short so a contended startup write does not
+// stall a socket-bound daemon for long while still tolerating brief,
+// legitimate contention (a concurrent stop's read-compare-unlink is sub-ms).
+var daemonPIDLockStartupBudget = 2 * time.Second
+
 // withDaemonPIDLock runs fn while holding an exclusive flock on a sidecar lock
 // file next to the daemon PID file. writeDaemonPIDFile writes daemon.pid with an
 // atomic temp-then-rename, and removePIDFileIfStillNames reads it and
@@ -243,14 +273,16 @@ var daemonPIDLockPoll = 20 * time.Millisecond
 // re-opened by later callers, the way the rest of the codebase's sidecar .lock
 // files are.
 //
-// deadline bounds the acquisition: zero blocks indefinitely (the
-// writeDaemonPIDFile startup contract, and StopDaemon, which carries no caller
-// deadline); a non-zero deadline makes the acquisition nonblocking and
-// deadline-aware, so a deadline-bounded stopDaemonUntil that reaches
-// foreign-PID cleanup while another writer holds daemon.pid.lock does not
-// block past its admission deadline. The lock is abandoned (the removal is
-// best-effort anyway) rather than waiting indefinitely on a suspended writer or
-// a stalled filesystem.
+// deadline bounds the acquisition: zero blocks indefinitely (StopDaemon, which
+// carries no caller deadline); a non-zero deadline makes the acquisition
+// nonblocking and deadline-aware, so writeDaemonPIDFile's startup write caps
+// its wait at daemonPIDLockStartupBudget — a suspended or stalled writer holding
+// daemon.pid.lock would otherwise block startup indefinitely after RunDaemon
+// bound the control socket and acquired the per-home singleton lock — and a
+// deadline-bounded stopDaemonUntil that reaches foreign-PID cleanup while
+// another writer holds daemon.pid.lock does not block past its admission
+// deadline. The lock is abandoned (the write is best-effort anyway) rather
+// than waiting indefinitely on a suspended writer or a stalled filesystem.
 func withDaemonPIDLock(pidFile string, deadline time.Time, fn func() error) error {
 	lock, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -562,6 +594,20 @@ func classifyDaemonHome(pid int) daemonScope {
 	if err != nil {
 		return daemonUnverifiable
 	}
+	// gotHome was resolved and canonicalDir above renders it in the CALLER's
+	// filesystem frame. An ABSOLUTE home such as AGENT_FACTORY_HOME=/state is
+	// interpreted in the CANDIDATE's frame (its root / mount namespace), not
+	// the caller's: a same-UID daemon in a container, chroot, or different mount
+	// namespace whose /state is a different directory than the caller's /state
+	// would resolve to the caller's /state here, compare equal to wantHome, be
+	// classified daemonOurs, and be signalled through a stale PID file or lone
+	// pgrep result — the #4793 hazard via a path collision across namespaces.
+	// When the candidate's frame is not the caller's, or cannot be established,
+	// the textual comparison cannot be trusted, so fail closed
+	// (daemonUnverifiable) rather than guessing ours.
+	if !sameProcessRoot(pid) {
+		return daemonUnverifiable
+	}
 	if got != wantHome {
 		return daemonForeign
 	}
@@ -585,6 +631,57 @@ func resolveHomeInDaemonFrame(pid int, home string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(cwd, home), true
+}
+
+// procRootFor returns the filesystem root the kernel exposes for pid on Linux
+// (/proc/<pid>/root), resolved through the caller's frame so a symlinked root
+// (a chroot reachable through /var/...) compares by its real target. The ok
+// return is false when /proc is not present (not Linux — no mount-namespace
+// hazard, sameProcessRoot keeps the existing behavior) or when the root symlink
+// cannot be read (the process exited between the uid/environ probes above and
+// this read, or the link is unavailable). A package var so a test can simulate
+// a candidate whose root differs from the caller's — a container, chroot, or
+// distinct mount namespace — which CI runners cannot create unprivileged.
+var procRootFor = func(pid int) (string, bool) {
+	link, err := os.Readlink(fmt.Sprintf("/proc/%d/root", pid))
+	if err != nil {
+		return "", false
+	}
+	if resolved, err := filepath.EvalSymlinks(link); err == nil {
+		link = resolved
+	}
+	return link, true
+}
+
+// sameProcessRoot reports whether the process at pid shares the caller's
+// filesystem root, so an absolute path resolved and compared in the caller's
+// frame names the same directory the candidate sees. classifyDaemonHome
+// resolves the candidate's home through the CALLER's frame (canonicalDir); a
+// candidate in a container, chroot, or different mount namespace has its own
+// root (/proc/<pid>/root is a symlink there), so its absolute AGENT_FACTORY_HOME
+// is interpreted in THAT frame and an equal textual spelling is not the same
+// directory. When the roots differ the comparison cannot be trusted and
+// classifyDaemonHome fails closed (daemonUnverifiable) rather than guessing
+// ours and signalling a cross-namespace daemon.
+//
+// Linux-only: /proc is the kernel's per-process root surface. On platforms
+// without /proc (macOS) there is no equivalent filesystem-namespace hazard and
+// this returns true so the existing path resolution stands; a /proc that IS
+// present but whose root link cannot be read is a frame we cannot establish,
+// so it returns false and the candidate falls through unverifiable.
+func sameProcessRoot(pid int) bool {
+	if _, err := os.Stat("/proc"); err != nil {
+		return true
+	}
+	cand, ok := procRootFor(pid)
+	if !ok {
+		return false
+	}
+	self, ok := procRootFor(os.Getpid())
+	if !ok {
+		return false
+	}
+	return cand == self
 }
 
 // scanDaemonCandidatesFn is the process-scan entry point used by

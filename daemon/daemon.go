@@ -719,7 +719,7 @@ func writeDaemonPIDFile() error {
 	if err != nil {
 		return err
 	}
-	return withDaemonPIDLock(path, time.Time{}, func() error {
+	return withDaemonPIDLock(path, time.Now().Add(daemonPIDLockStartupBudget), func() error {
 		return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
 	})
 }
