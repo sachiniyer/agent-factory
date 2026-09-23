@@ -34,7 +34,12 @@ import {
   renderAccountsSection,
 } from "./accounts.js";
 import { h } from "./dom.js";
-import type { ConfigEntry, ConfigSetResponse } from "./types.js";
+import type {
+  ConfigEntry,
+  ConfigSetResponse,
+  ExplainConfigResponse,
+  ResolvedValue,
+} from "./types.js";
 import { rebuildKeepingScroll } from "./scrollkeep.js";
 
 /** The config list is ONE global manifest, so every rebuild shows the same list and
@@ -45,12 +50,25 @@ const CONFIG_LIST_TOKEN = "config";
 /** What the config view can ask the shell to do. Saving is the shell's job (it
  *  owns the token and the refresh), so the pane reports intent and renders the
  *  outcome it is handed back. */
+/** The settled result of one ExplainConfig call (#4803): the daemon's
+ *  ResolvedValue, or its refusal already rendered to text by the shell (which
+ *  owns errorText — this view renders strings, it does not interpret errors). */
+export type ExplainOutcome =
+  | { ok: true; resp: ExplainConfigResponse }
+  | { ok: false; error: string };
+
 export interface ConfigActions {
   save: (key: string, value: string) => void;
   /** Opens the conversational config assistant (#2467) — the web analogue of the
    *  TUI's config-agent takeover. The shell owns the token and the modal host, so
    *  the pane only reports the intent. */
   openAssistant: () => void;
+  /** Resolves one key's provenance through the daemon's ExplainConfig — the
+   *  SAME config.ResolvedValue `af config get --explain` renders (#4803), so
+   *  this view formats a trace it did not compute and could not diverge from.
+   *  Always settles: a refusal (unknown key, a daemon too old for the route)
+   *  arrives as `{ok:false}` text rather than a rejection. */
+  explain: (key: string) => Promise<ExplainOutcome>;
   /** The Accounts section's two verbs (#3385). They are NOT config writes and do
    *  not go through `save`: an account is a credential directory on the daemon
    *  host, not a settable key, and routing them through the config writer would
@@ -201,6 +219,27 @@ export function saveNotice(resp: ConfigSetResponse): string {
   return parts.join(" · ");
 }
 
+/** The web spelling of config.FormatExplainValue (#4803): an explicitly
+ *  configured empty string stays visible as `""` — a bare blank would read as
+ *  absent — scalars print bare, and composites print as compact JSON. Exported
+ *  so config.test.ts locks the REAL renderer rather than a copy. */
+export function explainValueText(value: unknown): string {
+  if (typeof value === "string") {
+    return value === "" ? '""' : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 /**
  * Serializes async work per key: a second save for the same key waits for the
  * first to settle, so the LAST value the user chose is the last one written.
@@ -272,6 +311,17 @@ export class ConfigPane {
    *  and cleared around the single `this.render()` call). */
   private restoreKey: string | null = null;
   private advancedToggle: HTMLElement | null = null;
+
+  // The open provenance trace (#4803): at most one row explains at a time, the
+  // same way at most one edits — two open traces would read as though the keys
+  // resolved together. `explainGeneration` drops a stale fetch that lands after
+  // the user opened a different row or closed this one.
+  private explainKey: string | null = null;
+  private explainResp: ExplainConfigResponse | null = null;
+  private explainError = "";
+  private explainBusy = false;
+  private explainGeneration = 0;
+  private explainButton: HTMLElement | null = null;
 
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
@@ -349,6 +399,7 @@ export class ConfigPane {
     const caretStart = wasEditing ? (this.editingInput?.selectionStart ?? null) : null;
     const caretEnd = wasEditing ? (this.editingInput?.selectionEnd ?? null) : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    const wasExplain = this.explainButton !== null && active === this.explainButton;
     // The config list is always the same list — one global manifest — so a rebuild
     // never legitimately starts at the top. Keeping the place matters most right after
     // a save, which is exactly when this fires.
@@ -377,6 +428,8 @@ export class ConfigPane {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (wasExplain && this.explainButton) {
+      this.explainButton.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector<HTMLElement>('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -427,6 +480,7 @@ export class ConfigPane {
     // one would name a detached node for the rest of this render.
     this.editingInput = null;
     this.advancedToggle = null;
+    this.explainButton = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -527,7 +581,125 @@ export class ConfigPane {
         }
       }
     }
+    row.append(this.renderExplainSection(e));
     return row;
+  }
+
+  /** The provenance affordance (#4803): an "Explain" button per row that opens
+   *  the SAME candidate trace `af config get --explain` prints — which on-disk
+   *  layer won, and which were shadowed, absent, or disallowed. The daemon
+   *  computes the ResolvedValue; this view only formats it, so the two surfaces
+   *  cannot disagree about what a layer did. */
+  private renderExplainSection(e: ConfigEntry): HTMLElement {
+    const section = h("div", { class: "af-config-explain" });
+    const open = this.explainKey === e.key;
+    const btn = h(
+      "button",
+      { type: "button", class: "af-ghost af-config-explain-btn" },
+      open ? "Hide provenance" : "Explain",
+    );
+    btn.setAttribute("aria-expanded", String(open));
+    btn.addEventListener("click", () => this.toggleExplain(e.key));
+    if (open) {
+      this.explainButton = btn;
+    }
+    section.append(btn);
+    if (open) {
+      section.append(this.renderExplainBody());
+    }
+    return section;
+  }
+
+  private toggleExplain(key: string): void {
+    if (this.explainKey === key) {
+      this.explainKey = null;
+      this.explainResp = null;
+      this.explainError = "";
+      this.explainBusy = false;
+      this.rerenderKeepingUserState();
+      return;
+    }
+    this.explainKey = key;
+    this.explainResp = null;
+    this.explainError = "";
+    this.explainBusy = true;
+    const generation = ++this.explainGeneration;
+    this.rerenderKeepingUserState();
+    void this.actions.explain(key).then((outcome) => {
+      // A stale answer must not paint over a newer open: the user may have
+      // explained another key — or closed this one — while the fetch flew.
+      if (generation !== this.explainGeneration || this.explainKey !== key) {
+        return;
+      }
+      this.explainBusy = false;
+      if (outcome.ok) {
+        this.explainResp = outcome.resp;
+      } else {
+        this.explainError = outcome.error;
+      }
+      this.rerenderKeepingUserState();
+    });
+  }
+
+  /** The trace body for the open row: busy, refusal, or the ResolvedValue the
+   *  daemon answered — effective value, default, merge policy, then each
+   *  candidate's value, location, and verdict, plus per-leaf origins for
+   *  composite keys. */
+  private renderExplainBody(): HTMLElement {
+    const body = h("div", { class: "af-config-explain-body", role: "status" });
+    if (this.explainBusy) {
+      body.append(h("div", { class: "af-config-explain-line" }, "Resolving provenance…"));
+      return body;
+    }
+    if (this.explainError !== "") {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, this.explainError));
+      return body;
+    }
+    const v: ResolvedValue | undefined = this.explainResp?.explanation;
+    if (!v) {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, "The daemon returned no explanation."));
+      return body;
+    }
+
+    body.append(
+      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.value)}`),
+      h(
+        "div",
+        { class: "af-config-explain-line" },
+        v.default ? `default: ${v.default} · ` : "",
+        `policy: ${v.merge} · ${v.precedence.join(" < ")}`,
+      ),
+    );
+    for (const cand of v.candidates) {
+      const result = cand.reason !== "" ? `${cand.result} · ${cand.reason}` : cand.result;
+      const value = cand.present ? explainValueText(cand.value) : "—";
+      const location = cand.path ? `${cand.path}:${cand.key_path}` : "compiled default";
+      body.append(
+        h("div", { class: `af-config-explain-cand af-config-explain-${cand.result}` },
+          h("div", { class: "af-config-explain-layer" }, `${cand.layer}: ${result}`),
+          h("div", { class: "af-config-explain-src" }, `${value} · ${location}`),
+        ),
+      );
+    }
+    const origins = v.origins ?? {};
+    const leaves = Object.keys(origins).sort();
+    if (leaves.length > 0) {
+      body.append(h("div", { class: "af-config-explain-line" }, "origins:"));
+      for (const leaf of leaves) {
+        const origin = origins[leaf];
+        const location = origin.path ? `${origin.path}:${origin.key_path}` : "compiled default";
+        body.append(
+          h("div", { class: "af-config-explain-src" }, `${leaf}: ${origin.layer} · ${location}`),
+        );
+      }
+    }
+    // The route is explicit about this (running_value_checked): the trace says
+    // what the FILES resolve to, which is also what the next start reads — a
+    // running daemon's snapshot is a different question.
+    body.append(
+      h("div", { class: "af-config-explain-note" }, "On-disk sources · the running daemon's value was not checked."),
+    );
+    return body;
   }
 
   /** The control for one key, chosen from the manifest's own description of it:

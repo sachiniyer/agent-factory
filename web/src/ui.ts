@@ -53,7 +53,7 @@ import {
   rowTitle,
 } from "./status.js";
 import type { AccountsState } from "./accounts.js";
-import { ConfigPane, type ConfigStatus } from "./config.js";
+import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
@@ -320,6 +320,11 @@ export interface Actions {
    *  close. The config pane only reports the intent; the shell owns the token and the
    *  modal host. */
   openConfigAssistant(): void;
+  /** Resolves one config key's provenance through POST /v1/ExplainConfig (#4803)
+   *  — the same config.ResolvedValue `af config get --explain` renders, computed
+   *  daemon-side so the view formats a trace it could not diverge from. Always
+   *  settles: a refusal arrives as `{ok:false}` text. */
+  explainConfig(key: string): Promise<ExplainOutcome>;
   /** Creates an agent account's credential directory on the daemon host (#3385).
    *  Idempotent; the daemon holds the name rule and its refusal is shown verbatim. */
   registerAccount(agent: string, name: string): void;
@@ -1212,6 +1217,7 @@ export class AppShell {
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      explain: (key: string) => this.actions.explainConfig(key),
       accounts: {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
         login: (agent: string, name: string) => this.actions.openAccountLogin(agent, name),

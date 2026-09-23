@@ -46,8 +46,11 @@ import (
 var goSurfaces = map[string][]string{
 	// daemon/control_client.go is the CLI's gob control-socket path.
 	"cli": {"api", "daemon/control_client.go"},
-	// apiclient/ is the TUI's HTTP path to the daemon.
-	"tui": {"app", "apiclient"},
+	// apiclient/ is the TUI's HTTP path to the daemon, and ui/ is where the
+	// config editor's remote target builds its read/write/explain requests
+	// directly (#3708, #4803) — a surface scan that skipped it would let those
+	// request types grow a field the pane can never send.
+	"tui": {"app", "apiclient", "ui"},
 }
 
 // auditedRequests binds a daemon request type name to its reflect.Type so field
@@ -66,6 +69,8 @@ var auditedRequests = map[string]reflect.Type{
 	"CreateTabRequest":        reflect.TypeOf(daemon.CreateTabRequest{}),
 	"DeleteProjectRequest":    reflect.TypeOf(daemon.DeleteProjectRequest{}),
 	"DeliverPromptRequest":    reflect.TypeOf(daemon.DeliverPromptRequest{}),
+	"ExplainConfigRequest":    reflect.TypeOf(daemon.ExplainConfigRequest{}),
+	"GetConfigRequest":        reflect.TypeOf(daemon.GetConfigRequest{}),
 	"HandoffSessionRequest":   reflect.TypeOf(daemon.HandoffSessionRequest{}),
 	"KillSessionRequest":      reflect.TypeOf(daemon.KillSessionRequest{}),
 	"ListBackendsRequest":     reflect.TypeOf(daemon.ListBackendsRequest{}),

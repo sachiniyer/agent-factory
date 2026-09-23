@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +30,7 @@ func TestPaletteRetirementLaunchNeverAppliesConfig(t *testing.T) {
 }
 func TestPaletteRetirementGetDiagnostic(t *testing.T) {
 	for _, key := range []string{"theme", "theme.accent"} {
-		err := unknownConfigKeyError(key)
+		err := config.UnknownConfigKeyError(key)
 		require.ErrorContains(t, err, "retired")
 		require.ErrorContains(t, err, "appearance")
 	}

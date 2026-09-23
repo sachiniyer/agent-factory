@@ -342,6 +342,19 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
 	},
+	// The explain read (#4803): the same ResolvedValue `af config get --explain`
+	// prints, served so the UIs answer "which layer supplied this" through the
+	// identical resolver. Not sandboxAllowed: candidate locations are absolute
+	// host paths, and reading them hands a compromised sandbox the operator's
+	// filesystem layout — the same reconnaissance ListProjects/ListDirectory
+	// are denied for.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ExplainConfig",
+		Description: "Explain one global config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed.",
+		requestType: reflect.TypeOf(ExplainConfigRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ExplainConfig) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValue",

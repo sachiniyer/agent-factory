@@ -415,7 +415,9 @@ type configHint struct {
 //  1. the advanced toggle — `a` still works, and pressing it reveals the tier,
 //  2. `↑/↓ move` — arrow keys are the most conventional binding on the row,
 //  3. `↵ edit` — Enter to activate is nearly as conventional,
-//  4. `C assistant` — deliberately always-on (#2453), so it goes last of all,
+//  4. `e explain` — the provenance view (#4803); useful, but the row still says
+//     what a user who never found it would have asked it,
+//  5. `C assistant` — deliberately always-on (#2453), so it goes last of all,
 //
 // and `esc close` is shed by NOTHING. A modal must always advertise the way out:
 // the key stays live either way, but a user who cannot see it is stuck in a pane
@@ -440,7 +442,9 @@ type configHint struct {
 //  1. the advanced toggle — `a` still works, and pressing it reveals the tier,
 //  2. `↑/↓ move` — arrow keys are the most conventional binding on the row,
 //  3. `↵ edit` — Enter to activate is nearly as conventional,
-//  4. `C assistant` — deliberately always-on (#2453), so it goes last of all,
+//  4. `e explain` — the provenance view (#4803); useful, but the row still says
+//     what a user who never found it would have asked it,
+//  5. `C assistant` — deliberately always-on (#2453), so it goes last of all,
 //
 // and `esc close` is shed by NOTHING. A modal must always advertise the way out:
 // the key stays live either way, but a user who cannot see it is stuck in a pane

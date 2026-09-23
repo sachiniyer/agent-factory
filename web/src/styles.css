@@ -3199,6 +3199,60 @@ button:disabled,
   padding: var(--af-space-1) var(--af-space-2);
 }
 
+/* The Explain affordance (#4803): a quiet button per row whose trace panel
+ * spans both columns like the write echo — a candidate list is prose, not a
+ * control. */
+.af-config-explain {
+  grid-column: 1 / -1;
+}
+
+.af-config-explain-btn {
+  font-size: var(--af-type-caption);
+}
+
+.af-config-explain-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  margin: var(--af-space-1) 0 var(--af-space-2);
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  border-radius: var(--af-radius-control);
+  font-size: var(--af-type-caption);
+  font-family: var(--af-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.af-config-explain-effective {
+  color: var(--af-ink);
+  font-weight: 600;
+}
+
+.af-config-explain-line {
+  color: var(--af-ink-muted);
+}
+
+.af-config-explain-layer {
+  color: var(--af-ink);
+}
+
+/* The winner stands out; every other verdict is muted — the trace exists to
+ * answer "which layer supplied this", so that is the line to find first. */
+.af-config-explain-winner .af-config-explain-layer {
+  color: var(--af-accent);
+  font-weight: 600;
+}
+
+.af-config-explain-src {
+  color: var(--af-ink-muted);
+  padding-left: var(--af-space-4);
+}
+
+.af-config-explain-note {
+  color: var(--af-ink-muted);
+  margin-top: var(--af-space-1);
+}
+
 /* The Accounts section of the config view (#3385).
  *
  * It sits INSIDE the config view and must not read as part of it: an account is a

@@ -509,6 +509,56 @@ export interface ConfigSetResponse {
   listener_addr?: string;
 }
 
+/** config.SourceRef (config/provenance.go) — the exact configuration location
+ *  that supplied an effective scalar or composite leaf. */
+export interface SourceRef {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+}
+
+/** config.CandidateTrace (config/provenance.go) — one source considered while
+ *  resolving a key. `value` is the configured value at that source; absent and
+ *  disallowed candidates carry null. */
+export interface CandidateTrace {
+  layer: string;
+  path?: string;
+  format?: string;
+  key_path: string;
+  allowed: boolean;
+  present: boolean;
+  value: unknown;
+  result: string;
+  reason: string;
+}
+
+/** config.ResolvedValue (config/provenance.go) — an effective config value and
+ *  the complete trace that produced it. Replace/list keys name one `winner`;
+ *  composite keys instead carry a source per leaf in `origins`, so a composite
+ *  is never assigned a fake winner. */
+export interface ResolvedValue {
+  key: string;
+  value: unknown;
+  default?: string;
+  merge: string;
+  precedence: string[];
+  winner?: SourceRef;
+  origins?: Record<string, SourceRef>;
+  candidates: CandidateTrace[];
+}
+
+/** daemon.ExplainConfigResponse (daemon/control_types.go, #4803) — the shared
+ *  provenance explanation the CLI renders from `af config get --explain`,
+ *  served to clients that cannot resolve in-process. Global scope only; the
+ *  daemon deliberately does not consult its running config snapshot
+ *  (`running_value_checked`), so the trace describes on-disk sources. */
+export interface ExplainConfigResponse {
+  explanation: ResolvedValue;
+  scope: string;
+  running_value_checked: boolean;
+}
+
 /** daemon.AccountEntry — one registered agent account (#3384/#3385).
  *
  *  It never carries credential material. `dir` is the DIRECTORY af points the
