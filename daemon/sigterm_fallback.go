@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -19,12 +20,17 @@ import (
 // socket but the binary predates #501).
 //
 // Strategy:
-//  1. If ~/.agent-factory/daemon.pid exists, parse it. Verify the PID
-//     is alive AND its command line contains "--daemon" as a discrete token
-//     (defensive against PID reuse — the file may be stale).
-//  2. Otherwise (or if the PID file is missing), scan with `pgrep -f --
-//     '--daemon'`, keep only processes whose binary is `af` or
-//     `agent-factory` (#937 — source builds run under the latter name),
+//  1. If ~/.agent-factory/daemon.pid exists, parse it. Verify the PID is
+//     alive, its command line contains "--daemon" as a discrete token,
+//     AND it belongs to THIS caller's AGENT_FACTORY_HOME. The cmdline check
+//     alone cannot tell an `af --daemon` of this home from one of another
+//     home, so a stale PID file whose PID was recycled by another home's
+//     `af --daemon` would pass it while serving someone else's control
+//     socket; the home binding (pidBelongsToThisHome) is what keeps the
+//     fallback from SIGTERM-ing the wrong daemon.
+//  2. Otherwise (or if the PID file is missing/stale/foreign), scan with
+//     `pgrep -f -- '--daemon'`, keep only processes whose binary is `af`
+//     or `agent-factory` (#937 — source builds run under the latter name),
 //     filter out /tmp/Test* paths (Go test binaries) and the current
 //     process, and require exactly one candidate.
 //
@@ -74,10 +80,10 @@ func sigtermFallback() (ShutdownResult, error) {
 func locateDaemonPID() (int, string, error) {
 	pidFileSource := "no pid-file"
 	if pid, ok := readPIDFromFile(); ok {
-		if pidLooksAlive(pid) && isAgentFactoryDaemon(pid) {
+		if pidLooksAlive(pid) && isAgentFactoryDaemon(pid) && pidBelongsToThisHome(pid) {
 			return pid, "pid-file", nil
 		}
-		log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead or non-daemon; falling back to pgrep", pid)
+		log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead, non-daemon, or not this home's daemon; falling back to pgrep", pid)
 		pidFileSource = fmt.Sprintf("pid-file pid=%d stale", pid)
 	}
 
@@ -151,6 +157,35 @@ func pidLooksAlive(pid int) bool {
 		}
 	}
 	return true
+}
+
+// pidBelongsToThisHome reports whether the process at pid is an agent-factory
+// daemon serving THIS process's AGENT_FACTORY_HOME. It is the home-binding half
+// of the PID-file trust decision: cmdline alone (isAgentFactoryDaemon) cannot
+// distinguish an `af --daemon` of THIS home from one of another home, and a
+// stale daemon.pid whose PID the kernel recycled onto a DIFFERENT home's
+// `af --daemon` passes the cmdline check while serving someone else's control
+// socket. Signaling it would kill an unrelated daemon — possibly another user's
+// on a shared host — so every path that reads daemon.pid and signals the PID it
+// names must require this in addition to the cmdline match.
+//
+// It reuses verifyScopedDaemon, the same uid + AGENT_FACTORY_HOME binding
+// `af reset`'s orphan scan relies on (#1919), so the two PID-validation paths
+// StopDaemon and locateDaemonPID share agree (#1004) and the cross-home hazard
+// the unit operations already gate on (#1916) is gated on the PID-signal path
+// too. "Unverifiable" (a foreign or withheld environ) is NOT ours: callers fall
+// through to the pgrep ambiguity guard rather than trusting a PID they could
+// not bind — guessing "ours" here is exactly the bug.
+func pidBelongsToThisHome(pid int) bool {
+	configDir, err := config.GetConfigDir()
+	if err != nil {
+		return false
+	}
+	wantHome, err := canonicalDir(configDir)
+	if err != nil {
+		return false
+	}
+	return verifyScopedDaemon(pid, os.Getuid(), wantHome) == daemonOurs
 }
 
 // scanDaemonCandidatesFn is the process-scan entry point used by

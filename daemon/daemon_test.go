@@ -821,3 +821,52 @@ func TestStopDaemon_RefusesSelfPID(t *testing.T) {
 		t.Fatalf("expected PID file to be removed, stat err = %v", err)
 	}
 }
+
+// TestStopDaemon_ForeignHomePIDFileNotKilled is the cross-home regression for
+// StopDaemon's happy path. A stale daemon.pid in THIS home (AG=home H1) points
+// at a live `af --daemon` serving a DIFFERENT AGENT_FACTORY_HOME (H2) — the PID
+// the kernel recycled onto H2's daemon. isAgentFactoryDaemon passes (it IS an
+// af daemon), so the pre-fix code SIGTERM'd it and reported stopped=true,
+// taking down an unrelated daemon (possibly another user's on a shared host).
+// With the home binding (pidBelongsToThisHome), StopDaemon must treat the PID
+// as stale: remove the PID file, report stopped=false, and leave the foreign
+// daemon alive. The two PID-validation paths (StopDaemon and locateDaemonPID)
+// must agree (#1004).
+func TestStopDaemon_ForeignHomePIDFileNotKilled(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	// The OTHER home's daemon: a live `af --daemon` serving a different
+	// AGENT_FACTORY_HOME. Its PID is what the stale daemon.pid names.
+	otherHome := testguard.SocketTempDir(t)
+	foreignPID := spawnFakeDaemonWithHome(t, otherHome)
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", foreignPID)), 0600); err != nil {
+		t.Fatalf("failed to write PID file: %v", err)
+	}
+
+	stopped, err := StopDaemon()
+	if err != nil {
+		t.Fatalf("StopDaemon returned error: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for a foreign home's daemon pid=%d; expected false "+
+			"(the home binding should have kept it from signaling a daemon serving %q)", foreignPID, otherHome)
+	}
+
+	// The foreign home's daemon MUST still be alive — the home binding kept
+	// StopDaemon from SIGTERM-ing a daemon serving a different AGENT_FACTORY_HOME.
+	if !pidLooksAlive(foreignPID) {
+		t.Fatalf("StopDaemon killed a foreign home's daemon (pid=%d serving %q); the stale PID file "+
+			"bypassed the home binding", foreignPID, otherHome)
+	}
+
+	// PID file should have been cleaned up as stale.
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("expected stale PID file to be removed, stat err = %v", err)
+	}
+}

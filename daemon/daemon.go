@@ -758,6 +758,13 @@ var (
 // no daemon.pid, so a true success line here would be a lie. It verifies the
 // PID actually belongs to an agent-factory daemon before signaling it, so a
 // stale or reused PID in the PID file can't take down an unrelated process.
+// That cmdline check is paired with a home binding (pidBelongsToThisHome): a
+// stale daemon.pid whose PID was recycled by ANOTHER AGENT_FACTORY_HOME's
+// `af --daemon` passes the cmdline check while serving a different control
+// socket, and signaling it would kill an unrelated daemon — possibly another
+// user's on a shared host. The same binding gates locateDaemonPID so the two
+// PID-validation paths agree (#1004), mirroring the cross-home gate the unit
+// operations already carry (#1919).
 //
 // Shutdown is graceful by default: SIGTERM gives the daemon's signal handler a
 // chance to run SaveInstances() and clean up the PID file (see RunDaemon). We
@@ -821,6 +828,21 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 	// err on the side of caution and treat the PID file as stale rather than signaling a random process.
 	if !isAgentFactoryDaemon(pid) {
 		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon; removing stale PID file", pid)
+		_ = os.Remove(pidFile)
+		return false, nil
+	}
+
+	// Bind the PID to THIS home before signaling. The cmdline check above cannot
+	// tell an `af --daemon` of this home from one of another AGENT_FACTORY_HOME, so
+	// a stale daemon.pid whose PID the kernel recycled onto another home's
+	// `af --daemon` would pass it while serving someone else's control socket.
+	// Signaling that PID kills an unrelated daemon — possibly another user's on a
+	// shared host — so require the same uid + home binding the reset path relies
+	// on (#1919). The two PID-validation paths must agree (#1004). When the home
+	// cannot be established (a foreign or withheld environ) we do not guess:
+	// treat the PID file as stale and fall back to other discovery.
+	if !pidBelongsToThisHome(pid) {
+		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
 		_ = os.Remove(pidFile)
 		return false, nil
 	}
