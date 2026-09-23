@@ -12,7 +12,7 @@ import (
 // to /v1/Snapshot and unwraps resp.Instances from the shared envelope, so its
 // result is byte-identical to daemon.SnapshotNoSpawn's on a running daemon. Like
 // the RPC read it is scoped by req.RepoID (empty = all repos).
-func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	return c.SnapshotCtx(context.Background(), req)
 }
 
@@ -28,12 +28,18 @@ func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, e
 // collector (#3560) bounds this read and treats the deadline as "the session
 // inventory could not be read", which reports UNKNOWN and refuses every removal
 // — the same answer an unreachable daemon produces.
-func (c *Client) SnapshotCtx(ctx context.Context, req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+//
+// The second return carries repos the daemon dropped at startup due to a
+// corrupted instances.json, so the caller can refuse or caveat instead of
+// silently serving a partial list (#603 closed over the wire). Empty when no
+// repo was skipped; absent (also empty) on an older daemon that predates the
+// field.
+func (c *Client) SnapshotCtx(ctx context.Context, req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	var resp daemon.SnapshotResponse
 	if err := c.callCtx(ctx, "Snapshot", req, &resp); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.Instances, nil
+	return resp.Instances, resp.SkippedRepos, nil
 }
 
 // SnapshotNoSpawn is a drop-in for daemon.SnapshotNoSpawn over the HTTP API: it
@@ -50,20 +56,23 @@ func (c *Client) SnapshotCtx(ctx context.Context, req daemon.SnapshotRequest) ([
 // missing token MUST surface as an auth error rather than be masked by a
 // same-machine disk read. So a remote failure returns the real error verbatim;
 // the caller (api/sessions.go) suppresses its disk fallback when IsRemoteTarget().
-func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+//
+// The second return carries the daemon's startup-time skipped repos (#603
+// closed over the wire); see SnapshotCtx.
+func SnapshotNoSpawn(req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	c, err := NewTargeted()
 	if err != nil {
 		if IsRemoteTarget() {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, daemon.ErrDaemonUnavailable
+		return nil, nil, daemon.ErrDaemonUnavailable
 	}
-	instances, err := c.Snapshot(req)
+	instances, skipped, err := c.Snapshot(req)
 	if err != nil {
 		if IsRemoteTarget() {
-			return nil, err
+			return nil, nil, err
 		}
-		return nil, daemon.ErrDaemonUnavailable
+		return nil, nil, daemon.ErrDaemonUnavailable
 	}
-	return instances, nil
+	return instances, skipped, nil
 }

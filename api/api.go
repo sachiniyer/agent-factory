@@ -24,26 +24,48 @@ import (
 // daemon→disk read path (listSessions, getSessionByTitle, whoamiSession,
 // getSessionByTitleInScope) routes through so the "remote reads never fall back
 // to disk" contract cannot be silently reintroduced at a new read site (#1679,
-// #1681). On daemon success it returns (data, false, nil). On error it returns:
-//   - remote target: (nil, false, err) — surface the real error; a remote daemon
+// #1681). On daemon success it returns (data, skipped, false, nil), where
+// `skipped` carries repos the daemon dropped at startup due to a corrupted
+// instances.json (#603) — the wire-side incompleteness channel the caller uses
+// to refuse or caveat rather than silently serving a partial list as complete
+// (#730's principle extended to the wire surface #1029 PR 2 introduced). On
+// error it returns:
+//   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
 //     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
-//   - local target:  (nil, true, err)  — the caller runs its own disk scan.
+//   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the
 // fallBackToDisk flag before touching disk. This keeps each caller's exact local
 // disk-fallback behavior (diskListSessions / diskWhoami / findInstanceByTitle,
 // including their distinct not-found and corrupt-repo errors) while centralizing
 // the one decision that must never regress: whether disk may be read at all.
-func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, fallBackToDisk bool, err error) {
-	data, err = snapshotViaDaemon(req)
+func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
+	data, skipped, err = snapshotViaDaemon(req)
 	if err == nil {
-		return data, false, nil
+		return data, skipped, false, nil
 	}
 	if apiclient.IsRemoteTarget() {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return nil, true, err
+	return nil, nil, true, err
+}
+
+// skippedRepoIDs extracts the repo IDs from a Snapshot's skipped set, or nil when
+// none were skipped. The IDs are what list/get/whoami surface in their
+// corruption-aware refuse/caveat errors, mirroring the disk-fallback path
+// (diskListSessions / findInstanceByTitle / diskWhoami) so a daemon-up read and
+// a daemon-down read produce the same user-visible signal for the same on-disk
+// corruption.
+func skippedRepoIDs(skipped []daemon.SkippedRepo) []string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		ids = append(ids, s.RepoID)
+	}
+	return ids
 }
 
 // Shared flags
@@ -344,21 +366,49 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, []config.Rep
 	return session.DedupeSorted(paths), unreadable, nil
 }
 
+// corruptedRepoRepairHint is the one-line remedy appended to every corruption
+// refusal/caveat. af stores per-repo state only in instances.json and keeps no
+// backup of it, so the operator has to repair the file themselves (#4742).
+const corruptedRepoRepairHint = "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files."
+
+// corruptedRepoPaths renders the full path of each corrupted repo's
+// instances.json, resolved through the same home resolver the store uses
+// (config.RepoInstancesPath honors AGENT_FACTORY_HOME rather than a hard-coded
+// ~/.agent-factory). A bare repo id is the fallback only when the id is too
+// malformed to resolve to a path, which the corrupted repos the daemon reports
+// never are — they passed ValidateRepoID when first registered (#4742).
+func corruptedRepoPaths(corrupted []string) string {
+	sort.Strings(corrupted)
+	paths := make([]string, 0, len(corrupted))
+	for _, rid := range corrupted {
+		if p, err := config.RepoInstancesPath(rid); err == nil && p != "" {
+			paths = append(paths, p)
+		} else {
+			paths = append(paths, rid)
+		}
+	}
+	return strings.Join(paths, ", ")
+}
+
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
 // whose instances.json failed to parse. Callers use it to surface corruption
-// loudly instead of silently returning empty/partial results (#730).
+// loudly instead of silently returning empty/partial results (#730). Each repo
+// is named by its full instances.json path and the message carries the repair
+// step, so a miss caveats with something the operator can act on (#4742).
 func corruptedReposSuffix(corrupted []string) string {
-	sort.Strings(corrupted)
-	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // corruptedReposError builds a structured error for aggregate queries (e.g.
 // `sessions list`) that name the repos whose instances.json failed to parse.
 // Returning this instead of a silently-truncated result lets users tell "no
 // sessions exist" apart from "sessions exist but the file is corrupted" (#730).
+// Each repo is named by its full instances.json path and the message carries the
+// repair step, so a refusal is actionable rather than a dead end (#4742).
 func corruptedReposError(corrupted []string) error {
-	sort.Strings(corrupted)
-	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon

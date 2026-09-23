@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 	stdlog "log"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,6 +129,14 @@ type Manager struct {
 	taskTargetMu sync.Mutex
 	storage      *session.Storage
 	instances    map[string]*session.Instance
+	// skippedRepos names repos whose instances.json was corrupted and dropped at
+	// daemon startup (#603), seeded by restoreInstances and trimmed by the
+	// polling refresh to drop repaired repos without ever adding a
+	// mid-life-corrupted one. The Snapshot RPC reads it to carry the drop to
+	// clients instead of silently serving a partial list as complete (#730's
+	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
+	// m.mu.
+	skippedRepos []SkippedRepo
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before
@@ -800,7 +807,7 @@ func (m *Manager) RestoreInstances() error {
 // RunDaemon binds its control socket first (#829), performs this load, then keeps
 // state RPCs gated until the startup orphan sweep is complete (#2632).
 func (m *Manager) restoreInstances() error {
-	instances, ghosts, err := refreshDaemonInstances(nil)
+	instances, ghosts, skipped, err := refreshDaemonInstances(nil)
 	if err != nil {
 		return err
 	}
@@ -821,6 +828,11 @@ func (m *Manager) restoreInstances() error {
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	// Seed the startup-time skip set so the Snapshot RPC can report repos whose
+	// instances.json was corrupted and dropped at startup. A full restart always
+	// re-runs this path with existing==nil, so a repaired-and-restarted daemon
+	// recomputes the set from scratch (#603 closed over the wire).
+	m.skippedRepos = skipped
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	// Re-park every on_complete obligation the previous generation left durable
 	// on its rows (#4162): the completion edge cannot re-fire, so without this a
@@ -889,56 +901,14 @@ func (m *Manager) dockerReapProtectedSlugs() map[string]bool {
 // are ordered by (repo, title) key for a stable diff, so the TUI reconcile does
 // not repaint on map-iteration jitter. Each operation lock is probed without
 // waiting after its row is serialized; a free lock is released immediately.
+//
+// This is the instance-only view; the Snapshot RPC handler reads it together
+// with the skip set via SnapshotWithSkipped (see snapshot.go), which captures
+// both under one acquisition of m.mu so a polling refresh cannot leave the
+// response carrying the old instance list with a cleared skip set.
 func (m *Manager) Snapshot(repoID string) []session.InstanceData {
-	m.mu.Lock()
-	keys := make([]string, 0, len(m.instances)+len(m.pendingCreates))
-	for key := range m.instances {
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	for key := range m.pendingCreates {
-		if _, settled := m.instances[key]; settled {
-			continue
-		}
-		if repoID != "" {
-			rid, _ := splitDaemonInstanceKey(key)
-			if rid != repoID {
-				continue
-			}
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	type snapshotEntry struct {
-		instance *session.Instance
-		pending  session.InstanceData
-	}
-	entries := make([]snapshotEntry, 0, len(keys))
-	for _, key := range keys {
-		if inst := m.instances[key]; inst != nil {
-			entries = append(entries, snapshotEntry{instance: inst})
-			continue
-		}
-		if pending, ok := m.pendingCreates[key]; ok {
-			entries = append(entries, snapshotEntry{pending: pending})
-		}
-	}
-	m.mu.Unlock()
-
-	data := make([]session.InstanceData, 0, len(entries))
-	for _, entry := range entries {
-		projected := entry.pending
-		if entry.instance != nil {
-			projected = entry.instance.ToInstanceData()
-		}
-		data = append(data, projected)
-	}
-	return data
+	instances, _ := m.SnapshotWithSkipped(repoID)
+	return instances
 }
 
 // startLockForRepo returns the per-repo lock serializing session/tab creation

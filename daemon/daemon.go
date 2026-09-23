@@ -442,17 +442,27 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, err
+		return existing, nil, nil, err
 	}
 	allInstances, err := config.LoadAllRepoInstances()
 	if err != nil {
-		return existing, nil, err
+		return existing, nil, nil, err
 	}
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
+	// skipped collects repos whose instances.json failed to parse, so the
+	// Snapshot RPC can carry the drop to clients instead of silently serving a
+	// partial list (#603 closed over the wire). Collected on every refresh, but
+	// only the startup call (existing==nil) genuinely drops rows — the polling
+	// path re-hydrates a corrupted repo's prior in-memory rows, so its sessions
+	// stay in the snapshot and the caller (restoreInstances vs refreshLocked)
+	// decides whether the set is authoritative for the snapshot: seed at
+	// startup, then trim repaired repos on poll without ever adding a
+	// mid-life-corrupted one (see retainStillSkipped).
+	var skipped []SkippedRepo
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 			continue
@@ -477,6 +487,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			// the ghost count cannot close, and it is bounded by the same corruption
 			// that already costs the repo its whole session list.
 			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", repoID, err)
+			skipped = append(skipped, SkippedRepo{RepoID: repoID, Reason: SkippedRepoReasonCorruptedInstancesJSON})
 			if existing != nil {
 				keyPrefix := repoID + "\x00"
 				for key, inst := range existing {
@@ -583,14 +594,14 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
-	return next, ghostTaskRuns, nil
+	return next, ghostTaskRuns, skipped, nil
 }
 
 // refreshLocked rebuilds the manager's instance map from disk under m.mu. A
 // marked on_complete row that re-materializes here re-arms its owed teardown,
 // the same as at restore (#4162).
 func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
+	refreshed, ghosts, skipped, err := refreshDaemonInstances(m.instances)
 	if err != nil {
 		return err
 	}
@@ -602,6 +613,15 @@ func (m *Manager) refreshLocked() error {
 	// ghost, or its slot would be held twice — once by the ghost and once by the
 	// instance it became.
 	m.ghostTaskRuns = ghosts
+	// Trim repaired repos from the startup skip set without ever adding a
+	// mid-life-corrupted one. A startup-skipped repo still unreadable on this
+	// poll stays skipped, but one whose instances.json now parses drops out so
+	// list/get/whoami stop refusing the now-complete snapshot (#603 closed over
+	// the wire). A repo that newly corrupts mid-life keeps its prior in-memory
+	// rows via the re-hydration above, so its sessions stay in the snapshot and
+	// it is correctly NOT reported as skipped until the daemon restarts and
+	// re-runs startup. Guarded by m.mu (refreshLocked's caller holds it).
+	m.skippedRepos = retainStillSkipped(m.skippedRepos, skipped)
 	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.armOwedTaskLifecyclesLocked()
 	return nil
