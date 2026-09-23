@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -139,14 +140,23 @@ func runRecoverySubprocess(t *testing.T, bin, home string, args ...string) (stdo
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		ee, ok := err.(*exec.ExitError)
-		if !ok {
-			t.Fatalf("af %v failed to run: %v (stderr: %s)", args, err, errBuf.String())
+	done := make(chan error, 1)
+	require.NoError(t, cmd.Start())
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			ee, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("af %v failed to run: %v (stderr: %s)", args, err, errBuf.String())
+			}
+			exitCode = ee.ExitCode()
+		} else {
+			exitCode = 0
 		}
-		exitCode = ee.ExitCode()
-	} else {
-		exitCode = 0
+	case <-time.After(60 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("af %v did not exit within 60s; a wedged recovery child must fail the test, not hang the suite (stderr: %s)", args, errBuf.String())
 	}
 	return outBuf.Bytes(), errBuf.Bytes(), exitCode
 }
