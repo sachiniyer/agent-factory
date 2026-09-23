@@ -57,8 +57,9 @@ closing any of them does not stop the work.
 
 It also keeps sessions alive across process death and reboots, runs the
 scheduler, handles usage-limit parking and resume, and serves the web client. It
-starts on demand — the TUI starts it when you open `af`, and any `af` run
-starts it when an enabled task exists; install its autostart unit once to
+starts on demand — a bare `af` launch starts it (the TUI on its first control
+call, plus a background ensure when an enabled task exists), and commands that
+talk to the daemon ensure a local one is running; install its autostart unit once to
 keep tasks firing across logouts:
 
 ```bash

@@ -160,8 +160,9 @@ af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * *
 ```
 
 Scheduled and event-driven tasks are run by the background **daemon**, which
-starts on demand — opening the TUI starts it, and any `af` invocation starts it
-when an enabled task exists. To keep it — and your tasks —
+starts on demand — a bare `af` launch ensures one in the background when an
+enabled task exists, and commands that talk to the daemon ensure a local one
+is running. To keep it — and your tasks —
 running across logouts and reboots, install its autostart unit once:
 
 ```bash

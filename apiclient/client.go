@@ -6,12 +6,15 @@
 // client uses, it returns byte-identical results — without the TUI or CLI ever
 // touching the wire shape.
 //
-// The client carries the full surface: snapshot reads, session/tab/task
-// lifecycle writes, config get/set, and streaming attach. The TUI sends its
-// control calls over it (app/session_control.go's withDaemonHTTP); the CLI's
-// `af sessions`/`tasks`/`projects` trees in api/ call it too. The envelope is
-// NOT redefined here — the client decodes the exact bytes daemon/httpserver.go
-// writes via apiproto.WriteEnvelope, which is what guarantees parity.
+// The client covers the operations the TUI and CLI drive today — snapshot
+// reads, session/tab/task lifecycle writes, config get/set, and streaming
+// attach — a subset of the HTTP route catalog, not all of it (SendPrompt and
+// the tab rename/reorder routes have no wrapper yet, for example). The TUI
+// sends its control calls over it (app/session_control.go's withDaemonHTTP);
+// the CLI's `af sessions`/`tasks`/`projects` trees in api/ call it too. The
+// envelope is NOT redefined here — the client decodes the exact bytes
+// daemon/httpserver.go writes via apiproto.WriteEnvelope, which is what
+// guarantees parity.
 package apiclient
 
 import (
