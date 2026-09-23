@@ -11,11 +11,17 @@ import (
 // (docs/dev/file-length-lint.md). They are behavior-identical to their previous
 // in-config.go definitions — same package, no call-site changes.
 
-// prettyHomePath returns absPath with the user's home directory prefix
+// PrettyHomePath returns absPath with the user's home directory prefix
 // collapsed to "~". Used to render config-file paths in user-facing errors
 // without leaking the absolute filesystem layout. Returns absPath unchanged
 // when the home directory cannot be determined or is not a prefix.
-func prettyHomePath(absPath string) string {
+//
+// This is the canonical home-abbreviation helper — callers outside config
+// (e.g. the af CLI) render paths with it too, so every diagnostic spells the
+// same path the same way. The prefix test is component-aware
+// (homeDir+separator), so a path under a home SIBLING like "/home/u-other"
+// never abbreviates.
+func PrettyHomePath(absPath string) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil || homeDir == "" {
 		return absPath
@@ -52,5 +58,5 @@ func GlobalConfigFileForDisplay() string {
 	if err != nil {
 		return "the global config file"
 	}
-	return prettyHomePath(filepath.Join(dir, TomlConfigFileName))
+	return PrettyHomePath(filepath.Join(dir, TomlConfigFileName))
 }

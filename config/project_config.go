@@ -141,7 +141,7 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to read personal project config %s: %w", prettyHomePath(path), err)
+		return nil, fmt.Errorf("failed to read personal project config %s: %w", PrettyHomePath(path), err)
 	}
 	return parseProjectConfig(data, path)
 }
@@ -150,7 +150,7 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 // shared by the loader and by the write path's final parse gate, so a written
 // file is validated on exactly the rules a read applies.
 func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
-	prettyPath := prettyHomePath(path)
+	prettyPath := PrettyHomePath(path)
 	data = stripUTF8BOM(data)
 	if isEffectivelyEmptyToml(data) {
 		// A contentless file is valid TOML but never something to declare on

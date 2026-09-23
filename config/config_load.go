@@ -103,9 +103,9 @@ func loadConfig(readDigest *ConfigDigest) (*Config, error) {
 	}
 
 	configPath := filepath.Join(configDir, ConfigFileName)
-	prettyConfigPath := prettyHomePath(configPath)
+	prettyConfigPath := PrettyHomePath(configPath)
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
-	prettyTomlPath := prettyHomePath(tomlPath)
+	prettyTomlPath := PrettyHomePath(tomlPath)
 
 	// A DANGLING symlink reads as ENOENT, which would send this straight past
 	// the JSON branch into materializeDefaultConfig — whose exclusive create then
@@ -226,9 +226,9 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	}
 
 	configPath := filepath.Join(configDir, ConfigFileName)
-	prettyConfigPath := prettyHomePath(configPath)
+	prettyConfigPath := PrettyHomePath(configPath)
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
-	prettyTomlPath := prettyHomePath(tomlPath)
+	prettyTomlPath := PrettyHomePath(tomlPath)
 
 	// The same refusal the startup path makes, and for a sharper reason here: a
 	// dangling link reads as ENOENT, which this would report as Missing — so
@@ -551,7 +551,7 @@ func convertJSONToTOML(configPath, tomlPath, prettyConfigPath, prettyTomlPath st
 				prettyTomlPath, prettyConfigPath, renameErr, prettyTomlPath, prettyConfigPath)
 		} else {
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
-				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
+				prettyTomlPath, PrettyHomePath(bakPath), prettyTomlPath)
 		}
 		warnConvertedLegacyRootAgents(cfg.RootAgents, prettyConfigPath, prettyTomlPath)
 		result, err = parseLoadedConfigTOML(tomlBytes, prettyTomlPath, tomlPath)
@@ -582,7 +582,7 @@ var materializeRaceHookForTest func()
 // returned instead of being clobbered.
 func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Config, error) {
 	if configDirInitialized(configDir) {
-		log.ErrorLog.Printf("no config file (config.toml/config.json) in an initialized config dir (%s) — materializing defaults; previous settings are lost", prettyHomePath(configDir))
+		log.ErrorLog.Printf("no config file (config.toml/config.json) in an initialized config dir (%s) — materializing defaults; previous settings are lost", PrettyHomePath(configDir))
 	}
 	if materializeRaceHookForTest != nil {
 		materializeRaceHookForTest()

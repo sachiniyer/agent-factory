@@ -234,7 +234,7 @@ func TestResolveConfigLegacyDeprecationLog(t *testing.T) {
 	// relocates it here (#890).
 	_, legacyPath, lerr := repoConfigPath(repoID)
 	require.NoError(t, lerr)
-	assert.Contains(t, buf.String(), prettyHomePath(legacyPath))
+	assert.Contains(t, buf.String(), PrettyHomePath(legacyPath))
 	assert.NotContains(t, buf.String(), "~/.agent-factory")
 
 	// Once per repo per process: a second resolve stays quiet.

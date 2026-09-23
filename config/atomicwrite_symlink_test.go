@@ -495,7 +495,7 @@ func TestFollowedLockGuardsTheOutcomesThatNeverWrite(t *testing.T) {
 		alias, ok := configAliasForCanonical("network.listen_addr")
 		require.True(t, ok, "premise: the key under test is a migrated alias")
 
-		result, _, err := applyGlobalUnset(target, prettyHomePath(target.link), "network.listen_addr", alias)
+		result, _, err := applyGlobalUnset(target, PrettyHomePath(target.link), "network.listen_addr", alias)
 
 		require.Error(t, err, "a no-op report must not be made about a file the link stopped naming")
 		assert.Nil(t, result)

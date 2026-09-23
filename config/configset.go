@@ -502,7 +502,7 @@ func SetGlobalConfigValueWithDigest(key, rawValue string) (*SetResult, ConfigDig
 		return nil, ConfigDigest{}, err
 	}
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
-	prettyPath := prettyHomePath(tomlPath)
+	prettyPath := PrettyHomePath(tomlPath)
 
 	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
 		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
@@ -562,7 +562,7 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	prettyPath := prettyHomePath(path)
+	prettyPath := PrettyHomePath(path)
 	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured}
 
 	var result *SetResult

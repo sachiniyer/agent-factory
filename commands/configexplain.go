@@ -203,7 +203,7 @@ func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error 
 		}
 		location := "compiled default"
 		if candidate.Path != "" {
-			location = prettyPath(candidate.Path) + ":" + candidate.KeyPath
+			location = config.PrettyHomePath(candidate.Path) + ":" + candidate.KeyPath
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s · %s\n",
 			candidate.Layer, candidateValue, location, candidate.Result, candidate.Reason)
@@ -223,7 +223,7 @@ func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error 
 			origin := value.Origins[leaf]
 			location := "compiled default"
 			if origin.Path != "" {
-				location = prettyPath(origin.Path) + ":" + origin.KeyPath
+				location = config.PrettyHomePath(origin.Path) + ":" + origin.KeyPath
 			}
 			fmt.Fprintf(w, "  %s: %s · %s\n", leaf, origin.Layer, location)
 		}

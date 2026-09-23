@@ -156,7 +156,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// config.toml link — or an AF home link above an ordinary one — that moved
 	// after acquisition would have this migration compute a rewrite from one
 	// file and land it on another (#3688, #3697).
-	prettyPath := prettyHomePath(locked.link)
+	prettyPath := PrettyHomePath(locked.link)
 	raw, err := locked.read()
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
@@ -329,7 +329,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// — over an existing .bak there — and the cleanup below would then delete
 	// that one instead of ours (#3697 review).
 	if err := locked.writeSibling(backup, raw, mode); err != nil {
-		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
+		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", PrettyHomePath(backup), err)
 	}
 	if migrateWriteRaceHookForTest != nil {
 		migrateWriteRaceHookForTest()
@@ -341,7 +341,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		// untouched and this backup copies a file nobody rewrote. Take it back
 		// out rather than leave a .bak the error says does not exist.
 		if rmErr := locked.removeSibling(backup); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.WarningLog.Printf("migrate: could not remove the backup %s after the migration write failed: %v", prettyHomePath(backup), rmErr)
+			log.WarningLog.Printf("migrate: could not remove the backup %s after the migration write failed: %v", PrettyHomePath(backup), rmErr)
 		}
 		return nil, err
 	}
@@ -351,7 +351,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// should be the ordinary unified diff they already know how to read — and one
 	// this repo does not have to own a differ to produce.
 	result.Diff = udiff.Unified(prettyPath, prettyPath, before, content)
-	result.Cautions = downgradeCautions(result.Migrated, beforeCfg, prettyHomePath(backup))
+	result.Cautions = downgradeCautions(result.Migrated, beforeCfg, PrettyHomePath(backup))
 	return result, nil
 }
 

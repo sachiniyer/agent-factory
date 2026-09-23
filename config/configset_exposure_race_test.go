@@ -91,7 +91,7 @@ func TestExposureWarningJudgesTheFileInsideTheLock(t *testing.T) {
 			var res *SetResult
 			if err := WithFileLock(tomlPath, func() error {
 				var applyErr error
-				res, _, applyErr = write.apply(pinnedTestTarget(t, tomlPath), prettyHomePath(tomlPath))
+				res, _, applyErr = write.apply(pinnedTestTarget(t, tomlPath), PrettyHomePath(tomlPath))
 				return applyErr
 			}); err != nil {
 				t.Fatalf("applying %s=%q: %v", c.key, c.value, err)
@@ -183,7 +183,7 @@ func TestExposureWarningStaysSilentWhenTheRaceLeavesItSafe(t *testing.T) {
 			var res *SetResult
 			if err := WithFileLock(tomlPath, func() error {
 				var applyErr error
-				res, _, applyErr = write.apply(pinnedTestTarget(t, tomlPath), prettyHomePath(tomlPath))
+				res, _, applyErr = write.apply(pinnedTestTarget(t, tomlPath), PrettyHomePath(tomlPath))
 				return applyErr
 			}); err != nil {
 				t.Fatalf("applying %s=%q: %v", c.key, c.value, err)
