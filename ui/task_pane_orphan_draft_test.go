@@ -9,13 +9,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The tests in this file pin #4798: a draft whose task another writer deleted
-// (`af tasks remove`) can never be saved, so a reload drops it with one notice
-// naming it instead of keeping a row that retries the save forever.
+// The tests in this file pin #4798: once a save proves a draft's task deleted,
+// DiscardDeletedDraft drops the draft with one notice naming it, instead of
+// keeping a row whose save fails with "not found" on every close.
 
-// A reload that no longer contains the draft's task drops the draft, leaves
-// nothing to save, and queues exactly one notice naming the task.
-func TestTaskPaneReloadDropsDraftOfDeletedTask(t *testing.T) {
+// discardSave drives saveContentPaneState's sequence for a task another writer
+// deleted: the update answers "not found", so the edit is discarded rather than
+// restored, and the save reloads a list without the task.
+func discardSave(s *TaskPane, deletedID string, disk []task.Task) {
+	for _, edit := range s.ConsumeDirty() {
+		if edit.ID == deletedID {
+			s.DiscardDeletedDraft(edit.ID)
+		} else {
+			s.RestoreFailedEdit(edit.ID)
+		}
+	}
+	s.ConsumeDeleted()
+	s.SetTasks(disk)
+}
+
+func TestTaskPaneDiscardDeletedDraftDropsItWithOneNotice(t *testing.T) {
 	demo := reloadTask("demo-id", "p")
 	demo.Name = "demo"
 	s := NewTaskPane()
@@ -24,49 +37,25 @@ func TestTaskPaneReloadDropsDraftOfDeletedTask(t *testing.T) {
 	require.True(t, s.HandleKeyPress(keyRunes("x")))
 	require.True(t, s.IsDirty())
 
-	disk := load(reloadTask("b", "p"), reloadTask("c", "p"))
-	s.SetTasks(disk())
+	disk := load(reloadTask("b", "p"))
+	discardSave(s, "demo-id", disk())
 
-	assert.Equal(t, []string{"b", "c"}, paneIDs(s), "the orphaned draft must not stay in the list")
+	assert.Equal(t, []string{"b"}, paneIDs(s), "the draft's row must go")
 	assert.False(t, s.IsDirty(), "nothing is left to save")
-	assert.Empty(t, s.ConsumeDirty(), "a save must not retry an update of a deleted task")
-	assert.False(t, s.HasUnsavedEdit("demo-id"))
 	assert.Equal(t, `Discarded unsaved edits to "demo" — the task was deleted`, s.TakeDiscardedDraftNotice(),
 		"the draft is never dropped silently")
 	assert.Empty(t, s.TakeDiscardedDraftNotice(), "the notice is raised once")
-
-	s.SetTasks(disk())
-	assert.Equal(t, []string{"b", "c"}, paneIDs(s))
-	assert.Empty(t, s.TakeDiscardedDraftNotice(), "a later reload has nothing more to report")
-}
-
-// A save that fails because the task is gone reconciles on the reload that
-// follows it: the draft is dropped, the next save sends nothing, and the pane
-// is not dirty — so closing the overlay stops reporting "not found".
-func TestTaskPaneFailedSaveOfDeletedTaskIsNotRetried(t *testing.T) {
-	s := NewTaskPane()
-	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p")})
-	s.SetFocus(true)
-	require.True(t, s.HandleKeyPress(keyRunes("x")))
-
-	disk := load(reloadTask("b", "p"))
-	failSave(s) // the update is refused: task with id "a" not found
-	require.True(t, s.HasUnsavedEdit("a"), "a failed save retains the edit until the reload")
-	s.SetTasks(disk())
-
-	assert.False(t, s.HasUnsavedEdit("a"), "the reload shows the task is gone, so the edit is moot")
-	assert.Equal(t, []string{"b"}, paneIDs(s))
-	assert.False(t, s.IsDirty())
-	assert.Equal(t, `Discarded unsaved edits to "a" — the task was deleted`, s.TakeDiscardedDraftNotice())
 	for attempt := 1; attempt <= 3; attempt++ {
 		assert.Empty(t, s.ConsumeDirty(), "close %d must not retry the save", attempt)
 		s.SetTasks(disk())
+		assert.Equal(t, []string{"b"}, paneIDs(s))
 	}
+	assert.Empty(t, s.TakeDiscardedDraftNotice())
 }
 
-// A draft of a task that still exists is kept exactly as before (#4487): only
-// the draft whose task is gone is dropped.
-func TestTaskPaneReloadKeepsDraftWhoseTaskStillExists(t *testing.T) {
+// Only the proven-deleted draft goes. A draft whose save failed for any other
+// reason is retained through the same save, with its values.
+func TestTaskPaneDiscardDeletedDraftKeepsOtherDrafts(t *testing.T) {
 	s := NewTaskPane()
 	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p")})
 	s.SetFocus(true)
@@ -74,19 +63,39 @@ func TestTaskPaneReloadKeepsDraftWhoseTaskStillExists(t *testing.T) {
 	require.True(t, s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown}))
 	require.True(t, s.HandleKeyPress(keyRunes("x")))
 
-	s.SetTasks([]task.Task{reloadTask("b", "cli")})
+	discardSave(s, "a", []task.Task{reloadTask("b", "cli")})
 
 	assert.Equal(t, []string{"b"}, paneIDs(s))
-	assert.True(t, s.HasUnsavedEdit("b"), "the surviving task's draft must be kept")
-	assert.Equal(t, "p", s.tasks[0].Prompt, "the kept draft keeps its own values")
+	assert.True(t, s.IsDirty(), "b's failed edit is still waiting to save")
+	assert.False(t, s.tasks[0].Enabled, "b keeps its edit")
+	assert.Equal(t, "p", s.tasks[0].Prompt, "b keeps the values its edit was made against")
+	selected, ok := s.SelectedTask()
+	require.True(t, ok)
+	assert.Equal(t, "b", selected.ID, "the cursor stays on its task")
 	edits := s.ConsumeDirty()
 	require.Len(t, edits, 1)
 	assert.Equal(t, "b", edits[0].ID)
 	assert.Equal(t, `Discarded unsaved edits to "a" — the task was deleted`, s.TakeDiscardedDraftNotice())
 }
 
+// Absence from a reload is not proof the task was deleted — the reload can be
+// scoped to another project or simply be wrong — so a reload alone never drops
+// a draft (#4487's contract, which #4798 keeps).
+func TestTaskPaneReloadAloneNeverDiscardsADraft(t *testing.T) {
+	s := NewTaskPane()
+	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p")})
+	s.SetFocus(true)
+	require.True(t, s.HandleKeyPress(keyRunes("x")))
+
+	s.SetTasks([]task.Task{reloadTask("b", "p")})
+
+	assert.Equal(t, []string{"b", "a"}, paneIDs(s))
+	assert.True(t, s.IsDirty())
+	assert.Empty(t, s.TakeDiscardedDraftNotice())
+}
+
 // Several drafts dropped before the app takes the notice are named in one
-// notice rather than the first one being overwritten.
+// notice, each by the name it was loaded with rather than a rename it carried.
 func TestTaskPaneDiscardedDraftNoticeNamesEveryDraft(t *testing.T) {
 	s := NewTaskPane()
 	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p"), reloadTask("c", "p")})
@@ -94,61 +103,28 @@ func TestTaskPaneDiscardedDraftNoticeNamesEveryDraft(t *testing.T) {
 	require.True(t, s.HandleKeyPress(keyRunes("x")))
 	require.True(t, s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown}))
 	require.True(t, s.HandleKeyPress(keyRunes("x")))
+	s.tasks[1].Name = "renamed"
 
-	s.SetTasks([]task.Task{reloadTask("b", "p"), reloadTask("c", "p")})
-	s.SetTasks([]task.Task{reloadTask("c", "p")})
+	s.DiscardDeletedDraft("a")
+	s.DiscardDeletedDraft("b")
 
 	assert.Equal(t, []string{"c"}, paneIDs(s))
 	assert.Equal(t, `Discarded unsaved edits to "a", "b" — the tasks were deleted`, s.TakeDiscardedDraftNotice())
 }
 
 // A draft whose edit was reverted carries nothing a save would send, so
-// dropping it loses no work and raises no notice.
-func TestTaskPaneReloadDropsRevertedDraftWithoutNotice(t *testing.T) {
+// dropping it loses no work and raises no notice; an unknown ID is a no-op.
+func TestTaskPaneDiscardDeletedDraftWithoutWorkRaisesNoNotice(t *testing.T) {
 	s := NewTaskPane()
 	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p")})
 	s.SetFocus(true)
 	require.True(t, s.HandleKeyPress(keyRunes("x")))
 	require.True(t, s.HandleKeyPress(keyRunes("x")))
 
-	s.SetTasks([]task.Task{reloadTask("b", "p")})
+	s.DiscardDeletedDraft("a")
+	s.DiscardDeletedDraft("never-loaded")
 
 	assert.Equal(t, []string{"b"}, paneIDs(s))
 	assert.False(t, s.IsDirty())
 	assert.Empty(t, s.TakeDiscardedDraftNotice())
-}
-
-// An open edit form bound to a task deleted on disk is not pulled out from
-// under the user: its row stays until the form closes. Once the form writes
-// into it, the next reload drops the draft with the notice.
-func TestTaskPaneReloadKeepsOpenFormOfDeletedTaskUntilItCloses(t *testing.T) {
-	repo := newGitRepo(t)
-	withRepo := func(tk task.Task) task.Task {
-		tk.ProjectPath = repo
-		tk.Program = "claude"
-		return tk
-	}
-	s := NewTaskPane()
-	s.SetSize(100, 40)
-	s.SetTasks([]task.Task{withRepo(reloadTask("a", "p")), withRepo(reloadTask("b", "p"))})
-	s.SetFocus(true)
-	s.EnterEditSelected()
-	require.True(t, s.IsEditing())
-	s.editName.SetValue("renamed")
-
-	disk := load(withRepo(reloadTask("b", "p")))
-	s.SetTasks(disk())
-
-	require.True(t, s.IsEditing(), "a reload must not close the form")
-	assert.Equal(t, []string{"b", "a"}, paneIDs(s), "the form's row stays after the loaded rows")
-	assert.Empty(t, s.TakeDiscardedDraftNotice(), "nothing was dropped yet")
-
-	require.True(t, s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}))
-	require.False(t, s.IsEditing())
-	s.SetTasks(disk())
-
-	assert.Equal(t, []string{"b"}, paneIDs(s))
-	assert.False(t, s.IsDirty())
-	assert.Equal(t, `Discarded unsaved edits to "a" — the task was deleted`, s.TakeDiscardedDraftNotice(),
-		"the notice names the task as it was loaded, not the draft's rename")
 }
