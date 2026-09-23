@@ -111,9 +111,9 @@ func ListenerExposureNotice(cfg *Config) string {
 // understates the exposure converts an unexamined default into an examined and
 // approved one.
 //
-// Same emit channels as ListenerExposureNotice — bind-time daemon log,
-// apply-time transition warning, and per-write warning on every exposed save
-// of this key.
+	// Emits on three channels: the bind-time daemon log, the apply-time
+	// transition warning, and the per-write warning on every exposed save of
+	// this key.
 func PreviewListenerExposureNotice(cfg *Config) string {
 	if cfg == nil || cfg.PreviewListenAddr == "" || IsLoopbackListenAddr(cfg.PreviewListenAddr) {
 		return ""
