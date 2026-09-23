@@ -9,9 +9,11 @@
 // The client covers the operations the TUI and CLI drive today — snapshot
 // reads, session/tab/task lifecycle writes, config get/set, and streaming
 // attach — a subset of the HTTP route catalog, not all of it (SendPrompt and
-// the tab rename/reorder routes have no wrapper yet, for example). The TUI
-// sends its control calls over it (app/session_control.go's withDaemonHTTP);
-// the CLI's `af sessions` and `af tasks` trees in api/ call it too. The
+// the tab rename/reorder routes have no wrapper yet, for example). The TUI's
+// session control calls ride it (app/session_control.go's withDaemonHTTP),
+// though a few flows — local account registration and login, for one — still
+// use the gob client directly; the CLI's `af sessions` and `af tasks` trees
+// in api/ call it too. The
 // envelope is NOT redefined here — the client decodes the exact bytes
 // daemon/httpserver.go writes via apiproto.WriteEnvelope, which is what
 // guarantees parity.
