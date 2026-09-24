@@ -357,6 +357,73 @@ func TestHandleCodexSafetyBuffering_SecondPickerResetsPriorCompletedRecord(t *te
 		"the second picker's record must carry only its own keys, not the accumulated keys of both pickers")
 }
 
+// TestHandleCodexSafetyBuffering_ModelVerificationTimeoutKeepsRecordForSamePicker
+// is the #4740 review follow-up at codex_safety.go line 185: when the answered
+// picker stays rendered past the model-verification poll budget,
+// verifyCodexSafetyModel times out and calls finishModelVerification while the
+// SAME picker is still on screen, clearing awaitingModelCheck along with
+// selectionTarget. The next poll's main flow must NOT treat that same picker as
+// a fresh second picker and reset the completed record: that would drop the
+// recorded Down Enter before the retry Enter, anonymizing a death on the retry
+// and losing the Down on a success. The handler keeps the record until the
+// normal finish (footer readable, picker closed) proves a later rendered picker
+// is a new instance.
+func TestHandleCodexSafetyBuffering_ModelVerificationTimeoutKeepsRecordForSamePicker(t *testing.T) {
+	const normalPane = `• Working
+
+  gpt-5.6-sol max · ~/agent-factory`
+	frames := []trustPromptFrame{
+		{content: normalPane},
+		{content: codexSafetyBufferingDialog},
+		{content: codexSafetyBufferingKeepWaitingSelected},
+	}
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		frames = append(frames, trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected})
+	}
+	frames = append(frames, trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected})
+
+	session, _ := runTrustPromptFrames(t, ProgramCodex, frames...)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(), "a normal Codex pane is not a modal")
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the safety-buffering picker must be answered (Down Enter)")
+
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af answered the picker; a Down Enter record must exist")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys, "the answer records Down Enter")
+
+	// Drive the model-verification polls in which the answered picker stays
+	// rendered and no model footer is readable. The poll that hits the budget
+	// times out while the SAME picker is still on screen.
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		require.True(t, session.CheckAndHandleTrustPrompt(),
+			"the answered picker is still rendered on verification poll %d; the handler keeps blocking", i)
+	}
+	record, _, ok = session.recentDialogKeystroke()
+	require.True(t, ok, "the timeout alone must not anonymize the answered picker's record")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys,
+		"the model-verification timeout keeps the same picker's Down Enter; it is not a new picker")
+
+	// The next poll re-enters the main flow for the SAME picker. The reset must
+	// be skipped, so the prior Down survives and only the retry Enter is
+	// appended — a death on this retry reads as Down Enter, never anonymous, and
+	// the Down is never lost.
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the same picker is still rendered after its model-verification timeout; af retries the Enter")
+	record, _, ok = session.recentDialogKeystroke()
+	require.True(t, ok, "the retried Enter leaves a record; it must not be anonymous")
+	require.Equal(t, []string{"Down", "Enter", "Enter"}, record.keys,
+		"the same-picker timeout keeps the recorded Down Enter and appends the retry Enter; the reset must not fire here")
+
+	// A death during the retry Enter reads the surviving record, not a bare
+	// anonymous startup death — the whole point of the #4740 diagnostic.
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone)
+	require.Contains(t, err.Error(), codexSafetyDialogName,
+		"a death on the retry Enter is attributed to the safety dialog af answered, not anonymous")
+	require.Contains(t, err.Error(), "Down",
+		"the Down af sent survives the same-picker timeout and is named in the death diagnostic")
+}
+
 // TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic is the
 // end-to-end guard against the same regression recurring: it drives the real
 // CheckAndHandleTrustPrompt through the safety picker the way the daemon's
