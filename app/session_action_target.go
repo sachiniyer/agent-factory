@@ -157,6 +157,13 @@ func (target sessionActionTarget) closeTabRequest(tabID, tabName string) daemon.
 	}
 }
 
+func (target sessionActionTarget) reorderTabRequest(tabID, tabName string, newIndex int) daemon.ReorderTabRequest {
+	return daemon.ReorderTabRequest{
+		ID: target.id, Title: target.title, RepoID: target.repoID,
+		TabID: tabID, TabName: tabName, NewIndex: newIndex,
+	}
+}
+
 // renameTabRequest addresses the tab by its stable TabID the way
 // closeTabRequest does (#1929): a name is freed by a close and handed to the
 // next tab that asks for it, so the id — minted once and never reused — is what

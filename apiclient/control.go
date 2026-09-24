@@ -152,15 +152,19 @@ func (c *Client) RenameTab(req daemon.RenameTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
-// There is deliberately no ReorderTab here (#1813). This is the Go
-// HTTP client, and its only consumer is the TUI; the tab reorder verb
-// is driven by the web client, which is TypeScript and calls the daemon's
-// /v1/ReorderTab route directly (web/src/api.ts), and by the
-// CLI, which goes over the gob control socket (daemon.ReorderTab). Adding
-// a wrapper here purely for symmetry with CreateTab/CloseTab/RenameTab — which
-// exist because the TUI genuinely calls them (app/session_control.go) — would
-// be dead code whose only caller was its own test. Add it the day the TUI grows
-// a reorder surface.
+// ReorderTab asks the daemon to move one tab within a session's roster and
+// returns the moved tab's name and resolved final index (#1813). It is the
+// TUI's </> tab-move path — the same /v1/ReorderTab route the web's drag
+// reorder calls (web/src/api.ts) and `af sessions tab-reorder` reaches over the
+// gob control socket (daemon.ReorderTab), so all three surfaces permute one
+// roster through one method.
+func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+	var resp daemon.ReorderTabResponse
+	if err := c.call("ReorderTab", req, &resp); err != nil {
+		return daemon.ReorderTabResponse{}, err
+	}
+	return resp, nil
+}
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an

@@ -493,10 +493,23 @@ func (m *Menu) addInstanceOptions() {
 	// that actually work: number-jump (#988). R joins the gated set for
 	// consistency: a remote roster's agent tab refuses the rename, and the
 	// handler still answers a web tab there without the hint.
-	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyRenameTab, keys.KeyJumpTab}
+	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyRenameTab}
 	if m.instance != nil && !m.instance.Capabilities().TabManagement {
-		tabGroup = []keys.KeyName{keys.KeyJumpTab}
+		tabGroup = nil
 	}
+	// </> move the current tab within the roster (session.tab.reorder, #1813).
+	// It shares `t`/`w`'s gates: the TUI only mutates rosters it keeps current,
+	// and the snapshot's ReconcileTabsFromData skips non-TabManagement backends
+	// (app/sync.go), so an off-box or archived row would advertise a move whose
+	// result another client's reorder could silently diverge — or that the
+	// daemon refuses outright to keep the archived roster intact for restore.
+	// The hint exists only when a move does: the agent tab is pinned to slot 0,
+	// so a second movable tab must be present before either direction can act.
+	if m.instance != nil && m.instance.Capabilities().TabManagement &&
+		!m.instance.IsArchived() && m.instance.TabCount() >= 3 {
+		tabGroup = append(tabGroup, keys.KeyMoveTabLeft, keys.KeyMoveTabRight)
+	}
+	tabGroup = append(tabGroup, keys.KeyJumpTab)
 
 	// Pane group (#1088/#1321): s opens the selected tab as a workspace pane
 	// (or focuses its pane when already open); S commits a preview alongside
@@ -647,6 +660,11 @@ var hintDropOrder = [][]keys.KeyName{
 	// help overlay names it at every width.
 	{keys.KeyRenameTab},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
+	// The tab-move pair sheds right after the scroll pair: it advertises a
+	// convenience the other surfaces also carry, so a narrow bar loses nothing
+	// the user cannot still reach — the roster keeps its order, and the
+	// drag/CLI paths remain.
+	{keys.KeyMoveTabLeft, keys.KeyMoveTabRight},
 	{keys.KeyAttach},
 	{keys.KeySearch},
 	{keys.KeyHooks},
@@ -744,7 +762,8 @@ type hintSpan struct {
 // helpLabel covers only the DEFAULT binding by design, so a [keys] rebind of
 // scroll_up would have shown a label naming a key that no longer scrolls.
 var hintPairs = map[keys.KeyName]keys.KeyName{
-	keys.KeyShiftUp: keys.KeyShiftDown,
+	keys.KeyShiftUp:     keys.KeyShiftDown,
+	keys.KeyMoveTabLeft: keys.KeyMoveTabRight,
 }
 
 // renderHints renders the option row, skipping dropped options, and reports
