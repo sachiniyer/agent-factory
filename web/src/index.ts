@@ -1219,22 +1219,32 @@ const REBIND_ANSWER_MS = 30_000;
  *  pointed at when Rebind opened. */
 let rebindFollow: { id: string; oldRoot: string } | null = null;
 
-/** Consumes the pending rebind follow against a fresh registry read and returns
+/** Checks the pending rebind follow against a fresh registry read and returns
  *  the root the selection should move to, or null. It follows only when the user's
  *  project is still the old root — shown, or persisted while reconciliation fell
  *  back because the old root vanished from an earlier read — so a project the user
  *  chose mid-flight is left alone. Without it, the refetch drops the old root from
- *  the valid set and reconcileProject lands on an unrelated project. */
+ *  the valid set and reconcileProject lands on an unrelated project.
+ *
+ *  A read that still shows the record at the old root has observed no move yet —
+ *  a slow rebind may commit after it — so the intent survives that read. It is
+ *  consumed once the record has moved or is gone, or once the user has left the
+ *  old root. */
 function takeRebindFollow(projects: RegisteredProject[]): string | null {
   const follow = rebindFollow;
-  rebindFollow = null;
   if (follow === null) {
     return null;
   }
   if (store.get().selectedProject !== follow.oldRoot && loadProjectChoice() !== follow.oldRoot) {
+    rebindFollow = null;
     return null;
   }
-  return projects.find((p) => p.id === follow.id)?.root ?? null;
+  const root = projects.find((p) => p.id === follow.id)?.root ?? null;
+  if (root === follow.oldRoot) {
+    return null;
+  }
+  rebindFollow = null;
+  return root;
 }
 
 /** Opens the rebind-project modal (`af projects rebind`, made reachable from the
@@ -1279,12 +1289,11 @@ function openRebindProject(projectId: string, label: string): void {
         // Every outcome goes through settle() exactly once: the reply, or the
         // bounded wait below, whichever comes first. The guard lives only as long
         // as this attempt is undecided, and a reply that arrives after the wait
-        // gave up only re-reads the registry — the notice already said the
-        // outcome was unknown, so it neither re-arms nor re-toasts.
+        // gave up goes to lateReply — the notice already said the outcome was
+        // unknown, so it neither re-arms the form nor re-toasts.
         let settled = false;
         const settle = (): boolean => {
           if (settled) {
-            refreshRegisteredProjects();
             return false;
           }
           settled = true;
@@ -1304,6 +1313,19 @@ function openRebindProject(projectId: string, label: string): void {
         // No client-side timeout on the mutation itself: aborting it cannot undo
         // a rebind the daemon already committed. Instead the UI stops waiting,
         // says the outcome is unknown, and lets the registry read show the truth.
+        // A reply that arrives after the bounded wait gave up is still evidence:
+        // anything that may have landed keeps the follow armed for the read it
+        // triggers; a definitive refusal proves nothing moved, so it disarms it.
+        const lateReply = (mayHaveLanded: boolean): void => {
+          if (mayHaveLanded) {
+            followRegistry();
+            return;
+          }
+          if (rebindFollow?.id === projectId) {
+            rebindFollow = null;
+          }
+          refreshRegisteredProjects();
+        };
         const unanswered = window.setTimeout(() => {
           if (!settle()) return;
           if (modal === m) closeModal();
@@ -1315,7 +1337,10 @@ function openRebindProject(projectId: string, label: string): void {
         }, REBIND_ANSWER_MS);
         void rebindProject(projectId, path, tok)
           .then(() => {
-            if (!settle()) return;
+            if (!settle()) {
+              lateReply(true);
+              return;
+            }
             if (modal === m) closeModal();
             // The reply is not applied to the store: a newer rebind or delete
             // from another client may already be there. A fenced registry read
@@ -1323,7 +1348,10 @@ function openRebindProject(projectId: string, label: string): void {
             followRegistry();
           })
           .catch((e) => {
-            if (!settle()) return;
+            if (!settle()) {
+              lateReply(isMutationOutcomeUncertain(e));
+              return;
+            }
             if (isMutationCommittedError(e)) {
               // The daemon committed the rebind but a follow-up step failed.
               if (modal === m) closeModal();

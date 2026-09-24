@@ -85,7 +85,12 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 			m.closeProjectPicker()
 		}
 		m.refreshSidebarProjects()
-		return m, m.handleError(fmt.Errorf("rebind of project %q could not be confirmed — check the Projects list before retrying: %w", msg.name, msg.err))
+		errCmd := m.handleError(fmt.Errorf("rebind of project %q could not be confirmed — check the Projects list before retrying: %w", msg.name, msg.err))
+		// The rebind may have landed: follow the registry exactly as a confirmed
+		// success does. If it never landed, the record still names the old root
+		// and the scope stays put.
+		model, followCmd := m.followActiveRebind(msg)
+		return model, tea.Batch(errCmd, followCmd)
 	}
 	m.refreshSidebarProjects()
 	var toast tea.Cmd
@@ -95,17 +100,33 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 	if owned || !pickerOpen {
 		toast = m.showTransientMessage(fmt.Sprintf("Rebound project '%s' to %s", msg.name, msg.root))
 	}
-	if m.rebindMovedActiveProject(msg) {
-		// Follow the registry, not this reply's echo: another client may have
-		// rebound or deleted the project since this request committed, and the
-		// Projects section just re-read that newer state. A record that is gone
-		// (or a registry that cannot be read) leaves the scope where it is.
-		if root, ok := registeredProjectRoot(msg.projectID); ok {
-			model, switchCmd := m.switchToProjectRoot(root)
-			return model, tea.Batch(toast, switchCmd)
-		}
+	model, followCmd := m.followActiveRebind(msg)
+	return model, tea.Batch(toast, followCmd)
+}
+
+// followActiveRebind moves the TUI's scope after a rebind that moved — or may
+// have moved — the project it is scoped to. It follows the registry, never the
+// reply's echo: another client may have rebound or deleted the project since
+// this request committed, and the Projects section just re-read that newer
+// state. A record that is gone, a registry that cannot be read, or a record
+// still naming the old root (an uncertain rebind that never landed) leaves the
+// scope where it is.
+func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
+	if !m.rebindMovedActiveProject(msg) {
+		return m, nil
 	}
-	return m, toast
+	root, ok := registeredProjectRoot(msg.projectID)
+	if !ok || samePath(root, msg.oldRoot) || samePath(root, m.repoRoot) {
+		return m, nil
+	}
+	return m.switchToProjectRoot(root)
+}
+
+// samePath compares two roots under the #2110 spelling rule; an empty side
+// never matches.
+func samePath(a, b string) bool {
+	return a != "" && b != "" &&
+		pathutil.ResolveForCompare(filepath.Clean(a)) == pathutil.ResolveForCompare(filepath.Clean(b))
 }
 
 // registeredProjectRoot returns the root the registry binds project id to now,
@@ -142,6 +163,5 @@ func (m *home) rebindMovedActiveProject(msg projectReboundMsg) bool {
 	if msg.oldRepoID != "" && msg.oldRepoID == m.repoID {
 		return true
 	}
-	return msg.oldRoot != "" && m.repoRoot != "" &&
-		pathutil.ResolveForCompare(filepath.Clean(msg.oldRoot)) == pathutil.ResolveForCompare(filepath.Clean(m.repoRoot))
+	return samePath(msg.oldRoot, m.repoRoot)
 }

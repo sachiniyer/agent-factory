@@ -105,3 +105,39 @@ func TestControlServer_RebindProject_GatedWhenWarming(t *testing.T) {
 	err = notReady.RebindProject(RebindProjectRequest{ID: "prj_anything", Path: t.TempDir()}, &resp)
 	assert.True(t, IsDaemonStartingErr(err), "RebindProject on a warming manager: want daemon-starting error, got: %v", err)
 }
+
+// TestControlServer_RebindProject_RefusesRelativePath pins the Codex finding on
+// #4789: RebindProjectRequest.Path must be absolute or ~-prefixed. A relative
+// path would resolve against the DAEMON's cwd — here a real checkout, standing
+// in for an ad-hoc daemon launched inside some other repo — and silently repoint
+// the stable id there. It is refused at the RPC boundary: the record keeps its
+// root and no event fires.
+func TestControlServer_RebindProject_RefusesRelativePath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	original := setupControlRepo(t)
+	unrelated := filepath.Join(testguard.CanonicalTempDir(t), "unrelated")
+	cloneRepoTemplate(t, unrelated)
+	t.Chdir(unrelated)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	var reg RegisterProjectResponse
+	require.NoError(t, cs.RegisterProject(RegisterProjectRequest{Path: original}, &reg))
+	_, ch := manager.events.subscribe()
+
+	for _, rel := range []string{".", "sub/../."} {
+		var resp RebindProjectResponse
+		err := cs.RebindProject(RebindProjectRequest{ID: reg.Project.ID, Path: rel}, &resp)
+		require.Error(t, err, "relative path %q must be refused, not resolved against the daemon's cwd", rel)
+		assert.Contains(t, err.Error(), "must be absolute")
+		assert.False(t, resp.OK)
+	}
+
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	assert.Equal(t, reg.Project.Root, projects[0].Root, "a refused relative rebind must leave the record where it was")
+	assertNoEvent(t, ch, agentproto.EventProjectsChanged)
+}

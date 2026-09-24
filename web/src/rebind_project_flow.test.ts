@@ -255,3 +255,43 @@ test("a rebind that answers in time disarms the bounded wait", async () => {
   await settle();
   assert.equal(timers.size, 0, "a settled attempt leaves no timer to report a stale unknown outcome");
 });
+
+test("a rebind that commits after the bounded wait still moves the selection", async () => {
+  const { app, state, submits, pending, fire } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  fire(); // 30s pass: outcome unknown, a registry read starts
+  // That read lands before the daemon commits: the record still names /old.
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }]);
+  assert.equal(state.selectedProject, "/old");
+
+  // The daemon commits; its late reply triggers the read that observes the move.
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+
+  assert.equal(state.selectedProject, "/new", "the follow intent must survive a read that has not seen the move yet");
+});
+
+test("a late definitive refusal disarms the follow intent", async () => {
+  const { app, state, submits, pending, fire } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  fire();
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }]);
+  pending[0].reject(new StubError("path is already bound to another project", "refused"));
+  await settle();
+
+  // Much later, another client moves the record. This rebind never landed, so
+  // its intent must not drag the selection along.
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
+  assert.notEqual(state.selectedProject, "/elsewhere");
+});

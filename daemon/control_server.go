@@ -736,6 +736,13 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// Enforce RebindProjectRequest's contract here, before the registry moves:
+	// config.RebindProject would resolve a relative path against THIS process's
+	// cwd — an unrelated checkout for an ad-hoc daemon, / under systemd — and
+	// silently repoint the stable id there. ListDirectory refuses the same way.
+	if !filepath.IsAbs(config.ExpandTilde(strings.TrimSpace(req.Path))) {
+		return fmt.Errorf("rebind path %q must be absolute (or start with ~/): the daemon resolves it on its own filesystem and has no access to your working directory", req.Path)
+	}
 	project, err := config.RebindProject(req.ID, req.Path)
 	if err != nil {
 		return err

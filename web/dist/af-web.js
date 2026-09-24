@@ -18346,14 +18346,19 @@ var REBIND_ANSWER_MS = 3e4;
 var rebindFollow = null;
 function takeRebindFollow(projects) {
   const follow = rebindFollow;
-  rebindFollow = null;
   if (follow === null) {
     return null;
   }
   if (store.get().selectedProject !== follow.oldRoot && loadProjectChoice() !== follow.oldRoot) {
+    rebindFollow = null;
     return null;
   }
-  return projects.find((p) => p.id === follow.id)?.root ?? null;
+  const root2 = projects.find((p) => p.id === follow.id)?.root ?? null;
+  if (root2 === follow.oldRoot) {
+    return null;
+  }
+  rebindFollow = null;
+  return root2;
 }
 function openRebindProject(projectId, label) {
   if (rebindInFlight !== null) {
@@ -18384,7 +18389,6 @@ function openRebindProject(projectId, label) {
         let settled = false;
         const settle = () => {
           if (settled) {
-            refreshRegisteredProjects();
             return false;
           }
           settled = true;
@@ -18398,6 +18402,16 @@ function openRebindProject(projectId, label) {
           }
           refreshRegisteredProjects();
         };
+        const lateReply = (mayHaveLanded) => {
+          if (mayHaveLanded) {
+            followRegistry();
+            return;
+          }
+          if (rebindFollow?.id === projectId) {
+            rebindFollow = null;
+          }
+          refreshRegisteredProjects();
+        };
         const unanswered = window.setTimeout(() => {
           if (!settle()) return;
           if (modal === m) closeModal();
@@ -18408,11 +18422,17 @@ function openRebindProject(projectId, label) {
           );
         }, REBIND_ANSWER_MS);
         void rebindProject(projectId, path, tok).then(() => {
-          if (!settle()) return;
+          if (!settle()) {
+            lateReply(true);
+            return;
+          }
           if (modal === m) closeModal();
           followRegistry();
         }).catch((e) => {
-          if (!settle()) return;
+          if (!settle()) {
+            lateReply(isMutationOutcomeUncertain(e));
+            return;
+          }
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             followRegistry();

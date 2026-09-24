@@ -186,8 +186,10 @@ func activeRebindHome(t *testing.T) (*home, string) {
 	}
 	rec, err := config.RegisterProject(initTestGitRepo(t))
 	require.NoError(t, err)
+	// The row names the record's real root; it is the active project by its
+	// aggregation id, the way buildProjectList marks the scoped row.
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
-		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: rec.ID, MissingPath: true},
+		{Name: "active", Root: rec.Root, RepoID: h.repoID, RegistryID: rec.ID, MissingPath: true},
 	}, h.repoRoot)
 	h.projectPickerOverlay.SetMaxSize(80, 24)
 	h.state = stateSwitchProject
@@ -271,4 +273,37 @@ func TestRebindOfOtherProjectKeepsScope(t *testing.T) {
 
 	assert.Equal(t, rootBefore, h.repoRoot)
 	assert.Equal(t, idBefore, h.repoID)
+}
+
+// TestUncertainRebindThatLandedFollowsTheActiveProject pins the Codex finding
+// on #4789: the daemon durably writes the rebind, then the reply is lost. The
+// refreshed Projects list shows the new binding, so the active scope must follow
+// the registry exactly as a confirmed success does.
+func TestUncertainRebindThatLandedFollowsTheActiveProject(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	old := rebindProjectThroughDaemon
+	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+		if _, err := config.RebindProject(projectID, path); err != nil {
+			return config.Project{}, err
+		}
+		return config.Project{}, &apiclient.TransportError{Err: errors.New("read: connection reset by peer")}
+	}
+	t.Cleanup(func() { rebindProjectThroughDaemon = old })
+	newRoot := initTestGitRepo(t)
+
+	h.Update(submitPickerRebind(t, h, newRoot)())
+
+	assert.Equal(t, newRoot, h.repoRoot, "a rebind that landed behind a lost reply must still move the active scope")
+}
+
+// TestUncertainRebindThatNeverLandedKeepsScope is the control: the reply is
+// lost but the registry still names the old root, so the scope stays put.
+func TestUncertainRebindThatNeverLandedKeepsScope(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	rootBefore := h.repoRoot
+	stubRebind(t, &apiclient.TransportError{Err: errors.New("dial: connection refused")})
+
+	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+
+	assert.Equal(t, rootBefore, h.repoRoot)
 }
