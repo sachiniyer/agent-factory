@@ -14,6 +14,13 @@ type settleOwedEntry struct {
 	repoID   string
 	key      string
 	instance *session.Instance
+	// snapshot, when non-nil, is the exact row the retry must persist instead of
+	// re-reading the live instance. The stand-down discharge uses it so a failed
+	// marker clear is retried with the CLEARED row rather than the live instance:
+	// CompleteAdoptionDischarge restores the in-memory marker after the failed
+	// write, so a live re-read would write that restored marker back to disk and
+	// leave the durable marker set to re-arm a teardown after a restart.
+	snapshot *session.InstanceData
 }
 
 // A SETTLEMENT is the write that records the outcome of an irreversible step —
@@ -167,6 +174,9 @@ func (m *Manager) flushOneOwedSettlement(entry settleOwedEntry) error {
 	m.mu.Unlock()
 	if !registered || entry.instance.GetInFlightOp() != session.OpNone {
 		return nil
+	}
+	if entry.snapshot != nil {
+		return m.persistDischargeSnapshotSettlement(entry.repoID, entry.key, entry.instance, *entry.snapshot)
 	}
 	return m.persistSettlement(entry.repoID, entry.key, entry.instance)
 }

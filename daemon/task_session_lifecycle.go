@@ -607,7 +607,11 @@ func (m *Manager) fileOwedTaskLifecycle(repoID string, instance *session.Instanc
 // CompleteAdoptionDischarge closes the future with the persist result: on
 // success a parked delivery may proceed (the marker is durably gone); on
 // failure it is refused (the durable marker survived) and the in-memory marker
-// is restored for a re-attempt.
+// is restored for a re-attempt. That restore is why the durable clear is retried
+// with a snapshot of the CLEARED row (persistOwedTaskLifecycleDischargeRetryable)
+// rather than the live instance: a live re-read would checkpoint the restored
+// marker back to disk and leave the durable marker set, so a restart would
+// re-arm a teardown the stand-down already decided against.
 func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
 	m.mu.Lock()
 	inst := m.instances[daemonInstanceKey(repoID, title)]
@@ -619,7 +623,7 @@ func (m *Manager) dischargeOwedTaskLifecycle(repoID, sessionID, title string) {
 	if marker == nil {
 		return
 	}
-	err := m.persistOwedTaskLifecycle(repoID, inst)
+	err := m.persistOwedTaskLifecycleDischargeRetryable(repoID, inst)
 	inst.CompleteAdoptionDischarge(discharge, marker, err)
 }
 
@@ -679,6 +683,102 @@ func (m *Manager) persistOwedTaskLifecycleDischarge(repoID string, instance *ses
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	if err != nil {
 		return fmt.Errorf("the on_complete discharge for session %q could not be written to disk (the caller's delivery is refused; re-attempt it once the write can land): %w",
+			instance.Title, err)
+	}
+	return nil
+}
+
+// persistOwedTaskLifecycleDischargeRetryable is the stand-down discharge's
+// persist — the retryable twin of persistOwedTaskLifecycleDischarge. The delivery
+// notify (persistOwedTaskLifecycleDischarge) records NO retry: the refused
+// delivery is the retry, and an in-memory settleOwed retry would race the marker
+// restore. The stand-down has no caller to re-attempt it (a hook-timeout decision
+// leaves the session in place and returns), so a transient clear failure must be
+// retried by the poll. But the generic settleOwed retry re-reads the LIVE
+// instance, and CompleteAdoptionDischarge restores the in-memory marker after
+// the failed clear, so a live re-read would write that restored marker back to
+// disk instead of the intended clear — leaving the durable marker set to re-arm
+// a teardown after a restart (a hook-timeout stand-down reloaded with the marker
+// would proceed to archive or kill). This variant records a retry of the
+// marker-CLEARED snapshot (the row this write just attempted), so the poll
+// persists the discharge as it stood, not the restored fence. A later whole-row
+// write records under the same stable key and retires this retry, so a marker
+// filed after the discharge stood down is not clobbered.
+func (m *Manager) persistOwedTaskLifecycleDischargeRetryable(repoID string, instance *session.Instance) error {
+	key := daemonInstanceKey(repoID, instance.Title)
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	m.recordSettlementSnapshotWrite(repoID, key, instance, data, err)
+	if err != nil {
+		return fmt.Errorf("the on_complete discharge for session %q could not be written to disk "+
+			"(the daemon retries the cleared row on its poll; an unclean exit before it lands would re-arm the teardown): %w",
+			instance.Title, err)
+	}
+	return nil
+}
+
+// recordSettlementSnapshotWrite is the marker-discharge twin of
+// recordSettlementWrite: on failure it keeps a retry that persists the FIXED
+// snapshot the caller passed — the marker-cleared row the stand-down meant to
+// write — rather than a row re-read from the live instance on flush. A later
+// whole-row write (a new marker filing, or another settlement) records under the
+// same stable key and retires this entry, which is what keeps a snapshot retry
+// from overwriting a marker filed after the discharge stood down. Invoked before
+// the repo start lock is released, like its twin, so completion ordering cannot
+// invert the retry and the write it retries.
+func (m *Manager) recordSettlementSnapshotWrite(repoID, key string, instance *session.Instance, snapshot session.InstanceData, err error) {
+	owedKey := stableSessionKey(repoID, instance)
+	m.mu.Lock()
+	if err != nil {
+		if m.settleOwed == nil {
+			m.settleOwed = make(map[string]settleOwedEntry)
+		}
+		entry := settleOwedEntry{repoID: repoID, key: key, instance: instance}
+		entry.snapshot = &snapshot
+		m.settleOwed[owedKey] = entry
+	} else {
+		delete(m.settleOwed, owedKey)
+	}
+	m.mu.Unlock()
+}
+
+// persistDischargeSnapshotSettlement is the flush half of the snapshot retry: the
+// poll's FlushOwedSettlements dispatches here when a settleOwed entry carries a
+// snapshot. It persists that FIXED snapshot — the marker-cleared row a stand-down
+// discharge meant to write — instead of re-reading the live instance. The
+// discharge path restores the in-memory marker after a failed clear, so a live
+// re-read (persistSettlement) would checkpoint that restored marker back to disk
+// and leave the durable marker set to re-arm a teardown after a restart; the
+// snapshot is the cleared row the stand-down intended. The same repo-ordered
+// critical section guards the write and its bookkeeping, and the registration
+// guard retires the retry when the row has moved to a successor. Re-records the
+// same snapshot on failure so the cleared row stays eligible until the write lands.
+func (m *Manager) persistDischargeSnapshotSettlement(repoID, key string, instance *session.Instance, snapshot session.InstanceData) error {
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	m.mu.Lock()
+	registered := m.instances[key] == instance
+	m.mu.Unlock()
+	if !registered {
+		return nil
+	}
+	err := persistInstanceData(repoID, snapshot)
+	m.publishEvent(agentproto.EventSessionUpdated, snapshot)
+	m.recordSettlementSnapshotWrite(repoID, key, instance, snapshot, err)
+	if err != nil {
+		return fmt.Errorf("the discharged state for %q could not be written to disk "+
+			"(the daemon retries the cleared row on its poll; an unclean exit before it lands would re-arm the teardown): %w",
 			instance.Title, err)
 	}
 	return nil

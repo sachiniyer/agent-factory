@@ -205,6 +205,12 @@ func (i *Instance) NoteAdoptionDelivery() error {
 	// either returns, so the teardown reads both through the fence.
 	if i.discharge != nil {
 		wait := i.discharge
+		// Stamp this delivery in the same critical section that bumped its
+		// count (the discharging path stamps below): a delivery that parks on
+		// an in-flight discharge still mutates the instance, and the concurrent
+		// clear's persistence must not store the stale UpdatedAt this branch
+		// would otherwise leave behind.
+		i.touchLocked()
 		i.mu.Unlock()
 		<-wait.done
 		return wait.err

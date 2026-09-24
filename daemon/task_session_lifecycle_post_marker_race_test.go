@@ -137,7 +137,93 @@ func TestTaskSessionLifecycle_PostMarkerDischargePersistFailureRefusesDeliveryAn
 	require.NoError(t, json.Unmarshal(raw, &rows))
 	require.Len(t, rows, 1)
 	assert.NotContains(t, rows[0], "pending_on_complete",
-		"the retry's discharge is durable — no marker survives")
+		"the re-attempted discharge is durable — no marker survives")
+}
+
+// TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetriesTheClearedRow
+// pins the stand-down half of the durable-discharge contract after a transient
+// clear failure: the generic settlement retry that persisted the owed marker
+// before re-reads the LIVE instance, and CompleteAdoptionDischarge restores the
+// in-memory marker after the failed clear, so a live re-read would write the
+// restored marker back to disk and leave the durable marker set — re-arming a
+// teardown after a restart even though the stand-down already decided to leave
+// the session in place (a hook-timeout stand-down reloaded with the marker would
+// proceed to archive or kill). The fix retries the marker-CLEARED snapshot, so
+// the poll persists the discharge as it stood, not the restored fence.
+func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetriesTheClearedRow(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	endRunOnIdleEdge(t, inst)
+
+	// File the durable marker and install the discharge notify exactly as the
+	// completion edge does, without launching the lifecycle worker — the worker
+	// is irrelevant to the stand-down clear's retry contract under test.
+	manager.fileOwedTaskLifecycle(repo.ID, inst)
+	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
+
+	// Fail the stand-down discharge persist (the cleared row) only: it carries a
+	// TaskID with PendingOnComplete == nil, unlike the filing write (marker set)
+	// or the seed write (no TaskID).
+	prev := testHookPersistInstanceData
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "nightly" && data.TaskID != "" && data.PendingOnComplete == nil {
+			return errors.New("injected discharge persist failure (disk error)")
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+
+	// The stand-down clears the marker in memory and attempts the durable clear,
+	// which fails. CompleteAdoptionDischarge restores the in-memory marker and a
+	// retry of the cleared row is recorded for the poll to drain.
+	manager.dischargeOwedTaskLifecycle(repo.ID, inst.ID, inst.Title)
+
+	require.NotNil(t, inst.OwedOnComplete(),
+		"the in-memory marker is restored after the failed stand-down clear")
+
+	// The durable marker survives the failed clear.
+	raw, err := config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	var rows []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.Contains(t, rows[0], "pending_on_complete",
+		"the stand-down discharge did not persist — the durable marker survives the failed clear")
+
+	// A retry of the cleared row was recorded — not a generic live-state retry
+	// that would re-checkpoint the restored marker.
+	manager.mu.Lock()
+	assert.NotEmpty(t, manager.settleOwed, "the failed stand-down clear recorded a retry of the cleared row")
+	manager.mu.Unlock()
+
+	// Storage recovers. THE FIX: the next poll's FlushOwedSettlements must
+	// persist the CLEARED row and discharge the durable marker — not the live
+	// row, whose marker the failed clear restored and which a generic retry
+	// would write back to disk, leaving the marker set to re-arm a teardown.
+	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
+	manager.FlushOwedSettlements()
+
+	raw, err = config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	rows = nil
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.NotContains(t, rows[0], "pending_on_complete",
+		"the retry persists the marker-CLEARED row — the durable discharge lands once storage recovers, instead of re-checkpointing the restored marker")
+
+	// The retry is retired once the cleared write lands.
+	manager.mu.Lock()
+	assert.Empty(t, manager.settleOwed, "the retry is retired once the cleared row is durable")
+	manager.mu.Unlock()
 }
 
 // TestTaskSessionLifecycle_PostMarkerDeliveryRaceHonestReapWhenDischargeFailsBeforeUncleanExit
@@ -660,6 +746,13 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeSerializesConcurrentDe
 	}()
 	<-persistStarted
 
+	// Capture UpdatedAt before the concurrent delivery stamps its mutation. A
+	// delivery that parks on the in-flight discharge must still stamp in the same
+	// critical section that bumped its count (like the discharging path), or the
+	// concurrent stand-down clear's persistence would store the stale pre-delivery
+	// UpdatedAt this parking branch would otherwise leave behind.
+	preDelivery := inst.ToInstanceData().UpdatedAt
+
 	// Concurrent delivery: arrives while the stand-down's persist is still in
 	// flight. It takes i.mu, bumps the delivery count, finds nil owedOnComplete
 	// (the stand-down cleared it), captures the in-flight discharge future,
@@ -676,6 +769,13 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeSerializesConcurrentDe
 		return inst.AdoptionDeliveries() == 1
 	}, 5*time.Second, 25*time.Millisecond,
 		"the concurrent delivery bumps the count before parking on the stand-down's in-flight discharge future")
+
+	// The waiting delivery stamped UpdatedAt under i.mu before parking, so the
+	// instance mutation contract holds for a delivery that shares another
+	// caller's discharge — the branch does not return success over a stale
+	// timestamp the concurrent clear would then checkpoint.
+	assert.True(t, inst.ToInstanceData().UpdatedAt.After(preDelivery),
+		"a delivery that parks on an in-flight discharge still stamps UpdatedAt before releasing i.mu")
 
 	// Release the stand-down's discharge gate with a persist failure. The
 	// stand-down restores the in-memory marker and closes the discharge future
