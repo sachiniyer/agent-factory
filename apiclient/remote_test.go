@@ -156,7 +156,7 @@ func TestNewRemote_RESTRoundTripWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	got, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err != nil {
 		t.Fatalf("Snapshot over HTTP: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestNewRemote_WrongToken401(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRemote: %v", err)
 		}
-		_, err = c.Snapshot(daemon.SnapshotRequest{})
+		_, _, err = c.Snapshot(daemon.SnapshotRequest{})
 		if err == nil || !strings.Contains(err.Error(), "unauthorized") {
 			t.Fatalf("token %q: want unauthorized error, got %v", badTok, err)
 		}
@@ -256,7 +256,7 @@ func TestNewRemote_NeverRespondsAfterConnectTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.Snapshot(daemon.SnapshotRequest{})
+		_, _, e := c.Snapshot(daemon.SnapshotRequest{})
 		errc <- e
 	}()
 	select {
@@ -456,7 +456,7 @@ func TestNewRemote_SlowButProgressingResponseNotKilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRemote: %v", err)
 	}
-	got, err := c.Snapshot(daemon.SnapshotRequest{})
+	got, _, err := c.Snapshot(daemon.SnapshotRequest{})
 	if err != nil {
 		t.Fatalf("slow-but-progressing response must NOT be timed out, got %v", err)
 	}
