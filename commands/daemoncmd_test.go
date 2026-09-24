@@ -397,6 +397,54 @@ func TestRunDaemonRestart_FailedUnitRestartIsLoud(t *testing.T) {
 	}
 }
 
+// TestRunDaemonRestart_GatedUnitRestartIsLoud covers the OTHER demotion the
+// UnitErr test does not reach: when the post-shutdown ownership check cannot
+// determine whether the installed unit serves this home (for example, if the
+// unit becomes unreadable between the earlier refresh check and
+// unitRestartTarget), respawn conservatively starts an ad-hoc daemon and returns
+// UnitGateErr with no UnitErr. That branch loses login/reboot supervision just
+// the same, yet this command used to print only the success line over it.
+// runDaemonRestart now mirrors reportUpgradeRestart and routes the cause and
+// reinstall remedy to stderr.
+func TestRunDaemonRestart_GatedUnitRestartIsLoud(t *testing.T) {
+	gateErr := errors.New("autostart unit unreadable: permission denied")
+	out, errOut := daemonRestartPresentHarness(t, daemon.ShutdownViaRPC, respawnResult{UnitGateErr: gateErr})
+
+	if err := runDaemonRestart(out, errOut); err != nil {
+		t.Fatalf("runDaemonRestart: %v", err)
+	}
+
+	// The daemon IS running (just unsupervised), so the success line stands and
+	// is accurate; the warning qualifies it rather than replacing it.
+	if got := out.String(); got != "daemon restarted\n" {
+		t.Fatalf("stdout = %q, want the success line over the demotion", got)
+	}
+	if errOut.Len() == 0 {
+		t.Fatalf("a gated unit restart must reach the user, not just the log; stderr was empty.\nstdout=%q", out.String())
+	}
+	for _, want := range []string{
+		"autostart unit unreadable: permission denied", // names the gate failure
+		"was left alone",                // names that the unit was not touched
+		"unsupervised ad-hoc process",   // names the unsupervised fallback
+		"will not return at next login", // names the supervision loss
+		"af daemon install",             // names the repair
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("stderr missing %q.\ngot=%q", want, errOut.String())
+		}
+	}
+	// A gated restart attempted no unit restart, so the wording must not claim
+	// one failed (that is the UnitErr branch's message), and af daemon restart
+	// wrote no new binary, so it must not import the upgrade-specific "new
+	// binary" claim either.
+	if strings.Contains(errOut.String(), "could not be restarted") {
+		t.Fatalf("gated restart did not attempt a unit restart; stderr must not claim one failed.\ngot=%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "new binary") {
+		t.Fatalf("daemon restart never wrote a new binary; stderr must not claim one.\ngot=%q", errOut.String())
+	}
+}
+
 // TestRunDaemonRestart_CleanRestartIsQuiet locks the happy path against the
 // warning above becoming noise: a supervised (or genuinely ad-hoc) respawn with
 // no demotion must stay quiet on stderr and print the plain success line. The

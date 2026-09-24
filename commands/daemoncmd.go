@@ -456,16 +456,29 @@ func runDaemonRestart(w, errOut io.Writer) error {
 		fmt.Fprintln(w, "daemon restarted")
 	}
 	// The success line above is true only as far as "a daemon is running": a
-	// respawn whose autostart unit restart failed fell back to an ad-hoc daemon
-	// and lost systemd/launchd supervision — it dies with the session and will
-	// not return at next login. Printing plain success over that demotion is
-	// the exact anti-pattern respawnDaemonAfterUpgrade's contract names as
-	// "half of #1947"; `af upgrade` reports the same demotion via
-	// reportUpgradeRestart. af daemon restart wrote no new binary, so the
-	// wording names only the supervision loss and the repair.
+	// respawn that fell back to an ad-hoc daemon — because the autostart unit's
+	// restart failed (UnitErr) or because its ownership of this home could not
+	// be determined so it was left alone (UnitGateErr) — lost systemd/launchd
+	// supervision. It dies with the session and will not return at next login.
+	// Printing plain success over that demotion is the exact anti-pattern
+	// respawnDaemonAfterUpgrade's contract names as "half of #1947"; `af
+	// upgrade` reports the same demotions via reportUpgradeRestart. af daemon
+	// restart wrote no new binary, so the wording names only the supervision
+	// loss and the repair.
 	if result.Respawn.UnitErr != nil {
 		fmt.Fprintf(errOut, "The daemon autostart unit could not be restarted: %v\n", result.Respawn.UnitErr)
 		fmt.Fprintln(errOut, "The daemon was restarted as an ad-hoc process instead: it is unsupervised and will not return at next login. Re-register it with `af daemon install`.")
+	}
+	if result.Respawn.UnitGateErr != nil {
+		fmt.Fprintf(errOut, "The daemon autostart unit was left alone: %v\n", result.Respawn.UnitGateErr)
+		fmt.Fprintln(errOut, "Restarting a unit we cannot prove serves this AF home could stop an unrelated daemon, so the daemon was restarted as an unsupervised ad-hoc process: it will not return at next login.")
+		// NOT `af daemon restart`: that re-enters this same respawn, hits this
+		// same gate, and falls back to an ad-hoc daemon again — it would look
+		// like it worked while leaving supervision just as broken. Only a
+		// reinstall re-registers the unit for THIS home (InstallAutostart
+		// bakes the current AGENT_FACTORY_HOME and starts it), so it is the
+		// only repair that ends with the daemon supervised.
+		fmt.Fprintln(errOut, "Re-register this home's unit with `af daemon install` to restore supervision.")
 	}
 	return nil
 }
