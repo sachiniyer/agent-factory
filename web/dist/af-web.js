@@ -6859,7 +6859,7 @@ async function reapConfigAssistant(token2) {
 async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -7624,6 +7624,9 @@ function controlKind(e) {
 function canCommit(shown, current) {
   return shown !== current;
 }
+function shouldCloseSavedField(status, editing, statusIsNew) {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
 function saveNotice(resp) {
   const parts = [];
   const warnings = resp.warnings ?? [];
@@ -7675,6 +7678,11 @@ var ConfigPane = class {
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  restoreKey = null;
   advancedToggle = null;
   lastEntries = null;
   lastStatus = null;
@@ -7685,6 +7693,7 @@ var ConfigPane = class {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
       return;
     }
+    const statusIsNew = status !== this.lastStatus;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7697,7 +7706,7 @@ var ConfigPane = class {
     this.path = path;
     this.status = status;
     this.accounts = accounts;
-    if (status && !status.error && status.key === this.editing) {
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
     }
@@ -7730,7 +7739,9 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    this.restoreKey = null;
     this.restoreAccountDrafts(accountDrafts);
     if (wasEditing && this.editingInput) {
       this.editingInput.focus({ preventScroll: true });
@@ -7897,6 +7908,9 @@ var ConfigPane = class {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
     if (this.editing === e.key) {
+      this.editingInput = input;
+    }
+    if (this.restoreKey === e.key && this.editingInput === null) {
       this.editingInput = input;
     }
     input.setAttribute("aria-label", e.key);
@@ -11334,7 +11348,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   queueMicrotask(() => titleInput.focus());
   return handle;
 }
-function handoffModal(sessionTitle, currentAgent, callbacks) {
+function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
   const { handle, body, confirmBtn } = modalChrome({
     title: `Hand off ${sessionTitle}`,
     confirmLabel: "Hand off",
@@ -11344,24 +11358,33 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  const isCurrentAgent = (agent) => handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
+  const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = () => {
-    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
     const agent = agentSelect.value;
-    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    const choices = handoffAccountChoices(
+      accounts,
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
+    );
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[agent];
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
     const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
     accountSelect.value = selected?.value ?? "";
     accountSelect.disabled = choices.length === 0;
@@ -11382,12 +11405,18 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     if (catalogChoices === null || !accountsLoaded) return;
     const hasAccount = (agent) => handoffAccountChoices(
       accounts,
-      agent,
-      agent === currentAgent ? callbacks.currentAccount : ""
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
     ).length > 0;
-    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
-      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map((choice) => choice.value),
+      currentAgent,
+      recordedProgram,
+      accounts.resolved_agents
+    );
+    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
     renderChoices(choices);
@@ -11406,7 +11435,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
-    catalogChoices = handoffAgentChoices(catalog, currentAgent);
+    catalogChoices = handoffAgentChoices(catalog, "");
     refreshAgentChoices();
   }).catch(() => {
     renderChoices([]);
@@ -11442,6 +11471,17 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   });
   queueMicrotask(() => agentSelect.focus());
   return handle;
+}
+function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram) {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
+}
+function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, resolvedAgents) {
+  const matched = catalogValues.find((value) => handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== void 0) return matched;
+  return resolvedAgents === void 0 ? currentAgent : void 0;
 }
 function deletionConfirmationBody(opts) {
   if (opts.archived && opts.offBox) {
@@ -18210,9 +18250,11 @@ function openDeleteProject(root2, label) {
         }
         const m = modal;
         m.setBusy(true);
-        void deleteProject(root2, tok).then(closeModal).catch((e) => {
+        void deleteProject(root2, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             requestResync();
             refreshRegisteredProjects();
             surfaceTabError(e);
@@ -18248,7 +18290,9 @@ function openAddProject() {
         }
         const m = modal;
         m.setBusy(true);
-        void registerProject(path, tok).then(closeModal).catch((e) => {
+        void registerProject(path, tok).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -18511,11 +18555,17 @@ function doRegisterAccount(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void registerAccount(agent, name, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshAccounts();
+      return;
+    }
     const notices = resp.notices?.length ? ` \xB7 ${resp.notices.join(" \xB7 ")}` : "";
     setAccountStatus(agent, "", `Registered ${agent} account "${resp.entry.name}"${notices}`, false);
     refreshAccounts();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, "", errorText(err), true);
   });
 }
@@ -18524,8 +18574,10 @@ function doOpenAccountLogin(agent, name) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   setAccountStatus(agent, name, `Starting the ${agent} login\u2026`, false);
   void startAccountLogin(agent, name, tok).then((login) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (login.finished || login.session_name === "") {
       const copy = loginWithoutPaneCopy(login);
       setAccountStatus(agent, name, `${copy.status} \xB7 ${copy.detail}`, !login.logged_in);
@@ -18544,6 +18596,7 @@ function doOpenAccountLogin(agent, name) {
       }
     }));
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     setAccountStatus(agent, name, errorText(err), true);
   });
 }
@@ -18556,7 +18609,12 @@ function applyConfigValue(key, value) {
   queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
 function applyConfigValueNow(key, value, tok) {
+  const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) {
+      refreshConfig();
+      return;
+    }
     store.set({
       configStatus: {
         key: resp.result.key,
@@ -18568,6 +18626,7 @@ function applyConfigValueNow(key, value, tok) {
     });
     refreshConfig();
   }).catch((err) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
@@ -18647,11 +18706,11 @@ function openAddTask() {
         const m = modal;
         m.setBusy(true);
         void addTask(buildTask(input), tok).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18692,11 +18751,11 @@ function openEditTask(task) {
           },
           tok
         ).then(() => {
-          closeModal();
+          if (modal === m) closeModal();
           refreshTasks();
         }).catch((e) => {
           if (isMutationCommittedError(e)) {
-            closeModal();
+            if (modal === m) closeModal();
             refreshTasks();
             surfaceTabError(e);
             return;
@@ -18749,7 +18808,7 @@ function doHandoff() {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
@@ -18761,7 +18820,9 @@ function doHandoff() {
         }
         const m = modal;
         m.setBusy(true);
-        void handoffSession(target.id, target.title, to, tok, account).then(closeModal).catch((e) => {
+        void handoffSession(target.id, target.title, to, tok, account).then(() => {
+          if (modal === m) closeModal();
+        }).catch((e) => {
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             requestResync();
@@ -18786,9 +18847,15 @@ function doRemoveTask(task) {
     const handle = modal;
     handle.setBusy(true);
     void removeTask(task, tok).then(() => {
-      closeModal();
+      if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
+      if (isMutationCommittedError(error)) {
+        if (modal === handle) closeModal();
+        refreshTasks();
+        surfaceTabError(error);
+        return;
+      }
       handle.setBusy(false);
       handle.setError(errorText(error));
     });

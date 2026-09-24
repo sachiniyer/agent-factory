@@ -187,6 +187,50 @@ func TabKindRequires(kind TabKind) TabKindNeed {
 	}
 }
 
+// TabExit records how a process tab's command ended (#4479). Either af saw the
+// pane dead and stamped the exit status and death time tmux reported, or af
+// stopped the command itself and StoppedBy says why. It is never inferred from
+// the session's absence. Status is meaningful only when StatusKnown: a signal
+// death, or a tmux too old to report the code, still proves the command
+// finished.
+type TabExit struct {
+	Status      int
+	StatusKnown bool
+	At          time.Time
+	// StoppedBy is empty when the command exited on its own. Otherwise it is one
+	// of the TabStoppedBy* values, and At is when af stopped it.
+	StoppedBy string
+}
+
+// Why af stopped a process tab's still-running command (#4506 review). A
+// process command is never re-run, so the row has to say why it went inert.
+const (
+	// TabStoppedByAccountScope: the pane was started before the session's
+	// account scope, or under another account, so restore stopped it rather
+	// than leave it running on the wrong identity.
+	TabStoppedByAccountScope = "account-scope"
+	// TabStoppedByAccountSwap: an account swap stopped it with the rest of the
+	// session's panes.
+	TabStoppedByAccountSwap = "account-swap"
+)
+
+// tabExitFromData and data convert between Tab.Exit and its wire form; nil
+// maps to nil both ways. Every roster rebuild — load, reconcile, the root
+// heal's carry — goes through them, so none can drop the field (#4506 review).
+func tabExitFromData(d *TabExitData) *TabExit {
+	if d == nil {
+		return nil
+	}
+	return &TabExit{Status: d.Status, StatusKnown: d.StatusKnown, At: d.At, StoppedBy: d.StoppedBy}
+}
+
+func (e *TabExit) data() *TabExitData {
+	if e == nil {
+		return nil
+	}
+	return &TabExitData{Status: e.Status, StatusKnown: e.StatusKnown, At: e.At, StoppedBy: e.StoppedBy}
+}
+
 // Tab is one slot in an instance's tab roster (#930): the Agent tab at Tabs[0]
 // and any shell/process tabs each run a process backed by their own tmux
 // session, while web and VS Code tabs carry no tmux PTY (TabKind.HasTmux). The
@@ -239,15 +283,40 @@ type Tab struct {
 	// pins the branch tip at swap time, which is what makes per-agent attribution
 	// a checkable git range.
 	Handoffs []AgentHandoff
+	// Exit is the recorded finish of a process tab's command (#4479): the
+	// status and time af observed the pane dead. nil while the command is
+	// running, was never observed to exit, or the tab is not a process tab —
+	// a nil Exit never claims the command is still live, it claims nothing.
+	// It is what lets restore treat "session gone" as finished evidence
+	// instead of a command to re-execute.
+	Exit *TabExit
 	// tmux is the tab's tmux session. nil until the instance is started, and
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.
 	tmux *tmux.TmuxSession
+	// accountScope is the account af launched this tab's pane under, or "" when
+	// af launched it on the ambient identity or never recorded one (a row
+	// written before #4506). It is the persisted provenance that decides
+	// accountScopeProvenanceUnknown at load.
+	accountScope string
 	// accountScopeProvenanceUnknown marks a tmux-backed sibling reconstructed
-	// from disk. Its still-live pane may predate account scoping, so the first
-	// restore must replace it before the handle can be treated as scoped. Tabs
-	// created by this daemon leave it false and survive an agent-only respawn.
+	// from disk whose recorded launch account is not the session's account. Its
+	// still-live pane may predate account scoping, so the first restore must stop
+	// it before the handle can be treated as scoped. A tab af launched under the
+	// session's account leaves it false and survives restarts (#4506 review).
 	accountScopeProvenanceUnknown bool
+	// inert marks a process tab whose session restore found definitively
+	// absent. Nothing respawns a process tab, so it stays that way for this
+	// daemon's lifetime, and an account swap has no pane of it to observe
+	// (#4506 review).
+	inert bool
+}
+
+// siblingScopeUnknown decides accountScopeProvenanceUnknown for a sibling
+// rebuilt from its record: only a pane af did not record launching under the
+// session's current account needs the stop.
+func siblingScopeUnknown(sessionAccount, recordedScope string) bool {
+	return sessionAccount != "" && recordedScope != sessionAccount
 }
 
 // newAgentTab returns the single Agent-kind tab that wraps an instance's tmux

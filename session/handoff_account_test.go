@@ -1,9 +1,12 @@
 package session
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -12,7 +15,7 @@ func TestHandoffAccountPreservesCustomProgram(t *testing.T) {
 	inst.Program = "claude --model opus"
 	inst.Account = "work"
 	require.NoError(t, inst.BeginManualAccountSwap())
-	entry, err := inst.SelectAccountForHandoff("work", "personal", "claude", HandoffReasonManual, "tip", "continue")
+	entry, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	require.Equal(t, "claude --model opus", inst.AgentProgram())
 	require.Equal(t, "claude --model opus", inst.ToInstanceData().Program)
@@ -20,7 +23,7 @@ func TestHandoffAccountPreservesCustomProgram(t *testing.T) {
 	require.Equal(t, "claude", entry.To)
 	require.Equal(t, "work", entry.FromAccount)
 	require.Equal(t, "personal", entry.ToAccount)
-	require.Len(t, inst.Handoffs(), 1)
+	require.Len(t, inst.Tabs[0].Handoffs, 1)
 	require.NoError(t, inst.RevertHandoff(entry))
 	require.Equal(t, "claude --model opus", inst.AgentProgram())
 }
@@ -125,4 +128,33 @@ func TestParkManualAccountSwapRecordsMissionNonDelivery(t *testing.T) {
 	require.Equal(t, PromptNotDelivered, inst.ToInstanceData().PendingAccountSwap.MissionDeliveryStatus)
 	require.False(t, inst.PendingManualAccountSwapDeliveryUnconfirmed(),
 		"an incoming limit observed before submission must retain scheduled recovery")
+}
+
+// A committed AUTOMATIC swap's retry resolves the account in the namespace the
+// commit recorded — for a legacy pending record that namespace is the durable
+// accountAgent pin, not a fresh resolution under overrides that may have moved
+// since (#4430 review round 6). With claude→codex at commit and claude→gemini
+// after, resolving fresh would look "personal" up in gemini's registry — a
+// different account of the same name — while the pin keeps codex's.
+func TestValidateAccountSwap_CommittedAutoRetryUsesThePinnedNamespace(t *testing.T) {
+	saveProgramOverrides(t, map[string]string{tmux.ProgramClaude: tmux.ProgramGemini})
+	inst := accountSwapTestInstance(tmux.ProgramClaude)
+	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
+	inst.Path = initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	registerAccount(t, tmux.ProgramCodex, "personal")
+	// The committed transaction: the identity checkpoint already moved the
+	// session to "personal" inside codex's registry, and the durable pin is the
+	// only namespace record — the pending entry is the legacy shape with none.
+	inst.Account, inst.accountAutoSelected = "personal", true
+	inst.accountAgent = tmux.ProgramCodex
+	inst.pendingAccountSwap = &AccountSwapData{From: "work", To: "personal"}
+
+	require.NoError(t, inst.ValidateAccountSwap("personal"),
+		"the retry must resolve personal inside the pinned codex namespace")
+	require.NotNil(t, inst.accountSwapLaunch)
+	require.True(t, strings.HasPrefix(inst.accountSwapLaunch.program, tmux.ProgramCodex),
+		"the retry launches the committed codex command, got %q", inst.accountSwapLaunch.program)
 }

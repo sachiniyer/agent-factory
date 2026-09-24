@@ -28,9 +28,11 @@ func previewFromInstance(instance *session.Instance, tab int, full bool) (Previe
 		err     error
 	)
 	if full {
-		content, err = instance.PreviewTabFullHistory(tab)
+		snap, snapErr := instance.PreviewTabSnapshot(tab, true)
+		content, err = snap.Content, snapErr
 	} else {
-		content, err = instance.PreviewTab(tab)
+		snap, snapErr := instance.PreviewTabSnapshot(tab, false)
+		content, err = snap.Content, snapErr
 	}
 	return hostPreview(content), err
 }

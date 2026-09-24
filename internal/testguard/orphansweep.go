@@ -187,9 +187,24 @@ func (e *sweepEnv) classifyDir(dir string) (verdict ownerVerdict, stamped bool, 
 		return ownerUnknown, true, "owner stamp names a different pid namespace"
 	}
 	// Same namespace, different boot: the stamped instance cannot still
-	// exist. (The boot fallback is the namespace id itself, so a fallback
-	// boot id can only differ when the namespace already did.)
-	if stamp.bootID != e.bootID {
+	// exist — but only when BOTH boot ids are the kernel's strong UUID.
+	// proctree.BootID falls back to the PID-namespace identity ("pidns:…")
+	// when a subset=pid procfs hides /proc/sys/kernel/random/boot_id, and
+	// that fallback is governed by the MOUNT namespace, not the PID
+	// namespace. Two processes CAN share a PID namespace (so the nsID gate
+	// above passed) yet disagree on boot id because one read the fallback
+	// and the other read the real UUID. The fallback scopes identity to the
+	// namespace but can be reused after a host reboot, so the proctree.BootID
+	// contract requires a persisted destructive action that crosses the
+	// fallback boundary to pair the mismatch with proof from the live
+	// process (see BootIDIsFallback). Only when both ids are strong is a
+	// mismatch proof of death: a reboot ended every instance the stamp
+	// could name. When either side is a fallback, fall through to the
+	// live-process lookup below, which itself errs toward leaving
+	// (ownerUnknown) when it cannot read.
+	if stamp.bootID != e.bootID &&
+		!proctree.BootIDIsFallback(stamp.bootID) &&
+		!proctree.BootIDIsFallback(e.bootID) {
 		return ownerDead, true, "owner stamp names a different boot"
 	}
 	cur, err := e.lookup(stamp.pid)
@@ -239,11 +254,11 @@ func (e *sweepEnv) sweep(baseDir string) sweepStats {
 	}
 	for _, entry := range entries {
 		// testresidue owns which names this package creates: the exact
-		// MkdirTemp shape of IsolateTmux, SandboxTmux and SandboxHome, and
-		// nothing merely starting with one of their prefixes. SocketTempDir's
-		// af-* dirs are per-test t.TempDir-cleaned and deliberately not
-		// matched. An exact name test over the listing rather than
-		// filepath.Glob on purpose: a TMPDIR containing a glob metacharacter
+		// MkdirTemp shape of IsolateTmux, SandboxTmux, SandboxHome and the
+		// sandboxed HOME, and nothing merely starting with one of their prefixes.
+		// SocketTempDir's af-* dirs are per-test t.TempDir-cleaned and
+		// deliberately not matched. An exact name test over the listing rather
+		// than filepath.Glob on purpose: a TMPDIR containing a glob metacharacter
 		// would make Glob misread or fail the pattern and silently sweep
 		// nothing.
 		kind := testresidue.Classify(entry.Name())
@@ -252,7 +267,11 @@ func (e *sweepEnv) sweep(baseDir string) sweepStats {
 		}
 		// Only a tmux socket dir is a TMUX_TMPDIR, so only it can hold a
 		// tmux server to stop. A SandboxHome is an AGENT_FACTORY_HOME and is
-		// removed without kill-server.
+		// removed without kill-server. A sandboxed HOME holds neither a server
+		// nor a socket, and carries no owner stamp (sandboxUserHome never writes
+		// one), so it reads as unstamped below — counted as unattributed and
+		// left in place, which keeps the leak visible until `af doctor` clears
+		// it on content (#4170 sandbox-HOME regression).
 		isTmux := kind == testresidue.TmuxSocketDir
 		dir := filepath.Join(baseDir, entry.Name())
 		info, err := os.Stat(dir)

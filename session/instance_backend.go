@@ -251,7 +251,7 @@ func (i *Instance) runLiveBoundary() {
 
 // Respawn re-establishes the instance's backing session in place without a
 // liveness precondition — the guard-free core of Recover. The usage-limit
-// manual-retry (#1146, resumeFromLimit) uses it to re-spawn an agent that exited
+// manual-retry (#1146, resumeFromLimitOutcome) uses it to re-spawn an agent that exited
 // while blocked at a limit wall: that session is LiveLimitReached, which Recover's
 // !Lost guard rejects, but the re-spawn mechanics are identical. The caller owns
 // the precondition, enforced here before the guard-free backend core runs.
@@ -425,6 +425,11 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	}
 	if target := i.AgentProgram(); target != plan.target || strings.TrimSpace(plan.program) == "" {
 		return InstanceData{}, fmt.Errorf("session %q handoff plan no longer matches its recorded target", i.Title)
+	}
+	// A record still carrying an account at this boundary skipped the handoff
+	// transaction's scope decision (#4428); refuse before any pane is touched.
+	if err := i.handoffUnsettledAccountError(plan); err != nil {
+		return InstanceData{}, err
 	}
 	if plan.conversation.HasID() {
 		i.SetAgentConversation(plan.conversation)
