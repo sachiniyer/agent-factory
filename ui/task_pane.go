@@ -550,6 +550,16 @@ func (s *TaskPane) DeleteTask(id string) bool {
 		if s.tasks[i].ID == id {
 			s.selectedIdx = i
 			s.deleteSelectedTask()
+			// A delete confirmed from inside the edit form (the app layer
+			// routes edit-mode D through the same confirmation as list mode)
+			// returns the pane to list mode — mirroring Esc without dropping
+			// overlay focus — so the removed task's stale form is not left
+			// open over a shifted selection.
+			if s.editing {
+				s.editing = false
+				s.editError = ""
+				s.editErrorField = -1
+			}
 			return true
 		}
 	}
