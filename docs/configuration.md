@@ -666,7 +666,7 @@ ignored, so the setting it was meant to carry has no effect. af warns about it:
 on stderr when you run an `af` command (except under `--json`, whose stderr is
 reserved for the envelope), as a WARNING in the log (including the daemon's), and
 as a WARN finding in `af doctor`. The warning names the file and the key and,
-when a known key is close, suggests it (`did you mean run_args?`). Key case does
+when a known key is close, suggests it (`did you mean "run_args"?`). Key case does
 not matter: `Image` and `image` are the same key. A later release will refuse to
 load a file with an unknown `[docker]`/`[ssh]` key, so fix these when you see
 them ([#4845](https://github.com/sachiniyer/agent-factory/issues/4845)).

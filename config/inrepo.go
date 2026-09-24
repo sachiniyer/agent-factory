@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -102,7 +105,183 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 var (
 	inRepoAllowedKeys    = manifestKeysForSource(SourceRepoShared)
 	inRepoGlobalOnlyKeys = manifestGlobalOnlyKeySet()
+
+	// inRepoAllowedTableLeaves mirrors the top-level inRepoAllowedKeys
+	// check at the leaf level for the [docker] and [ssh] tables. An
+	// unknown/typo'd leaf under an allowed table (e.g. "runargs" for
+	// "run_args") earns a loud warning at load — naming the file, the
+	// unknown leaf, the likely intended key, and the allowed set — so the
+	// silent drop of Go's non-strict unmarshalling cannot change runtime
+	// behavior without a diagnostic. Per the owner's "warn now, reject
+	// later" decision the config still loads; turning the warning into a
+	// hard error is a later, separate change with a changelog note. Each
+	// set is derived from the same struct the typed decode targets, so
+	// adding a field to DockerConfig/SSHConfig automatically admits it
+	// here. The comparison folds case against the shape key (see
+	// LoadInRepoConfig): the typed decoders match field names
+	// case-insensitively, so a spelling the decode accepts (e.g. [docker]
+	// Image) is admitted here too, and the warning lands on spellings the
+	// decode does not accept — typos.
+	inRepoAllowedTableLeaves = map[string]map[string]bool{
+		"docker": inRepoTableLeavesFor(reflect.TypeOf(DockerConfig{})),
+		"ssh":    inRepoTableLeavesFor(reflect.TypeOf(SSHConfig{})),
+	}
 )
+
+// inRepoTableLeavesFor derives the set of leaf key names the typed decoder
+// accepts under a table-typed in-repo field, from the struct's toml and json
+// tags (struct tags in this package are lowercase, so the set is lowercase).
+// metadataForSource decodes sub-tables as map[string]any for both TOML
+// (go-toml/v2) and JSON (encoding/json), preserving the file's original key
+// casing in the shape; the leaf check in LoadInRepoConfig therefore lowercases
+// each shape key before lookup, matching the case-insensitive field matching
+// of both decoders.
+func inRepoTableLeavesFor(typ reflect.Type) map[string]bool {
+	leaves := map[string]bool{}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		for _, tag := range []string{field.Tag.Get("toml"), field.Tag.Get("json")} {
+			name := structTagName(tag)
+			if name == "" || name == "-" {
+				continue
+			}
+			leaves[name] = true
+		}
+	}
+	return leaves
+}
+
+// sortedKeysFrom returns the sorted keys of a bool-valued map for
+// deterministic error messages.
+func sortedKeysFrom(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// unknownTableLeafWarned memoizes which in-repo (file, table, leaf) sources
+// have already received the unknown-leaf warning. The daemon loads in-repo
+// config repeatedly per session-create — the same pattern that made the
+// un-memoized auto_yes notice the single largest source of WARNING noise in
+// agent-factory.log (#2496) — so an unknown leaf deserves ONE warning per
+// source, not one per load. The key embeds the config path, the table, and
+// the leaf, so two distinct offending leaves each still warn while a re-read
+// of the same file/leaf stays silent. It is process-scoped: the long-lived
+// daemon warns once per lifetime, a short-lived CLI warns once and exits.
+// sync.Map keeps the check-and-set atomic for the concurrent loads a
+// session-create issues. Mirrors removedAutoYesWarned in removed.go.
+var unknownTableLeafWarned sync.Map
+
+// warnUnknownTableLeaf emits the loud, load-surviving warning for an
+// unknown/typo'd leaf under an allowed [docker]/[ssh] table. It names the
+// in-repo file, the unknown leaf, its table, the likely intended key when
+// the typo is close enough to an allowed one ("did you mean run_args?"),
+// and the full allowed set. The warning reaches every surface that loads
+// the in-repo config through the shared project logger (log.WarningLog):
+// CLI stderr, the daemon log as WARNING, and af doctor's load-time
+// output. The config still loads — a hard rejection is a later, separate
+// change — so the typed decode below ignores the typo'd value and the
+// sibling, correctly-spelled leaves decode normally.
+func warnUnknownTableLeaf(prettyPath, table, leaf string, allowed map[string]bool) InRepoUnknownLeaf {
+	unknown := newInRepoUnknownLeaf(prettyPath, table, leaf, allowed)
+	source := fmt.Sprintf("in-repo %s:%s.%s", prettyPath, table, leaf)
+	if _, seen := unknownTableLeafWarned.LoadOrStore(source, struct{}{}); seen {
+		return unknown
+	}
+	log.WarningLog.Print(unknown.Message)
+	writeInteractiveWarning(unknown.Message)
+	return unknown
+}
+
+// newInRepoUnknownLeaf builds the report for one unknown leaf, including the
+// one-line message every surface shows (log, CLI stderr, af doctor).
+func newInRepoUnknownLeaf(prettyPath, table, leaf string, allowed map[string]bool) InRepoUnknownLeaf {
+	suggestion := closestTableLeafSuggestion(strings.ToLower(leaf), allowed)
+	didYouMean := ""
+	if suggestion != "" {
+		didYouMean = fmt.Sprintf(" did you mean %q?", suggestion)
+	}
+	return InRepoUnknownLeaf{
+		Path:       prettyPath,
+		Table:      table,
+		Key:        leaf,
+		Suggestion: suggestion,
+		Message: fmt.Sprintf("in-repo config %s: unknown key %q under %q is ignored;%s the config still loads (allowed %s keys: %s)",
+			prettyPath, leaf, table, didYouMean, table, strings.Join(sortedKeysFrom(allowed), ", ")),
+	}
+}
+
+// closestTableLeafSuggestion returns the allowed leaf a typo most likely
+// intended, or "" when no allowed key is close enough to be worth
+// suggesting. A wide miss (e.g. a random key against a two-entry docker
+// set) is more noise than help, so the closest match must be within a small
+// edit distance of the typo: <= max(2, len(typo)/2). Both the typo and the
+// allowlist are lowercased first, matching the case-folded comparison the
+// typed decoders perform and the lookup in LoadInRepoConfig.
+func closestTableLeafSuggestion(target string, allowed map[string]bool) string {
+	best := ""
+	bestDist := -1
+	for _, key := range sortedKeysFrom(allowed) {
+		d := editDistance(target, key)
+		if best == "" || d < bestDist {
+			best = key
+			bestDist = d
+		}
+	}
+	threshold := 2
+	if n := len(target) / 2; n > threshold {
+		threshold = n
+	}
+	if best == "" || bestDist > threshold {
+		return ""
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between a and b — the minimum
+// number of single-character insertions, deletions, or substitutions that
+// turn one into the other. Used only to score how close a typo'd leaf is to
+// each allowed leaf in closestTableLeafSuggestion.
+func editDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = min(prev[j]+1, min(curr[j-1]+1, prev[j-1]+cost))
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
+}
+
+// resetUnknownTableLeafWarnings clears the once-per-source memo, so a test
+// asserting the warning fires regardless of whether an earlier test in the
+// same process already warned for the same source string. Tests call it
+// directly (captureLog resets the sibling memos but not this one).
+func resetUnknownTableLeafWarnings() {
+	unknownTableLeafWarned.Clear()
+}
 
 // InRepoConfigPath returns the path of the in-repo JSON config file for a
 // repo root. The file is optional; callers should use LoadInRepoConfig rather
@@ -328,15 +507,47 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		}
 	}
 
-	// Unknown/typo'd leaves under the allowed [docker] and [ssh] tables are
-	// silently discarded by the non-strict typed decode below, so docker.runargs
-	// would load with err == nil and docker run would start without the flags.
-	// They are collected here and warned about, not rejected: rejecting would
-	// break repos whose config loads today, so the hard error is deferred to a
-	// later release (#4845). Global-only grouped leaves (for example
-	// docker.mount_agent_credentials) were already rejected above by
-	// globalOnlyGroupedAliasInShape and never reach this walk.
-	unknownLeaves := inRepoUnknownTableLeaves(metadata.shape, prettyPath)
+	// Warn on unknown/typo'd leaves under the allowed [docker] and [ssh]
+	// tables. The top-level allowlist above admits these tables, but the
+	// typed decode below uses Go's non-strict unmarshalling, which silently
+	// discards any leaf not on DockerConfig/SSHConfig. A typo like
+	// docker.runargs is therefore dropped with err == nil, and downstream
+	// code sees the zero value — for docker.run_args that means docker run
+	// starts without the intended flags and no error is ever emitted. Walk
+	// the shape's nested tables (which metadataForSource decoded as
+	// map[string]any for both TOML and JSON) and, for any leaf not in the
+	// struct-tag-derived allowlist, emit a loud warning via
+	// warnUnknownTableLeaf. Per the owner's "warn now, reject later"
+	// decision the config still loads; turning the warning into a hard
+	// error is a later, separate change with a changelog note. The typed
+	// decode below ignores the typo'd value, sibling correct leaves decode
+	// normally, and global-only grouped leaves (e.g.
+	// docker.mount_agent_credentials) are already hard-rejected above by
+	// globalOnlyGroupedAliasInShape, so they are not re-reachable here.
+	var unknownLeaves []InRepoUnknownLeaf
+	for table, allowed := range inRepoAllowedTableLeaves {
+		raw, present := metadata.shape[table]
+		if !present {
+			continue
+		}
+		sub, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for leaf := range sub {
+			// Fold case to match the typed decoders: encoding/json and
+			// go-toml/v2 both match field names case-insensitively, so a
+			// spelling like [docker] Image would be accepted by the typed
+			// decode into DockerConfig. The leaf check lowercases the shape
+			// key (whose casing is preserved from the file by
+			// metadataForSource) before the allowlist lookup so such
+			// spellings load cleanly and the warning lands on genuine
+			// typos (e.g. "runargs", "iamge") instead.
+			if !allowed[strings.ToLower(leaf)] {
+				unknownLeaves = append(unknownLeaves, warnUnknownTableLeaf(prettyPath, table, leaf, allowed))
+			}
+		}
+	}
 
 	var cfg InRepoConfig
 	if isToml {
@@ -350,8 +561,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 	cfg.setKeys = presentKeys
 	cfg.source = metadata
-	cfg.unknownLeaves = unknownLeaves
-	warnInRepoUnknownLeaves(unknownLeaves)
+	cfg.unknownLeaves = sortInRepoUnknownLeaves(unknownLeaves)
 
 	if cfg.IsSet("default_program") {
 		if err := ValidateProgramEnum(

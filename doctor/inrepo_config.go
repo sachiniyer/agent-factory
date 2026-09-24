@@ -43,7 +43,7 @@ func checkInRepoUnknownLeaves(ctx *scanContext, report *Report) {
 			remedy = "rename " + leaf.Table + "." + leaf.Key + " to " + leaf.Table + "." + leaf.Suggestion + " in " + leaf.Path
 		}
 		// The row is already named "in-repo config"; don't say it twice.
-		detail := strings.TrimPrefix(leaf.Message(), "in-repo config ")
+		detail := strings.TrimPrefix(leaf.Message, "in-repo config ")
 		report.Warn(sectionConfig, "in-repo config", detail, remedy, false)
 	}
 }

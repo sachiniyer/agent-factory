@@ -41,8 +41,8 @@ func TestDoctorWarnsOnInRepoUnknownLeaf(t *testing.T) {
 	assert.Equal(t, StatusWarn, row.Status)
 	assert.Equal(t, sectionConfig, row.Section)
 	assert.Contains(t, row.Detail, filepath.Join(config.InRepoConfigDirName, config.TomlConfigFileName))
-	assert.Contains(t, row.Detail, `unknown key "runargs" under [docker]`)
-	assert.Contains(t, row.Detail, "did you mean run_args?")
+	assert.Contains(t, row.Detail, `unknown key "runargs" under "docker"`)
+	assert.Contains(t, row.Detail, "did you mean \"run_args\"?")
 	assert.Contains(t, row.Remediation, "rename docker.runargs to docker.run_args")
 	assert.Zero(t, report.UnresolvedCount(), "advisory until the hard error lands (#4845)")
 }
