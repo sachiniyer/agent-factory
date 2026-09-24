@@ -21,11 +21,14 @@ func runeKey(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: [
 
 // dispatchKey drives one key through the real handler as the DISPATCH pass. A
 // mapped key press is first intercepted by handleMenuHighlighting (which sets
-// keySent and re-emits the same key); the action fires on the re-emitted pass,
-// when keySent is already true. Setting keySent here reproduces that second
-// pass so the test exercises the dispatch wiring, not the highlight animation.
+// keySent and records the pending key's identity, then re-emits the same key);
+// the action fires on the re-emitted pass, when keySent is already true and
+// the arriving key matches the recorded identity. Arming both here reproduces
+// that second pass so the test exercises the dispatch wiring, not the
+// highlight animation.
 func dispatchKey(h *home, msg tea.KeyMsg) tea.Cmd {
 	h.keySent = true
+	h.pendingKey = msg.String()
 	_, cmd := h.handleKeyPress(msg)
 	return cmd
 }

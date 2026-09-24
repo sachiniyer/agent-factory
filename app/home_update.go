@@ -444,8 +444,25 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		}
 	}
 	if m.keySent {
-		m.keySent = false
-		return nil, false
+		// pass-2: the re-emitted key returns with the same identity as the
+		// mapped key whose pass-1 armed keySent — dispatch its action. The
+		// re-emit traverses bubbletea's command pipeline (2 goroutine
+		// spawns + 4 unbuffered-channel hops) to reach p.msgs, but the next
+		// key from the terminal/test reaches p.msgs in a single send, so it
+		// can win the event loop's select while the first key's re-emit is
+		// still in flight. When that happens the next key arrives here with
+		// keySent still armed but a different identity: rather than run it
+		// in the pre-first-key state (which silently drops scripted/coalesced
+		// input — e.g. "/" then "p" loses "p" before search opens), re-emit
+		// it so it is processed only after the pending pass-2 has
+		// transitioned state. keySent/pendingKey stay armed so the original
+		// pass-2 still completes.
+		if msg.String() == m.pendingKey {
+			m.keySent = false
+			m.pendingKey = ""
+			return nil, false
+		}
+		return func() tea.Msg { return msg }, true
 	}
 	// While naming a new instance the menu only shows the submit-name (enter),
 	// change-program (tab), and cancel (esc) options, so those keys are the only ones
@@ -486,6 +503,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			return nil, false
 		}
 		m.keySent = true
+		m.pendingKey = msg.String()
 		return tea.Batch(
 			func() tea.Msg { return msg },
 			m.keydownCallback(name)), true
@@ -521,6 +539,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 	}
 
 	m.keySent = true
+	m.pendingKey = msg.String()
 	return tea.Batch(
 		func() tea.Msg { return msg },
 		m.keydownCallback(name)), true

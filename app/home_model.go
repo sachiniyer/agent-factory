@@ -129,6 +129,11 @@ type home struct {
 
 	// keySent is used to manage underlining menu items
 	keySent bool
+	// pendingKey is the String() of the key whose pass-1 armed keySent, so
+	// the pass-2 re-emit (the same key, returned via the bubbletea command
+	// pipeline) is distinguished from a different key that beat the re-emit
+	// onto p.msgs. See handleMenuHighlighting.
+	pendingKey string
 
 	// -- UI Components --
 
