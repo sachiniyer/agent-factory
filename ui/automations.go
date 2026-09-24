@@ -247,6 +247,17 @@ func watchSupervision(tsk task.Task) string {
 	return watchTaskStatus(tsk)
 }
 
+// nextRunLabel is the live next fire as the task lists show it. A far-out run
+// (task.NextRunFarOut) swaps the short "Jan 02 15:04" — which drops the year and
+// so hid a dated cron re-armed for next year — for the dated, distance-carrying
+// note (#4843).
+func nextRunLabel(tsk task.Task, now time.Time) string {
+	if note := task.FarOutNote(tsk, now); note != "" {
+		return note
+	}
+	return tsk.NextRunAt.Format("Jan 02 15:04")
+}
+
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
@@ -272,7 +283,7 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			// The LIVE armed entry when the record carries one (#3623): a number
 			// read off the scheduler cannot promise a fire the scheduler is not
 			// holding.
-			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+			parts = append(parts, "next "+nextRunLabel(tsk, a.now()))
 		case notArmed(tsk):
 			// Nothing: attentionFragment leads the line with "not armed", and the
 			// rail's rule is to say it once. Emphatically NOT falling through to the
