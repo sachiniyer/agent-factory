@@ -778,3 +778,64 @@ func TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, vis, 1, "the task stays visible in its project after the combined re-patch")
 }
+
+// TestAudit_SymlinkDivergentRebindIsDetectedNotRetained pins the filesystem
+// semantics sameProjectPathReassertion adds: two spellings that clean lexically
+// equal but resolve through a symlink to DIFFERENT directories are a real
+// rebind, not the same-path reassertion the dead-path protection retains. This
+// is the inverse of TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling,
+// whose equivalent spellings all resolve to the SAME directory and so retain.
+//
+// base/link -> other/child (a symlink), so base/link/../task resolves physically
+// to other/task while it cleans lexically to base/task; base/task is a different,
+// non-repo directory. Rebinding base/link/../task -> base/task with the new
+// target non-Git must clear the retained RepoID rather than preserve it and
+// leave the task scoped to its former project.
+func TestAudit_SymlinkDivergentRebindIsDetectedNotRetained(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other is a git repo; the recorded path resolves into it through the link.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	require.NoError(t, exec.Command("git", "init", other).Run())
+	// base/task is a plain non-Git dir — the rebind target.
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// Built as raw strings rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	recorded := base + sep + "link" + sep + ".." + sep + "task"
+	rebind := filepath.Join(base, "task")
+
+	// Precondition: the two spellings are lexically equal but physically
+	// distinct — the exact pair a cleaned-path compare misreads as same-path.
+	require.Equal(t, filepath.Clean(recorded), filepath.Clean(rebind))
+	resolvedRecorded, err := filepath.EvalSymlinks(recorded)
+	require.NoError(t, err)
+	resolvedRebind, err := filepath.EvalSymlinks(rebind)
+	require.NoError(t, err)
+	require.NotEqual(t, resolvedRecorded, resolvedRebind, "the two paths are physically distinct")
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00001", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
+
+	// The rebind target is non-Git, so its re-resolution is empty.
+	require.Empty(t, repoIDForPath(rebind), "precondition: the rebind target is not a repo")
+
+	_, err = UpdateTaskChecked("sym00001", TaskUpdate{ProjectPath: &rebind}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00001")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind to a non-Git path is a real rebind, not a same-path reassertion: the binding clears")
+}

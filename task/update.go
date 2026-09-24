@@ -275,28 +275,33 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				}
 				merged = update.apply(existing)
 				if update.ProjectPath != nil {
-					// Compare cleaned paths, not raw strings. The daemon does not
-					// normalize project_path, so a remote caller can reassert the SAME
-					// dead path with an equivalent spelling — a trailing separator or a
-					// "."/".." leaf — that a raw inequality reads as a rebind. The
-					// re-resolution of a dead path is empty, so the raw compare would
-					// overwrite the retained RepoID with "" and strand the task the
-					// moment that spelling was reasserted — the exact harm the else
-					// branch below exists to prevent. Lexical Clean only: a real
-					// filesystem walk would fail on the dead paths this case protects,
-					// so we intentionally do not evaluate symlinks here.
-					if rebindRepoID != "" || filepath.Clean(*update.ProjectPath) != filepath.Clean(existing.ProjectPath) {
+					// A patch that rebinds the task overwrites RepoID with the freshly
+					// re-resolved id (rebindRepoID). The exception is a same-path
+					// reassertion whose re-resolution is empty: the path stopped
+					// resolving (its .git died, or the recorded leaf was a sibling
+					// worktree or subdirectory whose owning repo is no longer reachable
+					// by an ancestor walk), so overwriting with "" would erase the binding
+					// apply already preserved from existing and strand the task from its
+					// own project's scope the moment that path was reasserted — the exact
+					// harm RepoID exists to prevent (see Task.RepoID's PURPOSE). The
+					// recompute itself stays: a legacy row whose retained RepoID is "" is
+					// still filled in by a same-path patch that DOES resolve.
+					//
+					// sameProjectPathReassertion recognizes the same path across the
+					// equivalent spellings a remote caller can reassert without the
+					// daemon normalizing project_path (a trailing separator or a
+					// "."/".." leaf). It compares filesystem-resolved paths when both
+					// sides still resolve, so a symlink-divergent spelling that cleans
+					// lexically equal — e.g. base/link/../task, where base/link points
+					// elsewhere, cleans to base/task but resolves to a different
+					// directory — is read as a real rebind rather than a same-path
+					// reassertion. It falls back to lexical Clean only for a path the
+					// filesystem can no longer resolve (the dead-path case this
+					// protection exists for), where EvalSymlinks fails and a genuine
+					// rebind cannot be proven either.
+					if rebindRepoID != "" || !sameProjectPathReassertion(existing.ProjectPath, *update.ProjectPath) {
 						merged.RepoID = rebindRepoID
 					}
-					// else: a same-path patch whose re-resolution is empty. The path
-					// stopped resolving (its .git died, or the recorded leaf was a
-					// sibling worktree or subdirectory whose owning repo is no longer
-					// reachable by an ancestor walk). Overwriting with "" would erase the
-					// binding that apply already preserved from existing — stranding the
-					// task from its own project's scope the moment that path was reasserted,
-					// the exact harm RepoID exists to prevent (see Task.RepoID's PURPOSE).
-					// The recompute itself stays: a legacy row whose retained RepoID is ""
-					// is still filled in by a same-path patch that DOES resolve.
 				}
 				if err := merged.ValidateTrigger(); err != nil {
 					return err
@@ -371,4 +376,29 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 		return Task{}, lockErr
 	}
 	return merged, nil
+}
+
+// sameProjectPathReassertion reports whether patched is the same recorded path
+// the task is already bound to, so an otherwise-empty re-resolution does not
+// erase the retained RepoID. See UpdateTaskChecked for the stranding this
+// prevents.
+//
+// The comparison respects filesystem semantics where it can: lexical Clean
+// alone misreads a symlink-divergent spelling as the same path — base/link/../task
+// cleans to base/task while base/link resolves elsewhere, so the two are
+// physically distinct. Evaluate symlinks on both sides when the filesystem can
+// answer, and fall back to lexical Clean only for a form the filesystem cannot
+// resolve (a path that has since been removed, the dead-path case this
+// comparison protects), where EvalSymlinks fails and a genuine rebind cannot be
+// proven either.
+func sameProjectPathReassertion(recorded, patched string) bool {
+	if recorded == patched {
+		return true
+	}
+	resolvedPatched, errPatched := filepath.EvalSymlinks(patched)
+	resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
+	if errPatched == nil && errRecorded == nil {
+		return resolvedPatched == resolvedRecorded
+	}
+	return filepath.Clean(patched) == filepath.Clean(recorded)
 }
