@@ -491,11 +491,14 @@ func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wa
 			observeErr = errors.Join(observeErr, err)
 		} else {
 			// A successful snapshot supersedes earlier transient read
-			// failures: the pass has just PROVEN, by evidence, the state
-			// of the captured set. Leaving a stale procfs read error alive
-			// here would make a later !live early return — one reached
-			// because every captured process is absent from THIS snapshot —
-			// report "process cleanup is incomplete" after the reaping
+			// failures: the pass has just rebuilt the captured set from a
+			// fresh, successful read. proctree.Snapshot silently skips PIDs
+			// it cannot read, so a captured process absent from this snapshot
+			// may be unreadable rather than dead — but that narrowing is by
+			// the fresh read's evidence, not by error type, and a stale procfs
+			// read error describes the previous failure, not the current
+			// state. Leaving it alive here would make a later !live early
+			// return report "process cleanup is incomplete" after the reaping
 			// already completed, aborting af reset for a failure that has
 			// since cleared. The captured identity list (returned in full
 			// on every path) is untouched, so a genuine survivor is still
