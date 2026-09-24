@@ -661,6 +661,16 @@ identity_file = "~/.ssh/id_ed25519"
 An unknown `backend` value (or `--backend`) is reported when the session's
 runtime is resolved at create time, naming the valid options.
 
+An unknown key inside `[docker]` or `[ssh]` — `runargs` for `run_args`, say — is
+ignored, so the setting it was meant to carry has no effect. af warns about it:
+on stderr when you run an `af` command (except under `--json`, whose stderr is
+reserved for the envelope), as a WARNING in the log (including the daemon's), and
+as a WARN finding in `af doctor`. The warning names the file and the key and,
+when a known key is close, suggests it (`did you mean "run_args"?`). Key case does
+not matter: `Image` and `image` are the same key. A later release will refuse to
+load a file with an unknown `[docker]`/`[ssh]` key, so fix these when you see
+them ([#4845](https://github.com/sachiniyer/agent-factory/issues/4845)).
+
 ### In-repo file name: `config.toml` or `config.json`
 
 Because the in-repo file is **checked into your repository**, both names are accepted indefinitely: `<repo-root>/.agent-factory/config.toml` **or** `<repo-root>/.agent-factory/config.json`. This is deliberate — a repo shared with collaborators still on an older `af` (which only understands `config.json`) must keep working, so `af` never renames a checked-in file out from under them.
