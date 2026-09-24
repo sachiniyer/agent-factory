@@ -471,9 +471,15 @@ func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Reflect the rename locally so the bar reads it before the next daemon
 	// snapshot lands — the same instant-projection pattern createNewTab uses.
 	// The daemon's answer is already sanitized and collision-suffixed, so
-	// RenameTabByID resolves it back to itself; a local miss only means the next
-	// snapshot reconciles instead, which is what it exists for.
-	if _, rerr := current.RenameTabByID(tab.ID, resolved); rerr != nil {
+	// RenameTabByID resolves it back to itself — unless the local roster is
+	// stale: another client may have just freed the name the daemon returned,
+	// and re-resolving against a sibling that is only still here locally would
+	// show "name-2" for a tab the daemon calls "name". The daemon is the
+	// authority, so in that case skip the projection and let the next snapshot
+	// apply the name verbatim; a local miss is what the snapshot exists for.
+	if localTabNameTaken(current, tab, resolved) {
+		log.InfoLog.Printf("rename to %q deferred to the next snapshot: the local roster still holds that name", resolved)
+	} else if _, rerr := current.RenameTabByID(tab.ID, resolved); rerr != nil {
 		log.ErrorLog.Printf("rename reflected daemon-side but not locally: %v", rerr)
 	}
 	// Through handleNotice, not errBox.SetNotice: it advances the notice
@@ -481,6 +487,22 @@ func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// lingers forever nor gets erased early by an older notice's timer.
 	notice := m.handleNotice(fmt.Errorf("renamed tab to %q", resolved))
 	return m, tea.Batch(notice, m.selectionChanged())
+}
+
+// localTabNameTaken reports whether a tab other than self holds name in inst's
+// local roster — the case where applying a daemon-resolved name locally would
+// re-suffix it instead of showing it verbatim.
+func localTabNameTaken(inst *session.Instance, self *session.Tab, name string) bool {
+	for _, candidate := range inst.GetTabs() {
+		if candidate == nil || candidate.Name != name {
+			continue
+		}
+		if candidate == self || (self.ID != "" && candidate.ID == self.ID) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // handleTabJump jumps to a 1-based tab number (the 1-9 number keys). With a

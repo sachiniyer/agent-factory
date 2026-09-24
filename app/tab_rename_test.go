@@ -291,3 +291,32 @@ func TestRenameTabNoticeExpires(t *testing.T) {
 	_, _ = h.Update(hideErrMsg{noticeID: h.transientNoticeID})
 	require.Empty(t, h.errBox.FullError(), "the rename confirmation expires like any notice")
 }
+
+// TestRenameTabAppliesDaemonNameVerbatim: another client closed the sibling
+// that held "docs" and the daemon handed that name to our tab, but this TUI has
+// not consumed the snapshot yet, so its roster still shows the sibling. The
+// local projection must not re-resolve against that stale sibling and show
+// "docs-2" for a tab the daemon calls "docs".
+func TestRenameTabAppliesDaemonNameVerbatim(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "rename-verbatim")
+	inst.AddWebTabForTest("web", "https://example.com")
+	inst.AddWebTabForTest("docs", "https://example.com/docs")
+	selectInstance(h, inst)
+	h.store.SetActiveTab(1)
+	recordRenameTab(t, "docs")
+
+	_, _ = h.showRenameTabPrompt()
+	for range "web" {
+		h.handleStateRenameTab(tea.KeyMsg{Type: tea.KeyBackspace})
+	}
+	typeIntoPrompt(h, "docs")
+	_, _ = h.handleStateRenameTab(tea.KeyMsg{Type: tea.KeyEnter})
+
+	for _, tab := range inst.GetTabs() {
+		require.NotEqual(t, "docs-2", tab.Name,
+			"a stale local sibling must not re-suffix the daemon's resolved name")
+	}
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.String(), `renamed tab to "docs"`)
+}
