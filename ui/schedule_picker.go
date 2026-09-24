@@ -13,6 +13,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/schedule"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // schedulePicker is the friendly, cron-free editor for a time-triggered task's
@@ -312,7 +313,7 @@ func (p *schedulePicker) adjust(dir int) {
 	case cellMeridiem:
 		p.meridiemPM = !p.meridiemPM
 	case cellWeekdays:
-		p.weekdayCursor = clampInt(p.weekdayCursor+dir, 0, 6)
+		p.weekdayCursor = layout.ClampInt(p.weekdayCursor+dir, 0, 6)
 	}
 }
 
@@ -653,7 +654,7 @@ func atoiClamp(s string, min, max, def int) int {
 	if err != nil {
 		return def
 	}
-	return clampInt(v, min, max)
+	return layout.ClampInt(v, min, max)
 }
 
 // to12Hour converts a 24-hour hour into a 12-hour hour and an isPM flag.
