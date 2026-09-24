@@ -400,11 +400,11 @@ daemon is running, this command exits successfully without starting one.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
-		return runDaemonRestart(cmd.OutOrStdout())
+		return runDaemonRestart(cmd.OutOrStdout(), cmd.ErrOrStderr())
 	},
 }
 
-func runDaemonRestart(w io.Writer) error {
+func runDaemonRestart(w, errOut io.Writer) error {
 	// Preserve this command's documented no-op before touching the installed
 	// unit. A stale or foreign unit is irrelevant when there is no daemon to
 	// stop, and failing to parse/reload it must not turn an idempotent restart
@@ -440,12 +440,12 @@ func runDaemonRestart(w io.Writer) error {
 		return fmt.Errorf("refusing to restart through an unsafe daemon autostart unit: %w", err)
 	}
 
-	result, err := restartDaemonFromPath(resolvedPath)
+	result, err := restartDaemonFromPathDetailed(resolvedPath)
 	if err != nil {
 		return err
 	}
 
-	switch result {
+	switch result.Shutdown {
 	case daemon.ShutdownNoDaemon:
 		if !daemonRestartQuiet {
 			fmt.Fprintln(w, "no running daemon to restart")
@@ -454,6 +454,18 @@ func runDaemonRestart(w io.Writer) error {
 		fmt.Fprintln(w, "daemon restarted (stopped old daemon via SIGTERM fallback)")
 	default:
 		fmt.Fprintln(w, "daemon restarted")
+	}
+	// The success line above is true only as far as "a daemon is running": a
+	// respawn whose autostart unit restart failed fell back to an ad-hoc daemon
+	// and lost systemd/launchd supervision — it dies with the session and will
+	// not return at next login. Printing plain success over that demotion is
+	// the exact anti-pattern respawnDaemonAfterUpgrade's contract names as
+	// "half of #1947"; `af upgrade` reports the same demotion via
+	// reportUpgradeRestart. af daemon restart wrote no new binary, so the
+	// wording names only the supervision loss and the repair.
+	if result.Respawn.UnitErr != nil {
+		fmt.Fprintf(errOut, "The daemon autostart unit could not be restarted: %v\n", result.Respawn.UnitErr)
+		fmt.Fprintln(errOut, "The daemon was restarted as an ad-hoc process instead: it is unsupervised and will not return at next login. Re-register it with `af daemon install`.")
 	}
 	return nil
 }
@@ -605,9 +617,12 @@ type restartOutcome struct {
 	FailedPhase restartPhase
 }
 
-// restartDaemonFromPath keeps the (result, error) shape the auto-update path
-// and `af daemon restart` are written against. Callers that must report on the
-// restart's fidelity — `af upgrade` — use restartDaemonFromPathDetailed.
+// restartDaemonFromPath keeps the (result, error) shape the auto-update path is
+// written against. Callers that must report on the restart's fidelity — `af
+// upgrade` and `af daemon restart` — use restartDaemonFromPathDetailed, which
+// returns the full restartOutcome including the respawn demotion fields; this
+// wrapper discards them and must not be adopted by any caller that surfaces the
+// restart's result to a user.
 func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 	outcome, err := restartDaemonFromPathDetailed(execPath)
 	return outcome.Shutdown, err
