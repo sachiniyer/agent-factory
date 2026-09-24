@@ -117,7 +117,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 				)
 			}
 			state.clearSelectionVerification()
-		case safetyPromptPresent || !t.codexSafetyPickerProvenClosed():
+		case safetyPromptPresent || !t.codexPickerProvenClosed():
 			// Either the picker is still on screen with the wrong row selected,
 			// or the capture matches no Codex shape at all because it landed
 			// mid-repaint. Both are pending renders. Releasing here on the
@@ -186,7 +186,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		selectedTarget, selectedPromptPresent, selectedPromptActive := t.inspectCodexSafetyPrompt(selectedContent)
 		selectedDialog, stillPresent := parseCodexSafetyDialog(selectedContent, selectedTarget, selectedPromptActive)
 		if !stillPresent {
-			if selectedPromptPresent || !t.codexSafetyPickerProvenClosed() {
+			if selectedPromptPresent || !t.codexPickerProvenClosed() {
 				t.recordPendingCodexSafetySelection()
 				return true
 			}
@@ -217,10 +217,10 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	return true
 }
 
-// codexSafetyPickerProvenClosed reports POSITIVE evidence that Codex's modal
+// codexPickerProvenClosed reports POSITIVE evidence that Codex's modal
 // picker no longer owns the pane: a visible terminal cursor, which its
 // ListSelectionView never exposes and its ordinary composer always does. It is
-// the same oracle inspectCodexSafetyPrompt trusts to decide the picker IS
+// the same oracle the Codex picker inspectors trust to decide a picker IS
 // active, read in the other direction.
 //
 // The absence of the picker's chrome is deliberately not accepted as that
@@ -231,7 +231,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 // runs only in the narrow window between af moving the cursor and seeing where
 // it landed, and every outcome of holding is recoverable while accepting the
 // wrong row is not.
-func (t *TmuxSession) codexSafetyPickerProvenClosed() bool {
+func (t *TmuxSession) codexPickerProvenClosed() bool {
 	cursor, err := t.readPaneCursorState()
 	if err != nil {
 		return false

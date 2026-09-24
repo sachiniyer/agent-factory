@@ -188,16 +188,64 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 // dead. When tmux reports none of status, signal or death time, the pane pid
 // decides.
 //
+// A root that has exited but that tmux has not collected yet is dead, and tmux
+// will report how it ended as soon as it collects it: tmux marks the pane dead
+// when its terminal closes, which can come first (#4682). The probe waits for
+// that report, up to paneStatusWait, rather than answer a plain `exit 7` with
+// an unknown status. A process tab's immediate-failure check and its durable
+// exit record both read this answer.
+//
 // The known contract matches ProbeSession: known=false means tmux could not
 // answer (timeout, socket policy), never that the pane is alive. status is
-// meaningful only when statusKnown: a signal death, or a tmux too old to report
-// the field, leaves it unknown.
+// meaningful only when statusKnown: a signal death, a tmux too old to report
+// the field, or a root tmux did not collect within paneStatusWait leaves it
+// unknown.
 func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, at time.Time, known bool) {
-	ctx, cancel := tmuxTimeoutContext()
+	exit, uncollected := t.readPaneExit(tmuxCommandTimeout)
+	// Every re-read is bounded by what is left of the wait, so a tmux that
+	// stalls mid-wait cannot hold the caller for a whole command timeout.
+	deadline := time.Now().Add(paneStatusWait)
+	pause := 5 * time.Millisecond
+	for uncollected {
+		time.Sleep(pause)
+		pause = min(2*pause, 50*time.Millisecond)
+		budget := time.Until(deadline)
+		if budget <= 0 {
+			break
+		}
+		next, stillUncollected := t.readPaneExit(budget)
+		if !next.dead {
+			// The root's exit is already established; a re-read that cannot
+			// confirm it (tmux failed, the session went away) must not undo it.
+			break
+		}
+		exit, uncollected = next, stillUncollected
+	}
+	return exit.dead, exit.status, exit.statusKnown, exit.at, exit.known
+}
+
+// paneStatusWait bounds how long ProbePaneExit waits for tmux to collect a pane
+// root that has already exited. tmux collects it from its event loop, so this is
+// normally milliseconds; the bound only matters when tmux is stalled. var, not
+// const, so tests can lower it.
+var paneStatusWait = 2 * time.Second
+
+// paneExit is one reading of ProbePaneExit's answer.
+type paneExit struct {
+	dead, statusKnown, known bool
+	status                   int
+	at                       time.Time
+}
+
+// readPaneExit reads the pane once, within budget. uncollected reports a pane
+// whose root has exited but that tmux has not collected, so it has reported
+// nothing about how the root ended yet.
+func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncollected bool) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
 	defer cancel()
 	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", exactTarget(t.sanitizedName), paneExitFormat)
 	if err != nil {
-		return false, 0, false, time.Time{}, false
+		return paneExit{}, false
 	}
 	// Split, not Fields: an empty field is information (#4506 review).
 	fields := strings.Split(strings.TrimSpace(string(out)), paneFieldSeparator)
@@ -208,25 +256,30 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 		return ""
 	}
 	if field(0) != "1" {
-		return false, 0, false, time.Time{}, true
+		return paneExit{known: true}, false
 	}
+	exit = paneExit{dead: true, known: true}
 	if code, perr := strconv.Atoi(field(1)); perr == nil {
-		status, statusKnown = code, true
+		exit.status, exit.statusKnown = code, true
 	}
 	if unix, perr := strconv.ParseInt(field(2), 10, 64); perr == nil && unix > 0 {
-		at = time.Unix(unix, 0)
+		exit.at = time.Unix(unix, 0)
 	}
 	if field(1) == "" && field(2) == "" && field(3) == "" {
 		// tmux has not reaped the root, or is too old to say it did.
 		pid, perr := strconv.Atoi(field(4))
 		if perr != nil || pid <= 0 {
-			return false, 0, false, time.Time{}, false
+			return paneExit{}, false
 		}
-		if !pidGone(pid) && !exitedUncollected(pid) {
-			return false, 0, false, time.Time{}, true
+		if pidGone(pid) {
+			return exit, false
 		}
+		if !exitedUncollected(pid) {
+			return paneExit{known: true}, false
+		}
+		return exit, true
 	}
-	return true, status, statusKnown, at, true
+	return exit, false
 }
 
 // exitedUncollected reports whether pid is a process that has exited and waits

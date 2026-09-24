@@ -116,3 +116,31 @@ func TestRepoInstancesSkipRemedyDoesNotSuggestDeletingNewerState(t *testing.T) {
 		t.Errorf("a newer-schema skip anywhere in the set must suppress removal advice; got: %q", remedy)
 	}
 }
+
+// TestLoadAllRepoInstancesReportingMissingTellsMissingFromEmpty pins what the
+// daemon's skip-set clearing depends on (#4783): a repo directory with no
+// instances.json loads as "[]" like an empty file does, and only missing tells
+// the two apart. An empty file WAS read; a missing one was not.
+func TestLoadAllRepoInstancesReportingMissingTellsMissingFromEmpty(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, SaveRepoInstances("gone", json.RawMessage("[]")))
+	gone, err := RepoInstancesPath("gone")
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(gone))
+
+	require.NoError(t, SaveRepoInstances("empty", json.RawMessage("[]")))
+	empty, err := RepoInstancesPath("empty")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(empty, nil, 0o600))
+
+	require.NoError(t, SaveRepoInstances("full", json.RawMessage(`[{"title":"a"}]`)))
+
+	result, skips, missing, err := LoadAllRepoInstancesReportingMissing()
+	require.NoError(t, err)
+	require.Empty(t, skips)
+	require.Equal(t, map[string]bool{"gone": true}, missing, "only the repo whose file is absent is missing")
+	require.Equal(t, json.RawMessage("[]"), result["gone"], "a missing file still loads as an empty repo for every other caller")
+	require.Contains(t, result, "empty")
+	require.Contains(t, result, "full")
+}

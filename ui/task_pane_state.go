@@ -1,27 +1,97 @@
 package ui
 
-import "github.com/sachiniyer/agent-factory/task"
+import (
+	"reflect"
+	"strconv"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/task"
+)
 
 // This file holds the TaskPane's task-list, selection, dirty-tracking, and
 // focus/mode state accessors — the non-rendering, non-key-handling surface the
 // app layer drives. Split out of task_pane.go to keep that file under the
 // file-length limit (#1145); the rendering and key-handling code stays there.
 
-// SetTasks sets the task data.
-func (s *TaskPane) SetTasks(tasks []task.Task) {
-	s.tasks = tasks
-	s.dirty = false
-	s.dirtyIDs = nil
+// SetTasks reconciles the pane with a freshly loaded task list, so a reload can
+// run at any time without costing the user their work (#4487). A row the user
+// has not touched takes the loaded record. What the user is holding survives:
+//
+//   - A row with an unsaved or failed edit (dirtyIDs) keeps its edited values
+//     and the baseline its patch is diffed against. Rebasing it would put
+//     another writer's fields into the patch (#1700) and pin a project binding
+//     the user never authorized (#3230).
+//   - The row an open edit form is bound to is held the same way, because Enter
+//     writes the form into that row and diffs it against that baseline.
+//   - A row queued for deletion stays hidden, and the queue is kept.
+//
+// A held row the load no longer contains stays visible, after the loaded rows,
+// so a draft is never dropped silently: the save reports why it failed, and
+// deleting the row discards it (that save then also reports the task as not
+// found). Loaded rows keep disk order ahead of it, so an index taken from the
+// rail still names the same task. The cursor follows its task by ID.
+//
+// Only the user's values are held. A held row also keeps the run status and
+// schedule health it was loaded with until it saves, as the whole pane did
+// before; the rail shows the fresh ones.
+//
+// SetTasks used to discard all of this, so callers had to skip it while an
+// edit was live, and the pane then hid anything the skipped reload would have
+// shown — a task whose deletion failed vanished (#4257), and restoring it by
+// hand instead appended a copy on every further failure (#4488).
+//
+// It reports whether the rows or the selection changed. A list from a
+// different scope, which nothing held belongs to, goes through ResetTasks.
+func (s *TaskPane) SetTasks(tasks []task.Task) bool {
+	held := s.heldRows()
+	queued := make(map[string]bool, len(s.deleted))
+	for _, d := range s.deleted {
+		queued[d.ID] = true
+	}
+	selectedID := ""
+	if s.selectedTaskInRange() {
+		selectedID = s.tasks[s.selectedIdx].ID
+	}
+
+	next := make([]task.Task, 0, len(tasks)+len(held))
 	// Snapshot the loaded records so ConsumeDirty can diff an edit against the
 	// copy the pane started from and emit a field-level patch (#1700). Task is a
 	// value type (its only pointer field, LastRunAt, is scheduler-owned and never
 	// diffed), so a by-value copy is a sufficient baseline.
-	s.originals = make(map[string]task.Task, len(tasks))
+	originals := make(map[string]task.Task, len(tasks)+len(held))
+	placed := make(map[string]bool, len(held))
 	for _, t := range tasks {
-		s.originals[t.ID] = t
+		if queued[t.ID] {
+			continue
+		}
+		if draft, ok := held[t.ID]; ok {
+			// Placed once even if a damaged file lists the ID twice: a second
+			// copy of a draft is a second row the user could edit or delete.
+			if !placed[t.ID] {
+				placed[t.ID] = true
+				next = append(next, draft)
+			}
+			continue
+		}
+		next = append(next, t)
+		originals[t.ID] = t
 	}
-	s.deleted = nil
-	s.editing = false
+	for _, t := range s.tasks {
+		if _, ok := held[t.ID]; ok && !placed[t.ID] {
+			placed[t.ID] = true
+			next = append(next, t)
+		}
+	}
+	for id := range held {
+		if original, ok := s.originals[id]; ok {
+			originals[id] = original
+		}
+	}
+
+	changed := !sameTasks(s.tasks, next)
+	s.tasks = next
+	s.originals = originals
+	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
 	// A reload replaces the create-form buffers a pending create was captured
 	// against, so a create left un-consumed by a failed save must be dropped —
 	// otherwise the next keypress after reopen fires it against the wrong
@@ -31,11 +101,82 @@ func (s *TaskPane) SetTasks(tasks []task.Task) {
 	// run-now must survive that reload to resolve by task ID (#1474). The
 	// overlay-close path clears pendingTrigger instead (SetFocus(false)).
 	s.pendingCreate = false
-	if len(s.tasks) == 0 {
+
+	previousIdx := s.selectedIdx
+	s.selectTaskID(selectedID)
+	return changed || s.selectedIdx != previousIdx
+}
+
+// selectTaskID moves the cursor to the task with the given ID. When that task
+// is gone the cursor keeps its position, clamped, so it lands on a neighbour.
+func (s *TaskPane) selectTaskID(id string) {
+	if id != "" {
+		for i, t := range s.tasks {
+			if t.ID == id {
+				s.selectedIdx = i
+				return
+			}
+		}
+	}
+	if len(s.tasks) == 0 || s.selectedIdx < 0 {
 		s.selectedIdx = 0
 	} else if s.selectedIdx >= len(s.tasks) {
 		s.selectedIdx = len(s.tasks) - 1
 	}
+}
+
+// ResetTasks replaces the pane's list and discards everything the user was
+// holding against the old one: edits, pending deletions, and an open edit
+// form. It is for a list from a different scope — a project switch — where a
+// held row would belong to another project. A reload of the same list goes
+// through SetTasks.
+func (s *TaskPane) ResetTasks(tasks []task.Task) {
+	s.dirtyIDs = nil
+	s.deleted = nil
+	s.editing = false
+	s.tasks = nil
+	s.SetTasks(tasks)
+}
+
+// heldRows returns the rows a reload must not replace, keyed by ID: every row
+// with an unsaved edit, and the row an open edit form is bound to.
+//
+// A damaged file can list an ID twice, and the reload keeps one copy of a held
+// ID, so it must be the copy carrying the user's work: the form's row, else the
+// first copy that differs from its baseline.
+func (s *TaskPane) heldRows() map[string]task.Task {
+	held := make(map[string]task.Task, len(s.dirtyIDs)+1)
+	formID := ""
+	if s.editing && s.selectedTaskInRange() {
+		formID = s.tasks[s.selectedIdx].ID
+		held[formID] = s.tasks[s.selectedIdx]
+	}
+	for _, t := range s.tasks {
+		if !s.dirtyIDs[t.ID] || t.ID == formID {
+			continue
+		}
+		if kept, seen := held[t.ID]; !seen || (s.unedited(kept) && !s.unedited(t)) {
+			held[t.ID] = t
+		}
+	}
+	return held
+}
+
+// unedited reports whether t carries no change a save would send.
+func (s *TaskPane) unedited(t task.Task) bool {
+	return task.DiffTask(s.originals[t.ID], t).IsEmpty()
+}
+
+func sameTasks(a, b []task.Task) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !reflect.DeepEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // GetTasks returns the current tasks.
@@ -133,10 +274,76 @@ func (s *TaskPane) RestoreFailedEdit(id string) {
 	s.markTaskDirty(id)
 }
 
+// DiscardDeletedDraft drops the unsaved edit to a task a save has just proved
+// deleted — the daemon answered the update with "not found" (#4798). Keeping it
+// would retry that save, and report the same failure, on every close forever.
+// The row goes with it, and the task's name is queued for
+// TakeDiscardedDraftNotice so the draft is never dropped silently. A row with
+// nothing a save would send is dropped without a notice: no work was lost.
+//
+// Only a positive not-found may call this. Absence from a reload is not one —
+// the reload can be scoped to another project, or simply fail — so SetTasks
+// keeps a draft whose task it cannot see, and any other save failure goes
+// through RestoreFailedEdit.
+func (s *TaskPane) DiscardDeletedDraft(id string) {
+	kept := s.tasks[:0:0]
+	lostWork := false
+	for _, t := range s.tasks {
+		if t.ID != id {
+			kept = append(kept, t)
+			continue
+		}
+		if !s.unedited(t) {
+			lostWork = true
+		}
+	}
+	if len(kept) == len(s.tasks) {
+		return
+	}
+	if lostWork {
+		// The name the task was loaded with, not a rename the draft carries:
+		// it is the name the user last saw on the rail and in `af tasks list`.
+		name := s.originals[id].Name
+		if name == "" {
+			name = id
+		}
+		s.discardedDrafts = append(s.discardedDrafts, name)
+	}
+	selectedID := ""
+	if s.selectedTaskInRange() {
+		selectedID = s.tasks[s.selectedIdx].ID
+	}
+	s.tasks = kept
+	delete(s.dirtyIDs, id)
+	delete(s.originals, id)
+	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
+	s.selectTaskID(selectedID)
+}
+
+// TakeDiscardedDraftNotice returns one notice naming every draft
+// DiscardDeletedDraft dropped since the last call, and clears them. It returns
+// "" when nothing was dropped. The save that drops a draft usually runs as the
+// overlay closes, so the app raises this on its own notice bar, not the pane.
+func (s *TaskPane) TakeDiscardedDraftNotice() string {
+	names := s.discardedDrafts
+	s.discardedDrafts = nil
+	if len(names) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = strconv.Quote(name)
+	}
+	if len(quoted) == 1 {
+		return "Discarded unsaved edits to " + quoted[0] + " — the task was deleted"
+	}
+	return "Discarded unsaved edits to " + strings.Join(quoted, ", ") + " — the tasks were deleted"
+}
+
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's
 // deletion state so a subsequent save can't reprocess already-deleted tasks.
-// Failed edits restored after ConsumeDirty keep the pane dirty until the final
-// reload succeeds or a later save retries them. The deletion loop in
+// Failed edits restored after ConsumeDirty keep the pane dirty, across reloads,
+// until a later save lands them. The deletion loop in
 // saveContentPaneState removes task records as a side effect, so re-running it
 // would call RemoveTask on records that no longer exist and log spurious errors
 // (fixes #763).

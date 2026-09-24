@@ -463,6 +463,15 @@ const RETRY_DELAYS_MS = [250, 1000];
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
 // read back as "nobody merged" — refusing the concession this exists to grant.
 const MERGE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
+// The same lesson for a check-run create that may already have LANDED. Its
+// marker reconcile reused RETRY_DELAYS_MS, so a create GitHub answered 503 for
+// had 1.25s to become listable — during the same degradation that produced the
+// 503 — before the transaction gave up on a run that existed (#4763).
+//
+// This buys back transactions, not safety: a window of any length cannot tell a
+// slow listing from a create that never landed, so what happens when it is
+// exhausted is decided by blockUnconfirmedInvalidation, not by this number.
+const CHECK_CREATE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
 const AGGREGATE_PROPAGATION_DELAYS_MS = [250, 500, 1000];
 const RULE_VIOLATION_RETRY_DELAY_MS = 1000;
 const MAX_RATE_LIMIT_DELAY_MS = 10000;
@@ -540,7 +549,12 @@ async function createCheckRun({
       if (!isRetryableGitHubError(error)) {
         throw error;
       }
-      return retryTransient(
+      // A 5xx RESPONSE is reconciled exactly like a transport failure, not
+      // replayed like the rate-limit refusal above. GitHub documents no 5xx as
+      // "rejected before any work", and a gateway can answer 503 for a create
+      // the backend went on to commit, so the response proves nothing about
+      // whether a run exists (#4763).
+      return reconcileAmbiguousCreate(
         `${label} after ambiguous create failure (${error.message || String(error)})`,
         async () => {
           const checkRuns = await github.paginate(github.rest.checks.listForRef, {
@@ -565,13 +579,37 @@ async function createCheckRun({
           }
           return { data: created };
         },
-        { failureName: "AutoGateCheckWriteError", readFailure: false },
       );
     }
   }
 }
 
-async function retryTransient(label, operation, { failureName, readFailure, subject = null }) {
+// The read-back of a create whose outcome the POST did not report. Exhausting it
+// is its own outcome — the write was issued exactly once and whether it landed is
+// what could not be read — so the failure says so, and a caller that can
+// establish what the head publishes some other way may act on that instead of
+// dying (#4763). Only the exhaustion is marked: a read-back GitHub refused
+// outright is rethrown untouched by retryTransient, and stays an ordinary error.
+async function reconcileAmbiguousCreate(label, findCreated) {
+  try {
+    return await retryTransient(label, findCreated, {
+      failureName: "AutoGateCheckWriteError",
+      readFailure: false,
+      delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+    });
+  } catch (error) {
+    if (isExhaustedCheckWrite(error)) {
+      error.autoGateCreateUnconfirmed = true;
+    }
+    throw error;
+  }
+}
+
+async function retryTransient(
+  label,
+  operation,
+  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS },
+) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await operation();
@@ -586,10 +624,10 @@ async function retryTransient(label, operation, { failureName, readFailure, subj
       if (!selfContradictory && !isRetryableGitHubError(error)) {
         throw error;
       }
-      if (attempt >= RETRY_DELAYS_MS.length) {
+      if (attempt >= delays.length) {
         throw retryFailure(label, attempt + 1, error, failureName, readFailure);
       }
-      await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
+      await delay(retryDelayMilliseconds(error, delays[attempt]));
     }
   }
 }
@@ -817,6 +855,22 @@ function githubErrorHeaders(error) {
 
 function isReadFailure(error) {
   return error?.autoGateReadFailure === true;
+}
+
+// A check write that GAVE UP on a retryable failure, as opposed to one GitHub
+// refused outright. The name is the record: retryFailure is the only thing that
+// assigns it, and the retry helpers build one only from an error
+// isRetryableGitHubError accepted — a 403, a 422, a validation failure are all
+// rethrown untouched and never carry it.
+function isExhaustedCheckWrite(error) {
+  return error?.name === "AutoGateCheckWriteError";
+}
+
+// An ambiguous check-run create whose marker never became visible: the POST was
+// issued once, GitHub did not say whether it landed, and the read-back gave up.
+// See reconcileAmbiguousCreate (#4763).
+function isUnconfirmedCheckCreate(error) {
+  return error?.autoGateCreateUnconfirmed === true;
 }
 
 function delay(milliseconds) {
@@ -2169,13 +2223,125 @@ async function blockAggregateEvaluation({
   };
 }
 
+// The lane's own invalidation could not be confirmed (#4763): GitHub answered the
+// create with a 5xx, or dropped the connection, and the marker never appeared.
+// That is a GitHub fault rather than a verdict, and it used to escape as an
+// unhandled error that reddened master — the class #3396, #3808 and #4461 each
+// closed one instance of.
+//
+// What decides the outcome is not the fault but what the head PUBLISHES, because
+// an invalidation exists to make exactly one thing true: the newest generation of
+// the fixed aggregate does not satisfy the ruleset. So that is read back, the way
+// the ruleset sees it.
+//
+// - The newest generation is non-passing. This is the ordinary case: the
+//   pre-lane job published a WAITING marker for this same event before the lane
+//   began. The commit is unmergeable whether or not this create landed — one
+//   that did land is itself a WAITING generation — so the transaction ends as
+//   #4461's could-not-evaluate: UNKNOWN, concluded AGGREGATE_NOT_PASSING, never
+//   neutral.
+// - The newest generation satisfies the ruleset, none is visible, or the read
+//   failed too. Nothing proves the head unmergeable: a stale PASS may be what the
+//   ruleset reads, and this transaction could not replace it. The original error
+//   is rethrown and the run stays red, which is #4461's rule for a transaction
+//   that left nothing non-passing behind.
+//
+// Either way the transaction stops here. It owns no generation, so it has nothing
+// to fence a publish with, and evaluating or merging without one is exactly what
+// the generation check exists to prevent.
+//
+// UNKNOWN goes on by UPDATE, onto the generation the read found. A second POST
+// would be the replay createCheckRun refuses to make; an update is idempotent,
+// and it only restates a conclusion that is already non-passing. This lane holds
+// the head's serialized slot, so nothing else is publishing on that generation —
+// and if that ever stopped being true, the write still moves the head toward
+// blocked, never toward green.
+async function blockUnconfirmedInvalidation({ github, context, core, headSha, error, reason }) {
+  if (!isUnconfirmedCheckCreate(error)) {
+    throw error;
+  }
+  const sha = normalizeHeadSha(headSha);
+  let published;
+  try {
+    published = await publishedAggregateCheck({ github, context, headSha: sha });
+  } catch (readError) {
+    core.warning(
+      `Auto Gate could not confirm its invalidation of ${sha}, and could not read what that ` +
+        `commit publishes either (${formatError(readError)}). Nothing proves it unmergeable, so ` +
+        "the invalidation failure stands.",
+    );
+    throw error;
+  }
+  if (!isNonPassingAggregate(published)) {
+    core.warning(
+      `Auto Gate could not confirm its invalidation of ${sha}, and the newest published ` +
+        `aggregate generation there is ${
+          published
+            ? `check ${published.id}, concluded ${published.conclusion || published.status}`
+            : "absent"
+        }. That does not prove the commit unmergeable, so the invalidation failure stands.`,
+    );
+    throw error;
+  }
+  core.warning(
+    `Auto Gate could not confirm its invalidation of ${sha}: ${formatError(error)}. The newest ` +
+      `published aggregate generation (check ${published.id}: ` +
+      `${published.output?.title || "untitled"}) is already non-passing, so the commit stays ` +
+      "unmergeable; a later subscribed event re-runs the evaluation.",
+  );
+  const detail = reason || formatError(error);
+  let blocked;
+  try {
+    blocked = await blockAggregateEvaluation({
+      github,
+      context,
+      core,
+      headSha: sha,
+      checkRunId: published.id,
+      reason: detail,
+      cause: error,
+    });
+  } catch (writeError) {
+    // Only a write that gave up on a transient is tolerated: the read above is
+    // the proof the head is blocked, and the UNKNOWN title is the courtesy of
+    // saying why. A write GitHub REFUSED is a permission or payload defect, and
+    // those stay loud wherever they surface.
+    if (!isExhaustedCheckWrite(writeError)) {
+      throw writeError;
+    }
+    core.warning(
+      `Auto Gate could not retitle check ${published.id} UNKNOWN on ${sha} ` +
+        `(${formatError(writeError)}); it stays non-passing as published.`,
+    );
+    blocked = {
+      ok: false,
+      headSha: sha,
+      pullNumbers: [],
+      blockers: [detail],
+      checkRuns: [],
+      summary: detail,
+      writeState: "unconfirmed",
+      priorAggregate: true,
+      state: "evaluation-error",
+    };
+  }
+  // Never the id that was written to: this transaction does not own that
+  // generation, and a checkRunId is what every later write treats as ownership.
+  return { ...blocked, checkRunId: null };
+}
+
 async function beginAggregateDecision({ github, context, core, headSha }) {
-  const invalidated = await invalidateAggregateDecision({
-    github,
-    context,
-    core,
-    headSha,
-  });
+  let invalidated;
+  try {
+    invalidated = await invalidateAggregateDecision({
+      github,
+      context,
+      core,
+      headSha,
+    });
+  } catch (error) {
+    return blockUnconfirmedInvalidation({ github, context, core, headSha, error });
+  }
   if (invalidated.writeState === "read-only") {
     return invalidated;
   }
@@ -2254,6 +2420,14 @@ async function establishPublishPreconditions(label, preconditions) {
 // all still pass while the published check is red, because it is invalidated
 // outside the head's serialized lane.
 async function publishedAggregateConclusion({ github, context, headSha }) {
+  const newest = await publishedAggregateCheck({ github, context, headSha });
+  return newest ? newest.conclusion || "" : null;
+}
+
+// That newest published generation itself, or null. isNonPassingAggregate needs
+// the status as well as the conclusion: a generation still in progress blocks the
+// ruleset with no conclusion at all.
+async function publishedAggregateCheck({ github, context, headSha }) {
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
   const checkRuns = await retryRead(`could not read the published aggregate at ${headSha}`, () =>
@@ -2274,7 +2448,7 @@ async function publishedAggregateConclusion({ github, context, headSha }) {
         run.app?.id === GITHUB_ACTIONS_APP_ID,
     ),
   );
-  return newest ? newest.conclusion || "" : null;
+  return newest || null;
 }
 
 // Observe the exact check we just wrote, rather than trusting the PATCH response.
@@ -2456,12 +2630,27 @@ async function processAggregateHead({
   // exhausted its retries, publish its failure without performing a second
   // evaluation that could silently turn the same run green or merge the PR.
   if (readFailureReason) {
-    const invalidated = await invalidateAggregateDecision({
-      github,
-      context,
-      core,
-      headSha,
-    });
+    let invalidated;
+    try {
+      invalidated = await invalidateAggregateDecision({
+        github,
+        context,
+        core,
+        headSha,
+      });
+    } catch (error) {
+      // The resolver's failure is still the reason this head is unevaluated; the
+      // unconfirmed create only changes which generation gets to say so.
+      const aggregate = await blockUnconfirmedInvalidation({
+        github,
+        context,
+        core,
+        headSha,
+        error,
+        reason: readFailureReason,
+      });
+      return { state: "evaluation-error", pending: aggregate, aggregate };
+    }
     if (invalidated.writeState === "read-only") {
       return { state: "read-only", pending: invalidated };
     }
@@ -3028,6 +3217,20 @@ async function createAggregateCheck({ github, context, core, headSha, decision }
     });
     return { writeState: "created", priorAggregate: false, checkRunId: response.data.id };
   } catch (error) {
+    // What gave up is the READ-BACK of a create that was issued once, so an
+    // unconfirmed invalidation is classified with the exhausted reads. It still
+    // throws — the pre-lane step's retry is the fencing re-POST, and it depends
+    // on the throw — but a second exhaustion now defers the head to the
+    // serialized lane, which settles it in blockUnconfirmedInvalidation, instead
+    // of failing the job. That is the "exhausted-transport invalidation" the step
+    // already documents deferring, which only a rate limit could reach (#4461).
+    //
+    // Marked here rather than in createCheckRun on purpose: the per-PR decision
+    // create surfaces inside catches that answer a read failure by publishing
+    // UNKNOWN, so marking every create would change that path too.
+    if (isUnconfirmedCheckCreate(error)) {
+      error.autoGateReadFailure = true;
+    }
     if (!isReadOnlyForkCheckError(error, context)) {
       throw error;
     }
@@ -3909,6 +4112,69 @@ async function readOrNull(operation) {
   }
 }
 
+// Events whose newer suites did NOT hide an older aggregate from the ruleset:
+// #3992 merged with its aggregate in an Auto Gate suite that already had newer
+// pull_request_review and pull_request_review_comment suites (#4802).
+const NON_SUPERSEDING_EVENTS = new Set(["pull_request_review", "pull_request_review_comment"]);
+
+// Why a PASS the rollup shows can still be "expected" to the ruleset (#4802).
+//
+// checks.create takes no suite: GitHub files every Actions-token check run in
+// the EARLIEST github-actions suite on the head, whichever run creates it. When
+// a newer suite of that same workflow arrives from a head event, the ruleset
+// stops counting the older suite's runs, and no rerun or republish moves the
+// aggregate out of it. Returns the explanation, or null when the placement is
+// not provably superseded — including when the aggregate's own check run or the
+// head's workflow runs cannot be read, so a missing fact never changes wording.
+async function describeSupersededPlacement({ github, owner, repo, headSha, ownedAggregateCheck }) {
+  let suiteId = Number(ownedAggregateCheck?.check_suite?.id);
+  if (!Number.isFinite(suiteId) || suiteId <= 0) {
+    const checkRunId = Number(ownedAggregateCheck?.id);
+    if (!Number.isFinite(checkRunId) || checkRunId <= 0) {
+      return null;
+    }
+    const checkRun = await github.rest.checks.get({ owner, repo, check_run_id: checkRunId });
+    suiteId = Number(checkRun?.data?.check_suite?.id);
+    if (!Number.isFinite(suiteId) || suiteId <= 0) {
+      return null;
+    }
+  }
+  // Every page: the listing is newest first and the placement is one of the
+  // head's EARLIEST runs, so a busy head (#4799 had ~40 Auto Gate runs) pushes
+  // it past page one, where a single read would miss it and say nothing.
+  const listed = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+    owner,
+    repo,
+    head_sha: headSha,
+    per_page: 100,
+  });
+  const runs = Array.isArray(listed) ? listed : listed?.workflow_runs || [];
+  const placement = runs.find((run) => Number(run?.check_suite_id) === suiteId);
+  if (!placement) {
+    return null;
+  }
+  const newer = runs
+    .filter(
+      (run) =>
+        run?.workflow_id === placement.workflow_id &&
+        Number(run?.check_suite_id) > suiteId &&
+        !NON_SUPERSEDING_EVENTS.has(run?.event),
+    )
+    .sort((a, b) => Number(a.check_suite_id) - Number(b.check_suite_id));
+  if (newer.length === 0) {
+    return null;
+  }
+  const workflow = placement.name || `workflow ${placement.workflow_id}`;
+  const newerSuites = newer.map((run) => `${run.check_suite_id} (${run.event})`).join(", ");
+  return (
+    `GitHub is not counting the passing ${AUTO_GATE_DECISION_CHECK}: it was placed in check suite ` +
+    `${suiteId} (${workflow} · ${placement.event}), and newer ${workflow} suite ${newerSuites} on ` +
+    `${headSha} supersedes it for the ruleset. The placement is permanent for this head — no rerun ` +
+    "or republish moves it. Push a new head (a commit with an identical tree re-rolls placement) " +
+    "and gate that head (#4802)"
+  );
+}
+
 async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck }) {
   const status = Number(
     error?.status ?? error?.response?.status ?? error?.response?.data?.status,
@@ -4075,9 +4341,15 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   // standing. Unknown ownership is still not "no winner": keep that error loud
   // and do not overwrite a transaction this run could not read (#3551).
   if (refusal.unprovenReason && !error.autoGateOwnershipUnknown) {
+    // Same control flow either way; only the reason changes. A superseded
+    // placement is permanent for this head, and "propagation" was the wrong
+    // name for it through three incidents (#4802).
+    const superseded = await readOrNull(() =>
+      describeSupersededPlacement({ github, owner, repo, headSha: expectedHeadSha, ownedAggregateCheck }),
+    );
     return {
       reason: "unproven-wait",
-      message: `Refusing to merge PR #${prNumber}; ${refusal.unprovenReason}`,
+      message: `Refusing to merge PR #${prNumber}; ${superseded || refusal.unprovenReason}`,
     };
   }
 
@@ -7672,6 +7944,7 @@ module.exports = {
   isNonPassingAggregate,
   isRateLimitFailure,
   isReadFailure,
+  isUnconfirmedCheckCreate,
   merge,
   processAggregateHead,
   reportAggregateDecision,
