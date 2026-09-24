@@ -727,8 +727,12 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 			return nil, ConfigDigest{}, fmt.Errorf("refusing to write: the current config does not load: %w", err)
 		}
 	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
-		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, before, true)
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, true)
 		if err != nil {
 			return nil, ConfigDigest{}, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}
@@ -838,8 +842,12 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("refusing to write: the current personal project config does not load: %w", err)
 		}
 	}
+	var existingOverrides map[string]string
+	if before != nil {
+		existingOverrides = before.ProgramOverrides
+	}
 	if w.structured {
-		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainstProject(w.key, w.rawStructured, before)
+		w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, existingOverrides, false)
 		if err != nil {
 			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
 		}
