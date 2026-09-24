@@ -318,3 +318,27 @@ test("a late refusal from an older attempt cannot clear a newer attempt's follow
   app.commitRegisteredProjects([{ id: "prj_A", root: "/second" }, { id: "prj_B", root: "/other" }]);
   assert.equal(state.selectedProject, "/second", "B's follow must survive A's late refusal");
 });
+
+test("a late success from an older attempt cannot replace a newer attempt's follow", async () => {
+  const { app, state, submits, pending, fire } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  // Attempt A (project A) outlives the bounded wait, which releases the guard.
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/first");
+  fire();
+  // The user moves to project B and rebinds it; B succeeds and arms its follow.
+  (app as unknown as { switchProject(r: string): void }).switchProject("/other");
+  app.openRebindProject("prj_B", "beta");
+  submits[1]("/other-new");
+  pending[1].resolve({ id: "prj_B", root: "/other-new" });
+  await settle();
+  // A finally answers, late, with a success.
+  pending[0].resolve({ id: "prj_A", root: "/first" });
+  await settle();
+
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/first" }, { id: "prj_B", root: "/other-new" }]);
+  assert.equal(state.selectedProject, "/other-new", "B's follow must survive A's late success");
+});

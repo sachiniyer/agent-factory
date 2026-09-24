@@ -18399,7 +18399,7 @@ function openRebindProject(projectId, label) {
           return true;
         };
         const followRegistry = () => {
-          if (oldRoot !== null) {
+          if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
             rebindFollow = { id: projectId, oldRoot, attempt };
           }
           refreshRegisteredProjects();

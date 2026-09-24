@@ -1311,7 +1311,10 @@ function openRebindProject(projectId: string, label: string): void {
         // the record points. If the rebind never landed, that is still the old
         // root and following it changes nothing.
         const followRegistry = (): void => {
-          if (oldRoot !== null) {
+          // The one intent slot belongs to the newest attempt that armed it: a
+          // late reply from an attempt the bounded wait released must not
+          // replace a newer attempt's intent (the user may have moved on to it).
+          if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
             rebindFollow = { id: projectId, oldRoot, attempt };
           }
           refreshRegisteredProjects();
