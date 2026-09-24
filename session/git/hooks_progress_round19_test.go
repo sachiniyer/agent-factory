@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressSuccessorReceiptWaitIsBounded(t *testing.T) {
@@ -124,7 +126,7 @@ func TestHookProgressExitReceiptPublishesAtomically(t *testing.T) {
 	entered, release := filepath.Join(dir, "entered"), filepath.Join(dir, "release")
 	shim := `#!/bin/sh
 : > ` + shellQuoteForShim(entered) + `
-while [ ! -f ` + shellQuoteForShim(release) + ` ]; do sleep 1; done
+` + testguard.BoundedGateWait(release, time.Second, 5*time.Minute) + `
 exec ` + shellQuoteForShim(realMV) + ` "$@"
 `
 	if err := os.WriteFile(filepath.Join(dir, "mv"), []byte(shim), 0700); err != nil {
@@ -133,9 +135,7 @@ exec ` + shellQuoteForShim(realMV) + ` "$@"
 
 	winner := exec.Command("sh", p.command(0, "exit 23")...)
 	winner.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := winner.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, winner)
 	winnerDone := make(chan error, 1)
 	go func() { winnerDone <- winner.Wait() }()
 	winnerFinished := false
@@ -176,9 +176,7 @@ exec ` + shellQuoteForShim(realMV) + ` "$@"
 	}
 
 	successor := exec.Command("sh", p.command(0, "true")...)
-	if err := successor.Start(); err != nil {
-		t.Fatal(err)
-	}
+	testguard.StartGroupProcess(t, successor)
 	successorDone := make(chan error, 1)
 	go func() { successorDone <- successor.Wait() }()
 	select {

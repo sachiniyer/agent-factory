@@ -53,6 +53,9 @@ func TestConfigAgentCodexFixtureProcess(t *testing.T) {
 	if os.Getenv(configAgentCodexFixtureEnv) != "1" {
 		t.Skip("Codex terminal fixture; re-exec'd by config-agent delivery tests")
 	}
+	// If the pane's tmux server dies, this fixture's ReadByte would block forever
+	// as an orphan (#4412).
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	if err := runConfigAgentCodexFixture(os.Getenv(configAgentCodexFixtureModeEnv)); err != nil {
 		t.Fatal(err)
 	}
@@ -270,6 +273,15 @@ func newConfigAgentCodexFixture(t *testing.T, mode string) (*Manager, string, st
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv(configAgentCodexFixtureEnv, "1")
 	t.Setenv(configAgentCodexFixtureModeEnv, mode)
+	// The fixture runs inside a tmux pane, so its parent is the pane's tmux
+	// server — a daemon that outlives this test process rather than dying
+	// with it. Name the test as the fixture's owner so the orphan watchdog's
+	// existence arm fires when the test goes away, however it goes away; a
+	// pane-only ppid watch would leave the ReadByte fixture running forever
+	// on a crashed run (#4412).
+	for _, kv := range testguard.ExpectedOwnerEnvPairs() {
+		t.Setenv(kv[0], kv[1])
+	}
 
 	binDir := testguard.SocketTempDir(t)
 	codexBin := filepath.Join(binDir, "codex")
@@ -285,7 +297,7 @@ func newConfigAgentCodexFixture(t *testing.T, mode string) (*Manager, string, st
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.SessionEnvPassthrough = []string{configAgentCodexFixtureEnv, configAgentCodexFixtureModeEnv}
+	cfg.SessionEnvPassthrough = []string{configAgentCodexFixtureEnv, configAgentCodexFixtureModeEnv, testguard.ExpectedParentEnv, testguard.ExpectedOwnerStartEnv}
 	if err := config.SaveConfig(cfg); err != nil {
 		t.Fatalf("save config-agent fixture config: %v", err)
 	}

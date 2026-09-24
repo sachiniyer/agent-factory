@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 const archiveRestartHelperEnv = "AF_TEST_ARCHIVE_RESTART_HELPER"
@@ -40,20 +42,18 @@ func TestArchiveHookOutputSurvivesRunnerExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := fmt.Sprintf(
-		"printf '%%s\\n' \"$$\" > %q; while [ ! -f %q ]; do sleep 0.02; done; %q; status=$?; printf '%%s\\n' \"$status\" > %q; exit \"$status\"",
-		pidFile, releaseFile, writer, statusFile,
+		"printf '%%s\\n' \"$$\" > %q; %s; %q; status=$?; printf '%%s\\n' \"$status\" > %q; exit \"$status\"",
+		pidFile, testguard.BoundedGateWait(releaseFile, 20*time.Millisecond, 5*time.Minute), writer, statusFile,
 	)
 
 	runner := exec.Command(os.Args[0], "-test.run=^TestArchiveHookOutputSurvivesRunnerExit$")
-	runner.Env = append(os.Environ(),
+	runner.Env = append(append(os.Environ(),
 		archiveRestartHelperEnv+"=1",
 		"AF_TEST_RESTART_HOME="+home,
 		"AF_TEST_RESTART_WORKTREE="+worktree,
 		"AF_TEST_RESTART_COMMAND="+command,
-	)
-	if err := runner.Start(); err != nil {
-		t.Fatalf("start archive-hook helper: %v", err)
-	}
+	), testguard.ExpectedOwnerEnv()...)
+	testguard.StartGroupProcess(t, runner)
 
 	hookPID := waitForArchiveRestartValue(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(-hookPID, syscall.SIGKILL) })
@@ -91,6 +91,9 @@ func TestArchiveHookOutputSurvivesRunnerExit(t *testing.T) {
 }
 
 func runArchiveRestartHelper(t *testing.T) {
+	// This process is a re-exec'd test binary owned by the test that spawned
+	// it; if that parent dies there is nothing left to reap it (#4412).
+	testguard.ExitWhenOrphaned(50 * time.Millisecond)
 	home := os.Getenv("AF_TEST_RESTART_HOME")
 	worktree := os.Getenv("AF_TEST_RESTART_WORKTREE")
 	command := os.Getenv("AF_TEST_RESTART_COMMAND")

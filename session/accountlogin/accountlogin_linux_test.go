@@ -431,7 +431,7 @@ func writeLoginAgentFixture(t *testing.T, dir string, tc loginPaneCase, reportPa
 		// terminal until the human finishes the browser or device-code step. A
 		// fixture that exited here would exercise the flow-ended-early path
 		// instead (TestLoginReportsAFlowThatEndedBeforeTheHandover).
-		"while :; do sleep 1; done\n"
+		testguard.BoundedSpin(time.Second, 5*time.Minute) + "\n"
 	path := filepath.Join(dir, tc.agent)
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write %s login fixture: %v", tc.agent, err)
@@ -443,7 +443,7 @@ func writeLoginAgentFixture(t *testing.T, dir string, tc loginPaneCase, reportPa
 func writeBlockingAgentFixture(t *testing.T, dir, agent string) {
 	t.Helper()
 	path := filepath.Join(dir, agent)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+testguard.BoundedSpin(time.Second, 5*time.Minute)+"\n"), 0o700); err != nil {
 		t.Fatalf("write %s fixture: %v", agent, err)
 	}
 }

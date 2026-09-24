@@ -434,7 +434,10 @@ func TestStopDaemon_EscalatesToSIGKILL(t *testing.T) {
 	// closing a race where the cmdline becomes visible while bash is still
 	// parsing the script.
 	readyFile := filepath.Join(tmpHome, "trap-ready")
-	script := fmt.Sprintf(`trap "" TERM; : > %s; while :; do sleep 1; done`, readyFile)
+	// Bounded so an orphaned copy cannot spin forever (#4412); the SIGKILL
+	// escalation this test exercises still lands long before the ceiling.
+	script := fmt.Sprintf(`trap "" TERM; : > %s; %s`, readyFile,
+		testguard.BoundedSpin(time.Second, 5*time.Minute))
 	cmd := spawnFakeDaemonProc(t, "af", script, "--daemon", "af-test")
 	pid := cmd.Process.Pid
 

@@ -53,7 +53,7 @@ exec "$@"
 	agent := `#!/bin/sh
 test "${OPENAI_API_KEY:-}" = bootstrap-secret || exit 9
 : >"$1"
-while :; do sleep 1; done
+` + testguard.BoundedSpin(time.Second, 5*time.Minute) + `
 `
 	if err := os.WriteFile(agentPath, []byte(agent), 0o700); err != nil {
 		t.Fatalf("write agent shim: %v", err)
@@ -145,7 +145,7 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 		"test -n \"$OPENAI_API_KEY\" && test -n \"$CUSTOM_PROVIDER_TOKEN\" || exit 9\n" +
 		"tr '\\000' '\\n' < /proc/$$/environ | sed 's/=.*//' | sort > \"$1.partial\" && mv -f \"$1.partial\" \"$1\"\n" +
 		"if git -C \"$2\" push origin HEAD:refs/heads/session-env-e2e >/dev/null 2>&1; then : > \"$3\"; fi\n" +
-		"while :; do sleep 1; done\n"
+		testguard.BoundedSpin(time.Second, 5*time.Minute) + "\n"
 	if err := os.WriteFile(agentPath, []byte(program), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 
 	dir := t.TempDir()
 	agentPath := filepath.Join(dir, ProgramCodex)
-	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
+	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\n"+testguard.BoundedSpin(time.Second, 5*time.Minute)+"\n"), 0o700); err != nil {
 		t.Fatalf("write agent fixture: %v", err)
 	}
 	reportPath := filepath.Join(dir, "shell-environment")

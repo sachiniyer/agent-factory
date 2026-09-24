@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // fastHookAdoptionPoll collapses the poll clock so a test can observe the
@@ -204,7 +205,7 @@ func TestAdoptionFindsALauncherThatHasNotRegisteredItsScope(t *testing.T) {
 	claimDaemonProcess(t)
 	const prefix = "af-hook-sess3682launch"
 	gate := filepath.Join(t.TempDir(), "release")
-	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+	startStubHookLauncher(t, prefix+"-g0-0.scope", testguard.BoundedGateWait(gate, time.Second, 5*time.Minute))
 
 	gw := worktreeWithRecordedScope(t, prefix)
 	AdoptRunningHooks([]*GitWorktree{gw})
