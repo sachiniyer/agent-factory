@@ -156,3 +156,19 @@ func (target sessionActionTarget) closeTabRequest(tabID, tabName string) daemon.
 		TabID: tabID, TabName: tabName,
 	}
 }
+
+// streamAddress returns the WS stream coordinates for inst. The daemon's
+// /v1/sessions/{idOrTitle}/stream route resolves an UNSCOPED path segment by
+// stable id first (authoritativeStreamTarget), so a session with a recorded id
+// is dialed by it — a killed-and-recreated row cannot inherit the pane's input
+// the way a reused title can, and a deferred attach really does reach the
+// captured session (#716's intent, carried onto the wire). Sending a repo_id
+// would select the title namespace instead, so the scope is deliberately empty
+// when the id is sent. A pre-ID record keeps the repo-scoped title contract:
+// an empty id must not occupy the id slot.
+func streamAddress(inst *session.Instance, repoID string) (idOrTitle, scopeRepoID string) {
+	if inst.ID != "" {
+		return inst.ID, ""
+	}
+	return inst.Title, repoID
+}

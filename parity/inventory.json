@@ -1477,8 +1477,8 @@
       "id": "wire.id-addressing",
       "title": "Address a session by its stable id rather than by title",
       "tui": {
-        "status": "partial",
-        "pointer": "app/session_action_target.go captures stable identity and constructs kill/archive/restore/limit/handoff/tab requests; retained handlers resolve completions by that identity"
+        "status": "yes",
+        "pointer": "app/session_action_target.go \u2014 captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths \u2014 the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) \u2014 sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
       },
       "web": {
         "status": "yes",
@@ -1486,11 +1486,11 @@
       },
       "cli": {
         "status": "partial",
-        "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id"
+        "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id; `send-prompt --all` carries each enumerated row's id through dispatch (scopedInstance.ID -> daemon.SendPromptRequest.ID, api/sessions_sendprompt.go)"
       },
-      "verdict": "real-gap",
+      "verdict": "deliberate",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable \u2014 and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract."
+      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget \u2014 captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope \u2014 the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace \u2014 for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest \u2014 a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped \u2014 they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect \u2014 and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
     },
     {
       "id": "worktree.hooks.edit",
@@ -1996,7 +1996,7 @@
       "CreateTabRequest": {
         "cli": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           }
         },
         "tui": {
@@ -2017,7 +2017,7 @@
       "CloseTabRequest": {
         "cli": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)."
@@ -2035,7 +2035,7 @@
       "KillSessionRequest": {
         "cli": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
           }
         }
       },
@@ -2057,13 +2057,7 @@
           }
         }
       },
-      "SendPromptRequest": {
-        "cli": {
-          "id": {
-            "gap": "wire.id-addressing"
-          }
-        }
-      },
+      "SendPromptRequest": {},
       "DeliverPromptRequest": {
         "cli": {
           "defer_while_attached": {
@@ -2257,7 +2251,7 @@
       "RenameTabRequest": {
         "cli": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
@@ -2270,7 +2264,7 @@
       "ReorderTabRequest": {
         "cli": {
           "id": {
-            "gap": "wire.id-addressing"
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."

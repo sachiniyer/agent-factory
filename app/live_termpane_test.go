@@ -69,16 +69,16 @@ func (f *fakeLiveTerm) TerminalModes() (terminal.Modes, bool) {
 func (f *fakeLiveTerm) SetSizeOwner(on bool) { f.sizeOwner = on }
 
 // stubLiveTermFactory points the attachment seam at fake attachments and returns
-// the created fakes + the session titles they were created for.
+// the created fakes + the session idOrTitle values they were created for.
 func stubLiveTermFactory(t *testing.T) (created *[]*fakeLiveTerm, titles *[]string) {
 	t.Helper()
 	var fakes []*fakeLiveTerm
 	var names []string
 	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
+	newLiveTermPaneFn = func(idOrTitle, repoID, tabID string, tab, width, height int) liveTermAttachment {
 		f := newFakeLiveTerm()
 		fakes = append(fakes, f)
-		names = append(names, title)
+		names = append(names, idOrTitle)
 		return f
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = orig })
@@ -112,7 +112,7 @@ func TestSyncLiveTermPaneBindsFocusedPane(t *testing.T) {
 	h.syncLiveTermPane()
 
 	require.Len(t, *fakes, 1, "the visible eligible pane must bind a live attachment")
-	assert.Equal(t, inst.Title, (*titles)[0], "attachment targets the pane's session title")
+	assert.Equal(t, inst.ID, (*titles)[0], "attachment targets the pane's session by stable id")
 	p := h.focusedOpenPane()
 	require.NotNil(t, p)
 	require.NotNil(t, h.liveTerms[p.ID()])
