@@ -190,25 +190,143 @@ func TestStaleInteractiveRequestDoesNotDrain(t *testing.T) {
 	require.Equal(t, []string{"x"}, fake.keys, "the queued key lands in the latest target, B")
 }
 
-// TestFailedActivationDropsPaneBoundKeys: keys buffered behind an interactive
-// entry were typed as pane input. When activation fails — here the pane closes
-// before the message lands — they must not run as host commands instead (a
+// pendingInteractiveHome arms the interactive gate the way a help-seen Enter
+// does and queues one pane-bound key behind it. The request's command is
+// discarded: these tests cover the exits where its enterInteractiveMsg does not
+// release the gate.
+func pendingInteractiveHome(t *testing.T) (*home, *session.Instance) {
+	t.Helper()
+	h, inst, _ := interactiveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+	_, cmd := h.requestInteractive(p, nil)
+	require.NotNil(t, cmd)
+	require.True(t, h.awaitingInteractive, "precondition: the request is pending")
+	_, _ = h.handleKeyPress(runeKey('x'))
+	require.Len(t, h.deferredKeys, 1, "precondition: pane input is queued")
+	return h, inst
+}
+
+// requireNavKeyHandled is the property every exit from a pending interactive
+// request must restore: a plain nav key is handled at once, and the queued pane
+// input is dropped rather than run as host commands.
+func requireNavKeyHandled(t *testing.T, h *home) {
+	t.Helper()
+	require.False(t, h.awaitingInteractive, "the pending request must be released")
+	_, _ = h.handleKeyPress(runeKey('j'))
+	require.Empty(t, h.deferredKeys, "the nav key must not be parked, and the pane input must be dropped")
+	require.True(t, h.keySent, "the nav key must reach its highlight pass at once")
+}
+
+// TestFailedActivationDropsPaneBoundKeys: the enterInteractiveMsg lands but
+// activation refuses (the session went lost first). The message's own release
+// runs, and the pane-bound keys are dropped rather than run as host commands (a
 // queued D would start a kill of whatever the tree has selected).
 func TestFailedActivationDropsPaneBoundKeys(t *testing.T) {
-	h, _, _ := interactiveTestHome(t)
+	h, inst, _ := interactiveTestHome(t)
 	p := h.focusedOpenPane()
 	require.NotNil(t, p)
 
 	_, cmd := h.requestInteractive(p, nil)
 	_, _ = h.handleKeyPress(runeKey('D'))
 	require.Len(t, h.deferredKeys, 1)
-	h.closePaneWindow(p)
+	_ = inst.Transition(session.ObserveLiveness(session.LiveLost))
 
 	_, _ = h.Update(cmd())
-	require.False(t, h.interactive, "activation of a closed pane fails")
+	require.False(t, h.interactive, "activation of a lost session fails")
 	require.Empty(t, h.deferredKeys, "pane-bound input with no pane is dropped")
 	require.False(t, h.keySent, "the dropped D must not have started its host action")
 	require.Equal(t, stateDefault, h.state)
+	requireNavKeyHandled(t, h)
+}
+
+// TestPendingInteractiveReleasedWhenPaneCloses: the awaited pane is closed
+// while the request is pending (closePaneWindow's release).
+func TestPendingInteractiveReleasedWhenPaneCloses(t *testing.T) {
+	h, _ := pendingInteractiveHome(t)
+	h.hidePane(h.awaitingPane)
+	requireNavKeyHandled(t, h)
+}
+
+// TestPendingInteractiveReleasedWhenSessionKilled: the kill finishes while the
+// request is pending; the finalize removes the row and prunes its pane
+// (closePaneWindow's release).
+func TestPendingInteractiveReleasedWhenSessionKilled(t *testing.T) {
+	h, inst := pendingInteractiveHome(t)
+	_, _ = h.handleInstanceKilled(instanceKilledMsg{target: captureSessionActionTarget(inst, h.repoID)})
+	require.Zero(t, h.store.NumOpenPanes(), "precondition: the kill closed the pane")
+	requireNavKeyHandled(t, h)
+}
+
+// TestPendingInteractiveReleasedWhenSessionArchived: the archive finishes while
+// the request is pending; archiving closes the session's panes
+// (closePaneWindow's release).
+func TestPendingInteractiveReleasedWhenSessionArchived(t *testing.T) {
+	h, inst := pendingInteractiveHome(t)
+	h.handleInstanceArchived(instanceArchivedMsg{target: captureSessionActionTarget(inst, h.repoID)})
+	require.Zero(t, h.store.NumOpenPanes(), "precondition: the archive closed the pane")
+	requireNavKeyHandled(t, h)
+}
+
+// TestPendingInteractiveReleasedWhenSessionLost: the session goes lost while
+// its pane stays open (expirePendingInteractive's liveness release).
+func TestPendingInteractiveReleasedWhenSessionLost(t *testing.T) {
+	h, inst := pendingInteractiveHome(t)
+	_ = inst.Transition(session.ObserveLiveness(session.LiveLost))
+	require.Equal(t, 1, h.store.NumOpenPanes(), "precondition: a lost session keeps its pane")
+	_, _ = h.handleKeyPress(runeKey('j'))
+	require.False(t, h.awaitingInteractive, "the pending request must be released")
+	require.Empty(t, h.deferredKeys, "the nav key must not be parked, and the pane input must be dropped")
+	require.True(t, h.keySent, "the nav key must reach its highlight pass at once")
+}
+
+// TestPendingInteractiveReleasedWhenKillStarts: a kill is in flight — the row
+// is tearing down but its pane is still open (expirePendingInteractive's
+// teardown release).
+func TestPendingInteractiveReleasedWhenKillStarts(t *testing.T) {
+	h, inst := pendingInteractiveHome(t)
+	inst.SetInFlightOpForTest(session.OpKilling)
+	_, _ = h.handleKeyPress(runeKey('j'))
+	require.False(t, h.awaitingInteractive, "the pending request must be released")
+	require.Empty(t, h.deferredKeys)
+	require.True(t, h.keySent)
+}
+
+// TestPendingInteractiveReleasedWhenAnotherScreenOpens: an async overlay (here
+// the general help) takes the keyboard while the request is pending — the same
+// state reset a project switch or confirmation produces. The key meant for that
+// screen must reach it, not queue behind an activation that would refuse
+// (expirePendingInteractive's state release).
+func TestPendingInteractiveReleasedWhenAnotherScreenOpens(t *testing.T) {
+	h, _ := pendingInteractiveHome(t)
+	_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+	require.Equal(t, stateHelp, h.state)
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	require.False(t, h.awaitingInteractive, "the pending request must be released")
+	require.Equal(t, stateDefault, h.state, "Esc reached the help screen and closed it")
+	requireNavKeyHandled(t, h)
+}
+
+// TestDismissedInteractiveHelpNeverArmsTheGate: with the first-run interactive
+// help unseen, the request parks on the help screen instead of arming the gate.
+// That screen has no cancel — every dismiss key, Esc included, continues into
+// activation through its own enterInteractiveMsg — so dismissing it leaves no
+// pending request to release, even before that message lands.
+func TestDismissedInteractiveHelpNeverArmsTheGate(t *testing.T) {
+	h, _ := liveTestHome(t)
+	_, _ = stubLiveTermFactory(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+
+	_, _ = h.requestInteractive(p, nil)
+	require.Equal(t, stateHelp, h.state, "precondition: the first-run help is showing")
+	require.False(t, h.awaitingInteractive, "the help screen owns the keyboard; no gate is armed")
+
+	_, dismissCmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	require.NotNil(t, dismissCmd, "the dismissal carries the activation")
+	require.Equal(t, stateDefault, h.state, "Esc dismisses the help screen")
+	requireNavKeyHandled(t, h)
 }
 
 // TestCtrlCRacingNamingActionKeepsOrder: in the naming form ctrl+c is not the

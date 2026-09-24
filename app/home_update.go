@@ -578,6 +578,62 @@ func (m *home) inputGated() bool {
 	return m.keySent || m.awaitingInteractive
 }
 
+// releasePendingInteractive ends a pending interactive request that will never
+// activate. The keys buffered behind it were typed as pane input, so with no
+// pane to take them they are dropped rather than run as host commands (a queued
+// D would start a kill of whatever the tree has selected).
+//
+// The gate has one release per way a pending request can end:
+//
+//   - activation lands: the enterInteractiveMsg case (it also drops the keys
+//     when activation fails);
+//   - the awaited pane closes — closed, its session killed or archived, a
+//     project switch: closePaneWindow, the one path that removes a pane;
+//   - the session is lost, dead, or being killed or archived while its pane
+//     stays open, or another screen takes the keyboard (an async overlay, a
+//     state reset): expirePendingInteractive, checked before any key is gated.
+//     A finished archive or kill closes the pane, so it lands on the previous
+//     release.
+//
+// The first-run help path never arms the gate: requestInteractive arms it only
+// when the help is skipped, and the help screen has no cancel — every dismissal
+// continues into activation.
+func (m *home) releasePendingInteractive() {
+	if !m.awaitingInteractive {
+		return
+	}
+	m.awaitingInteractive = false
+	m.awaitingPane = nil
+	m.deferredKeys = nil
+}
+
+// expirePendingInteractive releases the gate when the pending request can no
+// longer activate — activateInteractive would refuse it on arrival anyway — so
+// the key being handled is not parked behind a transition that cannot happen.
+// Cheap checks only: it runs on every physical key while a request is pending,
+// so it reads projected liveness rather than probing tmux.
+func (m *home) expirePendingInteractive() {
+	if !m.awaitingInteractive {
+		return
+	}
+	if m.state != stateDefault {
+		// Another screen owns the keyboard (an async help or confirmation, a
+		// state reset); activation requires stateDefault.
+		m.releasePendingInteractive()
+		return
+	}
+	if inst := m.awaitingPane.Instance(); inst != nil {
+		switch inst.GetLiveness() {
+		case session.LiveLost, session.LiveDead:
+			m.releasePendingInteractive()
+			return
+		}
+		if inst.IsTearingDown() || inst.UserKilled() {
+			m.releasePendingInteractive()
+		}
+	}
+}
+
 // handleKeyPress is the entry point for a PHYSICAL key. A mapped key is split
 // into two event-loop passes (highlight, then the replayed action), and the
 // next physical key can beat the replay onto p.msgs: bubbletea runs the
@@ -592,6 +648,7 @@ func (m *home) inputGated() bool {
 // pending action opens as merely "close". Everywhere else ctrl+c is contextual
 // and keeps its place in line.
 func (m *home) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.expirePendingInteractive()
 	if !m.ctrlCHardExits(msg) && (m.inputGated() || len(m.deferredKeys) > 0) {
 		m.deferredKeys = append(m.deferredKeys, msg)
 		return m, m.drainDeferredKeys()
