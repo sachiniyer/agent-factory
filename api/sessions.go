@@ -550,19 +550,31 @@ var (
 )
 
 // previewTabMissErr is the message for a tab-level miss — an --tab-id that no
-// longer resolves, or a --tab that is not a slot.
+// longer resolves, a --tab-name that resolved then closed mid-capture, or a
+// --tab that is not a slot.
 //
 // Both local and remote previews are daemon-resolved and report the miss through
 // TabGone, so a user cannot tell which machine resolved the selector. It names
 // the FLAG the user passed, which neither the daemon's session-oriented error nor
 // a bare "gone" can do.
 //
-// A --tab-name miss is deliberately NOT here: it is answered with the session's
-// roster, which only the side holding the tab list can produce.
+// The branches mirror ResolveTabIndex's selector precedence (id, then name, then
+// ordinal, session/tab.go), so the message names the first selector the user
+// supplied. A --tab-name that does NOT match is a typo answered by the session's
+// roster up front (ErrTabNameNotFound, daemon/preview.go) and never reaches here;
+// the --tab-name branch below is for the other miss class the daemon also routes
+// in: a name that DID resolve and was then closed mid-capture, which the daemon
+// maps to TabGone selector-agnostically. Without this branch the function falls
+// through to --tab with its default 0, blaming a flag the user never passed and a
+// slot (the agent tab) that is provably still present.
 func previewTabMissErr() error {
 	if previewTabIDFlag != "" {
 		return fmt.Errorf("--tab-id %q matches no tab in this session; it may have been closed",
 			previewTabIDFlag)
+	}
+	if previewTabNameFlag != "" {
+		return fmt.Errorf("--tab-name %q matches no live tab in this session; it may have been closed mid-capture",
+			previewTabNameFlag)
 	}
 	return fmt.Errorf("--tab %d is not a slot in this session", previewTabFlag)
 }
