@@ -451,18 +451,30 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		// key from the terminal/test reaches p.msgs in a single send, so it
 		// can win the event loop's select while the first key's re-emit is
 		// still in flight. When that happens the next key arrives here with
-		// keySent still armed but a different identity: rather than run it
+		// keySent still armed but a different identity. Rather than run it
 		// in the pre-first-key state (which silently drops scripted/coalesced
-		// input — e.g. "/" then "p" loses "p" before search opens), re-emit
-		// it so it is processed only after the pending pass-2 has
-		// transitioned state. keySent/pendingKey stay armed so the original
-		// pass-2 still completes.
+		// input — e.g. "/" then "p" loses "p" before search opens), buffer it
+		// in arrival order and replay it through the normal path once pass-2
+		// clears the arm, so it is processed after the opener's transition
+		// instead of re-emitted through its own goroutine (which races its
+		// siblings: "/", "p", "q" could arrive as "qp"). keySent/pendingKey
+		// stay armed so the original pass-2 still completes; see
+		// drainDeferredKeys.
+		if msg.String() == "ctrl+c" {
+			// Hard exit bypasses the deferral: fall through to the
+			// unconditional handleQuit check below instead of parking ctrl+c
+			// behind the pending pass-2. Otherwise the overlay the opener
+			// opens would swallow the deferred ctrl+c as merely "close",
+			// dropping the always-on hard exit.
+			return nil, false
+		}
 		if msg.String() == m.pendingKey {
 			m.keySent = false
 			m.pendingKey = ""
 			return nil, false
 		}
-		return func() tea.Msg { return msg }, true
+		m.deferredKeys = append(m.deferredKeys, msg)
+		return nil, true
 	}
 	// While naming a new instance the menu only shows the submit-name (enter),
 	// change-program (tab), and cancel (esc) options, so those keys are the only ones
@@ -545,7 +557,46 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keydownCallback(name)), true
 }
 
+// drainDeferredKeys sequences openerCmd first — so the opener's pass-2 action
+// (which may transition state asynchronously, e.g. via enterInteractiveMsg) is
+// in place before the replay — then replays each buffered racing key in arrival
+// order through the normal Update path, so coalesced input (e.g. "/", "p", "q")
+// lands in the post-transition state and in order ("pq", not "qp") instead of
+// being re-emitted through per-key goroutines that race their siblings. Clears
+// the buffer. Returns openerCmd unchanged when nothing is buffered, so the
+// wrapper can assign unconditionally.
+func (m *home) drainDeferredKeys(openerCmd tea.Cmd) tea.Cmd {
+	keys := m.deferredKeys
+	m.deferredKeys = nil
+	if len(keys) == 0 {
+		return openerCmd
+	}
+	cmds := make([]tea.Cmd, 0, len(keys)+1)
+	if openerCmd != nil {
+		cmds = append(cmds, openerCmd)
+	}
+	for i := range keys {
+		k := keys[i]
+		cmds = append(cmds, func() tea.Msg { return k })
+	}
+	return tea.Sequence(cmds...)
+}
+
+// handleKeyPress drives one key through the menu-highlight pass and the state
+// dispatch. When a pass-2 just cleared the highlight arm with buffered racing
+// keys pending, it sequences the opener's action cmd before the replay, so
+// coalesced input lands in the post-action state and in order instead of
+// racing its siblings (see drainDeferredKeys).
 func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
+	wasArmed := m.keySent
+	mod, cmd = m.handleKeyPressDispatch(msg)
+	if wasArmed && !m.keySent && len(m.deferredKeys) > 0 {
+		cmd = m.drainDeferredKeys(cmd)
+	}
+	return mod, cmd
+}
+
+func (m *home) handleKeyPressDispatch(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Interactive mode owns the keyboard before anything else — menu
 	// highlighting, quit keys, the global key map (#1089 PR 2, RFC §2.3).
 	// The state gate matters: an overlay opened by an async event (e.g. the
@@ -617,6 +668,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// through the generated table like every other rebindable action, via
 	// keys.KeyQuit in handleDefaultKeyPress (#1026).
 	if msg.String() == "ctrl+c" {
+		m.deferredKeys = nil
 		return m.handleQuit()
 	}
 

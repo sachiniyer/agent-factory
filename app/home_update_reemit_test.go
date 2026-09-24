@@ -19,56 +19,67 @@ import (
 // send, so it can win the event loop's select while the first key's re-emit is
 // still in flight.
 //
-// "/" opens the search overlay on pass-2; "p" is the first search-query
-// character. Sent back-to-back, "p" parks on p.msgs before "/"'s re-emit
-// resolves. The guard must defer "p" until after "/" opens search, so "p"
-// becomes the query (matching only "apple") rather than being swallowed as an
-// unmapped no-op in stateDefault (which would leave the query empty and match
-// all instances). Uses teatest — the real tea.Program event loop — so the race
-// is the same one production sees.
+// "/" opens the search overlay on pass-2; "p" and "q" are the first two
+// search-query characters. Sent "/" then "p" then "q" back-to-back, both query
+// chars park on p.msgs before "/"'s re-emit resolves. The guard buffers racing
+// keys in arrival order and drains them through the normal path once "/"
+// opens search (a single tea.Sequence, not per-key goroutines), so the query
+// becomes "pq" and matches only "pqrs". The per-key re-emit the guard replaced
+// had no ordering guarantee — two goroutines could deliver q before p, giving
+// "qp" (which matches nothing) — so this asserts ORDER among two distinct
+// racing keys, not merely that a single key survives. Uses teatest — the real
+// tea.Program event loop — so the race is the same one production sees.
+//
+// Fixtures are chosen so the result COUNT uniquely identifies the query:
+//
+//	"pq" -> 1 (only "pqrs" has p then q); "p" -> 2 ("pqrs"+"aple"); "q" -> 2
+//	("pqrs"+"quux"); "qp" -> 0; "" -> 4. So count==1 means both chars landed in
+//
+// order, untainted by a timing race between the search-open and the drain.
 func TestReemitReordersCoalescedKeys(t *testing.T) {
 	eh := newE2EHarness(t)
-	eh.addStartedInstance("apple")  // title "apple" contains "p"
-	eh.addStartedInstance("cherry") // title "cherry" does not
+	eh.addStartedInstance("pqrs")   // fuzzy "pq" matches (p then q)
+	eh.addStartedInstance("aple")   // has p, no q — matches "p" but not "pq"
+	eh.addStartedInstance("quux")   // has q, no p — matches "q" but not "pq"
+	eh.addStartedInstance("cherry") // neither p nor q — only matches ""
 	eh.start()
 
 	// Let Init's 100ms previewTick settle.
 	time.Sleep(300 * time.Millisecond)
 
-	// Send "/" (search opener) then "p" (first query char) as fast as
-	// possible. Both go through p.Send -> p.msgs. The second is delivered
-	// before the first's re-emit resolves through the command pipeline.
+	// Send "/" (search opener) then "p", "q" (first query chars) as fast as
+	// possible. All go through p.Send -> p.msgs. The query chars are
+	// delivered before "/"'s re-emit resolves through the command pipeline.
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 
-	// Wait for search state to be reached (re-emit pipeline resolves and
-	// opens the overlay). The handler closes done after fn runs, so fn
-	// must not close it (see home_update.go:158-163).
-	var searchReached bool
-	eh.waitUntil(5*time.Second, "search opens", func() bool {
+	// Poll the overlay's result count on the tea goroutine until it settles.
+	// Search opens synchronously on "/"'s pass-2, but the buffered "p"/"q"
+	// are drained AFTER that pass returns (a tea.Sequence), so waiting on
+	// state==stateSearch alone would race the drain; count==1 is the proof
+	// both chars landed — in order — since only "pq" yields 1. The
+	// runOnEventLoopMsg handler closes done after fn runs, so fn must not
+	// close it (see the runOnEventLoopMsg case in Update).
+	var resultCount int
+	eh.waitUntil(5*time.Second, "search query becomes \"pq\" in order (1 result)", func() bool {
 		done := make(chan struct{})
 		eh.tm.Send(runOnEventLoopMsg{fn: func(h *home) {
-			searchReached = h.state == stateSearch
+			if h.state == stateSearch && h.searchOverlay != nil {
+				resultCount = len(h.searchOverlay.ResultInstances())
+			}
 		}, done: done})
 		select {
 		case <-done:
 		case <-time.After(time.Second):
 			return false
 		}
-		return searchReached
+		return resultCount == 1
 	})
 
-	// Inspect the search overlay's result count.
-	var resultCount int
-	eh.query(func(h *home) {
-		if h.searchOverlay != nil {
-			resultCount = len(h.searchOverlay.ResultInstances())
-		}
-	})
-
-	// "p" typed into the open search -> query "p" -> only "apple" matches.
-	// If the re-emit race regresses, "p" is swallowed in stateDefault before
-	// search opens and the query stays empty, matching all instances.
+	// "p","q" drained in order into the open search -> query "pq" -> only
+	// "pqrs" matches (fuzzy: p then q). count==1 rules out every regression:
+	// "qp" (0), a swallowed char leaving "p"/"q" (2), or an empty query (4).
 	require.Equal(t, 1, resultCount,
-		"re-emit race swallowed 'p' before search opened; expected 1 result (apple only), got 2 (empty query matches all)")
+		"racing query chars landed out of order or were swallowed; expected query \"pq\" (1 result: pqrs), got %d", resultCount)
 }
