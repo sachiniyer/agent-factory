@@ -39,7 +39,16 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   const events: string[] = [];
   const submits: Array<(path: string) => void> = [];
   const pending: Deferred[] = [];
+  // Controllable timers: fire() runs every armed callback, as if the bounded wait
+  // elapsed; clearTimeout disarms one.
+  const timers = new Map<number, () => void>();
+  let nextTimer = 1;
+  const fire = () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } };
   const context = {
+    window: {
+      setTimeout: (fn: () => void) => { const id = nextTimer++; timers.set(id, fn); return id; },
+      clearTimeout: (id: number) => { timers.delete(id); },
+    },
     store: {
       get: () => state,
       set: (patch: Partial<State>) => Object.assign(state, patch),
@@ -78,6 +87,7 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   };
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null, rebindFollow = null;
+    const REBIND_ANSWER_MS = 30000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
     ${topLevelFunction(source, "takeRebindFollow")}
@@ -90,7 +100,7 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
     commitRegisteredProjects(projects: Project[]): void;
     closeModal(): void;
   };
-  return { app, state, events, submits, pending };
+  return { app, state, events, submits, pending, fire, timers };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -204,4 +214,44 @@ test("a rebind does not move a selection the user changed mid-flight", async () 
   app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
 
   assert.equal(state.selectedProject, "/other");
+});
+
+test("a rebind that never answers releases the guard and reports the outcome as unknown", async () => {
+  const { app, events, submits, pending, fire } = harness({ registeredProjects: [{ id: "prj_A", root: "/old" }], selectedProject: "/old" });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  // The request never settles: no reply, no rejection. Only the bounded wait runs.
+  fire();
+  await settle();
+
+  assert.ok(events.includes("close:1"), "the stalled form closes");
+  assert.ok(events.includes("refetch"), "the registry is re-read so the project list shows the truth");
+  const outcomes = events.filter(e => e.startsWith("outcome:"));
+  assert.equal(outcomes.length, 1);
+  assert.match(outcomes[0], /^outcome:uncertain:.*alpha.*unknown/, "the notice says the outcome is unknown, not success or failure");
+  assert.ok(!events.some(e => e.startsWith("error:") || e.startsWith("toast:")), "no failure is claimed");
+
+  app.openRebindProject("prj_A", "alpha");
+  assert.equal(submits.length, 2, "the in-flight guard must not outlive the attempt");
+
+  // A reply that finally arrives only re-reads the registry: no second notice,
+  // and it must not touch the new attempt's guard.
+  const before = events.length;
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  assert.deepEqual(events.slice(before), ["refetch"]);
+  submits[1]("/newer");
+  assert.equal(events.filter(e => e.startsWith("rpc:")).length, 2, "the second attempt is still admitted");
+});
+
+test("a rebind that answers in time disarms the bounded wait", async () => {
+  const { app, submits, pending, timers } = harness({ registeredProjects: [{ id: "prj_A", root: "/old" }], selectedProject: "/old" });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  assert.equal(timers.size, 1, "submitting arms the bounded wait");
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  assert.equal(timers.size, 0, "a settled attempt leaves no timer to report a stale unknown outcome");
 });

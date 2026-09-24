@@ -18342,6 +18342,7 @@ function openAddProject() {
   );
 }
 var rebindInFlight = null;
+var REBIND_ANSWER_MS = 3e4;
 var rebindFollow = null;
 function takeRebindFollow(projects) {
   const follow = rebindFollow;
@@ -18380,27 +18381,47 @@ function openRebindProject(projectId, label) {
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
-        void rebindProject(projectId, path, tok).then(() => {
+        let settled = false;
+        const settle = () => {
+          if (settled) {
+            refreshRegisteredProjects();
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
           rebindInFlight = null;
-          if (modal === m) closeModal();
+          return true;
+        };
+        const followRegistry = () => {
           if (oldRoot !== null) {
             rebindFollow = { id: projectId, oldRoot };
           }
           refreshRegisteredProjects();
+        };
+        const unanswered = window.setTimeout(() => {
+          if (!settle()) return;
+          if (modal === m) closeModal();
+          followRegistry();
+          surfaceMutationError(
+            new Error(`The rebind of ${label} has not answered in ${REBIND_ANSWER_MS / 1e3}s, so its outcome is unknown. Refreshing the project list.`),
+            "uncertain"
+          );
+        }, REBIND_ANSWER_MS);
+        void rebindProject(projectId, path, tok).then(() => {
+          if (!settle()) return;
+          if (modal === m) closeModal();
+          followRegistry();
         }).catch((e) => {
-          rebindInFlight = null;
-          if (isMutationOutcomeUncertain(e) && oldRoot !== null) {
-            rebindFollow = { id: projectId, oldRoot };
-          }
+          if (!settle()) return;
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
-            refreshRegisteredProjects();
+            followRegistry();
             surfaceMutationError(e, "confirmed");
             return;
           }
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
-            refreshRegisteredProjects();
+            followRegistry();
             surfaceMutationError(
               new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
               "uncertain"

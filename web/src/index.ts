@@ -1208,6 +1208,12 @@ function openAddProject(): void {
  *  registry mutation. */
 let rebindInFlight: string | null = null;
 
+/** How long a rebind may go unanswered before the UI stops waiting on it. The
+ *  mutation is not aborted — the daemon may still commit it — so hitting this
+ *  releases the in-flight guard, reports the outcome as unknown, and re-reads the
+ *  registry rather than claiming success or failure. */
+const REBIND_ANSWER_MS = 30_000;
+
 /** A successful rebind whose project the selection should follow once a registry
  *  read confirms where the record now points: its stable id and the root it
  *  pointed at when Rebind opened. */
@@ -1270,30 +1276,58 @@ function openRebindProject(projectId: string, label: string): void {
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
+        // Every outcome goes through settle() exactly once: the reply, or the
+        // bounded wait below, whichever comes first. The guard lives only as long
+        // as this attempt is undecided, and a reply that arrives after the wait
+        // gave up only re-reads the registry — the notice already said the
+        // outcome was unknown, so it neither re-arms nor re-toasts.
+        let settled = false;
+        const settle = (): boolean => {
+          if (settled) {
+            refreshRegisteredProjects();
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
+          rebindInFlight = null;
+          return true;
+        };
+        // Committed or maybe-committed: follow wherever the registry read says
+        // the record points. If the rebind never landed, that is still the old
+        // root and following it changes nothing.
+        const followRegistry = (): void => {
+          if (oldRoot !== null) {
+            rebindFollow = { id: projectId, oldRoot };
+          }
+          refreshRegisteredProjects();
+        };
+        // No client-side timeout on the mutation itself: aborting it cannot undo
+        // a rebind the daemon already committed. Instead the UI stops waiting,
+        // says the outcome is unknown, and lets the registry read show the truth.
+        const unanswered = window.setTimeout(() => {
+          if (!settle()) return;
+          if (modal === m) closeModal();
+          followRegistry();
+          surfaceMutationError(
+            new Error(`The rebind of ${label} has not answered in ${REBIND_ANSWER_MS / 1000}s, so its outcome is unknown. Refreshing the project list.`),
+            "uncertain",
+          );
+        }, REBIND_ANSWER_MS);
         void rebindProject(projectId, path, tok)
           .then(() => {
-            rebindInFlight = null;
+            if (!settle()) return;
             if (modal === m) closeModal();
             // The reply is not applied to the store: a newer rebind or delete
             // from another client may already be there. A fenced registry read
             // decides where the record points now, and the selection follows it.
-            if (oldRoot !== null) {
-              rebindFollow = { id: projectId, oldRoot };
-            }
-            refreshRegisteredProjects();
+            followRegistry();
           })
           .catch((e) => {
-            rebindInFlight = null;
-            if (isMutationOutcomeUncertain(e) && oldRoot !== null) {
-              // Committed or maybe-committed: follow wherever the registry read
-              // says the record points. If the rebind never landed, that is still
-              // the old root and following it changes nothing.
-              rebindFollow = { id: projectId, oldRoot };
-            }
+            if (!settle()) return;
             if (isMutationCommittedError(e)) {
               // The daemon committed the rebind but a follow-up step failed.
               if (modal === m) closeModal();
-              refreshRegisteredProjects();
+              followRegistry();
               surfaceMutationError(e, "confirmed");
               return;
             }
@@ -1303,7 +1337,7 @@ function openRebindProject(projectId: string, label: string): void {
               // the durable identity, so close it, re-read the registry, and say
               // the outcome is unknown. Only a definitive daemon refusal re-arms.
               if (modal === m) closeModal();
-              refreshRegisteredProjects();
+              followRegistry();
               surfaceMutationError(
                 new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
                 "uncertain",
