@@ -59,7 +59,7 @@ register_accounts() {
 set_project_default() {
     local account="$1"
     local bin; bin="$(_af_resolve_bin)"
-    "$bin" projects register "$AF_DRIVER_REPO" >/dev/null
+    "$bin" projects add "$AF_DRIVER_REPO" >/dev/null
     # stderr is kept: for an unregistered account this WARNS, and the warning is
     # part of what #3386 promises at the command that takes the value.
     "$bin" config set default_accounts.claude "$account" --project "$AF_DRIVER_REPO" >/dev/null

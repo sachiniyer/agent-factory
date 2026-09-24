@@ -59,9 +59,14 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-The daemon starts **on demand**: whenever you run `af` and there is work to host
-(an enabled task or a root agent), `af` makes sure a daemon is running.
-That means for interactive use you usually don't have to think about it at all.
+The daemon starts **on demand** on the default local target: a bare `af`
+launch starts it — the launch kicks a background ensure when an enabled task
+exists so cron schedules are evaluated promptly, and the TUI ensures it on
+its first control call. `af` commands that need a live daemon ensure one when
+they execute, while read-only listings like `af sessions list` deliberately
+do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
+`af` commands instead dial the remote daemon, which must already be running.
+For interactive use you usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:

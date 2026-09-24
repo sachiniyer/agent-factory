@@ -120,7 +120,8 @@ func TestLimitRespawnRetiresIdleEvidenceBeforeReplacementIsExposed(t *testing.T)
 	t.Cleanup(release)
 	done := make(chan error, 1)
 	go func() {
-		done <- manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+		_, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+		done <- err
 	}()
 
 	select {

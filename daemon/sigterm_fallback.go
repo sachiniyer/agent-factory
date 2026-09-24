@@ -19,7 +19,7 @@ import (
 // socket but the binary predates #501).
 //
 // Strategy:
-//  1. If ~/.config/agent-factory/daemon.pid exists, parse it. Verify the PID
+//  1. If ~/.agent-factory/daemon.pid exists, parse it. Verify the PID
 //     is alive AND its command line contains "--daemon" as a discrete token
 //     (defensive against PID reuse — the file may be stale).
 //  2. Otherwise (or if the PID file is missing), scan with `pgrep -f --

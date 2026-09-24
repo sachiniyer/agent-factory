@@ -533,7 +533,7 @@ func TestAccountSwapOpportunity_UsesObservationFromUnloadablePersistedSession(t 
 	// durable observation must still exclude the exhausted identity even though
 	// the row contributes nothing to the manager's in-memory instance map.
 	failLoadFor(t, observer.Title)
-	loaded, _, err := refreshDaemonInstances(nil)
+	loaded, _, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
 	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramClaude || conv.ID != want {
@@ -631,6 +631,143 @@ func TestResumeLimitedSessionsCapturesReplacementCodexConversation(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("replacement Codex conversation was never captured: %+v", inst.AgentConversation())
+}
+
+// TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout is the #4712
+// ordering regression. A fresh Codex process reaches its composer without
+// creating a rollout; the first submitted message creates it. The pre-delivery
+// capture must treat that absence as the committed fresh-conversation fallback,
+// deliver the mission, and retire the pending marker instead of respawning the
+// empty composer forever. Once delivery creates the rollout, post-delivery
+// capture must record its id so a later account handoff can carry this session.
+func TestResumeLimitedSessions_DeliversBeforeFreshCodexMintsRollout(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", false, "finish the migration", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work"}
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "codex-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "codex-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	previousTimeout := conversationCaptureTimeout
+	conversationCaptureTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { conversationCaptureTimeout = previousTimeout })
+	var fallbackAtSubmission string
+	backend.onPrompt = func(i *session.Instance, _ string) {
+		pending := i.ToInstanceData().PendingAccountSwap
+		require.NotNil(t, pending, "delivery must remain fenced by the pending transaction")
+		fallbackAtSubmission = pending.CarryFallback
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-09-19T12-00-00-019f63f8-35a7-7ab1-b9b8-d420f6c0e51b.jsonl", worktree)
+	}
+
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+
+	_, respawns, prompts := backend.snapshot()
+	require.Equal(t, 1, respawns, "the replacement pane must be launched only once")
+	require.Len(t, prompts, 1, "the mission is what causes Codex to mint its first rollout")
+	require.NotEmpty(t, fallbackAtSubmission,
+		"the committed record must retain why this same-agent swap starts fresh")
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap,
+		"successful delivery must retire the marker that fences lifecycle actions")
+	require.Eventually(t, func() bool {
+		conv := inst.AgentConversation()
+		return conv.Agent == tmux.ProgramCodex &&
+			conv.ID == "019f63f8-35a7-7ab1-b9b8-d420f6c0e51b"
+	}, 2*time.Second, 10*time.Millisecond,
+		"the rollout minted by mission delivery must be captured for the next account handoff")
+}
+
+// TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission covers
+// the durable retry shape from #4712: replacement_panes_started is already true,
+// the pane is live at an empty composer, and no rollout exists yet. Missing
+// pre-message conversation metadata is not proof the pane set is incomplete and
+// must not authorize another destructive respawn. The recovery attempt must
+// baseline the shared account store before delivery, then correlate the new
+// rollout by cwd and record its id for the next handoff (#4715).
+func TestResumeFromLimit_LiveStartedCodexSwapWithoutRolloutDeliversMission(t *testing.T) {
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", time.Time{})
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "live-codex-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "live-codex-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.ReconcileAccountHandoffSnapshot("work", "codex", true, &session.AccountSwapData{
+		To:                      "work",
+		CarryFallback:           "af had no recorded codex conversation id for the previous session",
+		ReplacementPanesStarted: true,
+	})
+	writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+		"rollout-2026-09-19T11-00-00-019f63f8-1111-7111-8111-111111111111.jsonl", worktree)
+	otherWorktree := filepath.Join(t.TempDir(), "other-codex-worktree")
+	backend.onPrompt = func(*session.Instance, string) {
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-09-19T12-00-00-019f63f8-2222-7222-8222-222222222222.jsonl", otherWorktree)
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-09-19T12-00-01-019f63f8-3333-7333-8333-333333333333.jsonl", worktree)
+	}
+
+	_, err = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+	require.NoError(t, err)
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns, "a proven live pane set must not be destroyed merely because Codex has no rollout yet")
+	require.Len(t, prompts, 1)
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap)
+	require.Eventually(t, func() bool {
+		conv := inst.AgentConversation()
+		return conv.Agent == tmux.ProgramCodex &&
+			conv.ID == "019f63f8-3333-7333-8333-333333333333"
+	}, 2*time.Second, 10*time.Millisecond,
+		"a live recovered replacement must record the rollout minted by mission delivery")
+}
+
+func TestResumeFromLimit_LiveStartedCodexSwapWithUnprovableWorkingDirStillDeliversMission(t *testing.T) {
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", time.Time{})
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, "codex -C /tmp"))
+	worktree := filepath.Join(t.TempDir(), "unprovable-codex-worktree")
+	require.NoError(t, os.MkdirAll(worktree, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "unprovable-codex-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.ReconcileAccountHandoffSnapshot("work", "codex", true, &session.AccountSwapData{
+		To:                      "work",
+		CarryFallback:           "af had no recorded codex conversation id for the previous session",
+		ReplacementPanesStarted: true,
+	})
+	warnings := captureWarnings(t)
+
+	_, err = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID})
+	require.NoError(t, err, "optional conversation capture must not block committed mission recovery")
+	_, respawns, prompts := backend.snapshot()
+	require.Zero(t, respawns)
+	require.Len(t, prompts, 1, "the mandatory mission must be delivered without a safe capture baseline")
+	require.Nil(t, inst.ToInstanceData().PendingAccountSwap, "successful delivery must retire the pending marker")
+	require.False(t, inst.AgentConversation().HasID(), "an unprovable cwd must never fall back to uncorrelated capture")
+	require.Contains(t, warnings.String(), "continuing account-swap recovery without conversation metadata")
 }
 
 // codexReplacementTrustModal is the real Codex first-run directory-trust frame
@@ -804,7 +941,7 @@ func TestResumeFromLimit_LiveCommittedCodexSwapRecapturesBeforeClearingMarker(t 
 			"rollout-2026-08-10T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", worktree)
 	}
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatal(err)
 	}
 	_, respawns, _ := backend.snapshot()
@@ -866,7 +1003,7 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
 		t.Fatalf("manual retry of committed replacement: %v", err)
 	}
 
@@ -899,7 +1036,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 		RunFunc: func(cmd *exec.Cmd) error {
 			if blockedSibling != "" && strings.Contains(cmd.String(), "new-session") &&
 				strings.Contains(cmd.String(), blockedSibling) {
-				return errors.New("process restart refused")
+				return errors.New("shell restart refused")
 			}
 			return innerExecutor.Run(cmd)
 		},
@@ -910,7 +1047,12 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(agent)
 	inst.SetBackend(&session.LocalBackend{})
-	if _, err := inst.AddProcessTab("git status --short", "build"); err != nil {
+	// A SHELL sibling, not a process tab: a missing process tab restores inert
+	// by design and is never relaunched (#4479), so only a sibling the
+	// replacement must restart can leave the pane set incomplete. /bin/sh is a
+	// shell the account boundary can launch startup-free.
+	t.Setenv("SHELL", "/bin/sh")
+	if _, err := inst.AddShellTab(); err != nil {
 		t.Fatal(err)
 	}
 	data := inst.ToInstanceData()
@@ -920,8 +1062,8 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	siblingName := data.Tabs[1].TmuxName
 	blockedSibling = siblingName
 	if state, err := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
-		siblingName, "git status --short", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
-		t.Fatalf("process sibling absent: state=%v err=%v", state, err)
+		siblingName, "/bin/sh", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
+		t.Fatalf("shell sibling absent: state=%v err=%v", state, err)
 	}
 	if inst.TabAlive(1) {
 		t.Fatal("fixture sibling must be absent while the replacement agent answers live")
@@ -945,7 +1087,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	inst.EndLimitResume()
 	requirePendingSwap()
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
 		t.Fatal("live agent with a missing expected sibling completed the pending account swap")
 	}
 	requirePendingSwap()
@@ -1050,7 +1192,7 @@ func TestResumeFromLimit_TeardownRefusalFallsBackWhenOrdinaryResumeIsDue(t *test
 	require.NotNil(t, swap)
 	swap.fallbackDue = true
 	key := daemonInstanceKey(repoID, inst.Title)
-	_ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
+	_, _ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
 
 	require.True(t, swap.fellBack,
 		"a pre-commit teardown refusal must not starve an already-due ordinary resume")
@@ -1152,9 +1294,9 @@ func TestAccountSwapOpportunity_UsesThePollsFrozenGlobalConfig(t *testing.T) {
 // resolved to codex by program_overrides records its wall in the CODEX
 // namespace. Deriving candidates from i.Program would scan the claude namespace
 // — where that observation does not exist — find every claude account
-// "unlimited", and hand each one to a preflight that resolveAccountForProvision
-// refuses as agent drift (#3082/#3108). No wrong identity is ever selected, but
-// the scan is wasted and its refusal names the wrong thing.
+// "unlimited", and hand each one to a picker that refuses the drifted
+// session's candidates as agent drift (#3082/#3108). No wrong identity is ever
+// selected, but the scan is wasted and its refusal names the wrong thing.
 //
 // The second half is the anti-vacuity witness, and it is not optional: with the
 // same fixture, same accounts and same candidate list, only the agent
@@ -1191,4 +1333,153 @@ func TestAccountSwapOpportunity_MakesNoDecisionWhenTheResolvedAgentDiffers(t *te
 	require.NoError(t, err)
 	require.NotNil(t, agreed, "the fixture must be able to produce a swap, or the nil above proves nothing")
 	require.Equal(t, "work", agreed.to)
+}
+
+// A redirected handoff settles in a shape the configured/live check alone
+// calls drift: a session whose account was auto-selected under codex and whose
+// program is later redirected `--to aider` with aider resolving to codex keeps
+// Program=aider while the running agent and the durable accountAgent pin are
+// both codex. The pin was committed under the lock, so when it names the live
+// agent's registry the wall — filed under that same live agent — may scan its
+// candidates (#4430 review round 8). The account must be auto-selected:
+// SelectAccountCandidates refuses a manually chosen identity before this code
+// runs, so the redirected scheduler-owned account is the reachable shape. An
+// UNPINNED mismatch stays refused by the test above, and a pin that disagrees
+// with the live agent stays refused here: rotating either registry would spend
+// an account the pin never named.
+func TestAccountSwapOpportunity_UsesPinnedNamespaceForRedirectedSettledState(t *testing.T) {
+	base := nowFunc()
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "keep going", base.Add(time.Hour))
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	for _, name := range []string{"work", "work2"} {
+		_, err = agentaccount.Register(home, tmux.ProgramCodex, name)
+		require.NoError(t, err)
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"work2\"]\n")
+	manager.Config().LimitAccountCandidates = []string{"work2"}
+
+	// Settled redirected state: requested enum aider, running agent codex,
+	// durable pin codex, scheduler-owned account — then re-mark the wall so
+	// its identity and account observation are filed under codex/work rather
+	// than the fixture's claude/no-account.
+	inst.Program = tmux.ProgramAider
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, true, nil)
+	inst.ClearLimitReached()
+	inst.SetLimitReached(base.Add(time.Hour))
+
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.NotNil(t, swap,
+		"a pin matching the live agent proves the redirect was committed; the codex registry must be scanned")
+	require.Equal(t, tmux.ProgramCodex, swap.agent)
+	require.Equal(t, "work2", swap.to)
+
+	// A pin that disagrees with the live agent is contradiction, not proof:
+	// same fixture, pin filed under claude — still no swap.
+	inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramClaude, true, nil)
+	drifted, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.Nil(t, drifted, "a pin naming a different registry than the live agent must still refuse")
+}
+
+// A committed AUTOMATIC swap restored after a restart under changed
+// program_overrides faces the same evidence problem the manual path was fixed
+// for: attach rewrites pane metadata to the new config's answer, so
+// CurrentAgentName can name an agent the transaction was never committed
+// under. Recovery launches the frozen program under the durable pin, and the
+// notice and completion log must name that same registry — the namespace both
+// accounts were actually selected in (#4430 review round 8).
+func TestCommittedAccountSwap_AutomaticSwapNamesTheDurableNamespace(t *testing.T) {
+	_, _, inst, _ := newAutoResumeManager(t, "", true, "continue", nowFunc().Add(time.Hour))
+	// The scheduler committed work under codex; the restart's rewritten pane
+	// metadata now answers gemini.
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramGemini))
+	require.True(t, inst.ReconcileAccountHandoffSnapshot("work", tmux.ProgramCodex, true,
+		&session.AccountSwapData{From: "old", To: "work"}))
+	inst.ClearLimitReached()
+
+	swap := committedAccountSwap(inst)
+	require.NotNil(t, swap, "the committed transaction is owed its completion notice")
+	require.Equal(t, tmux.ProgramCodex, swap.accountNamespace(),
+		"the incoming identity must be labeled with the registry it was selected in")
+	require.Equal(t, tmux.ProgramCodex, swap.agent,
+		"the outgoing identity lived in the same committed namespace, not the drifted pane agent")
+}
+
+// TestLimitedAccountsForSwap_LeakAcrossConfiguredResolvedDivergence is the
+// regression guard for the live-wall sibling loop in limitedAccountsForSwap: it
+// keyed on each sibling's CONFIGURED enum (AgentProgram) while a live wall is
+// filed under the RESOLVED agent (currentAgentNameLocked, honoring
+// program_overrides). A divergent sibling (configured claude, running codex)
+// leaked its codex wall into claude's limitedSet; the fix keys on
+// LimitIdentity's agent. Exercises the divergent-sibling live-wall path the
+// existing self-divergence and manual=true tests do not cover.
+func TestLimitedAccountsForSwap_LeakAcrossConfiguredResolvedDivergence(t *testing.T) {
+	base := nowFunc()
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+
+	// Sibling B: stored Program="claude" (configured enum the buggy loop keyed
+	// on), pane runs codex (resolved agent the wall is filed under), account
+	// scoped to "work".
+	bBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	b := registerStarted(t, m, repoID, inst.Path, "drifted", bBackend, true, session.Running)
+	b.Program = tmux.ProgramClaude
+	b.Account = "work"
+	b.SetTmuxSession(tmux.NewTmuxSession(b.Title, tmux.ProgramCodex))
+	b.SetLimitReached(base.Add(time.Hour))
+
+	// Pin the divergence the bug hinges on.
+	require.Equal(t, tmux.ProgramClaude, b.AgentProgram())
+	wallAgent, wallAccount, wallLive := b.LimitIdentity()
+	require.True(t, wallLive)
+	require.Equal(t, tmux.ProgramCodex, wallAgent)
+	require.Equal(t, "work", wallAccount)
+
+	// B's wall lives under codex, so "work" must NOT appear in the claude
+	// namespace's limited set (the durable loops already keyed on codex and
+	// skipped; with the fix the live-wall loop agrees).
+	limited, err := m.limitedAccountsForSwap(tmux.ProgramClaude, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.NotContains(t, limited, "work",
+		"a sibling wall filed under codex must not leak into the claude namespace")
+
+	// Anti-vacuity: the codex namespace, where the wall was actually filed,
+	// still sees "work" as limited, so the absence above is the keying fix.
+	limited, err = m.limitedAccountsForSwap(tmux.ProgramCodex, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.Contains(t, limited, "work")
+}
+
+// TestLimitedAccountsForSwap_SameNamespaceSiblingWallIsStillLimited is the
+// anti-vacuity companion: a sibling whose configured AND resolved agent both
+// match the scanned namespace must still exclude the account, proving the
+// resolved-key filter does not over-correct into ignoring a genuine
+// same-namespace wall.
+func TestLimitedAccountsForSwap_SameNamespaceSiblingWallIsStillLimited(t *testing.T) {
+	base := nowFunc()
+	m, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+
+	bBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	b := registerStarted(t, m, repoID, inst.Path, "claude-walled", bBackend, true, session.Running)
+	b.Program = tmux.ProgramClaude
+	b.Account = "work"
+	b.SetTmuxSession(tmux.NewTmuxSession(b.Title, tmux.ProgramClaude))
+	b.SetLimitReached(base.Add(time.Hour))
+
+	require.Equal(t, tmux.ProgramClaude, b.AgentProgram())
+	wallAgent, _, wallLive := b.LimitIdentity()
+	require.True(t, wallLive)
+	require.Equal(t, tmux.ProgramClaude, wallAgent)
+
+	limited, err := m.limitedAccountsForSwap(tmux.ProgramClaude, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.Contains(t, limited, "work",
+		"a sibling wall filed under claude must still limit claude's work account")
+
+	// And it does not leak into the codex namespace it has nothing to do with.
+	limited, err = m.limitedAccountsForSwap(tmux.ProgramCodex, loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.NotContains(t, limited, "work")
 }
