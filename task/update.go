@@ -404,6 +404,17 @@ func sameProjectPathReassertion(recorded, patched string) bool {
 	if recorded == patched {
 		return true
 	}
+	// EvalSymlinks is the physical, kernel-traversal resolver here, not a
+	// lexical one — Go's walk resolves each symlink component before applying
+	// the next "..", so base/link/../task with base/link -> other/child resolves
+	// to other/task, NOT to the lexically cleaned base/task. A symlink-divergent
+	// ".." rebind is therefore detected and re-resolved (RepoID cleared) rather
+	// than retained — pinned by TestAudit_SymlinkDivergentRebindIsDetectedNotRetained.
+	// The lexical ".." guard belongs only in the dead-path fallback below, where
+	// EvalSymlinks cannot answer and a ".." could cross a symlink Clean cannot
+	// see; rejecting ".." HERE would instead strand the up-and-back equivalent
+	// spelling <dir>/../<leaf>, which a directory that still lives resolves back
+	// to itself — pinned by TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling.
 	resolvedPatched, errPatched := filepath.EvalSymlinks(patched)
 	resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
 	if errPatched == nil && errRecorded == nil {
