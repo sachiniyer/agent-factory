@@ -168,11 +168,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (#1089 PR 2); the pane pointer is re-validated inside.
 		//
 		// Also the gate requestInteractive raised for the keys typed after the
-		// Enter — but only the latest request's message owns it; an older one
-		// landing late activates its pane and leaves the gate alone.
-		ownsGate := m.awaitingInteractive && msg.gen == m.interactiveGen
+		// Enter — but only an activation of the latest request's pane owns it;
+		// one for an older target landing late activates its pane and leaves
+		// the gate alone.
+		ownsGate := m.awaitingInteractive && msg.pane == m.awaitingPane
 		if ownsGate {
 			m.awaitingInteractive = false
+			m.awaitingPane = nil
 		}
 		cmd := m.activateInteractive(msg.pane)
 		// The replay exists to forward the transition keystroke INTO the pane

@@ -161,29 +161,33 @@ func TestGracefulQuitDropsDeferredKeys(t *testing.T) {
 }
 
 // TestStaleInteractiveRequestDoesNotDrain: mouse input is not gated, so a
-// second interactive request can be issued while the first one's
-// enterInteractiveMsg is still in flight. Only the latest request owns the
-// gate; the older message landing first must not drain keys meant for the
-// newer target.
+// request for pane B can be issued while pane A's enterInteractiveMsg is still
+// in flight. Only the latest request's pane owns the gate; A's activation
+// landing first must not drain keys meant for B.
 func TestStaleInteractiveRequestDoesNotDrain(t *testing.T) {
-	h, _, fakes := interactiveTestHome(t)
-	p := h.focusedOpenPane()
-	require.NotNil(t, p)
+	h, _, _ := interactiveTestHome(t)
+	resizeHome(h, 200, 40)
+	paneA := h.focusedOpenPane()
+	require.NotNil(t, paneA)
+	paneB := openTestPane(t, h, startedLocalInstance(t, "bravo"), 0)
+	require.NotSame(t, paneA, paneB)
 
-	_, first := h.requestInteractive(p, nil)
-	_, second := h.requestInteractive(p, nil)
+	_, toA := h.requestInteractive(paneA, nil)
+	_, toB := h.requestInteractive(paneB, nil)
 	_, _ = h.handleKeyPress(runeKey('x'))
 	require.Len(t, h.deferredKeys, 1)
 
-	_, _ = h.Update(first())
+	_, _ = h.Update(toA())
 	require.Len(t, h.deferredKeys, 1,
 		"an older request's activation must not drain input queued behind the newer request")
 
-	_, _ = h.Update(second())
+	_, _ = h.Update(toB())
 	require.True(t, h.interactive)
+	require.Same(t, paneB, h.focusedOpenPane())
 	require.Empty(t, h.deferredKeys)
-	require.Len(t, *fakes, 1)
-	require.Equal(t, []string{"x"}, (*fakes)[0].keys)
+	fake := focusedFake(h)
+	require.NotNil(t, fake)
+	require.Equal(t, []string{"x"}, fake.keys, "the queued key lands in the latest target, B")
 }
 
 // TestFailedActivationDropsPaneBoundKeys: keys buffered behind an interactive
