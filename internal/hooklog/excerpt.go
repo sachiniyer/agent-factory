@@ -20,9 +20,10 @@ const ExcerptLines = 5
 // " ERROR  @scope/pkg#build" reads as a top-level entry of its own.
 const ExcerptPrefix = "  | "
 
-// excerptLineBytes bounds one quoted line. A progress bar or a minified bundle
-// can be a single line of many kilobytes.
-const excerptLineBytes = 240
+// ExcerptLineBytes bounds one quoted line, ellipsis included, not counting
+// ExcerptPrefix. A progress bar or a minified bundle can be a single line of many
+// kilobytes, and a hook that never prints a newline is one line in total.
+const ExcerptLineBytes = 240
 
 // ansiEscape matches CSI and OSC terminal sequences. Build tools colour their
 // output even into a file, and the escapes are noise in a log.
@@ -34,7 +35,7 @@ var ansiEscape = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?
 //
 // Terminal escapes and other control characters are dropped, and a line that a
 // carriage return redrew keeps only what was drawn last, which is what the
-// terminal showed.
+// terminal showed. A line longer than ExcerptLineBytes keeps its end.
 func Excerpt(output string) string {
 	output = strings.TrimPrefix(output, truncatedMarker())
 	var lines []string
@@ -71,12 +72,14 @@ func excerptLine(raw string) string {
 		}
 		return r
 	}, raw))
-	if len(line) <= excerptLineBytes {
+	if len(line) <= ExcerptLineBytes {
 		return line
 	}
-	cut := excerptLineBytes
-	for cut > 0 && !utf8.RuneStart(line[cut]) {
-		cut--
+	// Keep the END of an overlong line: a hook that dies after a long unbroken
+	// run of output prints its reason last.
+	cut := len(line) - (ExcerptLineBytes - len("…"))
+	for cut < len(line) && !utf8.RuneStart(line[cut]) {
+		cut++
 	}
-	return line[:cut] + "…"
+	return "…" + line[cut:]
 }

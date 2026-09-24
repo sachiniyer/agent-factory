@@ -6,7 +6,10 @@ import (
 )
 
 func TestExcerpt(t *testing.T) {
-	long := strings.Repeat("é", excerptLineBytes)
+	long := strings.Repeat("é", ExcerptLineBytes) + "reason"
+	// "…" is 3 bytes and "é" 2, so the byte budget left for "é"s is odd: the cut
+	// lands mid-rune and must advance to the next rune start.
+	kept := strings.Repeat("é", (ExcerptLineBytes-len("…")-len("reason"))/2) + "reason"
 	for _, tc := range []struct {
 		name, output, want string
 	}{
@@ -34,14 +37,20 @@ func TestExcerpt(t *testing.T) {
 			want:   "; last output line:\n  | done",
 		},
 		{
-			name:   "bounds a long line on a rune boundary",
+			name:   "keeps the end of a long line on a rune boundary",
 			output: long + "\n",
-			want:   "; last output line:\n  | " + long[:excerptLineBytes] + "…",
+			want:   "; last output line:\n  | …" + kept,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := Excerpt(tc.output); got != tc.want {
+			got := Excerpt(tc.output)
+			if got != tc.want {
 				t.Fatalf("Excerpt(%q) =\n%q\nwant\n%q", tc.output, got, tc.want)
+			}
+			for _, line := range strings.Split(got, "\n")[1:] {
+				if n := len(strings.TrimPrefix(line, ExcerptPrefix)); n > ExcerptLineBytes {
+					t.Fatalf("quoted line is %d bytes, over the %d-byte bound: %q", n, ExcerptLineBytes, line)
+				}
 			}
 		})
 	}
