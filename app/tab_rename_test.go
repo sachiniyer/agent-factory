@@ -263,3 +263,31 @@ func TestRenameTabResolvedNameNotice(t *testing.T) {
 	require.Contains(t, h.errBox.String(), "web-2",
 		"the notice reports the resolved name, not the typed one")
 }
+
+// TestRenameTabNoticeExpires: the success notice is a transient notice like
+// every other — it takes a fresh notice generation, so its own expiry clears
+// it and an OLDER notice's pending expiry does not.
+func TestRenameTabNoticeExpires(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "rename-expiry")
+	inst.AddWebTabForTest("web", "https://example.com")
+	selectInstance(h, inst)
+	h.store.SetActiveTab(1)
+	recordRenameTab(t, "docs")
+
+	_ = h.handleNotice(fmt.Errorf("an older notice"))
+	older := h.transientNoticeID
+
+	_, _ = h.showRenameTabPrompt()
+	typeIntoPrompt(h, "-docs")
+	_, cmd := h.handleStateRenameTab(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "the rename must schedule its notice's expiry")
+	require.Greater(t, h.transientNoticeID, older, "the rename notice takes a new generation")
+
+	_, _ = h.Update(hideErrMsg{noticeID: older})
+	require.Contains(t, h.errBox.FullError(), "renamed tab to",
+		"an older notice's timer must not erase the rename confirmation")
+
+	_, _ = h.Update(hideErrMsg{noticeID: h.transientNoticeID})
+	require.Empty(t, h.errBox.FullError(), "the rename confirmation expires like any notice")
+}

@@ -476,8 +476,11 @@ func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if _, rerr := current.RenameTabByID(tab.ID, resolved); rerr != nil {
 		log.ErrorLog.Printf("rename reflected daemon-side but not locally: %v", rerr)
 	}
-	m.errBox.SetNotice(fmt.Errorf("renamed tab to %q", resolved))
-	return m, m.selectionChanged()
+	// Through handleNotice, not errBox.SetNotice: it advances the notice
+	// generation and schedules the usual expiry, so the confirmation neither
+	// lingers forever nor gets erased early by an older notice's timer.
+	notice := m.handleNotice(fmt.Errorf("renamed tab to %q", resolved))
+	return m, tea.Batch(notice, m.selectionChanged())
 }
 
 // handleTabJump jumps to a 1-based tab number (the 1-9 number keys). With a
