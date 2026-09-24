@@ -35,11 +35,14 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 	return canonicalizeStructuredValueAgainst(key, raw, nil, false)
 }
 
-// canonicalizeStructuredValueAgainst is the global writer's locked variant.
-// Whole program-overrides maps preserve an
-// omitted auto-detected default as an empty TOML tombstone so the loader cannot
-// seed that command back in after the user removed it.
-func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preserveBuiltInRemovals bool) (canonical, encoded string, err error) {
+// canonicalizeStructuredValueAgainst is the writers' locked variant. existing
+// is the program_overrides map already on the layer being written: a whole-map
+// write that omits an agent keeps that agent's "" tombstone, so replacing the
+// table cannot bring back the lower layer's override (#4699). reseedBuiltIns is
+// global-only: it also writes a tombstone for every omitted auto-detected
+// default so the loader cannot seed that command back in after the user
+// removed it. A personal project layer preserves only its own tombstones.
+func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]string, reseedBuiltIns bool) (canonical, encoded string, err error) {
 	if strings.TrimSpace(raw) == "null" {
 		return "", "", fmt.Errorf("expected compact JSON for %s, got null", key)
 	}
@@ -77,7 +80,7 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 
 	canonical = editorValue(field)
 	encodedValue := field
-	if key == "program_overrides" && preserveBuiltInRemovals {
+	if key == "program_overrides" && (len(existing) > 0 || reseedBuiltIns) {
 		requested := field.Interface().(map[string]string)
 		onDisk := make(map[string]string, len(requested)+1)
 		for agent, command := range requested {
@@ -87,18 +90,18 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		// them even if the corresponding executable is temporarily absent from
 		// PATH while another override is edited; otherwise the executable would
 		// silently reappear the next time detection succeeds.
-		if current != nil {
-			for agent, command := range current.ProgramOverrides {
-				if command == "" {
-					if _, present := requested[agent]; !present {
-						onDisk[agent] = ""
-					}
+		for agent, command := range existing {
+			if command == "" {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
 				}
 			}
 		}
-		for agent := range DefaultConfig().ProgramOverrides {
-			if _, present := requested[agent]; !present {
-				onDisk[agent] = ""
+		if reseedBuiltIns {
+			for agent := range DefaultConfig().ProgramOverrides {
+				if _, present := requested[agent]; !present {
+					onDisk[agent] = ""
+				}
 			}
 		}
 		encodedValue = reflect.ValueOf(onDisk)
@@ -497,6 +500,16 @@ func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool
 		return "", false
 	}
 	if key != "root_agent" {
+		if key == "program_overrides" {
+			visible := make(map[string]string, field.Len())
+			iter := field.MapRange()
+			for iter.Next() {
+				if command := iter.Value().String(); command != "" {
+					visible[iter.Key().String()] = command
+				}
+			}
+			return editorValue(reflect.ValueOf(visible)), true
+		}
 		return editorValue(field), true
 	}
 	shapeValue, _ := cfg.source.topLevel(key)
