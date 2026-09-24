@@ -198,7 +198,7 @@ function isDaemonRejection(err: EnvelopeError | null | undefined, status: number
     envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
 }
 
-export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
+const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 
 /**
  * A failed API call. `status` is the HTTP status (0 for a network/transport
@@ -302,7 +302,7 @@ export async function fetchSessionSnapshot(token: string): Promise<SessionSnapsh
   };
 }
 
-export async function fetchSnapshot(token: string): Promise<SessionData[]> {
+async function fetchSnapshot(token: string): Promise<SessionData[]> {
   return (await fetchSessionSnapshot(token)).sessions;
 }
 
@@ -534,7 +534,7 @@ export async function restoreSession(
  *  The daemon refuses a session that is not actually limit-blocked, so a stale
  *  click (the limit cleared itself between render and click) surfaces as an error
  *  rather than an unwanted prompt. */
-export interface ResumeFromLimitResult {
+interface ResumeFromLimitResult {
   ok: boolean;
   reason?: string;
   warning?: string;

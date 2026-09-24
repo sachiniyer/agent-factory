@@ -93,7 +93,7 @@ const LAST_DIR_KEY = "af.addproject.dir";
 
 /** The remembered starting directory, or "" for "let the daemon pick" (its
  *  home). Never throws — persistence is a convenience. */
-export function loadLastBrowsedDir(): string {
+function loadLastBrowsedDir(): string {
   try {
     return localStorage.getItem(LAST_DIR_KEY) ?? "";
   } catch {
@@ -103,7 +103,7 @@ export function loadLastBrowsedDir(): string {
 
 /** Remembers the browsed directory. Best-effort, like every other web
  *  preference (private mode / disabled storage just loses the convenience). */
-export function persistLastBrowsedDir(path: string): void {
+function persistLastBrowsedDir(path: string): void {
   try {
     localStorage.setItem(LAST_DIR_KEY, path);
   } catch {

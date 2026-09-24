@@ -241,7 +241,7 @@ export interface AppState {
  *  be a drop target (the browser then shows a no-drop cursor); a finger has no cursor
  *  to read, so the same refusal has to be said out loud. Sentence case, `·` as the
  *  fragment separator, per the repo's copy conventions. */
-export const TAB_PINNED_NOTICE = "Agent tab stays first · drag to a pane to split";
+const TAB_PINNED_NOTICE = "Agent tab stays first · drag to a pane to split";
 
 export interface Actions {
   connect(token: string): void;
@@ -428,7 +428,7 @@ export function isOffBoxWorkspace(s: Pick<SessionData, "backend_type">): boolean
  *  backend_type rule there is deliberate and is the safe direction: it is exactly
  *  what that daemon enforces, so the affordances still match ITS answer. The
  *  fallback is confined to this one function. */
-export function allowedTabKinds(s: SessionData): TabKindAllowance[] {
+function allowedTabKinds(s: SessionData): TabKindAllowance[] {
   if (s.tab_kinds && s.tab_kinds.length > 0) {
     return s.tab_kinds;
   }

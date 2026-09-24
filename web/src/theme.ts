@@ -19,7 +19,7 @@ export function connectionAttemptMayCommit(
 export function normalizeThemeChoice(value: unknown): ThemeChoice {
   return value === "light" || value === "dark" ? value : "system";
 }
-export function readThemeChoice(): ThemeChoice {
+function readThemeChoice(): ThemeChoice {
   try { return normalizeThemeChoice(localStorage.getItem(STORAGE_KEY)); }
   catch { return "system"; }
 }
@@ -41,7 +41,7 @@ function surface(mode: ThemeMode): string {
   probe.remove();
   return color;
 }
-export function themeColorMetaContents(choice: ThemeChoice): { light: string; dark: string } {
+function themeColorMetaContents(choice: ThemeChoice): { light: string; dark: string } {
   return { light: surface(choice === "system" ? "light" : choice), dark: surface(choice === "system" ? "dark" : choice) };
 }
 export function refreshThemeMode(): void {
@@ -63,5 +63,5 @@ export function bootStampTheme(): ThemeChoice {
   stampTheme(choice);
   return choice;
 }
-export function xtermTheme(mode: ThemeMode): ITheme { return TERMINAL_ANSI[mode]; }
+function xtermTheme(mode: ThemeMode): ITheme { return TERMINAL_ANSI[mode]; }
 export function currentXtermTheme(): ITheme { return xtermTheme(currentMode()); }
