@@ -394,6 +394,13 @@ func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
 // consumes its outcomes: an add request (validate + register + switch), a chosen
 // existing project (switch), or a cancel (close).
 func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending rebind makes the picker's form consume every key so nothing can
+	// race a second mutation — which would include the always-on Ctrl+C hard
+	// exit, leaving a TUI whose daemon call has stalled impossible to quit.
+	// Quitting is safe mid-flight: the daemon owns the write, not this process.
+	if msg.String() == "ctrl+c" && m.projectPickerOverlay.RebindPending() {
+		return m.handleQuit()
+	}
 	if msg.String() == "D" {
 		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
 			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
@@ -415,8 +422,8 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Rebind submit: the overlay stays open while the daemon answers so a
 	// rejection is corrected inline, mirroring the add flow's error handling.
-	if proj, path, ok := m.projectPickerOverlay.TakeRebindRequest(); ok {
-		return m.handleRebindProject(proj, path)
+	if req, ok := m.projectPickerOverlay.TakeRebindRequest(); ok {
+		return m.handleRebindProject(req)
 	}
 
 	if !shouldClose {
@@ -505,43 +512,59 @@ func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 // addProjectCmd. The picker stays open until the answer lands: a rejection
 // (not a git repo, path owned by another project) is corrected inline via
 // SetRebindError, a success closes and refreshes.
-func (m *home) handleRebindProject(proj overlay.Project, path string) (tea.Model, tea.Cmd) {
-	abs, err := config.ResolveUserPath(path)
+func (m *home) handleRebindProject(req overlay.RebindRequest) (tea.Model, tea.Cmd) {
+	abs, err := config.ResolveUserPath(req.Path)
 	if err != nil {
-		m.projectPickerOverlay.SetRebindError(fmt.Sprintf("cannot resolve path: %s", path))
+		m.projectPickerOverlay.SetRebindError(fmt.Sprintf("cannot resolve path: %s", req.Path))
 		return m, nil
 	}
-	return m, m.rebindProjectCmd(proj, abs)
+	req.Path = abs
+	return m, m.rebindProjectCmd(req)
 }
 
 // rebindProjectCmd rebinds a registered project through the daemon — the single
 // writer (#960) — off the event loop, mirroring addProjectCmd/deleteProjectCmd.
-func (m *home) rebindProjectCmd(proj overlay.Project, path string) tea.Cmd {
+// The reply carries the request's token so handleProjectRebound can tell it
+// apart from a reply to any other picker.
+func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 	return func() tea.Msg {
-		project, err := rebindProjectThroughDaemon(proj.RegistryID, path)
+		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Path)
 		root := project.Root
 		if root == "" {
-			root = path
+			root = req.Path
 		}
-		return projectReboundMsg{projectID: proj.RegistryID, name: proj.Name, root: root, err: err}
+		return projectReboundMsg{token: req.Token, projectID: req.Project.RegistryID, name: req.Project.Name, root: root, err: err}
 	}
 }
 
-// handleProjectRebound finalizes an async rebind. A rejection is fed back into
-// the still-open picker so the user can correct the path; when the picker has
-// been dismissed in the meantime the error goes to the error box instead. On
-// success the picker closes and the Projects section refreshes — the row's root
-// and name changed, and a `missing` marker clears.
+// handleProjectRebound finalizes an async rebind. The reply belongs to the
+// picker only when that picker is still open AND still waiting on this
+// request's token; a picker closed and reopened in the meantime is a different
+// request's (or none's), and must neither close nor show this reply's error.
+//
+// An owned rejection is fed back inline so the user can correct the path; an
+// owned success closes the picker with a toast. An unowned reply still refreshes
+// the Projects section on success — the registry did change — and reports a
+// rejection through the error box, but it announces success with a toast only
+// when no picker is on screen, since a toast over a different picker reads as
+// that picker's result.
 func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) {
+	pickerOpen := m.projectPickerOverlay != nil && m.state == stateSwitchProject
+	owned := pickerOpen && m.projectPickerOverlay.OwnsRebindReply(msg.token)
 	if msg.err != nil {
-		if m.projectPickerOverlay != nil && m.state == stateSwitchProject {
+		if owned {
 			m.projectPickerOverlay.SetRebindError(msg.err.Error())
 			return m, nil
 		}
 		return m, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err))
 	}
-	m.closeProjectPicker()
 	m.refreshSidebarProjects()
+	if pickerOpen && !owned {
+		return m, nil
+	}
+	if owned {
+		m.closeProjectPicker()
+	}
 	return m, m.showTransientMessage(fmt.Sprintf("Rebound project '%s' to %s", msg.name, msg.root))
 }
 

@@ -3,6 +3,7 @@ package overlay
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -39,6 +40,19 @@ type Project struct {
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.
 	MissingPath bool
+}
+
+// rebindTokens issues request tokens across every picker instance: a fresh
+// picker must never reuse a token an older, closed one handed out.
+var rebindTokens atomic.Uint64
+
+// RebindRequest is one submitted rebind: the row it targets (whose RegistryID
+// the daemon rebinds), the replacement path, and the token its reply must carry
+// back to OwnsRebindReply.
+type RebindRequest struct {
+	Project Project
+	Path    string
+	Token   uint64
 }
 
 // ProjectPickerOverlay is the project switcher (#1461). It navigates like the
@@ -90,6 +104,13 @@ type ProjectPickerOverlay struct {
 	// sees (inline error or success) is always the one for the path still on
 	// screen.
 	rebindPending bool
+	// rebindToken names the request rebindPending waits on. The daemon answers
+	// asynchronously, so the reply can outlive the picker that asked — Ctrl+C
+	// quits past it, and anything that closes and reopens the picker leaves a
+	// fresh instance on screen. OwnsRebindReply matches a reply against this
+	// token, and the token comes from a process-wide counter, so a reply can
+	// only ever reach the instance and request that started it.
+	rebindToken uint64
 	// rebindDeny, when non-empty, refuses rebind before it can submit — the
 	// refusal IS the message, pre-shown on entry and re-shown on Enter. The
 	// caller sets it when the targeted daemon is remote: the picker's prj_…
@@ -180,13 +201,13 @@ func (p *ProjectPickerOverlay) TakeAddRequest() (string, bool) {
 func (p *ProjectPickerOverlay) SetAddError(msg string) { p.addErr = msg }
 
 // TakeRebindRequest returns a submitted rebind-mode request once — the row it
-// was opened on (whose RegistryID is what the daemon rebinds) and the entered
-// replacement path — clearing the pending flag so the caller sends it exactly
-// once. The caller rebinds through the daemon on success, or calls
-// SetRebindError to surface an inline error and keep the overlay open.
-func (p *ProjectPickerOverlay) TakeRebindRequest() (Project, string, bool) {
+// was opened on (whose RegistryID is what the daemon rebinds), the entered
+// replacement path, and a fresh token — clearing the pending flag so the caller
+// sends it exactly once. The caller carries the token on the reply and routes
+// the reply here only when OwnsRebindReply accepts it.
+func (p *ProjectPickerOverlay) TakeRebindRequest() (RebindRequest, bool) {
 	if !p.rebindRequested {
-		return Project{}, "", false
+		return RebindRequest{}, false
 	}
 	p.rebindRequested = false
 	// The request is now in flight: the form goes inert until the caller
@@ -194,8 +215,22 @@ func (p *ProjectPickerOverlay) TakeRebindRequest() (Project, string, bool) {
 	// picker), so at most one rebind per picker can be pending and a second
 	// Enter cannot race a second mutation.
 	p.rebindPending = true
-	return p.rebindTarget, strings.TrimSpace(p.rebindInput), true
+	p.rebindToken = rebindTokens.Add(1)
+	return RebindRequest{Project: p.rebindTarget, Path: strings.TrimSpace(p.rebindInput), Token: p.rebindToken}, true
 }
+
+// OwnsRebindReply reports whether a rebind reply carrying token answers the
+// request this picker is waiting on. A reply for any other request — one from
+// a picker that has since closed, or one this picker already settled — is not
+// this picker's to show: it must neither close the picker nor paint its error.
+func (p *ProjectPickerOverlay) OwnsRebindReply(token uint64) bool {
+	return p.rebindPending && token != 0 && token == p.rebindToken
+}
+
+// RebindPending reports whether a submitted rebind is still waiting on the
+// daemon. The caller keeps its always-on hard exit (Ctrl+C) reachable while it
+// is, because the inert form consumes every other key.
+func (p *ProjectPickerOverlay) RebindPending() bool { return p.rebindPending }
 
 // SetRebindError shows an inline error under the rebind-mode input and keeps
 // the overlay open so the user can correct the path.
@@ -361,45 +396,49 @@ func (p *ProjectPickerOverlay) Render() string {
 	textRect := overlayTextRect(fit, style)
 	cw := textRect.W
 
-	var lines []string
-	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
-	lines = append(lines, "")
-	warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
-	if p.degraded && !p.adding {
-		// A failed registry read may hide every registered sessionless
-		// project — say so rather than render the remainder as complete
-		// (#3298).
-		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · list may be incomplete"), cw))
-	}
+	title := truncateOverlayLine(titleStyle.Render("Switch project"), cw)
 
 	if p.adding {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render("Enter a repo path:"), cw))
-		lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.pathInput)+ui.InputCaret(), cw))
+		errLine := ""
 		if p.addErr != "" {
-			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.addErr), cw))
+			errLine = truncateOverlayLine(errStyle.Render("  "+p.addErr), cw)
 		}
-		lines = append(lines, "")
-		hint := "enter add · esc back"
-		lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))
+		lines := formLines(textRect.H, title,
+			truncateOverlayLine(normalStyle.Render("Enter a repo path:"), cw),
+			truncateOverlayLine("  "+queryStyle.Render(p.pathInput)+ui.InputCaret(), cw),
+			errLine,
+			truncateOverlayLine(ui.ActionHint("enter add · esc back"), cw))
 		return finishRender(style, fit, textRect, lines)
 	}
 
 	if p.rebinding {
-		lines = append(lines, truncateOverlayLine(normalStyle.Render(
-			fmt.Sprintf("New checkout path for %s:", p.rebindTarget.Name)), cw))
-		lines = append(lines, truncateOverlayLine("  "+queryStyle.Render(p.rebindInput)+ui.InputCaret(), cw))
+		errLine := ""
 		if p.rebindErr != "" {
-			lines = append(lines, truncateOverlayLine(errStyle.Render("  "+p.rebindErr), cw))
+			errLine = truncateOverlayLine(errStyle.Render("  "+p.rebindErr), cw)
 		}
-		lines = append(lines, "")
 		// While the daemon decides, the inert form says so — a bare "enter
 		// rebind" hint would invite the second Enter that must not dispatch.
 		hint := "enter rebind · esc back"
 		if p.rebindPending {
-			hint = "rebinding…"
+			hint = "rebinding… · ctrl+c quit"
 		}
-		lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))
+		lines := formLines(textRect.H, title,
+			truncateOverlayLine(normalStyle.Render(
+				fmt.Sprintf("New checkout path for %s:", p.rebindTarget.Name)), cw),
+			truncateOverlayLine("  "+queryStyle.Render(p.rebindInput)+ui.InputCaret(), cw),
+			errLine,
+			truncateOverlayLine(ui.ActionHint(hint), cw))
 		return finishRender(style, fit, textRect, lines)
+	}
+
+	lines := []string{title, ""}
+	if p.degraded {
+		// A failed registry read may hide every registered sessionless
+		// project — say so rather than render the remainder as complete
+		// (#3298). Only the list states it: the add/rebind forms show no
+		// list, and their rows are budgeted without it.
+		warnStyle := lipgloss.NewStyle().Foreground(t.Dead)
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("Cannot read registry · list may be incomplete"), cw))
 	}
 
 	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
@@ -469,6 +508,37 @@ func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, coun
 		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount)) + missing
 	}
 	return "    " + normalStyle.Render(proj.Name) + count + missing
+}
+
+// formLines lays out the add/rebind path form inside rows text rows (rows <= 0
+// means unbounded). The full form is title, spacer, prompt, input, error (when
+// set), spacer, hint. A short frame sheds the spacers first, then the title, then
+// the prompt: the input, its error and the hint are what the user acts on, and
+// the frame must never grow past its budget — PlaceOverlay drops the whole
+// background for an oversized foreground.
+func formLines(rows int, title, prompt, input, errLine, hint string) []string {
+	type row struct {
+		text string
+		shed int // shed order when over budget; 0 is never shed
+	}
+	all := []row{{title, 3}, {"", 2}, {prompt, 4}, {input, 0}}
+	if errLine != "" {
+		all = append(all, row{errLine, 0})
+	}
+	all = append(all, row{"", 1}, row{hint, 0})
+	n := len(all)
+	shed := map[int]bool{}
+	for next := 1; rows > 0 && n > rows && next <= 4; next++ {
+		shed[next] = true
+		n--
+	}
+	lines := make([]string, 0, n)
+	for _, r := range all {
+		if r.shed == 0 || !shed[r.shed] {
+			lines = append(lines, r.text)
+		}
+	}
+	return lines
 }
 
 // finishRender sizes the style box and joins the content lines, matching the

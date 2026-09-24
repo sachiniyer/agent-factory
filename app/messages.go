@@ -77,8 +77,10 @@ type projectAddedMsg struct {
 // projectReboundMsg reports completion of an async rebind-project (the picker's
 // `b` verb). Unlike add, the picker stays open while the daemon answers so a
 // rejection can be corrected inline; root is the NEW root the registration now
-// points at.
+// points at. token is the picker request it answers (overlay.RebindRequest):
+// only the picker still waiting on that token may show the result.
 type projectReboundMsg struct {
+	token     uint64
 	projectID string
 	name      string
 	root      string

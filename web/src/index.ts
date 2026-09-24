@@ -1202,6 +1202,28 @@ function openAddProject(): void {
   );
 }
 
+/** The label of the rebind the daemon is deciding right now, or null. It lives
+ *  outside the modal on purpose: Escape disposes the modal while the RPC runs, so a
+ *  guard kept on the modal would let a reopened Rebind submit a second, racing
+ *  registry mutation. */
+let rebindInFlight: string | null = null;
+
+/** Lands a successful rebind before the daemon's projects.changed refetch confirms
+ *  it: the record (matched by its stable id) takes its new root, and a selection
+ *  still on the old root follows it. Without that, the refetch drops the old root
+ *  from the valid set and reconcileProject falls back to an unrelated project. A
+ *  selection the user moved elsewhere mid-flight is left alone. */
+function applyReboundProject(oldRoot: string | null, project: RegisteredProject): void {
+  const registered = store.get().registeredProjects;
+  const registeredProjects = registered.some((r) => r.id === project.id)
+    ? registered.map((r) => (r.id === project.id ? project : r))
+    : [...registered, project];
+  store.set({ registeredProjects });
+  if (oldRoot !== null && store.get().selectedProject === oldRoot) {
+    switchProject(project.root);
+  }
+}
+
 /** Opens the rebind-project modal (`af projects rebind`, made reachable from the
  *  switcher): the repair when the checkout a registration names was moved or
  *  recloned — the stable project id survives, only where it points changes. Same
@@ -1210,6 +1232,16 @@ function openAddProject(): void {
  *  the modal stays open to correct. On success the daemon's projects.changed
  *  refetches the registry and the row's root/missing marker update. */
 function openRebindProject(projectId: string, label: string): void {
+  if (rebindInFlight !== null) {
+    // Escape dismissed the modal while the daemon was still deciding. A second
+    // submission now would race the first registry mutation, and whichever
+    // landed last would win regardless of which modal appeared to finish.
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running — try again when it finishes.`);
+    return;
+  }
+  // The root the registration points at NOW: a selection still on it follows
+  // the rebind to the new root (applyReboundProject).
+  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -1225,19 +1257,31 @@ function openRebindProject(projectId: string, label: string): void {
       onSubmit: (path: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-        if (tok === null || !modal) {
+        if (tok === null || !modal || rebindInFlight !== null) {
           return;
         }
         const m = modal;
         m.setBusy(true);
+        rebindInFlight = label;
         void rebindProject(projectId, path, tok)
-          .then(() => { if (modal === m) closeModal(); })
+          .then((project) => {
+            rebindInFlight = null;
+            if (modal === m) closeModal();
+            applyReboundProject(oldRoot, project);
+          })
           .catch((e) => {
+            rebindInFlight = null;
             if (isMutationCommittedError(e)) {
               // The rebind may have landed even though the reply was lost — the
               // committed-warning path mirrors deleteProject's.
               if (modal === m) closeModal();
               refreshRegisteredProjects();
+              surfaceTabError(e);
+              return;
+            }
+            if (modal !== m) {
+              // The modal was dismissed mid-flight, so its inline error has
+              // nowhere to show — and must not land in whatever modal is open now.
               surfaceTabError(e);
               return;
             }

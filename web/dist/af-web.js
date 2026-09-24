@@ -18341,7 +18341,21 @@ function openAddProject() {
     })
   );
 }
+var rebindInFlight = null;
+function applyReboundProject(oldRoot, project) {
+  const registered = store.get().registeredProjects;
+  const registeredProjects = registered.some((r) => r.id === project.id) ? registered.map((r) => r.id === project.id ? project : r) : [...registered, project];
+  store.set({ registeredProjects });
+  if (oldRoot !== null && store.get().selectedProject === oldRoot) {
+    switchProject(project.root);
+  }
+}
 function openRebindProject(projectId, label) {
+  if (rebindInFlight !== null) {
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
+    return;
+  }
+  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -18356,17 +18370,25 @@ function openRebindProject(projectId, label) {
       errorText,
       onSubmit: (path) => {
         const tok = token;
-        if (tok === null || !modal) {
+        if (tok === null || !modal || rebindInFlight !== null) {
           return;
         }
         const m = modal;
         m.setBusy(true);
-        void rebindProject(projectId, path, tok).then(() => {
+        rebindInFlight = label;
+        void rebindProject(projectId, path, tok).then((project) => {
+          rebindInFlight = null;
           if (modal === m) closeModal();
+          applyReboundProject(oldRoot, project);
         }).catch((e) => {
+          rebindInFlight = null;
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             refreshRegisteredProjects();
+            surfaceTabError(e);
+            return;
+          }
+          if (modal !== m) {
             surfaceTabError(e);
             return;
           }
