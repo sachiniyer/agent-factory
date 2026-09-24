@@ -19,15 +19,10 @@ func reachesQuit(cmd tea.Cmd) bool {
 
 func runeKey(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 
-// dispatchKey drives one key through the real handler as the DISPATCH pass. A
-// mapped key press is first intercepted by handleMenuHighlighting (which arms
-// keySent and re-emits the key as a reemitKeyMsg); the action fires when that
-// replay is dispatched. Arming keySent and delivering the replay here
-// reproduces that second pass so the test exercises the dispatch wiring, not
-// the highlight animation.
+// dispatchKey drives one key through the real handler: the menu highlight and
+// the key's action both run in this one call.
 func dispatchKey(h *home, msg tea.KeyMsg) tea.Cmd {
-	h.keySent = true
-	_, cmd := h.Update(reemitKeyMsg{msg})
+	_, cmd := h.handleKeyPress(msg)
 	return cmd
 }
 

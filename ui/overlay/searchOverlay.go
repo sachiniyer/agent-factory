@@ -59,11 +59,6 @@ func (s *SearchOverlay) IsSubmitted() bool {
 	return s.submitted
 }
 
-// Query returns the text typed into the overlay so far.
-func (s *SearchOverlay) Query() string {
-	return s.query
-}
-
 // ResultInstances returns the instances currently matching the query, in
 // display order. Exposed for tests that assert the overlay's list stays a
 // stable copy independent of later sidebar mutations (#1008).

@@ -63,9 +63,7 @@ func TestKillConfirmationWarningUsesSentenceCaseAtCompactSizes(t *testing.T) {
 				resizeHome(h, size.width, size.height)
 
 				killKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")}
-				// Pass-1 paints the highlight; its tagged replay runs the action.
 				_, _ = h.Update(killKey)
-				_, _ = h.Update(reemitKeyMsg{killKey})
 				require.Equal(t, stateConfirm, h.state, "D opens the production kill confirmation")
 				require.NotNil(t, h.confirmationOverlay)
 

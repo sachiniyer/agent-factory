@@ -43,23 +43,8 @@ type enterInteractiveMsg struct {
 // keystroke to forward. When the first-run help IS shown, the dismiss key
 // replay (replayKeyAfterInteractiveHelpDismiss) overrides this key, so the
 // entry key that only surfaced the overlay is never double-forwarded.
-//
-// When the help screen is skipped, the returned cmd IS the transition: the
-// keyboard moves into the pane only once enterInteractiveMsg lands. Keys typed
-// meanwhile belong in the pane, so input is gated until then
-// (awaitingInteractive; the enterInteractiveMsg case lifts it and drains).
-// When the help screen shows, it takes the keyboard synchronously and no gate
-// is needed. The gate belongs to the latest request's target pane
-// (awaitingPane), and only an activation of that pane lifts it: mouse input is
-// not gated, so a click can request pane B while pane A's activation is still
-// in flight, and A's landing first must not drain keys meant for B. It is keyed
-// on the pane rather than on a per-request token so that any activation of the
-// requested pane lifts it — a gate only one exact message can open would
-// freeze input for good if that message were ever superseded.
 func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
-	immediate := false
-	mod, cmd := m.showHelpScreen(helpTypeInteractive{}, func() tea.Cmd {
-		immediate = true
+	return m.showHelpScreen(helpTypeInteractive{}, func() tea.Cmd {
 		return func() tea.Msg {
 			msg := enterInteractiveMsg{pane: p}
 			if replayKey != nil {
@@ -69,11 +54,6 @@ func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea
 			return msg
 		}
 	})
-	if immediate {
-		m.awaitingInteractive = true
-		m.awaitingPane = p
-	}
-	return mod, cmd
 }
 
 // activateInteractive focuses the pane, binds its live attachment

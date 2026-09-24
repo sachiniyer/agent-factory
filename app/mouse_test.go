@@ -892,11 +892,8 @@ func TestMouse_StaleClickTrackerClearedAcrossModal(t *testing.T) {
 		"precondition: the click seeds the double-click tracker")
 	require.Equal(t, beta.Title, h.store.GetSelectedInstance().Title)
 
-	// Open the kill confirmation through Update — 'D' first highlights the menu
-	// hint and re-emits itself as a reemitKeyMsg, and that replay reaches
-	// handleKill.
+	// Open the kill confirmation through Update, the real keyboard path.
 	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
-	_, _ = h.Update(reemitKeyMsg{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")}})
 	require.Equal(t, stateConfirm, h.state, "D opens the kill confirmation")
 	require.Empty(t, h.lastClickZone,
 		"a modal excursion must clear the stale pre-modal click tracker (#1731)")

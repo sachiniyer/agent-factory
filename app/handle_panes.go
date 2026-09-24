@@ -284,11 +284,6 @@ func (m *home) closePaneWindow(p *store.OpenPane) {
 	// If the user was typing INTO that pane, the mode's premise just left with it:
 	// drop to nav now rather than a tick later.
 	m.enforceInteractiveInvariant()
-	// Likewise if the user had just asked to type into it: the pending request
-	// can never activate now, so stop holding keys for it.
-	if p == m.awaitingPane {
-		m.releasePendingInteractive()
-	}
 	m.store.CloseOpenPane(p)
 	delete(m.paneWindows, p.ID())
 	delete(m.lastPaneCapture, p.ID())

@@ -145,8 +145,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to the embedded terminal. Purely additive: the keyboard remains
 		// fully sufficient.
 		return m.handleMouse(msg)
-	case reemitKeyMsg:
-		return m.handleReemittedKey(msg.KeyMsg)
 	case tea.KeyMsg:
 		if m.recovery != nil {
 			m.recovery = nil
@@ -166,16 +164,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case enterInteractiveMsg:
 		// Deferred by the first-time interactive help screen's dismiss cmd
 		// (#1089 PR 2); the pane pointer is re-validated inside.
-		//
-		// Also the gate requestInteractive raised for the keys typed after the
-		// Enter — but only an activation of the latest request's pane owns it;
-		// one for an older target landing late activates its pane and leaves
-		// the gate alone.
-		ownsGate := m.awaitingInteractive && msg.pane == m.awaitingPane
-		if ownsGate {
-			m.awaitingInteractive = false
-			m.awaitingPane = nil
-		}
 		cmd := m.activateInteractive(msg.pane)
 		// The replay exists to forward the transition keystroke INTO the pane
 		// rather than swallow it (#1576). The host-reserved exit key is the one
@@ -194,15 +182,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, replayCmd := m.handleInteractiveKey(msg.replayKey)
 			cmd = tea.Batch(cmd, replayCmd)
 		}
-		if ownsGate && !m.interactive {
-			// The buffered keys were typed as pane input. With no pane to take
-			// them (it closed, turned ineligible, or an overlay opened first),
-			// running them as host commands would be worse than dropping them:
-			// a queued D would open a kill confirmation for whatever the tree
-			// has selected now.
-			m.deferredKeys = nil
-		}
-		return m, tea.Batch(cmd, m.drainDeferredKeys())
+		return m, cmd
 	case beginAttachMsg:
 		if msg.run == nil {
 			m.attachTransitioning = false
@@ -450,9 +430,23 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleMenuHighlighting underlines the menu hint for a mapped key and returns
+// the tick that clears it. The action itself runs in the same Update, right
+// after (handleKeyPress): the underline is paint only — Menu.keyDown has no
+// reader but the menu renderer — so nothing needs it on screen before the
+// action runs.
+//
+// It used to split each mapped keypress into two Update passes — paint the
+// highlight, then re-emit the key through the command pipeline and act on the
+// replay. The next physical key could beat that replay onto the event loop and
+// run in the pre-action state ("/" then "p" lost the "p" before search opened,
+// #4828), and every guard against that race added a new one. One pass has no
+// replay to race. returnEarly reports a key consumed here that must not reach
+// the state dispatch.
 func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly bool) {
-	// Consume physical input before scheduling a replay: the catalog may open
-	// the picker before that replay runs, turning an early Enter into a choice.
+	// A form action while a promised backend picker is still loading answers
+	// with a notice instead of acting: its catalog would otherwise open the
+	// picker over a create the action already submitted or left.
 	if m.state == stateNew && m.backendPickerPending {
 		switch msg.Type {
 		case tea.KeyEnter, tea.KeyTab, tea.KeyShiftTab, tea.KeyCtrlR, tea.KeyCtrlO:
@@ -462,19 +456,6 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			// can turn this key into merely closing the backend picker.
 			return nil, false
 		}
-	}
-	// pass-2: the tagged replay of the key whose pass-1 armed keySent (see
-	// reemitKeyMsg). It skips the highlight and falls through to dispatch.
-	if m.replayingKey {
-		return nil, false
-	}
-	// A physical key while a pass-2 is still in flight is buffered by
-	// handleKeyPress before it gets here, so the only one that reaches this
-	// point is a nav-mode ctrl+c, which bypasses the deferral to keep its
-	// always-on hard exit. Let it through without re-arming: the in-flight
-	// replay still owns the arm.
-	if m.keySent {
-		return nil, false
 	}
 	// While naming a new instance the menu only shows the submit-name (enter),
 	// change-program (tab), and cancel (esc) options, so those keys are the only ones
@@ -514,16 +495,12 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		default:
 			return nil, false
 		}
-		m.keySent = true
-		return tea.Batch(
-			func() tea.Msg { return reemitKeyMsg{msg} },
-			m.keydownCallback(name)), true
+		return m.keydownCallback(name), false
 	}
 	// Any other modal state (help/confirm/search/select-program/hooks): the
-	// overlay owns the keyboard, so no hint highlighting and no re-emit —
-	// this runs BEFORE handleKeyPress's state switch, so without this guard
-	// mapped keys typed into an overlay would take the highlight + re-emit
-	// detour first. A blanket non-default check (rather than enumerating
+	// overlay owns the keyboard, so no hint highlighting — without this guard
+	// mapped keys typed into an overlay would underline hints the overlay
+	// hides. A blanket non-default check (rather than enumerating
 	// states) can't silently miss a future modal state (Greptile on #1083).
 	if m.state != stateDefault {
 		return nil, false
@@ -549,167 +526,10 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	m.keySent = true
-	return tea.Batch(
-		func() tea.Msg { return reemitKeyMsg{msg} },
-		m.keydownCallback(name)), true
+	return m.keydownCallback(name), false
 }
 
-// reemitKeyMsg is the pass-2 replay handleMenuHighlighting schedules after
-// painting a highlight. It is a distinct type, not the bare tea.KeyMsg, so the
-// replay can never be confused with a physical press of the same key: with
-// coalesced "/", "p", "/", the second physical "/" must be buffered behind the
-// first one's replay rather than taken for it (Codex on #4836).
-type reemitKeyMsg struct{ tea.KeyMsg }
-
-// inputGated reports whether a physical key must wait in deferredKeys instead
-// of dispatching now. Two things gate input, and both are STATE transitions,
-// never side effects:
-//
-//   - keySent: a pass-1 has painted a highlight and its reemitKeyMsg has not
-//     been dispatched yet, so the key's action has not run.
-//   - awaitingInteractive: a dispatched action returned the enterInteractiveMsg
-//     that flips the keyboard into the pane, and it has not landed yet.
-//
-// Everything else an action returns — a spawn that waits out readiness, a
-// restore, a preview fetch — is a side effect whose completion does not change
-// where the next key routes, so input never waits on it.
-func (m *home) inputGated() bool {
-	return m.keySent || m.awaitingInteractive
-}
-
-// releasePendingInteractive ends a pending interactive request that will never
-// activate. The keys buffered behind it were typed as pane input, so with no
-// pane to take them they are dropped rather than run as host commands (a queued
-// D would start a kill of whatever the tree has selected).
-//
-// The gate has one release per way a pending request can end:
-//
-//   - activation lands: the enterInteractiveMsg case (it also drops the keys
-//     when activation fails);
-//   - the awaited pane closes — closed, its session killed or archived, a
-//     project switch: closePaneWindow, the one path that removes a pane;
-//   - the session is lost, dead, or being killed or archived while its pane
-//     stays open, or another screen takes the keyboard (an async overlay, a
-//     state reset): expirePendingInteractive, checked before any key is gated.
-//     A finished archive or kill closes the pane, so it lands on the previous
-//     release.
-//
-// The first-run help path never arms the gate: requestInteractive arms it only
-// when the help is skipped, and the help screen has no cancel — every dismissal
-// continues into activation.
-func (m *home) releasePendingInteractive() {
-	if !m.awaitingInteractive {
-		return
-	}
-	m.awaitingInteractive = false
-	m.awaitingPane = nil
-	m.deferredKeys = nil
-}
-
-// expirePendingInteractive releases the gate when the pending request can no
-// longer activate — activateInteractive would refuse it on arrival anyway — so
-// the key being handled is not parked behind a transition that cannot happen.
-// Cheap checks only: it runs on every physical key while a request is pending,
-// so it reads projected liveness rather than probing tmux.
-func (m *home) expirePendingInteractive() {
-	if !m.awaitingInteractive {
-		return
-	}
-	if m.state != stateDefault {
-		// Another screen owns the keyboard (an async help or confirmation, a
-		// state reset); activation requires stateDefault.
-		m.releasePendingInteractive()
-		return
-	}
-	if inst := m.awaitingPane.Instance(); inst != nil {
-		switch inst.GetLiveness() {
-		case session.LiveLost, session.LiveDead:
-			m.releasePendingInteractive()
-			return
-		}
-		if inst.IsTearingDown() || inst.UserKilled() {
-			m.releasePendingInteractive()
-		}
-	}
-}
-
-// handleKeyPress is the entry point for a PHYSICAL key. A mapped key is split
-// into two event-loop passes (highlight, then the replayed action), and the
-// next physical key can beat the replay onto p.msgs: bubbletea runs the
-// replay's cmd in a goroutine and hops it through channels, while the terminal
-// delivers in one send. Dispatching that key immediately would run it in the
-// pre-action state — "/" then "p" would lose "p" before search opens (#4828).
-// So while input is gated it is buffered in arrival order, and replayed
-// synchronously the moment the gate lifts (drainDeferredKeys).
-//
-// ctrl+c skips the buffer where it is the always-on hard exit (see
-// ctrlCHardExits): deferred, it would be consumed by whatever overlay the
-// pending action opens as merely "close". Everywhere else ctrl+c is contextual
-// and keeps its place in line.
-func (m *home) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.expirePendingInteractive()
-	if !m.ctrlCHardExits(msg) && (m.inputGated() || len(m.deferredKeys) > 0) {
-		m.deferredKeys = append(m.deferredKeys, msg)
-		return m, m.drainDeferredKeys()
-	}
-	return m.handleKeyPressDispatch(msg)
-}
-
-// ctrlCHardExits reports whether msg is a ctrl+c that dispatching now would
-// route to handleQuit. Only nav mode does that. The naming form cancels the
-// draft on ctrl+c and every overlay closes on it, so a ctrl+c racing a
-// form action (Tab opening the program picker) must wait its turn and close
-// the picker, not cancel the draft ahead of the Tab. Interactive mode, and a
-// pending interactive entry, forward it into the pane.
-func (m *home) ctrlCHardExits(msg tea.KeyMsg) bool {
-	return msg.String() == "ctrl+c" && m.state == stateDefault && !m.interactive && !m.awaitingInteractive
-}
-
-// handleReemittedKey is pass-2: it disarms keySent, dispatches the key's action
-// (handleMenuHighlighting lets it through on replayingKey), then drains the keys
-// that raced it. The drain runs in this same Update, right after the action's
-// synchronous state transition, so buffered keys never wait for the action's
-// command to finish — only for the action itself.
-func (m *home) handleReemittedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.keySent = false
-	m.replayingKey = true
-	mod, cmd := m.handleKeyPressDispatch(msg)
-	m.replayingKey = false
-	return mod, tea.Batch(cmd, m.drainDeferredKeys())
-}
-
-// drainDeferredKeys dispatches buffered keys in arrival order, synchronously,
-// until the buffer is empty or one of them gates input again — a mapped key
-// arms its own pass-1, or an Enter asks for interactive mode — in which case
-// the rest stay buffered until that gate lifts and drains them. Dispatching in
-// the loop rather than returning per-key commands is what keeps the order: two
-// commands carry no ordering guarantee between them ("/", "p", "q" could land
-// "qp"), and a key typed after the drain cannot overtake a buffered one.
-//
-// A graceful quit discards the buffer: handleQuit has already closed the live
-// attachments and set m.quitting, so a buffered Enter or arrow must not reopen
-// an attachment or persist navigation state behind the teardown. The ctrl+c
-// hard exit clears it the same way.
-func (m *home) drainDeferredKeys() tea.Cmd {
-	var cmds []tea.Cmd
-	for len(m.deferredKeys) > 0 && !m.inputGated() {
-		if m.quitting {
-			m.deferredKeys = nil
-			break
-		}
-		k := m.deferredKeys[0]
-		m.deferredKeys = m.deferredKeys[1:]
-		_, cmd := m.handleKeyPressDispatch(k)
-		cmds = append(cmds, cmd)
-	}
-	if m.quitting {
-		m.deferredKeys = nil
-	}
-	return tea.Batch(cmds...)
-}
-
-func (m *home) handleKeyPressDispatch(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
+func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Interactive mode owns the keyboard before anything else — menu
 	// highlighting, quit keys, the global key map (#1089 PR 2, RFC §2.3).
 	// The state gate matters: an overlay opened by an async event (e.g. the
@@ -719,11 +539,17 @@ func (m *home) handleKeyPressDispatch(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cm
 		return m.handleInteractiveKey(msg)
 	}
 
-	cmd, returnEarly := m.handleMenuHighlighting(msg)
+	highlight, returnEarly := m.handleMenuHighlighting(msg)
 	if returnEarly {
-		return m, cmd
+		return m, highlight
 	}
+	mod, cmd = m.dispatchKeyAction(msg)
+	return mod, tea.Batch(highlight, cmd)
+}
 
+// dispatchKeyAction runs a key's action for the current state — the half of
+// handleKeyPress after the menu highlight.
+func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Dispatch to state-specific handlers
 	switch m.state {
 	case stateHelp:
@@ -781,7 +607,6 @@ func (m *home) handleKeyPressDispatch(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cm
 	// through the generated table like every other rebindable action, via
 	// keys.KeyQuit in handleDefaultKeyPress (#1026).
 	if msg.String() == "ctrl+c" {
-		m.deferredKeys = nil
 		return m.handleQuit()
 	}
 
