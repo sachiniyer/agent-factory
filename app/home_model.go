@@ -135,6 +135,9 @@ type home struct {
 	// that moves the keyboard into a pane, and cleared when that message lands.
 	// Keys typed in between belong in the pane, so they wait (inputGated).
 	awaitingInteractive bool
+	// interactiveGen numbers interactive requests; the enterInteractiveMsg of
+	// the latest one is the only one that lifts awaitingInteractive.
+	interactiveGen uint64
 	// deferredKeys holds physical keys that arrived while input was gated, in
 	// arrival order. drainDeferredKeys dispatches them synchronously as soon as
 	// the gate lifts, so coalesced input ("/", "p", "q") lands in the

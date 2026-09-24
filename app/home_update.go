@@ -168,9 +168,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (#1089 PR 2); the pane pointer is re-validated inside.
 		//
 		// Also the gate requestInteractive raised for the keys typed after the
-		// Enter: they belong in the pane, so they drain below, after the
-		// activation and the entry-key replay, whether or not activation took.
-		m.awaitingInteractive = false
+		// Enter — but only the latest request's message owns it; an older one
+		// landing late activates its pane and leaves the gate alone.
+		ownsGate := m.awaitingInteractive && msg.gen == m.interactiveGen
+		if ownsGate {
+			m.awaitingInteractive = false
+		}
 		cmd := m.activateInteractive(msg.pane)
 		// The replay exists to forward the transition keystroke INTO the pane
 		// rather than swallow it (#1576). The host-reserved exit key is the one
@@ -188,6 +191,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.replay && m.interactive && !isInteractiveExitKey(msg.replayKey) {
 			_, replayCmd := m.handleInteractiveKey(msg.replayKey)
 			cmd = tea.Batch(cmd, replayCmd)
+		}
+		if ownsGate && !m.interactive {
+			// The buffered keys were typed as pane input. With no pane to take
+			// them (it closed, turned ineligible, or an overlay opened first),
+			// running them as host commands would be worse than dropping them:
+			// a queued D would open a kill confirmation for whatever the tree
+			// has selected now.
+			m.deferredKeys = nil
 		}
 		return m, tea.Batch(cmd, m.drainDeferredKeys())
 	case beginAttachMsg:
@@ -457,9 +468,9 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 	}
 	// A physical key while a pass-2 is still in flight is buffered by
 	// handleKeyPress before it gets here, so the only one that reaches this
-	// point is ctrl+c, which bypasses the deferral to keep its always-on hard
-	// exit. Let it through without re-arming: the in-flight replay still owns
-	// the arm.
+	// point is a nav-mode ctrl+c, which bypasses the deferral to keep its
+	// always-on hard exit. Let it through without re-arming: the in-flight
+	// replay still owns the arm.
 	if m.keySent {
 		return nil, false
 	}
@@ -574,15 +585,26 @@ func (m *home) inputGated() bool {
 // So while input is gated it is buffered in arrival order, and replayed
 // synchronously the moment the gate lifts (drainDeferredKeys).
 //
-// ctrl+c is the one key never buffered: it is the always-on hard exit, and a
-// deferred ctrl+c would be consumed by whatever overlay the pending action
-// opens as merely "close".
+// ctrl+c skips the buffer where it is the always-on hard exit (see
+// ctrlCHardExits): deferred, it would be consumed by whatever overlay the
+// pending action opens as merely "close". Everywhere else ctrl+c is contextual
+// and keeps its place in line.
 func (m *home) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() != "ctrl+c" && (m.inputGated() || len(m.deferredKeys) > 0) {
+	if !m.ctrlCHardExits(msg) && (m.inputGated() || len(m.deferredKeys) > 0) {
 		m.deferredKeys = append(m.deferredKeys, msg)
 		return m, m.drainDeferredKeys()
 	}
 	return m.handleKeyPressDispatch(msg)
+}
+
+// ctrlCHardExits reports whether msg is a ctrl+c that dispatching now would
+// route to handleQuit. Only nav mode does that. The naming form cancels the
+// draft on ctrl+c and every overlay closes on it, so a ctrl+c racing a
+// form action (Tab opening the program picker) must wait its turn and close
+// the picker, not cancel the draft ahead of the Tab. Interactive mode, and a
+// pending interactive entry, forward it into the pane.
+func (m *home) ctrlCHardExits(msg tea.KeyMsg) bool {
+	return msg.String() == "ctrl+c" && m.state == stateDefault && !m.interactive && !m.awaitingInteractive
 }
 
 // handleReemittedKey is pass-2: it disarms keySent, dispatches the key's action

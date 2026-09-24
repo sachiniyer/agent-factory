@@ -159,3 +159,75 @@ func TestGracefulQuitDropsDeferredKeys(t *testing.T) {
 	require.Empty(t, h.deferredKeys, "input buffered behind a graceful quit is dropped")
 	require.False(t, h.keySent, "the dropped Enter must not have armed a new pass")
 }
+
+// TestStaleInteractiveRequestDoesNotDrain: mouse input is not gated, so a
+// second interactive request can be issued while the first one's
+// enterInteractiveMsg is still in flight. Only the latest request owns the
+// gate; the older message landing first must not drain keys meant for the
+// newer target.
+func TestStaleInteractiveRequestDoesNotDrain(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+
+	_, first := h.requestInteractive(p, nil)
+	_, second := h.requestInteractive(p, nil)
+	_, _ = h.handleKeyPress(runeKey('x'))
+	require.Len(t, h.deferredKeys, 1)
+
+	_, _ = h.Update(first())
+	require.Len(t, h.deferredKeys, 1,
+		"an older request's activation must not drain input queued behind the newer request")
+
+	_, _ = h.Update(second())
+	require.True(t, h.interactive)
+	require.Empty(t, h.deferredKeys)
+	require.Len(t, *fakes, 1)
+	require.Equal(t, []string{"x"}, (*fakes)[0].keys)
+}
+
+// TestFailedActivationDropsPaneBoundKeys: keys buffered behind an interactive
+// entry were typed as pane input. When activation fails — here the pane closes
+// before the message lands — they must not run as host commands instead (a
+// queued D would start a kill of whatever the tree has selected).
+func TestFailedActivationDropsPaneBoundKeys(t *testing.T) {
+	h, _, _ := interactiveTestHome(t)
+	p := h.focusedOpenPane()
+	require.NotNil(t, p)
+
+	_, cmd := h.requestInteractive(p, nil)
+	_, _ = h.handleKeyPress(runeKey('D'))
+	require.Len(t, h.deferredKeys, 1)
+	h.closePaneWindow(p)
+
+	_, _ = h.Update(cmd())
+	require.False(t, h.interactive, "activation of a closed pane fails")
+	require.Empty(t, h.deferredKeys, "pane-bound input with no pane is dropped")
+	require.False(t, h.keySent, "the dropped D must not have started its host action")
+	require.Equal(t, stateDefault, h.state)
+}
+
+// TestCtrlCRacingNamingActionKeepsOrder: in the naming form ctrl+c is not the
+// hard exit — it cancels the draft — so it must not jump the queue. Tab then
+// ctrl+c opens the program picker and closes it again, keeping the draft.
+func TestCtrlCRacingNamingActionKeepsOrder(t *testing.T) {
+	h := activeProjectHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.startNewInstance()
+	require.Equal(t, stateNew, h.state)
+	naming := h.namingInstance
+	require.NotNil(t, naming)
+
+	tab := tea.KeyMsg{Type: tea.KeyTab}
+	_, _ = h.handleKeyPress(tab)
+	require.True(t, h.keySent)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.Len(t, h.deferredKeys, 1, "a naming-form ctrl+c waits behind the pending Tab")
+	require.Same(t, naming, h.namingInstance, "the draft must survive until the Tab has run")
+
+	_, _ = h.Update(reemitKeyMsg{tab})
+	require.Equal(t, stateNew, h.state, "Tab opened the picker and the ctrl+c closed it")
+	require.Nil(t, h.selectionOverlay)
+	require.Same(t, naming, h.namingInstance, "the naming draft is preserved")
+	require.Empty(t, h.deferredKeys)
+}

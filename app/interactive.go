@@ -30,6 +30,10 @@ type enterInteractiveMsg struct {
 	pane      *store.OpenPane
 	replayKey tea.KeyMsg
 	replay    bool
+	// gen is the interactiveGen of the request that produced this message. Only
+	// the latest request owns the awaitingInteractive gate, so an older
+	// activation landing late cannot drain keys meant for a newer pane.
+	gen uint64
 }
 
 // requestInteractive routes Enter-on-a-live-eligible-pane through the
@@ -49,13 +53,17 @@ type enterInteractiveMsg struct {
 // meanwhile belong in the pane, so input is gated until then
 // (awaitingInteractive; the enterInteractiveMsg case lifts it and drains).
 // When the help screen shows, it takes the keyboard synchronously and no gate
-// is needed.
+// is needed. Every request takes a fresh interactiveGen, and only the message
+// carrying the latest one lifts the gate: mouse input is not gated, so a click
+// can issue a second request while the first is still in flight.
 func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
 	immediate := false
 	mod, cmd := m.showHelpScreen(helpTypeInteractive{}, func() tea.Cmd {
 		immediate = true
+		m.interactiveGen++
+		gen := m.interactiveGen
 		return func() tea.Msg {
-			msg := enterInteractiveMsg{pane: p}
+			msg := enterInteractiveMsg{pane: p, gen: gen}
 			if replayKey != nil {
 				msg.replay = true
 				msg.replayKey = *replayKey
