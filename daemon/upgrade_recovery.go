@@ -66,9 +66,20 @@ func HandleUpgradeRecoveryExec() {
 		os.Exit(1)
 	}
 	log.Initialize(false)
-	defer log.Close()
 	if runErr := RunUpgradeRecoveryActor(context.Background(), invocation); runErr != nil {
 		log.ErrorLog.Printf("daemon upgrade recovery actor failed: %v", runErr)
+		// os.Exit does not run deferred functions
+		// (https://pkg.go.dev/os#Exit), so the handler must close the log
+		// explicitly before exiting. log.Close() is what prints the
+		// operator-facing "wrote logs to <path>" hint when the run recorded
+		// a WARNING/ERROR (dirty=true, log/log.go); without it the recovery
+		// actor's failure detail lands only in the rotating log file and the
+		// process exits 1 with empty stderr and no pointer to that file —
+		// an operator reading the journal (Linux) or recovery.log (macOS),
+		// the platform's stderr capture targets, gets no in-band link to
+		// agent-factory.log. Mirrors the explicit close in
+		// commands/doctorcmd.go before its os.Exit(code).
+		log.Close()
 		os.Exit(1)
 	}
 	os.Exit(0)

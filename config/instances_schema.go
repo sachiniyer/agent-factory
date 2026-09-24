@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 var errInstancesSchemaContent = errors.New("invalid instances.json schema content")
@@ -73,6 +75,16 @@ func MigrateRepoInstancesForDaemonLoad(repoID string) (SchemaMigrationResult, er
 // (RepoInstancesMigrateOnLoadPaths) so the two can never enumerate a different
 // set. A missing instances directory is not an error: a daemon with no per-repo
 // state has nothing to migrate.
+//
+// A subdirectory whose name is not a valid repoID is skipped here, the same way
+// a non-directory entry already is. repoInstancesPath validates the id before
+// touching the filesystem, so feeding an unvalidated name to either consumer
+// fails at that pre-condition — a failure that is neither corrupted content nor
+// a write failure and so aborts the whole sweep under both callers. Skipping at
+// the walk keeps that class from blocking daemon startup while preserving the
+// hard-refuse posture for real repos with read/write/newer-schema problems. This
+// matches LoadAllRepoInstancesReportingMissing, which already logs and
+// continues on the identical case (state.go).
 func repoInstanceIDsForDaemonLoad() ([]string, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
@@ -88,6 +100,10 @@ func repoInstanceIDsForDaemonLoad() ([]string, error) {
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		if err := ValidateRepoID(entry.Name()); err != nil {
+			log.WarningLog.Printf("skipping instances subdirectory %q: not a valid repo id: %v", entry.Name(), err)
 			continue
 		}
 		ids = append(ids, entry.Name())
@@ -191,33 +207,38 @@ func extractInstancesArray(raw []byte, path string) (json.RawMessage, error) {
 	return instances, nil
 }
 
-func loadRepoInstancesForAll(repoID string) (json.RawMessage, error) {
+// loadRepoInstancesForAll reads one repo's instances.json for the all-repo
+// loaders. missing reports that the file did not exist, which the returned "[]" alone
+// cannot say: every all-repo reader treats a missing file as an empty repo, but
+// the daemon must not count one as a successful re-read of a repo it skipped
+// (#4783).
+func loadRepoInstancesForAll(repoID string) (raw json.RawMessage, missing bool, err error) {
 	path, err := repoInstancesPath(repoID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return json.RawMessage("[]"), nil
+			return json.RawMessage("[]"), true, nil
 		}
-		return nil, fmt.Errorf("failed to read repo instances: %w", err)
+		return nil, false, fmt.Errorf("failed to read repo instances: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return json.RawMessage("[]"), nil
+		return json.RawMessage("[]"), false, nil
 	}
 	instances, err := extractInstancesArray(data, path)
 	if err == nil {
-		return instances, nil
+		return instances, false, nil
 	}
 	var newer *UnsupportedSchemaVersionError
 	if errors.As(err, &newer) {
-		return nil, err
+		return nil, false, err
 	}
 	// All-repo callers historically decoded each repo's raw bytes themselves
 	// so they could aggregate and name corrupted repos (#730). Preserve that
 	// behavior even though single-repo reads now unwrap envelopes here.
-	return json.RawMessage(data), nil
+	return json.RawMessage(data), false, nil
 }
 
 func marshalInstancesEnvelope(data json.RawMessage) ([]byte, error) {

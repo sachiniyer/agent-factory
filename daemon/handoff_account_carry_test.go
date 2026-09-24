@@ -71,7 +71,7 @@ func TestHandoffAccountCarriesTheSameAgentConversation(t *testing.T) {
 	conv := inst.AgentConversation()
 	require.Equal(t, carryHandoffConversationID, conv.ID, "the replacement resumes the same conversation id")
 	require.Equal(t, session.ConversationCaptureCarried, conv.CaptureKind)
-	handoffs := inst.Handoffs()
+	handoffs := inst.Tabs[0].Handoffs
 	require.Len(t, handoffs, 1)
 	require.Equal(t, carryHandoffConversationID, handoffs[0].From.ID,
 		"the ledger keeps the outgoing conversation for provenance and return trips")
@@ -123,7 +123,7 @@ func TestAccountSwapPromptStatesTheConversationOutcome(t *testing.T) {
 func TestResumeFromLimitAbandonsACarryWhoseLaunchDidNotSurvive(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", false, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "work")
-	inst.ReconcileAccountHandoffSnapshot("work", true, &session.AccountSwapData{
+	inst.ReconcileAccountHandoffSnapshot("work", "claude", true, &session.AccountSwapData{
 		To:                    "work",
 		CarriedConversationID: carryHandoffConversationID,
 		CarriedLaunchStarted:  true,

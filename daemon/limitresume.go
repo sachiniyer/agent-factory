@@ -222,7 +222,7 @@ func (m *Manager) resumeLimitedSession(
 	incomingManualReset := false
 	if accountSwap != nil && accountSwap.manual && hasReset {
 		limitedAgent, limitedAccount, limited := inst.LimitIdentity()
-		incomingManualReset = limited && limitedAgent == accountSwap.agent && limitedAccount == accountSwap.to
+		incomingManualReset = limited && limitedAgent == accountSwap.accountNamespace() && limitedAccount == accountSwap.to
 	}
 	due := ordinaryDue
 	if accountSwap != nil && !incomingManualReset {
@@ -308,7 +308,7 @@ func (m *Manager) resumeLimitedSession(
 	attempts, wait := m.limitResumeAttempted(
 		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
-	resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
+	outcome, resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
 	if accountSwap != nil && accountSwap.fellBack && !hadReset && retryInterval > 0 {
 		wait = m.limitResumeFixedFallbackScheduled(st, now, retryInterval)
 	}
@@ -316,8 +316,17 @@ func (m *Manager) resumeLimitedSession(
 		m.warn().Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, resumeErr)
 		return
 	}
+	// resumeFromLimitLockedOutcome returns (resumeNotPerformed, nil) for several
+	// mid-pass aborts — above all a LimitAutoResume opt-out observed at the
+	// final-fence config recheck after the pass-start snapshot saw it enabled.
+	// Such a no-op performed no resume and committed no swap, so it must not log
+	// success. Gate the success log on the actual outcome, not on resumeErr ==
+	// nil (which is true for both resumePerformed and resumeNotPerformed).
+	if outcome != resumePerformed {
+		return
+	}
 	if accountSwap != nil && !accountSwap.fellBack {
-		m.info().Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.agent, accountSwap.to, attempts)
+		m.info().Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.accountNamespace(), accountSwap.to, attempts)
 	} else {
 		// State the trigger that was actually observed (#3240): with a parsed
 		// reset time the daemon scheduled against it; otherwise only the fallback

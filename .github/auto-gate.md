@@ -235,6 +235,29 @@ Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
 
+**A PR that ends during its own update-branch is a lost race, not an evaluation
+failure (#4462).** The gate does not own this PR, and the open read its
+evaluation was acting on is minutes old by the time the PUT writes — leaving a
+window where a hand or queue merge plus GitHub's delete-on-merge can land
+before the write completes. A fresh pre-write `pulls.get` narrows it to a round
+trip; a confirming re-read after a rejection or an accepted PUT closes the
+rest. When a read proves the PR merged or closed, the lane refuses as ordinary
+waiting — `Refusing to merge PR #N; the PR was merged while its update-branch
+was pending` for the pre-write read, or the same refusal with `was in flight`
+after a rejection or an accepted PUT — so `processAggregateHead` invalidates
+the fixed aggregate and returns the ordinary `waiting` state: the workflow run
+does not fail, but the fixed aggregate stays red as that invalidation's
+enforcement record (the required `Auto Gate decision` check remains red). An
+accepted PUT whose post-update re-read proves the PR ended approves no parked
+runs and schedules no successor: nothing remains for this run to merge. The
+proof is the read, never the update's error shape alone (a 422 is also a real
+tree conflict, a 404 could be a fork PR still owed an answer); a read that
+fails or shows the PR still open stays the update failure it always was only
+on a rejected PUT — an accepted PUT whose confirming re-read fails or still
+shows the old open head instead sets `recoveryError` or observes no new SHA,
+and dispatches the successor Auto Gate run anyway, returning the ordinary
+waiting above rather than an update failure (#3551).
+
 **Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
 The update endpoint can acknowledge before a PR read exposes its new head. The
 immediate approval and run-existence checks only execute when that read returns
@@ -419,10 +442,10 @@ from availability ordering as well as verdict selection. A maintained summary
 is status, never an unrecognised outage response. The repository outage record
 uses the same corroboration rule for current and superseded commits, with
 commit dates, PR creation, force-push history and recorded head announcements
-supplying historical freshness floors. Only merge accounting requires the merged head specifically.
-Recovery uses the row's own time, never the summary edit time, and cannot be
-earlier than the corroborating artifact. A later artifact therefore cannot
-backdate a recovery or erase an earlier degraded merge.
+supplying historical freshness floors. Recovery uses the row's own time, never
+the summary edit time, and cannot be earlier than the corroborating artifact. A
+later artifact therefore cannot backdate a recovery or erase an earlier degraded
+merge.
 
 Reviewer-unavailable evidence includes Codex inline review replies
 (`in_reply_to_id` set), including replies carried by an empty `COMMENTED` review
@@ -495,6 +518,19 @@ transaction is running. Only successfully invalidated heads enter evaluation.
 This preserves generation ownership checks immediately before PASS and merge,
 including write retries. Runner availability and API failures still apply;
 concurrency adds no wait here.
+
+One exception: an invalidation GitHub's API could not complete — a rate limit
+(#4461), or a create answered with a 5xx whose marker never became listable
+(#4763) — is retried once and then deferred into the lane, which retries the
+invalidation itself. A check-run create is never replayed on an ambiguous
+failure; it is reconciled by its marker over a seven-second window. If the
+lane's own create is still unconfirmed after that, the lane reads the newest
+published generation of the fixed aggregate. When that generation is already
+non-passing, the transaction stops without evaluating, retitles it `UNKNOWN`
+(concluded `failure`, never `neutral`, which the ruleset counts as satisfied),
+and the run does not fail. When it satisfies the ruleset, is absent, or cannot
+be read, the run fails: a stale PASS may still be what the ruleset enforces, and
+nothing replaced it.
 
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR

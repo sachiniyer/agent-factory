@@ -1,18 +1,24 @@
 // Package apiclient is a typed Go client for the daemon-hosted HTTP/JSON API
 // (#1029) that the daemon serves on its `daemon-http.sock` Unix socket. It is
-// the read-side twin of the gob `net/rpc` control client in daemon/: it dials
-// the SAME daemon core over a DIFFERENT transport and, by decoding the shared
+// the HTTP twin of the gob `net/rpc` control client in daemon/: it dials the
+// SAME daemon core over a DIFFERENT transport and, by decoding the shared
 // `{data,error}` envelope back into the SAME request/response structs the RPC
-// client uses, it returns byte-identical results. This is the seam #1592 Phase 2
-// grows the client API on — HTTP today, WebSocket streaming later — without the
-// TUI or CLI ever touching the wire shape.
+// client uses, it returns byte-identical results — without the TUI or CLI ever
+// touching the HTTP envelope shape. The streaming path is the exception: the
+// TUI drives the WebSocket protocol itself (app/live_stream.go, over
+// agentproto) through the raw connection DialStream exposes.
 //
-// Phase 2 PR2 scope: this client exposes only the READ-ONLY Snapshot path and
-// its first consumer is the non-spawning `af sessions list`/`get` read
-// (api/sessions.go). Every write/control call stays on net/rpc; the disk
-// fallback is unchanged. The envelope is NOT redefined here — the client decodes
-// the exact bytes daemon/httpserver.go writes via apiproto.WriteEnvelope, which
-// is what guarantees parity.
+// The client covers the operations the TUI and CLI drive today — snapshot
+// reads, session/tab/task lifecycle writes, config get/set, and streaming
+// attach — a subset of the HTTP route catalog, not all of it (SendPrompt and
+// the tab rename/reorder routes have no wrapper yet, for example). The TUI's
+// session control calls ride it (app/session_control.go's withDaemonHTTP),
+// though a few flows — local account registration and login, for one — still
+// use the gob client directly; the CLI's `af sessions` and `af tasks` trees
+// in api/ call it too. The
+// envelope is NOT redefined here — the client decodes the exact bytes
+// daemon/httpserver.go writes via apiproto.WriteEnvelope, which is what
+// guarantees parity.
 package apiclient
 
 import (
