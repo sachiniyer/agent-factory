@@ -400,11 +400,11 @@ daemon is running, this command exits successfully without starting one.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
-		return runDaemonRestart(cmd.OutOrStdout())
+		return runDaemonRestart(cmd.OutOrStdout(), cmd.ErrOrStderr())
 	},
 }
 
-func runDaemonRestart(w io.Writer) error {
+func runDaemonRestart(w, errOut io.Writer) error {
 	// Preserve this command's documented no-op before touching the installed
 	// unit. A stale or foreign unit is irrelevant when there is no daemon to
 	// stop, and failing to parse/reload it must not turn an idempotent restart
@@ -440,12 +440,12 @@ func runDaemonRestart(w io.Writer) error {
 		return fmt.Errorf("refusing to restart through an unsafe daemon autostart unit: %w", err)
 	}
 
-	result, err := restartDaemonFromPath(resolvedPath)
+	result, err := restartDaemonFromPathDetailed(resolvedPath)
 	if err != nil {
 		return err
 	}
 
-	switch result {
+	switch result.Shutdown {
 	case daemon.ShutdownNoDaemon:
 		if !daemonRestartQuiet {
 			fmt.Fprintln(w, "no running daemon to restart")
@@ -454,6 +454,31 @@ func runDaemonRestart(w io.Writer) error {
 		fmt.Fprintln(w, "daemon restarted (stopped old daemon via SIGTERM fallback)")
 	default:
 		fmt.Fprintln(w, "daemon restarted")
+	}
+	// The success line above is true only as far as "a daemon is running": a
+	// respawn that fell back to an ad-hoc daemon — because the autostart unit's
+	// restart failed (UnitErr) or because its ownership of this home could not
+	// be determined so it was left alone (UnitGateErr) — lost systemd/launchd
+	// supervision. It dies with the session and will not return at next login.
+	// Printing plain success over that demotion is the exact anti-pattern
+	// respawnDaemonAfterUpgrade's contract names as "half of #1947"; `af
+	// upgrade` reports the same demotions via reportUpgradeRestart. af daemon
+	// restart wrote no new binary, so the wording names only the supervision
+	// loss and the repair.
+	if result.Respawn.UnitErr != nil {
+		fmt.Fprintf(errOut, "The daemon autostart unit could not be restarted: %v\n", result.Respawn.UnitErr)
+		fmt.Fprintln(errOut, "The daemon was restarted as an ad-hoc process instead: it is unsupervised and will not return at next login. Re-register it with `af daemon install`.")
+	}
+	if result.Respawn.UnitGateErr != nil {
+		fmt.Fprintf(errOut, "The daemon autostart unit was left alone: %v\n", result.Respawn.UnitGateErr)
+		fmt.Fprintln(errOut, "Restarting a unit we cannot prove serves this AF home could stop an unrelated daemon, so the daemon was restarted as an unsupervised ad-hoc process: it will not return at next login.")
+		// NOT `af daemon restart`: that re-enters this same respawn, hits this
+		// same gate, and falls back to an ad-hoc daemon again — it would look
+		// like it worked while leaving supervision just as broken. Only a
+		// reinstall re-registers the unit for THIS home (InstallAutostart
+		// bakes the current AGENT_FACTORY_HOME and starts it), so it is the
+		// only repair that ends with the daemon supervised.
+		fmt.Fprintln(errOut, "Re-register this home's unit with `af daemon install` to restore supervision.")
 	}
 	return nil
 }
@@ -605,9 +630,12 @@ type restartOutcome struct {
 	FailedPhase restartPhase
 }
 
-// restartDaemonFromPath keeps the (result, error) shape the auto-update path
-// and `af daemon restart` are written against. Callers that must report on the
-// restart's fidelity — `af upgrade` — use restartDaemonFromPathDetailed.
+// restartDaemonFromPath keeps the (result, error) shape the auto-update path is
+// written against. Callers that must report on the restart's fidelity — `af
+// upgrade` and `af daemon restart` — use restartDaemonFromPathDetailed, which
+// returns the full restartOutcome including the respawn demotion fields; this
+// wrapper discards them and must not be adopted by any caller that surfaces the
+// restart's result to a user.
 func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 	outcome, err := restartDaemonFromPathDetailed(execPath)
 	return outcome.Shutdown, err

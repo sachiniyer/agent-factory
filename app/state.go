@@ -64,4 +64,10 @@ const (
 	// to stateNew when it closes; this returns to stateDefault. Both drive the same
 	// promptOverlay field — one overlay, two owners, distinguished by who is asking.
 	stateJumpTab
+	// stateRenameTab is the `R` rename-tab prompt (#1904's verb reaching the TUI).
+	// Its own state for the same reason stateJumpTab is: it returns to
+	// stateDefault, drives the shared promptOverlay, and owns its Enter/Esc
+	// semantics — a tab name is one line, so Enter submits and Esc cancels,
+	// neither of which is the composer's meaning for them.
+	stateRenameTab
 )

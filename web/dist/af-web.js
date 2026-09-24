@@ -15362,7 +15362,7 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   const key = active && menu.contains(active) ? active.dataset.projectFocus : void 0;
   menu.replaceChildren(...children);
   if (key === void 0) return;
-  if (menu.hidden) {
+  if (menu.getClientRects().length === 0) {
     fallback.focus({ preventScroll: true });
     return;
   }
