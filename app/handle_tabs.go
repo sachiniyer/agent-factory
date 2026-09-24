@@ -2,10 +2,13 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
@@ -319,6 +322,192 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 		m.sidebar.SyncCursorToActiveTab()
 	}
 	return m, m.selectionChanged()
+}
+
+// tabRenameRef is the identity the rename prompt acts on, captured when it
+// opens (#1904's verb reaching the TUI). The session half is a
+// sessionActionTarget for the usual reason — a background snapshot can replace
+// the instance pointer or reuse its title while the modal owns the keyboard
+// (#2358). The tab half carries the stable id; the roster generation is the
+// fallback proof for a pre-#1738 id-less tab, where a captured NAME is only
+// trustworthy while the roster provably has not changed (the same rule the
+// delete consent applies — a name is freed by a close and handed to the next
+// tab that asks for it, #1929).
+type tabRenameRef struct {
+	session          sessionActionTarget
+	tabID            string
+	tabName          string
+	tabLabel         string
+	rosterGeneration uint64
+}
+
+// showRenameTabPrompt opens the `R` rename prompt against the tab the user is
+// LOOKING at — the focused pane's effective binding, or the tree's selection's
+// active tab. That is the same target `w` closes, resolved the same way for the
+// same reason (#1884: every wrong-target tab bug has been two sources
+// disagreeing about which tab is on screen).
+//
+// The guards mirror the daemon's own (daemon.Manager.RenameTab): only kinds
+// that DISPLAY their name are renameable (session.TabKindRenameable) — the
+// agent tab always renders "Agent" and a shell tab always renders "Terminal",
+// so a rename there would write a field nothing reads. Refusing before the
+// prompt opens beats taking a name and then failing; the RPC re-checks
+// everything regardless.
+func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
+	// Gated on workspace focus, exactly as the digit jumps and `g` are (#3067):
+	// R is routed through the global key map, so without this gate it would
+	// retarget a session's roster while the automations or projects rail owns
+	// the keyboard. A rail that owns the keyboard keeps it.
+	if active := m.ring.Active(); active != layout.RegionTree && !layout.IsPaneRegion(active) {
+		return m, nil
+	}
+
+	inst := m.store.GetSelectedInstance()
+	idx := m.store.ActiveTab()
+	if p := m.focusedOpenPane(); p != nil {
+		b := m.effectivePaneBinding(p)
+		inst, idx = b.instance, b.tab
+	}
+	if inst == nil {
+		return m, nil
+	}
+	if idx <= 0 {
+		return m, m.handleNotice(fmt.Errorf("the agent tab can't be renamed: it always displays as %q", "Agent"))
+	}
+	tabs := inst.GetTabs()
+	if idx >= len(tabs) {
+		// A stale index (the tab it named has since closed) is not the agent
+		// tab; say what actually happened, as handleCloseTab keeps these apart.
+		return m, m.handleNotice(fmt.Errorf("the selected tab no longer exists; select a tab and try again"))
+	}
+	tab := tabs[idx]
+	if tab == nil {
+		return m, nil
+	}
+	if !session.TabKindRenameable(tab.Kind) {
+		return m, m.handleNotice(fmt.Errorf("tab %q can't be renamed: it always displays as %q — only web, process and VS Code tabs show a custom name",
+			tab.Name, session.TabLabel(tab)))
+	}
+
+	m.tabRenameTarget = tabRenameRef{
+		session:          captureSessionActionTarget(inst, m.repoID),
+		tabID:            tab.ID,
+		tabName:          tab.Name,
+		tabLabel:         session.TabLabel(tab),
+		rosterGeneration: inst.TabRosterGeneration(),
+	}
+	// Seeded with the current name so the user edits rather than retypes; the
+	// name — not the label — is the editable field.
+	m.promptOverlay = overlay.NewPromptOverlay(fmt.Sprintf("Rename tab %q", m.tabRenameTarget.tabLabel), tab.Name)
+	m.promptOverlay.SetPlaceholder("New tab name…")
+	m.promptOverlay.SetHints("enter rename · esc cancel", "enter rename · esc cancel")
+	m.layoutPromptOverlay()
+	m.state = stateRenameTab
+	return m, nil
+}
+
+// handleStateRenameTab drives the prompt and performs the rename. Submit and
+// cancel are owned HERE, not delegated — PromptOverlay is the naming form's
+// multi-line field, where Enter is text and only ctrl+c marks a cancel; a
+// one-line rename needs Enter to submit and Esc to abandon (the same re-owning
+// handleStateJumpTab does, #4172).
+func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.promptOverlay = nil
+		m.tabRenameTarget = tabRenameRef{}
+		m.state = stateDefault
+		return m, nil
+	case tea.KeyEnter:
+		// fall through to submit
+	default:
+		m.promptOverlay.HandleKeyPress(msg)
+		return m, nil
+	}
+
+	newName := strings.TrimSpace(m.promptOverlay.Value())
+	target := m.tabRenameTarget
+	m.promptOverlay = nil
+	m.tabRenameTarget = tabRenameRef{}
+	m.state = stateDefault
+	if newName == "" {
+		// An empty submission abandons the rename rather than asking the daemon
+		// to sanitize nothing — Enter on a blank prompt is how a user backs out
+		// of a field they opened by accident.
+		return m, nil
+	}
+
+	current := m.resolveSessionActionTarget(target.session)
+	if current == nil {
+		return m, m.handleNotice(fmt.Errorf("tab %q is no longer available to rename", target.tabLabel))
+	}
+	if current.HasInFlightOp() {
+		return m, m.handleNotice(fmt.Errorf("Session %q is busy; try again", current.Title))
+	}
+
+	// Re-find the tab the prompt was opened on, by the same identity that will
+	// go on the wire: the stable id survives reorder and snapshot replacement;
+	// the id-less legacy case needs the captured roster generation to prove the
+	// name still names the same tab (the delete consent rule).
+	var tab *session.Tab
+	if target.tabID != "" {
+		if at, ok := current.TabIndexByID(target.tabID); ok {
+			tab = current.GetTabs()[at]
+		}
+	} else {
+		if current.TabRosterGeneration() != target.rosterGeneration {
+			return m, m.handleNotice(fmt.Errorf("Tab %q changed while the prompt was open; reopen it and try again", target.tabLabel))
+		}
+		for _, candidate := range current.GetTabs() {
+			if candidate != nil && candidate.Name == target.tabName {
+				tab = candidate
+				break
+			}
+		}
+	}
+	if tab == nil {
+		return m, m.handleNotice(fmt.Errorf("Tab %q is no longer available to rename", target.tabLabel))
+	}
+
+	resolved, err := renameTabThroughDaemon(target.session.renameTabRequest(tab.ID, tab.Name, newName))
+	if err != nil {
+		return m, m.handleError(err)
+	}
+	// Reflect the rename locally so the bar reads it before the next daemon
+	// snapshot lands — the same instant-projection pattern createNewTab uses.
+	// The daemon's answer is already sanitized and collision-suffixed, so
+	// RenameTabByID resolves it back to itself — unless the local roster is
+	// stale: another client may have just freed the name the daemon returned,
+	// and re-resolving against a sibling that is only still here locally would
+	// show "name-2" for a tab the daemon calls "name". The daemon is the
+	// authority, so in that case skip the projection and let the next snapshot
+	// apply the name verbatim; a local miss is what the snapshot exists for.
+	if localTabNameTaken(current, tab, resolved) {
+		log.InfoLog.Printf("rename to %q deferred to the next snapshot: the local roster still holds that name", resolved)
+	} else if _, rerr := current.RenameTabByID(tab.ID, resolved); rerr != nil {
+		log.ErrorLog.Printf("rename reflected daemon-side but not locally: %v", rerr)
+	}
+	// Through handleNotice, not errBox.SetNotice: it advances the notice
+	// generation and schedules the usual expiry, so the confirmation neither
+	// lingers forever nor gets erased early by an older notice's timer.
+	notice := m.handleNotice(fmt.Errorf("renamed tab to %q", resolved))
+	return m, tea.Batch(notice, m.selectionChanged())
+}
+
+// localTabNameTaken reports whether a tab other than self holds name in inst's
+// local roster — the case where applying a daemon-resolved name locally would
+// re-suffix it instead of showing it verbatim.
+func localTabNameTaken(inst *session.Instance, self *session.Tab, name string) bool {
+	for _, candidate := range inst.GetTabs() {
+		if candidate == nil || candidate.Name != name {
+			continue
+		}
+		if candidate == self || (self.ID != "" && candidate.ID == self.ID) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // handleMoveTab moves the tab the user is LOOKING at one slot — `<` left, `>`

@@ -607,7 +607,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// Account identity and its pending delivery obligation can change while the
 	// row stays Running/Ready. Mirror them before action predicates are evaluated,
 	// so Retry addresses the daemon's transaction instead of stale local state.
-	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAutoSelected, d.PendingAccountSwap) {
+	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAgent, d.AccountAutoSelected, d.PendingAccountSwap) {
 		changed = true
 	}
 	if inst.ReconcilePendingHandoffSnapshot(d.PendingHandoffMission, d.HandoffDeliveryStatus) {

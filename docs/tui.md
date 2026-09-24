@@ -92,6 +92,10 @@ matching the 1-9 jump keys; it was removed in #3023):
 - **`w`** asks to delete the focused tab and names its session. Press `y` to
   confirm or `n`/`Esc` to cancel. The agent tab stays; use Delete session for it.
   Hiding a pane leaves its tab available; deletion requests runtime cleanup.
+- **`R`** opens a rename prompt for the focused tab, seeded with its current
+  name. Only tabs that display a name can be renamed — web, process, and VS
+  Code tabs. The agent tab always shows "Agent" and a Terminal tab always shows
+  "Terminal", so they refuse; `af sessions tab-rename` is the CLI equivalent.
 - **`<`** / **`>`** move the focused tab one slot left or right — the same
   reorder the web tab bar performs by dragging. The agent tab is pinned to the
   first slot, so nothing moves past it in either direction. Like `t`/`w`, this

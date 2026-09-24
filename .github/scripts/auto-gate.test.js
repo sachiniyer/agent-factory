@@ -645,6 +645,9 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
       "auto-gate-reconcile",
     ],
     workflow_dispatch: [{}, { pr_number: 4060 }, 4060],
+    // auto-gate-head.yml's opened/synchronize runs: a called workflow sees the
+    // caller's pull_request_target payload (#4802).
+    workflow_call: [{ pull_request: { number: 4060 } }, {}, 4060],
   };
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
   assert.deepEqual(
@@ -692,7 +695,12 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
   assert.match(
     workflow,
-    /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
+    /pull_request_target:\s+types: \[reopened, closed, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
+  );
+  // The push-time actions moved to their own workflow, which calls this one (#4802).
+  assert.match(
+    fs.readFileSync(path.join(__dirname, "..", "workflows", "auto-gate-head.yml"), "utf8"),
+    /pull_request_target:\s+types: \[opened, synchronize\][\s\S]*uses: \.\/\.github\/workflows\/auto-gate\.yml/,
   );
   assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
   assert.match(workflow, /schedule:\s+- cron: "\*\/5 \* \* \* \*"/);
@@ -2744,11 +2752,15 @@ test("exhausted aggregate invalidation prevents the transaction from merging", a
       targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
       mergeEnabled: true,
     }),
-    /could not invalidate aggregate .* after ambiguous create failure \(fetch failed\) after 3 attempts/,
+    /could not invalidate aggregate .* after ambiguous create failure \(fetch failed\) after 4 attempts/,
   );
 
   assert.equal(github.checkCreateAttempts, 1);
-  assert.equal(github.checkListReads, 3);
+  // Four settle-window polls for the marker, then the one read that asks what
+  // the head publishes (#4763). It finds no aggregate generation at all, which
+  // proves nothing about mergeability — so this stays a rejection.
+  assert.equal(github.checkListReads, 5);
+  assert.deepEqual(github.updatedChecks, []);
   assert.equal(github.mergedWith, null);
   assert.equal(github.operations.includes("merge"), false);
 });
@@ -3192,6 +3204,266 @@ test("a non-rate-limit apply-gate transaction error still fails the run", async 
   const { error } = await runApplyGateStep({ github });
 
   assert.ok(error, "a real write defect must still be loud");
+});
+
+// #4763. `checks.create` for the lane's own invalidation answered HTTP 503, the
+// marker reconcile gave up ~1.25s later, and the exhaustion escaped
+// processAggregateHead unhandled — a red Auto Gate run on master for a transient
+// GitHub fault, the class #3396/#3808/#4461 each closed one instance of.
+//
+// The fixtures below are the incident's shape: the create is REJECTED (it never
+// lands, so no reconcile window of any length can find it), and the head already
+// carries the WAITING marker the pre-lane invalidate job published for this same
+// event — which is what makes the commit provably unmergeable without this
+// transaction's write.
+function serverError503() {
+  const error = new Error("Server Error");
+  error.status = 503;
+  error.response = { status: 503, headers: {}, data: { message: "Server Error" } };
+  return error;
+}
+
+function publishedAggregate({ id = 777, conclusion = "failure", title }) {
+  return {
+    ...checkRun({
+      id,
+      name: "Auto Gate decision",
+      externalId: aggregateExternalId(HEAD_SHA),
+      conclusion,
+    }),
+    output: { title },
+  };
+}
+
+const PRE_LANE_WAITING_TITLE = "WAITING: refreshing every PR/head decision at this commit";
+
+test("a 503 on the lane's invalidation create leaves the fenced head UNKNOWN instead of reddening the run (#4763)", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+  });
+  const warnings = [];
+
+  const { error } = await runApplyGateStep({
+    github,
+    core: { warning: (message) => warnings.push(String(message)) },
+  });
+
+  assert.equal(error, null, "a transient GitHub 5xx on a head that is already non-passing is not a defect");
+  assert.equal(github.checkCreateAttempts, 1, "the ambiguous POST is reconciled, never replayed");
+  assert.deepEqual(github.createdChecks, [], "the rejected create landed nothing");
+
+  // The exact terminal state #4461 uses for a could-not-evaluate transient: a
+  // FAILING conclusion titled UNKNOWN, written by idempotent update onto the
+  // generation the read proved is the newest one — not a second POST.
+  assert.equal(github.updatedChecks.length, 1);
+  const verdict = github.updatedChecks[0];
+  assert.equal(verdict.check_run_id, 777);
+  assert.equal(verdict.status, "completed");
+  assert.equal(verdict.conclusion, "failure");
+  assert.match(verdict.output.title, /^UNKNOWN: Auto Gate could not evaluate/);
+  assert.match(
+    verdict.output.summary,
+    /could not invalidate aggregate .* after ambiguous create failure \(Server Error\)/,
+  );
+  assertNoAggregateWriteSatisfiesTheRuleset(github, "a transient must never round to a satisfied required check");
+
+  // Without a generation of its own the transaction owns nothing to publish on,
+  // so it must stop: no evaluation, no per-PR decision, no merge.
+  assert.equal(github.graphqlReadsByNumber[1465] ?? 0, 0, "no PR was evaluated");
+  assert.equal(github.mergedWith, null);
+  assert.match(warnings.join("\n"), /could not confirm its invalidation[\s\S]*503/);
+});
+
+test("a 503 on the invalidation create still fails the run when a PASS is the newest generation (#4763)", async () => {
+  // The fail-closed boundary, and the control for the test above: same fault,
+  // but nothing non-passing stands on the head. The PASS is still what the
+  // ruleset reads and this transaction could not replace it, so a green run
+  // would be the only signal and it would say nothing happened (#4461).
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      publishedAggregate({
+        conclusion: "success",
+        title: "PASS: every open master PR at this commit passes Auto Gate",
+      }),
+    ],
+    checkCreateErrors: [serverError503()],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.ok(error, "a stale PASS with a green run is a silent merge-through");
+  assert.equal(error.name, "AutoGateCheckWriteError");
+  assert.equal(error.status, 503);
+  assert.match(error.message, /could not invalidate aggregate .* after ambiguous create failure \(Server Error\)/);
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.deepEqual(github.createdChecks, []);
+  assert.deepEqual(github.updatedChecks, [], "a generation this lane does not own is never rewritten off a PASS");
+  assert.equal(github.mergedWith, null);
+});
+
+test("a satisfied-but-not-success newest generation is as stale a PASS as success is (#4763)", async () => {
+  // GitHub counts neutral and skipped required checks as satisfied. The proof
+  // that the head is unmergeable has to read those the way the ruleset does.
+  // Concurrent only because each case sits out the whole settle window and the
+  // two share nothing.
+  await Promise.all(
+    ["neutral", "skipped"].map(async (conclusion) => {
+      const github = fakeGateGithub({
+        checkRuns: [...happyCheckRuns(), publishedAggregate({ conclusion, title: "legacy" })],
+        checkCreateErrors: [serverError503()],
+      });
+
+      await assert.rejects(
+        autoGate.processAggregateHead({
+          github,
+          context: fakeContext(),
+          core: fakeCore(),
+          headSha: HEAD_SHA,
+          targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+          mergeEnabled: true,
+        }),
+        /could not invalidate aggregate .* after ambiguous create failure \(Server Error\)/,
+        `${conclusion} satisfies the ruleset, so the run must stay loud`,
+      );
+      assert.deepEqual(github.updatedChecks, []);
+    }),
+  );
+});
+
+test("an invalidation create that lands after the read-retry window is adopted, not abandoned (#4763)", async () => {
+  // The other sub-case: GitHub answered 503 but the create LANDED, and check-run
+  // listing lagged past the old 1.25s / three-poll reconcile. Hidden for exactly
+  // the three listings the old window made, visible on the next.
+  const github = fakeGateGithub({ checkCreateAcceptedErrors: [serverError503()] });
+  const realPaginate = github.paginate;
+  let listings = 0;
+  github.paginate = async (fn, options) => {
+    const runs = await realPaginate(fn, options);
+    if (fn.name !== "listForRef") {
+      return runs;
+    }
+    listings += 1;
+    return listings <= 3
+      ? runs.filter((run) => !run.output?.text?.includes("auto-gate-check-create:"))
+      : runs;
+  };
+
+  const invalidated = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(listings, 4, "the fixture must have hidden the create for the whole old window");
+  assert.equal(invalidated.writeState, "created");
+  assert.equal(invalidated.checkRunId, 10000, "the transaction owns the generation its one POST created");
+  assert.equal(github.checkCreateAttempts, 1, "the ambiguous write must not be replayed");
+});
+
+test("the pre-lane step defers an unconfirmed invalidation create to the lane after its own retry (#4763)", async () => {
+  // The real error, not a hand-built look-alike: the step's partition reads
+  // flags the helper sets, so the helper has to be what sets them.
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      publishedAggregate({
+        conclusion: "success",
+        title: "PASS: every open master PR at this commit passes Auto Gate",
+      }),
+    ],
+    checkCreateErrors: [serverError503()],
+  });
+  let unconfirmed = null;
+  try {
+    await autoGate.invalidateAggregateDecision({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+    });
+  } catch (error) {
+    unconfirmed = error;
+  }
+  assert.ok(unconfirmed, "invalidateAggregateDecision itself stays loud — the pre-lane retry depends on the throw");
+  assert.equal(autoGate.isUnconfirmedCheckCreate(unconfirmed), true);
+  assert.equal(autoGate.isReadFailure(unconfirmed), true, "what gave up is the read-back of the create");
+  assert.equal(unconfirmed.status, 503);
+  assert.match(unconfirmed.message, /after ambiguous create failure \(Server Error\) after 4 attempts/);
+
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [{ head_sha: HEAD_SHA }],
+    invalidateResults: { [HEAD_SHA]: [unconfirmed, unconfirmed] },
+  });
+
+  assert.deepEqual(run.attempts, [HEAD_SHA, HEAD_SHA], "the fencing re-POST is still attempted first");
+  assert.equal(run.error, null, "a GitHub 5xx window is not a defect-red job failure");
+  assert.deepEqual(
+    JSON.parse(run.outputs.invalidated_heads).map((head) => head.head_sha),
+    [HEAD_SHA],
+    "the deferred head enters the lane, which retries the invalidation and proves the head non-passing or fails",
+  );
+});
+
+test("a 5xx that also refuses the UNKNOWN write still ends clean on a proven non-passing head (#4763)", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+    checkUpdateErrors: Array.from({ length: 10 }, () => serverError503()),
+  });
+  const warnings = [];
+
+  const { error } = await runApplyGateStep({
+    github,
+    core: { warning: (message) => warnings.push(String(message)) },
+  });
+
+  assert.equal(error, null, "the read already proved the head unmergeable; the title is a courtesy");
+  assert.ok(github.checkUpdateAttempts > 0, "the UNKNOWN write was attempted and refused");
+  assert.deepEqual(github.updatedChecks, []);
+  assert.deepEqual(github.createdChecks, []);
+  assert.match(warnings.join("\n"), /could not retitle/);
+  assert.equal(github.mergedWith, null);
+});
+
+test("a non-transient refusal of the UNKNOWN write after an unconfirmed invalidation stays loud (#4763)", async () => {
+  const forbidden = new Error("Resource not accessible by integration");
+  forbidden.status = 403;
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+    checkUpdateErrors: [forbidden],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.ok(error, "a permission regression on check writes must not pass as infrastructure noise");
+  assert.match(error.message, /Resource not accessible by integration/);
+});
+
+test("an unconfirmed invalidation on a resolver read-failure head keeps the resolver's reason (#4763)", async () => {
+  // The lane's other entry: target resolution already failed upstream, so the
+  // lane invalidates and publishes that failure without evaluating anything.
+  const github = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), publishedAggregate({ title: PRE_LANE_WAITING_TITLE })],
+    checkCreateErrors: [serverError503()],
+  });
+
+  const { error } = await runApplyGateStep({
+    github,
+    readFailure: "BLOCKED: could not resolve the event's pull requests after 3 attempts: fetch failed",
+  });
+
+  assert.equal(error, null);
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].check_run_id, 777);
+  assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(github.updatedChecks[0].output.title, /^UNKNOWN:/);
+  assert.match(github.updatedChecks[0].output.summary, /could not resolve the event's pull requests/);
+  assert.equal(github.mergedWith, null);
 });
 
 test("an older transaction cannot overwrite a newer invalidation generation", async () => {
@@ -12288,6 +12560,192 @@ test("a newer owner is recognised in the shape the API actually returns", async 
   });
   assert.notEqual(older?.reason, "newer-owner", "an older generation must not concede");
   assert.equal(older?.reason, "unproven-wait");
+});
+
+// #4802. checks.create takes no suite, so GitHub files the aggregate in the
+// earliest github-actions suite on the head. On #4799 that was the Auto Gate
+// pull_request_target suite for the push; the play-tested label's later Auto
+// Gate run superseded it, and the ruleset answered "is expected" to every merge
+// for a PASS the rollup showed green. These are that head's real suite ids.
+const PLACEMENT_RUNS_4799 = [
+  { id: 35862841477, name: "Auto Gate", workflow_id: 1, event: "pull_request_target", check_suite_id: 97106034523 },
+  { id: 35862841667, name: "CodeQL", workflow_id: 2, event: "dynamic", check_suite_id: 97106035052 },
+  { id: 35862845455, name: "PR Validation", workflow_id: 3, event: "pull_request", check_suite_id: 97106045872 },
+  { id: 35862852331, name: "Auto Gate", workflow_id: 1, event: "pull_request_review", check_suite_id: 97106066048 },
+  { id: 35862884666, name: "Auto Gate", workflow_id: 1, event: "pull_request_target", check_suite_id: 97106156964 },
+  { id: 35865356873, name: "Auto Gate", workflow_id: 1, event: "pull_request_target", check_suite_id: 97113140377 },
+];
+
+async function refuseWithPlacement({ runs, owned, listError = null, checkRun = null }) {
+  const github = fakeGateGithub({});
+  github.rest.pulls.get = async () => ({ data: { merged: false, merge_commit_sha: null } });
+  const reads = [];
+  // Newest first and paged, like GitHub: the placement is among the EARLIEST
+  // runs, so on a busy head it is on the last page, not the first.
+  const newestFirst = [...runs].sort((a, b) => Number(b.check_suite_id) - Number(a.check_suite_id));
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    reads.push(options);
+    if (listError) throw listError;
+    const perPage = options.per_page || 30;
+    const page = options.page || 1;
+    return {
+      data: {
+        total_count: runs.length,
+        workflow_runs: newestFirst.slice((page - 1) * perPage, page * perPage),
+      },
+    };
+  };
+  github.paginate = async (method, options) => {
+    if (method !== github.rest.actions.listWorkflowRunsForRepo) return [];
+    const all = [];
+    for (let page = 1; ; page += 1) {
+      const { data } = await method({ ...options, page });
+      all.push(...data.workflow_runs);
+      if (data.workflow_runs.length < options.per_page) return all;
+    }
+  };
+  github.rest.checks.get = async (options) => {
+    reads.push(options);
+    return { data: checkRun };
+  };
+  const resolved = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal('Repository rule violations found\n\nRequired status check "Auto Gate decision" is expected.'),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 4799, sha: HEAD_SHA },
+    ownedAggregateCheck: owned,
+  });
+  return { resolved, reads };
+}
+
+const OWNED_4799 = {
+  id: 107228633872,
+  started_at: "2026-09-23T14:33:22Z",
+  completed_at: "2026-09-23T14:33:22Z",
+  check_suite: { id: 97106034523 },
+};
+
+test("a refusal names a superseded aggregate placement instead of propagation (#4802)", async () => {
+  const { resolved, reads } = await refuseWithPlacement({ runs: PLACEMENT_RUNS_4799, owned: OWNED_4799 });
+  // The control flow is the #3902 wait, unchanged: leave PASS, retry once.
+  assert.equal(resolved?.reason, "unproven-wait");
+  assert.match(resolved.message, /^Refusing to merge PR #4799; GitHub is not counting the passing Auto Gate decision/);
+  assert.match(resolved.message, /check suite 97106034523 \(Auto Gate · pull_request_target\)/);
+  assert.match(resolved.message, /97106156964 \(pull_request_target\), 97113140377 \(pull_request_target\)/);
+  assert.match(resolved.message, /Push a new head/);
+  // A review-event suite is not named: #3992 merged with one newer than its aggregate.
+  assert.doesNotMatch(resolved.message, /97106066048/);
+  // Nor is a different workflow's suite, however new.
+  assert.doesNotMatch(resolved.message, /97106045872|97106035052/);
+  assert.doesNotMatch(resolved.message, /propagation|has not accepted/);
+  assert.deepEqual(
+    reads.map((read) => read.head_sha),
+    [HEAD_SHA],
+    "the runs are read for the refused head, once",
+  );
+});
+
+test("the placement is found past the first page of a busy head's runs (#4802)", async () => {
+  // Codex on #4805: a head with more than 100 runs pushes its earliest suite,
+  // the placement, off page one. 150 later comment-driven runs of another
+  // workflow put it on page two; a single read would find no placement and fall
+  // back to the propagation wording.
+  const busy = [
+    ...PLACEMENT_RUNS_4799,
+    ...Array.from({ length: 150 }, (_, index) => ({
+      id: 36000000000 + index,
+      name: "PR Validation",
+      workflow_id: 3,
+      event: "workflow_dispatch",
+      check_suite_id: 97200000000 + index,
+    })),
+  ];
+  const { resolved, reads } = await refuseWithPlacement({ runs: busy, owned: OWNED_4799 });
+  assert.deepEqual(reads.map((read) => read.page), [1, 2]);
+  assert.match(resolved.message, /check suite 97106034523 \(Auto Gate · pull_request_target\)/);
+  assert.match(resolved.message, /97106156964 \(pull_request_target\), 97113140377 \(pull_request_target\)/);
+});
+
+test("a placement with no newer head-event suite keeps the unproven wording (#4802)", async () => {
+  // #3992's shape: newer Auto Gate suites exist, but only from review events,
+  // and that head merged. So nothing here may claim the placement is the cause.
+  const runs3992 = PLACEMENT_RUNS_4799.filter((run) => ![97106156964, 97113140377].includes(run.check_suite_id));
+  // A newer suite from ANOTHER workflow is not a supersession either.
+  const otherWorkflow = [
+    ...PLACEMENT_RUNS_4799.filter((run) => run.check_suite_id !== 97106034523),
+    { id: 1, name: "Dependency review", workflow_id: 9, event: "pull_request", check_suite_id: 97106034523 },
+  ];
+  for (const runs of [runs3992, otherWorkflow, []]) {
+    const { resolved } = await refuseWithPlacement({ runs, owned: OWNED_4799 });
+    assert.equal(resolved?.reason, "unproven-wait");
+    assert.equal(
+      resolved.message,
+      "Refusing to merge PR #4799; the ruleset has not accepted the passing checks; no competing winner was proven",
+    );
+  }
+});
+
+test("a missing fact about placement never changes the refusal's wording (#4802)", async () => {
+  const fallback =
+    "Refusing to merge PR #4799; the ruleset has not accepted the passing checks; no competing winner was proven";
+  // An unreadable run listing is no evidence, and must not turn into an error.
+  const unreadable = await refuseWithPlacement({
+    runs: PLACEMENT_RUNS_4799,
+    owned: OWNED_4799,
+    listError: Object.assign(new Error("Server Error"), { status: 502 }),
+  });
+  assert.equal(unreadable.resolved?.reason, "unproven-wait");
+  assert.equal(unreadable.resolved.message, fallback);
+  // No owned check to locate: nothing is read, nothing is claimed.
+  const unowned = await refuseWithPlacement({ runs: PLACEMENT_RUNS_4799, owned: null });
+  assert.equal(unowned.resolved.message, fallback);
+  assert.equal(unowned.reads.length, 0);
+});
+
+test("an owned check without its suite is located by id before diagnosing (#4802)", async () => {
+  const { check_suite: _suite, ...withoutSuite } = OWNED_4799;
+  const { resolved, reads } = await refuseWithPlacement({
+    runs: PLACEMENT_RUNS_4799,
+    owned: withoutSuite,
+    checkRun: { id: OWNED_4799.id, check_suite: { id: 97106034523 } },
+  });
+  assert.equal(reads[0].check_run_id, OWNED_4799.id);
+  assert.match(resolved.message, /check suite 97106034523 \(Auto Gate · pull_request_target\)/);
+});
+
+test("the push-time pull_request_target actions run in a workflow of their own (#4802)", () => {
+  const head = fs.readFileSync(path.join(__dirname, "..", "workflows", "auto-gate-head.yml"), "utf8");
+  const gate = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const types = (text) => {
+    const match = text.match(/^  pull_request_target:\n    types: \[([^\]]*)\]$/m);
+    assert.ok(match, "pull_request_target must list its activity types on one line");
+    return match[1].split(",").map((type) => type.trim());
+  };
+  // One suite per head: the placement can never be superseded by its own
+  // workflow. A second trigger or activity type here reopens #4802.
+  assert.deepEqual(types(head), ["opened", "synchronize"]);
+  assert.deepEqual(
+    [...onSection(head).matchAll(/^  ([\w-]+):/gm)].map((match) => match[1]),
+    ["pull_request_target"],
+    "auto-gate-head.yml must subscribe to nothing but pull_request_target",
+  );
+  assert.match(head, /^jobs:\n  gate:\n    uses: \.\/\.github\/workflows\/auto-gate\.yml\n?$/m);
+  // The callee applies its own workflow-level group; the same group on the
+  // caller deadlocks, and a different one would change the coalescing contract.
+  assert.doesNotMatch(head, /concurrency:/);
+  assert.match(onSection(gate), /^  workflow_call:$/m);
+  // Nothing is lost in the move, and nothing runs twice.
+  const gateTypes = types(gate);
+  assert.equal(gateTypes.filter((type) => types(head).includes(type)).length, 0);
+  assert.deepEqual(
+    [...types(head), ...gateTypes].sort(),
+    [
+      "auto_merge_disabled", "auto_merge_enabled", "closed", "converted_to_draft", "edited",
+      "labeled", "opened", "ready_for_review", "reopened", "synchronize", "unlabeled",
+    ],
+  );
+  // The caller grants every permission the callee's jobs use.
+  const permissions = (text) => text.match(/^permissions:\n((?:  .+\n)+)/m)?.[1];
+  assert.equal(permissions(head), permissions(gate));
 });
 
 // #3902: a ruleset can lag the PASS write without any competing transaction.

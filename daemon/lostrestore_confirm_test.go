@@ -24,7 +24,9 @@ import (
 // probe got an ANSWER out of the runtime. Tests drive it explicitly because that,
 // not elapsed time, is what confirms a restore (#1917 round 6).
 func observeAlive(m *Manager, repoID string, inst *session.Instance) {
-	m.noteAliveObservation(repoID, inst)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.noteAliveObservationLocked(repoID, inst)
 }
 
 // confirmAlive drives the SUSTAINED liveness a restore takes (#3412). One answer

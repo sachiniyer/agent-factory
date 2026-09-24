@@ -485,14 +485,15 @@ func (m *Menu) addInstanceOptions() {
 		}
 	}
 
-	// Tab group: create, close, and number-jump (#930 PR 4). The tab CYCLE key
-	// is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are reached
-	// via the tree, the 1-9 jump keys and the unbounded g prompt. Backends without
-	// tab management block
-	// `t` (new tab) and `w` (close tab) — those handlers reject them with an
-	// error — so only advertise the tab keys that actually work: number-jump
-	// (#988).
-	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab}
+	// Tab group: create, close, rename, and number-jump (#930 PR 4). The tab
+	// CYCLE key is gone — Tab now cycles the focus ring (#1024 PR 4); tabs are
+	// reached via the tree, the 1-9 jump keys and the unbounded g prompt.
+	// Backends without tab management block `t` (new tab) and `w` (close tab) —
+	// those handlers reject them with an error — so only advertise the tab keys
+	// that actually work: number-jump (#988). R joins the gated set for
+	// consistency: a remote roster's agent tab refuses the rename, and the
+	// handler still answers a web tab there without the hint.
+	tabGroup := []keys.KeyName{keys.KeyNewTab, keys.KeyCloseTab, keys.KeyRenameTab}
 	if m.instance != nil && !m.instance.Capabilities().TabManagement {
 		tabGroup = nil
 	}
@@ -651,10 +652,18 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeySetAccount, keys.KeyEditAccount},
 	{keys.KeySetBackend, keys.KeyEditBackend},
 	{keys.KeySetPrompt, keys.KeyEditPrompt},
+	// R rename tab is the newest affordance on the instance row, so it sheds
+	// before every hint that already lived there — the same rule the
+	// account/backend/prompt hints above follow: a new chip arriving
+	// unadvertised at narrow widths costs less than evicting an affordance a
+	// user already has. The key still works when its hint is shed, and the
+	// help overlay names it at every width.
+	{keys.KeyRenameTab},
 	{keys.KeyShiftUp, keys.KeyShiftDown},
-	// The tab-move pair sheds second: it advertises a convenience the other
-	// surfaces also carry, so a narrow bar loses nothing the user cannot still
-	// reach — the roster keeps its order, and the drag/CLI paths remain.
+	// The tab-move pair sheds right after the scroll pair: it advertises a
+	// convenience the other surfaces also carry, so a narrow bar loses nothing
+	// the user cannot still reach — the roster keeps its order, and the
+	// drag/CLI paths remain.
 	{keys.KeyMoveTabLeft, keys.KeyMoveTabRight},
 	{keys.KeyAttach},
 	{keys.KeySearch},

@@ -191,33 +191,38 @@ func extractInstancesArray(raw []byte, path string) (json.RawMessage, error) {
 	return instances, nil
 }
 
-func loadRepoInstancesForAll(repoID string) (json.RawMessage, error) {
+// loadRepoInstancesForAll reads one repo's instances.json for the all-repo
+// loaders. missing reports that the file did not exist, which the returned "[]" alone
+// cannot say: every all-repo reader treats a missing file as an empty repo, but
+// the daemon must not count one as a successful re-read of a repo it skipped
+// (#4783).
+func loadRepoInstancesForAll(repoID string) (raw json.RawMessage, missing bool, err error) {
 	path, err := repoInstancesPath(repoID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return json.RawMessage("[]"), nil
+			return json.RawMessage("[]"), true, nil
 		}
-		return nil, fmt.Errorf("failed to read repo instances: %w", err)
+		return nil, false, fmt.Errorf("failed to read repo instances: %w", err)
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return json.RawMessage("[]"), nil
+		return json.RawMessage("[]"), false, nil
 	}
 	instances, err := extractInstancesArray(data, path)
 	if err == nil {
-		return instances, nil
+		return instances, false, nil
 	}
 	var newer *UnsupportedSchemaVersionError
 	if errors.As(err, &newer) {
-		return nil, err
+		return nil, false, err
 	}
 	// All-repo callers historically decoded each repo's raw bytes themselves
 	// so they could aggregate and name corrupted repos (#730). Preserve that
 	// behavior even though single-repo reads now unwrap envelopes here.
-	return json.RawMessage(data), nil
+	return json.RawMessage(data), false, nil
 }
 
 func marshalInstancesEnvelope(data json.RawMessage) ([]byte, error) {

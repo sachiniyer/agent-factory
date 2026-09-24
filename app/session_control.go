@@ -387,6 +387,21 @@ var reorderTabThroughDaemon = func(request daemon.ReorderTabRequest) (daemon.Reo
 	return response, err
 }
 
+// renameTabThroughDaemon routes the TUI's `R` (rename tab) mutation to the
+// daemon's RenameTab RPC — the same /v1/RenameTab the web calls and
+// `af sessions tab-rename` reaches over the control socket — and returns the
+// RESOLVED name (sanitized, collision-suffixed), which the TUI applies to its
+// local projection so the bar reads it before the next snapshot lands.
+var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, error) {
+	var resolved string
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resolved, e = c.RenameTab(request)
+		return e
+	})
+	return resolved, err
+}
+
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
 // repo (#960 PR 3). It is the TUI's read path under the single-writer model: the
 // sidebar mirrors this projection instead of re-reading instances.json.
@@ -604,6 +619,12 @@ func SetTabReordererForTest(f func(daemon.ReorderTabRequest) (daemon.ReorderTabR
 	prev := reorderTabThroughDaemon
 	reorderTabThroughDaemon = f
 	return func() { reorderTabThroughDaemon = prev }
+}
+
+func SetTabRenamerForTest(f func(daemon.RenameTabRequest) (string, error)) func() {
+	prev := renameTabThroughDaemon
+	renameTabThroughDaemon = f
+	return func() { renameTabThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {
