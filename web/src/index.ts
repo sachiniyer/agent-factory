@@ -1208,20 +1208,27 @@ function openAddProject(): void {
  *  registry mutation. */
 let rebindInFlight: string | null = null;
 
-/** Lands a successful rebind before the daemon's projects.changed refetch confirms
- *  it: the record (matched by its stable id) takes its new root, and a selection
- *  still on the old root follows it. Without that, the refetch drops the old root
- *  from the valid set and reconcileProject falls back to an unrelated project. A
- *  selection the user moved elsewhere mid-flight is left alone. */
-function applyReboundProject(oldRoot: string | null, project: RegisteredProject): void {
-  const registered = store.get().registeredProjects;
-  const registeredProjects = registered.some((r) => r.id === project.id)
-    ? registered.map((r) => (r.id === project.id ? project : r))
-    : [...registered, project];
-  store.set({ registeredProjects });
-  if (oldRoot !== null && store.get().selectedProject === oldRoot) {
-    switchProject(project.root);
+/** A successful rebind whose project the selection should follow once a registry
+ *  read confirms where the record now points: its stable id and the root it
+ *  pointed at when Rebind opened. */
+let rebindFollow: { id: string; oldRoot: string } | null = null;
+
+/** Consumes the pending rebind follow against a fresh registry read and returns
+ *  the root the selection should move to, or null. It follows only when the user's
+ *  project is still the old root — shown, or persisted while reconciliation fell
+ *  back because the old root vanished from an earlier read — so a project the user
+ *  chose mid-flight is left alone. Without it, the refetch drops the old root from
+ *  the valid set and reconcileProject lands on an unrelated project. */
+function takeRebindFollow(projects: RegisteredProject[]): string | null {
+  const follow = rebindFollow;
+  rebindFollow = null;
+  if (follow === null) {
+    return null;
   }
+  if (store.get().selectedProject !== follow.oldRoot && loadProjectChoice() !== follow.oldRoot) {
+    return null;
+  }
+  return projects.find((p) => p.id === follow.id)?.root ?? null;
 }
 
 /** Opens the rebind-project modal (`af projects rebind`, made reachable from the
@@ -1240,7 +1247,7 @@ function openRebindProject(projectId: string, label: string): void {
     return;
   }
   // The root the registration points at NOW: a selection still on it follows
-  // the rebind to the new root (applyReboundProject).
+  // the rebind to the new root (takeRebindFollow).
   const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
   openModal(
     rebindProjectModal({
@@ -1264,19 +1271,43 @@ function openRebindProject(projectId: string, label: string): void {
         m.setBusy(true);
         rebindInFlight = label;
         void rebindProject(projectId, path, tok)
-          .then((project) => {
+          .then(() => {
             rebindInFlight = null;
             if (modal === m) closeModal();
-            applyReboundProject(oldRoot, project);
+            // The reply is not applied to the store: a newer rebind or delete
+            // from another client may already be there. A fenced registry read
+            // decides where the record points now, and the selection follows it.
+            if (oldRoot !== null) {
+              rebindFollow = { id: projectId, oldRoot };
+            }
+            refreshRegisteredProjects();
           })
           .catch((e) => {
             rebindInFlight = null;
+            if (isMutationOutcomeUncertain(e) && oldRoot !== null) {
+              // Committed or maybe-committed: follow wherever the registry read
+              // says the record points. If the rebind never landed, that is still
+              // the old root and following it changes nothing.
+              rebindFollow = { id: projectId, oldRoot };
+            }
             if (isMutationCommittedError(e)) {
-              // The rebind may have landed even though the reply was lost — the
-              // committed-warning path mirrors deleteProject's.
+              // The daemon committed the rebind but a follow-up step failed.
               if (modal === m) closeModal();
               refreshRegisteredProjects();
-              surfaceTabError(e);
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            if (isMutationOutcomeUncertain(e)) {
+              // The rebind may have landed (a lost reply, an unverified error from
+              // an intermediary). Re-arming the form would invite a second move of
+              // the durable identity, so close it, re-read the registry, and say
+              // the outcome is unknown. Only a definitive daemon refusal re-arms.
+              if (modal === m) closeModal();
+              refreshRegisteredProjects();
+              surfaceMutationError(
+                new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
+                "uncertain",
+              );
               return;
             }
             if (modal !== m) {
@@ -2026,18 +2057,28 @@ function requestTaskResync(): void {
 const projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
-  commit: (projects) => {
-    const selectedProject = reconcileProject(
-      store.get().sessions,
-      store.get().tasks,
-      loadProjectChoice(),
-      store.get().selectedProject,
-      projectRoots(projects),
-    );
-    store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
-  },
+  commit: commitRegisteredProjects,
   onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });
+
+/** Commits a fenced registry read. A pending rebind follow is applied here, against
+ *  the authoritative registry, never against the RPC's echo: the record is found by
+ *  its stable id in THIS read, so a newer rebind or delete from another client wins,
+ *  and a deleted record is simply not followed. */
+function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  const follow = takeRebindFollow(projects);
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects),
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+  if (follow !== null) {
+    switchProject(follow);
+  }
+}
 
 function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();

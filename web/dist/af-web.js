@@ -18342,13 +18342,17 @@ function openAddProject() {
   );
 }
 var rebindInFlight = null;
-function applyReboundProject(oldRoot, project) {
-  const registered = store.get().registeredProjects;
-  const registeredProjects = registered.some((r) => r.id === project.id) ? registered.map((r) => r.id === project.id ? project : r) : [...registered, project];
-  store.set({ registeredProjects });
-  if (oldRoot !== null && store.get().selectedProject === oldRoot) {
-    switchProject(project.root);
+var rebindFollow = null;
+function takeRebindFollow(projects) {
+  const follow = rebindFollow;
+  rebindFollow = null;
+  if (follow === null) {
+    return null;
   }
+  if (store.get().selectedProject !== follow.oldRoot && loadProjectChoice() !== follow.oldRoot) {
+    return null;
+  }
+  return projects.find((p) => p.id === follow.id)?.root ?? null;
 }
 function openRebindProject(projectId, label) {
   if (rebindInFlight !== null) {
@@ -18376,16 +18380,31 @@ function openRebindProject(projectId, label) {
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
-        void rebindProject(projectId, path, tok).then((project) => {
+        void rebindProject(projectId, path, tok).then(() => {
           rebindInFlight = null;
           if (modal === m) closeModal();
-          applyReboundProject(oldRoot, project);
+          if (oldRoot !== null) {
+            rebindFollow = { id: projectId, oldRoot };
+          }
+          refreshRegisteredProjects();
         }).catch((e) => {
           rebindInFlight = null;
+          if (isMutationOutcomeUncertain(e) && oldRoot !== null) {
+            rebindFollow = { id: projectId, oldRoot };
+          }
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
             refreshRegisteredProjects();
-            surfaceTabError(e);
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          if (isMutationOutcomeUncertain(e)) {
+            if (modal === m) closeModal();
+            refreshRegisteredProjects();
+            surfaceMutationError(
+              new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
+              "uncertain"
+            );
             return;
           }
           if (modal !== m) {
@@ -18766,18 +18785,23 @@ function requestTaskResync() {
 var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
-  commit: (projects) => {
-    const selectedProject = reconcileProject(
-      store.get().sessions,
-      store.get().tasks,
-      loadProjectChoice(),
-      store.get().selectedProject,
-      projectRoots(projects)
-    );
-    store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
-  },
+  commit: commitRegisteredProjects,
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
+function commitRegisteredProjects(projects) {
+  const follow = takeRebindFollow(projects);
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects)
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+  if (follow !== null) {
+    switchProject(follow);
+  }
+}
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
