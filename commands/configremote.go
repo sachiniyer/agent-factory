@@ -155,7 +155,7 @@ func remoteConfigWriteError(client *apiclient.Client, name, route string, err er
 
 // configWriteLocation renders WHERE a config write landed, for the success line.
 //
-// prettyPath abbreviates $HOME to ~, which is right for a local write and a trap
+// config.PrettyHomePath abbreviates $HOME to ~, which is right for a local write and a trap
 // for a remote one: the daemon host's path is a path on ANOTHER machine, and
 // `~/.agent-factory/config.toml` — which is what it collapses to whenever the two
 // hosts share a home layout, the common case for one operator's own boxes —
@@ -166,5 +166,5 @@ func configWriteLocation(path string) string {
 	if url := apiclient.RemoteTargetURL(); url != "" {
 		return fmt.Sprintf("%s on %s", path, url)
 	}
-	return prettyPath(path)
+	return config.PrettyHomePath(path)
 }

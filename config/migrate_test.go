@@ -503,7 +503,7 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 		assert.Contains(t, caution, "network.require_token")
 		assert.Contains(t, caution, "network.require_loopback_token")
 		assert.Contains(t, caution, "#3354")
-		assert.Contains(t, caution, prettyHomePath(result.Backup),
+		assert.Contains(t, caution, PrettyHomePath(result.Backup),
 			"the caution must name the backup that restores the setting")
 		assert.Contains(t, caution, "127.0.0.1:8443",
 			"the listener stays up on a downgrade — that is what makes the fallback unsafe")
@@ -526,7 +526,7 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 		assert.Contains(t, caution, "network.listen_addr is empty")
 		assert.Contains(t, caution, "127.0.0.1:8443")
 		assert.Contains(t, caution, "#3354")
-		assert.Contains(t, caution, prettyHomePath(result.Backup))
+		assert.Contains(t, caution, PrettyHomePath(result.Backup))
 	})
 
 	t.Run("silent when the loopback listener never authenticated anyone", func(t *testing.T) {

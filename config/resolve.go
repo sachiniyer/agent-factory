@@ -675,7 +675,7 @@ func warnLegacyRepoConfig(repoID, repoRoot string, legacy *RepoConfig, inRepo *I
 		return
 	}
 	log.WarningLog.Printf("deprecated: %s is still read from %s; move it to %s — the legacy location stops working in a future release",
-		strings.Join(fields, ", "), prettyHomePath(legacyPath), InRepoConfigPath(repoRoot))
+		strings.Join(fields, ", "), PrettyHomePath(legacyPath), InRepoConfigPath(repoRoot))
 }
 
 // warnRetainedLegacyBareRepoConfig keeps the pre-#3358 parent-keyed legacy

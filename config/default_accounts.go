@@ -204,7 +204,7 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 				path = ""
 			}
 			globalLayer = DefaultAccountSelection{
-				Agent: agent, Name: name, Layer: SourceGlobal, Path: prettyHomePath(path),
+				Agent: agent, Name: name, Layer: SourceGlobal, Path: PrettyHomePath(path),
 			}
 		}
 	}
@@ -245,7 +245,7 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 		if origin, found := value.Origins[agent]; found {
 			project.Layer = sourceForLayerName(origin.Layer)
 			if origin.Path != "" {
-				project.Path = prettyHomePath(origin.Path)
+				project.Path = PrettyHomePath(origin.Path)
 			}
 		}
 	}

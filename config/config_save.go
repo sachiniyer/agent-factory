@@ -78,12 +78,12 @@ func loadConfigLocked(locked lockedTarget) (*Config, error) {
 		if os.IsNotExist(err) {
 			return DefaultConfig(), nil
 		}
-		return nil, fmt.Errorf("failed to read config file %s: %w", prettyHomePath(locked.link), err)
+		return nil, fmt.Errorf("failed to read config file %s: %w", PrettyHomePath(locked.link), err)
 	}
 	if isEffectivelyEmptyToml(data) {
 		return DefaultConfig(), nil
 	}
-	return parseLoadedConfigTOML(data, prettyHomePath(locked.link), locked.link)
+	return parseLoadedConfigTOML(data, PrettyHomePath(locked.link), locked.link)
 }
 
 // saveConfigLocked saves the configuration to disk as config.toml WITHOUT

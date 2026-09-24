@@ -481,23 +481,31 @@ func TestPrettyHomePath(t *testing.T) {
 	t.Run("collapses home prefix to tilde", func(t *testing.T) {
 		assert.Equal(t,
 			"~/.agent-factory/config.json",
-			prettyHomePath(filepath.Join(homeDir, ".agent-factory", "config.json")),
+			PrettyHomePath(filepath.Join(homeDir, ".agent-factory", "config.json")),
 		)
 	})
 
 	t.Run("returns ~ for exact home dir", func(t *testing.T) {
-		assert.Equal(t, "~", prettyHomePath(homeDir))
+		assert.Equal(t, "~", PrettyHomePath(homeDir))
 	})
 
 	t.Run("returns input unchanged when no home prefix", func(t *testing.T) {
-		assert.Equal(t, "/tmp/foo/bar", prettyHomePath("/tmp/foo/bar"))
+		assert.Equal(t, "/tmp/foo/bar", PrettyHomePath("/tmp/foo/bar"))
 	})
 
 	t.Run("does not collapse a path that shares a prefix substring with home", func(t *testing.T) {
 		// "/home/alice-other/foo" must not be mangled when home is "/home/alice".
 		// Build the sibling by appending a suffix to the home basename.
 		sibling := homeDir + "-other/foo"
-		assert.Equal(t, sibling, prettyHomePath(sibling))
+		assert.Equal(t, sibling, PrettyHomePath(sibling))
+	})
+
+	t.Run("collapses a home child whose name starts with dot-dot", func(t *testing.T) {
+		// A component literally named "..foo" is a child of home, not an escape:
+		// the old commands.prettyPath copy decided containment with a bare
+		// `strings.HasPrefix(rel, "..")` and left this absolute.
+		p := filepath.Join(homeDir, "..foo", "config.toml")
+		assert.Equal(t, "~/..foo/config.toml", PrettyHomePath(p))
 	})
 }
 
@@ -738,7 +746,7 @@ func TestLoadConfig(t *testing.T) {
 	})
 
 	t.Run("error references home-relative config path", func(t *testing.T) {
-		// Set AGENT_FACTORY_HOME under $HOME so prettyHomePath collapses it
+		// Set AGENT_FACTORY_HOME under $HOME so PrettyHomePath collapses it
 		// to a ~/-rooted string in the error message (see #661).
 		homeDir, err := os.UserHomeDir()
 		require.NoError(t, err)

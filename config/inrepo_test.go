@@ -178,7 +178,7 @@ func TestLoadInRepoConfigRejectsGlobalOnlyKeys(t *testing.T) {
 			// active config dir, not a hardcoded ~/.agent-factory path that
 			// AGENT_FACTORY_HOME has relocated (#890). Every global key
 			// belongs in the authoritative TOML file (#4069).
-			assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, TomlConfigFileName)))
+			assert.Contains(t, err.Error(), PrettyHomePath(filepath.Join(home, TomlConfigFileName)))
 			assert.NotContains(t, err.Error(), "~/.agent-factory/config.json")
 		})
 	}
@@ -248,7 +248,7 @@ func TestLoadInRepoConfigRejectsNonObject(t *testing.T) {
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "must be a JSON object")
-		assert.Contains(t, err.Error(), prettyHomePath(path))
+		assert.Contains(t, err.Error(), PrettyHomePath(path))
 	})
 
 	t.Run("bare string", func(t *testing.T) {
@@ -305,7 +305,7 @@ func TestSaveInRepoPostWorktreeCommandsNull(t *testing.T) {
 	err := SaveInRepoPostWorktreeCommands(repoRoot, []string{"make setup"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must be a JSON object")
-	assert.Contains(t, err.Error(), prettyHomePath(path))
+	assert.Contains(t, err.Error(), PrettyHomePath(path))
 }
 
 func TestLoadInRepoConfigTraversalSafety(t *testing.T) {

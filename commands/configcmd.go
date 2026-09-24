@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -608,7 +606,7 @@ owns.`, tmux.SupportedProgramsString()),
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
-				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
+				res.Key, echoValue(res.Value), configSetProjectFlag, config.PrettyHomePath(res.Path))
 			if res.RequiresRestart {
 				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
@@ -735,14 +733,14 @@ host to check that host.`,
 				}))
 		}
 		if loaded.EmptyStub {
-			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af runs on built-in defaults and leaves it untouched; write your settings or delete it to regenerate\n", prettyPath(loaded.Path))
+			fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s is an empty stub — af runs on built-in defaults and leaves it untouched; write your settings or delete it to regenerate\n", config.PrettyHomePath(loaded.Path))
 			return nil
 		}
 		if loaded.Missing {
 			fmt.Fprintln(cmd.OutOrStdout(), "config OK: no config file yet — af will write defaults on first start")
 			return nil
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s loads\n", prettyPath(loaded.Path))
+		fmt.Fprintf(cmd.OutOrStdout(), "config OK: %s loads\n", config.PrettyHomePath(loaded.Path))
 		return nil
 	},
 }
@@ -820,7 +818,7 @@ override file it clears is this machine's.`,
 			return nil
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
-			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
+			res.Key, configUnsetProjectFlag, config.PrettyHomePath(res.Path))
 		if res.RequiresRestart {
 			if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
@@ -852,17 +850,6 @@ func echoValue(v string) string {
 		return `""`
 	}
 	return v
-}
-
-// prettyPath abbreviates $HOME to ~ for display, matching how the config
-// package renders paths in diagnostics.
-func prettyPath(p string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if rel, err := filepath.Rel(home, p); err == nil && !strings.HasPrefix(rel, "..") {
-			return filepath.Join("~", rel)
-		}
-	}
-	return p
 }
 
 // warnDeprecatedConfigProjectAlias keeps the compatibility notice on the human

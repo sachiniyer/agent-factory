@@ -109,7 +109,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "global setting")
 		assert.NotContains(t, err.Error(), "unknown key",
 			"a global-only key must not fall through to the generic unknown-key message")
-		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, TomlConfigFileName)))
+		assert.Contains(t, err.Error(), PrettyHomePath(filepath.Join(home, TomlConfigFileName)))
 	})
 
 	t.Run("rejects grouped network settings as global-only", func(t *testing.T) {
@@ -140,7 +140,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "global setting")
 		assert.Contains(t, err.Error(), TomlConfigFileName)
-		assert.NotContains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)),
+		assert.NotContains(t, err.Error(), PrettyHomePath(filepath.Join(home, ConfigFileName)),
 			"the keys rejection must not point at the ignored config.json path")
 	})
 
@@ -154,7 +154,7 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "retired")
 		assert.Contains(t, err.Error(), "appearance")
-		assert.NotContains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)),
+		assert.NotContains(t, err.Error(), PrettyHomePath(filepath.Join(home, ConfigFileName)),
 			"the theme rejection must not point at the ignored config.json path")
 	})
 

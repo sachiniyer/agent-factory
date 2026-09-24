@@ -153,7 +153,7 @@ func locateInRepoConfigFile(repoRoot string) (string, error) {
 	switch {
 	case tomlExists && jsonExists:
 		return "", fmt.Errorf("both %s and %s exist; an in-repo config must have exactly one — delete one of them (they are never merged, and af will not guess which is live)",
-			prettyHomePath(tomlPath), prettyHomePath(jsonPath))
+			PrettyHomePath(tomlPath), PrettyHomePath(jsonPath))
 	case tomlExists:
 		return tomlPath, nil
 	case jsonExists:
@@ -169,7 +169,7 @@ func lstatExists(path string) (bool, error) {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
-		return false, fmt.Errorf("failed to stat in-repo config %s: %w", prettyHomePath(path), err)
+		return false, fmt.Errorf("failed to stat in-repo config %s: %w", PrettyHomePath(path), err)
 	}
 	return true, nil
 }
@@ -206,14 +206,14 @@ func readInRepoConfigFile(repoRoot string) ([]byte, string, error) {
 
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve in-repo config %s: %w", prettyHomePath(path), err)
+		return nil, "", fmt.Errorf("failed to resolve in-repo config %s: %w", PrettyHomePath(path), err)
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(repoRoot)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to resolve repo root %s: %w", repoRoot, err)
 	}
 	if !pathutil.IsStrictlyInside(resolved, filepath.Clean(resolvedRoot)) {
-		return nil, "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to read it", prettyHomePath(path), prettyHomePath(resolved))
+		return nil, "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to read it", PrettyHomePath(path), PrettyHomePath(resolved))
 	}
 
 	if configDir, dirErr := GetConfigDir(); dirErr == nil {
@@ -227,15 +227,15 @@ func readInRepoConfigFile(repoRoot string) ([]byte, string, error) {
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to stat in-repo config %s: %w", prettyHomePath(path), err)
+		return nil, "", fmt.Errorf("failed to stat in-repo config %s: %w", PrettyHomePath(path), err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, "", fmt.Errorf("in-repo config %s is not a regular file", prettyHomePath(path))
+		return nil, "", fmt.Errorf("in-repo config %s is not a regular file", PrettyHomePath(path))
 	}
 
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to read in-repo config %s: %w", prettyHomePath(path), err)
+		return nil, "", fmt.Errorf("failed to read in-repo config %s: %w", PrettyHomePath(path), err)
 	}
 	return data, path, nil
 }
@@ -255,7 +255,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 	isToml := filepath.Base(path) == TomlConfigFileName
 
-	prettyPath := prettyHomePath(path)
+	prettyPath := PrettyHomePath(path)
 	globalConfigLocation := GlobalConfigFileForDisplay()
 	if (isToml && isEffectivelyEmptyToml(data)) || (!isToml && len(data) == 0) {
 		// A contentless config.toml (zero bytes, whitespace, a bare BOM, or comments)
@@ -430,15 +430,15 @@ func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
 	if info, lstatErr := os.Lstat(path); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
 		resolvedPath, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return "", "", fmt.Errorf("failed to resolve in-repo config %s: %w", prettyHomePath(path), err)
+			return "", "", fmt.Errorf("failed to resolve in-repo config %s: %w", PrettyHomePath(path), err)
 		}
 		resolvedPath = filepath.Clean(resolvedPath)
 		if !pathutil.IsStrictlyInside(resolvedPath, resolvedRoot) {
-			return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
+			return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", PrettyHomePath(path), PrettyHomePath(resolvedPath))
 		}
 		return filepath.Dir(resolvedPath), filepath.Base(resolvedPath), nil
 	} else if lstatErr != nil && !os.IsNotExist(lstatErr) {
-		return "", "", fmt.Errorf("failed to stat in-repo config %s: %w", prettyHomePath(path), lstatErr)
+		return "", "", fmt.Errorf("failed to stat in-repo config %s: %w", PrettyHomePath(path), lstatErr)
 	}
 
 	dir := filepath.Dir(path)
@@ -447,12 +447,12 @@ func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve in-repo config directory %s: %w", prettyHomePath(dir), err)
+		return "", "", fmt.Errorf("failed to resolve in-repo config directory %s: %w", PrettyHomePath(dir), err)
 	}
 	resolvedDir = filepath.Clean(resolvedDir)
 	resolvedPath := filepath.Join(resolvedDir, filepath.Base(path))
 	if !pathutil.IsStrictlyInside(resolvedPath, resolvedRoot) {
-		return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
+		return "", "", fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", PrettyHomePath(path), PrettyHomePath(resolvedPath))
 	}
 	return resolvedDir, filepath.Base(path), nil
 }
@@ -472,7 +472,7 @@ func inRepoConfigWriteTarget(repoRoot, path string) (string, string, error) {
 func atomicWriteFileInDirNoFollow(dir, name string, data []byte, perm os.FileMode) error {
 	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return fmt.Errorf("failed to open in-repo config directory %s without following symlinks: %w", prettyHomePath(dir), err)
+		return fmt.Errorf("failed to open in-repo config directory %s without following symlinks: %w", PrettyHomePath(dir), err)
 	}
 	defer unix.Close(dirFD)
 
@@ -518,7 +518,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 		for _, globalName := range []string{ConfigFileName, TomlConfigFileName} {
 			globalPath := filepath.Join(configDir, globalName)
 			if resolvedPath == pathutil.ResolveForCompare(globalPath) {
-				return fmt.Errorf("in-repo config path %s collides with the global config file %s; not saving — run this from a repo whose root is not the config home", prettyHomePath(path), prettyHomePath(globalPath))
+				return fmt.Errorf("in-repo config path %s collides with the global config file %s; not saving — run this from a repo whose root is not the config home", PrettyHomePath(path), PrettyHomePath(globalPath))
 			}
 		}
 	}
@@ -527,7 +527,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	// guard alone can't cover this — it only fires when the config file
 	// already exists at the resolved location.
 	if !pathutil.IsStrictlyInside(resolvedPath, pathutil.ResolveForCompare(repoRoot)) {
-		return fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", prettyHomePath(path), prettyHomePath(resolvedPath))
+		return fmt.Errorf("in-repo config %s resolves outside the repository (to %s); refusing to save it", PrettyHomePath(path), PrettyHomePath(resolvedPath))
 	}
 	data, _, err := readInRepoConfigFile(repoRoot)
 	if err != nil {
@@ -542,7 +542,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 		rawKeys := map[string]any{}
 		if len(data) > 0 {
 			if err := toml.Unmarshal(data, &rawKeys); err != nil {
-				return tomlParseError("in-repo config "+prettyHomePath(path), err)
+				return tomlParseError("in-repo config "+PrettyHomePath(path), err)
 			}
 		}
 		rawKeys["post_worktree_commands"] = commands
@@ -554,13 +554,13 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 		rawKeys := map[string]json.RawMessage{}
 		if len(data) > 0 {
 			if err := json.Unmarshal(data, &rawKeys); err != nil {
-				return fmt.Errorf("failed to parse in-repo config %s: %w", prettyHomePath(path), err)
+				return fmt.Errorf("failed to parse in-repo config %s: %w", PrettyHomePath(path), err)
 			}
 			// A bare JSON `null` nils out the map above; without this guard the
 			// key assignment below panics on a nil-map write. Reject it with the
 			// same actionable error the read path uses (#1153).
 			if rawKeys == nil {
-				return fmt.Errorf("in-repo config %s must be a JSON object, not null", prettyHomePath(path))
+				return fmt.Errorf("in-repo config %s must be a JSON object, not null", PrettyHomePath(path))
 			}
 		}
 		encoded, err := json.Marshal(commands)

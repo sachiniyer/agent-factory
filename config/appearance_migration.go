@@ -49,7 +49,7 @@ func persistAppearanceMigration(cfg *Config) (*Config, error) {
 		return cfg, nil
 	}
 	path := cfg.source.path
-	prettyPath := prettyHomePath(path)
+	prettyPath := PrettyHomePath(path)
 	var result *Config
 	err := withFollowedFileLock(path, func(locked lockedTarget) error {
 		current, err := locked.read()

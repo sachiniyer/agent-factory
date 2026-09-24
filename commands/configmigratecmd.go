@@ -90,7 +90,7 @@ host to migrate that host.`,
 // writeMigrationReport renders a finished migration for a human: what moved,
 // the exact bytes that changed, and what is still deprecated afterwards.
 func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
-	path := prettyPath(result.Path)
+	path := config.PrettyHomePath(result.Path)
 	if result.ConvertedFromJSON {
 		// This ran before any key migration and moved the original aside, so it
 		// is reported whether or not a deprecated key was found.
@@ -100,7 +100,7 @@ func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 		fmt.Fprintf(w, "nothing to migrate in %s\n", path)
 	} else {
 		fmt.Fprintf(w, "migrated %s in %s · backup %s\n\n",
-			pluralKeys(len(result.Migrated)), path, prettyPath(result.Backup))
+			pluralKeys(len(result.Migrated)), path, config.PrettyHomePath(result.Backup))
 		for _, migrated := range result.Migrated {
 			if migrated.Redundant {
 				fmt.Fprintf(w, "  %s → dropped · %s already carried the same value\n", migrated.From, migrated.To)
@@ -117,7 +117,7 @@ func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 		// the copy when config.toml.bak already exists, so a hardcoded
 		// "config.toml.bak" here would point a reader recovering from a bad
 		// migration at an OLDER file than the one this run just saved.
-		fmt.Fprintf(w, "\nthe effective configuration is unchanged — af reads both spellings · moved keys show below as a removed and an added line, and %s holds the original\n", prettyPath(result.Backup))
+		fmt.Fprintf(w, "\nthe effective configuration is unchanged — af reads both spellings · moved keys show below as a removed and an added line, and %s holds the original\n", config.PrettyHomePath(result.Backup))
 		fmt.Fprintf(w, "\n%s\n", strings.TrimRight(result.Diff, "\n"))
 	}
 	for _, caution := range result.Cautions {

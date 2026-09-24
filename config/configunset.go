@@ -40,7 +40,7 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	prettyPath := prettyHomePath(path)
+	prettyPath := PrettyHomePath(path)
 
 	var result *UnsetResult
 	writeErr := WithFileLock(path, func() error {
@@ -152,7 +152,7 @@ func UnsetGlobalConfigValueWithDigest(key string) (*UnsetResult, ConfigDigest, e
 		return nil, ConfigDigest{}, err
 	}
 	path := filepath.Join(configDir, TomlConfigFileName)
-	prettyPath := prettyHomePath(path)
+	prettyPath := PrettyHomePath(path)
 
 	var result *UnsetResult
 	var digest ConfigDigest

@@ -469,11 +469,11 @@ func writeFileExclusive(path string, data []byte, perm os.FileMode) error {
 func describeSchemaStore(name, path string) string {
 	switch {
 	case name != "" && path != "":
-		return fmt.Sprintf("%s %s", name, prettyHomePath(path))
+		return fmt.Sprintf("%s %s", name, PrettyHomePath(path))
 	case name != "":
 		return name
 	case path != "":
-		return prettyHomePath(path)
+		return PrettyHomePath(path)
 	default:
 		return "state file"
 	}
