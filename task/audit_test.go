@@ -602,6 +602,68 @@ func TestAudit_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T) {
 	require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project after a dead-path re-patch")
 }
 
+// TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling: the daemon does
+// not normalize project_path, so a remote caller can reassert the SAME dead path
+// with an equivalent spelling (a trailing separator or a "."/".." leaf) whose raw
+// string differs from the recorded one. Before the cleaned-path compare that raw
+// inequality read as a rebind and the empty re-resolution erased the retained
+// RepoID, stranding the worktree task from its own project's scoped list. The fix
+// recognizes the equivalent spellings as same-path and keeps the binding. Pairs
+// with TestAudit_SamePathDeadPatchRetainsWorktreeBinding, the exact-spelling twin.
+func TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wte00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the worktree task is visible in its project's scoped list")
+
+	// Kill the worktree's .git: the recorded path no longer resolves, and the
+	// lateral main repo is unreachable by the ancestor walk (the stranding shape).
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	require.Empty(t, repoIDForPath(worktree), "precondition: the worktree path no longer resolves to a repo")
+	dead := config.ResolveProjectPath(worktree)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	// Built as raw strings rather than filepath.Join, which would Clean away the
+	// very difference this test exercises. Each differs from worktree as a raw
+	// string yet cleans back to it, so each is an equivalent dead-path reassertion.
+	sep := string(filepath.Separator)
+	spellings := []string{
+		worktree + sep,       // trailing separator
+		worktree + sep + ".", // trailing "." leaf
+		worktree + sep + ".." + sep + filepath.Base(worktree), // ".." then back to the leaf
+	}
+	for _, spelling := range spellings {
+		require.NotEqual(t, worktree, spelling, "precondition: the spelling differs as a raw string: %q", spelling)
+		require.Equal(t, filepath.Clean(worktree), filepath.Clean(spelling), "precondition: but is equivalent once cleaned: %q", spelling)
+		require.Empty(t, repoIDForPath(spelling), "precondition: the equivalent spelling is also a dead path: %q", spelling)
+
+		_, err := UpdateTaskChecked("wte00001", TaskUpdate{ProjectPath: &spelling}, ProjectExpectation{}, ActorCLI, nil)
+		require.NoError(t, err)
+
+		stored, err := GetTask("wte00001")
+		require.NoError(t, err)
+		assert.Equal(t, retained, stored.RepoID, "an equivalent spelling of a dead path must not erase the retained RepoID: %q", spelling)
+		for _, e := range stored.Audit {
+			assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "no daemon-upgrade entry fires for an equivalent dead-path reassertion: %q", spelling)
+		}
+
+		vis, err := LoadTasksForRepo(mainRoot)
+		require.NoError(t, err)
+		require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project across an equivalent dead-path reassertion: %q", spelling)
+	}
+}
+
 // TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass:
 // the daemon's startup re-binding pass must not disturb the retained binding
 // either. It backfills only rows whose ProjectPath still resolves (Root != "");
