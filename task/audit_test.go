@@ -839,3 +839,72 @@ func TestAudit_SymlinkDivergentRebindIsDetectedNotRetained(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind to a non-Git path is a real rebind, not a same-path reassertion: the binding clears")
 }
+
+// TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath is the dead-recorded
+// twin of TestAudit_SymlinkDivergentRebindIsDetectedNotRetained. There the two
+// spellings both resolved, so EvalSymlinks caught the divergence on the physical
+// branch; here the RECORDED path no longer exists (EvalSymlinks fails on it),
+// driving sameProjectPathReassertion into the lexical Clean fallback — the path
+// the ".." restriction now guards.
+//
+// base/link -> other/child, so base/link/../task resolves physically to
+// other/task (a non-Git directory) while it cleans lexically to base/task. The
+// recorded base/task is removed entirely, so EvalSymlinks cannot answer for it
+// and the fallback must decide. A ".." segment can cross a symlink Clean cannot
+// see, so the patch is read as a real rebind and re-resolved (to empty, the
+// non-Git target) rather than retained as a same-path reassertion — the inverse
+// of the dead-path retain cases, whose spellings resolve and so never reach
+// this branch.
+func TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other/task is the non-Git directory the patch resolves to through the
+	// link; other/child exists so the symlink target is reachable.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// base/task starts as its own git repo so the task binds to it and retains a
+	// RepoID; it is then removed entirely so the recorded path no longer exists
+	// and EvalSymlinks fails on it — the dead-recorded-path shape this test
+	// exists for.
+	recorded := filepath.Join(base, "task")
+	require.NoError(t, os.MkdirAll(recorded, 0o755))
+	require.NoError(t, exec.Command("git", "init", recorded).Run())
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00002", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID from base/task's own repo")
+	retained := created.RepoID
+
+	require.NoError(t, os.RemoveAll(recorded))
+	_, err = filepath.EvalSymlinks(recorded)
+	require.Error(t, err, "precondition: the recorded path is gone, so the physical comparison is unavailable")
+	require.Empty(t, repoIDForPath(recorded), "precondition: the removed path no longer resolves to a repo")
+
+	// Built as a raw string rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	patch := base + sep + "link" + sep + ".." + sep + "task"
+	require.Equal(t, filepath.Clean(patch), filepath.Clean(recorded), "precondition: the two spellings clean lexically equal")
+	resolvedPatch, err := filepath.EvalSymlinks(patch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(other, "task"), resolvedPatch, "precondition: but the patch resolves physically to other/task")
+	require.Empty(t, repoIDForPath(patch), "precondition: the patch resolves to a non-Git directory, so the re-resolution is empty")
+
+	_, err = UpdateTaskChecked("sym00002", TaskUpdate{ProjectPath: &patch}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00002")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind against a dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
+	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed base/task is not retained across a \"..\"-divergent rebind")
+}

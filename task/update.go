@@ -9,6 +9,7 @@ package task
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -289,16 +290,19 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 					//
 					// sameProjectPathReassertion recognizes the same path across the
 					// equivalent spellings a remote caller can reassert without the
-					// daemon normalizing project_path (a trailing separator or a
-					// "."/".." leaf). It compares filesystem-resolved paths when both
-					// sides still resolve, so a symlink-divergent spelling that cleans
+					// daemon normalizing project_path (a trailing separator or a "."
+					// leaf). It compares filesystem-resolved paths when both sides
+					// still resolve, so a symlink-divergent spelling that cleans
 					// lexically equal — e.g. base/link/../task, where base/link points
 					// elsewhere, cleans to base/task but resolves to a different
 					// directory — is read as a real rebind rather than a same-path
 					// reassertion. It falls back to lexical Clean only for a path the
 					// filesystem can no longer resolve (the dead-path case this
 					// protection exists for), where EvalSymlinks fails and a genuine
-					// rebind cannot be proven either.
+					// rebind cannot be proven either — and only for spellings without
+					// a ".." segment, since ".." can cross a symlink Clean cannot see
+					// against a dead recorded path, so it is treated as a rebind (the
+					// conservative outcome) rather than risk retaining a stale RepoID.
 					if rebindRepoID != "" || !sameProjectPathReassertion(existing.ProjectPath, *update.ProjectPath) {
 						merged.RepoID = rebindRepoID
 					}
@@ -390,7 +394,11 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 // answer, and fall back to lexical Clean only for a form the filesystem cannot
 // resolve (a path that has since been removed, the dead-path case this
 // comparison protects), where EvalSymlinks fails and a genuine rebind cannot be
-// proven either.
+// proven either. The fallback is restricted to spellings without a ".."
+// segment: ".." can cross a symlink to a directory Clean cannot reach, so
+// against a dead recorded path the cleaned compare would read a real rebind as
+// same-path and retain a stale RepoID; a spelling with ".." is treated as a
+// rebind instead (the conservative outcome).
 func sameProjectPathReassertion(recorded, patched string) bool {
 	if recorded == patched {
 		return true
@@ -400,5 +408,36 @@ func sameProjectPathReassertion(recorded, patched string) bool {
 	if errPatched == nil && errRecorded == nil {
 		return resolvedPatched == resolvedRecorded
 	}
+	// Lexical Clean is only a safe fallback for spellings that cannot cross a
+	// symlink. A ".." segment resolves physically somewhere Clean cannot see —
+	// base/link/../task cleans to base/task but, with base/link pointing at
+	// other/child, resolves to other/task — so against a recorded path the
+	// filesystem can no longer answer (EvalSymlinks failed, the dead-recorded
+	// case) the cleaned compare would read a real rebind as a same-path
+	// reassertion and retain a now-stale RepoID. Fall back only for spellings
+	// without a ".." segment (a trailing "/" or "." leaf is safe to clean);
+	// otherwise treat the patch as a rebind and let the caller re-resolve, the
+	// conservative outcome.
+	if patchHasDotDotSegment(patched) {
+		return false
+	}
 	return filepath.Clean(patched) == filepath.Clean(recorded)
+}
+
+// patchHasDotDotSegment reports whether patched contains a ".." path segment
+// after trimming a trailing separator. Such a segment can resolve through a
+// symlink to a directory filepath.Clean does not reach, so the lexical compare
+// is unsafe as a same-path test; a trailing "/" or "." leaf never crosses a
+// symlink and is left to the Clean compare.
+func patchHasDotDotSegment(patched string) bool {
+	trimmed := strings.TrimRight(patched, string(filepath.Separator))
+	if trimmed == "" {
+		return false
+	}
+	for _, seg := range strings.Split(trimmed, string(filepath.Separator)) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
