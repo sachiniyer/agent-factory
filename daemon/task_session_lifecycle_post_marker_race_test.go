@@ -995,3 +995,74 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryPreservesLaterTab
 	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands")
 	manager.mu.Unlock()
 }
+
+// TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryFlushedBeforeShutdownCheckpoint
+// pins finding 10's fix: after a stand-down clear fails, the discharge retry sits in
+// dischargeOwed while CompleteAdoptionDischarge restores the marker on the live
+// instance. drainDaemon stops the poll before the terminal checkpoint, so the final
+// SaveInstancesForShutdown would otherwise serialize that restored marker without
+// consulting the retry map — and a restart would re-arm a teardown the worker
+// already stood down (a hook-timeout decision reloaded with the marker would
+// proceed to archive or kill). The fix flushes the pending discharge retries before
+// serializing, so the checkpoint reflects the stand-down decision. Fails on the
+// unmodified tree (the checkpoint serializes the restored marker) and passes once
+// the shutdown flush lands the clear.
+func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryFlushedBeforeShutdownCheckpoint(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	endRunOnIdleEdge(t, inst)
+
+	// File the durable marker and install the discharge notify.
+	manager.fileOwedTaskLifecycle(repo.ID, inst)
+	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
+
+	// Fail the stand-down discharge persist (the cleared row) only: it carries a
+	// TaskID with PendingOnComplete == nil, unlike the filing write (marker set)
+	// or the seed write (no TaskID).
+	prev := testHookPersistInstanceData
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "nightly" && data.TaskID != "" && data.PendingOnComplete == nil {
+			return errors.New("injected discharge persist failure (disk error)")
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+
+	manager.dischargeOwedTaskLifecycle(repo.ID, inst.ID, inst.Title)
+	require.NotNil(t, inst.OwedOnComplete(),
+		"the in-memory marker is restored after the failed stand-down clear")
+	manager.mu.Lock()
+	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
+	manager.mu.Unlock()
+
+	// Storage recovers before the daemon shuts down, so the shutdown flush can
+	// land the clear the poll never got to run.
+	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
+
+	// THE FIX: the terminal checkpoint flushes the pending discharge retries
+	// before serializing, so it does not checkpoint the restored marker a
+	// restart would re-arm against the stand-down's own decision.
+	require.NoError(t, manager.SaveInstancesForShutdown())
+
+	raw, err := config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	var rows []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.Nil(t, rows[0].PendingOnComplete,
+		"the shutdown checkpoint flushed the pending discharge before serializing — the cleared row is durable, not the restored marker a restart would re-arm")
+	require.Nil(t, inst.OwedOnComplete(),
+		"the in-memory marker is cleared once the shutdown flush lands the discharge")
+	manager.mu.Lock()
+	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands at shutdown")
+	manager.mu.Unlock()
+}
