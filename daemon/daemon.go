@@ -189,6 +189,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 
 	scheduler := newTaskScheduler()
 	watchers := newWatcherSupervisorWithEventsPerMinute(cfg.WatcherEventsPerMinute)
+	watchers.observeTargetLimit = manager.observeTaskTargetLimit
 
 	shutdownCh := make(chan struct{})
 	closeControl, alreadyRunning, err := bindControlServerExclusive(manager, scheduler, watchers, shutdownCh)
@@ -441,19 +442,50 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
+//
+// The fifth return, reread, names every repo whose instances.json this call
+// read AND parsed. It is the only evidence that clears a repo from the skip set
+// (retainStillSkipped): a repo the loader could not read, or that is absent from
+// disk altogether, is not in it, so an omission is never mistaken for a repair
+// (#4783).
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, err
+		return existing, nil, nil, nil, err
 	}
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, unreadable, missing, err := loadAllRepoInstancesForRefresh()
 	if err != nil {
-		return existing, nil, err
+		return existing, nil, nil, nil, err
 	}
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
+	// skipped collects repos whose instances.json failed to read or parse, so the
+	// Snapshot RPC can carry the drop to clients instead of silently serving a
+	// partial list (#603 closed over the wire). Collected on every refresh, but
+	// only the startup call (existing==nil) genuinely drops rows — the polling
+	// path re-hydrates a corrupted repo's prior in-memory rows, so its sessions
+	// stay in the snapshot and the caller (restoreInstances vs refreshLocked)
+	// decides whether the set is authoritative for the snapshot: seed at
+	// startup, then trim repaired repos on poll without ever adding a
+	// mid-life-corrupted one (see retainStillSkipped).
+	var skipped []SkippedRepo
+	// An unreadable repo is skipped exactly like a corrupt one, with its own
+	// reason so the refusal can say "could not be read" rather than "corrupted"
+	// (#4783). Its rows, like a corrupt repo's, are re-hydrated from existing on
+	// the poll by the absent-repo pass below, since the loader left it out of
+	// allInstances.
+	unreadableRepos := make(map[string]bool, len(unreadable))
+	for _, skip := range unreadable {
+		log.WarningLog.Printf("daemon skipping repo %s: unreadable instances.json: %s", skip.RepoID, skip)
+		skipped = append(skipped, SkippedRepo{RepoID: skip.RepoID, Reason: skippedRepoReasonForReadError(skip.Err)})
+		unreadableRepos[skip.RepoID] = true
+	}
+	reread := make(map[string]bool, len(allInstances))
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+			// A missing file loads as "[]" too, but nothing was read, so it
+			// clears nothing (#4783).
+			reread[repoID] = !missing[repoID]
 			continue
 		}
 
@@ -476,6 +508,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			// the ghost count cannot close, and it is bounded by the same corruption
 			// that already costs the repo its whole session list.
 			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", repoID, err)
+			skipped = append(skipped, SkippedRepo{RepoID: repoID, Reason: SkippedRepoReasonCorruptedInstancesJSON})
 			if existing != nil {
 				keyPrefix := repoID + "\x00"
 				for key, inst := range existing {
@@ -486,6 +519,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			}
 			continue
 		}
+		reread[repoID] = true
 
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
@@ -520,6 +554,14 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			instance, err := fromInstanceDataForRefresh(item)
 			if err != nil {
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				// A marked row that cannot materialize still owes its teardown
+				// (#4162) — the obligation is durable but nothing in memory can
+				// drain it. Name the session so the leak is a visible diagnosis,
+				// not the silent disappearance the marker exists to fix.
+				if item.PendingOnComplete != nil {
+					log.WarningLog.Printf("daemon: session %q is owed an on_complete teardown for task %s (filed %s) but its record failed to load; it stays on disk for repair or manual cleanup: %v",
+						item.Title, item.PendingOnComplete.TaskID, item.PendingOnComplete.FiledAt.Format(time.RFC3339), err)
+				}
 				// The row is invisible to everything that walks m.instances from here on
 				// — but its agent may still be running, and its task run is still in
 				// flight if the persisted marker says so. Keep it counted against the
@@ -566,7 +608,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if _, ok := allInstances[repoID]; ok {
 				continue
 			}
-			if !warnedRepos[repoID] {
+			if !warnedRepos[repoID] && !unreadableRepos[repoID] {
 				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
 				warnedRepos[repoID] = true
 			}
@@ -574,7 +616,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
-	return next, ghostTaskRuns, nil
+	return next, ghostTaskRuns, skipped, reread, nil
 }
 
 func daemonInstanceKey(repoID, title string) string {

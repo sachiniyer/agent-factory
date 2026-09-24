@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/sachiniyer/agent-factory/internal/redactx"
 )
 
 func TestScrubLogRecognizesMultilineRawPostWorktreeCommand(t *testing.T) {
@@ -258,7 +260,7 @@ func TestProvenShellGrammarAppliesLiteralWordTransformations(t *testing.T) {
 			if quotedStart < 0 {
 				t.Fatalf("scrubbed log lost its quoted command: %s", logOut)
 			}
-			quotedEnd := goQuotedEnd(logOut, quotedStart)
+			quotedEnd := redactx.GoQuotedEnd(logOut, quotedStart)
 			if quotedEnd < 0 {
 				t.Fatalf("scrubbed log lost its quoted command: %s", logOut)
 			}

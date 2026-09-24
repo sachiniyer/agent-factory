@@ -107,6 +107,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
+		// A save since the last poll dropped a draft whose task was deleted;
+		// say so once (#4798).
+		if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
+			cmds = append(cmds, m.showTransientMessage(notice))
+		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
 			// selectionChanged must NOT steal focus onto the selected instance's

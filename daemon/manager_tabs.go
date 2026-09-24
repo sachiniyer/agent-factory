@@ -350,6 +350,26 @@ func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (st
 	return name, nil
 }
 
+// credentialBearingHandoffSiblings names the sibling tabs a descoping handoff
+// would leave running under the dropped account's environment: every
+// tmux-backed tab spawned with the scoped environment, and the VS Code editor,
+// which the same account injection launches. The agent tab is excluded — the
+// swap restarts it under the new environment — and web tabs carry no process
+// environment at all. Used by the handoff admission that refuses to split one
+// session's identity across two account environments (#4430 review round 2).
+func credentialBearingHandoffSiblings(instance *session.Instance) []string {
+	var names []string
+	for idx, tab := range instance.GetTabs() {
+		if idx == 0 {
+			continue
+		}
+		if tab.Kind.HasTmux() || tab.Kind == session.TabKindVSCode {
+			names = append(names, tab.Name)
+		}
+	}
+	return names
+}
+
 // instanceHasVSCodeTab reports whether any of instance's tabs is still a VS Code
 // tab, i.e. whether its editor is still needed.
 func instanceHasVSCodeTab(instance *session.Instance) bool {

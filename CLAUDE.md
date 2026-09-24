@@ -61,9 +61,13 @@ Working style:
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
   `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`,
-  `scripts/lint-file-length.sh` — plus `go test` on **only the non-daemon,
-  non-app package you changed**. Then push and let CI run the rest, and fix what
-  CI reports on your PR head.
+  `scripts/lint-file-length.sh` — and, when the diff touches a generated-docs
+  input (a Cobra command in `commands/` or `api/`, `daemon/httproutes.go`,
+  the plugin usage text in `session/`, `design/`, the `web/src` shells, or
+  recovery goldens in `app/testdata/recovery/`), `scripts/gen-docs.sh` with a
+  clean `git status --porcelain` on the generated paths — plus `go test` on
+  **only the non-daemon, non-app package you changed**. Then push and let CI
+  run the rest, and fix what CI reports on your PR head.
 - **`deadcode` is not a local check, and no longer blocks.** It is whole-program
   reachability analysis, not a lint: it builds and walks the entire call graph,
   and ~15 sessions running it at once was the largest CPU consumer on this box —
@@ -91,6 +95,8 @@ Working style:
   production sessions rather than merely burning CPU. `app/` is the same deal —
   its tests drive real tmux. Never bare `go test ./...`; use
   `go test $(go list ./... | grep -vE '/(daemon|app)')` if you need breadth.
+  To prove such a test fails without its fix, dispatch a probe run
+  (`-f probe=true`, docs/dev/probe-runs.md), not a full PR Validation run.
 - Captain Claude is fully autonomous: ship without waiting for greenlight,
   merge own PRs once the `gate-pr` gates pass, close issues that aren't worth
   doing. Green CI is the floor, not the bar — the Codex review lands after it.
@@ -140,6 +146,27 @@ golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
 scripts/lint-file-length.sh   # or: make lint-file-length
 
+# Generated-artifact drift — the same gate CI's Docs job runs
+# (docs/reference, plugins/**, the two marketplaces, design tokens, recovery
+# stills). ~3s warm; up to ~35s cold — the cost is two `go run` builds, no
+# daemon, no tmux, no containers. Needed when the diff touches a generator
+# input: a Cobra command in commands/ or api/ (cli.md), daemon/httproutes.go
+# (api.md), the af usage/skill text in session/systemprompt.go or
+# session/agentskill.go (plugins/**, .agents/.claude-plugin marketplaces),
+# design/tokens.json or design/style-guide.tmpl (web/src, ui/theme,
+# docs/stylesheets, docs/design), the recovery goldens
+# app/testdata/recovery/*.{svg,ansi} (docs/assets/recovery/tui-model-driver),
+# or a generator (commands/docs_gen.go, commands/plugins_gen.go,
+# internal/designtokens/, scripts/gen-docs.sh). The porcelain check is the
+# gate — porcelain, not diff, because a new untracked artifact must count
+# (same reason docs.yml uses it).
+scripts/gen-docs.sh
+git status --porcelain -- docs/reference plugins .agents .claude-plugin \
+    web/src/tokens.css web/src/index.html web/src/manifest.webmanifest \
+    ui/theme docs/stylesheets/tokens.css docs/design/style-guide.md \
+    docs/design/interface-design.md \
+    docs/assets/recovery/tui-model-driver   # must be empty
+
 # copylocks and the rest of vet's passes (#3613). golangci-lint runs with
 # --fast, which disables govet outright (fast: false), so vet findings are
 # invisible to the line above no matter what a config file says. This IS a
@@ -166,7 +193,8 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 
 ## Project Structure
 
-- `main.go` — entry point, CLI commands via Cobra
+- `main.go` — entry point (version fallback, internal exec hooks); the Cobra tree is built in `commands/`
+- `commands/` — Cobra CLI commands (the `sessions`/`tasks`/`projects`/`api` trees live in `api/`)
 - `app/` — main TUI application (bubbletea)
 - `ui/` — terminal UI components (sidebar, overlays, panes)
 - `keys/` — key binding definitions
@@ -174,13 +202,13 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `session/git/` — git worktree operations, GitHub integration
 - `session/tmux/` — tmux PTY integration
 - `config/` — configuration and state management
-- `api/` — REST/JSON API for sessions and tasks
+- `api/` — `af sessions`/`tasks`/`projects`/`api` command implementations (mixed transports: `apiclient` HTTP, the `daemon/` control client, and direct `config` access depending on the operation)
 - `apiproto/` — API envelope types and marker interfaces (leaf package, no daemon/client imports)
 - `apiclient/` — HTTP API client used by TUI/CLI to talk to daemon
 - `agentproto/` — WebSocket wire protocol for PTY stream and events
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit
-- `cmd/` — CLI command utilities
+- `cmd/` — `exec.Cmd` `Executor` seam (test injection; nothing to do with CLI commands)
 - `log/` — logging
 - `docs/` — documentation (remote hooks, etc.)
 - `examples/` — example configurations

@@ -109,6 +109,24 @@ func TestIsLimitContent(t *testing.T) {
 			wantResetUTC: time.Date(2026, 7, 25, 17, 55, 0, 0, loc).UTC(), // 21:55 UTC
 		},
 		{
+			name:  "codex current banner: typographic apostrophe and wrapped purchase clause",
+			agent: tmux.ProgramCodex,
+			content: "■ You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to\n" +
+				"purchase more credits or try again at Sep 20th, 2026 9:16 AM.",
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 9, 20, 9, 16, 0, 0, loc).UTC(),
+		},
+		{
+			name:  "codex weekly: purchase URL before wrapped reset clause",
+			agent: tmux.ProgramCodex,
+			content: "■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to\n" +
+				"  purchase more credits or try again at Sep 17th, 2026 1:34 PM.",
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 9, 17, 13, 34, 0, 0, loc).UTC(),
+		},
+		{
 			name:         "codex relative countdown: try again in N days/hours/minutes",
 			agent:        tmux.ProgramCodex,
 			content:      "You've hit your usage limit, try again in 4 days 2 hours 46 minutes.",
@@ -202,6 +220,18 @@ func TestIsLimitContent(t *testing.T) {
 			name:    "codex working pane, no banner -> no hit",
 			agent:   tmux.ProgramCodex,
 			content: "› thinking...\nRunning tests",
+			wantHit: false,
+		},
+		{
+			name:    "codex healthy prose: conditional usage-limit explanation is not exhaustion",
+			agent:   tmux.ProgramCodex,
+			content: "If you hit your usage limit, af parks the session",
+			wantHit: false,
+		},
+		{
+			name:    "codex healthy prose: usage-limit badge documentation is not exhaustion",
+			agent:   tmux.ProgramCodex,
+			content: "Sessions that hit your usage limit are shown with a [limit] badge.",
 			wantHit: false,
 		},
 		{

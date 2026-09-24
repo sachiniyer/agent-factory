@@ -621,6 +621,36 @@ async function typeableShellTab(p: Page): Promise<Locator> {
   return host;
 }
 
+/**
+ * The terminal row a command's OUTPUT begins on: a row whose text STARTS with
+ * `text`, the newest such row.
+ *
+ * Not "a row containing it", and not `toContainText` on the host, because the shell
+ * echoes the command line before it runs it — and the command line carries the same
+ * text, after the prompt. A wait on the text alone passes on that echo, the output
+ * has not arrived, and the row it picks is the command line, so a gesture aimed at
+ * its left edge lands on the prompt (#4585: the long press copied `#`). Output
+ * printed at column 0 is the one row whose text begins with it; the echo begins with
+ * the prompt. Waiting for THIS row to be visible is waiting for the output itself.
+ *
+ * Pair it with {@link LATE_OUTPUT}, which makes the race this guards against happen
+ * on every run instead of on an unlucky one.
+ */
+function outputRowStartingWith(host: Locator, text: string): Locator {
+  const anchored = new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`);
+  return host.locator(".xterm-rows > div", { hasText: anchored }).last();
+}
+
+/**
+ * Appended to a command whose output a test then locates and presses on: the output
+ * arrives a second AFTER the shell has echoed the command line, instead of usually
+ * in the same frame. This is not a wait — the test never sleeps on it — it is the
+ * late-output condition #4585 flaked on, staged deliberately, so a wait that is
+ * satisfied by the echo fails every run rather than one run in a hundred. The output
+ * itself is byte-for-byte what printf wrote.
+ */
+const LATE_OUTPUT = " | { sleep 1; cat; }";
+
 interface ElementBox {
   x: number;
   y: number;
@@ -2310,12 +2340,11 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     await createTerminalTab(p);
 
     const host = await typeableShellTab(p);
-    await p.keyboard.type("printf 'af-2787-copy-me\\n'");
+    await p.keyboard.type(`printf 'af-2787-copy-me\\n'${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("af-2787-copy-me", { timeout: 15_000 });
 
-    const outputRow = host.locator(".xterm-rows > div", { hasText: "af-2787-copy-me" }).last();
-    await expect(outputRow).toBeVisible();
+    const outputRow = outputRowStartingWith(host, "af-2787-copy-me");
+    await expect(outputRow).toBeVisible({ timeout: 15_000 });
     const rowBox = await outputRow.boundingBox();
     expect(rowBox, "the visible output row must have selectable geometry").toBeTruthy();
     const { x, y, width, height } = rowBox as { x: number; y: number; width: number; height: number };
@@ -2738,14 +2767,13 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // word-vs-line assertions below actually discriminate.
     const TOKEN = "/srv/af-2849.log";
     const TRAILER = "ready";
-    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}`);
+    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText(`${TOKEN} ${TRAILER}`, { timeout: 20_000 });
 
-    // The LAST row showing it is the printf output; the row above is the echoed
-    // command line, which would copy the same token from the wrong place.
-    const tokenRow = host.locator(".xterm-rows > div", { hasText: TOKEN }).last();
-    await expect(tokenRow).toBeVisible();
+    // The printf output's row, NOT the echoed command line above it, which holds the
+    // same text after the prompt and exists before the command has even run.
+    const tokenRow = outputRowStartingWith(host, `${TOKEN} ${TRAILER}`);
+    await expect(tokenRow).toBeVisible({ timeout: 20_000 });
     const rowBox = await tokenRow.boundingBox();
     expect(rowBox, "the token's row must have geometry to press on").toBeTruthy();
     const { x, y, width, height } = rowBox as ElementBox;
@@ -2809,11 +2837,20 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // buffer row, and a scan that stopped at the row edge would copy a fragment and
     // look like it had worked.
     const LONG = `/srv/af-2849/${"wrapped-".repeat(6)}end`;
-    await p.keyboard.type(`printf '%s\\n' ${LONG}`);
+    await p.keyboard.type(`printf '%s\\n' ${LONG}${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("wrapped-end", { timeout: 20_000 });
-    const wrappedRow = host.locator(".xterm-rows > div", { hasText: "/srv/af-2849/wrapped-" }).last();
-    await expect(wrappedRow).toBeVisible();
+    const wrappedRow = outputRowStartingWith(host, "/srv/af-2849/wrapped-");
+    await expect(wrappedRow).toBeVisible({ timeout: 20_000 });
+    // …and ALL of it, both rows. The first row can paint before the PTY delivers the
+    // rest, and a press then reads a token that really does end at the screen edge —
+    // correctly, since nothing more exists yet. The echo already holds LONG once, so the
+    // output is the second occurrence.
+    await expect
+      .poll(async () => ((await host.textContent()) ?? "").split(LONG).length - 1, {
+        message: "the wrapped token's output must have arrived whole before it is pressed",
+        timeout: 20_000,
+      })
+      .toBeGreaterThanOrEqual(2);
     const wrappedBox = (await wrappedRow.boundingBox()) as ElementBox;
     await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
     await touchLongPress(cdp, wrappedBox.x + 2, wrappedBox.y + wrappedBox.height / 2);
@@ -3382,6 +3419,195 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
     await expect(field).toHaveValue("abcZdef");
   } finally {
     releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXTURE, async ({ browser }) => {
+  // The sibling of #4244. #4244 pins the UNRELATED-rebuild case: a different key's
+  // save landing while a field is mid-edit. This pins the SAME-key case: the user
+  // commits the field they are editing with Enter. Enter does not blur (config.ts
+  // preventDefault()s it), so the input genuinely holds focus through the whole
+  // save round-trip, and rerenderKeepingUserState's `wasEditing` is true coming in.
+  // But update()'s close-on-save clears `this.editing` BEFORE the rerender, so the
+  // `if (this.editing === e.key)` gate in renderControl no longer re-points
+  // `editingInput` at the rebuilt input — `editingInput` stays null, the
+  // `if (wasEditing && this.editingInput)` restoration branch no-ops, and focus
+  // falls to <body>. The user's next keystrokes then become document shortcuts
+  // (`[`/`]` cycle the view) or, for any other printable key, are silently
+  // swallowed (decideKey returns {kind:"none"} without preventDefault for a
+  // body-focused key in config view). The fix re-points editingInput for the
+  // just-saved row so the existing restoration branch keeps focus on the rebuilt
+  // input — without re-opening the edit.
+  //
+  // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
+  // applies live and would otherwise rebind this very daemon's listener. Only the
+  // canned reply drives configStatus + ConfigPane.update/render.
+  const ctx = await browser.newContext();
+  let releaseSave: (() => void) | undefined;
+  try {
+    const p = await ctx.newPage();
+    let markSaveStarted!: () => void;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+
+    // network.listen_addr — a text row. Mark it dirty with a nonce the daemon does
+    // not hold, set the caret at offset 3, then commit with Enter so the save is
+    // for the SAME key the field is editing.
+    const field = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    await field.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "abcdef";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "abcdef", inputType: "insertText" }));
+      input.setSelectionRange(3, 3);
+    });
+    await field.press("Enter");
+    await saveStarted;
+    releaseSave!();
+
+    // The echo proves configStatus drove ConfigPane.update (the close-on-save
+    // clear + the rebuild ran), which is the exact path that dropped focus before.
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    // RED without the fix: focus fell to <body> when the rebuilt input replaced the
+    // focused one and the restoration gate no-oped on `this.editingInput === null`.
+    await expect(field).toBeFocused();
+    // The caret survived the rebuild — direct evidence the restoration branch
+    // (the only site that re-applies setSelectionRange) drove the rebuilt input.
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.selectionStart)).toBe(3);
+
+    // Typing reaches the rebuilt input at the restored caret instead of falling
+    // onto <body> (where it would be discarded or interpreted as a view shortcut).
+    // The rebuilt input's value is the daemon's freshly re-read value, not the
+    // nonce: the intercepted save did not mutate the daemon, so refreshConfig
+    // repopulates the field from e.value and Z is inserted at the restored caret.
+    await p.keyboard.type("Z");
+    await expect.poll(() => field.evaluate((input: HTMLInputElement) => input.value)).toContain("Z");
+  } finally {
+    releaseSave?.();
+    await ctx.close().catch(() => {});
+  }
+});
+
+test("config: a later save's status does not pull focus out of the field the user is in", REAL_FIXTURE, async ({ browser }) => {
+  // The third case in this family, and the only one that moves focus to the WRONG
+  // ROW rather than to <body>. Saves are serialized PER KEY (createKeyedQueue), and
+  // config.test.ts pins that two keys have no ordering relationship — so key A's
+  // response can land after key B's. By then the user is in B: B's own save closed
+  // its field and handed focus back to the rebuilt input. A's status then drives
+  // another ConfigPane.update/render, and a restoration that picked its row from
+  // `status.key` would re-point `editingInput` at A and move focus — plus the caret
+  // captured from B — into a field the user never opened, so the next keystroke
+  // edits the wrong setting silently. Restoration reads the key that actually HELD
+  // focus instead, so A's late status rebuilds the list without moving the user.
+  //
+  // Every SetConfigValue is intercepted, so the daemon is NOT mutated:
+  // network.listen_addr applies live and would otherwise rebind this very daemon's
+  // listener. Only the canned replies drive configStatus + ConfigPane.update.
+  const ctx = await browser.newContext();
+  const startResolvers = new Map<string, () => void>();
+  const releaseResolvers = new Map<string, () => void>();
+  const started = (key: string) => new Promise<void>((resolve) => startResolvers.set(key, resolve));
+  const held = (key: string) => new Promise<void>((resolve) => releaseResolvers.set(key, resolve));
+  const addrStarted = started("network.listen_addr");
+  const prefixStarted = started("branch_prefix");
+  const holds: Record<string, Promise<void>> = {
+    "network.listen_addr": held("network.listen_addr"),
+    branch_prefix: held("branch_prefix"),
+  };
+  const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
+  try {
+    const p = await ctx.newPage();
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      startResolvers.get(body.key)?.();
+      await holds[body.key];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
+      });
+    });
+
+    await openTokenless(p);
+    await p.locator('.af-viewtab[data-view="config"]').click();
+    const pane = p.locator(".af-config");
+    await expect(pane).toBeVisible();
+    await expect(pane.locator(".af-account-disclosure")).toHaveCount(1);
+    // branch_prefix is the only other text row without an enum, and it is advanced:
+    // network.listen_addr is the single core-tier free-text key.
+    await pane.locator(".af-config-toggle").click();
+    const addr = pane.locator('.af-config-row[data-key="network.listen_addr"] input');
+    const prefix = pane.locator('.af-config-row[data-key="branch_prefix"] input');
+    await expect(prefix).toBeVisible();
+
+    // A is committed first and its response is held, so it is still in flight when
+    // B is committed — the overlap the per-key queue permits by design.
+    await addr.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "127.0.0.1:9443";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "3", inputType: "insertText" }));
+    });
+    await addr.press("Enter");
+    await addrStarted;
+
+    await prefix.evaluate((input: HTMLInputElement) => {
+      input.focus();
+      input.value = "af-web-selftest/";
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "/", inputType: "insertText" }));
+    });
+    await prefix.press("Enter");
+    await prefixStarted;
+
+    // B answers first: its save closes its own field and focus comes back to the
+    // rebuilt input — the same-key behavior the sibling test above pins.
+    releaseResolvers.get("branch_prefix")!();
+    await expect(pane.locator('.af-config-row[data-key="branch_prefix"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+
+    // A answers second. RED without the fix: `status.key` now names
+    // network.listen_addr, so the restoration re-pointed editingInput at THAT row
+    // and focus left branch_prefix for a field the user never opened.
+    releaseResolvers.get("network.listen_addr")!();
+    await expect(pane.locator('.af-config-row[data-key="network.listen_addr"] .af-config-echo')).toBeVisible();
+    await expect(prefix).toBeFocused();
+    await expect(addr).not.toBeFocused();
+
+    // The user-visible contract behind the focus assertion: the next keystroke
+    // edits the field they are in, and leaves the other one alone.
+    const addrBefore = await addr.inputValue();
+    await p.keyboard.type("x");
+    await expect.poll(() => prefix.inputValue()).toMatch(/x$/);
+    await expect(addr).toHaveValue(addrBefore);
+  } finally {
+    releaseAll();
     await ctx.close().catch(() => {});
   }
 });
@@ -9961,34 +10187,47 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
   const ctx = await browser.newContext();
   const win = await ctx.newPage();
   try {
-    // A handle on the SPA's event socket, so the test can drop it. Recording only — the
-    // constructor is not otherwise altered, so the app connects exactly as it always
-    // does. Needed because closing the LIVE socket is the one thing network emulation
-    // will not do for us: going offline blocks new traffic but leaves an established
-    // WebSocket open, so the client never notices, never reconnects, and never
-    // re-Snapshots (measured — the first cut of this test timed out waiting for it).
+    // The SPA's event socket, held by its CONSTRUCTOR: a handle on each one so the test
+    // can drop it, and a switch that refuses every new one for as long as the gap is
+    // held. Together they reproduce a real outage: the socket drops, retries fail, and
+    // the events published meanwhile are dropped by the daemon's hub rather than queued
+    // (events.ts) — which is exactly why the reconnect must re-Snapshot, and why that
+    // one Snapshot carries a close and a recreate FUSED into a single roster change.
+    //
+    // The constructor is the only layer that does both. Going offline leaves an
+    // established WebSocket open, so the client never notices, never reconnects, and
+    // never re-Snapshots (measured — the first cut of this test timed out waiting for
+    // it). And CDP's Network.setBlockedURLs, which held the retries off before #4584,
+    // refuses matching HTTP requests but NOT WebSocket handshakes (measured: 20 of 20
+    // handshakes opened under the block). That made the "outage" one 500 ms reconnect
+    // backoff long (events.ts), and the spec raced it — whenever the two CLI mutations
+    // below outran the backoff, the recreate arrived as a LIVE event and rebound the
+    // pane before the offline assertion read it.
+    //
+    // A refused attempt is closed while still CONNECTING, which fails it without ever
+    // firing `open`. The close is a microtask so the app has attached its handlers, and
+    // it lands before any task could deliver an open. To the client that is a refused
+    // connection — error, close, schedule the next retry — so it keeps reporting
+    // "reconnecting". An allowed attempt is not altered, so the app connects exactly as
+    // it always does.
     await win.addInitScript(() => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
       w.__afEventSockets = [];
+      w.__afRefuseEvents = false;
       const Native = WebSocket;
       window.WebSocket = new Proxy(Native, {
         construct(target, args: [string, (string | string[])?]) {
           const ws = new target(...args);
           if (String(args[0]).includes("/v1/events")) {
             w.__afEventSockets.push(ws);
+            if (w.__afRefuseEvents) {
+              queueMicrotask(() => ws.close());
+            }
           }
           return ws;
         },
       });
     });
-    // Block the events endpoint at the NETWORK layer, so every reconnect ATTEMPT fails
-    // for as long as the flag is set. Together with the close below this reproduces a
-    // real outage: the socket drops, retries fail, and the events published meanwhile
-    // are dropped by the daemon's hub rather than queued (events.ts) — which is exactly
-    // why the reconnect must re-Snapshot, and why that one Snapshot carries a close and
-    // a recreate FUSED into a single roster change.
-    const cdp = await ctx.newCDPSession(win);
-    await cdp.send("Network.enable");
 
     // Wait for the startup resync CHAIN to be accepted before manufacturing the
     // outage. openTokenless proves the seed Snapshot rendered the rail, but the event
@@ -10030,10 +10269,11 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     // The gap: retries are refused, then the live socket is dropped. Neither the close
     // nor the recreate below is delivered as an event — delivered live they would each
     // repaint the bar and settle the edit early, which is the (already-covered) path
-    // above, not this one.
-    await cdp.send("Network.setBlockedURLs", { urls: ["*/v1/events*"] });
+    // above, not this one. Refused BEFORE the drop, in the same evaluate: the drop's
+    // reconnect is scheduled by its close handler, which cannot run first.
     const eventSocketClose = await win.evaluate(async () => {
-      const w = window as unknown as { __afEventSockets: WebSocket[] };
+      const w = window as unknown as { __afEventSockets: WebSocket[]; __afRefuseEvents: boolean };
+      w.__afRefuseEvents = true;
       await Promise.all(
         w.__afEventSockets.map(
           (ws) =>
@@ -10065,6 +10305,15 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     ).toHaveAttribute("data-live", "reconnecting");
     af("sessions", "tab-delete", SESSION_ORDER, "--name", VICTIM);
     af("sessions", "tab-create", SESSION_ORDER, "--command", "sleep 300", "--name", VICTIM);
+    // Still in the gap once both mutations have landed — asserted, because a reconnect
+    // that got through is exactly how this spec used to flake (#4584): the client read
+    // "open" here and had the recreate as a live event before the binding below was
+    // read. Checked first so a leak in the staging fails under its own name, not as a
+    // lost binding.
+    await expect(
+      win.locator(".af-app"),
+      "no events socket may open while the gap is held — it would deliver the mutations live",
+    ).toHaveAttribute("data-live", "reconnecting");
     await expect(editedPane, "the offline fixture must retain the old binding until reconnect")
       .toHaveAttribute("data-tab-id", editedPaneID!);
 
@@ -10076,7 +10325,9 @@ test("#1813: a close+recreate of the same name mid-edit renames NOTHING — neve
     const resync = win.waitForResponse((r) => r.url().includes("/v1/Snapshot") && r.status() === 200, {
       timeout: 30_000,
     });
-    await cdp.send("Network.setBlockedURLs", { urls: [] });
+    await win.evaluate(() => {
+      (window as unknown as { __afRefuseEvents: boolean }).__afRefuseEvents = false;
+    });
     const resyncResponse = await resync;
     const resyncEnvelope = (await resyncResponse.json()) as {
       data?: {

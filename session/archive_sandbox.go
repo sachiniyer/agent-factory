@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -206,6 +205,14 @@ func recoverSandbox(i *Instance) error {
 // branch, so the new sandbox clones the pushed state back; on success the new
 // backend + remote agent-server endpoint + teardown replace the old (dead) ones.
 func (i *Instance) reprovisionRemote() error {
+	// Bound the hook's lifetime to this attempt: clear it on every exit so a
+	// hook registered for this call cannot survive to fire on a later call.
+	// After a successful reap (below) the hook is already taken and fired, so
+	// this defer gets nil — a no-op. After a reap failure the explicit clear
+	// below is reached first; this defer is then also a no-op. For all
+	// pre-reap returns (missing backend, bad kind, unresolvable account,
+	// runtime resolution failure, config/drift check) only this defer runs.
+	defer i.takeOnSandboxRetired()
 	i.mu.RLock()
 	backend := i.backend
 	accountName := i.Account
@@ -225,12 +232,47 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
 	}
+	// Refuse a drifted agent BEFORE anything is reaped or provisioned (#3082) —
+	// and before the account resolution below, which would answer a different
+	// question first (#4430): the resolver looks the persisted account up under
+	// the CURRENTLY resolved agent's registry, so a drifted config either finds
+	// no account there or reports the resolved agent "does not support multiple
+	// accounts" — roster answers, when the defect is that the session's
+	// persisted identity no longer matches what its program will launch.
+	//
+	// The create path checks this; reprovision did not, so a restore or recovery
+	// after program_overrides changed would rebuild the container against the same
+	// account while running a different agent — the identity the account names
+	// would be reported, and another one spent. Same question, same helper: two
+	// places deciding "has the program changed?" separately is how they drift.
+	//
+	// A refusal must cost nothing: the old runtime is still live and still
+	// recoverable, and reaping first would destroy it for a create that is
+	// about to be refused anyway.
+	// The namespace is the durable selection record, not a fresh parse of the
+	// recorded enum: a cross-agent handoff can pin an account whose registry
+	// differs from Program, and an override edit must not move it (#4430 review
+	// round 4).
+	scopedAgent := i.AccountAgent()
+	if strings.TrimSpace(accountName) != "" {
+		resolved, cfgErr := resolveRepoConfig(i.Path)
+		if cfgErr != nil {
+			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, cfgErr)
+		}
+		if err := refuseAccountAgentDrift(accountName, scopedAgent, config.ResolveProgram(&resolved.Config, i.Program)); err != nil {
+			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
+		}
+	}
 	// Resolve the persisted account before reaping the old sandbox. A missing or
 	// cross-agent account makes the replacement unusable, and that is not a reason
-	// to destroy the only runtime the session still has. The initial create uses
-	// this same resolver, so restore cannot drift onto ambient credentials.
+	// to destroy the only runtime the session still has. The drift check above
+	// already proved the resolved program's agent is the durable namespace, so
+	// selection runs inside it directly — re-deriving from spec.Program's enum
+	// would refuse a handoff-scoped pin whose registry is not the recorded
+	// enum's (#4430 review round 4), and restore cannot drift onto ambient
+	// credentials.
 	if kind.CarriesAccount() && strings.TrimSpace(accountName) != "" {
-		account, accountErr := resolveAccountForProvision(spec.RepoRoot, spec.Program, accountName)
+		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
 		}
@@ -243,34 +285,24 @@ func (i *Instance) reprovisionRemote() error {
 	i.mu.RLock()
 	creds := i.sandboxCreds
 	i.mu.RUnlock()
-	// Refuse a drifted agent BEFORE anything is reaped or provisioned (#3082).
-	//
-	// The create path checks this; reprovision did not, so a restore or recovery
-	// after program_overrides changed would rebuild the container against the same
-	// account while running a different agent — the identity the account names
-	// would be reported, and another one spent. Same question, same helper: two
-	// places deciding "has the program changed?" separately is how they drift.
-	//
-	// Placed above the reap because a refusal must cost nothing: the old runtime is
-	// still live and still recoverable, and reaping first would destroy it for a
-	// create that is about to be refused anyway.
-	if strings.TrimSpace(i.Account) != "" {
-		resolved, cfgErr := resolveRepoConfig(i.Path)
-		if cfgErr != nil {
-			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, cfgErr)
-		}
-		scopedAgent := sessionenv.AgentForCommand(i.Program)
-		if err := refuseAccountAgentDrift(i.Account, scopedAgent, config.ResolveProgram(&resolved.Config, i.Program)); err != nil {
-			return fmt.Errorf("cannot re-provision session %q: %w", i.Title, err)
-		}
-	}
 
 	// A failed archive/recovery can leave the old sandbox wiring live. Reap it
 	// before provisioning a replacement so bindProvisionResult never discards its
 	// only cleanup handle. An unknown outcome keeps the old wiring installed for a
 	// real retry instead of provisioning a second sandbox on a guess.
 	if err := i.reapRemoteRuntimeForReplacement(); err != nil {
+		// Retirement failed: clear any registered hook so it is not inherited by a
+		// later call or fired at the wrong point.
+		i.takeOnSandboxRetired()
 		return fmt.Errorf("cannot re-provision session %q: previous sandbox cleanup state is unknown: %w", i.Title, err)
+	}
+	// The old sandbox is now provably gone: fire the one-shot hook before
+	// continuing. This is the earliest point from which a new Recover episode
+	// can legitimately begin. Pre-reap failures are excluded because the old
+	// sandbox may still be live, and firing there would let repeated pre-reap
+	// failures reset the budget indefinitely.
+	if fn := i.takeOnSandboxRetired(); fn != nil {
+		fn()
 	}
 	// Mint AFTER the reap, through the same helper the create path uses (#3068).
 	//

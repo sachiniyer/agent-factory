@@ -139,6 +139,11 @@ export interface SessionData {
    *  handoff picker excludes it, matching the daemon's same-agent guard. Absent
    *  when unknowable. */
   current_agent?: string;
+  /** The recorded program enum (session's Program): the handoff picker's
+   *  opaque-command sameness check compares it against the requested enum —
+   *  for an unprovable override the enum is the only evidence that the request
+   *  would relaunch the same command (#4430 review round 6). */
+  program?: string;
   /** The credential account this session's agent runs as (#3051), or absent for
    *  the ambient identity. It is a DIRECTORY NAME in the daemon host's account
    *  registry and never carries credential material.
@@ -489,6 +494,12 @@ export interface ConfigSetResult {
 export interface ConfigSetResponse {
   result: ConfigSetResult;
   restart_notice: string;
+  /** Save-time warnings, including a live-apply error whose details the
+   *  restart notice tells the operator to resolve. Optional for older daemons. */
+  warnings?: string[];
+  /** Machine-readable live-apply result. Optional for older daemons; the form
+   * renders the notice and warnings rather than re-deriving their policy. */
+  apply_outcome?: "applied" | "deferred" | "no_daemon" | "failed" | "unconfirmed" | "unknown";
   /** Where the daemon is ACCEPTING now, when the written key moved one of its
    *  listeners (#3722) — absent for every other key. Saving network.listen_addr
    *  from this form moves the very listener the form is talking over, so the
@@ -531,6 +542,14 @@ export interface AccountsResponse {
    *  than this client does not send it at all — in which case the picker simply
    *  offers no preselection, which is what it did before this field existed. */
   defaults?: Record<string, string>;
+  /** Per agent name, the agent its resolved program_overrides command actually
+   *  launches for this repo. A handoff picker classifies a target's account
+   *  capability by this value, not the enum: codex→aider drops the scope rather
+   *  than needing an account no Aider registry could honor (#4430 review).
+   *
+   *  Optional for the same reason as defaults — an older daemon does not send
+   *  it, and the enum fallback restores the old classification. */
+  resolved_agents?: Record<string, string>;
 }
 
 /** RegisterAccountResponse (daemon/control_types_accounts.go). */
