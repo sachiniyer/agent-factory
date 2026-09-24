@@ -84,11 +84,15 @@ type projectReboundMsg struct {
 	projectID string
 	// oldRepoID and oldRoot name the row as it was when the rebind was sent, so
 	// a success can tell whether it moved the project the TUI is scoped to.
-	oldRepoID string
-	oldRoot   string
-	name      string
-	root      string
-	err       error
+	// oldRegistryRoot is the root the REGISTRATION recorded then — what "did
+	// the record move" is judged against (oldRoot is the row's display root,
+	// which an aggregated row can take from another source).
+	oldRepoID       string
+	oldRoot         string
+	oldRegistryRoot string
+	name            string
+	root            string
+	err             error
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async

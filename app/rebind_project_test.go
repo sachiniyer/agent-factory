@@ -193,7 +193,7 @@ func activeRebindHome(t *testing.T) (*home, string) {
 	// The row names the record's real root; it is the active project by its
 	// aggregation id, the way buildProjectList marks the scoped row.
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
-		{Name: "active", Root: rec.Root, RepoID: h.repoID, RegistryID: rec.ID, MissingPath: true},
+		{Name: "active", Root: rec.Root, RepoID: h.repoID, RegistryID: rec.ID, RegistryRoot: rec.Root, MissingPath: true},
 	}, h.repoRoot)
 	h.projectPickerOverlay.SetMaxSize(80, 24)
 	h.state = stateSwitchProject
@@ -337,4 +337,28 @@ func TestRebindToastNamesTheRegistryRootNotTheEcho(t *testing.T) {
 	toast := h.errBox.FullError()
 	assert.Contains(t, toast, newer, "the toast must name the registry's current root")
 	assert.NotContains(t, toast, echo, "the toast must not name the stale echo")
+}
+
+// TestUncertainRebindOfAnAggregatedRowKeepsScope pins Codex round 11 on #4789:
+// an aggregated row displays a higher-priority path (here the active workspace)
+// than the root its registration records. An uncertain rebind that never landed
+// leaves the record where it was; comparing the registry against the DISPLAY
+// root would mistake that for a move and switch the TUI to the recorded path.
+func TestUncertainRebindOfAnAggregatedRowKeepsScope(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	rootBefore := h.repoRoot
+	// Replace the row: the display root is the active workspace, not the root
+	// the registration records.
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
+		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: projects[0].ID, RegistryRoot: projects[0].Root, MissingPath: true},
+	}, h.repoRoot)
+	h.projectPickerOverlay.SetMaxSize(80, 24)
+	stubRebind(t, &apiclient.TransportError{Err: errors.New("read: connection reset by peer")})
+
+	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+
+	assert.Equal(t, rootBefore, h.repoRoot, "an unmoved record must not look moved because the row displayed another root")
 }

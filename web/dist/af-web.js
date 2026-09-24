@@ -17844,6 +17844,8 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;
+  rebindInFlight = null;
+  rebindFollow = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -18343,6 +18345,7 @@ function openAddProject() {
   );
 }
 var rebindInFlight = null;
+var rebindInFlightGeneration = 0;
 var REBIND_ANSWER_MS = 3e4;
 var rebindFollow = null;
 var projectChoiceGeneration = 0;
@@ -18352,7 +18355,7 @@ function takeRebindFollow(projects) {
   if (follow === null) {
     return null;
   }
-  if (projectChoiceGeneration !== follow.choiceGeneration) {
+  if (projectChoiceGeneration !== follow.choiceGeneration || connectionGeneration !== follow.connection) {
     rebindFollow = null;
     return null;
   }
@@ -18367,7 +18370,7 @@ function takeRebindFollow(projects) {
   return root2;
 }
 function openRebindProject(projectId, label) {
-  if (rebindInFlight !== null) {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
     showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
     return;
   }
@@ -18387,13 +18390,16 @@ function openRebindProject(projectId, label) {
       errorText,
       onSubmit: (path) => {
         const tok = token;
-        if (tok === null || !modal || rebindInFlight !== null) {
+        if (tok === null || !modal || rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
           return;
         }
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
         const attempt = ++rebindAttempts;
+        const current = () => connection === connectionGeneration;
         let settled = false;
         const settle = () => {
           if (settled) {
@@ -18401,18 +18407,27 @@ function openRebindProject(projectId, label) {
           }
           settled = true;
           window.clearTimeout(unanswered);
-          rebindInFlight = null;
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
           return true;
         };
-        const followRegistry = (confirmed) => {
+        const followRegistry = (confirmed, landedRoot) => {
+          if (confirmed && landedRoot !== void 0 && landedRoot === oldRoot) {
+            if (rebindFollow?.attempt === attempt) {
+              rebindFollow = null;
+            }
+            refreshRegisteredProjects();
+            return;
+          }
           if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
-            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed };
+            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed, connection };
           }
           refreshRegisteredProjects();
         };
-        const lateReply = (outcome) => {
+        const lateReply = (outcome, landedRoot) => {
           if (outcome !== "refused") {
-            followRegistry(outcome === "confirmed");
+            followRegistry(outcome === "confirmed", landedRoot);
             return;
           }
           if (rebindFollow?.attempt === attempt) {
@@ -18421,7 +18436,7 @@ function openRebindProject(projectId, label) {
           refreshRegisteredProjects();
         };
         const unanswered = window.setTimeout(() => {
-          if (!settle()) return;
+          if (!current() || !settle()) return;
           if (modal === m) closeModal();
           followRegistry(false);
           surfaceMutationError(
@@ -18429,14 +18444,16 @@ function openRebindProject(projectId, label) {
             "uncertain"
           );
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok).then(() => {
+        void rebindProject(projectId, path, tok).then((project) => {
+          if (!current()) return;
           if (!settle()) {
-            lateReply("confirmed");
+            lateReply("confirmed", project.root);
             return;
           }
           if (modal === m) closeModal();
-          followRegistry(true);
+          followRegistry(true, project.root);
         }).catch((e) => {
+          if (!current()) return;
           if (!settle()) {
             lateReply(isMutationCommittedError(e) ? "confirmed" : isMutationOutcomeUncertain(e) ? "uncertain" : "refused");
             return;

@@ -96,6 +96,7 @@ function harness(
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null, rebindFollow = null, rebindAttempts = 0;
     var projectChoiceGeneration = 0; // var: shared with the harness's switchProject stub
+    var connectionGeneration = 0, rebindInFlightGeneration = 0; // var: tests bump the connection
     const REBIND_ANSWER_MS = 30000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
@@ -109,7 +110,10 @@ function harness(
     commitRegisteredProjects(projects: Project[]): void;
     closeModal(): void;
   };
-  return { app, state, events, submits, pending, fire, timers };
+  // Simulates a reconnect (connect() bumps the generation too, without going
+  // through disconnect()), so the fence is tested on its own.
+  const reconnect = () => { (context as unknown as { connectionGeneration: number }).connectionGeneration++; };
+  return { app, state, events, submits, pending, fire, timers, reconnect };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -389,4 +393,46 @@ test("a confirmed rebind that changed nothing does not follow a later, unrelated
   // Much later another client rebinds prj_A. This attempt is long settled.
   app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
   assert.notEqual(state.selectedProject, "/elsewhere", "a settled no-op rebind must not claim someone else's move");
+});
+
+test("a rebind from a previous connection neither blocks nor acts on the new one", async () => {
+  const { app, state, events, submits, pending, fire, reconnect } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/first");
+  app.closeModal();
+  reconnect();
+
+  app.openRebindProject("prj_A", "alpha");
+  assert.equal(submits.length, 2, "an old connection's in-flight guard must not block the new connection");
+
+  const before = events.length;
+  fire(); // the old attempt's bounded wait
+  pending[0].resolve({ id: "prj_A", root: "/first" }); // and its late reply
+  await settle();
+  assert.deepEqual(events.slice(before).filter(e => !e.startsWith("busy:")), [],
+    "the old attempt must not notify, refetch, or arm a follow on the new connection");
+
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/first" }, { id: "prj_B", root: "/other" }]);
+  assert.notEqual(state.selectedProject, "/first", "no follow was armed for the old connection's attempt");
+});
+
+test("a confirmed no-op arms no follow, even when the refetch fails", async () => {
+  const { app, state, submits, pending } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/old/via-symlink");
+  pending[0].resolve({ id: "prj_A", root: "/old" });
+  await settle();
+  // The refetch this triggered failed: no registry read commits.
+
+  // Later, another client rebinds prj_A, and that read is the next to land.
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
+  assert.notEqual(state.selectedProject, "/elsewhere", "a confirmed no-op must not claim someone else's move");
 });

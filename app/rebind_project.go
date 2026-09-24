@@ -46,13 +46,14 @@ func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 			root = req.Path
 		}
 		return projectReboundMsg{
-			token:     req.Token,
-			projectID: req.Project.RegistryID,
-			oldRepoID: req.Project.RepoID,
-			oldRoot:   req.Project.Root,
-			name:      req.Project.Name,
-			root:      root,
-			err:       err,
+			token:           req.Token,
+			projectID:       req.Project.RegistryID,
+			oldRepoID:       req.Project.RepoID,
+			oldRoot:         req.Project.Root,
+			oldRegistryRoot: req.Project.RegistryRoot,
+			name:            req.Project.Name,
+			root:            root,
+			err:             err,
 		}
 	}
 }
@@ -132,7 +133,14 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	root, ok := registeredProjectRoot(msg.projectID)
-	if !ok || samePath(root, msg.oldRoot) || samePath(root, m.repoRoot) {
+	// "Did the record move" compares registry to registry: the recorded root
+	// when the rebind was sent against the one now. The row's display root can
+	// come from another source, and an unmoved record would then look moved.
+	recorded := msg.oldRegistryRoot
+	if recorded == "" {
+		recorded = msg.oldRoot
+	}
+	if !ok || samePath(root, recorded) || samePath(root, m.repoRoot) {
 		return m, nil
 	}
 	return m.switchToProjectRoot(root)

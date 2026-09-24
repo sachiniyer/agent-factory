@@ -36,6 +36,11 @@ type Project struct {
 	// (rebind) meaningful: rebind moves a REGISTRATION's stable identity, so
 	// the verb is offered only on registry-backed rows.
 	RegistryID string
+	// RegistryRoot is the root that registration records, which can differ
+	// from Root: a row aggregates several discovery sources and displays the
+	// highest-priority path (a live session, the active workspace). Whether a
+	// rebind MOVED the record is judged against this, never the display root.
+	RegistryRoot string
 	// MissingPath marks a registry-backed row whose recorded root the registry
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.

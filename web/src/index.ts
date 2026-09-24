@@ -496,6 +496,10 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   connectionGeneration++;
+  // An in-flight rebind belongs to the connection just torn down; its
+  // completions are fenced off, so its guard and follow intent go with it.
+  rebindInFlight = null;
+  rebindFollow = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -1209,6 +1213,11 @@ function openAddProject(): void {
  *  registry mutation. */
 let rebindInFlight: string | null = null;
 
+/** The connection generation rebindInFlight was set under. A guard left by a
+ *  previous connection must not block this one: its attempt's completions are
+ *  fenced off (see openRebindProject), so nothing would ever clear it. */
+let rebindInFlightGeneration = 0;
+
 /** How long a rebind may go unanswered before the UI stops waiting on it. The
  *  mutation is not aborted — the daemon may still commit it — so hitting this
  *  releases the in-flight guard, reports the outcome as unknown, and re-reads the
@@ -1228,6 +1237,9 @@ let rebindFollow: {
   /** The daemon confirmed this attempt. A confirmed rebind cannot move the
    *  record later, so a read that still shows the old root settles it. */
   confirmed: boolean;
+  /** connectionGeneration when armed: an intent from an earlier connection is
+   *  dropped, never applied against the new connection's registry. */
+  connection: number;
 } | null = null;
 
 /** Counts EXPLICIT project switches (switchProject), never reconciliation's own
@@ -1257,7 +1269,7 @@ function takeRebindFollow(projects: RegisteredProject[]): string | null {
   if (follow === null) {
     return null;
   }
-  if (projectChoiceGeneration !== follow.choiceGeneration) {
+  if (projectChoiceGeneration !== follow.choiceGeneration || connectionGeneration !== follow.connection) {
     rebindFollow = null;
     return null;
   }
@@ -1283,7 +1295,7 @@ function takeRebindFollow(projects: RegisteredProject[]): string | null {
  *  the modal stays open to correct. On success the daemon's projects.changed
  *  refetches the registry and the row's root/missing marker update. */
 function openRebindProject(projectId: string, label: string): void {
-  if (rebindInFlight !== null) {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
     // Escape dismissed the modal while the daemon was still deciding. A second
     // submission now would race the first registry mutation, and whichever
     // landed last would win regardless of which modal appeared to finish.
@@ -1309,13 +1321,19 @@ function openRebindProject(projectId: string, label: string): void {
       onSubmit: (path: string) => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
-        if (tok === null || !modal || rebindInFlight !== null) {
+        if (tok === null || !modal || (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration)) {
           return;
         }
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
         const attempt = ++rebindAttempts;
+        // Every completion below is fenced by the connection that submitted it:
+        // after a disconnect or reconnect, this attempt's timer and reply must
+        // not show notices, arm a follow, or refetch with the new token.
+        const current = (): boolean => connection === connectionGeneration;
         // Every outcome goes through settle() exactly once: the reply, or the
         // bounded wait below, whichever comes first. The guard lives only as long
         // as this attempt is undecided, and a reply that arrives after the wait
@@ -1328,18 +1346,30 @@ function openRebindProject(projectId: string, label: string): void {
           }
           settled = true;
           window.clearTimeout(unanswered);
-          rebindInFlight = null;
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
           return true;
         };
         // Committed or maybe-committed: follow wherever the registry read says
         // the record points. If the rebind never landed, that is still the old
         // root and following it changes nothing.
-        const followRegistry = (confirmed: boolean): void => {
+        const followRegistry = (confirmed: boolean, landedRoot?: string): void => {
+          if (confirmed && landedRoot !== undefined && landedRoot === oldRoot) {
+            // A confirmed no-op (the path canonicalized to the root the record
+            // already had): nothing moved and nothing will, so there is nothing
+            // to follow — even if the refetch below fails.
+            if (rebindFollow?.attempt === attempt) {
+              rebindFollow = null;
+            }
+            refreshRegisteredProjects();
+            return;
+          }
           // The one intent slot belongs to the newest attempt that armed it: a
           // late reply from an attempt the bounded wait released must not
           // replace a newer attempt's intent (the user may have moved on to it).
           if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
-            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed };
+            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed, connection };
           }
           refreshRegisteredProjects();
         };
@@ -1349,9 +1379,9 @@ function openRebindProject(projectId: string, label: string): void {
         // A reply that arrives after the bounded wait gave up is still evidence:
         // anything that may have landed keeps the follow armed for the read it
         // triggers; a definitive refusal proves nothing moved, so it disarms it.
-        const lateReply = (outcome: "confirmed" | "uncertain" | "refused"): void => {
+        const lateReply = (outcome: "confirmed" | "uncertain" | "refused", landedRoot?: string): void => {
           if (outcome !== "refused") {
-            followRegistry(outcome === "confirmed");
+            followRegistry(outcome === "confirmed", landedRoot);
             return;
           }
           if (rebindFollow?.attempt === attempt) {
@@ -1360,7 +1390,7 @@ function openRebindProject(projectId: string, label: string): void {
           refreshRegisteredProjects();
         };
         const unanswered = window.setTimeout(() => {
-          if (!settle()) return;
+          if (!current() || !settle()) return;
           if (modal === m) closeModal();
           followRegistry(false);
           surfaceMutationError(
@@ -1369,18 +1399,21 @@ function openRebindProject(projectId: string, label: string): void {
           );
         }, REBIND_ANSWER_MS);
         void rebindProject(projectId, path, tok)
-          .then(() => {
+          .then((project) => {
+            if (!current()) return;
             if (!settle()) {
-              lateReply("confirmed");
+              lateReply("confirmed", project.root);
               return;
             }
             if (modal === m) closeModal();
             // The reply is not applied to the store: a newer rebind or delete
             // from another client may already be there. A fenced registry read
             // decides where the record points now, and the selection follows it.
-            followRegistry(true);
+            // The reply's root is used for one thing only: recognizing a no-op.
+            followRegistry(true, project.root);
           })
           .catch((e) => {
+            if (!current()) return;
             if (!settle()) {
               lateReply(isMutationCommittedError(e) ? "confirmed" : isMutationOutcomeUncertain(e) ? "uncertain" : "refused");
               return;
