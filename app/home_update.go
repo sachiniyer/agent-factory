@@ -129,6 +129,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// short positive acknowledgement while the resulting session and updated
 		// task status live-project in from the daemon snapshot.
 		if msg.err != nil {
+			// A run that may have started is never reported as failed: pressing
+			// run again would fire it twice (#4820). The snapshot and task polls
+			// show whether it ran.
+			if mutationMayHaveLanded(msg.err) {
+				return m, m.handleError(mutationOutcomeError(
+					fmt.Sprintf("running task %q", msg.title), "the sidebar and the task's last run", msg.err))
+			}
 			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
@@ -331,6 +338,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// No instances.json write: the failed instance was a Loading
 			// placeholder, which is never persisted, and the daemon is the sole
 			// writer (#960 PR 4). Removing the in-memory row is the whole cleanup.
+
+			// The create may have landed with only its reply lost (#4820). The
+			// draft is NOT re-armed — resubmitting it would create a second
+			// session — and the removed placeholder is not a claim either way:
+			// the next snapshot poll adds the session back if the daemon made it.
+			if mutationMayHaveLanded(msg.err) {
+				return m, tea.Batch(m.handleError(mutationOutcomeError(
+					fmt.Sprintf("creating session %q", msg.instance.Title), "the sidebar", msg.err)),
+					m.selectionChanged())
+			}
 
 			if msg.draft != nil {
 				m.failedCreate = &msg
