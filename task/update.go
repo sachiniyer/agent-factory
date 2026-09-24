@@ -8,6 +8,7 @@ package task
 
 import (
 	"encoding/json"
+	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -274,7 +275,17 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				}
 				merged = update.apply(existing)
 				if update.ProjectPath != nil {
-					if rebindRepoID != "" || *update.ProjectPath != existing.ProjectPath {
+					// Compare cleaned paths, not raw strings. The daemon does not
+					// normalize project_path, so a remote caller can reassert the SAME
+					// dead path with an equivalent spelling — a trailing separator or a
+					// "."/".." leaf — that a raw inequality reads as a rebind. The
+					// re-resolution of a dead path is empty, so the raw compare would
+					// overwrite the retained RepoID with "" and strand the task the
+					// moment that spelling was reasserted — the exact harm the else
+					// branch below exists to prevent. Lexical Clean only: a real
+					// filesystem walk would fail on the dead paths this case protects,
+					// so we intentionally do not evaluate symlinks here.
+					if rebindRepoID != "" || filepath.Clean(*update.ProjectPath) != filepath.Clean(existing.ProjectPath) {
 						merged.RepoID = rebindRepoID
 					}
 					// else: a same-path patch whose re-resolution is empty. The path
