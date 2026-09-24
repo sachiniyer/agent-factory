@@ -33,6 +33,7 @@ import type {
   AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  ExplainConfigResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
@@ -1122,6 +1123,19 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+}
+
+/** ExplainConfig (#4803): the same `config.ResolvedValue` `af config get
+ *  --explain` renders — which on-disk layer supplied the effective value, and
+ *  which were shadowed, absent, or disallowed — served to clients that cannot
+ *  resolve in-process. Global scope; the daemon reports on-disk sources and
+ *  deliberately does not consult its running config snapshot.
+ *
+ *  Throws ApiError carrying the daemon's message on an unknown key or on a
+ *  daemon too old to know the route — the view shows it verbatim rather than
+ *  fabricating a trace. */
+export async function explainConfig(key: string, token: string): Promise<ExplainConfigResponse> {
+  return af<ExplainConfigResponse>("ExplainConfig", { key }, token);
 }
 
 // --- config assistant (#2467) ----------------------------------------------

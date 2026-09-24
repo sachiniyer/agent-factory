@@ -112,20 +112,20 @@
       "id": "config.explain",
       "title": "Explain which config layers supplied an effective value",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane.go 'e' -> ui/config_pane_explain.go renderExplainView -> ui/config_target.go ExplainConfigForEditor (in-process locally, the targeted daemon's ExplainConfig under --daemon-url/AF_DAEMON_URL)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/config.ts renderExplainSection -> web/src/index.ts explainConfig -> web/src/api.ts explainConfig -> daemon POST /v1/ExplainConfig"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/configexplain.go:53-127; commands/configcmd.go:181-190,233-241 --explain"
+        "pointer": "config/explain.go ExplainGlobalValue (the shared resolution) rendered by commands/configexplain.go; commands/configcmd.go --explain"
       },
-      "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "The CLI now exposes complete on-disk source candidates, per-leaf origins, and whether the running daemon was checked. TUI/web/config-agent introspection remains #2216 stage 7 so those surfaces consume the same resolver rather than growing a second precedence implementation."
+      "verdict": "parity",
+      "issue": "#4803",
+      "notes": "The CLI's --explain resolution now lives in config/explain.go so every surface renders the SAME config.ResolvedValue rather than growing a second precedence implementation. The daemon serves it over POST /v1/ExplainConfig: the TUI explains in-process locally and through the targeted daemon under --daemon-url/AF_DAEMON_URL (never falling back to the local file), and the web renders the trace in a per-row Explain disclosure. The trace covers on-disk sources only (running_value_checked=false), matching the CLI's 'running daemon value not checked' contract. Project-scoped explanation stays with the project-config work; the route is global-only."
     },
     {
       "id": "config.read",
@@ -1600,6 +1600,7 @@
       "POST /v1/DeleteProject": "project.delete",
       "POST /v1/DeliverPrompt": "-",
       "POST /v1/GetConfig": "config.read",
+      "POST /v1/ExplainConfig": "config.explain",
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
@@ -1689,6 +1690,7 @@
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
       "GetConfig": "config.read",
+      "ExplainConfig": "config.explain",
       "HandoffSessionV2": "session.handoff",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",

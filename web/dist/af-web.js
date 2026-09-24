@@ -6829,6 +6829,9 @@ async function getConfig(token2) {
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
 }
+async function explainConfig(key, token2) {
+  return af("ExplainConfig", { key }, token2);
+}
 function spawnConfigAssistant(token2) {
   return af("config-assistant", {}, token2);
 }
@@ -7640,6 +7643,22 @@ function saveNotice(resp) {
   }
   return parts.join(" \xB7 ");
 }
+function explainValueText(value) {
+  if (typeof value === "string") {
+    return value === "" ? '""' : value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (value === null || value === void 0) {
+    return "null";
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 function createKeyedQueue() {
   const tails = /* @__PURE__ */ new Map();
   return (key, run) => {
@@ -7684,6 +7703,16 @@ var ConfigPane = class {
    *  and cleared around the single `this.render()` call). */
   restoreKey = null;
   advancedToggle = null;
+  // The open provenance trace (#4803): at most one row explains at a time, the
+  // same way at most one edits — two open traces would read as though the keys
+  // resolved together. `explainGeneration` drops a stale fetch that lands after
+  // the user opened a different row or closed this one.
+  explainKey = null;
+  explainResp = null;
+  explainError = "";
+  explainBusy = false;
+  explainGeneration = 0;
+  explainButton = null;
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
@@ -7694,6 +7723,7 @@ var ConfigPane = class {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
+    const entriesAreNew = this.lastEntries !== entries;
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
@@ -7709,6 +7739,9 @@ var ConfigPane = class {
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
+    }
+    if (entriesAreNew && this.explainKey !== null) {
+      this.requestExplain(this.explainKey);
     }
     this.rerenderKeepingUserState();
   }
@@ -7739,6 +7772,7 @@ var ConfigPane = class {
     const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
     const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
     const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    const wasExplain = this.explainButton !== null && active === this.explainButton;
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
     rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
     this.restoreKey = null;
@@ -7750,6 +7784,8 @@ var ConfigPane = class {
       }
     } else if (wasToggle && this.advancedToggle) {
       this.advancedToggle.focus({ preventScroll: true });
+    } else if (wasExplain && this.explainButton) {
+      this.explainButton.focus({ preventScroll: true });
     } else if (accountAgentFocused) {
       this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
     } else if (accountSummaryFocused) {
@@ -7792,6 +7828,7 @@ var ConfigPane = class {
   render() {
     this.editingInput = null;
     this.advancedToggle = null;
+    this.explainButton = null;
     const head = h(
       "div",
       { class: "af-config-head" },
@@ -7874,7 +7911,129 @@ var ConfigPane = class {
         }
       }
     }
+    row.append(this.renderExplainSection(e));
     return row;
+  }
+  /** The provenance affordance (#4803): an "Explain" button per row that opens
+   *  the SAME candidate trace `af config get --explain` prints — which on-disk
+   *  layer won, and which were shadowed, absent, or disallowed. The daemon
+   *  computes the ResolvedValue; this view only formats it, so the two surfaces
+   *  cannot disagree about what a layer did. */
+  renderExplainSection(e) {
+    const section = h("div", { class: "af-config-explain" });
+    const open = this.explainKey === e.key;
+    const btn = h(
+      "button",
+      { type: "button", class: "af-ghost af-config-explain-btn" },
+      open ? "Hide provenance" : "Explain"
+    );
+    btn.setAttribute("aria-expanded", String(open));
+    btn.addEventListener("click", () => this.toggleExplain(e.key));
+    if (open) {
+      this.explainButton = btn;
+    }
+    section.append(btn);
+    if (open) {
+      section.append(this.renderExplainBody());
+    }
+    return section;
+  }
+  toggleExplain(key) {
+    if (this.explainKey === key) {
+      this.explainKey = null;
+      this.explainResp = null;
+      this.explainError = "";
+      this.explainBusy = false;
+      this.rerenderKeepingUserState();
+      return;
+    }
+    this.explainKey = key;
+    this.explainResp = null;
+    this.explainError = "";
+    this.explainBusy = true;
+    const generation = ++this.explainGeneration;
+    this.rerenderKeepingUserState();
+    this.requestExplain(key, generation);
+  }
+  /** Fetches one key's trace into the open disclosure. update() calls this
+   *  without a generation when fresh manifest rows arrive (the trace re-resolves
+   *  in place); toggleExplain passes its own so a second open supersedes the
+   *  first. The settle check is the same either way: the answer paints only if
+   *  it is still the newest request for the row still open. */
+  requestExplain(key, generation) {
+    const gen = generation ?? ++this.explainGeneration;
+    void this.actions.explain(key).then((outcome) => {
+      if (gen !== this.explainGeneration || this.explainKey !== key) {
+        return;
+      }
+      this.explainBusy = false;
+      if (outcome.ok) {
+        this.explainResp = outcome.resp;
+        this.explainError = "";
+      } else {
+        this.explainResp = null;
+        this.explainError = outcome.error;
+      }
+      this.rerenderKeepingUserState();
+    });
+  }
+  /** The trace body for the open row: busy, refusal, or the ResolvedValue the
+   *  daemon answered — effective value, default, merge policy, then each
+   *  candidate's value, location, and verdict, plus per-leaf origins for
+   *  composite keys. */
+  renderExplainBody() {
+    const body = h("div", { class: "af-config-explain-body", role: "status" });
+    if (this.explainBusy) {
+      body.append(h("div", { class: "af-config-explain-line" }, "Resolving provenance\u2026"));
+      return body;
+    }
+    if (this.explainError !== "") {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, this.explainError));
+      return body;
+    }
+    const v = this.explainResp?.explanation;
+    if (!v) {
+      body.append(h("div", { class: "af-config-error", role: "alert" }, "The daemon returned no explanation."));
+      return body;
+    }
+    body.append(
+      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.value)}`),
+      h(
+        "div",
+        { class: "af-config-explain-line" },
+        v.default ? `default: ${v.default} \xB7 ` : "",
+        `policy: ${v.merge} \xB7 ${v.precedence.join(" < ")}`
+      )
+    );
+    for (const cand of v.candidates) {
+      const result = cand.reason !== "" ? `${cand.result} \xB7 ${cand.reason}` : cand.result;
+      const value = cand.present ? explainValueText(cand.value) : "\u2014";
+      const location2 = cand.path ? `${cand.path}:${cand.key_path}` : "compiled default";
+      body.append(
+        h(
+          "div",
+          { class: `af-config-explain-cand af-config-explain-${cand.result}` },
+          h("div", { class: "af-config-explain-layer" }, `${cand.layer}: ${result}`),
+          h("div", { class: "af-config-explain-src" }, `${value} \xB7 ${location2}`)
+        )
+      );
+    }
+    const origins = v.origins ?? {};
+    const leaves2 = Object.keys(origins).sort();
+    if (leaves2.length > 0) {
+      body.append(h("div", { class: "af-config-explain-line" }, "origins:"));
+      for (const leaf of leaves2) {
+        const origin = origins[leaf];
+        const location2 = origin.path ? `${origin.path}:${origin.key_path}` : "compiled default";
+        body.append(
+          h("div", { class: "af-config-explain-src" }, `${leaf}: ${origin.layer} \xB7 ${location2}`)
+        );
+      }
+    }
+    body.append(
+      h("div", { class: "af-config-explain-note" }, "On-disk sources \xB7 the running daemon's value was not checked.")
+    );
+    return body;
   }
   /** The control for one key, chosen from the manifest's own description of it:
    *  a picker when the values are enumerated, a checkbox for a bool, and a text
@@ -15817,6 +15976,7 @@ var AppShell = class {
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
+      explain: (key) => this.actions.explainConfig(key),
       accounts: {
         register: (agent, name) => this.actions.registerAccount(agent, name),
         login: (agent, name) => this.actions.openAccountLogin(agent, name)
@@ -18601,6 +18761,16 @@ function applyConfigValue(key, value) {
   }
   queueConfigSave(key, () => applyConfigValueNow(key, value, tok));
 }
+function explainConfigValue(key) {
+  const tok = token;
+  if (tok === null) {
+    return Promise.resolve({ ok: false, error: "not connected to the daemon" });
+  }
+  return explainConfig(key, tok).then(
+    (resp) => ({ ok: true, resp }),
+    (err) => ({ ok: false, error: errorText(err) })
+  );
+}
 function applyConfigValueNow(key, value, tok) {
   const requestGeneration = connectionGeneration;
   return setConfigValue(key, value, tok).then((resp) => {
@@ -18922,6 +19092,7 @@ var actions = {
   switchView,
   setConfigValue: applyConfigValue,
   openConfigAssistant: doOpenConfigAssistant,
+  explainConfig: explainConfigValue,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,
   switchProject,

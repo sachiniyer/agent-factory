@@ -203,6 +203,28 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 	return nil
 }
 
+// ExplainConfig returns one global config key's provenance — the same
+// config.ResolvedValue `af config get <key> --explain` prints — so the TUI and
+// web config surfaces answer "which layer supplied this value" through the
+// identical resolver rather than growing a second precedence implementation
+// (#4803, the UI half of #2216's explain ask).
+//
+// Like GetConfig it is deliberately NOT gated on requireManagerReady: the trace
+// is resolved from the on-disk sources fresh per call, so it describes the file
+// as it is now — including a hand-edit made since the daemon started — and the
+// answer stays available while the daemon warms up. That is also why
+// RunningValueChecked reports false: the explanation is about the FILE the user
+// edits, the same contract the CLI prints ("running daemon value not checked").
+func (s *controlServer) ExplainConfig(req ExplainConfigRequest, resp *ExplainConfigResponse) error {
+	value, err := config.ExplainGlobalValue(req.Key)
+	if err != nil {
+		return err
+	}
+	resp.Explanation = value
+	resp.Scope = "global"
+	return nil
+}
+
 // SetConfigValue writes one config key on the caller's behalf, through
 // config.SetGlobalConfigValue — the identical validated, file-locked, atomic
 // path a daemonless `af config set` uses. The daemon adds nothing: no second

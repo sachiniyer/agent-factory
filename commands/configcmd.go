@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -169,24 +168,11 @@ func loadGlobalConfigEntries() ([]configEntry, error) {
 	return entries, nil
 }
 
-// formatConfigValue renders a value for human output: scalars bare (so
-// `af config get default_program` prints exactly `claude`, script-friendly),
-// composites as compact JSON.
+// formatConfigValue renders a value for human output, delegating to
+// config.FormatValue — the one renderer the CLI's get/list output, --explain's
+// values, and the TUI explain view share.
 func formatConfigValue(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case bool:
-		return strconv.FormatBool(x)
-	case int:
-		return strconv.Itoa(x)
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Sprintf("%v", v)
-		}
-		return string(b)
-	}
+	return config.FormatValue(v)
 }
 
 // formatConfigListValue makes absence visible without hiding an explicit
@@ -202,7 +188,7 @@ func formatConfigListValue(entry configEntry) string {
 	if !entry.configured {
 		return "(unset)"
 	}
-	return formatConfigExplanationValue(entry.Value)
+	return config.FormatExplainValue(entry.Value)
 }
 
 func isEmptyConfigValue(value any) bool {
@@ -309,7 +295,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				// registry. For root_agent keys, degrade the surrounding
 				// explanation context to global scope and let the specialized
 				// value below answer; every other key keeps the loud error.
-				if !isRootAgentExplainKey(args[0]) {
+				if !config.IsRootAgentExplainKey(args[0]) {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				resolved, err = loadResolvedConfig("")
@@ -344,14 +330,14 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			// root_agent.program has no generic origin when no global program is
 			// configured, so the generic lookup reports it unknown before the
 			// fail-closed projector can answer (#3264 review).
-			if isRootAgentExplainKey(args[0]) {
-				specialized, err := rootAgentReadValue(projectSelector, args[0], explicitProject)
+			if config.IsRootAgentExplainKey(args[0]) {
+				specialized, err := config.RootAgentExplainValue(projectSelector, args[0], explicitProject)
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				value = specialized
 			} else if !ok {
-				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
+				return jsonWrapError(cmd, configJSONFlag, config.UnknownConfigKeyError(args[0]))
 			}
 			if configGetExplainFlag {
 				if configJSONFlag {
@@ -385,7 +371,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				return nil
 			}
 		}
-		return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
+		return jsonWrapError(cmd, configJSONFlag, config.UnknownConfigKeyError(args[0]))
 	},
 }
 
@@ -421,7 +407,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
-			values, err := rootAgentAwareResolution(resolved, projectSelector, explicitProject)
+			values, err := config.RootAgentAwareResolution(resolved, projectSelector, explicitProject)
 			if err != nil {
 				return jsonWrapError(cmd, configJSONFlag, err)
 			}
@@ -473,16 +459,6 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 func writeRootAgentShapeLegend(w io.Writer) error {
 	_, err := fmt.Fprintln(w, "# root_agents: legacy path map; root_agent: current project profile")
 	return err
-}
-
-func unknownConfigKeyError(key string) error {
-	if err := config.RetiredThemeKeyError(key); err != nil {
-		return err
-	}
-	if key == "auto_yes" {
-		return config.RemovedAutoYesError()
-	}
-	return fmt.Errorf("unknown config key %q; run `af config list` to see all keys", key)
 }
 
 var configSetCmd = &cobra.Command{

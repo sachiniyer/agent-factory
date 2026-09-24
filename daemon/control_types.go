@@ -805,6 +805,33 @@ type GetConfigResponse struct {
 	Path string `json:"path"`
 }
 
+// ExplainConfigRequest asks for one global config key's layer-by-layer
+// provenance — the explain half of the config read surface (#4803, the UI half
+// of #2216). The TUI and web editors render the effective value; this is how
+// they answer which layer supplied it, through the identical resolver
+// `af config get <key> --explain` prints rather than a second precedence
+// implementation.
+type ExplainConfigRequest struct {
+	// Key is the manifest key to explain — a top-level key or a dotted leaf
+	// (root_agent resolves through its specialized four-layer trace).
+	Key string `json:"key"`
+}
+type ExplainConfigResponse struct {
+	// Explanation is config.ResolvedValue verbatim: effective value, default,
+	// merge policy, precedence, every source candidate with its result and
+	// reason, and per-leaf origins for composite values.
+	Explanation config.ResolvedValue `json:"explanation"`
+	// Scope names the scope the explanation describes. "global" is the only
+	// scope served: project-scoped provenance follows the project-config read
+	// surface, the same staging as config.read-project's UI half.
+	Scope string `json:"scope"`
+	// RunningValueChecked is always false: the trace resolves on-disk sources
+	// fresh per call, never the running daemon's in-memory config — the same
+	// contract `af config get --explain` prints. Carried so a client surfaces
+	// the distinction rather than leaving a reader to assume it.
+	RunningValueChecked bool `json:"running_value_checked"`
+}
+
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.
 // Value is the raw string form; the daemon hands it to the same validator, so an
 // invalid value is rejected here with the identical message rather than being
