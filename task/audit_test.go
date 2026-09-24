@@ -908,3 +908,72 @@ func TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath(t *testing.T) {
 	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind against a dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
 	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed base/task is not retained across a \"..\"-divergent rebind")
 }
+
+// TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath is the inverse of
+// TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath: there the ".." lived
+// in the (live) patch and the recorded path was removed; here the RECORDED path
+// carries the ".." and is the one that dies, while the patch is a plain non-Git
+// directory with no "..". The recorded base/link/../task binds through the link
+// to other/task (inside other's repo) and retains other's id; once other/task is
+// removed EvalSymlinks cannot answer for the recorded spelling, so the decision
+// falls to the lexical Clean compare. Both spellings clean to base/task, so
+// before the guard covered the recorded spelling's ".." the cleaned compare
+// read a real rebind as a same-path reassertion and the retained id survived —
+// leaving the task scoped to a repository it no longer binds to. The guard now
+// checks both spellings, so the recorded ".." drives a rebind and the (non-Git)
+// patch re-resolves to empty, clearing the binding.
+func TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other is a git repo; the recorded path resolves into it through the link.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	require.NoError(t, exec.Command("git", "init", other).Run())
+	// base/task is a plain non-Git dir — the patch (rebind target).
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// Built as a raw string rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	recorded := base + sep + "link" + sep + ".." + sep + "task"
+	patch := filepath.Join(base, "task")
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00003", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
+	retained := created.RepoID
+
+	// Kill the recorded path's resolution: other/task is removed, so
+	// EvalSymlinks(recorded) can no longer answer, and re-derivation from the raw
+	// recorded string also finds no repo.
+	require.NoError(t, os.RemoveAll(filepath.Join(other, "task")))
+	_, err = filepath.EvalSymlinks(recorded)
+	require.Error(t, err, "precondition: the recorded path is gone, so the physical comparison is unavailable")
+	require.Empty(t, repoIDForPath(recorded), "precondition: the dead recorded path no longer resolves to a repo")
+
+	// The patch is a live non-Git directory with no "..": before the guard
+	// covered the recorded spelling this was the pair that cleaned equal and
+	// retained a stale id.
+	require.Equal(t, filepath.Clean(recorded), filepath.Clean(patch), "precondition: the two spellings clean lexically equal")
+	resolvedPatch, err := filepath.EvalSymlinks(patch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "task"), resolvedPatch, "precondition: the patch resolves physically to base/task, a live non-Git dir")
+	require.Empty(t, repoIDForPath(patch), "precondition: the patch resolves to a non-Git directory, so the re-resolution is empty")
+
+	_, err = UpdateTaskChecked("sym00003", TaskUpdate{ProjectPath: &patch}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00003")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind whose \"..\" is in the dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
+	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed other/task is not retained across a \"..\"-divergent rebind whose \"..\" is in the recorded path")
+}
