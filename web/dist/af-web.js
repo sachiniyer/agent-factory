@@ -17968,6 +17968,7 @@ function switchProject(root2) {
   if (store.get().selectedProject === root2) {
     return;
   }
+  projectChoiceGeneration++;
   clearTabError();
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
@@ -18344,18 +18345,22 @@ function openAddProject() {
 var rebindInFlight = null;
 var REBIND_ANSWER_MS = 3e4;
 var rebindFollow = null;
+var projectChoiceGeneration = 0;
 var rebindAttempts = 0;
 function takeRebindFollow(projects) {
   const follow = rebindFollow;
   if (follow === null) {
     return null;
   }
-  if (store.get().selectedProject !== follow.oldRoot && loadProjectChoice() !== follow.oldRoot) {
+  if (projectChoiceGeneration !== follow.choiceGeneration) {
     rebindFollow = null;
     return null;
   }
   const root2 = projects.find((p) => p.id === follow.id)?.root ?? null;
   if (root2 === follow.oldRoot) {
+    if (follow.confirmed) {
+      rebindFollow = null;
+    }
     return null;
   }
   rebindFollow = null;
@@ -18367,6 +18372,7 @@ function openRebindProject(projectId, label) {
     return;
   }
   const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  const choiceGeneration = projectChoiceGeneration;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -18398,15 +18404,15 @@ function openRebindProject(projectId, label) {
           rebindInFlight = null;
           return true;
         };
-        const followRegistry = () => {
+        const followRegistry = (confirmed) => {
           if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
-            rebindFollow = { id: projectId, oldRoot, attempt };
+            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed };
           }
           refreshRegisteredProjects();
         };
-        const lateReply = (mayHaveLanded) => {
-          if (mayHaveLanded) {
-            followRegistry();
+        const lateReply = (outcome) => {
+          if (outcome !== "refused") {
+            followRegistry(outcome === "confirmed");
             return;
           }
           if (rebindFollow?.attempt === attempt) {
@@ -18417,7 +18423,7 @@ function openRebindProject(projectId, label) {
         const unanswered = window.setTimeout(() => {
           if (!settle()) return;
           if (modal === m) closeModal();
-          followRegistry();
+          followRegistry(false);
           surfaceMutationError(
             new Error(`The rebind of ${label} has not answered in ${REBIND_ANSWER_MS / 1e3}s, so its outcome is unknown. Refreshing the project list.`),
             "uncertain"
@@ -18425,25 +18431,25 @@ function openRebindProject(projectId, label) {
         }, REBIND_ANSWER_MS);
         void rebindProject(projectId, path, tok).then(() => {
           if (!settle()) {
-            lateReply(true);
+            lateReply("confirmed");
             return;
           }
           if (modal === m) closeModal();
-          followRegistry();
+          followRegistry(true);
         }).catch((e) => {
           if (!settle()) {
-            lateReply(isMutationOutcomeUncertain(e));
+            lateReply(isMutationCommittedError(e) ? "confirmed" : isMutationOutcomeUncertain(e) ? "uncertain" : "refused");
             return;
           }
           if (isMutationCommittedError(e)) {
             if (modal === m) closeModal();
-            followRegistry();
+            followRegistry(true);
             surfaceMutationError(e, "confirmed");
             return;
           }
           if (isMutationOutcomeUncertain(e)) {
             if (modal === m) closeModal();
-            followRegistry();
+            followRegistry(false);
             surfaceMutationError(
               new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
               "uncertain"

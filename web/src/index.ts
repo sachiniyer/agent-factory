@@ -699,6 +699,7 @@ function switchProject(root: string): void {
   if (store.get().selectedProject === root) {
     return;
   }
+  projectChoiceGeneration++;
   clearTabError();
   // Keep the current selection only if it lives in the newly selected project; else
   // clear it so the main pane returns to its empty state instead of showing a session
@@ -1217,7 +1218,23 @@ const REBIND_ANSWER_MS = 30_000;
 /** A successful rebind whose project the selection should follow once a registry
  *  read confirms where the record now points: its stable id and the root it
  *  pointed at when Rebind opened. */
-let rebindFollow: { id: string; oldRoot: string; attempt: number } | null = null;
+let rebindFollow: {
+  id: string;
+  oldRoot: string;
+  attempt: number;
+  /** projectChoiceGeneration when Rebind opened: a later value means the user
+   *  explicitly chose another project since, and the follow must not drag them. */
+  choiceGeneration: number;
+  /** The daemon confirmed this attempt. A confirmed rebind cannot move the
+   *  record later, so a read that still shows the old root settles it. */
+  confirmed: boolean;
+} | null = null;
+
+/** Counts EXPLICIT project switches (switchProject), never reconciliation's own
+ *  fallbacks. It is what tells "the user moved on" from "a registry read dropped
+ *  the old root and reconcile picked a default" — the persisted choice cannot,
+ *  since storage may be unavailable. */
+let projectChoiceGeneration = 0;
 
 /** Numbers rebind attempts, so a follow intent names the attempt that armed it
  *  and a late reply can clear only its own — never a newer attempt's for the
@@ -1225,10 +1242,10 @@ let rebindFollow: { id: string; oldRoot: string; attempt: number } | null = null
 let rebindAttempts = 0;
 
 /** Checks the pending rebind follow against a fresh registry read and returns
- *  the root the selection should move to, or null. It follows only when the user's
- *  project is still the old root — shown, or persisted while reconciliation fell
- *  back because the old root vanished from an earlier read — so a project the user
- *  chose mid-flight is left alone. Without it, the refetch drops the old root from
+ *  the root the selection should move to, or null. It follows only when the user has
+ *  made no explicit project switch since Rebind opened (projectChoiceGeneration)
+ *  — reconciliation falling back because the old root vanished from an earlier
+ *  read does not count — so a project the user chose mid-flight is left alone. Without it, the refetch drops the old root from
  *  the valid set and reconcileProject lands on an unrelated project.
  *
  *  A read that still shows the record at the old root has observed no move yet —
@@ -1240,12 +1257,18 @@ function takeRebindFollow(projects: RegisteredProject[]): string | null {
   if (follow === null) {
     return null;
   }
-  if (store.get().selectedProject !== follow.oldRoot && loadProjectChoice() !== follow.oldRoot) {
+  if (projectChoiceGeneration !== follow.choiceGeneration) {
     rebindFollow = null;
     return null;
   }
   const root = projects.find((p) => p.id === follow.id)?.root ?? null;
   if (root === follow.oldRoot) {
+    if (follow.confirmed) {
+      // A confirmed rebind that resolved to the root it already had (a symlink
+      // or subdirectory of the same checkout): nothing moved and nothing can,
+      // so a later move of the record is someone else's and must not be followed.
+      rebindFollow = null;
+    }
     return null;
   }
   rebindFollow = null;
@@ -1270,6 +1293,7 @@ function openRebindProject(projectId: string, label: string): void {
   // The root the registration points at NOW: a selection still on it follows
   // the rebind to the new root (takeRebindFollow).
   const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  const choiceGeneration = projectChoiceGeneration;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -1310,12 +1334,12 @@ function openRebindProject(projectId: string, label: string): void {
         // Committed or maybe-committed: follow wherever the registry read says
         // the record points. If the rebind never landed, that is still the old
         // root and following it changes nothing.
-        const followRegistry = (): void => {
+        const followRegistry = (confirmed: boolean): void => {
           // The one intent slot belongs to the newest attempt that armed it: a
           // late reply from an attempt the bounded wait released must not
           // replace a newer attempt's intent (the user may have moved on to it).
           if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
-            rebindFollow = { id: projectId, oldRoot, attempt };
+            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed };
           }
           refreshRegisteredProjects();
         };
@@ -1325,9 +1349,9 @@ function openRebindProject(projectId: string, label: string): void {
         // A reply that arrives after the bounded wait gave up is still evidence:
         // anything that may have landed keeps the follow armed for the read it
         // triggers; a definitive refusal proves nothing moved, so it disarms it.
-        const lateReply = (mayHaveLanded: boolean): void => {
-          if (mayHaveLanded) {
-            followRegistry();
+        const lateReply = (outcome: "confirmed" | "uncertain" | "refused"): void => {
+          if (outcome !== "refused") {
+            followRegistry(outcome === "confirmed");
             return;
           }
           if (rebindFollow?.attempt === attempt) {
@@ -1338,7 +1362,7 @@ function openRebindProject(projectId: string, label: string): void {
         const unanswered = window.setTimeout(() => {
           if (!settle()) return;
           if (modal === m) closeModal();
-          followRegistry();
+          followRegistry(false);
           surfaceMutationError(
             new Error(`The rebind of ${label} has not answered in ${REBIND_ANSWER_MS / 1000}s, so its outcome is unknown. Refreshing the project list.`),
             "uncertain",
@@ -1347,24 +1371,24 @@ function openRebindProject(projectId: string, label: string): void {
         void rebindProject(projectId, path, tok)
           .then(() => {
             if (!settle()) {
-              lateReply(true);
+              lateReply("confirmed");
               return;
             }
             if (modal === m) closeModal();
             // The reply is not applied to the store: a newer rebind or delete
             // from another client may already be there. A fenced registry read
             // decides where the record points now, and the selection follows it.
-            followRegistry();
+            followRegistry(true);
           })
           .catch((e) => {
             if (!settle()) {
-              lateReply(isMutationOutcomeUncertain(e));
+              lateReply(isMutationCommittedError(e) ? "confirmed" : isMutationOutcomeUncertain(e) ? "uncertain" : "refused");
               return;
             }
             if (isMutationCommittedError(e)) {
               // The daemon committed the rebind but a follow-up step failed.
               if (modal === m) closeModal();
-              followRegistry();
+              followRegistry(true);
               surfaceMutationError(e, "confirmed");
               return;
             }
@@ -1374,7 +1398,7 @@ function openRebindProject(projectId: string, label: string): void {
               // the durable identity, so close it, re-read the registry, and say
               // the outcome is unknown. Only a definitive daemon refusal re-arms.
               if (modal === m) closeModal();
-              followRegistry();
+              followRegistry(false);
               surfaceMutationError(
                 new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
                 "uncertain",

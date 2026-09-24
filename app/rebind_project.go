@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -65,8 +66,9 @@ func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 // the path. Any outcome that may have landed — success, a committed error, or an
 // uncertain one — never re-arms the form: the picker it owns closes, and the
 // Projects section is re-read so it shows where the registration points now. A
-// success announces itself with a toast only when no other picker is on screen,
-// since a toast over a different picker reads as that picker's result; an
+// success toast, and an unowned definitive refusal, show only when no other
+// picker is on screen, since either over a different picker reads as that
+// picker's result (the refusal changed nothing, so it is logged instead); an
 // unknown outcome always says so. A success that moved the project the TUI is
 // scoped to switches to wherever the registry binds that project now, so new
 // sessions and tasks stop targeting the root that was just repaired away.
@@ -77,6 +79,13 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		if !rebindOutcomeUncertain(msg.err) {
 			if owned {
 				m.projectPickerOverlay.SetRebindError(msg.err.Error())
+				return m, nil
+			}
+			if pickerOpen {
+				// A definitive refusal changed nothing, and shown over a
+				// different picker it reads as THAT picker's result — the same
+				// reason a stale success raises no toast there. Log it instead.
+				log.WarningLog.Printf("stale rebind of project %q refused while another picker is open: %v", msg.name, msg.err)
 				return m, nil
 			}
 			return m, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err))

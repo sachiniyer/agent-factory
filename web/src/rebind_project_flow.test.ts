@@ -32,10 +32,14 @@ class StubError extends Error {
   constructor(message: string, readonly kind: "refused" | "uncertain") { super(message); }
 }
 
-function harness(initial: { registeredProjects: Project[]; selectedProject: string | null }) {
+function harness(
+  initial: { registeredProjects: Project[]; selectedProject: string | null },
+  opts: { storage?: boolean } = {},
+) {
+  const storage = opts.storage ?? true;
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const state: State = { ...initial, sessions: [], tasks: [] };
-  let persisted: string | null = initial.selectedProject;
+  let persisted: string | null = storage ? initial.selectedProject : null;
   const events: string[] = [];
   const submits: Array<(path: string) => void> = [];
   const pending: Deferred[] = [];
@@ -66,9 +70,13 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
       events.push(`rpc:${id}:${path}`);
       return new Promise<Project>((resolve, reject) => pending.push({ resolve, reject }));
     },
+    // Mirrors index.ts switchProject: persist (when storage works), and count an
+    // explicit switch only when the selection really changes.
     switchProject: (root: string) => {
       events.push(`switch:${root}`);
-      persisted = root;
+      if (storage) persisted = root;
+      if (state.selectedProject === root) return;
+      (context as unknown as { projectChoiceGeneration: number }).projectChoiceGeneration++;
       state.selectedProject = root;
     },
     loadProjectChoice: () => persisted,
@@ -87,6 +95,7 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   };
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null, rebindFollow = null, rebindAttempts = 0;
+    var projectChoiceGeneration = 0; // var: shared with the harness's switchProject stub
     const REBIND_ANSWER_MS = 30000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
@@ -341,4 +350,43 @@ test("a late success from an older attempt cannot replace a newer attempt's foll
 
   app.commitRegisteredProjects([{ id: "prj_A", root: "/first" }, { id: "prj_B", root: "/other-new" }]);
   assert.equal(state.selectedProject, "/other-new", "B's follow must survive A's late success");
+});
+
+test("without local storage, a reconcile fallback does not cancel the follow", async () => {
+  const { app, state, submits, pending } = harness(
+    { registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }], selectedProject: "/old" },
+    { storage: false },
+  );
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  // projects.changed lands before the HTTP reply: that read already drops /old,
+  // and reconciliation (no persisted choice to fall back on) moves the selection.
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+  assert.notEqual(state.selectedProject, "/old", "precondition: reconciliation moved off the vanished root");
+
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+
+  assert.equal(state.selectedProject, "/new", "a reconcile fallback is not the user leaving; the follow must still land");
+});
+
+test("a confirmed rebind that changed nothing does not follow a later, unrelated move", async () => {
+  const { app, state, submits, pending } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/old/via-symlink");
+  // The daemon canonicalizes it to the root the record already has.
+  pending[0].resolve({ id: "prj_A", root: "/old" });
+  await settle();
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }]);
+  assert.equal(state.selectedProject, "/old");
+
+  // Much later another client rebinds prj_A. This attempt is long settled.
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
+  assert.notEqual(state.selectedProject, "/elsewhere", "a settled no-op rebind must not claim someone else's move");
 });

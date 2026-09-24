@@ -90,6 +90,7 @@ func TestStaleRebindErrorDoesNotLandInAnotherPicker(t *testing.T) {
 	h.closeProjectPicker()
 	pickerB := openRebindPicker(h)
 	submitPickerRebind(t, h, "/other")
+	noticeBefore := h.transientNoticeID
 
 	h.Update(cmdA())
 
@@ -97,6 +98,9 @@ func TestStaleRebindErrorDoesNotLandInAnotherPicker(t *testing.T) {
 	assert.Equal(t, stateSwitchProject, h.state)
 	assert.True(t, pickerB.RebindPending(), "A's rejection must not settle B's in-flight request")
 	assert.NotContains(t, pickerB.Render(), "already bound", "A's rejection must not render inside picker B")
+	// Nor over it: an error box naming the same project reads as B's result
+	// while B is still pending (Codex round 9 on #4789).
+	assert.Equal(t, noticeBefore, h.transientNoticeID, "A's refusal must not raise an error over picker B")
 }
 
 // TestOwnedRebindReplyStillReachesItsPicker keeps the happy path the ownership
