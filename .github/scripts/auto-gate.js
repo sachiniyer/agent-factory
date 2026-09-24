@@ -4112,6 +4112,69 @@ async function readOrNull(operation) {
   }
 }
 
+// Events whose newer suites did NOT hide an older aggregate from the ruleset:
+// #3992 merged with its aggregate in an Auto Gate suite that already had newer
+// pull_request_review and pull_request_review_comment suites (#4802).
+const NON_SUPERSEDING_EVENTS = new Set(["pull_request_review", "pull_request_review_comment"]);
+
+// Why a PASS the rollup shows can still be "expected" to the ruleset (#4802).
+//
+// checks.create takes no suite: GitHub files every Actions-token check run in
+// the EARLIEST github-actions suite on the head, whichever run creates it. When
+// a newer suite of that same workflow arrives from a head event, the ruleset
+// stops counting the older suite's runs, and no rerun or republish moves the
+// aggregate out of it. Returns the explanation, or null when the placement is
+// not provably superseded — including when the aggregate's own check run or the
+// head's workflow runs cannot be read, so a missing fact never changes wording.
+async function describeSupersededPlacement({ github, owner, repo, headSha, ownedAggregateCheck }) {
+  let suiteId = Number(ownedAggregateCheck?.check_suite?.id);
+  if (!Number.isFinite(suiteId) || suiteId <= 0) {
+    const checkRunId = Number(ownedAggregateCheck?.id);
+    if (!Number.isFinite(checkRunId) || checkRunId <= 0) {
+      return null;
+    }
+    const checkRun = await github.rest.checks.get({ owner, repo, check_run_id: checkRunId });
+    suiteId = Number(checkRun?.data?.check_suite?.id);
+    if (!Number.isFinite(suiteId) || suiteId <= 0) {
+      return null;
+    }
+  }
+  // Every page: the listing is newest first and the placement is one of the
+  // head's EARLIEST runs, so a busy head (#4799 had ~40 Auto Gate runs) pushes
+  // it past page one, where a single read would miss it and say nothing.
+  const listed = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+    owner,
+    repo,
+    head_sha: headSha,
+    per_page: 100,
+  });
+  const runs = Array.isArray(listed) ? listed : listed?.workflow_runs || [];
+  const placement = runs.find((run) => Number(run?.check_suite_id) === suiteId);
+  if (!placement) {
+    return null;
+  }
+  const newer = runs
+    .filter(
+      (run) =>
+        run?.workflow_id === placement.workflow_id &&
+        Number(run?.check_suite_id) > suiteId &&
+        !NON_SUPERSEDING_EVENTS.has(run?.event),
+    )
+    .sort((a, b) => Number(a.check_suite_id) - Number(b.check_suite_id));
+  if (newer.length === 0) {
+    return null;
+  }
+  const workflow = placement.name || `workflow ${placement.workflow_id}`;
+  const newerSuites = newer.map((run) => `${run.check_suite_id} (${run.event})`).join(", ");
+  return (
+    `GitHub is not counting the passing ${AUTO_GATE_DECISION_CHECK}: it was placed in check suite ` +
+    `${suiteId} (${workflow} · ${placement.event}), and newer ${workflow} suite ${newerSuites} on ` +
+    `${headSha} supersedes it for the ruleset. The placement is permanent for this head — no rerun ` +
+    "or republish moves it. Push a new head (a commit with an identical tree re-rolls placement) " +
+    "and gate that head (#4802)"
+  );
+}
+
 async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck }) {
   const status = Number(
     error?.status ?? error?.response?.status ?? error?.response?.data?.status,
@@ -4278,9 +4341,15 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   // standing. Unknown ownership is still not "no winner": keep that error loud
   // and do not overwrite a transaction this run could not read (#3551).
   if (refusal.unprovenReason && !error.autoGateOwnershipUnknown) {
+    // Same control flow either way; only the reason changes. A superseded
+    // placement is permanent for this head, and "propagation" was the wrong
+    // name for it through three incidents (#4802).
+    const superseded = await readOrNull(() =>
+      describeSupersededPlacement({ github, owner, repo, headSha: expectedHeadSha, ownedAggregateCheck }),
+    );
     return {
       reason: "unproven-wait",
-      message: `Refusing to merge PR #${prNumber}; ${refusal.unprovenReason}`,
+      message: `Refusing to merge PR #${prNumber}; ${superseded || refusal.unprovenReason}`,
     };
   }
 
