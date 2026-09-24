@@ -45,6 +45,19 @@ consult the relevant notes below when preparing the announcement.
   from your automation or manage PR information outside Agent Factory. Expect
   the missing `pr_info` field and HTTP 404s, rather than a migration to new names.
 
+## A caught-up reconnect after a recovery keeps the recovered pane's output (fixed in v1.0.292)
+
+- **Fixes a regression shipped in v1.0.290 and v1.0.291.** A client that was
+  caught up at the live tail when it dropped, and reconnected after a
+  pane-replacing session recovery, could lose the recovered pane's buffered
+  output when the screen snapshot failed (or carried no repaint state): its
+  terminal stayed on the dead pane's frozen screen until unrelated output
+  arrived. The reconnect now replays the recovered pane's retained output, so
+  a failed snapshot no longer loses it (#4615).
+- A reconnect whose snapshot succeeds is unchanged (the repaint is delivered,
+  no replay), as is the case where the recovered ring is empty (live output
+  follows as before).
+
 ## `af sessions list` now tells you what its numbers mean
 
 - **Three new string fields, and nothing removed.** Every session carries
