@@ -586,11 +586,20 @@ func (m *home) drainDeferredKeys(openerCmd tea.Cmd) tea.Cmd {
 // dispatch. When a pass-2 just cleared the highlight arm with buffered racing
 // keys pending, it sequences the opener's action cmd before the replay, so
 // coalesced input lands in the post-action state and in order instead of
-// racing its siblings (see drainDeferredKeys).
+// racing its siblings (see drainDeferredKeys). When that dispatch was a
+// successful graceful quit, the buffer is discarded instead: cleanQuitCmd is
+// itself a tea.Sequence, so sequencing the deferred keys after it would let a
+// buffered Enter/arrow overtake the quit teardown (handleQuit has already
+// closed live attachments and set m.quitting) — mirroring the ctrl+c
+// hard-exit path, which clears m.deferredKeys before handleQuit.
 func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	wasArmed := m.keySent
 	mod, cmd = m.handleKeyPressDispatch(msg)
 	if wasArmed && !m.keySent && len(m.deferredKeys) > 0 {
+		if m.quitting {
+			m.deferredKeys = nil
+			return mod, cmd
+		}
 		cmd = m.drainDeferredKeys(cmd)
 	}
 	return mod, cmd
