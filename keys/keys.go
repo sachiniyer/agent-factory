@@ -181,6 +181,18 @@ const (
 	// outside this modal form.
 	KeySetAccount
 	KeyEditAccount
+
+	// KeyRenameTab opens the rename prompt for the tab the user is looking at
+	// (the focused pane's tab, or the tree's active tab — the same target `w`
+	// closes). The daemon's RenameTab RPC does the relabel (#1813); only kinds
+	// that display their name are renameable (session.TabKindRenameable), so the
+	// agent tab and shell tabs are refused before the prompt opens.
+	//
+	// "R", not "r": lower-case r is restore, and capital defaults are the
+	// established pattern for verbs that mutate (D kill, S split, F handoff).
+	// Appended at the end of this iota block for the same reason KeyConfigAgent
+	// was — inserting mid-block renumbers every KeyName after it.
+	KeyRenameTab
 )
 
 // spec is one action's canonical binding definition: its default keys, help
@@ -248,6 +260,7 @@ var specs = []spec{
 	{name: KeyShiftTab, keys: []string{"shift+tab"}, desc: "focus prev", dispatch: true},
 	{name: KeyNewTab, configKey: "new_tab", keys: []string{"t"}, desc: "new tab", dispatch: true},
 	{name: KeyCloseTab, configKey: "close_tab", keys: []string{"w"}, desc: "del tab", dispatch: true},
+	{name: KeyRenameTab, configKey: "rename_tab", keys: []string{"R"}, desc: "rename tab", dispatch: true},
 	// The chip names BOTH gestures — "1-9/g go" — rather than gaining a second chip
 	// (#3021). The old "1-9" read as "there are nine tabs", and the footer is exactly
 	// where that impression was formed; naming g beside the digits says the digits are
