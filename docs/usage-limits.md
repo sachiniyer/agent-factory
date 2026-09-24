@@ -246,9 +246,8 @@ A scope drop is one-way: the session records the dropped name on the handoff's
 account-capable agent does not restore it — name the account again with
 `--account`.
 
-The session keeps its worktree and branch, and the new conversation receives the
-handoff brief. See [Hand off to another account](#hand-off-to-another-account)
-for examples, admission checks, and the TUI and web pickers.
+The session keeps its worktree and branch. See [Hand off to another account](#hand-off-to-another-account)
+for the conversation outcome, examples, admission checks, and the TUI and web pickers.
 
 ### Bug report redaction
 

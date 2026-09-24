@@ -78,9 +78,20 @@ func listSessions(repoID string) ([]session.InstanceData, error) {
 // daemon applies them before transfer; applying the same pure filter here keeps
 // daemonless disk fallback useful and prevents a rolled-back daemon that ignores
 // unknown JSON fields from silently widening a filtered command.
+//
+// When the daemon succeeded but dropped a repo at startup due to a corrupted
+// instances.json (#603), the snapshot carries the dropped repo in
+// SkippedRepos. listSessions refuses naming those repos rather than silently
+// serving a partial list, mirroring diskListSessions (#730's loud corrupt-file
+// contract extended to the wire surface #1029 PR 2 introduced). Scoped to the
+// request by the daemon, so `--repo X` reports only X's drop and an all-repo
+// list reports every drop.
 func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
-	data, fallBack, err := snapshotRead(req)
+	data, skipped, fallBack, err := snapshotRead(req)
 	if err == nil {
+		if len(skipped) > 0 {
+			return nil, skippedReposError(skipped)
+		}
 		return daemon.FilterSnapshotInstances(req, data)
 	}
 	if !fallBack {
@@ -96,7 +107,11 @@ func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, er
 // getSessionByTitle returns the single session matching title across ALL repos,
 // preferring the daemon's live snapshot and falling back to the disk scan when no
 // daemon is reachable (#1029 PR 2). When a live snapshot is available the daemon
-// is authoritative: a miss returns not-found without re-reading disk.
+// is authoritative: a miss returns not-found without re-reading disk — UNLESS the
+// daemon dropped a repo at startup due to a corrupted instances.json (#603), in
+// which case a miss caveats naming the dropped repos the same way
+// findInstanceByTitle does on the disk path (#730), so a session hidden behind a
+// corrupted file is not reported as a clean not-found.
 //
 // Titles are unique per-repo, so this unscoped lookup resolves only when exactly
 // one session matches; several matches return ErrAmbiguousTitle. Callers with a
@@ -105,7 +120,7 @@ func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, er
 // The second return is the ambiguity-widening notice (empty when clean); see
 // warnIncompleteTitleWidening and #3511.
 func getSessionByTitle(title string) (*session.InstanceData, string, error) {
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
 		var matches []session.InstanceData
 		for i := range data {
@@ -145,7 +160,13 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			}
 			return &matches[0], notice, nil
 		}
-		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
+		// Mirror findInstanceByTitle's miss: a clean miss (no repo was dropped)
+		// returns errTitleNotFound; a miss with a corrupted repo that may be
+		// hiding the title caveats naming the dropped repos instead, so a hidden
+		// session is not reported as a clean not-found (#730, #603 over the wire).
+		if len(skipped) > 0 {
+			return nil, "", fmt.Errorf("session %q not found; %s", title, skippedReposSuffix(skipped))
+		}
 		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}
 	// Remote target: no local disk fallback; surface the error (see snapshotRead).
@@ -161,15 +182,24 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 }
 
 // whoamiSession returns the session whose TmuxName matches tmuxName, preferring
-// the daemon's live snapshot and falling back to the disk scan when no daemon
-// is reachable (#1029 PR 2).
+// the daemon's live snapshot and falling back to the disk scan when no daemon is
+// reachable (#1029 PR 2). When the daemon dropped a repo at startup due to a
+// corrupted instances.json (#603), a no-match caveats naming the dropped repos
+// rather than reporting a clean "not found", mirroring diskWhoami (#730).
 func whoamiSession(tmuxName string) (*session.InstanceData, error) {
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
 		for i := range data {
 			if data[i].TmuxName == tmuxName {
 				return &data[i], nil
 			}
+		}
+		// A match short-circuits above, so nothing here weakens a found session.
+		// The absence claim caveats when the daemon dropped a repo at startup —
+		// a corrupted file may be hiding the matching session — mirroring
+		// diskWhoami's not-found-with-corruption behavior.
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, skippedReposSuffix(skipped))
 		}
 		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
 	}

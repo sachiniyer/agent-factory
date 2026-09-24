@@ -85,8 +85,8 @@ func TestSessionsListJSON_ByteParity_APIClientVsNetRPC(t *testing.T) {
 
 	// --- net/rpc side: SnapshotNoSpawn's success output is exactly its input. ---
 	prev := snapshotViaDaemon
-	snapshotViaDaemon = func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
-		return canned, nil
+	snapshotViaDaemon = func(daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return canned, nil, nil
 	}
 	netrpcJSON := renderListJSON(t)
 	snapshotViaDaemon = prev
