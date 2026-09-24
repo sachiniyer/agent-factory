@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -460,4 +462,257 @@ func TestAudit_ARealRebindIsTheUsersChange(t *testing.T) {
 	require.Len(t, trail, 2, "the create, and the user's move — not a third for the derived id")
 	assert.Equal(t, ActorCLI, trail[1].Actor)
 	assert.Equal(t, []string{"project_path"}, trail[1].Fields)
+}
+
+// These pin the destructive inverse of TestAudit_SamePathBackfillIsRecorded: a
+// same-path ProjectPath reassertion over a path that has SINCE stopped resolving
+// must not erase the retained RepoID. The recompute stays — it backs the legacy
+// backfill where the retained id is "" and the path resolves — but an empty
+// re-resolution over a retained, non-empty id strands the task from its own
+// project's scope, the exact harm Task.RepoID exists to prevent. See
+// Task.RepoID's PURPOSE and the contract contemplation of subdirectory and
+// linked-worktree bindings at task/task.go:103-108.
+
+// bindMainWithLinkedWorktree creates a main git repo and a linked worktree at a
+// SIBLING path, the contract-contemplated binding whose owning repo root is not
+// a directory-tree ancestor of the recorded path. Returns the symlink-resolved
+// main root and worktree path. A commit is made so `git worktree add` can branch.
+func bindMainWithLinkedWorktree(t *testing.T) (mainRoot, worktree string) {
+	t.Helper()
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "main")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	for _, args := range [][]string{
+		{"-C", mainRoot, "config", "user.email", "test@example.com"},
+		{"-C", mainRoot, "config", "user.name", "Test User"},
+		{"-C", mainRoot, "commit", "--allow-empty", "-m", "init"},
+	} {
+		require.NoError(t, exec.Command("git", args...).Run(), "git %v", args)
+	}
+	wtRaw := filepath.Join(base, "linked")
+	out, err := exec.Command("git", "-C", mainRoot, "worktree", "add", "-b", "feature", wtRaw).CombinedOutput()
+	require.NoError(t, err, "git worktree add: %s", out)
+	worktree, err = filepath.EvalSymlinks(wtRaw)
+	require.NoError(t, err)
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+	return mainRoot, worktree
+}
+
+// bindMainWithSubdir creates a main git repo and a subdirectory inside it, the
+// other contract-contemplated binding: the TUI records the subdirectory the user
+// typed. Returns the symlink-resolved main root and the subdirectory path.
+func bindMainWithSubdir(t *testing.T) (mainRoot, sub string) {
+	t.Helper()
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "repo")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	sub = filepath.Join(mainRoot, "services", "dlq")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	var err error
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+	sub, err = filepath.EvalSymlinks(sub)
+	require.NoError(t, err)
+	return mainRoot, sub
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoID is the simplest shape: a plain `git
+// init` whose recorded path IS its own root. This shape does NOT surface a scope
+// divergence (the retained id and the dead-path fallback hash the same cleaned
+// path), so this test pins only that the field is NOT erased and that NO
+// daemon-upgrade audit entry fires for the destructive direction — the inverse
+// of TestAudit_SamePathBackfillIsRecorded, where a same-path patch FILLS a
+// retained id and the daemon-upgrade entry correctly fires.
+func TestAudit_SamePathDeadPatchRetainsRepoID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	require.NoError(t, exec.Command("git", "init", repo).Run())
+	resolved, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	repo = resolved
+
+	created, err := AddTaskChecked(Task{
+		ID: "own00001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	require.NoError(t, os.RemoveAll(filepath.Join(repo, ".git")))
+	require.Empty(t, repoIDForPath(repo), "precondition: the path no longer resolves to a repo")
+
+	same := repo
+	_, err = UpdateTaskChecked("own00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("own00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires: the destructive clear is neither performed nor recorded")
+}
+
+// TestAudit_SamePathDeadPatchRetainsWorktreeBinding: the sibling-worktree shape
+// the Task.RepoID contract names directly. The recorded path is a worktree at a
+// sibling of the main repo, so once its .git dies an ancestor walk from the
+// recorded path never crosses the lateral main repo and re-derivation invents an
+// id that matches nothing. Erasing RepoID on a same-path re-patch strandts the
+// task from its own project's scoped list; the fix retains the id.
+func TestAudit_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the worktree task is visible in its project's scoped list")
+
+	// Kill the worktree's .git: the recorded path no longer resolves, and the
+	// lateral main repo is unreachable by the ancestor walk (the stranding shape).
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	require.Empty(t, repoIDForPath(worktree), "precondition: the worktree path no longer resolves to a repo")
+	dead := config.ResolveProjectPath(worktree)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	same := worktree
+	_, err = UpdateTaskChecked("wtd00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("wtd00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires for the un-resolving re-bind")
+
+	// The retained id short-circuits scope matching before the dead path is
+	// re-derived, so the task stays in its own project's scoped list.
+	vis, err = LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project after a dead-path re-patch")
+}
+
+// TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass:
+// the daemon's startup re-binding pass must not disturb the retained binding
+// either. It backfills only rows whose ProjectPath still resolves (Root != "");
+// the dead worktree path does not, so the loader skips the row and the retained
+// id stays authoritative on disk.
+func TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00003", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	retained := created.RepoID
+
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	same := worktree
+	_, err = UpdateTaskChecked("wtd00003", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	// The daemon's loader pass: commits backfills for legacy rows whose path
+	// resolves and returns the authoritative list plus what it rewrote.
+	loaded, updated, err := LoadTasksForRepoIDWithBindingUpdates(retained)
+	require.NoError(t, err)
+	assert.Empty(t, updated, "the loader rewrites nothing: the retained id is already non-empty")
+	require.Len(t, loaded, 1, "the retained id keeps the task in its project's authoritative list")
+	assert.Equal(t, retained, loaded[0].RepoID)
+
+	stored, err := GetTask("wtd00003")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained id survives the loader pass on disk")
+	assert.Len(t, stored.Audit, 1, "the loader adds no daemon-upgrade entry for an already-bound row")
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the task remains visible in its project's scoped list after the loader pass")
+}
+
+// TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding: the subdirectory
+// shape. The TUI records the subdirectory the user typed; git resolves it back
+// to the main repo while it lives. Once the repo's .git dies the ancestor walk
+// from the subdir finds nothing, so re-derivation invents sha256(subdir), which
+// differs from the retained sha256(repo) — erasing RepoID strands the task.
+func TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, sub := bindMainWithSubdir(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "sub00001", Name: "subdir-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: sub, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID)
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the subdir task is visible in its project while the repo lives")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(mainRoot, ".git")))
+	require.Empty(t, repoIDForPath(sub), "precondition: the dead subdir no longer resolves to a repo")
+	dead := config.ResolveProjectPath(sub)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	same := sub
+	_, err = UpdateTaskChecked("sub00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sub00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires for the un-resolving re-bind")
+
+	vis, err = LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the retained binding keeps the task visible in its project after the owning repo dies")
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField: the realistic
+// trigger — an operator re-applies task config that includes --project-path
+// while editing another field, without knowing the path is already dead on the
+// daemon host. The other field's change is recorded as the user's; RepoID is
+// retained and no daemon-upgrade repo_id entry fires.
+func TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00004", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	retained := created.RepoID
+
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+
+	same := worktree
+	prompt := "sweep harder"
+	_, err = UpdateTaskChecked("wtd00004", TaskUpdate{ProjectPath: &same, Prompt: &prompt}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("wtd00004")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained RepoID survives a same-path dead re-patch that also edits a field")
+	require.Len(t, stored.Audit, 2, "the create, and the user's prompt change — no daemon-upgrade repo_id entry")
+	assert.Equal(t, ActorCLI, stored.Audit[1].Actor)
+	assert.Equal(t, []string{"prompt"}, stored.Audit[1].Fields, "the trail records the user's prompt change, not a derived repo_id")
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the task stays visible in its project after the combined re-patch")
 }

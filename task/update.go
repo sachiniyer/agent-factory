@@ -274,7 +274,18 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				}
 				merged = update.apply(existing)
 				if update.ProjectPath != nil {
-					merged.RepoID = rebindRepoID
+					if rebindRepoID != "" || *update.ProjectPath != existing.ProjectPath {
+						merged.RepoID = rebindRepoID
+					}
+					// else: a same-path patch whose re-resolution is empty. The path
+					// stopped resolving (its .git died, or the recorded leaf was a
+					// sibling worktree or subdirectory whose owning repo is no longer
+					// reachable by an ancestor walk). Overwriting with "" would erase the
+					// binding that apply already preserved from existing — stranding the
+					// task from its own project's scope the moment that path was reasserted,
+					// the exact harm RepoID exists to prevent (see Task.RepoID's PURPOSE).
+					// The recompute itself stays: a legacy row whose retained RepoID is ""
+					// is still filled in by a same-path patch that DOES resolve.
 				}
 				if err := merged.ValidateTrigger(); err != nil {
 					return err
