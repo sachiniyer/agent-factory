@@ -64,7 +64,7 @@ func pointDaemonHTTPAt(t *testing.T, sockPath string) {
 }
 
 // tuiMutations is every TUI seam that changes daemon state through the HTTP
-// launcher, keyed by the /v1 route it calls. Enumerated from session_control.go:
+// launcher, keyed by the /v1 route its apiclient method actually posts to. Enumerated from session_control.go:
 // a new mutation seam belongs here, which is what holds it to the no-replay rule.
 func tuiMutations() map[string]func() error {
 	expect := task.ProjectExpectation{}
@@ -82,7 +82,8 @@ func tuiMutations() map[string]func() error {
 			_, err := restoreSessionThroughDaemon(daemon.RestoreSessionRequest{ID: "i"})
 			return err
 		},
-		"/v1/HandoffSession": func() error {
+		// The handoff client posts to the account-aware route, not /v1/HandoffSession.
+		"/v1/" + daemon.AccountAwareHandoffMethod: func() error {
 			_, err := handoffSessionThroughDaemon(daemon.HandoffSessionRequest{ID: "i"})
 			return err
 		},
