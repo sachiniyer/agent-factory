@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 
@@ -62,6 +61,10 @@ type InRepoConfig struct {
 	// "absent" (falls through to the legacy/global value).
 	setKeys map[string]bool
 
+	// unknownLeaves lists the [docker]/[ssh] leaves the typed decode dropped
+	// because no field matches them; see UnknownLeaves.
+	unknownLeaves []InRepoUnknownLeaf
+
 	// source retains nested presence and the source path for provenance. It is
 	// populated by the same decode as setKeys; the resolver never re-reads the
 	// checked-in file to explain a value.
@@ -99,61 +102,7 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 var (
 	inRepoAllowedKeys    = manifestKeysForSource(SourceRepoShared)
 	inRepoGlobalOnlyKeys = manifestGlobalOnlyKeySet()
-
-	// inRepoAllowedTableLeaves mirrors the top-level inRepoAllowedKeys
-	// rejection at the leaf level for the [docker] and [ssh] tables. An
-	// unknown/typo'd leaf under an allowed table (e.g. "runargs" for
-	// "run_args") is rejected at load so the silent drop of Go's non-strict
-	// unmarshalling cannot change runtime behavior without a diagnostic
-	// (inrepo.go:93-96: "typos fail loudly"). Each set is derived from the
-	// same struct the typed decode targets, so adding a field to
-	// DockerConfig/SSHConfig automatically admits it here. The comparison
-	// folds case against the shape key (see LoadInRepoConfig): the typed
-	// decoders match field names case-insensitively, so a spelling the
-	// decode accepts (e.g. [docker] Image) is admitted here too, and the
-	// rejection lands on spellings the decode does not accept — typos.
-	inRepoAllowedTableLeaves = map[string]map[string]bool{
-		"docker": inRepoTableLeavesFor(reflect.TypeOf(DockerConfig{})),
-		"ssh":    inRepoTableLeavesFor(reflect.TypeOf(SSHConfig{})),
-	}
 )
-
-// inRepoTableLeavesFor derives the set of leaf key names the typed decoder
-// accepts under a table-typed in-repo field, from the struct's toml and json
-// tags (struct tags in this package are lowercase, so the set is lowercase).
-// metadataForSource decodes sub-tables as map[string]any for both TOML
-// (go-toml/v2) and JSON (encoding/json), preserving the file's original key
-// casing in the shape; the leaf check in LoadInRepoConfig therefore lowercases
-// each shape key before lookup, matching the case-insensitive field matching
-// of both decoders.
-func inRepoTableLeavesFor(typ reflect.Type) map[string]bool {
-	leaves := map[string]bool{}
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
-		if !field.IsExported() {
-			continue
-		}
-		for _, tag := range []string{field.Tag.Get("toml"), field.Tag.Get("json")} {
-			name := structTagName(tag)
-			if name == "" || name == "-" {
-				continue
-			}
-			leaves[name] = true
-		}
-	}
-	return leaves
-}
-
-// sortedKeysFrom returns the sorted keys of a bool-valued map for
-// deterministic error messages.
-func sortedKeysFrom(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
 // InRepoConfigPath returns the path of the in-repo JSON config file for a
 // repo root. The file is optional; callers should use LoadInRepoConfig rather
@@ -379,43 +328,15 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		}
 	}
 
-	// Reject unknown/typo'd leaves under the allowed [docker] and [ssh]
-	// tables. The top-level allowlist above admits these tables, but the
-	// typed decode below uses Go's non-strict unmarshalling, which silently
-	// discards any leaf not on DockerConfig/SSHConfig. A typo like
-	// docker.runargs is therefore dropped with err == nil, and downstream
-	// code sees the zero value — for docker.run_args that means docker run
-	// starts without the intended flags and no error is ever emitted. Walk
-	// the shape's nested tables (which metadataForSource decoded as
-	// map[string]any for both TOML and JSON) and reject any leaf not in the
-	// struct-tag-derived allowlist, mirroring the top-level rejection.
-	// Global-only grouped leaves (e.g. docker.mount_agent_credentials) are
-	// already rejected above by globalOnlyGroupedAliasInShape, so they are
-	// not re-reachable here.
-	for table, allowed := range inRepoAllowedTableLeaves {
-		raw, present := metadata.shape[table]
-		if !present {
-			continue
-		}
-		sub, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		for leaf := range sub {
-			// Fold case to match the typed decoders: encoding/json and
-			// go-toml/v2 both match field names case-insensitively, so a
-			// spelling like [docker] Image would be accepted by the typed
-			// decode into DockerConfig. The leaf check lowercases the shape
-			// key (whose casing is preserved from the file by
-			// metadataForSource) before the allowlist lookup so such
-			// spellings load cleanly and the rejection lands on genuine
-			// typos (e.g. "runargs", "iamge") instead.
-			if !allowed[strings.ToLower(leaf)] {
-				return nil, nil, fmt.Errorf("in-repo config %s: unknown key %q under %q (allowed %s keys: %s)",
-					prettyPath, leaf, table, table, strings.Join(sortedKeysFrom(allowed), ", "))
-			}
-		}
-	}
+	// Unknown/typo'd leaves under the allowed [docker] and [ssh] tables are
+	// silently discarded by the non-strict typed decode below, so docker.runargs
+	// would load with err == nil and docker run would start without the flags.
+	// They are collected here and warned about, not rejected: rejecting would
+	// break repos whose config loads today, so the hard error is deferred to a
+	// later release (#4845). Global-only grouped leaves (for example
+	// docker.mount_agent_credentials) were already rejected above by
+	// globalOnlyGroupedAliasInShape and never reach this walk.
+	unknownLeaves := inRepoUnknownTableLeaves(metadata.shape, prettyPath)
 
 	var cfg InRepoConfig
 	if isToml {
@@ -429,6 +350,8 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	}
 	cfg.setKeys = presentKeys
 	cfg.source = metadata
+	cfg.unknownLeaves = unknownLeaves
+	warnInRepoUnknownLeaves(unknownLeaves)
 
 	if cfg.IsSet("default_program") {
 		if err := ValidateProgramEnum(

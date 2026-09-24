@@ -8,6 +8,19 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## Warning: unknown `[docker]`/`[ssh]` keys in in-repo config (upcoming release)
+
+- **A typo'd leaf under `[docker]` or `[ssh]` in `.agent-factory/config.{toml,json}`
+  now warns.** Before, `docker.runargs` (for `run_args`) was dropped without a
+  word, so `docker run` started without the flags. The file still loads exactly
+  as before and the key is still ignored. The warning names the file, the key and
+  the closest known key, and it appears on CLI stderr (not under `--json`), in
+  the log and daemon log as WARNING, and in `af doctor` as an advisory WARN
+  (exit code unchanged) (#4599).
+- **Planned break:** a later release will make an unknown `[docker]`/`[ssh]` key
+  a load error, as unknown top-level in-repo keys already are (#4845). Name that
+  release in its own notes when it lands.
+
 ## Breaking: branch-associated PR integration removed (upcoming release)
 
 - **Session JSON no longer includes `pr_info`.** This includes session records
