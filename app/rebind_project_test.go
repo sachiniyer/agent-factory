@@ -8,7 +8,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -135,4 +139,76 @@ func TestCtrlCQuitsWhileRebindPending(t *testing.T) {
 	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyCtrlC})
 
 	assert.True(t, h.quitting, "ctrl+c must quit while a rebind is pending")
+}
+
+// committedErr is a daemon "mutation committed, follow-up failed" error.
+type committedErr struct{}
+
+func (committedErr) Error() string           { return "rebind committed, but publishing projects.changed failed" }
+func (committedErr) MutationCommitted() bool { return true }
+
+var _ apiproto.MutationCommittedError = committedErr{}
+
+// TestUncertainRebindDoesNotReArmThePicker pins the Codex finding on #4789: a
+// rebind whose reply was lost in transport (or that the daemon reports as
+// committed) may already be durable. Re-arming the form would let the user move
+// the identity a second time, so the picker closes and the outcome is reported
+// as unconfirmed instead of treated as a correctable refusal.
+func TestUncertainRebindDoesNotReArmThePicker(t *testing.T) {
+	for name, err := range map[string]error{
+		"transport": &apiclient.TransportError{Err: errors.New("read: connection reset by peer")},
+		"committed": committedErr{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestHome(t)
+			stubRebind(t, err)
+			picker := openRebindPicker(h)
+			h.Update(submitPickerRebind(t, h, "/new/project")())
+
+			assert.True(t, picker.RebindPending(), "an uncertain outcome must not re-arm the rebind form")
+			assert.Nil(t, h.projectPickerOverlay, "the picker closes on an uncertain outcome")
+			assert.Equal(t, stateDefault, h.state)
+		})
+	}
+}
+
+// TestRebindOfActiveProjectSwitchesToNewCheckout pins the Codex finding on
+// #4789: rebinding the project the TUI is scoped to must move the scope to the
+// new checkout, or sessions and tasks keep targeting the root that was just
+// repaired away.
+func TestRebindOfActiveProjectSwitchesToNewCheckout(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	stubRebind(t, nil)
+	newRoot := initTestGitRepo(t)
+
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
+		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: "prj_active", MissingPath: true},
+	}, h.repoRoot)
+	h.projectPickerOverlay.SetMaxSize(80, 24)
+	h.state = stateSwitchProject
+
+	_, cmd := h.Update(submitPickerRebind(t, h, newRoot)())
+	_ = cmd
+
+	assert.Equal(t, newRoot, h.repoRoot, "the TUI must follow its active project to the rebound checkout")
+	assert.Equal(t, config.RepoIDFromRoot(newRoot), h.repoID)
+}
+
+// TestRebindOfOtherProjectKeepsScope is the control: rebinding a project the
+// TUI is not scoped to leaves the active project alone.
+func TestRebindOfOtherProjectKeepsScope(t *testing.T) {
+	h := newTestHome(t)
+	stubRebind(t, nil)
+	rootBefore, idBefore := h.repoRoot, h.repoID
+	openRebindPicker(h) // rows name /old/project, not the active repo
+	h.Update(submitPickerRebind(t, h, "/new/project")())
+
+	assert.Equal(t, rootBefore, h.repoRoot)
+	assert.Equal(t, idBefore, h.repoID)
 }

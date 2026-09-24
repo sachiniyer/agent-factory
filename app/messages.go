@@ -82,6 +82,10 @@ type projectAddedMsg struct {
 type projectReboundMsg struct {
 	token     uint64
 	projectID string
+	// oldRepoID and oldRoot name the row as it was when the rebind was sent, so
+	// a success can tell whether it moved the project the TUI is scoped to.
+	oldRepoID string
+	oldRoot   string
 	name      string
 	root      string
 	err       error
