@@ -48,6 +48,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Program:                  i.Program,
 		RuntimeProgram:           i.runtimeProgram,
 		Account:                  i.Account,
+		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
 		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
@@ -100,6 +101,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
 
+	// An archived row cannot owe its own teardown — reaching Archived IS the
+	// discharge. Any other state may legitimately carry the obligation across a
+	// restart, and must (#4162): the completion edge that armed it cannot
+	// re-fire, so dropping the marker here would lose it permanently.
+	if i.liveness != LiveArchived {
+		data.PendingOnComplete = i.owedOnComplete
+	}
+
 	// Persist each tab so the full local agent+shell tab list survives a restart
 	// (Sachin's hard requirement for #930): on reload FromInstanceData restores
 	// each local tab's tmux session by its exact persisted name. An off-box
@@ -121,6 +130,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		if len(tab.Handoffs) > 0 {
 			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
 		}
+		td.Exit = tab.Exit.data()
+		td.AccountScope = tab.accountScope
 		data.Tabs = append(data.Tabs, td)
 	}
 	// An archived off-box row is inert, but the web rail still renders its
@@ -340,6 +351,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Program:                  data.Program,
 		runtimeProgram:           data.RuntimeProgram,
 		Account:                  data.Account,
+		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
 		Prompt:                   data.Prompt,
@@ -354,6 +366,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		rootRecreateContext: data.RootRecreateContext,
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
+	// The pending on_complete obligation rides the restart so the daemon can
+	// re-drive the teardown it could not finish (#4162). An archived row cannot
+	// owe its own teardown — mirroring the serialize gate — so a marker that
+	// somehow reached one is dropped rather than armed.
+	if liveness != LiveArchived {
+		instance.owedOnComplete = data.PendingOnComplete
+	}
 	worktreeReaped := false
 	restoredRelocationRecovery := false
 
@@ -595,6 +614,13 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			var ts *tmux.TmuxSession
 			if td.TmuxName != "" {
 				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
+				// Keep the restored handle consistent with a fresh process
+				// tab's: the flag only matters if Start is ever invoked, and
+				// after #4479 nothing invokes it — but the invariant costs
+				// nothing and keeps a future Start caller honest.
+				if ts != nil && kind == TabKindProcess {
+					ts.SetRemainOnExit()
+				}
 			}
 			var conversation AgentConversationData
 			if td.Conversation != nil {
@@ -621,8 +647,10 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				URL:                           td.URL,
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
+				Exit:                          tabExitFromData(td.Exit),
 				tmux:                          ts,
-				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux() && ts != nil,
+				accountScope:                  td.AccountScope,
+				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),
 			})
 		}
 		return

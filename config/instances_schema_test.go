@@ -124,6 +124,124 @@ func TestRepoInstancesMigrateOnLoadPathsNoInstancesDir(t *testing.T) {
 	assert.Empty(t, paths)
 }
 
+// TestMigrateAndManifestSkipInvalidRepoIDSubdir pins the fix for the
+// bad-directory-name class: a subdirectory under instances/ whose name is not a
+// valid repoID (contains ".", "/", spaces, etc.) must NOT abort the migration
+// sweep or the upgrade manifest, mirroring the all-repo loader's skip-and-warn
+// posture (state.go). Pre-fix, the unvalidated walk fed such a name straight to
+// repoInstancesPath, whose ValidateRepoID failure hit the migrator's default
+// branch and aborted every repo's restore — and the manifest's resolve step
+// returned the same error, blocking binary-only upgrades. af itself only ever
+// creates valid-named subdirectories (SaveRepoInstances → repoInstancesPath →
+// ValidateRepoID), so this class is always an externally-created stray.
+func TestMigrateAndManifestSkipInvalidRepoIDSubdir(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	healthyA := RepoIDFromRoot("/repo/alpha")
+	healthyB := RepoIDFromRoot("/repo/beta")
+	for _, repoID := range []string{healthyA, healthyB} {
+		rows, err := json.Marshal([]map[string]string{{"title": "s", "path": "/r"}})
+		require.NoError(t, err)
+		require.NoError(t, SaveRepoInstances(repoID, json.RawMessage(rows)))
+	}
+	alphaPath, err := repoInstancesPath(healthyA)
+	require.NoError(t, err)
+	betaPath, err := repoInstancesPath(healthyB)
+	require.NoError(t, err)
+
+	dir, err := instancesDirPath()
+	require.NoError(t, err)
+	// A stray directory whose name fails ValidateRepoID (contains "."). Pre-fix
+	// this aborted the whole sweep under both the migrator and the manifest.
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "stray.backup.dir"), 0755))
+
+	// Migrator: must NOT abort on the stray dir; the healthy repos still migrate.
+	require.NoError(t, MigrateAllRepoInstancesForDaemonLoad(),
+		"a stray subdirectory with an invalid repoID must not abort migration of every repo")
+
+	// Manifest: must list exactly the healthy repos' paths, skipping the stray
+	// dir so the manifest enumerates the same set the migrator walks.
+	paths, err := RepoInstancesMigrateOnLoadPaths()
+	require.NoError(t, err,
+		"a stray subdirectory with an invalid repoID must not abort manifest generation")
+	assert.ElementsMatch(t, []string{alphaPath, betaPath}, paths,
+		"the manifest must enumerate exactly the repos the migrator walks, excluding the invalid-named dir the walk skips")
+
+	// Loader: the same stray dir is handled gracefully — loaded 2, skipped 1.
+	// The three paths now agree on the skip for this class.
+	result, skipped, _, loadErr := LoadAllRepoInstancesReportingMissing()
+	require.NoError(t, loadErr)
+	assert.Len(t, result, 2)
+	assert.Len(t, skipped, 1)
+}
+
+// TestRepoInstanceIDsForDaemonLoadSkipsOnlyInvalidNames pins that the walk keeps
+// every directory name ValidateRepoID accepts and rejects exactly the ones it
+// does not, so the filter is "is this a repoID-shaped name" rather than a
+// broader exclusion that could silently drop real repos.
+func TestRepoInstanceIDsForDaemonLoadSkipsOnlyInvalidNames(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	dir, err := instancesDirPath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+
+	for _, name := range []string{"valid-repo", "d-abcdef123456", "UPPER_123"} {
+		require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0755))
+	}
+	// Each of these is a real single directory entry whose name fails
+	// ValidateRepoID: "." traverses, " " breaks the pattern, "\" is rejected
+	// even though Linux allows it as a filename character.
+	for _, name := range []string{"stray.backup.dir", "has space", "back\\slash"} {
+		require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0755))
+	}
+	// A non-directory entry is still skipped by the IsDir filter, unchanged.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plain-file"), []byte("x"), 0644))
+
+	ids, err := repoInstanceIDsForDaemonLoad()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"valid-repo", "d-abcdef123456", "UPPER_123"}, ids,
+		"only valid repoID-shaped directory names are enumerated; invalid-named dirs and files are skipped")
+}
+
+// TestMigrateAllRepoInstancesForDaemonLoadStillRefusesUnreadableValidRepo pins
+// that the invalid-name skip did NOT relax the hard-refuse the unreadable-records
+// gate (daemon/unreadable_records_test.go) depends on: a valid-repoID repo whose
+// instances.json cannot be read must still abort the migration sweep. The fix
+// filters directories whose NAMES are not valid repoIDs; a readable-name repo
+// with an I/O failure still reaches MigrateRepoInstancesForDaemonLoad, fails at
+// os.ReadFile, and hits the migrator's default branch. A bad directory name is a
+// pre-condition failure (the name describes no repo, no file is opened); a read
+// failure on a real repo is the class the default branch was written for.
+func TestMigrateAllRepoInstancesForDaemonLoadStillRefusesUnreadableValidRepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.NoError(t, SaveRepoInstances("readable", json.RawMessage("[]")))
+	require.NoError(t, SaveRepoInstances("blocked", json.RawMessage("[]")))
+	blocked, err := repoInstancesPath("blocked")
+	require.NoError(t, err)
+
+	// chmod 0000 is the realistic shape, but modes inherit the ambient umask and
+	// root ignores them, so apply it and then PROVE the file is unreadable —
+	// falling back to a directory in its place, which os.ReadFile refuses for
+	// everyone. A missing file would not do: the migrator maps that to a no-op.
+	require.NoError(t, os.Chmod(blocked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o600) })
+	if _, err := os.ReadFile(blocked); err == nil {
+		require.NoError(t, os.Remove(blocked))
+		require.NoError(t, os.Mkdir(blocked, 0o755))
+	}
+	_, readErr := os.ReadFile(blocked)
+	require.Error(t, readErr, "fixture did not take: %s is still readable", blocked)
+	require.False(t, os.IsNotExist(readErr), "fixture must produce a READ error, not a missing file")
+
+	err = MigrateAllRepoInstancesForDaemonLoad()
+	require.Error(t, err,
+		"an unreadable instances.json under a valid repoID must still abort the migration sweep")
+	assert.Contains(t, err.Error(), "blocked",
+		"the refusal must name the repo whose file could not be read")
+}
+
 func TestSaveRepoInstancesWritesEnvelopeAndLoadReturnsArray(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", tempHome)

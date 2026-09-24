@@ -374,6 +374,12 @@ type home struct {
 	// Background snapshots may move the sidebar selection, replace its pointer,
 	// or reuse its display title while the modal is open (#2358).
 	tabCreateTarget sessionActionTarget
+	// tabRenameTarget identifies the session AND the tab the rename prompt will
+	// act on, captured when the prompt opens for the same reason as
+	// tabCreateTarget — plus the roster generation, because a pre-#1738 tab has
+	// no stable id and the captured name can only be trusted while the roster
+	// provably has not changed (the same rule delete consent applies, #2358).
+	tabRenameTarget tabRenameRef
 	// searchOverlay handles session search
 	searchOverlay *overlay.SearchOverlay
 	// projectPickerOverlay handles switching the active project (#1461)
@@ -722,10 +728,12 @@ func (m *home) relayout() {
 
 	m.layoutModalOverlays()
 
-	// Live panes size their sessions over the WS stream (last-resize-wins
-	// resize-window, #1592 Phase 2 PR6): each attachment's Resize rides the pane
-	// geometry through SetRect → w.live.Resize, so the TUI no longer resizes local
-	// tmux sessions from the relayout.
+	// Live panes report their view geometry through SetRect → w.live.Resize —
+	// which is render-only unless the attachment currently OWNS the pane's size
+	// (the focused interactive pane, #4480): only an owner's Resize reaches the
+	// WS stream's last-resize-wins resize-window. The TUI no longer resizes
+	// local tmux sessions from the relayout, and a passive viewer's layout churn
+	// never does either.
 }
 
 func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPane) *store.OpenPane {

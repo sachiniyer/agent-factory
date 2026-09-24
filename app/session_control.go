@@ -370,6 +370,38 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 	})
 }
 
+// reorderTabThroughDaemon routes the TUI's </> tab move to the daemon's
+// ReorderTab RPC — the same /v1/ReorderTab route the web's drag reorder calls
+// (web/src/api.ts) and `af sessions tab-reorder` reaches over the control
+// socket, so all three surfaces permute one roster one way and the daemon's
+// agent-tab pinning and rollback rules apply identically. The response carries
+// the resolved final index, which the projection applies rather than trusting
+// its own arithmetic.
+var reorderTabThroughDaemon = func(request daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+	var response daemon.ReorderTabResponse
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		response, e = c.ReorderTab(request)
+		return e
+	})
+	return response, err
+}
+
+// renameTabThroughDaemon routes the TUI's `R` (rename tab) mutation to the
+// daemon's RenameTab RPC — the same /v1/RenameTab the web calls and
+// `af sessions tab-rename` reaches over the control socket — and returns the
+// RESOLVED name (sanitized, collision-suffixed), which the TUI applies to its
+// local projection so the bar reads it before the next snapshot lands.
+var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, error) {
+	var resolved string
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		resolved, e = c.RenameTab(request)
+		return e
+	})
+	return resolved, err
+}
+
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
 // repo (#960 PR 3). It is the TUI's read path under the single-writer model: the
 // sidebar mirrors this projection instead of re-reading instances.json.
@@ -579,6 +611,20 @@ func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	prev := closeTabThroughDaemon
 	closeTabThroughDaemon = f
 	return func() { closeTabThroughDaemon = prev }
+}
+
+// SetTabReordererForTest swaps the ReorderTab seam so a test can assert the
+// TUI routes a </> tab move through the daemon — without dialing a real one.
+func SetTabReordererForTest(f func(daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error)) func() {
+	prev := reorderTabThroughDaemon
+	reorderTabThroughDaemon = f
+	return func() { reorderTabThroughDaemon = prev }
+}
+
+func SetTabRenamerForTest(f func(daemon.RenameTabRequest) (string, error)) func() {
+	prev := renameTabThroughDaemon
+	renameTabThroughDaemon = f
+	return func() { renameTabThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {
