@@ -3,7 +3,7 @@ package sessionenv
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/assert"
 )
 
 // Unmodeled argv-passthrough wrappers (strace, perf, valgrind, gdb --args,
@@ -73,8 +73,10 @@ func TestValidateAccountEnvironmentCommand_RefusesUnmodeledWrapperHiddenAssignme
 		"strace --setenv=CODEX_HOME codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
-		require.Error(t, err, "command %q hides a denied NAME= assignment behind an unmodeled wrapper", command)
-		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+		if !assert.Error(t, err, "command %q hides a denied NAME= assignment behind an unmodeled wrapper", command) {
+			continue
+		}
+		assert.Contains(t, err.Error(), "sets an identity or shell-startup variable",
 			"command %q must be refused by the account-environment guard", command)
 	}
 }
@@ -106,7 +108,7 @@ func TestValidateAccountEnvironmentCommand_RefusesUnmodeledWrapperAcrossAgents(t
 	for _, test := range cases {
 		account := Account{Agent: test.agent, Name: "work", Dir: "/afhome/accounts/" + test.agent + "/work"}
 		err := ValidateAccountEnvironmentCommand(test.command, account)
-		require.Error(t, err, "agent %q: command %q hides a denied assignment behind a wrapper",
+		assert.Error(t, err, "agent %q: command %q hides a denied assignment behind a wrapper",
 			test.agent, test.command)
 	}
 }
@@ -161,13 +163,6 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		"rg OPENAI_API_KEY= .",
 		"grep CODEX_HOME= /etc/environment",
 		"cat CODEX_HOME=/other",
-		// A nested env with no command word is env's print mode: it mutates
-		// only its own process's environment and execs nothing, so the tail
-		// assignment overrides no running agent.
-		"strace env CODEX_HOME=/other",
-		// A dynamic tail word could expand to `env`, but with no command word
-		// after the assignment the result is still print mode.
-		"strace $W CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -177,7 +172,7 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		"xargs --process-slot-var=PORT env codex",
 		"xargs -I{} env PORT={} codex",
 	} {
-		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+		assert.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 			"command %q carries no denied NAME= word and must stay allowed", command)
 	}
 }
@@ -229,12 +224,15 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace sh -c 'export CODEX_HOME=/x; codex'", true},
 		{"strace bash -c 'CODEX_HOME=/x codex'", true},
 		{"sh -c 'unset CODEX_HOME; codex'", true}, // control: bare shell form is caught
-		// A trailing shell name with no argv after it has nothing to prove
-		// against, so noun-uses stay allowed.
-		{"strace sh", false},
+		// A trailing shell name in an unmodeled wrapper's tail stays allowed
+		// there, but strace is modeled now: every suffix is judged as a
+		// standalone command, and a bare interactive shell is unproven under
+		// the same shellCommandIsUnproven rule that refuses `sh` at command
+		// position.
+		{"strace sh", true},
 		{"echo sh", false},
 		{"man sh", false},
-		{"strace -p 1234 sh", false},
+		{"strace -p 1234 sh", true},
 		// A tail that parses as a real unproven shell invocation refuses even
 		// under a non-wrapper head — the same trade `echo env X=y cmd` takes.
 		{"echo sh -c 'unset CODEX_HOME'", true},
@@ -256,7 +254,7 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
-		require.Equal(t, test.want, got, "command %q", test.command)
+		assert.Equal(t, test.want, got, "command %q", test.command)
 	}
 }
 
@@ -273,8 +271,10 @@ func TestApplyAccountEnvironment_RefusesUnmodeledWrapperHiddenAssignment(t *test
 		"valgrind env CODEX_HOME=/other codex",
 	} {
 		_, err := ApplyAccountEnvironment(nil, command, account)
-		require.Error(t, err, "command %q must not replace the sibling account environment", command)
-		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+		if !assert.Error(t, err, "command %q must not replace the sibling account environment", command) {
+			continue
+		}
+		assert.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 	}
 }
 
@@ -340,7 +340,7 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		{"xargs --version echo hi", false},
 		{"xargs --help env codex", false},
 	} {
-		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
+		assert.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
 			"command %q", test.command)
 	}
 }

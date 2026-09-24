@@ -291,7 +291,7 @@ func executableIsAgent(executable, agent, trustedExecutable string) bool {
 // receive the selected account root. Requiring a bare name puts PATH resolution —
 // the operator's configuration — in charge of which binary runs.
 func isBareName(word *syntax.Word, want string) bool {
-	value, ok := literalShellWord(word)
+	value, ok := literalShellWordExpandableSafe(word)
 	if !ok || strings.Contains(value, "/") {
 		return false
 	}

@@ -6,16 +6,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// operandTailMemo bounds the shadowed-wrapper operand walk. Every words slice
-// inside one validation is a suffix of the call's Args — the parser allocates
-// each Word once — so the first element's pointer names a distinct remaining
-// suffix, and the answer to "does the operand-onward tail mutate" depends only
-// on that suffix. Without it the same suffix is walked once by the operand
-// check and again by the enclosing unwrap loop's continuation, so nested
-// value-taking wrappers recurred exponentially (Codex on #4465: ~3s at depth
-// 20 of `nice -n nice ...`, unbounded at 25).
-type operandTailMemo map[*syntax.Word]bool
-
 // wrapperOperandTailMutates keeps a consumed option operand a candidate for
 // inspection. The modeled wrappers match by basename, which cannot prove the
 // binary is real util-linux: a repository-local or PATH-shadowed `ionice`
@@ -33,30 +23,35 @@ type operandTailMemo map[*syntax.Word]bool
 // literal `-c sh /tmp/launch-agent` refused (Codex on #4465), so the dynamic
 // case fails closed. The option consumption that follows still covers the
 // real binary's reading.
-func wrapperOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+func wrapperOperandTailMutates(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) bool {
 	if len(words) == 0 {
 		return false
 	}
-	if answer, seen := memo[words[0]]; seen {
+	if answer, seen := evaluation.operandTails[words[0]]; seen {
 		return answer
 	}
-	answer := wrapperOperandTailMutatesUncached(words, names, memo)
-	memo[words[0]] = answer
+	answer := wrapperOperandTailMutatesUncached(words, names, evaluation)
+	if evaluation.operandTails == nil {
+		evaluation.operandTails = make(map[*syntax.Word]bool)
+	}
+	evaluation.operandTails[words[0]] = answer
 	return answer
 }
 
-func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	if _, literal := literalShellWord(words[0]); !literal {
+func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) bool {
+	// The operand is judged as a command head, so it must be one the walk can
+	// prove as a head: literal AND immune to /bin/sh expansion (#4466).
+	if !provableCommandHead(words[0]) {
 		return true
 	}
-	tail, unsafe := unwrapAccountCommand(words, names, memo)
+	tail, unsafe := unwrapAccountCommand(words, names, evaluation)
 	if unsafe {
 		return true
 	}
 	if len(tail) == 0 {
 		return false
 	}
-	return unwrappedAccountCommandMutates(tail, names, memo)
+	return unwrappedAccountCommandMutates(tail, names, evaluation)
 }
 
 // shadowedTailOperandLimit bounds a childless tail. The real binaries take a
@@ -88,12 +83,12 @@ const shadowedTailOperandLimit = 64
 // Each suffix judgment re-walks the rest of the tail, so the scan is quadratic
 // in its length — 8000 literal PIDs took 8s against 6ms on master — and a tail
 // past shadowedTailOperandLimit fails closed instead.
-func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) bool {
 	if len(words) > shadowedTailOperandLimit {
 		return true
 	}
 	for i := range words {
-		if wrapperOperandTailMutates(words[i:], names, memo) {
+		if wrapperOperandTailMutates(words[i:], names, evaluation) {
 			return true
 		}
 	}
@@ -105,7 +100,7 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 		words = words[1:]
 	}
 	if len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal || strings.HasPrefix(option, "-") {
 			return nil, true
 		}
@@ -113,9 +108,9 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return words, false
 }
 
-func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapNice(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -126,10 +121,10 @@ func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTai
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
-			if wrapperOperandTailMutates(words[1:], names, memo) {
+			if wrapperOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			words = words[2:]
@@ -148,9 +143,9 @@ func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTai
 	return nil, false
 }
 
-func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -160,11 +155,11 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 			if len(words) < 2 {
 				return nil, false
 			}
-			if _, literal := literalShellWord(words[0]); !literal &&
+			if _, literal := literalShellWordExpandableSafe(words[0]); !literal &&
 				!isSimpleQuotedParameterWord(words[0]) {
 				return nil, true
 			}
-			if wrapperOperandTailMutates(words, names, memo) {
+			if wrapperOperandTailMutates(words, names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -172,10 +167,10 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
-			if wrapperOperandTailMutates(words[1:], names, memo) {
+			if wrapperOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			words = words[2:]
@@ -191,7 +186,7 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 			}
 			// The duration is an operand like taskset's mask: it stays a
 			// candidate for the shadowed reading.
-			if wrapperOperandTailMutates(words, names, memo) {
+			if wrapperOperandTailMutates(words, names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -200,9 +195,9 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 	return nil, false
 }
 
-func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -210,7 +205,7 @@ func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case "--":
 			return words[1:], false
 		case "-h", "--help", "-V", "--version":
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -232,9 +227,9 @@ func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandT
 	return nil, false
 }
 
-func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -242,7 +237,7 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case option == "--":
 			return words[1:], false
 		case option == "--help" || option == "--version":
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -252,10 +247,10 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 			if len(words) < 2 {
 				return nil, true
 			}
-			if _, literal := literalShellWord(words[1]); !literal {
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal {
 				return nil, true
 			}
-			if wrapperOperandTailMutates(words[1:], names, memo) {
+			if wrapperOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			words = words[2:]
@@ -281,10 +276,10 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 // opaque leaf program whose arguments were inert, so
 // `ionice -c 3 sh -c 'unset CODEX_HOME; codex'` reached the default-safe
 // return and the nested shell removed the selected root before launch.
-func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapIonice(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	var scope ioniceProofScope
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			// An option token carrying a quoted value is still ONE argv word when
 			// a literal '=' or literal value text pins its boundary, so the value
@@ -306,7 +301,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// `invalid PID argument` and prints nothing — so inspecting it as a
 			// command refuses only what a shadowed wrapper could actually run.
 			if ioniceProcessOnlyOption(prefix) {
-				if !scope.admitExtension() || shadowedOperandTailMutates(words[1:], names, memo) {
+				if !scope.admitExtension() || shadowedOperandTailMutates(words[1:], names, evaluation) {
 					return nil, true
 				}
 				return words[1:], false
@@ -346,7 +341,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// --help/--version exit before reaching a child on the real
 			// binary, but the basename match cannot prove this IS that binary;
 			// the words after the option still get inspected as a command.
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -360,7 +355,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// PID operands judge as an unrecognized literal command and stay
 			// accepted; an env or shell tail is refused. Process-control policy
 			// is outside this validator's environment-mutation contract.
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -381,11 +376,11 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// "unknown scheduling class" before launching anything, and a valid one
 			// goes on to --help or -p mode, so every runtime value of a single-word
 			// operand leaves the following no-child modes reachable.
-			if _, literal := literalShellWord(words[1]); !literal &&
+			if _, literal := literalShellWordExpandableSafe(words[1]); !literal &&
 				!isSimpleQuotedParameterWord(words[1]) {
 				return nil, true
 			}
-			if wrapperOperandTailMutates(words[1:], names, memo) {
+			if wrapperOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			words = words[2:]
@@ -548,9 +543,9 @@ func ioniceProcessOnlyOption(option string) bool {
 // unwrapTaskset is unwrapIonice for `taskset`, with one extra step: taskset's
 // first OPERAND is the affinity mask (or, after -c, the cpu list), and the
 // command it runs begins only after it.
-func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			// taskset's selector behaves as ionice's does: -p switches it to
 			// operating on an existing PID, so no expansion of an attached quoted
@@ -561,7 +556,7 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			// so the name is matched with any attached value cut away.
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
 			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
-				if shadowedOperandTailMutates(words[1:], names, memo) {
+				if shadowedOperandTailMutates(words[1:], names, evaluation) {
 					return nil, true
 				}
 				return words[1:], false
@@ -570,9 +565,9 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 		}
 		switch {
 		case option == "--":
-			return tasksetCommandAfterMask(words[1:], names, memo)
+			return tasksetCommandAfterMask(words[1:], names, evaluation)
 		case utilLinuxTerminalOption(option, "acp"):
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -582,7 +577,7 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			// mutate on the real binary. The operand tail is still inspected:
 			// the basename match cannot distinguish taskset from a
 			// PATH-shadowed script that execs whatever follows the selector.
-			if shadowedOperandTailMutates(words[1:], names, memo) {
+			if shadowedOperandTailMutates(words[1:], names, evaluation) {
 				return nil, true
 			}
 			return words[1:], false
@@ -592,7 +587,7 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 		case strings.HasPrefix(option, "-"):
 			return nil, true
 		default:
-			return tasksetCommandAfterMask(words, names, memo)
+			return tasksetCommandAfterMask(words, names, evaluation)
 		}
 	}
 	return nil, false
@@ -641,7 +636,7 @@ func tasksetProcessOnlyOption(option string) bool {
 	return false
 }
 
-func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	if len(words) == 0 {
 		return nil, false
 	}
@@ -650,14 +645,14 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 	// Measured on util-linux 2.39.3, an empty or unparseable mask exits with
 	// "failed to parse CPU mask"/"CPU list" before exec, and a valid one runs the
 	// child — which the walk then inspects either way.
-	if _, literal := literalShellWord(words[0]); !literal &&
+	if _, literal := literalShellWordExpandableSafe(words[0]); !literal &&
 		!isSimpleQuotedParameterWord(words[0]) {
 		return nil, true
 	}
 	// The mask word stays a candidate like any other consumed operand: a
 	// shadowed taskset need not skip it, so the mask-onward tail is judged as
 	// a command before the real binary's child is returned.
-	if wrapperOperandTailMutates(words, names, memo) {
+	if wrapperOperandTailMutates(words, names, evaluation) {
 		return nil, true
 	}
 	return words[1:], false
@@ -671,13 +666,13 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 // receive either is unprovable, because env re-parses the substituted word —
 // an item spelling NAME=value becomes an assignment even when the marker sat
 // in env's command slot.
-func unwrapXargs(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+func unwrapXargs(words []*syntax.Word, names map[string]struct{}, evaluation *evaluationBudget) ([]*syntax.Word, bool) {
 	substituting := false
 	markerKnown := true
 	marker := "{}"
 options:
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return nil, true
 		}
@@ -691,7 +686,7 @@ options:
 			name, value, attached := strings.Cut(option[2:], "=")
 			switch name {
 			case "help", "version":
-				if shadowedOperandTailMutates(words[1:], names, memo) {
+				if shadowedOperandTailMutates(words[1:], names, evaluation) {
 					return nil, true
 				}
 				return words[1:], false
@@ -716,7 +711,7 @@ options:
 					}
 					// The argument value itself is inert to this analysis on
 					// the real binary, but a shadowed xargs may exec it.
-					if wrapperOperandTailMutates(words[1:], names, memo) {
+					if wrapperOperandTailMutates(words[1:], names, evaluation) {
 						return nil, true
 					}
 					words = words[1:]
@@ -731,8 +726,8 @@ options:
 					if len(words) < 2 {
 						return nil, true
 					}
-					arg, argLiteral = literalShellWord(words[1])
-					if wrapperOperandTailMutates(words[1:], names, memo) {
+					arg, argLiteral = literalShellWordExpandableSafe(words[1])
+					if wrapperOperandTailMutates(words[1:], names, evaluation) {
 						return nil, true
 					}
 					words = words[1:]
@@ -768,8 +763,8 @@ options:
 						if len(words) < 2 {
 							return nil, true
 						}
-						arg, argLiteral = literalShellWord(words[1])
-						if wrapperOperandTailMutates(words[1:], names, memo) {
+						arg, argLiteral = literalShellWordExpandableSafe(words[1])
+						if wrapperOperandTailMutates(words[1:], names, evaluation) {
 							return nil, true
 						}
 						words = words[1:]
@@ -795,7 +790,7 @@ options:
 		// item — nothing here to unwrap.
 		return nil, false
 	}
-	if _, literal := literalShellWord(words[0]); !literal {
+	if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 		return nil, true
 	}
 	for j := 0; j < len(words); j++ {
@@ -820,7 +815,7 @@ options:
 				return nil, true
 			}
 			for k := 0; k < operandEnd; k++ {
-				lit, ok := literalShellWord(words[j+1+k])
+				lit, ok := literalShellWordExpandableSafe(words[j+1+k])
 				if !ok {
 					return nil, true
 				}
@@ -865,7 +860,7 @@ func isLastBackgroundPidWord(word *syntax.Word) bool {
 
 func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for len(words) > 0 {
-		option, literal := literalShellWord(words[0])
+		option, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			// `$!` is the ONE expansion that cannot turn into an option: the shell
 			// sets it to the last background pid and it is not assignable, so it is
@@ -899,7 +894,7 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 				if idx != len(flags)-1 || len(words) < 2 {
 					return true
 				}
-				target, literal := literalShellWord(words[1])
+				target, literal := literalShellWordExpandableSafe(words[1])
 				if !literal || accountEnvironmentOperandDenied(target, names) {
 					return true
 				}
@@ -915,7 +910,7 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 
 func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for _, word := range words {
-		expression, literal := literalShellWord(word)
+		expression, literal := literalShellWordExpandableSafe(word)
 		if !literal || accountSubscriptInArithmetic(expression, names) {
 			return true
 		}
@@ -924,8 +919,9 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 			return true
 		}
 		mutates := false
+		evaluation := &evaluationBudget{}
 		syntax.Walk(parsed, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, evaluation) {
 				mutates = true
 				return false
 			}
@@ -962,7 +958,7 @@ func isShellNameByte(value byte) bool {
 func arrayReadMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	options := true
 	for len(words) > 0 {
-		value, literal := literalShellWord(words[0])
+		value, literal := literalShellWordExpandableSafe(words[0])
 		if !literal {
 			return true
 		}
@@ -978,7 +974,7 @@ func arrayReadMutatesAccountEnvironment(words []*syntax.Word, names map[string]s
 				if len(words) == 0 {
 					return true
 				}
-				if _, literal := literalShellWord(words[0]); !literal {
+				if _, literal := literalShellWordExpandableSafe(words[0]); !literal {
 					return true
 				}
 				words = words[1:]
