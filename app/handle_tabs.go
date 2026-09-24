@@ -371,9 +371,14 @@ func (m *home) showRenameTabPrompt() (tea.Model, tea.Cmd) {
 	if inst == nil {
 		return m, nil
 	}
-	tabs := inst.GetTabs()
-	if idx <= 0 || idx >= len(tabs) {
+	if idx <= 0 {
 		return m, m.handleNotice(fmt.Errorf("the agent tab can't be renamed: it always displays as %q", "Agent"))
+	}
+	tabs := inst.GetTabs()
+	if idx >= len(tabs) {
+		// A stale index (the tab it named has since closed) is not the agent
+		// tab; say what actually happened, as handleCloseTab keeps these apart.
+		return m, m.handleNotice(fmt.Errorf("the selected tab no longer exists; select a tab and try again"))
 	}
 	tab := tabs[idx]
 	if tab == nil {

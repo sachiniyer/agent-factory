@@ -320,3 +320,22 @@ func TestRenameTabAppliesDaemonNameVerbatim(t *testing.T) {
 	h.errBox.SetSize(200, 1)
 	require.Contains(t, h.errBox.String(), `renamed tab to "docs"`)
 }
+
+// TestRenameTabStaleIndexIsNotTheAgentTab: an active-tab index past the end of
+// the roster (its tab closed since) must not be reported as the agent tab.
+func TestRenameTabStaleIndexIsNotTheAgentTab(t *testing.T) {
+	h := newTestHome(t)
+	inst := freshLocalInstance(t, "rename-stale-idx")
+	inst.AddWebTabForTest("web", "https://example.com")
+	selectInstance(h, inst)
+	h.store.SetActiveTab(5)
+	calls, _ := recordRenameTab(t, "unused")
+
+	_, _ = h.showRenameTabPrompt()
+
+	require.Nil(t, h.promptOverlay, "no prompt for a tab that no longer exists")
+	require.Empty(t, *calls)
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.String(), "no longer exists")
+	require.NotContains(t, h.errBox.String(), "agent tab")
+}
