@@ -294,9 +294,11 @@ type DeleteProjectResponse struct {
 // the DAEMON's filesystem; the daemon expands ~, resolves symlinks, and walks to
 // the git checkout's canonical main-repo root, then validates it.
 //
-// Path must already be absolute (or ~-prefixed) — the daemon has no access to the
-// caller's working directory, so a relative path would resolve against the
-// daemon's own cwd, which is not the caller's. Callers whose input can be
+// Path must already be absolute (or ~-prefixed) after surrounding whitespace is
+// trimmed — the daemon has no access to the caller's working directory, so a
+// relative path would resolve against the daemon's own cwd, which is not the
+// caller's. The daemon REFUSES one before touching the registry (#4821), and
+// registers the trimmed, expanded value it checked. Callers whose input can be
 // relative resolve it against the user's cwd BEFORE sending: the CLI's
 // `af projects add` does this (see api/projects.go), and the web only ever
 // supplies daemon-host paths. Registration is idempotent: a known checkout is a

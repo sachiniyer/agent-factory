@@ -694,9 +694,9 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 // registry in-process, so one process owns the store and — for a web or remote
 // client — the path is resolved on the daemon's filesystem, not the caller's.
 //
-// config.RegisterProject does the work (expand ~, resolve the git root,
-// validate, persist, idempotent) under its own file lock, so this handler adds
-// only the admission gate and the projects-changed publish. It does NOT take a
+// config.RegisterProject does the work (resolve the git root, validate,
+// persist, idempotent) under its own file lock, so this handler adds only the
+// admission gate, the absolute-path boundary, and the projects-changed publish. It does NOT take a
 // manager lock: the registry is independent of the session roster, and
 // RegisterProject's own lock already serializes concurrent registrations.
 //
@@ -709,7 +709,15 @@ func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *Regist
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	project, err := config.RegisterProject(req.Path)
+	// Enforce RegisterProjectRequest's contract here, before the registry is
+	// touched (#4821): config.RegisterProject would resolve a relative path
+	// against THIS process's cwd. The normalized value is the one registered, so
+	// what was checked is exactly what is stored.
+	path, err := config.ResolveDaemonHostPath(req.Path)
+	if err != nil {
+		return fmt.Errorf("project %w", err)
+	}
+	project, err := config.RegisterProject(path)
 	if err != nil {
 		return err
 	}

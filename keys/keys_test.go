@@ -50,6 +50,8 @@ func TestDefaultMapsMatchApprovedKeymap(t *testing.T) {
 		// R: the TUI's tab-rename verb — the #1904/#1813 capability the web and
 		// CLI already expose. Capital like the other mutating verbs (D, S, F).
 		"R":      KeyRenameTab,
+		"<":      KeyMoveTabLeft,
+		">":      KeyMoveTabRight,
 		"?":      KeyHelp,
 		"s":      KeyOpenPane,
 		"S":      KeySplitPane,

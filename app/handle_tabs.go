@@ -510,6 +510,112 @@ func localTabNameTaken(inst *session.Instance, self *session.Tab, name string) b
 	return false
 }
 
+// handleMoveTab moves the tab the user is LOOKING at one slot — `<` left, `>`
+// right — through the daemon's ReorderTab RPC (#1813), the same route the web's
+// drag reorder and `af sessions tab-reorder` take, so all three surfaces
+// permute one roster one way.
+//
+// The target is resolved exactly like `w` (#1884): a pane-focused move acts on
+// the FOCUSED PANE's effective binding — the tab on screen, not the tree's
+// active tab — and a tree-focused move acts on the store selection's active
+// tab. Everything else is the daemon's invariant enforced TUI-side so the
+// friendly notice shows without a round-trip: the agent tab is pinned to slot
+// 0 in both directions (reorderTabLocked's from/to <= 0 guard), and a move
+// past either end is a no-op with a notice rather than a silent swallow.
+//
+// It shares `w`/`t`'s roster gates even though a reorder spawns and kills
+// nothing: the snapshot's ReconcileTabsFromData skips non-TabManagement
+// backends (app/sync.go), so a move on an off-box roster could diverge from a
+// second client's view with nothing to heal it, and the daemon refuses every
+// tab mutation on an archived session outright to keep the roster intact for
+// restore. Refusing here keeps the notice friendly and off the wire.
+//
+// On success the projection applies the daemon's RESOLVED index — by stable id
+// when the tab carries one, else by ordinal for the id-less legacy window —
+// then the shared slot-resolver carries every open pane and the tree selection
+// across the permutation (the same code the snapshot reconcile runs when a
+// reorder arrives out-of-band, so an in-TUI move and a web drag reconcile
+// identically). The TUI never persists; the daemon write is the one write.
+func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
+	inst := m.store.GetSelectedInstance()
+	idx := m.store.ActiveTab()
+	treeFocused := true
+	if p := m.focusedOpenPane(); p != nil {
+		b := m.effectivePaneBinding(p)
+		inst, idx = b.instance, b.tab
+		treeFocused = false
+		// A pane may be previewing the tab about to move; the transient binding
+		// must not keep pointing at whatever slides into the slot (#1884).
+		m.cancelPanePreview(false)
+	}
+	if inst == nil {
+		return m, nil
+	}
+	if treeFocused {
+		// On an archived row the sidebar cursor resolves to the ARCHIVED
+		// instance while the store's display selection stays sticky on a live
+		// one (#1884) — so an unguarded move here would silently reorder a
+		// session the user is not looking at, and whose row footer does not
+		// advertise the pair. Refuse on what the cursor actually names; the
+		// archived roster is frozen for restore regardless.
+		if cur := m.sidebar.GetSelectedInstance(); cur != nil && cur.IsArchived() {
+			return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", cur.Title))
+		}
+	}
+	if !inst.Capabilities().TabManagement {
+		return m, m.handleNotice(fmt.Errorf("only local sessions support tab moves — this session's workspace runs off-box (docker/ssh/remote), so its tab order belongs to the runtime"))
+	}
+	if inst.IsArchived() {
+		return m, m.handleNotice(fmt.Errorf("cannot reorder tabs on archived session %q; restore it first (af sessions restore)", inst.Title))
+	}
+	if idx == 0 {
+		return m, m.handleNotice(fmt.Errorf("the agent tab is pinned to the first slot"))
+	}
+	tabs := inst.GetTabs()
+	if idx < 0 || idx >= len(tabs) {
+		return m, nil
+	}
+	to := idx + delta
+	if to <= 0 {
+		return m, m.handleNotice(fmt.Errorf("the agent tab is pinned to the first slot"))
+	}
+	if to >= len(tabs) {
+		return m, m.handleNotice(fmt.Errorf("the tab is already at the last position"))
+	}
+	if inst.HasInFlightOp() {
+		return m, m.handleNotice(fmt.Errorf("Session %q is busy; try again", inst.Title))
+	}
+
+	tab := tabs[idx]
+	target := captureSessionActionTarget(inst, m.repoID)
+	// Capture the slot→identity list before the permutation: the resolver maps
+	// every open pane and the tree selection across it by stable id (#1886).
+	oldKeys := paneTabKeys(inst)
+
+	resp, err := reorderTabThroughDaemon(target.reorderTabRequest(tab.ID, tab.Name, to))
+	if err != nil {
+		return m, m.handleError(err)
+	}
+	if tab.ID != "" {
+		err = inst.ReorderTabByID(tab.ID, resp.Index)
+	} else {
+		// A pre-#1738 row has no stable id until the next snapshot backfills it;
+		// the ordinal is the only key it has, and the synchronous call means the
+		// local roster cannot have drifted since the capture above.
+		err = inst.ReorderTab(idx, resp.Index)
+	}
+	if err != nil {
+		return m, m.handleError(err)
+	}
+	if m.reconcilePanesForTabs(inst, oldKeys, sameSessionTabs) {
+		m.relayout()
+	}
+	if m.remapActiveTabForTabs(inst, oldKeys, sameSessionTabs) {
+		m.sidebar.SyncCursorToActiveTab()
+	}
+	return m, m.selectionChanged()
+}
+
 // handleTabJump jumps to a 1-based tab number (the 1-9 number keys). With a
 // pane focused, the pane's own binding changes tab — unless the target tab is
 // already open in another pane, in which case THAT pane is focused instead
