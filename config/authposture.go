@@ -111,8 +111,9 @@ func ListenerExposureNotice(cfg *Config) string {
 // understates the exposure converts an unexamined default into an examined and
 // approved one.
 //
-// Same emit-at-most-once-per-daemon-start discipline as ListenerExposureNotice:
-// a string, reported by the one startup site, never on a per-request path.
+// Emits on three channels: the bind-time daemon log, the apply-time
+// transition warning, and the per-write warning on every exposed save of
+// this key.
 func PreviewListenerExposureNotice(cfg *Config) string {
 	if cfg == nil || cfg.PreviewListenAddr == "" || IsLoopbackListenAddr(cfg.PreviewListenAddr) {
 		return ""
