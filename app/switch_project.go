@@ -560,8 +560,8 @@ func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 // success announces itself with a toast only when no other picker is on screen,
 // since a toast over a different picker reads as that picker's result; an
 // unknown outcome always says so. A success that moved the project the TUI is
-// scoped to switches to the new checkout, so new sessions and tasks stop
-// targeting the root that was just repaired away.
+// scoped to switches to wherever the registry binds that project now, so new
+// sessions and tasks stop targeting the root that was just repaired away.
 func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	pickerOpen := m.projectPickerOverlay != nil && m.state == stateSwitchProject
 	owned := pickerOpen && m.projectPickerOverlay.OwnsRebindReply(msg.token)
@@ -588,10 +588,31 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		toast = m.showTransientMessage(fmt.Sprintf("Rebound project '%s' to %s", msg.name, msg.root))
 	}
 	if m.rebindMovedActiveProject(msg) {
-		model, switchCmd := m.switchToProjectRoot(msg.root)
-		return model, tea.Batch(toast, switchCmd)
+		// Follow the registry, not this reply's echo: another client may have
+		// rebound or deleted the project since this request committed, and the
+		// Projects section just re-read that newer state. A record that is gone
+		// (or a registry that cannot be read) leaves the scope where it is.
+		if root, ok := registeredProjectRoot(msg.projectID); ok {
+			model, switchCmd := m.switchToProjectRoot(root)
+			return model, tea.Batch(toast, switchCmd)
+		}
 	}
 	return m, toast
+}
+
+// registeredProjectRoot returns the root the registry binds project id to now,
+// or false when no readable record has that id.
+func registeredProjectRoot(id string) (string, bool) {
+	projects, err := config.ListProjects()
+	if err != nil {
+		return "", false
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return p.Root, true
+		}
+	}
+	return "", false
 }
 
 // rebindOutcomeUncertain reports whether a failed rebind may nonetheless have

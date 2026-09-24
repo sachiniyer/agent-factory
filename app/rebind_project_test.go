@@ -172,11 +172,11 @@ func TestUncertainRebindDoesNotReArmThePicker(t *testing.T) {
 	}
 }
 
-// TestRebindOfActiveProjectSwitchesToNewCheckout pins the Codex finding on
-// #4789: rebinding the project the TUI is scoped to must move the scope to the
-// new checkout, or sessions and tasks keep targeting the root that was just
-// repaired away.
-func TestRebindOfActiveProjectSwitchesToNewCheckout(t *testing.T) {
+// activeRebindHome is a home whose active project is backed by a real registry
+// record, with the snapshot seams stubbed so a project switch can complete. The
+// picker is open on that active row. It returns the record's id.
+func activeRebindHome(t *testing.T) (*home, string) {
+	t.Helper()
 	h := newTestHome(t)
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
@@ -184,20 +184,80 @@ func TestRebindOfActiveProjectSwitchesToNewCheckout(t *testing.T) {
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
-	stubRebind(t, nil)
-	newRoot := initTestGitRepo(t)
-
+	rec, err := config.RegisterProject(initTestGitRepo(t))
+	require.NoError(t, err)
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
-		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: "prj_active", MissingPath: true},
+		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: rec.ID, MissingPath: true},
 	}, h.repoRoot)
 	h.projectPickerOverlay.SetMaxSize(80, 24)
 	h.state = stateSwitchProject
+	return h, rec.ID
+}
 
-	_, cmd := h.Update(submitPickerRebind(t, h, newRoot)())
-	_ = cmd
+// stubRebindThrough makes the daemon seam perform the real registry rebind,
+// then run after (another client acting before this reply is handled), and
+// answer with this request's own echo.
+func stubRebindThrough(t *testing.T, after func()) {
+	t.Helper()
+	old := rebindProjectThroughDaemon
+	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+		project, err := config.RebindProject(projectID, path)
+		if err == nil && after != nil {
+			after()
+		}
+		return project, err
+	}
+	t.Cleanup(func() { rebindProjectThroughDaemon = old })
+}
+
+// TestRebindOfActiveProjectSwitchesToNewCheckout pins the Codex finding on
+// #4789: rebinding the project the TUI is scoped to must move the scope to the
+// new checkout, or sessions and tasks keep targeting the root that was just
+// repaired away.
+func TestRebindOfActiveProjectSwitchesToNewCheckout(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	stubRebindThrough(t, nil)
+	newRoot := initTestGitRepo(t)
+
+	h.Update(submitPickerRebind(t, h, newRoot)())
 
 	assert.Equal(t, newRoot, h.repoRoot, "the TUI must follow its active project to the rebound checkout")
 	assert.Equal(t, config.RepoIDFromRoot(newRoot), h.repoID)
+}
+
+// TestRebindFollowsTheRegistryNotTheEcho pins the follow-up Codex finding on
+// #4789: another client rebinds the same project after this request commits
+// but before its reply is handled. The Projects section re-reads that newer
+// binding, so the active scope must follow it too — not this reply's echo.
+func TestRebindFollowsTheRegistryNotTheEcho(t *testing.T) {
+	h, id := activeRebindHome(t)
+	newer := initTestGitRepo(t)
+	stubRebindThrough(t, func() {
+		_, err := config.RebindProject(id, newer)
+		require.NoError(t, err)
+	})
+	echo := initTestGitRepo(t)
+
+	h.Update(submitPickerRebind(t, h, echo)())
+
+	assert.Equal(t, newer, h.repoRoot, "the scope must follow the registry's current binding, not the stale echo")
+}
+
+// TestRebindOfAnUnregisteredRecordKeepsScope: when the registry has no record
+// under the reply's id — deleted by another client, say — the scope stays put
+// rather than moving to the echo's root.
+func TestRebindOfAnUnregisteredRecordKeepsScope(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	rootBefore := h.repoRoot
+	stubRebind(t, nil) // answers success with the echo, but writes no record
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
+		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: "prj_gone", MissingPath: true},
+	}, h.repoRoot)
+	h.projectPickerOverlay.SetMaxSize(80, 24)
+
+	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+
+	assert.Equal(t, rootBefore, h.repoRoot, "a record the registry no longer has must not move the scope to the echo")
 }
 
 // TestRebindOfOtherProjectKeepsScope is the control: rebinding a project the
