@@ -571,3 +571,23 @@ func TestProjectPickerFormsStayWithinMaxHeight(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectPickerRegistryHintKeepsRebindAtNarrowWidths pins Codex on #4789:
+// the hint is the only on-screen discovery point for the picker-local `b`, so a
+// registry row must advertise it — and D — at every supported width, down to
+// the 40-column terminal minimum, where the old fallback dropped both.
+func TestProjectPickerRegistryHintKeepsRebindAtNarrowWidths(t *testing.T) {
+	for w := 40; w <= 100; w++ {
+		p := NewProjectPickerOverlay([]Project{
+			{Name: "gone", Root: "/old/gone", RegistryID: "prj_w", MissingPath: true},
+		}, "")
+		p.SetMaxSize(w, 24)
+		out := renderedText(p.Render())
+		if !strings.Contains(out, "b rebind") || !strings.Contains(out, "D delete") {
+			t.Fatalf("width %d: a registry row's hint must keep `b rebind` and `D delete`; got:\n%s", w, out)
+		}
+		if got := lipgloss.Width(p.Render()); got > w {
+			t.Fatalf("width %d: picker rendered %d columns", w, got)
+		}
+	}
+}

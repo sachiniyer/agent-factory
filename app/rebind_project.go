@@ -107,7 +107,14 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		m.closeProjectPicker()
 	}
 	if owned || !pickerOpen {
-		toast = m.showTransientMessage(fmt.Sprintf("Rebound project '%s' to %s", msg.name, msg.root))
+		// Name the root the registry holds NOW, never this reply's echo: another
+		// client may have rebound the project again since this request committed.
+		// A record that is gone (or unreadable) gets a root-free message.
+		text := fmt.Sprintf("Rebound project '%s'", msg.name)
+		if root, ok := registeredProjectRoot(msg.projectID); ok {
+			text = fmt.Sprintf("Rebound project '%s' to %s", msg.name, root)
+		}
+		toast = m.showTransientMessage(text)
 	}
 	model, followCmd := m.followActiveRebind(msg)
 	return model, tea.Batch(toast, followCmd)

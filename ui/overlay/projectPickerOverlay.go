@@ -472,12 +472,23 @@ func (p *ProjectPickerOverlay) Render() string {
 			hint = "j/k select · enter switch · D delete · b rebind · esc cancel"
 		}
 	}
-	if layout.Cells(hint) > cw && registryRow {
-		// A registry row's longer hint shrinks by dropping the prose, keeping the
-		// verbs the row actually offers (an unadvertised verb is unreachable).
-		hint = "j/k · enter · D delete · b rebind · esc"
+	if registryRow {
+		// A registry row's longer hint shrinks by dropping the prose, then the
+		// navigation keys, but never the row's own verbs: the hint is the only
+		// on-screen discovery point for `b`, and an unadvertised verb is
+		// unreachable — at the 40-column minimum included.
+		for _, shorter := range []string{
+			"j/k · enter · D delete · b rebind · esc",
+			"b rebind · D delete · esc",
+			"b rebind · D delete",
+		} {
+			if layout.Cells(hint) <= cw {
+				break
+			}
+			hint = shorter
+		}
 	}
-	if layout.Cells(hint) > cw {
+	if layout.Cells(hint) > cw && !registryRow {
 		hint = "j/k · enter · esc"
 	}
 	lines = append(lines, truncateOverlayLine(ui.ActionHint(hint), cw))

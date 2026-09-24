@@ -311,3 +311,30 @@ func TestUncertainRebindThatNeverLandedKeepsScope(t *testing.T) {
 
 	assert.Equal(t, rootBefore, h.repoRoot)
 }
+
+// TestRebindToastNamesTheRegistryRootNotTheEcho pins Codex on #4789: when
+// another client rebinds the project after this request commits, the success
+// toast must name where the registry binds it now, not this reply's stale echo.
+func TestRebindToastNamesTheRegistryRootNotTheEcho(t *testing.T) {
+	h := newTestHome(t)
+	rec, err := config.RegisterProject(initTestGitRepo(t))
+	require.NoError(t, err)
+	// Not the active project: this test is about the toast, not the scope switch.
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
+		{Name: "elsewhere", Root: rec.Root, RepoID: "not-active", RegistryID: rec.ID, MissingPath: true},
+	}, h.repoRoot)
+	h.projectPickerOverlay.SetMaxSize(80, 24)
+	h.state = stateSwitchProject
+	newer := initTestGitRepo(t)
+	stubRebindThrough(t, func() {
+		_, err := config.RebindProject(rec.ID, newer)
+		require.NoError(t, err)
+	})
+	echo := initTestGitRepo(t)
+
+	h.Update(submitPickerRebind(t, h, echo)())
+
+	toast := h.errBox.FullError()
+	assert.Contains(t, toast, newer, "the toast must name the registry's current root")
+	assert.NotContains(t, toast, echo, "the toast must not name the stale echo")
+}
