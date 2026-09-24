@@ -29,13 +29,19 @@ func remoteTarget(t *testing.T) {
 // (or a forced ErrDaemonUnavailable) without a live daemon (#1029 PR 2). The
 // returned pointer captures every request the code under test issued so a test
 // can assert --repo scoping is threaded through.
+//
+// fn returns only the (instances, error) pair most tests care about; the helper
+// reports no skipped repos (nil), so a clean snapshot stays clean. Tests that
+// need to exercise the corruption-signal path stub snapshotViaDemon directly
+// with the three-value signature.
 func stubSnapshot(t *testing.T, fn func(daemon.SnapshotRequest) ([]session.InstanceData, error)) *[]daemon.SnapshotRequest {
 	t.Helper()
 	var reqs []daemon.SnapshotRequest
 	prev := snapshotViaDaemon
-	snapshotViaDaemon = func(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+	snapshotViaDaemon = func(req daemon.SnapshotRequest) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 		reqs = append(reqs, req)
-		return fn(req)
+		data, err := fn(req)
+		return data, nil, err
 	}
 	t.Cleanup(func() { snapshotViaDaemon = prev })
 	return &reqs
@@ -409,7 +415,7 @@ func TestSnapshotRead_RemoteVsLocalBranch(t *testing.T) {
 	t.Run("remote surfaces error, forbids disk", func(t *testing.T) {
 		remoteTarget(t)
 		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, snapErr })
-		data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+		data, _, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 		if !errors.Is(err, snapErr) {
 			t.Fatalf("want snapErr surfaced, got %v", err)
 		}
@@ -423,7 +429,7 @@ func TestSnapshotRead_RemoteVsLocalBranch(t *testing.T) {
 
 	t.Run("local permits disk fallback", func(t *testing.T) {
 		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return nil, snapErr })
-		_, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+		_, _, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 		if !errors.Is(err, snapErr) {
 			t.Fatalf("want snapErr returned, got %v", err)
 		}
@@ -435,12 +441,15 @@ func TestSnapshotRead_RemoteVsLocalBranch(t *testing.T) {
 	t.Run("success returns data and forbids disk", func(t *testing.T) {
 		live := []session.InstanceData{{Title: "live"}}
 		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
-		data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
+		data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
 		if fallBack {
 			t.Fatal("success must not trigger disk fallback")
+		}
+		if len(skipped) != 0 {
+			t.Fatalf("clean snapshot must not report skipped repos, got %v", skipped)
 		}
 		if len(data) != 1 || data[0].Title != "live" {
 			t.Fatalf("want live snapshot, got %v", data)
