@@ -1,76 +1,161 @@
 package app
 
 import (
-	"reflect"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/configagent"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
-// TestReemitDefersRacingKeyToPostActionState is a deterministic guard of the
-// fix's mechanism — the keySent guard distinguishes pass-2 (the re-emitted
-// opener, same identity) from a key that raced the re-emit onto p.msgs
-// (different identity), and buffers the racer so it is replayed through the
-// normal path AFTER the opener's action rather than swallowed in the
-// pre-action state or re-emitted through its own goroutine.
-//
-// "m" opens the task manager on pass-2 (KeyTaskList -> showTasksOverlay ->
-// stateTasks). "n" is the racing follow-up: in stateDefault it is KeyNew
-// (opens the naming flow); in stateTasks it enters task-create mode. This
-// drives the passes directly (no event loop, no timing) for a DIFFERENT modal
-// than the search case in home_update_reemit_test.go, so a regression in the
-// guard's identity check is caught regardless of which modal triggers it.
+// These tests drive the highlight passes by hand — pass-1 through
+// handleKeyPress, the replay as the reemitKeyMsg pass-1 scheduled — so the
+// interleavings the event loop produces under coalesced input are pinned
+// deterministically, with no timing. home_update_reemit_test.go covers the same
+// race through the real tea.Program loop.
+
+// TestReemitDefersRacingKeyToPostActionState: "m" opens the task manager on
+// pass-2 (KeyTaskList -> stateTasks). "n" races it: in stateDefault it would
+// be KeyNew (the naming flow); in stateTasks it enters task-create mode. The
+// racer must be buffered until "m"'s action has run, then land in the
+// post-action state.
 func TestReemitDefersRacingKeyToPostActionState(t *testing.T) {
 	h := newTestHome(t)
 
-	// pass-1 of the mapped opener "m": paint highlight + arm the pass-2 re-emit.
 	_, cmd := h.handleKeyPress(runeKey('m'))
-	require.NotNil(t, cmd, "pass-1 must re-emit the opener for pass-2")
+	require.NotNil(t, cmd, "pass-1 must schedule the replay")
 	require.True(t, h.keySent, "pass-1 arms keySent")
-	require.Equal(t, "m", h.pendingKey, "pass-1 records the pending key identity")
 	require.Equal(t, stateDefault, h.state, "the opener's action runs on pass-2, not pass-1")
 
-	// Racing follow-up "n" arrives before "m"'s pass-2 re-emit resolves. The
-	// guard buffers it (rather than re-emitting through its own goroutine,
-	// which would race its siblings) and leaves the arm in place so "m"'s
-	// pass-2 still dispatches.
 	_, racingCmd := h.handleKeyPress(runeKey('n'))
-	require.Nil(t, racingCmd, "racing key must be buffered, not re-emitted through its own command")
-	require.Len(t, h.deferredKeys, 1, "racing key must be appended to the deferred buffer")
-	require.Equal(t, "n", h.deferredKeys[0].String(), "the buffered key must be the racer")
-	require.True(t, h.keySent, "the pending pass-2 arm must stay armed so the opener's action still runs")
-	require.Equal(t, "m", h.pendingKey, "the pending identity must stay the opener's, not the racer's")
+	require.Nil(t, racingCmd, "a racing key is buffered, not dispatched or re-emitted")
+	require.Len(t, h.deferredKeys, 1)
 	require.Equal(t, stateDefault, h.state, "neither key's action has run yet")
 
-	// "m"'s pass-2 re-emit lands: same identity as pending -> dispatch the
-	// opener. The handleKeyPress wrapper wraps the opener's action cmd with a
-	// tea.Sequence that, after the opener's transition, replays the buffered
-	// "n" in arrival order. sequenceMsg is unexported, so unpack the Sequence
-	// reflectively (see remote_detach_reset_test.go): it is a slice of tea.Cmd,
-	// ordered opener-action then drained keys.
-	_, drainCmd := h.handleKeyPress(runeKey('m'))
-	require.False(t, h.keySent, "pass-2 clears the arm")
-	require.Equal(t, "", h.pendingKey, "pass-2 clears the pending identity")
-	require.Empty(t, h.deferredKeys, "pass-2 must drain the buffer into the returned Sequence")
+	_, _ = h.Update(reemitKeyMsg{runeKey('m')})
+	require.False(t, h.keySent, "pass-2 disarms")
+	require.Empty(t, h.deferredKeys, "pass-2 drains the buffer")
 	require.Equal(t, stateTasks, h.state, "the opener's action opened the task overlay")
-
-	seq := reflect.ValueOf(drainCmd())
-	require.Equal(t, reflect.Slice, seq.Kind(),
-		"pass-2 must drain via a tea.Sequence (opener action, then buffered keys in order), got %T", drainCmd())
-	require.GreaterOrEqual(t, seq.Len(), 1, "sequence must contain the drained racing key")
-	replay, ok := seq.Index(seq.Len() - 1).Interface().(tea.Cmd)
-	require.True(t, ok, "the final sequenced entry must be a tea.Cmd")
-	replayMsg, ok := replay().(tea.KeyMsg)
-	require.True(t, ok, "the drained entry must replay the buffered racing KeyMsg, got %T", replay())
-	require.Equal(t, "n", replayMsg.String(), "the drained key must be the buffered racer in order")
-
-	// Drive the replayed "n" through the normal path. It must land in
-	// stateTasks (the post-action state) and enter create mode — the proof it
-	// was deferred past the opener's transition rather than swallowed in
-	// stateDefault before "m" opened the overlay.
-	_, _ = h.handleKeyPress(replayMsg)
-	require.Equal(t, stateTasks, h.state, "the drained key must land inside the task overlay, not reopen the naming flow")
 	require.True(t, h.automations.TaskPane().IsCreating(),
-		"deferred 'n' must reach the task overlay's create mode, not be swallowed in stateDefault before 'm' opened it")
+		"the racing 'n' must reach the task overlay's create mode, not reopen the naming flow")
+}
+
+// TestRepeatedPhysicalKeyIsNotTakenForReplay is the Codex #5 case on #4836:
+// coalesced "/", "p", "/". The second "/" is a physical press of the same key
+// whose replay is still in flight. Matched by key string it would pass for
+// that replay, open search, and let the real replay land afterwards as query
+// text racing the drained "p" — "/p" instead of the typed "p/". Tagging the
+// replay makes the second press an ordinary racing key.
+func TestRepeatedPhysicalKeyIsNotTakenForReplay(t *testing.T) {
+	h := newTestHome(t)
+	h.store.AddInstance(freshLocalInstance(t, "p-slash"))
+
+	_, _ = h.handleKeyPress(runeKey('/'))
+	require.True(t, h.keySent)
+	_, _ = h.handleKeyPress(runeKey('p'))
+	_, _ = h.handleKeyPress(runeKey('/'))
+	require.Equal(t, stateDefault, h.state,
+		"a physical press of the pending key must not stand in for its replay")
+	require.Len(t, h.deferredKeys, 2, "both physical keys wait behind the replay")
+
+	_, _ = h.Update(reemitKeyMsg{runeKey('/')})
+	require.Equal(t, stateSearch, h.state, "the replay opens search")
+	require.NotNil(t, h.searchOverlay)
+	require.Equal(t, "p/", h.searchOverlay.Query(),
+		"the racing keys must land in the order they were typed")
+	require.False(t, h.keySent, "no stale arm may outlive the replay")
+	require.Empty(t, h.deferredKeys)
+}
+
+// TestDeferredKeyDoesNotWaitForSlowActionCommand is the Codex #4 case on
+// #4836: "C" returns a command that waits out the config agent's readiness —
+// up to 60s. A key that raced "C" must dispatch as soon as "C"'s action has
+// run, not after that command returns. The spawn never runs here at all, which
+// is the point: the racing "2" has already jumped tabs before anyone executes
+// the command "C" returned.
+func TestDeferredKeyDoesNotWaitForSlowActionCommand(t *testing.T) {
+	h := newTestHome(t)
+	inst := startedLocalInstance(t, "slow-cmd")
+	selectInstance(h, inst)
+	stubTabDaemonSeams(t, inst)
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
+	_, _ = h.handleTabJump(1)
+	require.Equal(t, 0, h.store.ActiveTab())
+
+	spawned := 0
+	t.Cleanup(SetConfigAgentSpawnerForTest(func(configagent.Mode, string) (string, string, error) {
+		spawned++
+		return "af-config-1", "", nil
+	}))
+
+	_, _ = h.handleKeyPress(runeKey('C'))
+	require.True(t, h.keySent)
+	_, _ = h.handleKeyPress(runeKey('2'))
+	require.Equal(t, 0, h.store.ActiveTab(), "the racing key waits behind C's replay")
+
+	_, cmd := h.Update(reemitKeyMsg{runeKey('C')})
+	require.NotNil(t, cmd, "C's action returns its spawn command")
+	require.True(t, h.configAgentSpawning, "C's action ran")
+	require.Equal(t, 1, h.store.ActiveTab(),
+		"the racing '2' must dispatch once C's action has run, without waiting for its spawn command")
+	require.Empty(t, h.deferredKeys)
+	require.Zero(t, spawned, "nothing may have executed C's command to get here")
+}
+
+// TestDeferredKeyWaitsForInteractiveTransition is the other half of Codex #4:
+// an action whose state transition itself arrives as a message must still be
+// ordered before the keys that raced it. Enter on a focused live pane returns
+// the enterInteractiveMsg that moves the keyboard into the pane; an "x" typed
+// behind the Enter belongs in the pane, after the forwarded Enter — not to the
+// nav-mode handlers, which would run it as a host action.
+func TestDeferredKeyWaitsForInteractiveTransition(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	require.NotNil(t, h.focusedOpenPane(), "precondition: the live pane has focus")
+
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	_, _ = h.handleKeyPress(enter)
+	require.True(t, h.keySent)
+	_, _ = h.handleKeyPress(runeKey('x'))
+
+	_, cmd := h.Update(reemitKeyMsg{enter})
+	require.False(t, h.interactive, "activation arrives as a message, not inside the Enter's dispatch")
+	require.Len(t, h.deferredKeys, 1,
+		"the racing key must keep waiting until the interactive transition lands")
+
+	runHermeticCmd(t, h, cmd, 0)
+	require.True(t, h.interactive)
+	require.Len(t, *fakes, 1)
+	require.Equal(t, []string{"enter", "x"}, (*fakes)[0].keys,
+		"the racing key must reach the pane after the forwarded Enter")
+	require.Empty(t, h.deferredKeys)
+}
+
+// TestCtrlCBypassesDeferral keeps ctrl+c's always-on hard exit when it races a
+// highlighted opener: buffered, it would be consumed by the search overlay "/"
+// opens as merely "close".
+func TestCtrlCBypassesDeferral(t *testing.T) {
+	h := newTestHome(t)
+
+	_, _ = h.handleKeyPress(runeKey('/'))
+	_, _ = h.handleKeyPress(runeKey('p'))
+	_, cmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlC})
+	require.True(t, reachesQuit(cmd), "ctrl+c must hard-exit even while a replay is in flight")
+	require.Empty(t, h.deferredKeys, "the hard exit discards buffered input")
+}
+
+// TestGracefulQuitDropsDeferredKeys: the quit key's action has closed the live
+// attachments by the time its replay returns, so an Enter that raced it must
+// not be dispatched behind the teardown.
+func TestGracefulQuitDropsDeferredKeys(t *testing.T) {
+	h := newTestHome(t)
+
+	_, _ = h.handleKeyPress(runeKey('q'))
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := h.Update(reemitKeyMsg{runeKey('q')})
+	require.True(t, h.quitting)
+	require.True(t, reachesQuit(cmd))
+	require.Empty(t, h.deferredKeys, "input buffered behind a graceful quit is dropped")
+	require.False(t, h.keySent, "the dropped Enter must not have armed a new pass")
 }

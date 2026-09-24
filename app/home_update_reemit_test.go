@@ -23,8 +23,8 @@ import (
 // search-query characters. Sent "/" then "p" then "q" back-to-back, both query
 // chars park on p.msgs before "/"'s re-emit resolves. The guard buffers racing
 // keys in arrival order and drains them through the normal path once "/"
-// opens search (a single tea.Sequence, not per-key goroutines), so the query
-// becomes "pq" and matches only "pqrs". The per-key re-emit the guard replaced
+// opens search (synchronously, in the same Update as the replay — not through
+// per-key goroutines), so the query becomes "pq" and matches only "pqrs". The per-key re-emit the guard replaced
 // had no ordering guarantee — two goroutines could deliver q before p, giving
 // "qp" (which matches nothing) — so this asserts ORDER among two distinct
 // racing keys, not merely that a single key survives. Uses teatest — the real
@@ -55,9 +55,9 @@ func TestReemitReordersCoalescedKeys(t *testing.T) {
 	eh.tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 
 	// Poll the overlay's result count on the tea goroutine until it settles.
-	// Search opens synchronously on "/"'s pass-2, but the buffered "p"/"q"
-	// are drained AFTER that pass returns (a tea.Sequence), so waiting on
-	// state==stateSearch alone would race the drain; count==1 is the proof
+	// Search opens on "/"'s pass-2 and the buffered "p"/"q" drain in that same
+	// Update, but polling result count rather than state==stateSearch keeps the
+	// assertion about ORDER, not about the overlay existing; count==1 is the proof
 	// both chars landed — in order — since only "pq" yields 1. The
 	// runOnEventLoopMsg handler closes done after fn runs, so fn must not
 	// close it (see the runOnEventLoopMsg case in Update).

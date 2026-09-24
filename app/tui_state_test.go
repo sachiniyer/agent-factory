@@ -244,8 +244,7 @@ func TestTUIViewStatePreviewTickDoesNotWriteUnchangedState(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr), "unchanged preview tick must not write TUI state")
 
 	h.keySent = true
-	h.pendingKey = "s"
-	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	_, _ = h.Update(reemitKeyMsg{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}})
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err, "a structural pane-open action must save TUI state")
 	assert.Contains(t, string(raw), `"schema_version"`)

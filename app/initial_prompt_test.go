@@ -41,12 +41,12 @@ func pressFormKey(t *testing.T, h *home, msg tea.KeyMsg) []tea.Msg {
 	}
 	var out []tea.Msg
 	for _, produced := range drainCmd(t, cmd, time.Second) {
-		km, ok := produced.(tea.KeyMsg)
+		km, ok := produced.(reemitKeyMsg)
 		if !ok {
 			out = append(out, produced)
 			continue
 		}
-		if _, replayCmd := h.handleKeyPress(km); replayCmd != nil {
+		if _, replayCmd := h.Update(km); replayCmd != nil {
 			out = append(out, drainCmd(t, replayCmd, time.Second)...)
 		}
 	}

@@ -90,8 +90,8 @@ func pressExpectingNotice(t *testing.T, h *home, msg tea.KeyMsg) {
 	t.Helper()
 	_, cmd := h.handleKeyPress(msg)
 	for _, produced := range drainCmd(t, cmd, time.Second) {
-		if km, ok := produced.(tea.KeyMsg); ok {
-			_, _ = h.handleKeyPress(km)
+		if km, ok := produced.(reemitKeyMsg); ok {
+			_, _ = h.Update(km)
 		}
 	}
 }

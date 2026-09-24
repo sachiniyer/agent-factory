@@ -23,8 +23,8 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	_, cmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}, Alt: true})
 	// Replay the menu-highlight hop before inspecting the creation outcome.
 	for _, msg := range drainCmd(t, cmd, time.Second) {
-		if key, ok := msg.(tea.KeyMsg); ok {
-			_, cmd = h.handleKeyPress(key)
+		if key, ok := msg.(reemitKeyMsg); ok {
+			_, cmd = h.Update(key)
 		}
 	}
 	requireNamingFormOpened(t, h, "configured new_remote must open creation without a local hooks precheck")
@@ -35,8 +35,8 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	require.NoError(t, h.namingInstance.SetTitle("choose-backend"))
 	_, enterCmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	for _, msg := range drainCmd(t, enterCmd, 4*time.Second) {
-		if key, ok := msg.(tea.KeyMsg); ok {
-			_, replay := h.handleKeyPress(key)
+		if key, ok := msg.(reemitKeyMsg); ok {
+			_, replay := h.Update(key)
 			drainCmd(t, replay, 4*time.Second)
 		}
 	}

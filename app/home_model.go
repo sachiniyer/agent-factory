@@ -124,20 +124,21 @@ type home struct {
 	// generated once per naming in startNewInstance and cleared with namingInstance.
 	namingPlaceholder string
 
-	// keySent is used to manage underlining menu items
+	// keySent is armed by a highlight pass-1 and cleared when its reemitKeyMsg
+	// is dispatched: while it is set, the key's action has not run yet, so
+	// physical input is buffered (inputGated).
 	keySent bool
-	// pendingKey is the String() of the key whose pass-1 armed keySent, so
-	// the pass-2 re-emit (the same key, returned via the bubbletea command
-	// pipeline) is distinguished from a different key that beat the re-emit
-	// onto p.msgs. See handleMenuHighlighting.
-	pendingKey string
-	// deferredKeys holds keys that arrived while a pass-2 was pending
-	// (keySent armed, identity != pendingKey), in arrival order. They are
-	// replayed through the normal path once pass-2 clears the arm, so
-	// coalesced input (e.g. "/", "p", "q") is processed after the opener's
-	// transition and in order, rather than re-emitted through per-key
-	// goroutines that race their siblings into "qp". Bounded by the
-	// pass-1→pass-2 window (drained every pass-2) and dropped on hard exit.
+	// replayingKey is true only for the duration of a pass-2 dispatch, so
+	// handleMenuHighlighting lets the replayed key through to its action.
+	replayingKey bool
+	// awaitingInteractive is set when an action returns the enterInteractiveMsg
+	// that moves the keyboard into a pane, and cleared when that message lands.
+	// Keys typed in between belong in the pane, so they wait (inputGated).
+	awaitingInteractive bool
+	// deferredKeys holds physical keys that arrived while input was gated, in
+	// arrival order. drainDeferredKeys dispatches them synchronously as soon as
+	// the gate lifts, so coalesced input ("/", "p", "q") lands in the
+	// post-action state and in order. Dropped on quit.
 	deferredKeys []tea.KeyMsg
 
 	// -- UI Components --
