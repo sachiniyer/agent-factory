@@ -439,6 +439,43 @@ func (i *Instance) TakeOwedOnCompleteForDischarge() (*PendingOnCompleteData, *ad
 	return marker, discharge
 }
 
+// TakeOwedOnCompleteForDischargeRetry is the poll's flush analogue of
+// TakeOwedOnCompleteForDischarge: it clears the in-memory marker and installs an
+// in-flight discharge future ONLY while the marker is still the one a stand-down
+// discharge failed to clear, so a marker filed since (a new run completing) is a
+// different pointer and is left in place, and a delivery that already cleared it
+// durably retires the retry. The future it installs is the same one a concurrent
+// NoteAdoptionDelivery parks on, so the flush's re-run shares its durable verdict
+// with a delivery instead of racing it to a PTY write on top of the surviving
+// marker.
+//
+// It returns the future and taken=true when the marker was taken; the caller
+// persists the fresh cleared row and completes the future exactly as a delivery
+// does. It returns taken=false with retry=true when the marker is nil because a
+// delivery or stand-down is still mid-discharge (an in-flight caller that may FAIL
+// and restore the marker without recording its own retry); the flush must leave
+// the retry in place for the next poll rather than retire it on a transient nil.
+// It returns taken=false with retry=false when the marker is durably gone (no
+// in-flight discharge) or has been replaced by a different marker, so the
+// obligation this retry represented is moot.
+func (i *Instance) TakeOwedOnCompleteForDischargeRetry(marker *PendingOnCompleteData) (*adoptionDischarge, bool, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.owedOnComplete == nil {
+		// A delivery or stand-down is mid-discharge and may restore the marker; its
+		// own future is still installed. Retire nothing — retry on the next poll.
+		return nil, false, i.discharge != nil
+	}
+	if i.owedOnComplete != marker {
+		// A new marker was filed after the stand-down; leave it in place.
+		return nil, false, false
+	}
+	i.owedOnComplete = nil
+	discharge := &adoptionDischarge{done: make(chan struct{})}
+	i.discharge = discharge
+	return discharge, true, false
+}
+
 // CompleteAdoptionDischarge closes the in-flight discharge future under i.mu
 // with the durable clear's result, releasing any concurrent NoteAdoptionDelivery
 // waiter parked on it. On failure it restores the in-memory marker so a

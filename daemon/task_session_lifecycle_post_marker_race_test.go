@@ -199,16 +199,19 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetriesTheClearedRow(t
 	assert.Contains(t, rows[0], "pending_on_complete",
 		"the stand-down discharge did not persist — the durable marker survives the failed clear")
 
-	// A retry of the cleared row was recorded — not a generic live-state retry
-	// that would re-checkpoint the restored marker.
+	// A discharge retry was recorded in its OWN map (not the generic settleOwed a
+	// later status checkpoint would retire) — one that will re-run the discharge
+	// and persist a FRESH cleared row, not a stale snapshot that re-checkpoints
+	// the restored marker.
 	manager.mu.Lock()
-	assert.NotEmpty(t, manager.settleOwed, "the failed stand-down clear recorded a retry of the cleared row")
+	assert.NotEmpty(t, manager.dischargeOwed, "the failed stand-down clear recorded a discharge retry")
+	assert.Empty(t, manager.settleOwed, "the discharge retry lives outside the generic settlement retry map a checkpoint would retire")
 	manager.mu.Unlock()
 
-	// Storage recovers. THE FIX: the next poll's FlushOwedSettlements must
-	// persist the CLEARED row and discharge the durable marker — not the live
-	// row, whose marker the failed clear restored and which a generic retry
-	// would write back to disk, leaving the marker set to re-arm a teardown.
+	// Storage recovers. THE FIX: the next poll's FlushOwedSettlements re-runs the
+	// discharge and persists a FRESH row with the marker cleared — discharging the
+	// durable marker rather than re-checkpointing the restored marker a generic
+	// live-state retry would write back to disk, leaving it set to re-arm a teardown.
 	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
 	manager.FlushOwedSettlements()
 
@@ -218,12 +221,15 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetriesTheClearedRow(t
 	require.NoError(t, json.Unmarshal(raw, &rows))
 	require.Len(t, rows, 1)
 	assert.NotContains(t, rows[0], "pending_on_complete",
-		"the retry persists the marker-CLEARED row — the durable discharge lands once storage recovers, instead of re-checkpointing the restored marker")
+		"the retry re-runs the discharge and persists the marker-CLEARED row — the durable discharge lands once storage recovers, instead of re-checkpointing the restored marker")
 
-	// The retry is retired once the cleared write lands.
+	// The retry is retired once the discharge's cleared write lands, and the
+	// in-memory marker is cleared with it so a later checkpoint cannot re-set it.
 	manager.mu.Lock()
-	assert.Empty(t, manager.settleOwed, "the retry is retired once the cleared row is durable")
+	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the cleared row is durable")
 	manager.mu.Unlock()
+	require.Nil(t, inst.OwedOnComplete(),
+		"the in-memory marker is cleared once the durable discharge lands")
 }
 
 // TestTaskSessionLifecycle_PostMarkerDeliveryRaceHonestReapWhenDischargeFailsBeforeUncleanExit
@@ -830,4 +836,162 @@ func TestTaskSessionLifecycle_PostMarkerStandDownDischargeSerializesConcurrentDe
 	require.Len(t, rows, 1)
 	assert.NotContains(t, rows[0], "pending_on_complete",
 		"the re-attempted discharge is durable — no marker survives")
+}
+
+// TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetrySurvivesStatusCheckpoint
+// pins finding 8's fix: after a stand-down clear fails, the discharge retry lives
+// in its OWN map, so a later whole-row status checkpoint — which re-writes the
+// restored marker along with the row and ret the GENERIC settlement retry via
+// recordSettlementWrite(..., nil) (daemon/limit.go:249-251) — does NOT retire it.
+// Before the fix the retry shared the generic map's key, so the checkpoint's
+// retirement deleted it while disk still carried the (re-written) marker, leaving
+// a durable marker no later flush could clear and a restart would re-arm against
+// the stand-down's own decision. The retry survives, and the next poll's flush
+// re-runs the discharge and clears the marker the generic retry could not.
+func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetrySurvivesStatusCheckpoint(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	endRunOnIdleEdge(t, inst)
+
+	// File the durable marker and install the discharge notify.
+	manager.fileOwedTaskLifecycle(repo.ID, inst)
+	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
+
+	// Fail the stand-down discharge persist (the cleared row) only.
+	prev := testHookPersistInstanceData
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "nightly" && data.TaskID != "" && data.PendingOnComplete == nil {
+			return errors.New("injected discharge persist failure (disk error)")
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+
+	manager.dischargeOwedTaskLifecycle(repo.ID, inst.ID, inst.Title)
+	require.NotNil(t, inst.OwedOnComplete(),
+		"the in-memory marker is restored after the failed stand-down clear")
+	manager.mu.Lock()
+	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
+	manager.mu.Unlock()
+
+	// Simulate the status checkpoint finding 8 names: it persists the
+	// marker-restored live row (durableChanged) and ret the generic settlement
+	// retry through recordSettlementWrite(..., nil). The hook lets the marker-set
+	// row through (PendingOnComplete != nil).
+	require.NoError(t, persistInstanceData(repo.ID, inst.ToInstanceData()))
+	manager.recordSettlementWrite(repo.ID, daemonInstanceKey(repo.ID, inst.Title), inst, nil)
+
+	// Finding 8 fix: the discharge retry lives in its own map and is NOT retired by
+	// the generic settlement retry's retirement — even though disk again carries
+	// the marker the checkpoint just re-wrote.
+	manager.mu.Lock()
+	assert.NotEmpty(t, manager.dischargeOwed,
+		"the discharge retry survives a status checkpoint that ret the generic settlement retry")
+	assert.Empty(t, manager.settleOwed, "the generic settlement retry was retired; the discharge retry was not")
+	manager.mu.Unlock()
+
+	raw, err := config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	var rows []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].PendingOnComplete,
+		"the marker-restored row the checkpoint wrote is still on disk — only the retry can clear it")
+
+	// Storage recovers; the next poll's flush re-runs the discharge and clears the
+	// durable marker the generic retry could not (it was retired).
+	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
+	manager.FlushOwedSettlements()
+
+	raw, err = config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	rows = nil
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.Nil(t, rows[0].PendingOnComplete,
+		"the surviving retry re-ran the discharge and cleared the durable marker")
+	require.Nil(t, inst.OwedOnComplete(),
+		"the in-memory marker is cleared with the durable discharge")
+	manager.mu.Lock()
+	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands")
+	manager.mu.Unlock()
+}
+
+// TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryPreservesLaterTabMutation
+// pins finding 9's fix: a failed stand-down discharge retries by RE-RUNNING the
+// discharge against a FRESH row, not by persisting a stale cleared snapshot.
+// After the failed clear, a user can create or rename a tab before the next
+// settlement flush; those paths persist the newer full row without retiring the
+// retry (manager_tabs_arrange.go persists via persistInstanceData directly, no
+// recordSettlementWrite). The flush must not then overwrite the newer row
+// wholesale with the older cleared snapshot (erasing the tab change after a
+// restart), but persist a fresh cleared row that carries the new tab state.
+func TestTaskSessionLifecycle_PostMarkerStandDownDischargeRetryPreservesLaterTabMutation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	testguard.IsolateTmux(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	inst := registerTaskSpawnedSession(t, manager, repo.ID, repoPath, "nightly", "task-kill")
+	stubTaskLifecycle(t, "task-kill", task.OnCompleteKill)
+	endRunOnIdleEdge(t, inst)
+
+	// File the durable marker and install the discharge notify.
+	manager.fileOwedTaskLifecycle(repo.ID, inst)
+	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
+
+	// Fail the stand-down discharge persist (the cleared row) only.
+	prev := testHookPersistInstanceData
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "nightly" && data.TaskID != "" && data.PendingOnComplete == nil {
+			return errors.New("injected discharge persist failure (disk error)")
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+
+	manager.dischargeOwedTaskLifecycle(repo.ID, inst.ID, inst.Title)
+	require.NotNil(t, inst.OwedOnComplete(), "the in-memory marker is restored after the failed stand-down clear")
+	manager.mu.Lock()
+	require.NotEmpty(t, manager.dischargeOwed, "the failed stand-down recorded a discharge retry")
+	manager.mu.Unlock()
+
+	// Before the flush, the user adds a web tab — exactly the create/rename/reorder
+	// path finding 9 names — and that newer full row is persisted the way the tab
+	// mutation paths persist it (persistInstanceData directly, no settleOwed
+	// retirement). The hook lets the marker-set row through (PendingOnComplete != nil).
+	inst.AddWebTabForTest("preview", "https://example.com")
+	require.True(t, tabNamed(inst.ToInstanceData(), "preview"), "precondition: the new tab is live")
+	require.NoError(t, persistInstanceData(repo.ID, inst.ToInstanceData()))
+
+	// Storage recovers; the next poll's flush re-runs the discharge against the
+	// FRESH row (carrying the new tab) and clears the marker.
+	testHookPersistInstanceData = func(string, session.InstanceData) error { return nil }
+	manager.FlushOwedSettlements()
+
+	raw, err := config.LoadRepoInstances(repo.ID)
+	require.NoError(t, err)
+	var rows []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	assert.True(t, tabNamed(rows[0], "preview"),
+		"the discharge retry preserved the tab mutation: it persisted a fresh cleared row, not the stale snapshot that would have erased it")
+	assert.Nil(t, rows[0].PendingOnComplete, "the retry cleared the durable marker")
+	require.Nil(t, inst.OwedOnComplete(), "the in-memory marker is cleared with the durable discharge")
+	manager.mu.Lock()
+	assert.Empty(t, manager.dischargeOwed, "the retry is retired once the discharge lands")
+	manager.mu.Unlock()
 }
