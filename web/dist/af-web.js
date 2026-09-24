@@ -18344,6 +18344,7 @@ function openAddProject() {
 var rebindInFlight = null;
 var REBIND_ANSWER_MS = 3e4;
 var rebindFollow = null;
+var rebindAttempts = 0;
 function takeRebindFollow(projects) {
   const follow = rebindFollow;
   if (follow === null) {
@@ -18386,6 +18387,7 @@ function openRebindProject(projectId, label) {
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
+        const attempt = ++rebindAttempts;
         let settled = false;
         const settle = () => {
           if (settled) {
@@ -18398,7 +18400,7 @@ function openRebindProject(projectId, label) {
         };
         const followRegistry = () => {
           if (oldRoot !== null) {
-            rebindFollow = { id: projectId, oldRoot };
+            rebindFollow = { id: projectId, oldRoot, attempt };
           }
           refreshRegisteredProjects();
         };
@@ -18407,7 +18409,7 @@ function openRebindProject(projectId, label) {
             followRegistry();
             return;
           }
-          if (rebindFollow?.id === projectId) {
+          if (rebindFollow?.attempt === attempt) {
             rebindFollow = null;
           }
           refreshRegisteredProjects();

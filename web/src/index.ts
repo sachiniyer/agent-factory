@@ -1217,7 +1217,12 @@ const REBIND_ANSWER_MS = 30_000;
 /** A successful rebind whose project the selection should follow once a registry
  *  read confirms where the record now points: its stable id and the root it
  *  pointed at when Rebind opened. */
-let rebindFollow: { id: string; oldRoot: string } | null = null;
+let rebindFollow: { id: string; oldRoot: string; attempt: number } | null = null;
+
+/** Numbers rebind attempts, so a follow intent names the attempt that armed it
+ *  and a late reply can clear only its own — never a newer attempt's for the
+ *  same project. */
+let rebindAttempts = 0;
 
 /** Checks the pending rebind follow against a fresh registry read and returns
  *  the root the selection should move to, or null. It follows only when the user's
@@ -1286,6 +1291,7 @@ function openRebindProject(projectId: string, label: string): void {
         const m = modal;
         m.setBusy(true);
         rebindInFlight = label;
+        const attempt = ++rebindAttempts;
         // Every outcome goes through settle() exactly once: the reply, or the
         // bounded wait below, whichever comes first. The guard lives only as long
         // as this attempt is undecided, and a reply that arrives after the wait
@@ -1306,7 +1312,7 @@ function openRebindProject(projectId: string, label: string): void {
         // root and following it changes nothing.
         const followRegistry = (): void => {
           if (oldRoot !== null) {
-            rebindFollow = { id: projectId, oldRoot };
+            rebindFollow = { id: projectId, oldRoot, attempt };
           }
           refreshRegisteredProjects();
         };
@@ -1321,7 +1327,7 @@ function openRebindProject(projectId: string, label: string): void {
             followRegistry();
             return;
           }
-          if (rebindFollow?.id === projectId) {
+          if (rebindFollow?.attempt === attempt) {
             rebindFollow = null;
           }
           refreshRegisteredProjects();

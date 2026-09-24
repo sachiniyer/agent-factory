@@ -86,7 +86,7 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
     listDirectory: () => Promise.resolve({}),
   };
   const code = ts.transpileModule(`
-    let token = "token", modal = null, rebindInFlight = null, rebindFollow = null;
+    let token = "token", modal = null, rebindInFlight = null, rebindFollow = null, rebindAttempts = 0;
     const REBIND_ANSWER_MS = 30000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
@@ -294,4 +294,27 @@ test("a late definitive refusal disarms the follow intent", async () => {
   // its intent must not drag the selection along.
   app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
   assert.notEqual(state.selectedProject, "/elsewhere");
+});
+
+test("a late refusal from an older attempt cannot clear a newer attempt's follow", async () => {
+  const { app, state, submits, pending, fire } = harness({
+    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+    selectedProject: "/old",
+  });
+
+  // Attempt A outlives the bounded wait, which releases the guard.
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/first");
+  fire();
+  // Attempt B, for the same project, succeeds and arms its own follow.
+  app.openRebindProject("prj_A", "alpha");
+  submits[1]("/second");
+  pending[1].resolve({ id: "prj_A", root: "/second" });
+  await settle();
+  // A's definitive refusal arrives before B's registry read commits.
+  pending[0].reject(new StubError("path is already bound to another project", "refused"));
+  await settle();
+
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/second" }, { id: "prj_B", root: "/other" }]);
+  assert.equal(state.selectedProject, "/second", "B's follow must survive A's late refusal");
 });

@@ -141,3 +141,35 @@ func TestControlServer_RebindProject_RefusesRelativePath(t *testing.T) {
 	assert.Equal(t, reg.Project.Root, projects[0].Root, "a refused relative rebind must leave the record where it was")
 	assertNoEvent(t, ch, agentproto.EventProjectsChanged)
 }
+
+// TestControlServer_RebindProject_UsesTheNormalizedPath pins Codex round 7 on
+// #4789: the boundary check trims the path, so the mutation must receive that
+// same trimmed value. A whitespace-prefixed absolute path — sent while the
+// daemon's cwd is an unrelated checkout — must rebind to the absolute path it
+// names, never resolve as relative under the cwd.
+func TestControlServer_RebindProject_UsesTheNormalizedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	original := setupControlRepo(t)
+	target := filepath.Join(testguard.CanonicalTempDir(t), "target")
+	cloneRepoTemplate(t, target)
+	unrelated := filepath.Join(testguard.CanonicalTempDir(t), "unrelated")
+	cloneRepoTemplate(t, unrelated)
+	t.Chdir(unrelated)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	var reg RegisterProjectResponse
+	require.NoError(t, cs.RegisterProject(RegisterProjectRequest{Path: original}, &reg))
+
+	var resp RebindProjectResponse
+	require.NoError(t, cs.RebindProject(RebindProjectRequest{ID: reg.Project.ID, Path: "  " + target + "\t"}, &resp))
+	require.True(t, resp.OK)
+	assert.Equal(t, filepath.Clean(target), resp.Project.Root, "the rebind must use the trimmed absolute path")
+
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	assert.Equal(t, filepath.Clean(target), projects[0].Root)
+}
