@@ -17845,7 +17845,6 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
   connectionGate.invalidate();
   connectionGeneration++;
   rebindInFlight = null;
-  rebindFollow = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -17970,7 +17969,6 @@ function switchProject(root2) {
   if (store.get().selectedProject === root2) {
     return;
   }
-  projectChoiceGeneration++;
   clearTabError();
   const sel = selectedSessionData();
   const keep = sel && sel.worktree?.repo_path === root2 ? store.get().selectedId : null;
@@ -18347,27 +18345,21 @@ function openAddProject() {
 var rebindInFlight = null;
 var rebindInFlightGeneration = 0;
 var REBIND_ANSWER_MS = 3e4;
-var rebindFollow = null;
-var projectChoiceGeneration = 0;
-var rebindAttempts = 0;
-function takeRebindFollow(projects) {
-  const follow = rebindFollow;
-  if (follow === null) {
-    return null;
-  }
-  if (projectChoiceGeneration !== follow.choiceGeneration || connectionGeneration !== follow.connection) {
-    rebindFollow = null;
-    return null;
-  }
-  const root2 = projects.find((p) => p.id === follow.id)?.root ?? null;
-  if (root2 === follow.oldRoot) {
-    if (follow.confirmed) {
-      rebindFollow = null;
+function rebindOutcomeUnknown(label) {
+  return new Error(`Rebind of ${label} \xB7 outcome unknown \xB7 check the project list`);
+}
+function followConfirmedRebind(projectId, tok, connection) {
+  void listProjects(tok).then((projects) => {
+    if (connection !== connectionGeneration || token !== tok) return;
+    const root2 = projects.find((p) => p.id === projectId)?.root;
+    if (root2 !== void 0) {
+      store.set({ registeredProjects: projects });
+      switchProject(root2);
     }
-    return null;
-  }
-  rebindFollow = null;
-  return root2;
+    refreshRegisteredProjects();
+  }).catch(() => {
+    if (connection === connectionGeneration && token === tok) refreshRegisteredProjects();
+  });
 }
 function openRebindProject(projectId, label) {
   if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
@@ -18375,7 +18367,6 @@ function openRebindProject(projectId, label) {
     return;
   }
   const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
-  const choiceGeneration = projectChoiceGeneration;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -18398,7 +18389,6 @@ function openRebindProject(projectId, label) {
         rebindInFlight = label;
         const connection = connectionGeneration;
         rebindInFlightGeneration = connection;
-        const attempt = ++rebindAttempts;
         const current = () => connection === connectionGeneration;
         let settled = false;
         const settle = () => {
@@ -18412,65 +18402,48 @@ function openRebindProject(projectId, label) {
           }
           return true;
         };
-        const followRegistry = (confirmed, landedRoot) => {
-          if (confirmed && landedRoot !== void 0 && landedRoot === oldRoot) {
-            if (rebindFollow?.attempt === attempt) {
-              rebindFollow = null;
-            }
-            refreshRegisteredProjects();
-            return;
-          }
-          if (oldRoot !== null && (rebindFollow === null || rebindFollow.attempt <= attempt)) {
-            rebindFollow = { id: projectId, oldRoot, attempt, choiceGeneration, confirmed, connection };
-          }
+        const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
+        const unknownOutcome = () => {
+          if (modal === m) closeModal();
           refreshRegisteredProjects();
-        };
-        const lateReply = (outcome, landedRoot) => {
-          if (outcome !== "refused") {
-            followRegistry(outcome === "confirmed", landedRoot);
-            return;
-          }
-          if (rebindFollow?.attempt === attempt) {
-            rebindFollow = null;
-          }
-          refreshRegisteredProjects();
+          surfaceMutationError(rebindOutcomeUnknown(label), "uncertain");
         };
         const unanswered = window.setTimeout(() => {
           if (!current() || !settle()) return;
-          if (modal === m) closeModal();
-          followRegistry(false);
-          surfaceMutationError(
-            new Error(`The rebind of ${label} has not answered in ${REBIND_ANSWER_MS / 1e3}s, so its outcome is unknown. Refreshing the project list.`),
-            "uncertain"
-          );
+          unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok).then((project) => {
+        void rebindProject(projectId, path, tok).then(() => {
           if (!current()) return;
           if (!settle()) {
-            lateReply("confirmed", project.root);
+            refreshRegisteredProjects();
             return;
           }
+          const follow = stillHere();
           if (modal === m) closeModal();
-          followRegistry(true, project.root);
+          if (follow) {
+            followConfirmedRebind(projectId, tok, connection);
+          } else {
+            refreshRegisteredProjects();
+          }
         }).catch((e) => {
           if (!current()) return;
           if (!settle()) {
-            lateReply(isMutationCommittedError(e) ? "confirmed" : isMutationOutcomeUncertain(e) ? "uncertain" : "refused");
+            refreshRegisteredProjects();
             return;
           }
           if (isMutationCommittedError(e)) {
+            const follow = stillHere();
             if (modal === m) closeModal();
-            followRegistry(true);
+            if (follow) {
+              followConfirmedRebind(projectId, tok, connection);
+            } else {
+              refreshRegisteredProjects();
+            }
             surfaceMutationError(e, "confirmed");
             return;
           }
           if (isMutationOutcomeUncertain(e)) {
-            if (modal === m) closeModal();
-            followRegistry(false);
-            surfaceMutationError(
-              new Error(`The rebind of ${label} could not be confirmed. ${errorText(e)}`),
-              "uncertain"
-            );
+            unknownOutcome();
             return;
           }
           if (modal !== m) {
@@ -18855,7 +18828,6 @@ var projectsRefetcher = createFencedRefetcher({
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
 function commitRegisteredProjects(projects) {
-  const follow = takeRebindFollow(projects);
   const selectedProject = reconcileProject(
     store.get().sessions,
     store.get().tasks,
@@ -18864,9 +18836,6 @@ function commitRegisteredProjects(projects) {
     projectRoots(projects)
   );
   store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
-  if (follow !== null) {
-    switchProject(follow);
-  }
 }
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();

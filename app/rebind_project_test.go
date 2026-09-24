@@ -154,26 +154,20 @@ func (committedErr) MutationCommitted() bool { return true }
 var _ apiproto.MutationCommittedError = committedErr{}
 
 // TestUncertainRebindDoesNotReArmThePicker pins the Codex finding on #4789: a
-// rebind whose reply was lost in transport (or that the daemon reports as
-// committed) may already be durable. Re-arming the form would let the user move
-// the identity a second time, so the picker closes and the outcome is reported
-// as unconfirmed instead of treated as a correctable refusal.
+// rebind whose reply was lost in transport may already be durable. Re-arming
+// the form would let the user move the identity a second time, so the picker
+// closes and the one "outcome unknown" notice is shown instead of treating it
+// as a correctable refusal.
 func TestUncertainRebindDoesNotReArmThePicker(t *testing.T) {
-	for name, err := range map[string]error{
-		"transport": &apiclient.TransportError{Err: errors.New("read: connection reset by peer")},
-		"committed": committedErr{},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newTestHome(t)
-			stubRebind(t, err)
-			picker := openRebindPicker(h)
-			h.Update(submitPickerRebind(t, h, "/new/project")())
+	h := newTestHome(t)
+	stubRebind(t, &apiclient.TransportError{Err: errors.New("read: connection reset by peer")})
+	picker := openRebindPicker(h)
+	h.Update(submitPickerRebind(t, h, "/new/project")())
 
-			assert.True(t, picker.RebindPending(), "an uncertain outcome must not re-arm the rebind form")
-			assert.Nil(t, h.projectPickerOverlay, "the picker closes on an uncertain outcome")
-			assert.Equal(t, stateDefault, h.state)
-		})
-	}
+	assert.True(t, picker.RebindPending(), "an uncertain outcome must not re-arm the rebind form")
+	assert.Nil(t, h.projectPickerOverlay, "the picker closes on an uncertain outcome")
+	assert.Equal(t, stateDefault, h.state)
+	assert.Equal(t, "Rebind of old-project · outcome unknown · check the project list", h.errBox.FullError())
 }
 
 // activeRebindHome is a home whose active project is backed by a real registry
@@ -279,12 +273,13 @@ func TestRebindOfOtherProjectKeepsScope(t *testing.T) {
 	assert.Equal(t, idBefore, h.repoID)
 }
 
-// TestUncertainRebindThatLandedFollowsTheActiveProject pins the Codex finding
-// on #4789: the daemon durably writes the rebind, then the reply is lost. The
-// refreshed Projects list shows the new binding, so the active scope must follow
-// the registry exactly as a confirmed success does.
-func TestUncertainRebindThatLandedFollowsTheActiveProject(t *testing.T) {
+// TestUnknownRebindOutcomeNeverFollows pins the (b) simplification on #4789:
+// an outcome that is not known never moves the TUI's scope — even when the
+// rebind did land behind the lost reply and the registry shows the new root.
+// The Projects section is re-read and one notice tells the user to check it.
+func TestUnknownRebindOutcomeNeverFollows(t *testing.T) {
 	h, _ := activeRebindHome(t)
+	rootBefore := h.repoRoot
 	old := rebindProjectThroughDaemon
 	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
 		if _, err := config.RebindProject(projectID, path); err != nil {
@@ -293,23 +288,32 @@ func TestUncertainRebindThatLandedFollowsTheActiveProject(t *testing.T) {
 		return config.Project{}, &apiclient.TransportError{Err: errors.New("read: connection reset by peer")}
 	}
 	t.Cleanup(func() { rebindProjectThroughDaemon = old })
+
+	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+
+	assert.Equal(t, rootBefore, h.repoRoot, "an unknown outcome must not move the scope, even if it landed")
+	assert.Equal(t, "Rebind of active · outcome unknown · check the project list", h.errBox.FullError())
+}
+
+// TestCommittedRebindFollowsAndReports: a committed error is a KNOWN, landed
+// move whose follow-up step failed, so the active scope follows the registry as
+// on success, and the follow-up failure is reported.
+func TestCommittedRebindFollowsAndReports(t *testing.T) {
+	h, _ := activeRebindHome(t)
+	old := rebindProjectThroughDaemon
+	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+		if _, err := config.RebindProject(projectID, path); err != nil {
+			return config.Project{}, err
+		}
+		return config.Project{}, committedErr{}
+	}
+	t.Cleanup(func() { rebindProjectThroughDaemon = old })
 	newRoot := initTestGitRepo(t)
 
 	h.Update(submitPickerRebind(t, h, newRoot)())
 
-	assert.Equal(t, newRoot, h.repoRoot, "a rebind that landed behind a lost reply must still move the active scope")
-}
-
-// TestUncertainRebindThatNeverLandedKeepsScope is the control: the reply is
-// lost but the registry still names the old root, so the scope stays put.
-func TestUncertainRebindThatNeverLandedKeepsScope(t *testing.T) {
-	h, _ := activeRebindHome(t)
-	rootBefore := h.repoRoot
-	stubRebind(t, &apiclient.TransportError{Err: errors.New("dial: connection refused")})
-
-	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
-
-	assert.Equal(t, rootBefore, h.repoRoot)
+	assert.Equal(t, newRoot, h.repoRoot, "a committed rebind is confirmed: the scope follows it")
+	assert.Contains(t, h.errBox.FullError(), "publishing projects.changed failed", "the follow-up failure is reported")
 }
 
 // TestRebindToastNamesTheRegistryRootNotTheEcho pins Codex on #4789: when
@@ -339,12 +343,12 @@ func TestRebindToastNamesTheRegistryRootNotTheEcho(t *testing.T) {
 	assert.NotContains(t, toast, echo, "the toast must not name the stale echo")
 }
 
-// TestUncertainRebindOfAnAggregatedRowKeepsScope pins Codex round 11 on #4789:
-// an aggregated row displays a higher-priority path (here the active workspace)
-// than the root its registration records. An uncertain rebind that never landed
-// leaves the record where it was; comparing the registry against the DISPLAY
-// root would mistake that for a move and switch the TUI to the recorded path.
-func TestUncertainRebindOfAnAggregatedRowKeepsScope(t *testing.T) {
+// TestNoOpRebindOfAnAggregatedRowKeepsScope pins Codex round 11 on #4789: an
+// aggregated row displays a higher-priority path (here the active workspace)
+// than the root its registration records. A confirmed rebind that left the
+// record where it was (a no-op) must not look like a move: comparing the
+// registry against the DISPLAY root would switch the TUI to the recorded path.
+func TestNoOpRebindOfAnAggregatedRowKeepsScope(t *testing.T) {
 	h, _ := activeRebindHome(t)
 	rootBefore := h.repoRoot
 	// Replace the row: the display root is the active workspace, not the root
@@ -356,7 +360,7 @@ func TestUncertainRebindOfAnAggregatedRowKeepsScope(t *testing.T) {
 		{Name: "active", Root: h.repoRoot, RepoID: h.repoID, RegistryID: projects[0].ID, RegistryRoot: projects[0].Root, MissingPath: true},
 	}, h.repoRoot)
 	h.projectPickerOverlay.SetMaxSize(80, 24)
-	stubRebind(t, &apiclient.TransportError{Err: errors.New("read: connection reset by peer")})
+	stubRebind(t, nil) // confirmed success that writes nothing: the record is unmoved
 
 	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
 

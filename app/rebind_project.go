@@ -63,21 +63,25 @@ func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 // request's token; a picker closed and reopened in the meantime is a different
 // request's (or none's), and must neither close nor show this reply's error.
 //
-// A definitive daemon refusal it owns is fed back inline so the user can correct
-// the path. Any outcome that may have landed — success, a committed error, or an
-// uncertain one — never re-arms the form: the picker it owns closes, and the
-// Projects section is re-read so it shows where the registration points now. A
-// success toast, and an unowned definitive refusal, show only when no other
-// picker is on screen, since either over a different picker reads as that
-// picker's result (the refusal changed nothing, so it is logged instead); an
-// unknown outcome always says so. A success that moved the project the TUI is
-// scoped to switches to wherever the registry binds that project now, so new
-// sessions and tasks stop targeting the root that was just repaired away.
+// Three outcomes:
+//   - Confirmed (success, or a committed error whose follow-up step failed): the
+//     picker it owns closes, the Projects section is re-read, and a move of the
+//     project the TUI is scoped to is followed to wherever the registry binds it
+//     now (followActiveRebind). The success toast shows only when no other
+//     picker is on screen — over a different picker it reads as that picker's.
+//   - Unknown (lost in transport, cancelled): the picker it owns closes, the
+//     Projects section is re-read, the scope is left alone, and one notice says
+//     the outcome is unknown. Nothing is followed: the refreshed list is where
+//     the user sees what happened.
+//   - A definitive refusal: fed back inline to the picker that owns it, which
+//     re-arms. An unowned one changed nothing; over a different picker it is
+//     logged rather than shown, else it goes to the error box.
 func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	pickerOpen := m.projectPickerOverlay != nil && m.state == stateSwitchProject
 	owned := pickerOpen && m.projectPickerOverlay.OwnsRebindReply(msg.token)
-	if msg.err != nil {
-		if !rebindOutcomeUncertain(msg.err) {
+	committed := msg.err != nil && apiproto.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committed {
+		if !rebindOutcomeUnknown(msg.err) {
 			if owned {
 				m.projectPickerOverlay.SetRebindError(msg.err.Error())
 				return m, nil
@@ -95,19 +99,18 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 			m.closeProjectPicker()
 		}
 		m.refreshSidebarProjects()
-		errCmd := m.handleError(fmt.Errorf("rebind of project %q could not be confirmed — check the Projects list before retrying: %w", msg.name, msg.err))
-		// The rebind may have landed: follow the registry exactly as a confirmed
-		// success does. If it never landed, the record still names the old root
-		// and the scope stays put.
-		model, followCmd := m.followActiveRebind(msg)
-		return model, tea.Batch(errCmd, followCmd)
+		return m, m.handleError(fmt.Errorf("Rebind of %s · outcome unknown · check the project list", msg.name))
 	}
 	m.refreshSidebarProjects()
-	var toast tea.Cmd
 	if owned {
 		m.closeProjectPicker()
 	}
-	if owned || !pickerOpen {
+	var notice tea.Cmd
+	switch {
+	case committed:
+		// The move landed; a follow-up step failed. Follow it, and say what failed.
+		notice = m.handleError(fmt.Errorf("rebound project %q, but: %w", msg.name, msg.err))
+	case owned || !pickerOpen:
 		// Name the root the registry holds NOW, never this reply's echo: another
 		// client may have rebound the project again since this request committed.
 		// A record that is gone (or unreadable) gets a root-free message.
@@ -115,19 +118,31 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		if root, ok := registeredProjectRoot(msg.projectID); ok {
 			text = fmt.Sprintf("Rebound project '%s' to %s", msg.name, root)
 		}
-		toast = m.showTransientMessage(text)
+		notice = m.showTransientMessage(text)
 	}
 	model, followCmd := m.followActiveRebind(msg)
-	return model, tea.Batch(toast, followCmd)
+	return model, tea.Batch(notice, followCmd)
 }
 
-// followActiveRebind moves the TUI's scope after a rebind that moved — or may
-// have moved — the project it is scoped to. It follows the registry, never the
-// reply's echo: another client may have rebound or deleted the project since
-// this request committed, and the Projects section just re-read that newer
-// state. A record that is gone, a registry that cannot be read, or a record
-// still naming the old root (an uncertain rebind that never landed) leaves the
-// scope where it is.
+// rebindOutcomeUnknown reports whether a failed rebind's outcome is not known:
+// the reply was lost in transport (the daemon may have written the registry
+// and then exited), or the request was cancelled mid-flight. An error the
+// daemon returned in its envelope is a definitive refusal, and a committed
+// error (apiproto.IsMutationCommitted) is a known, landed move — neither is
+// unknown.
+func rebindOutcomeUnknown(err error) bool {
+	return apiclient.IsTransportError(err) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
+}
+
+// followActiveRebind moves the TUI's scope after a CONFIRMED rebind of the
+// project it is scoped to. It follows the registry, never the reply's echo:
+// another client may have rebound or deleted the project since this request
+// committed, and the Projects section just re-read that newer state. A record
+// that is gone, a registry that cannot be read, or a record still naming the
+// root it recorded (a no-op rebind, or one another client moved back) leaves
+// the scope where it is. Unknown outcomes never reach it.
 func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	if !m.rebindMovedActiveProject(msg) {
 		return m, nil
@@ -166,18 +181,6 @@ func registeredProjectRoot(id string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// rebindOutcomeUncertain reports whether a failed rebind may nonetheless have
-// landed: the daemon said it committed before a follow-up failed, the reply was
-// lost in transport (the daemon may have written the registry and then exited),
-// or the request was cancelled mid-flight. Only an error the daemon returned in
-// its envelope is a definitive refusal that is safe to correct and resubmit.
-func rebindOutcomeUncertain(err error) bool {
-	return apiproto.IsMutationCommitted(err) ||
-		apiclient.IsTransportError(err) ||
-		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)
 }
 
 // rebindMovedActiveProject reports whether a rebind moved the project the TUI

@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
-// Drives index.ts's real openRebindProject / commitRegisteredProjects /
-// takeRebindFollow in a sandbox, the same extract-and-run harness
+// Drives index.ts's real openRebindProject / followConfirmedRebind /
+// commitRegisteredProjects in a sandbox, the same extract-and-run harness
 // remove_task_committed.test.ts uses, so the test exercises the shipped handlers
 // rather than a copy of their logic.
 
@@ -18,7 +18,7 @@ function topLevelFunction(source: string, name: string): string {
 }
 
 interface Project { id: string; root: string }
-interface Deferred { resolve(p: Project): void; reject(e: Error): void }
+interface Deferred<T> { resolve(v: T): void; reject(e: Error): void }
 interface State {
   registeredProjects: Project[];
   selectedProject: string | null;
@@ -27,22 +27,23 @@ interface State {
 }
 
 /** An error the stubbed api classifies: "refused" is a definitive daemon refusal,
- *  "uncertain" a lost reply / unverified intermediary error. */
+ *  "uncertain" a lost reply / unverified intermediary error, "committed" a rebind
+ *  that landed before a follow-up step failed. */
 class StubError extends Error {
-  constructor(message: string, readonly kind: "refused" | "uncertain") { super(message); }
+  constructor(message: string, readonly kind: "refused" | "uncertain" | "committed") { super(message); }
 }
 
-function harness(
-  initial: { registeredProjects: Project[]; selectedProject: string | null },
-  opts: { storage?: boolean } = {},
-) {
-  const storage = opts.storage ?? true;
+const UNKNOWN = (label: string) => `outcome:uncertain:Rebind of ${label} · outcome unknown · check the project list`;
+
+function harness(initial: { registeredProjects: Project[]; selectedProject: string | null }) {
   const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const state: State = { ...initial, sessions: [], tasks: [] };
-  let persisted: string | null = storage ? initial.selectedProject : null;
+  let persisted: string | null = initial.selectedProject;
   const events: string[] = [];
   const submits: Array<(path: string) => void> = [];
-  const pending: Deferred[] = [];
+  const pending: Array<Deferred<Project>> = [];
+  // Each followConfirmedRebind registry read, answered by the test.
+  const reads: Array<Deferred<Project[]>> = [];
   // Controllable timers: fire() runs every armed callback, as if the bounded wait
   // elapsed; clearTimeout disarms one.
   const timers = new Map<number, () => void>();
@@ -70,13 +71,13 @@ function harness(
       events.push(`rpc:${id}:${path}`);
       return new Promise<Project>((resolve, reject) => pending.push({ resolve, reject }));
     },
-    // Mirrors index.ts switchProject: persist (when storage works), and count an
-    // explicit switch only when the selection really changes.
+    listProjects: () => {
+      events.push("read");
+      return new Promise<Project[]>((resolve, reject) => reads.push({ resolve, reject }));
+    },
     switchProject: (root: string) => {
       events.push(`switch:${root}`);
-      if (storage) persisted = root;
-      if (state.selectedProject === root) return;
-      (context as unknown as { projectChoiceGeneration: number }).projectChoiceGeneration++;
+      persisted = root;
       state.selectedProject = root;
     },
     loadProjectChoice: () => persisted,
@@ -88,19 +89,19 @@ function harness(
     surfaceTabError: (e: Error) => events.push(`toast:${e.message}`),
     surfaceMutationError: (e: Error, kind = "failed") => events.push(`outcome:${kind}:${e.message}`),
     refreshRegisteredProjects: () => events.push("refetch"),
-    isMutationCommittedError: () => false,
-    isMutationOutcomeUncertain: (e: StubError) => e.kind === "uncertain",
+    isMutationCommittedError: (e: StubError) => e.kind === "committed",
+    isMutationOutcomeUncertain: (e: StubError) => e.kind !== "refused",
     errorText: (e: Error) => e.message,
     listDirectory: () => Promise.resolve({}),
   };
   const code = ts.transpileModule(`
-    let token = "token", modal = null, rebindInFlight = null, rebindFollow = null, rebindAttempts = 0;
-    var projectChoiceGeneration = 0; // var: shared with the harness's switchProject stub
+    let token = "token", modal = null, rebindInFlight = null;
     var connectionGeneration = 0, rebindInFlightGeneration = 0; // var: tests bump the connection
     const REBIND_ANSWER_MS = 30000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
-    ${topLevelFunction(source, "takeRebindFollow")}
+    ${topLevelFunction(source, "rebindOutcomeUnknown")}
+    ${topLevelFunction(source, "followConfirmedRebind")}
     ${topLevelFunction(source, "commitRegisteredProjects")}
     ${topLevelFunction(source, "openRebindProject")}
   `, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
@@ -113,10 +114,16 @@ function harness(
   // Simulates a reconnect (connect() bumps the generation too, without going
   // through disconnect()), so the fence is tested on its own.
   const reconnect = () => { (context as unknown as { connectionGeneration: number }).connectionGeneration++; };
-  return { app, state, events, submits, pending, fire, timers, reconnect };
+  return { app, state, events, submits, pending, reads, fire, timers, reconnect };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+const twoProjects = () => ({
+  registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
+  selectedProject: "/old",
+});
+
+// --- single flight and stale replies -------------------------------------------
 
 test("escape mid-rebind cannot reopen rebind and race a second mutation", async () => {
   const { app, events, submits, pending } = harness({ registeredProjects: [{ id: "prj_A", root: "/old" }], selectedProject: "/old" });
@@ -149,8 +156,30 @@ test("a refusal after the modal was dismissed surfaces as a toast, not in a late
   assert.ok(!events.some(e => e.startsWith("error:")), "a dismissed modal's error must not be set inline");
 });
 
+test("a rebind from a previous connection neither blocks nor acts on the new one", async () => {
+  const { app, state, events, submits, pending, fire, reconnect } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/first");
+  app.closeModal();
+  reconnect();
+
+  app.openRebindProject("prj_A", "alpha");
+  assert.equal(submits.length, 2, "an old connection's in-flight guard must not block the new connection");
+
+  const before = events.length;
+  fire(); // the old attempt's bounded wait
+  pending[0].resolve({ id: "prj_A", root: "/first" }); // and its late reply
+  await settle();
+  assert.deepEqual(events.slice(before).filter(e => !e.startsWith("busy:")), [],
+    "the old attempt must not notify, refetch, read, or follow on the new connection");
+  assert.equal(state.selectedProject, "/old");
+});
+
+// --- definitive refusal: inline error, re-armed form, no follow ---------------
+
 test("a definitive refusal re-arms the open modal inline", async () => {
-  const { app, events, submits, pending } = harness({ registeredProjects: [{ id: "prj_A", root: "/old" }], selectedProject: "/old" });
+  const { app, state, events, submits, pending } = harness(twoProjects());
 
   app.openRebindProject("prj_A", "alpha");
   submits[0]("/taken");
@@ -158,10 +187,108 @@ test("a definitive refusal re-arms the open modal inline", async () => {
   await settle();
 
   assert.deepEqual(events.slice(-2), ["busy:1:false", "error:1:path is already bound to another project"]);
+  assert.ok(!events.includes("read"), "a refusal changed nothing: nothing to follow");
+  assert.equal(state.selectedProject, "/old");
 });
 
-test("an uncertain outcome closes the modal, re-reads the registry, and does not re-arm", async () => {
-  const { app, events, submits, pending } = harness({ registeredProjects: [{ id: "prj_A", root: "/old" }], selectedProject: "/old" });
+// --- confirmed, in-time success: follow the registry, never the echo ----------
+
+test("a successful rebind follows the selection to the root the registry read reports", async () => {
+  const { app, state, submits, pending, reads, events } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  assert.ok(events.includes("close:1"));
+  assert.equal(reads.length, 1, "a confirmed success reads the registry once, after the reply");
+
+  reads[0].resolve([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+  assert.equal(state.selectedProject, "/new", "the selection must follow the registration to its new root");
+  assert.ok(events.includes("refetch"), "a fenced refetch follows to settle anything that raced the read");
+});
+
+test("a newer registry state is not overwritten by the rebind's own echo", async () => {
+  const { app, state, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  // Another client rebinds prj_A again after this request commits; the reply
+  // still echoes /new, but the registry read says /newer.
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  reads[0].resolve([{ id: "prj_A", root: "/newer" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+
+  assert.equal(state.selectedProject, "/newer", "follow the registry's current binding, not the echo");
+  assert.deepEqual(state.registeredProjects.map(p => p.root), ["/newer", "/other"]);
+});
+
+test("a confirmed success does not follow a record the registry no longer has", async () => {
+  const { app, state, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  reads[0].resolve([{ id: "prj_B", root: "/other" }]); // deleted by another client meanwhile
+  await settle();
+
+  assert.notEqual(state.selectedProject, "/new", "a deleted record must not be resurrected by the echo");
+});
+
+test("without local storage, a reconcile fallback before the reply does not stop the follow", async () => {
+  const { app, state, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  // projects.changed lands before the HTTP reply: that read already drops /old
+  // and reconciliation moves the selection. The modal is still open — the user
+  // is still in this rebind — so the confirmed success still follows.
+  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+  reads[0].resolve([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+
+  assert.equal(state.selectedProject, "/new");
+});
+
+test("a rebind does not move a selection the user changed mid-flight", async () => {
+  const { app, state, submits, pending, events } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  app.closeModal();
+  // The user explicitly switched projects while the daemon decided.
+  (app as unknown as { switchProject(r: string): void }).switchProject("/other");
+  pending[0].resolve({ id: "prj_A", root: "/new" });
+  await settle();
+
+  assert.equal(state.selectedProject, "/other");
+  assert.ok(!events.includes("read"), "no follow read for a user who has left this rebind");
+  assert.ok(events.includes("refetch"), "the registry is still re-read");
+});
+
+test("a committed-then-failed rebind follows like a success and reports the follow-up failure", async () => {
+  const { app, state, events, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+  pending[0].reject(new StubError("rebind committed, but publishing projects.changed failed", "committed"));
+  await settle();
+  reads[0].resolve([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+
+  assert.equal(state.selectedProject, "/new");
+  assert.ok(events.includes("outcome:confirmed:rebind committed, but publishing projects.changed failed"));
+});
+
+// --- unknown outcome: no follow, re-read, one notice ---------------------------
+
+test("an uncertain outcome closes the modal, re-reads the registry, and neither re-arms nor follows", async () => {
+  const { app, state, events, submits, pending } = harness(twoProjects());
 
   app.openRebindProject("prj_A", "alpha");
   submits[0]("/new");
@@ -171,62 +298,12 @@ test("an uncertain outcome closes the modal, re-reads the registry, and does not
   assert.ok(!events.includes("busy:1:false"), "an uncertain outcome must not re-enable the form");
   assert.ok(events.includes("close:1"), "the form closes so a second path cannot be submitted into it");
   assert.ok(events.includes("refetch"), "the registry is re-read to learn what actually happened");
-  assert.ok(events.some(e => e.startsWith("outcome:uncertain:") && e.includes("alpha")), "the notice says the outcome is unknown");
-});
+  assert.ok(!events.includes("read"), "no follow on an unknown outcome");
+  assert.deepEqual(events.filter(e => e.startsWith("outcome:")), [UNKNOWN("alpha")]);
 
-test("a successful rebind follows the selection to the root the registry read reports", async () => {
-  const { app, state, submits, pending, events } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/new");
-  pending[0].resolve({ id: "prj_A", root: "/new" });
-  await settle();
-  assert.ok(events.includes("refetch"), "success must trigger a fenced registry read");
-
+  // Even if the registry shows the move, the selection is left where it was.
   app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
-  assert.equal(state.selectedProject, "/new", "the selection must follow the registration to its new root");
-});
-
-test("a newer registry state is not overwritten by the rebind's own echo", async () => {
-  const { app, state, submits, pending } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/new");
-  // Another client deletes prj_A after this rebind commits, and that refetch
-  // lands before this request's delayed reply.
-  app.commitRegisteredProjects([{ id: "prj_B", root: "/other" }]);
-  pending[0].resolve({ id: "prj_A", root: "/new" });
-  await settle();
-
-  assert.deepEqual(state.registeredProjects.map(p => p.root), ["/other"], "the echo must not resurrect a deleted record");
-
-  // The follow-up read still does not know prj_A: nothing to follow, no phantom.
-  app.commitRegisteredProjects([{ id: "prj_B", root: "/other" }]);
   assert.notEqual(state.selectedProject, "/new");
-});
-
-test("a rebind does not move a selection the user changed mid-flight", async () => {
-  const { app, state, submits, pending } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/new");
-  app.closeModal();
-  // The user explicitly switched projects while the daemon decided.
-  (app as unknown as { switchProject(r: string): void }).switchProject("/other");
-  pending[0].resolve({ id: "prj_A", root: "/new" });
-  await settle();
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
-
-  assert.equal(state.selectedProject, "/other");
 });
 
 test("a rebind that never answers releases the guard and reports the outcome as unknown", async () => {
@@ -240,16 +317,15 @@ test("a rebind that never answers releases the guard and reports the outcome as 
 
   assert.ok(events.includes("close:1"), "the stalled form closes");
   assert.ok(events.includes("refetch"), "the registry is re-read so the project list shows the truth");
-  const outcomes = events.filter(e => e.startsWith("outcome:"));
-  assert.equal(outcomes.length, 1);
-  assert.match(outcomes[0], /^outcome:uncertain:.*alpha.*unknown/, "the notice says the outcome is unknown, not success or failure");
+  assert.deepEqual(events.filter(e => e.startsWith("outcome:")), [UNKNOWN("alpha")],
+    "one notice: the outcome is unknown, not success or failure");
   assert.ok(!events.some(e => e.startsWith("error:") || e.startsWith("toast:")), "no failure is claimed");
 
   app.openRebindProject("prj_A", "alpha");
   assert.equal(submits.length, 2, "the in-flight guard must not outlive the attempt");
 
   // A reply that finally arrives only re-reads the registry: no second notice,
-  // and it must not touch the new attempt's guard.
+  // no follow, and it must not touch the new attempt's guard.
   const before = events.length;
   pending[0].resolve({ id: "prj_A", root: "/new" });
   await settle();
@@ -269,170 +345,16 @@ test("a rebind that answers in time disarms the bounded wait", async () => {
   assert.equal(timers.size, 0, "a settled attempt leaves no timer to report a stale unknown outcome");
 });
 
-test("a rebind that commits after the bounded wait still moves the selection", async () => {
-  const { app, state, submits, pending, fire } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
+test("a late success after the bounded wait does not auto-follow", async () => {
+  const { app, state, events, submits, pending, fire } = harness(twoProjects());
 
   app.openRebindProject("prj_A", "alpha");
   submits[0]("/new");
-  fire(); // 30s pass: outcome unknown, a registry read starts
-  // That read lands before the daemon commits: the record still names /old.
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }]);
-  assert.equal(state.selectedProject, "/old");
-
-  // The daemon commits; its late reply triggers the read that observes the move.
-  pending[0].resolve({ id: "prj_A", root: "/new" });
+  fire(); // 30s pass: outcome unknown, the registry is re-read
+  pending[0].resolve({ id: "prj_A", root: "/new" }); // the daemon commits, late
   await settle();
   app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
 
-  assert.equal(state.selectedProject, "/new", "the follow intent must survive a read that has not seen the move yet");
-});
-
-test("a late definitive refusal disarms the follow intent", async () => {
-  const { app, state, submits, pending, fire } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/new");
-  fire();
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }]);
-  pending[0].reject(new StubError("path is already bound to another project", "refused"));
-  await settle();
-
-  // Much later, another client moves the record. This rebind never landed, so
-  // its intent must not drag the selection along.
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
-  assert.notEqual(state.selectedProject, "/elsewhere");
-});
-
-test("a late refusal from an older attempt cannot clear a newer attempt's follow", async () => {
-  const { app, state, submits, pending, fire } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  // Attempt A outlives the bounded wait, which releases the guard.
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/first");
-  fire();
-  // Attempt B, for the same project, succeeds and arms its own follow.
-  app.openRebindProject("prj_A", "alpha");
-  submits[1]("/second");
-  pending[1].resolve({ id: "prj_A", root: "/second" });
-  await settle();
-  // A's definitive refusal arrives before B's registry read commits.
-  pending[0].reject(new StubError("path is already bound to another project", "refused"));
-  await settle();
-
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/second" }, { id: "prj_B", root: "/other" }]);
-  assert.equal(state.selectedProject, "/second", "B's follow must survive A's late refusal");
-});
-
-test("a late success from an older attempt cannot replace a newer attempt's follow", async () => {
-  const { app, state, submits, pending, fire } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  // Attempt A (project A) outlives the bounded wait, which releases the guard.
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/first");
-  fire();
-  // The user moves to project B and rebinds it; B succeeds and arms its follow.
-  (app as unknown as { switchProject(r: string): void }).switchProject("/other");
-  app.openRebindProject("prj_B", "beta");
-  submits[1]("/other-new");
-  pending[1].resolve({ id: "prj_B", root: "/other-new" });
-  await settle();
-  // A finally answers, late, with a success.
-  pending[0].resolve({ id: "prj_A", root: "/first" });
-  await settle();
-
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/first" }, { id: "prj_B", root: "/other-new" }]);
-  assert.equal(state.selectedProject, "/other-new", "B's follow must survive A's late success");
-});
-
-test("without local storage, a reconcile fallback does not cancel the follow", async () => {
-  const { app, state, submits, pending } = harness(
-    { registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }], selectedProject: "/old" },
-    { storage: false },
-  );
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/new");
-  // projects.changed lands before the HTTP reply: that read already drops /old,
-  // and reconciliation (no persisted choice to fall back on) moves the selection.
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
-  assert.notEqual(state.selectedProject, "/old", "precondition: reconciliation moved off the vanished root");
-
-  pending[0].resolve({ id: "prj_A", root: "/new" });
-  await settle();
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/new" }, { id: "prj_B", root: "/other" }]);
-
-  assert.equal(state.selectedProject, "/new", "a reconcile fallback is not the user leaving; the follow must still land");
-});
-
-test("a confirmed rebind that changed nothing does not follow a later, unrelated move", async () => {
-  const { app, state, submits, pending } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/old/via-symlink");
-  // The daemon canonicalizes it to the root the record already has.
-  pending[0].resolve({ id: "prj_A", root: "/old" });
-  await settle();
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }]);
-  assert.equal(state.selectedProject, "/old");
-
-  // Much later another client rebinds prj_A. This attempt is long settled.
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
-  assert.notEqual(state.selectedProject, "/elsewhere", "a settled no-op rebind must not claim someone else's move");
-});
-
-test("a rebind from a previous connection neither blocks nor acts on the new one", async () => {
-  const { app, state, events, submits, pending, fire, reconnect } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/first");
-  app.closeModal();
-  reconnect();
-
-  app.openRebindProject("prj_A", "alpha");
-  assert.equal(submits.length, 2, "an old connection's in-flight guard must not block the new connection");
-
-  const before = events.length;
-  fire(); // the old attempt's bounded wait
-  pending[0].resolve({ id: "prj_A", root: "/first" }); // and its late reply
-  await settle();
-  assert.deepEqual(events.slice(before).filter(e => !e.startsWith("busy:")), [],
-    "the old attempt must not notify, refetch, or arm a follow on the new connection");
-
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/first" }, { id: "prj_B", root: "/other" }]);
-  assert.notEqual(state.selectedProject, "/first", "no follow was armed for the old connection's attempt");
-});
-
-test("a confirmed no-op arms no follow, even when the refetch fails", async () => {
-  const { app, state, submits, pending } = harness({
-    registeredProjects: [{ id: "prj_A", root: "/old" }, { id: "prj_B", root: "/other" }],
-    selectedProject: "/old",
-  });
-
-  app.openRebindProject("prj_A", "alpha");
-  submits[0]("/old/via-symlink");
-  pending[0].resolve({ id: "prj_A", root: "/old" });
-  await settle();
-  // The refetch this triggered failed: no registry read commits.
-
-  // Later, another client rebinds prj_A, and that read is the next to land.
-  app.commitRegisteredProjects([{ id: "prj_A", root: "/elsewhere" }, { id: "prj_B", root: "/other" }]);
-  assert.notEqual(state.selectedProject, "/elsewhere", "a confirmed no-op must not claim someone else's move");
+  assert.ok(!events.includes("read"), "a late reply never starts a follow");
+  assert.notEqual(state.selectedProject, "/new", "the user was told to check the project list; nothing moves them");
 });
