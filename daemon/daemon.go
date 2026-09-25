@@ -724,13 +724,16 @@ func daemonPIDFilePath() (string, error) {
 // It REFUSES a symlinked path (#3672). The PID file is af's own liveness
 // bookkeeping at a path af chose, written on start and deleted on teardown, so
 // a link there is neither af's to write through nor af's to replace — the same
-// answer the bearer token and the autostart unit take.
+// answer the bearer token and the autostart unit take. It takes the PID-file
+// lock (withDaemonPIDLock) so a stop's read-compare-unlink can't interleave.
 func writeDaemonPIDFile() error {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	return withDaemonPIDLock(path, time.Now().Add(daemonPIDLockStartupBudget), func() error {
+		return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	})
 }
 
 // removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
@@ -770,6 +773,13 @@ var (
 // no daemon.pid, so a true success line here would be a lie. It verifies the
 // PID actually belongs to an agent-factory daemon before signaling it, so a
 // stale or reused PID in the PID file can't take down an unrelated process.
+// That cmdline check is paired with a home binding (pidBelongsToThisHome): a
+// stale daemon.pid whose PID was recycled by ANOTHER AGENT_FACTORY_HOME's
+// `af --daemon` passes the cmdline check while serving a different control
+// socket, and signaling it would kill an unrelated daemon — possibly another
+// user's on a shared host. The same binding gates locateDaemonPID so the two
+// PID-validation paths agree (#1004), mirroring the cross-home gate the unit
+// operations already carry (#1919).
 //
 // Shutdown is graceful by default: SIGTERM gives the daemon's signal handler a
 // chance to run SaveInstances() and clean up the PID file (see RunDaemon). We
@@ -835,6 +845,25 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon; removing stale PID file", pid)
 		_ = os.Remove(pidFile)
 		return false, nil
+	}
+
+	// Bind the PID to THIS home before signaling (#4793, #1919, #1004). The
+	// cmdline check above cannot tell this home's `af --daemon` from another
+	// home's. A PROVEN-foreign PID is a stale PID file; an INCONCLUSIVE binding
+	// (daemonUnverifiable) is neither safe to signal nor safe to orphan by
+	// deleting the PID file over it — leave the file and surface why.
+	switch scope := classifyDaemonHome(pid); scope {
+	case daemonOurs:
+		// Proven to serve this home: signal it below.
+	case daemonForeign:
+		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
+		removePIDFileIfStillNames(pidFile, pid, deadline)
+		return false, nil
+	default: // daemonUnverifiable — inconclusive; neither signal nor orphan a live daemon.
+		if reclaimDeadUnverifiablePIDFile(pidFile, pid, deadline) {
+			return false, nil
+		}
+		return false, fmt.Errorf("PID %d could not be bound to this home (uid, AGENT_FACTORY_HOME, or path unresolved); not signaling and leaving the PID file in place", pid)
 	}
 
 	// Send SIGTERM so the daemon's signal handler can SaveInstances() before
