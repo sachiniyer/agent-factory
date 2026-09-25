@@ -59,7 +59,7 @@ import type { AccountsState } from "./accounts.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
-import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
+import { pressDistance, TAB_PRESS_LIMITS, tabDragFeedbackRegion, tabPressVerdict } from "./tabtouch.js";
 import { KeyedRows, orderChildren } from "./keyed-rows.js";
 import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
@@ -2654,11 +2654,20 @@ export class AppShell {
       }
       // Picked up: this gesture is ours, so stop the page reacting to it as a scroll.
       e.preventDefault();
-      // Over a pane → that pane's split zone; otherwise the bar's insertion gap.
-      if (!bar.contains(document.elementFromPoint(e.clientX, e.clientY)) && this.actions.paneDropHintAt(e.clientX, e.clientY)) {
-        this.hideTabInsert();
-      } else {
+      // Three regions, mirroring the pointerup drop decision below: a pane shows its
+      // split zone, the bar shows its insertion gap, and anywhere else (the header,
+      // appbar controls, or empty space) shows nothing — a release there is a cancel,
+      // so the indicator must not track a finger that is no longer over the bar. The
+      // verdict lives in tabtouch.ts for the same reason `tabPressVerdict` does. The
+      // pane hit-test shows its hint as a side effect, so it runs only when the pointer
+      // is off the bar (short-circuit), exactly as before.
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const overBar = bar.contains(hit);
+      const overPane = !overBar && this.actions.paneDropHintAt(e.clientX, e.clientY);
+      if (tabDragFeedbackRegion(overBar, overPane) === "bar") {
         this.showTabInsert(bar, e.clientX);
+      } else {
+        this.hideTabInsert();
       }
     });
 
