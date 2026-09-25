@@ -98,18 +98,11 @@ func (s *SearchOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		if s.selectedIdx < len(s.results)-1 {
 			s.selectedIdx++
 		}
-	case tea.KeyBackspace:
-		if len(s.query) > 0 {
-			runes := []rune(s.query)
-			s.query = string(runes[:len(runes)-1])
+	default:
+		if query, ok := ui.EditLine(s.query, msg); ok && query != s.query {
+			s.query = query
 			s.updateResults()
 		}
-	case tea.KeySpace:
-		s.query += " "
-		s.updateResults()
-	case tea.KeyRunes:
-		s.query += string(msg.Runes)
-		s.updateResults()
 	}
 	return false
 }
