@@ -21,6 +21,15 @@ func mutationMayHaveLanded(err error) bool {
 	return apiclient.IsMutationOutcomeUncertain(err)
 }
 
+// mutationOutcomeUnknown is mutationMayHaveLanded minus a committed outcome: the
+// daemon may or may not have applied the mutation, and nothing says which. A
+// call site that already handles a committed outcome as landed (archive,
+// restore, handoff, delete project, …) keeps that branch and uses this for the
+// rest, so a committed outcome behaves exactly as before (#4824).
+func mutationOutcomeUnknown(err error) bool {
+	return mutationMayHaveLanded(err) && !apiclient.IsMutationCommitted(err)
+}
+
 // mutationOutcomeError words a failure mutationMayHaveLanded accepted. action
 // is the verb phrase ("creating session \"x\""); where names what the user
 // should look at before retrying ("the sidebar"). A committed outcome is known

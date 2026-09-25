@@ -230,6 +230,13 @@ func (m *home) handleHandoffDone(msg handoffDoneMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s, with warning: %v", msg.title, handoffIdentityLabel(from, msg.fromAccount), handoffIdentityLabel(msg.target, msg.toAccount), msg.err))
 		}
+		// A handoff whose reply was lost may already have swapped the agent and
+		// delivered the mission (#4824). Reporting it as failed invites a second
+		// handoff, which swaps again and delivers the brief twice.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("handing '%s' to %s", msg.title, msg.target), "the session's agent", msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("handoff of '%s' to %s failed: %w", msg.title, msg.target, msg.err))
 	}
 	from := msg.from
