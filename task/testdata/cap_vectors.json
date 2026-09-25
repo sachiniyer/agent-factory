@@ -1,0 +1,51 @@
+{
+  "_readme": [
+    "Shared concurrency-cap vectors for #4180 (max_concurrent_runs on both UIs).",
+    "BOTH the Go tests (task/cap_vectors_test.go) and the web tests",
+    "(web/src/tasks_cap.test.ts) load this file so the two implementations of the",
+    "cap gate and the cap parse cannot drift — the #1970 shared-source-of-truth",
+    "pattern, same as schedule/testdata/vectors.json. Go is canonical: fix the TS,",
+    "or change the vectors and BOTH implementations together.",
+    "",
+    "Each entry in `applies` is checked as follows:",
+    "  - Go:  task.CapApplies(is_watch, target) == applies, and",
+    "        task.CapUnavailableReason(is_watch, target) == reason (empty == null)",
+    "  - Web: capUnavailableReason(is_watch ? \"watch\" : \"cron\", target) returns",
+    "        reason verbatim, or null when applies is true",
+    "  - The reason strings are the refusal copy BOTH surfaces render; check order",
+    "    is part of the contract (a shape failing both rules reports the trigger).",
+    "",
+    "Each entry in `parse` is checked as follows:",
+    "  - Go:  task.ParseCapInput(raw) == (value, ok)",
+    "  - Web: parseCapInput(raw) == value when ok, else null",
+    "  - ok:false means BOTH forms refuse the string; value is the stored int.",
+    "  - The 9007199254740991 ceiling is task.MaxCapValue = Number.MAX_SAFE_INTEGER:",
+    "    above it the two surfaces could not represent the same digits identically."
+  ],
+  "applies": [
+    { "name": "watch-no-target",       "is_watch": true,  "target": "",        "applies": true },
+    { "name": "watch-blank-target",    "is_watch": true,  "target": "   ",     "applies": true },
+    { "name": "cron-no-target",        "is_watch": false, "target": "",        "applies": false, "reason": "Cron fires already coalesce." },
+    { "name": "cron-with-target",      "is_watch": false, "target": "captain", "applies": false, "reason": "Cron fires already coalesce." },
+    { "name": "watch-with-target",     "is_watch": true,  "target": "captain", "applies": false, "reason": "Deliveries into one session already serialize." },
+    { "name": "watch-padded-target",   "is_watch": true,  "target": "  x  ",   "applies": false, "reason": "Deliveries into one session already serialize." }
+  ],
+  "parse": [
+    { "name": "empty-is-unlimited",    "raw": "",                    "ok": true,  "value": 0 },
+    { "name": "blank-is-unlimited",    "raw": "   ",                 "ok": true,  "value": 0 },
+    { "name": "zero",                  "raw": "0",                   "ok": true,  "value": 0 },
+    { "name": "five",                  "raw": "5",                   "ok": true,  "value": 5 },
+    { "name": "surrounding-space",     "raw": "  7 ",                "ok": true,  "value": 7 },
+    { "name": "leading-plus",          "raw": "+3",                  "ok": true,  "value": 3 },
+    { "name": "leading-zeros",         "raw": "007",                 "ok": true,  "value": 7 },
+    { "name": "negative",              "raw": "-1",                  "ok": false },
+    { "name": "negative-zero-ok",      "raw": "-0",                  "ok": true,  "value": 0 },
+    { "name": "decimal",               "raw": "1.5",                 "ok": false },
+    { "name": "text",                  "raw": "many",                "ok": false },
+    { "name": "exponent",              "raw": "1e3",                 "ok": false },
+    { "name": "interior-space",        "raw": "4 5",                 "ok": false },
+    { "name": "hex",                   "raw": "0x10",                "ok": false },
+    { "name": "safe-max",              "raw": "9007199254740991",    "ok": true,  "value": 9007199254740991 },
+    { "name": "above-safe-max",        "raw": "9007199254740992",    "ok": false }
+  ]
+}

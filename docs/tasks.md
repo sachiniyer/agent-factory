@@ -238,7 +238,7 @@ af tasks add --name "DLQ triage" \
   --max-concurrent-runs 3
 ```
 
-The default is `0` — unlimited, which is exactly the historical behavior. A cap is opt-in; existing tasks are unaffected.
+The default is `0` — unlimited, which is exactly the historical behavior. A cap is opt-in; existing tasks are unaffected. The same bound is settable in the task form: the TUI editor and the web modal both carry a "Max runs" / "Max concurrent runs" field on a watch task with no `target_session`, and show the reason instead of the input on any other shape.
 
 How it behaves:
 

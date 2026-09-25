@@ -1352,19 +1352,19 @@
       "id": "task.max-concurrent-runs",
       "title": "Cap a watch task's in-flight session count",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/task_pane_edit.go renderCapField — Max runs row, create and edit"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/tasks.ts taskFormModal cap input; edit sent inline at web/src/index.ts openEditTask"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+        "pointer": "api/api.go:862 af tasks add/update --max-concurrent-runs"
       },
-      "verdict": "unclear",
-      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+      "verdict": "parity",
+      "notes": "Surfaced on both UIs in #4180, following the on_complete gated-field pattern exactly: a text input on watch/no-target shapes, the daemon's own reason in place of it otherwise. Both UIs ask ONE predicate — task.CapUnavailableReason, with the web's twin pinned by task/testdata/cap_vectors.json — and parse input by the shared task.ParseCapInput rule (empty = 0 = unlimited; negatives, non-integers, and values above the safe-integer ceiling refused identically)."
     },
     {
       "id": "task.on-complete",
@@ -2196,9 +2196,6 @@
           "task.dropped_events": {
             "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
           },
-          "task.max_concurrent_runs": {
-            "gap": "task.max-concurrent-runs"
-          },
           "task.repo_id": {
             "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
           }
@@ -2231,7 +2228,7 @@
             "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.max_concurrent_runs": {
-            "gap": "task.max-concurrent-runs"
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Max runs row (ui/task_pane_edit.go renderCapField) writes task.Task.MaxConcurrentRuns and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           },
           "expect.enforce": {
             "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
@@ -2416,9 +2413,6 @@
       "UpdateTask": {
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
-        },
-        "update.max_concurrent_runs": {
-          "gap": "task.max-concurrent-runs"
         }
       },
       "AddTask": {
@@ -2469,9 +2463,6 @@
         },
         "task.dropped_events": {
           "ok": "Daemon-owned watch-delivery history (#4357): the supervisor advances it only when the per-minute source cap discards an event, and task.AddTaskChecked clears any client-supplied value. A surface setting it would forge loss that did not occur."
-        },
-        "task.max_concurrent_runs": {
-          "gap": "task.max-concurrent-runs"
         },
         "task.repo_id": {
           "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."

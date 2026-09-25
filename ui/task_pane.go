@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,8 +37,8 @@ var taskPlaceholderStyle = lipgloss.NewStyle().
 var taskFormMoreStyle = lipgloss.NewStyle().Foreground(activeTheme.InkMuted)
 
 // Edit-form focus stops, in tab order. The form is grouped: Essentials
-// (name, trigger, prompt) then Delivery (target session, on-complete, path,
-// program).
+// (name, trigger, prompt) then Delivery (target session, on-complete, max
+// runs, path, program).
 // The trigger is a two-step stop: a cron|watch type selector followed by the
 // matching value input — only the selected trigger's field is shown, which
 // makes the exactly-one-trigger contract (#782) structural instead of a
@@ -49,6 +50,7 @@ const (
 	taskFocusPrompt
 	taskFocusTarget
 	taskFocusOnComplete // spawned-session lifecycle: keep | archive | kill (#2595)
+	taskFocusMaxRuns    // watch-task in-flight session cap (#4180)
 	taskFocusPath
 	taskFocusProgram
 	taskFocusSave
@@ -77,7 +79,11 @@ type TaskPane struct {
 	schedule   *schedulePicker
 	editWatch  textinput.Model
 	editTarget textinput.Model
-	editPath   textinput.Model
+	// editMaxRuns is the watch-task concurrency-cap input (#4180): a plain text
+	// input like Target, rendered only while the shape can carry a cap
+	// (task.CapApplies) — otherwise its row carries the reason instead.
+	editMaxRuns textinput.Model
+	editPath    textinput.Model
 	// Program selector state. editProgramOptions is the list of choices shown
 	// inline (index 0 is always the "use config default" entry, followed by
 	// tmux.SupportedPrograms). Per-task Program is restricted to the agent
@@ -201,6 +207,12 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	target.CharLimit = 64
 	target.Blur()
 
+	maxRuns := textinput.New()
+	maxRuns.Placeholder = "0 · unlimited"
+	maxRuns.PlaceholderStyle = taskPlaceholderStyle
+	maxRuns.CharLimit = 24
+	maxRuns.Blur()
+
 	path := textinput.New()
 	path.PlaceholderStyle = taskPlaceholderStyle
 	path.CharLimit = 256
@@ -212,6 +224,12 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 		watch.SetValue(tsk.WatchCmd)
 		target.SetValue(tsk.TargetSession)
 		path.SetValue(tsk.ProjectPath)
+		if tsk.MaxConcurrentRuns > 0 {
+			// 0 stores as "unlimited" and seeds an empty field — the same
+			// empty-means-default convention the target field uses — so only a
+			// positive cap is shown as a value.
+			maxRuns.SetValue(strconv.Itoa(tsk.MaxConcurrentRuns))
+		}
 		s.editTriggerIsWatch = tsk.IsWatch()
 		s.setProgramFromValue(tsk.Program)
 		s.setOnCompleteFromValue(tsk.OnComplete)
@@ -234,6 +252,7 @@ func (s *TaskPane) initForm(tsk *task.Task, defaultPath string) {
 	s.schedule = picker
 	s.editWatch = watch
 	s.editTarget = target
+	s.editMaxRuns = maxRuns
 	s.editPath = path
 	s.focusIndex = taskFocusName
 	s.editError = ""
@@ -329,6 +348,32 @@ func (s *TaskPane) onCompleteApplies() bool {
 	return task.CanonicalTargetSession(s.editTarget.Value()) == ""
 }
 
+// capApplies reports whether the form's CURRENT shape can carry a concurrency
+// cap (#4180). It asks task.CapApplies — the one predicate, shared with
+// ValidateTrigger and the web's pinned twin — feeding it the form's own ground
+// truths: the trigger selector for "is a watch task" and the target field for
+// the canonical emptiness test. A form that answered either its own way would
+// offer a cap the daemon then refuses, which is the two-answers defect the
+// predicate exists to remove.
+func (s *TaskPane) capApplies() bool {
+	return task.CapApplies(s.editTriggerIsWatch, s.editTarget.Value())
+}
+
+// capValue returns the cap to save for the current input, in the STORED form:
+// 0 for unlimited, and 0 as well when the form's shape cannot carry one. That
+// is not the input being ignored — the row is rendered inapplicable in that
+// state and refuses input — it is the save agreeing with what the daemon's
+// merge would do anyway (task.clearInapplicableCap), so the patch DiffTask
+// emits cannot carry a cap ValidateTrigger would reject. ParseCapInput's
+// failure is unreachable here: validateForm gates the save on it.
+func (s *TaskPane) capValue() int {
+	if !s.capApplies() {
+		return 0
+	}
+	n, _ := task.ParseCapInput(s.editMaxRuns.Value())
+	return n
+}
+
 // onCompleteValue returns the OnComplete verb to save for the current selector
 // state, in the STORED form: "" for keep, so an untouched task's record is
 // byte-identical to what it was before the field existed (task.canonicalizeOnComplete).
@@ -389,6 +434,10 @@ type TaskDraft struct {
 	// (#2595): "" for keep, and "" as well when the draft names a target
 	// session, which cannot carry one. See TaskPane.onCompleteValue.
 	OnComplete string
+	// MaxConcurrentRuns is the watch-task concurrency cap in its STORED form
+	// (#4180): 0 for unlimited, and 0 as well when the draft's shape cannot
+	// carry one. See TaskPane.capValue.
+	MaxConcurrentRuns int
 }
 
 // ConsumePendingCreate returns the submitted create data and clears the pending flag.
@@ -396,14 +445,15 @@ func (s *TaskPane) ConsumePendingCreate() TaskDraft {
 	s.pendingCreate = false
 	cronVal, watchVal := s.triggerValues()
 	return TaskDraft{
-		Name:          s.editName.Value(),
-		Prompt:        s.editPrompt.Value(),
-		Cron:          cronVal,
-		WatchCmd:      watchVal,
-		TargetSession: s.editTarget.Value(),
-		Path:          s.editPath.Value(),
-		Program:       s.programValue(),
-		OnComplete:    s.onCompleteValue(),
+		Name:              s.editName.Value(),
+		Prompt:            s.editPrompt.Value(),
+		Cron:              cronVal,
+		WatchCmd:          watchVal,
+		TargetSession:     s.editTarget.Value(),
+		Path:              s.editPath.Value(),
+		Program:           s.programValue(),
+		OnComplete:        s.onCompleteValue(),
+		MaxConcurrentRuns: s.capValue(),
 	}
 }
 
