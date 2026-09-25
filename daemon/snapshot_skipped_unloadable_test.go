@@ -68,7 +68,10 @@ func TestRefreshDaemonInstances_ParsesButZeroRowsRetractsReread(t *testing.T) {
 // poll cleared it from the skip set (reread was set on parse alone) and the
 // Snapshot RPC served [] with SkippedRepos empty — the silent substitution of a
 // partial list as complete the skip set exists to prevent. Post-fix, the repo
-// stays skipped so list/get/whoami refuse on the wire.
+// stays skipped so list/get/whoami refuse on the wire, AND its reason is
+// rewritten from the stale corrupted code to rows-failed-to-load (count 1): the
+// file parsed, so "corrupted instances.json" would send the operator to repair a
+// file that is fine (#4876).
 func TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileParsesButAllRowsFail(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubFromInstanceForRefresh(t)
@@ -101,8 +104,8 @@ func TestManager_RefreshLocked_KeepsSkippedRepoWhoseFileParsesButAllRowsFail(t *
 
 	m.mu.Lock()
 	require.NoError(t, m.refreshLocked(), "a parses-but-zero-rows poll must not error")
-	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}, m.skippedRepos,
-		"a repo whose file parses but yields no loadable rows stays skipped (it is not a repaired snapshot)")
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, m.skippedRepos,
+		"a repo whose file parses but yields no loadable rows stays skipped, carrying the rows-failed reason and count instead of the stale corrupted one (it is not a repaired snapshot)")
 	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")],
 		"the unloadable row contributes no instance")
 	require.NotNil(t, m.instances[daemonInstanceKey("valid-r", "ok")],
@@ -193,8 +196,10 @@ func TestManager_RefreshLocked_SelfHealsWhenRowsMaterializeAgain(t *testing.T) {
 // TestManager_RefreshLocked_GenuinelyEmptyFileStillClearsSkipSet pins the case
 // the fix must PRESERVE: a startup-skipped repo repaired to a genuinely-empty
 // instances.json ([] with no rows) IS a now-complete snapshot (zero sessions is
-// the complete answer), so the repo drops from the skip set. The retraction is
-// gated on len(data) > 0 specifically so this unchanged behavior holds.
+// the complete answer), so the repo drops from the skip set. A genuinely-empty
+// file is short-circuited before the materialize loop (so it is never retracted),
+// which is what keeps this unchanged behavior holding under the any-row-failed
+// retraction.
 func TestManager_RefreshLocked_GenuinelyEmptyFileStillClearsSkipSet(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubFromInstanceForRefresh(t)
@@ -216,13 +221,15 @@ func TestManager_RefreshLocked_GenuinelyEmptyFileStillClearsSkipSet(t *testing.T
 		"a genuinely-empty repaired file clears the skip set (zero sessions is the complete snapshot)")
 }
 
-// TestManager_RefreshLocked_PartialRowFailureStillClearsSkipSet pins the case
-// the fix deliberately leaves alone: a startup-skipped repo whose file parses
-// and materializes SOME rows (N-1 of N) drops from the skip set as today. The
-// one dropped row's absence is covered by the existing ghost/on_complete
-// recovery surface, and the loaded rows are served — the design's tolerance for
-// a single unmaterializable row within an otherwise-loaded repo.
-func TestManager_RefreshLocked_PartialRowFailureStillClearsSkipSet(t *testing.T) {
+// TestManager_RefreshLocked_PartialRowFailureStaysSkipped is the 1-of-N repro
+// for #4876: a startup-skipped repo repaired to valid JSON whose N=2 rows parse,
+// one loads and one fails to materialize, is NOT a complete snapshot, so the
+// repo stays skipped (reread retracted on materialized < len(data)) and its
+// reason is rewritten to rows-failed-to-load carrying the count. Serving the N-1
+// loaded rows as the complete answer is the same lie the zero-rows case is.
+// Pre-fix, the repo cleared the skip set (materialized > 0 was treated as a
+// repair) and the Snapshot RPC silently served 1 of 2 sessions.
+func TestManager_RefreshLocked_PartialRowFailureStaysSkipped(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	stubFromInstanceForRefresh(t)
 	_ = captureWarnings(t)
@@ -245,10 +252,10 @@ func TestManager_RefreshLocked_PartialRowFailureStillClearsSkipSet(t *testing.T)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	require.NoError(t, m.refreshLocked())
-	require.Empty(t, m.skippedRepos,
-		"a repo that materializes at least one row clears the skip set (it is not a zero-rows non-repair)")
+	require.Equal(t, []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonRowsFailedToLoad, FailedRows: 1}}, m.skippedRepos,
+		"a repo with any unloadable row stays skipped and carries the rows-failed reason and count (1 of N=2)")
 	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "loads")],
-		"the loadable row is served")
+		"the loadable row is still served")
 	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "stuck")],
-		"the unloadable row is dropped (its slot is covered by the ghost surface)")
+		"the unloadable row is dropped")
 }

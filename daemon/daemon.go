@@ -444,10 +444,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // projection discipline as the rest of the count.
 //
 // The fifth return, reread, names every repo whose instances.json this call
-// read AND parsed into a loadable row. It is the only evidence that clears a
-// repo from the skip set (retainStillSkipped): a repo the loader could not
-// read, that is absent from disk, or that parses-but-nothing-loadable (retracted
-// below) is not in it, so neither an omission nor a zero-rows file is a repair (#4783, #4812).
+// read AND parsed INTO a fully loadable row set. It is the only evidence that
+// clears a repo from the skip set (retainStillSkipped): a repo the loader
+// could not read, that is absent from disk, or that parses-but-yields-any-
+// unloadable-row (retracted below) is not in it, so neither an omission, a
+// zero-rows file, nor a partial loss is a repair (#4783, #4812, #4876).
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
 		return existing, nil, nil, nil, err
@@ -520,10 +521,12 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			continue
 		}
 		reread[repoID] = true
-		// Retractable below: a parses-but-zero-rows file is not a repair, or
-		// list/get/whoami silently serve [] as the complete answer the skip set
-		// exists to prevent (#4812, the "read AND parsed" trim left open here).
-		materialized := 0
+		// Retractable below: a parses-but-any-row-unloadable file is not a
+		// repair, or list/get/whoami silently serve a partial list as the
+		// complete answer the skip set exists to prevent — a partial loss is
+		// the same lie as a total one (#4812, #4876, the "read AND parsed" trim
+		// left open here).
+		materialized, failedRows := 0, 0
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
 			if item.ID == "" && !isLegacyTransientGhost(item) {
@@ -556,6 +559,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 			instance, err := fromInstanceDataForRefresh(item)
 			if err != nil {
+				failedRows++
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
 				// A marked row that cannot materialize still owes its teardown
 				// (#4162) — the obligation is durable but nothing in memory can
@@ -594,11 +598,31 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			next[key] = instance
 			materialized++
 		}
-		// Parsed but nothing loadable: retract the "repaired" signal so the repo
-		// stays skipped (a non-repair, #4812); a genuinely-empty file keeps reread
-		// and still clears, and a later poll that materializes a row re-arms and drops it.
-		if len(data) > 0 && materialized == 0 {
+		// Parsed but not fully loadable: retract the "repaired" signal so the
+		// repo stays skipped. A PARTIAL loss is the same lie as a total one —
+		// list/get/whoami would serve N-1 of N rows as the complete answer the
+		// skip set exists to prevent (#4876) — so the retraction fires whenever
+		// ANY row failed, not only when all did. A genuinely-empty file ([])
+		// never reaches this loop: it is short-circuited above, so reread stays
+		// set and the repo still clears (zero sessions is the complete answer).
+		// A later poll that re-materializes every row re-arms reread and drops
+		// the repo (self-healing).
+		if materialized < len(data) {
 			delete(reread, repoID)
+			// On the polling path carry a skipped entry naming the rows that
+			// failed to load so retainStillSkipped rewrites a previously-skipped
+			// repo's stale reason (corrupted/unreadable) to the accurate one —
+			// the file parsed; the worktree or tmux is what is gone (#4876). Not
+			// seeded at startup (existing==nil): a fresh repo with unloadable
+			// rows is out of this fix's scope, and seeding it would widen the
+			// startup skip set the PR does not touch.
+			if existing != nil && failedRows > 0 {
+				skipped = append(skipped, SkippedRepo{
+					RepoID:     repoID,
+					Reason:     SkippedRepoReasonRowsFailedToLoad,
+					FailedRows: failedRows,
+				})
+			}
 		}
 	}
 
