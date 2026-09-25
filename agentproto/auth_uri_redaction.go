@@ -54,9 +54,7 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	// Remaining query text may itself carry a URL or access_token field. Match
 	// that decoded logical text too, but project only the sensitive span back
 	// onto this original pair so neighbouring syntax stays byte-for-byte.
-	if redacted, found := redactPercentEncodedAccessTokenText(pair, true); found {
-		return redacted, true
-	}
+	redacted, found := redactPercentEncodedAccessTokenText(pair, true)
 
 	// A valid %HH escape can overlap the leading characters of an otherwise
 	// literal access_token<...> substring (e.g. %access_token=SECRET, where
@@ -64,11 +62,22 @@ func redactAccessTokenQueryPair(pair string) (string, bool) {
 	// above collapses %ac to a single byte, so the decoded view's text no
 	// longer contains the access_token= needle, while the raw pair bytes
 	// still carry a literal access_token=<value> that net/url re-emits
-	// verbatim from RawQuery. Scan the raw pair directly: redactAccessToken
-	// split the query on its field separators before this is called, so a
-	// pair contains no & or ; and the value cannot extend into a
+	// verbatim from RawQuery. Scan the decoded-pass output directly so any
+	// span the decoded matcher redacted stays untouched. Run unconditionally
+	// rather than gating on the decoded scan missing: a co-located pair can
+	// carry both such an overlap and a later literal access_token=, where the
+	// single-anchor decoded matcher anchors at the trailing literal and a
+	// gate would short-circuit this raw scan for the entire pair. The decoded
+	// pass's redacted span is the literal REDACTED marker, which contains no
+	// access_token= needle, so idempotency (not code-path exclusion) keeps
+	// this from reprocessing a span the structured pass already redacted.
+	// redactAccessToken split the query on its field separators before this is
+	// called, so a pair contains no & or ; and the value cannot extend into a
 	// neighbouring field.
-	if redacted, found := redactRawAccessTokenValue(pair, ""); found {
+	if rawRedacted, rawFound := redactRawAccessTokenValue(redacted, ""); rawFound {
+		return rawRedacted, true
+	}
+	if found {
 		return redacted, true
 	}
 	return pair, false
@@ -119,9 +128,12 @@ func percentDecodedBoundary(view redactx.View, offset, rawLength int) int {
 // literal characters from the very word it overlaps: %ac decodes to a single
 // byte 0xAC, so the decoded text loses access_token= while the raw bytes still
 // carry a literal access_token=<value>. Scanning the raw bytes catches the
-// overlap that the decoded view cannot, and only the spans the decoded
-// matcher missed see this code path (callers run the decoded scan first), so
-// this never reprocesses a span the structured pass already redacted.
+// overlap that the decoded view cannot. Callers run the decoded scan first and
+// feed its output here, so a span the decoded pass redacted is the literal
+// REDACTED marker, which contains no access_token= needle — the raw scan can
+// only match a genuine surviving access_token= overlap, so idempotency (not a
+// code-path gate) keeps this from reprocessing a span the structured pass
+// already redacted.
 //
 // terminators is the component's structural separator set (/ ; ? # for path,
 // fragment, and opaque; empty for a query pair, whose separator was already
