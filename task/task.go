@@ -168,6 +168,11 @@ type Task struct {
 	// armed entry rather than recomputed from the expression. Absent when the
 	// task is not armed, and that absence is itself the signal.
 	NextRunAt *time.Time `json:"next_run_at,omitempty"`
+	// NextRunFar says the task is enabled and NextRunAt is more than
+	// FarOutThreshold away — typically a dated cron that re-armed for next year
+	// (#4843). Stamped from NextRunAt by NextRunFarOut wherever NextRunAt is
+	// set, and absent whenever NextRunAt is.
+	NextRunFar bool `json:"next_run_far,omitempty"`
 	// Arming is the live arming observation: ArmingArmed, ArmingNotArmed, or
 	// ArmingUnknown (the zero value) when no daemon answered.
 	Arming string `json:"arming,omitempty"`
