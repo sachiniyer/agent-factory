@@ -30,7 +30,15 @@ func NextRunFarOut(t Task, now time.Time) bool {
 	if !t.Enabled || t.IsWatch() || t.NextRunAt == nil {
 		return false
 	}
-	return t.NextRunAt.Sub(now) > FarOutThreshold
+	return FarOutAt(*t.NextRunAt, now)
+}
+
+// FarOutAt is the threshold test alone, for a next run that is not a live
+// scheduler entry — the task editor's preview computes one from the expression
+// as it is typed (#4855). Everything that flags a far-out run goes through it,
+// so the editor and the lists cannot disagree about where "far" starts.
+func FarOutAt(next, now time.Time) bool {
+	return next.Sub(now) > FarOutThreshold
 }
 
 // FarOutNote is the calm wording for a far-out next run, such as
@@ -41,7 +49,16 @@ func FarOutNote(t Task, now time.Time) string {
 	if !NextRunFarOut(t, now) {
 		return ""
 	}
-	next := t.NextRunAt.In(now.Location())
+	return FarOutNoteAt(*t.NextRunAt, now)
+}
+
+// FarOutNoteAt is FarOutNote for a computed next run: the same wording, or ""
+// when FarOutAt is false.
+func FarOutNoteAt(next, now time.Time) string {
+	if !FarOutAt(next, now) {
+		return ""
+	}
+	next = next.In(now.Location())
 	return fmt.Sprintf("%s (%s)", next.Format("2006-01-02"), FarOutDistance(next, now))
 }
 
