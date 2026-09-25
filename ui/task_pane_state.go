@@ -79,7 +79,7 @@ func (s *TaskPane) SetTasks(tasks []task.Task) bool {
 	for _, t := range s.tasks {
 		if _, ok := held[t.ID]; ok && !placed[t.ID] {
 			placed[t.ID] = true
-			next = append(next, t)
+			next = append(next, held[t.ID])
 		}
 	}
 	for id := range held {
