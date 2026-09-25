@@ -232,11 +232,28 @@ export function taskHealthSummary(t: TaskData): string {
   return t.unassessable ? "Health unknown" : "";
 }
 
+/** The far-out wording, "2027-09-21 (in 11 months)" — the same words as
+ *  task.FarOutNote in the TUI. Only formatting lives here: whether a run is far
+ *  out is the daemon's `next_run_far`, never a threshold re-derived client-side.
+ *  Whole calendar months, rounded down, in the viewer's local time. */
+export function farOutNote(nextRunAt: string, now: Date = new Date()): string {
+  const next = new Date(nextRunAt);
+  if (Number.isNaN(next.getTime())) return "";
+  let months = (next.getFullYear() - now.getFullYear()) * 12 + next.getMonth() - now.getMonth();
+  const nextClock = next.getHours() * 3_600_000 + next.getMinutes() * 60_000 + next.getSeconds() * 1000 + next.getMilliseconds();
+  const nowClock = now.getHours() * 3_600_000 + now.getMinutes() * 60_000 + now.getSeconds() * 1000 + now.getMilliseconds();
+  if (next.getDate() < now.getDate() || (next.getDate() === now.getDate() && nextClock < nowClock)) months--;
+  const date = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+  return `${date} (in ${months} ${months === 1 ? "month" : "months"})`;
+}
+
 /** The next-run fragment: what the LIVE scheduler entry will fire, or the fact
  *  that nothing is holding this task. Absent arming says nothing at all — no
  *  daemon has reported on it, which is not the same as "not armed". */
 export function taskArmingSummary(t: TaskData, now: Date = new Date()): string {
   if (t.next_run_at) {
+    const far = t.next_run_far ? farOutNote(t.next_run_at, now) : "";
+    if (far) return `Next run ${far}`;
     return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   // The not-armed fact belongs to the HEALTH fragment now, which leads the line

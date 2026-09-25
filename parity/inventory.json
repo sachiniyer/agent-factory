@@ -2103,6 +2103,9 @@
           "task.next_run_at": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
           },
+          "task.next_run_far": {
+            "ok": "Derived at READ time and stripped on write (#4843): the daemon stamps it from next_run_at with task.NextRunFarOut (enabled and more than 60 days out), beside the live scheduler entry it reads. saveTasks strips it with the other derived fields, so a surface that sent one would be asserting a verdict rather than requesting a task."
+          },
           "task.overdue": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
           },
@@ -2149,6 +2152,9 @@
           },
           "task.next_run_at": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.next_run_far": {
+            "ok": "Derived at READ time and stripped on write (#4843): the daemon stamps it from next_run_at with task.NextRunFarOut (enabled and more than 60 days out), beside the live scheduler entry it reads. saveTasks strips it with the other derived fields, so a surface that sent one would be asserting a verdict rather than requesting a task."
           },
           "task.overdue": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -2413,6 +2419,9 @@
         },
         "task.next_run_at": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.next_run_far": {
+          "ok": "Derived at READ time and stripped on write (#4843): the daemon stamps it from next_run_at with task.NextRunFarOut (enabled and more than 60 days out), beside the live scheduler entry it reads. saveTasks strips it with the other derived fields, so a surface that sent one would be asserting a verdict rather than requesting a task."
         },
         "task.overdue": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
