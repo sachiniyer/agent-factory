@@ -781,6 +781,15 @@ func normalizeKeySpec(s string) (string, bool) {
 			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
 				return "", false
 			}
+			// Bubble Tea's Key has no Shift field: for rune input (KeyRunes) it
+			// writes the rune verbatim, so Shift+A is emitted as "A", never
+			// "shift+a". Only dedicated KeyShift*/KeyCtrlShift* named KeyTypes
+			// spell "shift+", and those are already gated by the named-key guard
+			// above. Reject shift on a plain rune so the binding is not installed
+			// under a spelling Bubble Tea cannot emit (#4040).
+			if shift && !namedKeys[rest] {
+				return "", false
+			}
 			var b strings.Builder
 			if alt {
 				b.WriteString("alt+")
