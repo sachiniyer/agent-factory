@@ -598,32 +598,11 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			next[key] = instance
 			materialized++
 		}
-		// Parsed but not fully loadable: retract the "repaired" signal so the
-		// repo stays skipped. A PARTIAL loss is the same lie as a total one —
-		// list/get/whoami would serve N-1 of N rows as the complete answer the
-		// skip set exists to prevent (#4876) — so the retraction fires whenever
-		// ANY row failed, not only when all did. A genuinely-empty file ([])
-		// never reaches this loop: it is short-circuited above, so reread stays
-		// set and the repo still clears (zero sessions is the complete answer).
-		// A later poll that re-materializes every row re-arms reread and drops
-		// the repo (self-healing).
-		if materialized < len(data) {
-			delete(reread, repoID)
-			// On the polling path carry a skipped entry naming the rows that
-			// failed to load so retainStillSkipped rewrites a previously-skipped
-			// repo's stale reason (corrupted/unreadable) to the accurate one —
-			// the file parsed; the worktree or tmux is what is gone (#4876). Not
-			// seeded at startup (existing==nil): a fresh repo with unloadable
-			// rows is out of this fix's scope, and seeding it would widen the
-			// startup skip set the PR does not touch.
-			if existing != nil && failedRows > 0 {
-				skipped = append(skipped, SkippedRepo{
-					RepoID:     repoID,
-					Reason:     SkippedRepoReasonRowsFailedToLoad,
-					FailedRows: failedRows,
-				})
-			}
-		}
+		// Parsed but not fully loadable is NOT a repair: retract the "repaired"
+		// signal so the repo stays skipped, and on poll record a rows-failed
+		// skip entry whose reason rewrites the stale one (#4812, #4876). The
+		// partial-loss and self-healing rationale lives in the helper.
+		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, existing != nil, skipped)
 	}
 
 	// Preserve in-memory instances whose repo directory vanished from disk
