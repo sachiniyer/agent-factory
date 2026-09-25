@@ -220,8 +220,7 @@ func TestCtrlCloseBracketReturnsToNav(t *testing.T) {
 	assert.False(t, (*fakes)[0].closed, "leaving interactive keeps the live attachment (render continues)")
 
 	// Nav keys work again: Tab cycles the focus ring instead of forwarding.
-	// (Direct dispatch, like pressTab — handleKeyPress would take the menu
-	// highlight re-emit detour first.)
+	// (Direct dispatch, like pressTab.)
 	before := h.ring.Active()
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyTab}, keys.KeyTab)
 	assert.NotEqual(t, before, h.ring.Active(), "Tab must cycle focus again in nav mode")
