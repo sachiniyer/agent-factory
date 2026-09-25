@@ -677,6 +677,18 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// RebindProject asks the daemon to move a registered project's stable identity
+// to the checkout at req.Path (`af projects rebind`) — the same single-writer
+// registry path RegisterProject takes, so a running client is told through
+// projects.changed rather than discovering the move on a later read.
+func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	var resp RebindProjectResponse
+	if err := callDaemon("RebindProject", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // SendPromptWithStatus asks the daemon to send a prompt and returns the
 // delivery observation made by the runtime's existing bounded submit path.
 func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
