@@ -15,9 +15,10 @@ import (
 )
 
 // killGitTimeout bounds the local git metadata reads the kill confirmation runs.
-// handleKill is synchronous on the Bubble Tea Update loop, so a wedged git (a
-// hung network mount, a D-state process holding the worktree) would freeze the
-// whole TUI without a deadline (#2030). The reads are local and offline (status,
+// The reads run off the event loop (#4848), but the kill dialog withholds its
+// confirm until they return, so a wedged git (a hung network mount, a D-state
+// process holding the worktree) would leave it pending forever without a
+// deadline (#2030). The reads are local and offline (status,
 // log, rev-parse, symbolic-ref), so this only trips on a genuine stall; it is
 // generous enough that a slow-but-progressing read on a cold cache still
 // completes. Mirrors session/git's localGitTimeout reasoning (#1917).
@@ -73,8 +74,8 @@ func runKillGit(dir string, args ...string) ([]byte, error) {
 }
 
 // This file holds the kill-confirmation copy and the data-loss detection behind
-// it. handleKill (handle_actions.go) assembles these into the confirmation the
-// user consents to. The governing rule (#2022): show the bare, safe-looking
+// it. assessKillLoss (kill_check.go) runs the checks off the event loop and
+// openKillConfirm assembles them into the confirmation the user consents to. The governing rule (#2022): show the bare, safe-looking
 // prompt ONLY with positive evidence there is no unmerged work to lose; unknown
 // or unverifiable warns. Forgetting must be safe.
 
@@ -146,8 +147,8 @@ func killConfirmMessage(title, warning string, reserved bool, impact *session.Wo
 // the user gets a data-loss warning must not depend on their status preferences.
 // `normal` rather than `all` because this is a boolean: `normal` collapses an
 // untracked directory to a single `?? dir/` entry instead of walking every file
-// under it, which matters on a path that runs synchronously on the Bubble Tea
-// Update loop (#2030).
+// under it, which matters on a path the kill dialog waits on before it lets the
+// user confirm (#2030, #4848).
 func killConfirmationWarning(wt string) string {
 	out, err := runKillGit(wt, "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
@@ -202,9 +203,9 @@ func unmergedCommitWarning(worktreePath, branchName, recordedBaseSHA string, del
 	// those commits reachable only through the worktree's HEAD. Cleanup removes
 	// that worktree, so a branch-only check would silently orphan them (#2210
 	// review). Assess both independently and preserve every warning in the
-	// confirmation. They run concurrently because this path blocks the Bubble Tea
-	// event loop: adding a second serial chain would multiply the existing bounded
-	// Git-read latency and violate #2030's whole-confirmation responsiveness gate.
+	// confirmation. They run concurrently because the kill dialog withholds its
+	// confirm until this returns: a second serial chain would multiply the bounded
+	// Git-read latency the user waits through (#2030's responsiveness gate).
 	type warningResult struct {
 		line   string
 		severe bool
