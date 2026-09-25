@@ -519,6 +519,31 @@ func TestRedactAccessTokenURLInNeedleOverlapComposedWithLiteral(t *testing.T) {
 			raw:       "http://h/?next=%access%25%35%46token=af-sentinel-comp/access_token=dummy",
 			wantExact: "http://h/?next=%access%25%35%46token=REDACTED",
 		},
+		// The same composition in the path, fragment, and opaque components
+		// (Codex on #4702). #4701 composed those scans; these pin that the
+		// in-needle matcher is reached there too. The decoded pass rewrites
+		// Path and Fragment, so String re-encodes the key from the decoded
+		// bytes; Opaque has no decoded twin and keeps its spelling.
+		{
+			name:      "path overlap before literal in one component",
+			raw:       "http://h/p/%access%5Ftoken=af-sentinel-comp/access_token=dummy",
+			wantExact: "http://h/p/%ACcess_token=REDACTED/access_token=REDACTED",
+		},
+		{
+			name:      "path separated-overlap before literal in one component",
+			raw:       "http://h/p/%access%25%35%46token=af-sentinel-comp/access_token=dummy",
+			wantExact: "http://h/p/%ACcess%255Ftoken=REDACTED/access_token=REDACTED",
+		},
+		{
+			name:      "fragment overlap before literal in one component",
+			raw:       "http://h/p#%access%5Ftoken=af-sentinel-comp/access_token=dummy",
+			wantExact: "http://h/p#%ACcess_token=REDACTED/access_token=REDACTED",
+		},
+		{
+			name:      "opaque overlap before literal in one component",
+			raw:       "af:%access%5Ftoken=af-sentinel-comp/access_token=dummy",
+			wantExact: "af:%access%5Ftoken=REDACTED/access_token=REDACTED",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := RedactAccessTokenURL(tc.raw)
