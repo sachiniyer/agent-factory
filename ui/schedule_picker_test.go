@@ -250,8 +250,8 @@ func TestSchedulePickerCustomPreviewShowsNextRun(t *testing.T) {
 	p.setWidth(80)
 	p.setFocused(true)
 
-	p.raw.SetValue("0 0 1 1 *")
-	assert.Contains(t, stripANSI(p.render()), "Next run Jan 01 00:00",
+	p.raw.SetValue("0 0 1 9 *")
+	assert.Contains(t, stripANSI(p.render()), "Next run Sep 01 00:00",
 		"a parseable custom expression previews its next fire time")
 
 	p.raw.SetValue("0 0 1 1")
@@ -270,10 +270,41 @@ func TestAutomationsPaneTestClockReachesOwnedSchedulePicker(t *testing.T) {
 	pane := a.TaskPane()
 	pane.initForm(nil, "")
 	pane.schedule.setType(schedule.Custom)
-	pane.schedule.raw.SetValue("0 0 1 1 *")
+	pane.schedule.raw.SetValue("0 0 1 9 *")
 	pane.schedule.setWidth(80)
 
-	require.Contains(t, stripANSI(pane.schedule.render()), "Next run Jan 01 00:00")
+	require.Contains(t, stripANSI(pane.schedule.render()), "Next run Sep 01 00:00")
+}
+
+// TestSchedulePickerCustomPreviewDatesFarOutNextRun pins #4855: typed a few
+// days after its date, "0 7 21 9 *" next fires eleven months out, and the
+// yearless "Sep 21 07:00" read as this year's run. Past task.FarOutThreshold
+// the preview uses the lists' far-out wording, from the same helper, so the
+// editor and the lists cannot disagree about where "far" starts.
+func TestSchedulePickerCustomPreviewDatesFarOutNextRun(t *testing.T) {
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		expr, want string
+	}{
+		{"0 7 21 9 *", "Next run 2027-09-21 (in 11 months)"},
+		// 59 days out: inside the threshold, so the short shape stays.
+		{"0 12 22 11 *", "Next run Nov 22 12:00"},
+		// Exactly 60 days out: the threshold is strict, as in the lists.
+		{"0 12 23 11 *", "Next run Nov 23 12:00"},
+		{"1 12 23 11 *", "Next run 2026-11-23 (in 1 month)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expr, func(t *testing.T) {
+			p := newSchedulePicker()
+			p.now = func() time.Time { return now }
+			p.setType(schedule.Custom)
+			p.raw.SetValue(tc.expr)
+			p.setWidth(80)
+			p.setFocused(true)
+
+			assert.Contains(t, stripANSI(p.render()), tc.want)
+		})
+	}
 }
 
 // TestSchedulePickerCustomPreviewOmitsUnsatisfiableNextRun covers the cron
