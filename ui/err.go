@@ -29,6 +29,10 @@ type ErrBox struct {
 	// failure (handleError) or informational guidance (handleNotice / a success
 	// message), which is what the details overlay titles itself from.
 	retainedIsFailure bool
+	// detailsHint, when set, replaces the error_details binding's hint on a
+	// clipped notice. A modal text field types `E` as a character, so it
+	// advertises the key that does open the details from there (#4123).
+	detailsHint string
 }
 
 var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
@@ -67,6 +71,12 @@ func (e *ErrBox) Clear() {
 	e.err = nil
 	e.retained = nil
 	e.retainedIsFailure = false
+}
+
+// SetDetailsHint overrides the hint a clipped notice carries; "" restores the
+// error_details binding's own hint.
+func (e *ErrBox) SetDetailsHint(hint string) {
+	e.detailsHint = hint
 }
 
 func (e *ErrBox) SetSize(width, height int) {
@@ -113,7 +123,11 @@ func (e *ErrBox) statusLine() string {
 	if runewidth.StringWidth(line) <= e.width {
 		return line
 	}
-	if hint := errorDetailsHint(); hint != "" {
+	hint := e.detailsHint
+	if hint == "" {
+		hint = errorDetailsHint()
+	}
+	if hint != "" {
 		const sep = "  "
 		hintWidth := runewidth.StringWidth(sep + hint)
 		if prefixWidth := e.width - hintWidth; prefixWidth > 3 {

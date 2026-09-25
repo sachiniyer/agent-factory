@@ -661,11 +661,16 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
 		m.textOverlayDismissPolicy = nil
-		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
-		m.menu.SetState(ui.StateDefault)
+		if m.returnToNamingFormAfterDetails() {
+			m.state = stateNew
+			m.menu.SetState(ui.StateNewInstance)
+		} else {
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+		}
 		if replayDismissKey {
 			dismissCmd = replayKeyAfterInteractiveHelpDismiss(dismissCmd, msg)
 		}
