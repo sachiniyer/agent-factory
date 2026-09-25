@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"testing"
@@ -165,6 +166,9 @@ func TestInstanceStarted_CommittedWarning_KeepsRowSurfacesWarningNoDraftNoRecove
 	assert.Contains(t, notice, warning, "the daemon's committed warning text must reach the user verbatim")
 	assert.Contains(t, notice, "created session", "the warning must frame the outcome as a created session, not a failure")
 	assert.Contains(t, notice, "retained-create")
+	assert.Contains(t, notice, "done, with a warning", "a committed create surfaces the 'done, with a warning' wording in the shared helper, not 'could not be confirmed'")
+	assert.NotContains(t, notice, "could not be confirmed", "a committed create landed; it is not an unknown outcome")
+	assert.NotContains(t, notice, "may have done it", "a committed create is known to have landed, never 'may have'")
 }
 
 // TestInstanceStarted_CommittedWarning_UserNavigatedAway_KeepsRowSilently proves
@@ -310,6 +314,45 @@ func TestInstanceStarted_CommittedWarning_PreservesDaemonLiveness(t *testing.T) 
 		"a committed retained row must keep the daemon's liveness, not be forced to LiveRunning")
 	assert.Equal(t, session.OpNone, started.GetInFlightOp(),
 		"the committed row's op axis must be untouched")
+}
+
+// TestMutationOutcomeError_CommittedRendersDoneWithWarning pins the shared
+// helper's committed-with-warning wording at two committed-capable sites — the
+// create action and the archive action — so a mutationCommittedError renders
+// "<action> — done, with a warning: <post-commit error>" everywhere
+// mutationOutcomeError is called, not "could not be confirmed". On master this
+// committed branch still reads "went through, but the daemon reported a
+// follow-up problem", so the "done, with a warning" assertions fail there and
+// pass here; the uncertain control keeps #4904's "could not be confirmed"
+// wording unchanged.
+func TestMutationOutcomeError_CommittedRendersDoneWithWarning(t *testing.T) {
+	const postCommit = "its VS Code editor did not stop in time, so the tombstoned record was kept for a retry"
+	committedErr := &testMutationCommittedError{msg: postCommit}
+	require.True(t, apiclient.IsMutationCommitted(committedErr),
+		"precondition: the stubbed error must classify as mutation-committed")
+
+	t.Run("create action", func(t *testing.T) {
+		got := mutationOutcomeError(fmt.Sprintf("created session %q", "x"), "the sidebar", committedErr)
+		assert.Contains(t, got.Error(), `created session "x"`)
+		assert.Contains(t, got.Error(), "done, with a warning", "a committed create renders the 'done, with a warning' wording, not 'went through'")
+		assert.Contains(t, got.Error(), postCommit, "the post-commit error must be wrapped verbatim")
+		assert.NotContains(t, got.Error(), "could not be confirmed", "a committed outcome is not unknown")
+		assert.NotContains(t, got.Error(), "may have done it", "a committed outcome is known to have landed, never 'may have'")
+	})
+
+	t.Run("archive action", func(t *testing.T) {
+		got := mutationOutcomeError(fmt.Sprintf("archiving session '%s'", "y"), "the sidebar", committedErr)
+		assert.Contains(t, got.Error(), "archiving session 'y'")
+		assert.Contains(t, got.Error(), "done, with a warning", "the shared helper renders 'done, with a warning' at every committed-capable site, not just create")
+		assert.Contains(t, got.Error(), postCommit)
+		assert.NotContains(t, got.Error(), "could not be confirmed")
+	})
+
+	t.Run("uncertain outcome keeps the unknown wording", func(t *testing.T) {
+		got := mutationOutcomeError(fmt.Sprintf("created session %q", "x"), "the sidebar", replyLost())
+		assert.Contains(t, got.Error(), "could not be confirmed", "#4904's uncertain wording is unchanged")
+		assert.NotContains(t, got.Error(), "done, with a warning", "the committed wording must not leak into the uncertain branch")
+	})
 }
 
 // plainCreateError is a non-committed error — the shape a plain daemon refusal

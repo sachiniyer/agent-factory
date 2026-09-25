@@ -37,7 +37,7 @@ func mutationOutcomeUnknown(err error) bool {
 // never "failed".
 func mutationOutcomeError(action, where string, err error) error {
 	if apiclient.IsMutationCommitted(err) {
-		return fmt.Errorf("%s went through, but the daemon reported a follow-up problem — check %s: %w", action, where, err)
+		return fmt.Errorf("%s — done, with a warning: %w", action, err)
 	}
 	return fmt.Errorf("%s could not be confirmed — the daemon may have done it; check %s before trying again: %w", action, where, err)
 }
