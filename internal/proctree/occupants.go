@@ -131,6 +131,23 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 			if seen[descendant.PID] {
 				continue
 			}
+			if IsTmuxProcess(descendant.PID) {
+				// Same contract as the outer-loop guard above: every tmux process
+				// is excluded, clients included (#4678). The outer loop continue's
+				// without marking seen, so a tmux pid skipped there can still be
+				// reached here as a descendant of a matching ancestor and would
+				// be appended unconditionally. Mark seen before continuing so a
+				// later TreeOf walk from another matching ancestor cannot re-admit
+				// it — the dedup the comment below depends on.
+				//
+				// Only the tmux process itself is excluded; its children stay
+				// eligible (the outer-loop contract, lines 114-115): they are the
+				// panes and their descendants, which is exactly what this looks
+				// for. The reaper's pruned[PPID] subtree propagation is deliberately
+				// NOT copied.
+				seen[descendant.PID] = true
+				continue
+			}
 			seen[descendant.PID] = true
 			// The matched ancestor reports the cwd that matched; a descendant
 			// attributed through it reports its own, when readable, so a report can
