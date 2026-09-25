@@ -473,7 +473,13 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		s.showActions = !s.showActions
 		return true
 	case "esc":
-		s.hasFocus = false
+		// Route the close through SetFocus(false) so the pendingCreate /
+		// pendingTrigger / pendingTriggerID clears the #1531 contract relies on
+		// actually run. Writing hasFocus directly bypasses them, so a pending
+		// run-now whose pre-trigger flush failed survives the close and fires on
+		// the first keypress after reopen (SetTasks preserves it deliberately for
+		// the mid-flush reload, #1474, so the close is the only drop).
+		s.SetFocus(false)
 		return true
 	case "up", "k":
 		if s.selectedIdx > 0 {
