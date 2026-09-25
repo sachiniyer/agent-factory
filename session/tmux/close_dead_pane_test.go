@@ -46,9 +46,10 @@ func startHeldPane(t *testing.T, name, command string) {
 
 // paneStatusDiagnosis says why a probe of a held dead pane had no exit status.
 // startHeldPane waits only for pane_dead, which tmux sets when the terminal
-// closes, possibly before it collects the root (#4682); the probe itself waits
-// for the status. A status tmux reports now means it collected the root only
-// after the probe gave up; none at all means this tmux does not report it.
+// closes, possibly before it collects the root (#4682); probeUntilStatusKnown
+// waits for the status. A status tmux reports now means it collected the root
+// only after the last probe gave up; none at all means this tmux does not report
+// it, or never collected the root within the test's deadline.
 func paneStatusDiagnosis(t *testing.T, name string) string {
 	t.Helper()
 	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
@@ -56,9 +57,36 @@ func paneStatusDiagnosis(t *testing.T, name string) string {
 	case err != nil:
 		return fmt.Sprintf("the pane could not be re-read: %v", err)
 	case status != "":
-		return fmt.Sprintf("tmux reported status %s only after the probe's %s wait", status, paneStatusWait)
+		return fmt.Sprintf("tmux reported status %s only after the last probe's %s wait", status, paneStatusWait)
 	default:
 		return "tmux still reports none: it never collected the root, or does not report pane_dead_status"
+	}
+}
+
+// heldPaneStatusDeadline is how long a test waits for tmux to collect a held
+// pane's exited root. It is the test's own bound, far above the production
+// paneStatusWait: the test asserts that the status is reported, not how fast,
+// and a loaded CI runner can take tmux longer than 2s to collect (#4682).
+const heldPaneStatusDeadline = 30 * time.Second
+
+// probeUntilStatusKnown re-probes a held dead pane until the probe reports its
+// exit status. One probe gives up after paneStatusWait and answers
+// statusKnown=false, which is correct production behaviour but not a failure of
+// the property under test; only the test's own deadline is.
+func probeUntilStatusKnown(t *testing.T, s *TmuxSession, name string) (dead bool, status int, at time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(heldPaneStatusDeadline)
+	for {
+		dead, status, statusKnown, at, known := s.ProbePaneExit()
+		require.True(t, known)
+		if statusKnown {
+			return dead, status, at
+		}
+		require.True(t, dead, "a probe without a status must still see the exited root")
+		if !time.Now().Before(deadline) {
+			t.Fatalf("no exit status within %s: %s", heldPaneStatusDeadline, paneStatusDiagnosis(t, name))
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -76,10 +104,8 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 	startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
 
 	s := NewTmuxSessionFromSanitizedName(name, "sh")
-	dead, status, statusKnown, at, known := s.ProbePaneExit()
-	require.True(t, known)
+	dead, status, at := probeUntilStatusKnown(t, s, name)
 	require.True(t, dead)
-	require.True(t, statusKnown, "no exit status for `exit 7`: %s", paneStatusDiagnosis(t, name))
 	require.Equal(t, 7, status)
 	require.False(t, at.Before(before), "death time %v predates the pane", at)
 

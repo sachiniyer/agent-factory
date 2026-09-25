@@ -653,6 +653,18 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.selectionOverlay.SetSelectedIndex(idx)
 			return m.handleStateSelectAccount(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// And the delivery-resolve picker (#4429) — the same overlay a fifth time,
+	// so the same click routing. Its rows are the two answers to "delivery was
+	// not confirmed", and a list that answers the keyboard and ignores the mouse
+	// is the #1819 class.
+	case stateSelectHandoffResolve:
+		if m.selectionOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.selectionOverlay.SetSelectedIndex(idx)
+			return m.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateSearch:
 		if m.searchOverlay == nil {
 			return m, nil

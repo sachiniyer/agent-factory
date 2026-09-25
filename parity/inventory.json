@@ -861,6 +861,25 @@
       "notes": "Closed across all three surfaces. #1934 promoted ResumeFromLimit into the public catalog and added the web Retry action; `af sessions retry-limit <title>` closes the remaining CLI half using the same daemon controlServer and Manager.resumeFromLimit action. The CLI follows the established repo-scoped title contract and leaves stable-id addressing to the all-project web client (wire.id-addressing). Every surface therefore shares the daemon-owned respawn, pending-prompt delivery, and durable liveness transition instead of implementing recovery client-side."
     },
     {
+      "id": "session.handoff-delivery-confirm",
+      "title": "Retire an ambiguous pending handoff mission on the operator's attestation that it already landed, without resending",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/handle_handoff_resolve.go — the `c` resolve picker's \"Mark delivered\" row -> app/session_control.go confirmHandoffDeliveryThroughDaemon"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/ui.ts markDeliveredActionForSession -> web/src/index.ts doMarkDelivered -> web/src/api.ts confirmHandoffDelivery (markDeliveredModal is the deliberate confirm)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_limit_retry.go (af sessions retry-limit <title> --delivered)"
+      },
+      "verdict": "parity",
+      "issue": "#4429",
+      "notes": "A handoff whose mission delivery reports sent-unverified or could-not-confirm may already have landed: resending can double-deliver, doing nothing leaves a durable obligation no verb used to retire. ConfirmHandoffDelivery is the attestation half of the exit — a separate verb rather than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead of silently resending. The daemon probes that a runtime answers at the binding, then settles the leftover replacement/startup-unknown state and clears the mission in one commit. Automatic recovery still owns only positive mission-scoped non-delivery (PromptNotDelivered); ambiguous verdicts stay operator-resolved. The TUI surfaces it inside the `c` resolve picker (no new binding — the same key now chooses between resend and mark-delivered when a confirmable verdict exists); the web grows a second head action with a confirmation modal; the CLI spells it as a flag on the same recovery command."
+    },
+    {
       "id": "session.list",
       "title": "List sessions",
       "tui": {
@@ -1595,6 +1614,7 @@
       "POST /v1/AccountLogin": "session.account-login",
       "POST /v1/ArchiveSession": "session.archive",
       "POST /v1/CloseTab": "session.tab.close",
+      "POST /v1/ConfirmHandoffDelivery": "session.handoff-delivery-confirm",
       "POST /v1/CreateSession": "session.create",
       "POST /v1/CreateTab": "session.tab.create",
       "POST /v1/DeleteProject": "project.delete",
@@ -1690,6 +1710,7 @@
       "AddTask": "task.add",
       "ArchiveSession": "session.archive",
       "CloseTab": "session.tab.close",
+      "ConfirmHandoffDelivery": "session.handoff-delivery-confirm",
       "CreateSession": "session.create",
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
@@ -1842,6 +1863,7 @@
       "af sessions preview --tab-name": "session.preview-tab",
       "af sessions restore --force-reap": "session.restore",
       "af sessions restore --help": "meta.discovery",
+      "af sessions retry-limit --delivered": "session.handoff-delivery-confirm",
       "af sessions retry-limit --help": "meta.discovery",
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
       "af sessions send-prompt --all-repos": "session.send-prompt.broadcast",
@@ -2306,6 +2328,13 @@
         "cli": {
           "id": {
             "ok": "The CLI resolves sessions by title under --repo scoping, exactly as kill/archive/send-prompt do; the stable id is the all-project web client's collision-proof key."
+          }
+        }
+      },
+      "ConfirmHandoffDeliveryRequest": {
+        "cli": {
+          "id": {
+            "ok": "Same resolution contract as retry-limit: the CLI resolves the target by title under --repo scoping; the stable id is the TUI/web client's collision-proof key for a confirmable row captured before snapshot drift."
           }
         }
       },

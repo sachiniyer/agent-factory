@@ -551,6 +551,44 @@ export async function resumeFromLimit(id: string, title: string, token: string):
   }
 }
 
+export interface ConfirmHandoffDeliveryResult {
+  ok: boolean;
+  reason?: string;
+  warning?: string;
+  code?: string;
+}
+
+const CONFIRM_HANDOFF_UNSUPPORTED =
+  "daemon does not serve ConfirmHandoffDelivery (likely an older daemon — upgrade it); the pending mission was left untouched";
+
+/** Retires a pending handoff mission on the operator's attestation that it
+ *  already landed (#4429) — the web's "Mark delivered" button, the no-resend
+ *  half of the TUI's `c` resolve picker. The daemon probes the runtime, settles
+ *  the replacement fence, lifts startup-unknown, and clears the obligation in
+ *  one commit; the resulting session.updated event repaints the rail.
+ *
+ *  Sends `id` like resumeFromLimit — this verb marks a durable obligation
+ *  delivered, so a misroute would retire the wrong session's mission. A daemon
+ *  predating the route cannot serve it: the 404 becomes an upgrade message, NOT
+ *  a fallback resend — a resend is the double-delivery this verb prevents. */
+export async function confirmHandoffDelivery(id: string, title: string, token: string): Promise<void> {
+  let result: ConfirmHandoffDeliveryResult;
+  try {
+    result = await af<ConfirmHandoffDeliveryResult>("ConfirmHandoffDelivery", { id, title, repo_id: "" }, token);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, CONFIRM_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "delivery was not confirmed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+}
+
 /** The daemon's HandoffSession response (daemon.HandoffSessionResponse): the
  *  outgoing and incoming agents and optional account identities, echoed so the
  *  UI can report the committed swap without re-reading the snapshot. */

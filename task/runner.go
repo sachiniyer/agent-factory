@@ -91,6 +91,11 @@ var (
 	// line in the transcript forever, and "Build ·" also sits inside the live
 	// composer — keying on either would pin an idle session at Running permanently.
 	opencodeWorkingIndicator = regexp.MustCompile(`esc +interrupt`)
+	// escToInterruptHint matches the "esc to interrupt" chrome several supported
+	// agents draw only while a turn is in flight. It is matched on the
+	// ANSI-stripped pane and always scoped per agent in submittedTurnContent —
+	// never trusted whole-pane, where transcript prose could quote it.
+	escToInterruptHint = regexp.MustCompile(`esc +to +interrupt`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook

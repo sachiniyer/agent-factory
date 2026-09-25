@@ -626,6 +626,10 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 		return false
 	}
 	i.pendingAccountSwap = nil
+	// The notice was just delivered, so the agent's new work ends the run on
+	// its own idle edge — see ClearPendingHandoffMission for why a held edge
+	// must not outlive a resend.
+	i.taskRunIdleEdgeHeld = false
 	i.touchLocked()
 	i.accountSwapLaunch = nil
 	return true

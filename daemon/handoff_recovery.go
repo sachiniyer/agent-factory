@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -48,8 +47,18 @@ func (m *Manager) ResumePendingHandoffs() {
 
 	for _, entry := range entries {
 		mission := entry.instance.PendingHandoffMission()
-		if mission == "" || entry.instance.UserKilled() || entry.instance.StartupStateUnknown() ||
-			!entry.instance.PendingHandoffMissionAutoRetryable() {
+		if mission == "" || entry.instance.UserKilled() {
+			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
+			continue
+		}
+		// A recorded delivered verdict already proved the mission landed; all a
+		// crash could have skipped is the bookkeeping settle (#4429). Retire it
+		// without a resend — and without an operator attestation.
+		if entry.instance.PendingHandoffMissionSettleable() {
+			m.settleDeliveredPendingHandoff(entry, mission)
+			continue
+		}
+		if entry.instance.StartupStateUnknown() || !entry.instance.PendingHandoffMissionAutoRetryable() {
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 			continue
 		}
@@ -57,6 +66,69 @@ func (m *Manager) ResumePendingHandoffs() {
 			m.warn().Printf("handoff %q: pending mission retry did not complete: %v", entry.instance.Title, err)
 		}
 	}
+}
+
+// settleDeliveredPendingHandoff retires a pending mission whose recorded
+// verdict is PromptDelivered (#4429). The delivery itself was confirmed before
+// the crash — the only unfinished business is the bookkeeping: settle the
+// reconstructed replacement fence, clear the obligation, persist and publish.
+// The same target-before-op locks as retryPendingHandoff keep it from racing a
+// kill or a concurrent mutation.
+func (m *Manager) settleDeliveredPendingHandoff(entry pendingHandoffEntry, mission string) {
+	unlock := m.lockTarget(entry.repoID, entry.instance.Title)
+	defer unlock()
+
+	opLock := m.opLockFor(entry.key)
+	if !opLock.TryLock() {
+		return
+	}
+	defer opLock.Unlock()
+
+	m.mu.Lock()
+	current := m.instances[entry.key]
+	_, killing := m.killsInFlight[entry.key]
+	m.mu.Unlock()
+	if killing || current != entry.instance || entry.instance.IsTearingDown() ||
+		entry.instance.PendingHandoffMission() != mission ||
+		!entry.instance.PendingHandoffMissionSettleable() {
+		return
+	}
+
+	// The delivered verdict is a durable fact, so the mission and fence retire
+	// even on a Lost/Dead/Archived row. Restore still owns that row's runtime,
+	// so nothing here may claim one: ResolveStartupState would restore
+	// `started`, and CommitHandoff always lands on Running — saving and
+	// publishing a reloaded Lost row as a live agent. Dead rows keep their
+	// startup-unknown marker and drop the fence through ClearOp, which leaves
+	// liveness alone. The swap itself completed (the mission landed), so this
+	// is not AbortHandoff's "the runtime swap did not complete".
+	settle := session.CommitHandoff()
+	switch entry.instance.GetLiveness() {
+	case session.LiveLost, session.LiveDead, session.LiveArchived:
+		settle = session.ClearOp()
+	default:
+		entry.instance.ResolveStartupState()
+	}
+	if entry.instance.GetInFlightOp() == session.OpReplacing {
+		if err := entry.instance.Transition(settle); err != nil {
+			m.warn().Printf("handoff %q: delivered pending mission could not settle the replacement fence: %v",
+				entry.instance.Title, err)
+			return
+		}
+	}
+	if !entry.instance.ClearPendingHandoffMission(mission) {
+		m.warn().Printf("handoff %q: delivered pending mission changed before settlement", entry.instance.Title)
+		return
+	}
+	if perr := m.persistSettlement(entry.repoID, entry.key, entry.instance); perr != nil {
+		// The mutation committed in memory; only the durable write failed. The
+		// record still carries the delivered verdict, so this pass retries it on
+		// the next poll — the settle is idempotent.
+		m.warn().Printf("handoff %q: delivered pending mission settled but the write did not persist: %v",
+			entry.instance.Title, perr)
+	}
+	m.clearPendingHandoffRetry(entry.repoID, entry.instance)
+	m.info().Printf("handoff %q: retired delivered pending mission", entry.instance.Title)
 }
 
 // retryPendingHandoff is the single submission transaction for agent-only
@@ -86,8 +158,30 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 	if killing || current != entry.instance || entry.instance.IsTearingDown() ||
 		(op != session.OpNone && op != session.OpReplacing) ||
 		entry.instance.PendingHandoffMission() != mission || !retryable ||
-		entry.instance.UserKilled() || entry.instance.StartupStateUnknown() {
+		entry.instance.UserKilled() ||
+		// Automatic recovery still requires a KNOWN startup state — it has no
+		// operator inspection behind it. The explicit retry is the supported
+		// exit for the unknown wedge (#4429), once the probe below has answered.
+		(!explicit && entry.instance.StartupStateUnknown()) {
 		return false, nil
+	}
+
+	// A startup-unknown row has `started` down, and the local backend refuses
+	// both the readiness capture and the send on such a row — so without this
+	// the retry would spend the full readiness timeout under these locks and
+	// then fail "instance not started". Probe the pane first, as the confirm
+	// verb does: a runtime that answers restores the binding
+	// (ResolveStartupState), and anything else refuses the retry with the row
+	// untouched. If readiness then fails, the marker goes back up below.
+	wasUnknown := entry.instance.StartupStateUnknown()
+	if wasUnknown {
+		if probe := probeLiveness(entry.instance, entry.instance.AgentServer()); probe != probeAlive {
+			return false, fmt.Errorf(
+				"session %q's runtime could not be confirmed live (%s), so its pending mission was not resent; "+
+					"if the pane is gone, restore or kill owns this row",
+				entry.instance.Title, probe.notAliveReason())
+		}
+		entry.instance.ResolveStartupState()
 	}
 
 	switch entry.instance.GetLiveness() {
@@ -113,7 +207,13 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		// startup output and an already-delivered mission both look Running, so
 		// guessing from it would either lose the brief or duplicate it.
 	default:
-		if op == session.OpReplacing {
+		// The replacement fence authorizes the same bypass it always did — the
+		// send path's own readiness wait is the real gate. So does the explicit
+		// arm: the operator's inspection is the attestation, and #4429 settles
+		// the fence on ambiguous verdicts, so the pending mission checked above
+		// is what marks the obligation now — including on a startup-unknown row
+		// whose probe answered above.
+		if op == session.OpReplacing || explicit {
 			break
 		}
 		return false, nil
@@ -126,10 +226,14 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		repoID: entry.repoID, key: entry.key, title: entry.instance.Title,
 		mission: mission, instance: entry.instance,
 	}
-	if err := m.beginHandoffMissionDelivery(delivery); err != nil {
-		return false, err
+	status, err, beginErr := m.waitAndSubmitHandoffMission(delivery)
+	if beginErr != nil {
+		if wasUnknown {
+			// Nothing was sent; the row goes back to what it was before the probe.
+			entry.instance.MarkStartupStateUnknown()
+		}
+		return false, beginErr
 	}
-	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), entry.instance, mission)
 	if evidenceErr := entry.instance.RecordPendingHandoffMissionDelivery(mission, status); evidenceErr != nil {
 		return false, errors.Join(err, evidenceErr)
 	}
@@ -157,12 +261,28 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		// Best-effort, unlike the settlement writes above (#2781): this raises a
 		// suppression marker over a mission that was never delivered, so losing it
 		// costs another recovery attempt, never a duplicate execution.
-		if op == session.OpReplacing && errors.Is(err, task.ErrAgentReadiness) {
+		//
+		// A startup-unknown row whose probe answered is in the same position: the
+		// probe proved only that the pane exists, readiness then failed, so the
+		// row goes back to unknown rather than keeping a binding nothing proved.
+		if (op == session.OpReplacing || wasUnknown) && errors.Is(err, task.ErrAgentReadiness) {
 			entry.instance.MarkStartupStateUnknown()
 			m.persistAndPublishInstance(entry.repoID, entry.instance)
 			m.clearPendingHandoffRetry(entry.repoID, entry.instance)
 		}
 		if errors.Is(err, task.ErrPromptDelivery) {
+			// An ambiguous verdict settles the replacement fence on the runtime
+			// proof readiness already supplied — the swap is complete; only the
+			// mission stays pending for the operator's confirm-or-retry (#4429).
+			// Positive non-delivery keeps the fence: automatic recovery owns the
+			// resend and the row stays inert until that lands or exhausts.
+			if op == session.OpReplacing && status != session.PromptNotDelivered {
+				if terr := entry.instance.Transition(session.CommitHandoff()); terr != nil {
+					return false, &mutationCommittedError{err: fmt.Errorf(
+						"the pending handoff mission's delivery stayed unconfirmed, but the replacement fence could not be settled: %w",
+						errors.Join(err, terr))}
+				}
+			}
 			if evidenceErr := m.persistSettlement(entry.repoID, entry.key, entry.instance); evidenceErr != nil {
 				return false, errors.Join(err, evidenceErr)
 			}
