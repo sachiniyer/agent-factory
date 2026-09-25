@@ -14694,8 +14694,20 @@ function taskHealthSummary(t) {
   }
   return t.unassessable ? "Health unknown" : "";
 }
+function farOutNote(nextRunAt, now = /* @__PURE__ */ new Date()) {
+  const next = new Date(nextRunAt);
+  if (Number.isNaN(next.getTime())) return "";
+  let months = (next.getFullYear() - now.getFullYear()) * 12 + next.getMonth() - now.getMonth();
+  const nextClock = next.getHours() * 36e5 + next.getMinutes() * 6e4 + next.getSeconds() * 1e3 + next.getMilliseconds();
+  const nowClock = now.getHours() * 36e5 + now.getMinutes() * 6e4 + now.getSeconds() * 1e3 + now.getMilliseconds();
+  if (next.getDate() < now.getDate() || next.getDate() === now.getDate() && nextClock < nowClock) months--;
+  const date = `${next.getFullYear()}-${pad22(next.getMonth() + 1)}-${pad22(next.getDate())}`;
+  return `${date} (in ${months} ${months === 1 ? "month" : "months"})`;
+}
 function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   if (t.next_run_at) {
+    const far = t.next_run_far ? farOutNote(t.next_run_at, now) : "";
+    if (far) return `Next run ${far}`;
     return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   return "";
