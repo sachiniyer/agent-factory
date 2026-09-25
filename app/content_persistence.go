@@ -24,6 +24,11 @@ func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
 		return m, m.showTransientMessage(notice)
 	}
+	// A kept edit whose save could not be confirmed is never re-sent on the
+	// way out (#4824), so leaving drops it; say so once before letting go.
+	if notice := m.automations.TaskPane().TakeUnconfirmedQuitNotice(); notice != "" {
+		return m, m.showTransientMessage(notice)
+	}
 	m.flushTUIViewStateBestEffort()
 
 	// No instances.json write on quit: the daemon is the sole writer (#960 PR 4)
@@ -124,6 +129,19 @@ func (m *home) saveContentPaneState() error {
 				// failed. Keep surfacing that failure, but advance this task's
 				// baseline so a later edit is diffed against durable state.
 				sp.AcknowledgeSavedEdit(edit.ID)
+			} else if mutationOutcomeUnknown(err) {
+				// The update may have landed with only its reply lost (#4824).
+				// The draft is kept, since only a positive not-found may drop one
+				// (#4798), but it is held out of automatic saves: re-sending it on
+				// the next overlay close could overwrite a change another writer
+				// made in between. The reload below re-reads the task; if it now
+				// carries the edit, the pane settles it and says so, and if not,
+				// the user saves it again by editing the task.
+				sp.HoldUnconfirmedEdit(edit.ID)
+				log.WarningLog.Printf("task update outcome unknown: %v", err)
+				saveErr = errors.Join(saveErr, mutationOutcomeError(
+					fmt.Sprintf("saving task %q (the edit is kept, not re-sent)", edit.ID), "the task list", err))
+				continue
 			} else {
 				sp.RestoreFailedEdit(edit.ID)
 				failedEdit = true
@@ -146,6 +164,14 @@ func (m *home) saveContentPaneState() error {
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
 				saveErr = errors.Join(saveErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
+				continue
+			}
+			// A removal that may have landed is not reported as a failure
+			// (#4824); the reload below shows whether the task is still there.
+			if mutationOutcomeUnknown(err) {
+				log.WarningLog.Printf("task removal outcome unknown: %v", err)
+				saveErr = errors.Join(saveErr, mutationOutcomeError(
+					fmt.Sprintf("removing task %q", tsk.Name), "the task list", err))
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
