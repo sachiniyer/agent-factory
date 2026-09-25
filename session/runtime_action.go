@@ -148,6 +148,16 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		if IsReservedTitle(v.Title) {
 			return fmt.Errorf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
 		}
+		// An unresolved mission from the LAST handoff (#4429). Its replacement
+		// fence settles on the incoming runtime's liveness, so the op axis below
+		// is OpNone and cannot speak for this obligation — and a second handoff
+		// would call SetPendingHandoffMission and overwrite the first mission and
+		// its verdict, discarding an obligation nothing else records.
+		if v.PendingHandoffMission {
+			return fmt.Errorf(
+				"session %q still owes the mission from its last handoff; resolve it first — `af sessions retry-limit %s` resends it, `--delivered` retires it",
+				v.Title, v.Title)
+		}
 		if v.InFlightOp != OpNone {
 			return runtimeActionBusyError(v)
 		}

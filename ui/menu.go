@@ -422,8 +422,14 @@ func (m *Menu) addInstanceOptions() {
 	if m.instance != nil {
 		lifecycleAction = m.instance.LifecycleAction()
 		canKill = m.instance.CanKill()
+		// The `c` key resolves a pending handoff delivery either way it can go —
+		// resend or mark-delivered — so the bar advertises it for a confirmable
+		// row too (#4429). Pressing it there opens the resolve picker, which is
+		// where the verb is named.
 		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery() ||
-			m.instance.CanRetryPendingHandoffMissionDelivery()
+			m.instance.CanRetryPendingHandoffMissionDelivery() ||
+			m.instance.CanConfirmPendingHandoffDelivery() ||
+			m.instance.CanConfirmPendingManualAccountSwapDelivery()
 	}
 	if lifecycleAction == session.LifecycleActionNone && !canRetryHandoff {
 		m.options = []keys.KeyName{keys.KeyNew}

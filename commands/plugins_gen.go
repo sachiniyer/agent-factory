@@ -79,6 +79,7 @@ var pluginReleaseDigests = []string{
 	"d3fc6b5bf86c271996caf9391ac9be5a62787451dc949c84ee503909ace268e4", // 3.14 — account-aware handoff and explicit ambiguous-delivery retry (#4018)
 	"a7f642df5fed58f13fe5f0504e26695541183caafe32671e721b3d14f43f2865", // 3.15 — forbid bypassing Git's live-worktree branch guard (#4092)
 	"ae2b7057ea8fc398586676ae3dc4e34240e9a24c9e4f4ab8569c62a7bb41a768", // 3.16 — root-agent config forms and adopted-session remediation (#4087)
+	"3a9901060da8792f1540a636f7bc853acda06dcd0f54fa60abf03fbf1b9515ec", // 3.17 — retry-limit --delivered: the mark-delivered exit for ambiguous handoff delivery (#4429)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

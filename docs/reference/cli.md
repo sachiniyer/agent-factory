@@ -2085,16 +2085,28 @@ clears the limit state after delivery succeeds.
 
 Before retrying an unconfirmed handoff, inspect its pane: the first submission
 may already have landed, and this command is the operator's explicit decision to
-send the pending mission again. The command fails when neither recovery
-obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
-badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
+send the pending mission again. When the pane shows the incoming agent ALREADY
+acting on its mission, use --delivered instead: it retires the pending
+obligation and clears the leftover operation/startup flags WITHOUT sending the
+mission a second time.
+
+The command fails when neither recovery obligation exists. Use 'af sessions
+list' to find sessions carrying the [limit] badge; the TUI and web expose
+Retry handoff and Mark delivered for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth
+  af sessions retry-limit fix-auth --delivered
 
 ```
-af sessions retry-limit <title>
+af sessions retry-limit <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--delivered` |  | Mark the pending handoff mission as delivered and retire it WITHOUT resending — use after inspecting the pane and confirming the incoming agent already received it |
 
 **Global flags**
 

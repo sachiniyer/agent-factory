@@ -266,7 +266,8 @@ func (m *home) View() string {
 		}
 		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
 	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent ||
-		m.state == stateSelectBackend || m.state == stateSelectAccount {
+		m.state == stateSelectBackend || m.state == stateSelectAccount ||
+		m.state == stateSelectHandoffResolve {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}

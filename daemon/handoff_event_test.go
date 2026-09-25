@@ -128,10 +128,12 @@ func TestHandoffSession_PublishesSwapThenSettlement(t *testing.T) {
 }
 
 // TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap is the case the
-// checkpoint publish exists for. A post-ready paste failure leaves the mission
-// pending behind the fence and NEVER settles inside this call — the recovery loop
-// owns it from here. The agent program has still changed, and the requester learns
-// that from the RPC error path; everyone else has only the events plane.
+// checkpoint publish exists for. A post-ready paste failure leaves an AMBIGUOUS
+// verdict (could-not-confirm): readiness already proved the incoming runtime, so
+// the replacement fence settles on that proof (#4429) while the mission stays
+// pending for the confirm-or-retry exits. The agent program has still changed,
+// and the requester learns that from the RPC error path; everyone else has only
+// the events plane.
 func TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	sendErr := errors.New("paste transport failed")
@@ -148,8 +150,13 @@ func TestHandoffSession_UndeliveredMissionStillAnnouncesTheSwap(t *testing.T) {
 	if !errors.Is(err, task.ErrPromptDelivery) {
 		t.Fatalf("HandoffSession error = %v, want a post-ready prompt-delivery failure", err)
 	}
-	if got := inst.GetInFlightOp(); got != session.OpReplacing {
-		t.Fatalf("op = %v, want the fence still raised for the retry path", got)
+	// The ambiguous verdict settles the swap — the runtime was proven — while the
+	// mission obligation and its verdict stay durable for the explicit exits.
+	if got := inst.GetInFlightOp(); got != session.OpNone {
+		t.Fatalf("op = %v, want the fence settled on the proven runtime (#4429)", got)
+	}
+	if inst.PendingHandoffMission() == "" {
+		t.Fatal("the ambiguous mission must stay pending for the confirm-or-retry exits")
 	}
 
 	updates := drainSessionUpdates(t, ch)

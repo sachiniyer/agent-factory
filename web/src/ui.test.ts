@@ -14,6 +14,7 @@ import {
   documentTitle,
   refreshIdleReasonAges,
   retryActionForSession,
+  markDeliveredActionForSession,
   isActionableSession,
   isKillableSession,
   sessionRow,
@@ -236,7 +237,7 @@ test("Retry names an ambiguous handoff separately from a usage-limit retry", () 
       title: "Retry the handoff after inspecting the pane",
     },
   );
-  assert.equal(
+  assert.deepEqual(
     retryActionForSession(sess({
       liveness: Liveness.Running,
       in_flight_op: InFlightOp.Replacing,
@@ -244,14 +245,75 @@ test("Retry names an ambiguous handoff separately from a usage-limit retry", () 
       pending_handoff_delivery_status: "could-not-confirm",
       startup_state_unknown: true,
     })),
-    null,
-    "an unknown replacement runtime has no pane the operator can safely inspect",
+    {
+      kind: "handoff",
+      label: "Retry handoff",
+      title: "Retry the handoff after inspecting the pane",
+    },
+    "a startup-unknown ambiguous row is the #4429 wedge — the explicit retry's " +
+    "own readiness wait re-proves the binding before the composer is touched",
   );
   assert.deepEqual(
     retryActionForSession(sess({ liveness: Liveness.LimitReached })),
     { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" },
   );
   assert.equal(retryActionForSession(sess({ liveness: Liveness.Ready })), null);
+});
+
+test("Mark delivered is offered exactly for confirmable pending deliveries", () => {
+  // The #4429 wedge: ambiguous verdict + fence + startup-unknown — the row no
+  // supported verb used to reach.
+  assert.deepEqual(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+      startup_state_unknown: true,
+    })),
+    {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    },
+  );
+  // The account-swap sibling's orphaned-respawn shape.
+  assert.deepEqual(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Ready,
+      in_flight_op: InFlightOp.Respawning,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "could-not-confirm",
+      },
+    })),
+    {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    },
+  );
+  // Positive non-delivery belongs to automatic recovery, not an attestation.
+  assert.equal(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Running,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "not-delivered",
+    })),
+    null,
+  );
+  // A lost runtime has no pane the mission could have landed in.
+  assert.equal(
+    markDeliveredActionForSession(sess({
+      liveness: Liveness.Lost,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    null,
+  );
+  assert.equal(markDeliveredActionForSession(sess({ liveness: Liveness.Ready })), null);
 });
 
 test("an unrelated status/title snapshot on the selected session keeps the SAME sig", () => {

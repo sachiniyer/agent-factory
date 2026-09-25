@@ -236,6 +236,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProjectRebound(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
+	case handoffDeliveryConfirmedMsg:
+		return m.handleHandoffDeliveryConfirmed(msg)
 	case configAgentSpawnedMsg:
 		return m.handleConfigAgentSpawned(msg)
 	case configAgentDoneMsg:
@@ -576,6 +578,8 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateRenameTab(msg)
 	case stateSelectHandoffAgent:
 		return m.handleStateSelectHandoffAgent(msg)
+	case stateSelectHandoffResolve:
+		return m.handleStateSelectHandoffResolve(msg)
 	case stateSelectBackend:
 		return m.handleStateSelectBackend(msg)
 	case stateSelectAccount:
