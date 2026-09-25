@@ -18,7 +18,7 @@ import (
 // wedgedDaemonSocket binds a Unix-socket HTTP server that accepts every
 // connection and never answers, releasing at cleanup. No real daemon, no real AF
 // home: the socket lives in t.TempDir() and EnsureDaemon is bypassed by the
-// withDaemonHTTP seam below, so this test can never touch the box's daemon.
+// withDaemonHTTPMutation seam below, so this test can never touch the box's daemon.
 func wedgedDaemonSocket(t *testing.T) string {
 	t.Helper()
 	sockPath := testguard.SocketPath(t, "daemon-http.sock")
@@ -41,7 +41,7 @@ func wedgedDaemonSocket(t *testing.T) string {
 // instead of doing anything.
 //
 // It drives the REAL killSessionThroughDaemon — the seam killInstanceCmd calls —
-// so the production bound is what's under test, not a helper. Only withDaemonHTTP
+// so the production bound is what's under test, not a helper. Only withDaemonHTTPMutation
 // is faked, and only to skip EnsureDaemon and point the client at a wedged socket;
 // the ctx the fix threads still has to survive that closure for the bound to fire.
 //
@@ -53,11 +53,11 @@ func wedgedDaemonSocket(t *testing.T) string {
 func TestKillSessionThroughDaemon_WedgedDaemon_ReturnsActionableError(t *testing.T) {
 	sock := wedgedDaemonSocket(t)
 
-	origWith := withDaemonHTTP
+	origWith := withDaemonHTTPMutation
 	origTimeout := killRPCTimeout
-	t.Cleanup(func() { withDaemonHTTP = origWith; killRPCTimeout = origTimeout })
+	t.Cleanup(func() { withDaemonHTTPMutation = origWith; killRPCTimeout = origTimeout })
 
-	withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
+	withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
 		return fn(apiclient.NewWithSocket(sock))
 	}
 	killRPCTimeout = 250 * time.Millisecond
@@ -173,9 +173,9 @@ func TestKillSessionThroughDaemon_DaemonError_SurfacesVerbatim(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	origWith := withDaemonHTTP
-	t.Cleanup(func() { withDaemonHTTP = origWith })
-	withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
+	origWith := withDaemonHTTPMutation
+	t.Cleanup(func() { withDaemonHTTPMutation = origWith })
+	withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
 		return fn(apiclient.NewWithSocket(sockPath))
 	}
 
