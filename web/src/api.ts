@@ -657,6 +657,20 @@ export async function registerProject(path: string, token: string): Promise<Regi
   return resp.project;
 }
 
+/** Moves a registered project's stable identity to the checkout at `path`
+ *  (mirrors `af projects rebind`): the repair after the checkout a registration
+ *  names was moved or recloned elsewhere — the `id` survives, only where it
+ *  points changes. `path` follows the registerProject rule — a path ON THE
+ *  DAEMON HOST, sent verbatim for the daemon to resolve; the daemon refuses a
+ *  root another project already owns. A rejection (unknown id, not a git repo,
+ *  ownership conflict) throws an ApiError carrying the daemon's actionable
+ *  message for inline display; on success the echoed projects.changed refetches
+ *  the registry and the rebound root lands in the switcher union. */
+export async function rebindProject(id: string, path: string, token: string): Promise<RegisteredProject> {
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", { id, path }, token);
+  return resp.project;
+}
+
 /** Lists the daemon's registered projects (the #2355 registry) — the read half of
  *  the #2456 union. The client ∪s these roots with the projects it derives from live
  *  sessions and tasks, so a registered-but-sessionless project still shows in the

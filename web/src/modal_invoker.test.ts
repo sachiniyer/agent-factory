@@ -227,6 +227,7 @@ test("reconnect retains a completed restore through its pre-response initial Sna
     fetchRegisteredProjects: async () => ({ projects: [], error: "" }),
     errorText: () => "", connectionAttemptMayCommit: () => true,
     reconcileProject: () => "", loadProjectChoice: () => null,
+    projectRoots: (projects: { root: string }[]) => projects.map((p) => p.root),
     optimisticSessions: { reset() {} }, pickSelection: () => null,
     applySessions: (_sessions: unknown, evidence: Parameters<PendingRestores["observe"]>[1]) => {
       pending.observe(rows, evidence);

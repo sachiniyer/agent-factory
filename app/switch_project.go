@@ -29,6 +29,16 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	projects, registryDegraded := m.buildProjectList()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
+	if isRemoteTarget() {
+		// The picker's registry rows come from the LOCAL config.ListProjects
+		// and its path input resolves on THIS filesystem, but a rebind would
+		// land on the REMOTE daemon's registry — where the prj_ id likely
+		// does not exist, or worse, names a different record. Observation and
+		// mutation must come from the same daemon (#3626's rule); until the
+		// switcher reads the remote registry too, rebind stays local-only and
+		// the remote repair is `af projects rebind` on the daemon host.
+		m.projectPickerOverlay.SetRebindDenied("local registry — `af projects rebind` on daemon host")
+	}
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject
@@ -197,6 +207,13 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// so a registered project on a stalled or missing checkout keeps its own
 	// row instead of vanishing or borrowing an ancestor's.
 	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	// registryRecordByRow maps each registry record to the row id the union
+	// below assigns it — the resolved repo id when Git proves the recorded
+	// root, else the reconciled recorded identity (the same split the union
+	// makes). It is what lets a row carry the record's prj_… id — what `b`
+	// rebinds — and its path_exists flag, so the picker can offer rebind only
+	// where there is a registration to move and flag a checkout that is gone.
+	registryRecordByRow := make(map[string]config.Project, len(registeredProjects))
 	// recordedIdentities remembers which identity each registry row lent to a
 	// path, so the root_agents union below can ask rather than re-hash.
 	recordedIdentities := make(map[string]string, len(registeredProjects))
@@ -237,6 +254,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// path registration resolved (#2110's rule — macOS `/var` ->
 		// `/private/var` makes the two unequal every time).
 		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
+		registryRecordByRow[resolved.id] = project
 		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
@@ -304,6 +322,13 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		}
 		return projects[i].Root < projects[j].Root
 	})
+	for i := range projects {
+		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
+			projects[i].RegistryID = rec.ID
+			projects[i].RegistryRoot = rec.Root
+			projects[i].MissingPath = !rec.PathExists
+		}
+	}
 	return projects, registryDegraded, probeBudgets
 }
 
@@ -370,6 +395,13 @@ func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
 // consumes its outcomes: an add request (validate + register + switch), a chosen
 // existing project (switch), or a cancel (close).
 func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending rebind makes the picker's form consume every key so nothing can
+	// race a second mutation — which would include the always-on Ctrl+C hard
+	// exit, leaving a TUI whose daemon call has stalled impossible to quit.
+	// Quitting is safe mid-flight: the daemon owns the write, not this process.
+	if msg.String() == "ctrl+c" && m.projectPickerOverlay.RebindPending() {
+		return m.handleQuit()
+	}
 	if msg.String() == "D" {
 		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
 			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
@@ -387,6 +419,12 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// registered and switched to.
 	if path, ok := m.projectPickerOverlay.TakeAddRequest(); ok {
 		return m.handleAddProject(path)
+	}
+
+	// Rebind submit: the overlay stays open while the daemon answers so a
+	// rejection is corrected inline, mirroring the add flow's error handling.
+	if req, ok := m.projectPickerOverlay.TakeRebindRequest(); ok {
+		return m.handleRebindProject(req)
 	}
 
 	if !shouldClose {

@@ -1520,6 +1520,11 @@ Rebind a stable project id to a new checkout path.
 The project id is preserved. Rebinding refuses to take a path already owned by
 another registered project.
 
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — the daemon, which owns the registry write, then resolves the
+checkout it lands on.
+
 ```
 af projects rebind <project-id> <path>
 ```
