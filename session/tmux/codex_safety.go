@@ -51,11 +51,23 @@ type codexSafetyBufferingState struct {
 	modelChangedTo     string
 	verificationPolls  int
 	awaitingModelCheck bool
-	selectionTarget    string
-	selectionStarted   time.Time
-	selectionPolls     int
-	selectionFailed    bool
-	notified           bool
+	// pickerOpenAfterModelTimeout is set when the model-verification poll
+	// budget elapses while the answered picker is STILL rendered. The timeout
+	// branch of verifyCodexSafetyModel then calls finishModelVerification with
+	// the same picker on screen, clearing awaitingModelCheck along with
+	// selectionTarget, so without this flag the next poll's main flow would
+	// mistake that same picker for a fresh second instance and drop its
+	// completed Down Enter record before the retry Enter — anonymizing a death
+	// on the retry and losing the Down on a success (#4740 review follow-up).
+	// It is cleared by finishModelVerification's full-state reset on the normal
+	// path (footer readable, picker closed), the boundary that proves a later
+	// rendered picker is a genuinely new instance.
+	pickerOpenAfterModelTimeout bool
+	selectionTarget             string
+	selectionStarted            time.Time
+	selectionPolls              int
+	selectionFailed             bool
+	notified                    bool
 }
 
 type codexSafetyDialog struct {
@@ -126,6 +138,12 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			t.recordPendingCodexSafetySelection()
 			return true
 		default:
+			// The picker closed itself after af's navigation but before its
+			// confirming Enter, so the recorded navigation keys are abandoned.
+			// Drop them now: a later safety picker inside the attribution
+			// window would otherwise accumulate onto this unconfirmed record
+			// and a death reading would fold keys from two separate pickers.
+			t.resetAbandonedCodexSafetyKeystroke()
 			state.clearSelectionVerification()
 			if model != "" {
 				state.observeModel(model)
@@ -167,12 +185,34 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		state.notified = true
 	}
 
+	// A second safety-check picker can appear inside the 30s attribution
+	// window while the prior picker's record still carries its own Enter.
+	// noteDialogKeystroke tells dialogs apart by name alone, and two safety
+	// pickers share that name, so without dropping the completed prior record
+	// here a later picker's navigation would append to it and a later death
+	// would read the prior Enter as af answering the new picker. Reaching this
+	// block only proves awaitingModelCheck and the pending-selection guard are
+	// both clear, NOT that a fresh picker started: the model-verification
+	// timeout (verifyCodexSafetyModel below) calls finishModelVerification
+	// while the SAME answered picker is still rendered, clearing
+	// awaitingModelCheck and selectionTarget together, so the next poll would
+	// reach this reset for that same picker and drop its recorded Down Enter
+	// before the retry Enter — anonymizing a death on the retry and losing the
+	// Down on a success (#4740 review follow-up). pickerOpenAfterModelTimeout
+	// stays set across that timeout finish and is cleared only by the normal
+	// finish (footer readable, picker closed), the boundary that proves a
+	// later rendered picker is a genuinely new instance.
+	if !state.pickerOpenAfterModelTimeout {
+		t.resetCompletedCodexSafetyKeystroke()
+	}
+
 	keys := navigationKeys(dialog.selectedIndex, dialog.targetIndex)
 	if len(keys) > 0 {
 		if err := t.tapPromptKeys(keys...); err != nil {
 			log.ErrorLog.Printf("could not navigate Codex additional safety checks for session %q: %v", t.sanitizedName, err)
 			return true
 		}
+		t.noteDialogKeystroke(codexSafetyDialogName, dialog.targetLabel, keys...)
 		state.beginSelectionVerification(dialog.targetLabel)
 
 		// Selection is a terminal UI state, not a numbered form value. Read
@@ -190,6 +230,12 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 				t.recordPendingCodexSafetySelection()
 				return true
 			}
+			// The picker closed itself after af's navigation but before its
+			// confirming Enter, so the recorded navigation keys are abandoned.
+			// Drop them now: a later safety picker inside the attribution
+			// window would otherwise accumulate onto this unconfirmed record
+			// and a death reading would fold keys from two separate pickers.
+			t.resetAbandonedCodexSafetyKeystroke()
 			state.clearSelectionVerification()
 			if current := codexStatusLineModel(selectedContent); current != "" {
 				state.observeModel(current)
@@ -215,6 +261,42 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	state.verificationPolls = 0
 	state.awaitingModelCheck = true
 	return true
+}
+
+// resetCompletedCodexSafetyKeystroke drops any prior Codex safety-check record
+// af already confirmed with Enter, so a second safety-check picker appearing
+// inside the dialog-death attribution window starts a fresh record instead of
+// accumulating onto the completed one. The safety dialog is the only one af
+// answers that can recur within the window, and noteDialogKeystroke tells
+// dialogs apart by name alone — two safety pickers share that name, so without
+// this a death during the new picker's selection-verification capture finds the
+// prior Enter via confirmed() and reads as af having answered the new picker,
+// misattributing keys from two separate interactions.
+func (t *TmuxSession) resetCompletedCodexSafetyKeystroke() {
+	t.dialogInputMu.Lock()
+	defer t.dialogInputMu.Unlock()
+	if t.dialogInput.dialog == codexSafetyDialogName && t.dialogInput.confirmed() {
+		t.dialogInput = dialogKeystroke{}
+	}
+}
+
+// resetAbandonedCodexSafetyKeystroke drops a pending (unconfirmed) Codex
+// safety-check navigation record the moment af has positive evidence the
+// picker closed before its confirming Enter. The two closure paths are the
+// only callers, reached only after a navigation key has been recorded, so a
+// pane that dies before the picker closes still reads as "still navigating ...
+// confirmed nothing". Two safety pickers share the safety dialog name, and
+// noteDialogKeystroke accumulates same-dialog keys inside the 30-second
+// attribution window, so without this clear the next safety picker's
+// navigation appends onto the abandoned one and a death on the new picker
+// attributes keys from two separate interactions — the same cross-instance
+// fold resetCompletedCodexSafetyKeystroke closes for the enter-confirmed side.
+func (t *TmuxSession) resetAbandonedCodexSafetyKeystroke() {
+	t.dialogInputMu.Lock()
+	defer t.dialogInputMu.Unlock()
+	if t.dialogInput.dialog == codexSafetyDialogName && !t.dialogInput.confirmed() {
+		t.dialogInput = dialogKeystroke{}
+	}
 }
 
 // codexPickerProvenClosed reports POSITIVE evidence that Codex's modal
@@ -292,6 +374,14 @@ func (t *TmuxSession) verifyCodexSafetyModel(model string, dialogPresent bool) {
 			t.sanitizedName, state.verificationPolls,
 		)
 		state.finishModelVerification(model)
+		// The answered picker is still rendered on this timeout path, so the
+		// next main-flow poll must not treat it as a fresh second picker and
+		// drop its completed Down Enter record. finishModelVerification just
+		// zeroed the state, so re-establish the same-instance guard. The normal
+		// path below leaves it false because the picker had already closed.
+		if dialogPresent {
+			state.pickerOpenAfterModelTimeout = true
+		}
 		return
 	}
 
