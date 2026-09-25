@@ -281,6 +281,13 @@ func (i *Instance) ReconcilePendingHandoffSnapshot(mission string, status Prompt
 // ClearPendingHandoffMission clears the marker only if it still names mission.
 // The compare makes a delayed recovery attempt unable to erase a newer handoff's
 // brief after the same session has moved on.
+//
+// Its callers have just sent the mission, or handed it to the limit resume that
+// will, so the agent is about to work and its run ends on that work's own idle
+// edge. The held idle edge is dropped in the same critical section: left set, an
+// idle tick that lands before the agent picks the turn up would end the run —
+// and hand a working session to its task's on_complete policy. Retiring a
+// mission WITHOUT a resend is ConfirmPendingHandoffDelivery, which keeps it.
 func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -290,6 +297,7 @@ func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 	if i.pendingHandoffMission != "" {
 		i.pendingHandoffMission = ""
 		i.handoffDeliveryStatus = ""
+		i.taskRunIdleEdgeHeld = false
 		i.touchLocked()
 	}
 	return true

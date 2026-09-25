@@ -140,6 +140,12 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
+	// a handoff mission was still owed (#4429), so the next idle observation after
+	// the mission is resolved ends the run. Persisted for the same reason as
+	// TaskRunActive: the held edge is already spent and nothing re-derives it.
+	// omitempty + additive: an older record decodes to false, which holds nothing.
+	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle

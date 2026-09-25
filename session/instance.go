@@ -102,6 +102,15 @@ type Instance struct {
 	// so a session has exactly one run. Work a user starts in that session
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
+	// taskRunIdleEdgeHeld records that the agent's idle edge arrived while a
+	// handoff mission was still owed, so the run was kept open rather than ended
+	// (#4429). The edge is spent once it is held — the pane stays Ready, and every
+	// later idle poll is Ready → Ready — so without this the run would never end
+	// after the operator resolves the mission without making the agent work again
+	// (Mark delivered). With it, the first idle observation after the obligation
+	// clears ends the run, as the held edge would have. Meaningful only while
+	// taskRunActive; persisted with it, because the edge is not re-derivable.
+	taskRunIdleEdgeHeld bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.

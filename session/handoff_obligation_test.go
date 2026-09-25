@@ -106,3 +106,89 @@ func TestHandoffRefusedWhileAMissionIsOwed(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveRunning)))
 	require.NoError(t, inst.ValidateRuntimeAction(RuntimeActionHandoff))
 }
+
+// Resolving an owed mission WITHOUT a resend must still let the run end. The
+// held idle edge is already spent — the pane stays Ready and every later idle
+// poll is Ready → Ready — so if the edge were simply dropped, Mark delivered on
+// an already-idle task session would leave its run open forever: the task's
+// concurrency slot stays taken and its on_complete policy never runs.
+func TestResolvingAnIdleOwedMissionEndsTheRunOnTheNextIdlePoll(t *testing.T) {
+	const mission = "continue the inherited work"
+
+	t.Run("mark delivered on an agent handoff", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.True(t, inst.TaskRunActive(), "precondition: the owed mission held the idle edge")
+
+		require.NoError(t, inst.ConfirmPendingHandoffDelivery(mission))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+
+		require.False(t, inst.TaskRunActive(),
+			"the first idle poll after Mark delivered ends the run the held edge kept open")
+	})
+
+	t.Run("mark delivered on a manual account swap", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		require.True(t, inst.ClearPendingHandoffMission(mission))
+		inst.pendingAccountSwap = &AccountSwapData{
+			Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
+			Mission: "continue", MissionDeliveryStatus: PromptSentUnverified,
+		}
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.True(t, inst.TaskRunActive(), "precondition: the owed notice held the idle edge")
+
+		require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+
+		require.False(t, inst.TaskRunActive(),
+			"the account-swap confirm releases the held edge the same way")
+	})
+
+	// The held edge is durable: it is already spent, so a daemon restart
+	// between the hold and the operator's confirm must not lose it. A sandbox
+	// record is enough to exercise the codec without a real worktree.
+	t.Run("the held edge survives a reload", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		data := inst.ToInstanceData()
+		data.BackendType = "docker"
+		stored := data.ForStorage()
+		require.True(t, stored.TaskRunIdleEdgeHeld, "the held edge is written to disk")
+
+		reloaded, err := FromInstanceData(stored)
+		require.NoError(t, err)
+		require.True(t, reloaded.taskRunIdleEdgeHeld, "and read back")
+
+		// Meaningless without an active run, so a stray value never loads.
+		stored.TaskRunActive = false
+		finished, err := FromInstanceData(stored)
+		require.NoError(t, err)
+		require.False(t, finished.taskRunIdleEdgeHeld)
+	})
+
+	// While the mission is still owed, repeated idle polls keep holding: the
+	// marker must not turn Ready → Ready into an edge on its own.
+	t.Run("idle polls while still owed keep the run open", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+
+		require.True(t, inst.TaskRunActive())
+	})
+
+	// A resend makes the agent work, and that work ends the run on its own idle
+	// edge. An idle tick that lands before the agent picks the resent turn up
+	// must NOT end it — that would hand a working session to on_complete.
+	t.Run("a resend drops the held edge", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+
+		require.True(t, inst.ClearPendingHandoffMission(mission))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.True(t, inst.TaskRunActive(), "an idle tick right after a resend is not the resent turn finishing")
+
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveRunning)))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.False(t, inst.TaskRunActive(), "the resent turn's own idle edge ends the run")
+	})
+}
