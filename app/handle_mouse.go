@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -743,7 +744,25 @@ func (m *home) paneByRegion(region string) (*store.OpenPane, *ui.TabbedWindow) {
 // keyMsgFromString synthesizes the tea.KeyMsg a click stands in for, from a
 // binding's primary key string (keys.GlobalKeyBindings[…].Keys()[0]). ok is
 // false for strings with no single-key equivalent.
+//
+// The lookup is override-aware. A status-bar hint registers a click zone with
+// the binding's EFFECTIVE primary key, so a [keys] rebind can point it at any
+// valid multi-character key the closed switch below never enumerates (ctrl+b,
+// f1, pgup, alt+x, …). Reverse-resolving through keys.GlobalKeyStringsMap —
+// the same map the keyboard path uses — and rebuilding the event with
+// keys.KeyMsgForString keeps the documented "clicking is equivalent to
+// pressing it" true after a rebind: the synthetic event's String() is the
+// rebound key, so handleKeyPress re-derives the same action from
+// GlobalKeyStringsMap the keyboard press would. The fallback switch still
+// covers the un-bound specials a hint can advertise WITHOUT being in
+// GlobalKeyStringsMap: ctrl+] the interactive-mode exit, the naming form's
+// ctrl+r/ctrl+o, and the diff-only shift+up/shift+down.
 func keyMsgFromString(s string) (tea.KeyMsg, bool) {
+	if _, ok := keys.GlobalKeyStringsMap[s]; ok {
+		if msg, ok := keys.KeyMsgForString(s); ok {
+			return msg, true
+		}
+	}
 	switch s {
 	case "enter":
 		return tea.KeyMsg{Type: tea.KeyEnter}, true
