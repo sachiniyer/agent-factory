@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -104,6 +106,14 @@ var (
 	// matching row. What separates chrome from text is that chrome TICKS — see
 	// submittedTurnVisible.
 	runningTimer = regexp.MustCompile(`\d+s`)
+	// elapsedTimer reads the elapsed time off a timed status row — "12s", and
+	// claude's longer "1m 30s" / "1h 2m 3s" forms — so two captures of the SAME
+	// row can be compared: a live row's value grows between them.
+	elapsedTimer = regexp.MustCompile(`(?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s`)
+	// statusRowNumber masks every other number on a timed row (token counts,
+	// "1.2k") when deriving the row's identity, since those repaint with the
+	// timer and would otherwise make one row read as two.
+	statusRowNumber = regexp.MustCompile(`\d+(?:\.\d+)?`)
 	// postSubmitDeliveredBudget bounds the post-Enter observation that may
 	// upgrade a sent-unverified verdict to delivered (#4429), and
 	// postSubmitDeliveredPoll is its re-check interval. The send path proved the
@@ -513,12 +523,15 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 	// row is unscopeable — it sits above the composer with the transcript above
 	// it — so presence alone would accept prose that merely holds the same two
 	// fragments, including a verbatim quote of the chrome or a stale line a
-	// failed paste scrolled into view. Requiring a row this window has not seen
-	// before asks the timer to advance: chrome ticks, text does not. The other
-	// agents' indicators are already scoped to their live frame, so for them the
-	// row's presence there is the proof.
+	// failed paste scrolled into view. So the proof is the timer ADVANCING on
+	// one row: the same status row, found once in each of two consecutive
+	// captures, with a larger elapsed time in the later one. Chrome ticks; text
+	// stands still, and a row that merely scrolls into view has no earlier self
+	// to have ticked from (timedRowTicked). The other agents' indicators are
+	// already scoped to their live frame, so for them the row's presence there
+	// is the proof.
 	timed := agent == tmux.ProgramClaude || agent == tmux.ProgramDevin
-	var seen map[string]bool
+	var prev map[string]timedRow
 	deadline := time.Now().Add(postSubmitDeliveredBudget)
 	for {
 		if ctx.Err() != nil {
@@ -532,23 +545,11 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 				return true
 			}
 		default:
-			rows := timedTurnRows(content)
-			if seen == nil {
-				// The opening capture only records what was already on screen —
-				// including nothing, which is the ordinary case for a pane that
-				// was idle at submit. Every row here is text until proven
-				// otherwise, however many of them there are.
-				seen = make(map[string]bool, len(rows))
-				for _, row := range rows {
-					seen[row] = true
-				}
-				break
+			cur := timedTurnRowsByIdentity(content)
+			if timedRowTicked(prev, cur) {
+				return true
 			}
-			for _, row := range rows {
-				if !seen[row] {
-					return true
-				}
-			}
+			prev = cur
 		}
 		if !time.Now().Before(deadline) {
 			return false
@@ -610,7 +611,8 @@ func submittedTurnContent(content, agent string) bool {
 // between the two that a capture can see. So a row of prose that happens to hold
 // both fragments matches, and one can arrive without the agent writing it: a
 // paste that fails to submit pushes the view up and can scroll an older line into
-// frame. The caller separates the two by watching the rows CHANGE.
+// frame. The caller separates the two by watching one row's timer ADVANCE —
+// see timedRowTicked.
 func timedTurnRows(content string) []string {
 	var rows []string
 	for _, line := range strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n") {
@@ -621,6 +623,98 @@ func timedTurnRows(content string) []string {
 		}
 	}
 	return rows
+}
+
+// timedRow is one timed status row as timedRowTicked compares it: how many rows
+// in the capture share its identity, and where and with what elapsed time the
+// first of them was drawn.
+type timedRow struct {
+	count int
+	// fromBottom is the row's line offset from the bottom of the capture. The
+	// live row is anchored above the composer; transcript text scrolls.
+	fromBottom int
+	elapsed    time.Duration
+}
+
+// timedTurnRowsByIdentity groups a capture's timed status rows by identity —
+// the row with its spinner glyph dropped and every number masked — so the same
+// row can be found again in the next capture after its timer, token count and
+// spinner frame have repainted.
+func timedTurnRowsByIdentity(content string) map[string]timedRow {
+	lines := strings.Split(strings.TrimRight(paneAnsiEscape.ReplaceAllString(content, ""), " \t\r\n"), "\n")
+	var byID map[string]timedRow
+	for idx, line := range lines {
+		if !escToInterruptHint.MatchString(line) || !runningTimer.MatchString(line) {
+			continue
+		}
+		row := strings.TrimSpace(line)
+		elapsed, ok := rowElapsed(row)
+		if !ok {
+			continue
+		}
+		// The spinner frame is the only part of a live row that repaints
+		// without meaning anything, so drop it along with the numbers.
+		id := strings.TrimLeftFunc(row, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+		id = statusRowNumber.ReplaceAllString(id, "#")
+		if byID == nil {
+			byID = make(map[string]timedRow)
+		}
+		entry := byID[id]
+		if entry.count == 0 {
+			entry.fromBottom = len(lines) - 1 - idx
+			entry.elapsed = elapsed
+		}
+		entry.count++
+		byID[id] = entry
+	}
+	return byID
+}
+
+// rowElapsed reads the elapsed time off a timed status row.
+func rowElapsed(row string) (time.Duration, bool) {
+	m := elapsedTimer.FindStringSubmatch(row)
+	if m == nil {
+		return 0, false
+	}
+	var total time.Duration
+	for i, unit := range []time.Duration{time.Hour, time.Minute, time.Second} {
+		if m[i+1] == "" {
+			continue
+		}
+		n, err := strconv.Atoi(m[i+1])
+		if err != nil {
+			return 0, false
+		}
+		total += time.Duration(n) * unit
+	}
+	return total, true
+}
+
+// timedRowTicked reports whether some status row in cur is a row from prev whose
+// timer advanced — the one thing a running claude or devin turn does that
+// transcript text cannot.
+//
+// Each half of the condition closes a way static text could pass:
+//
+//   - the row must already be in prev. A row that is merely NEW is not a tick: a
+//     paste that fails to submit pushes the view up and can scroll an old status
+//     line into frame, and that line has no earlier self to have ticked from.
+//   - it must be the only row with its identity in BOTH captures, at the same
+//     distance from the bottom. With two matching rows there is no telling
+//     which one moved; and a scroll that carries one quoted copy out while
+//     another comes in shows one row per capture, but not in the same place.
+//     The live row stays put above the composer while it ticks.
+//   - the elapsed time must grow. Equal is a row that stood still; smaller is a
+//     different row, never the same timer.
+func timedRowTicked(prev, cur map[string]timedRow) bool {
+	for id, now := range cur {
+		before, ok := prev[id]
+		if ok && before.count == 1 && now.count == 1 &&
+			before.fromBottom == now.fromBottom && now.elapsed > before.elapsed {
+			return true
+		}
+	}
+	return false
 }
 
 // isDocTrustPrompt reports whether content shows the documentation-link trust

@@ -913,8 +913,8 @@ func TestSubmittedTurnVisible(t *testing.T) {
 	t.Run("chrome appearing mid-window upgrades", func(t *testing.T) {
 		var calls atomic.Int32
 		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
-			if calls.Add(1) >= 3 {
-				return "✻ Whirring… (2s · esc to interrupt)\n❯ ", nil
+			if n := calls.Add(1); n >= 3 {
+				return fmt.Sprintf("✻ Whirring… (%ds · esc to interrupt)\n❯ ", n), nil
 			}
 			return "❯ ", nil
 		})
@@ -983,6 +983,80 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		})
 		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("an advancing timer is the agent's own proof that a turn is running")
+		}
+	})
+
+	// #4528 (Codex, second round): a row that is merely NEW is not a tick. A paste
+	// that fails to submit pushes the view up and can scroll an old status line
+	// into frame; it then stands still, and it has no earlier self in the window
+	// to have ticked from. Neither shape may retire a mission that never landed.
+	t.Run("a static row scrolled into view never upgrades", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			agent  string
+			frames []string
+		}{
+			{
+				name:  "an old status line enters after the opening capture",
+				agent: "claude",
+				frames: []string{
+					"line a\nline b\n❯ ",
+					"✻ Whirring… (12s · esc to interrupt)\nline a\nline b\n❯ [Pasted text]",
+				},
+			},
+			{
+				name:  "one quoted row scrolls out as a later one scrolls in",
+				agent: "claude",
+				frames: []string{
+					"✻ Whirring… (12s · esc to interrupt)\nline a\n❯ ",
+					"line a\n✻ Whirring… (30s · esc to interrupt)\n❯ [Pasted text]",
+				},
+			},
+			{
+				name:  "two matching rows, one of them larger later",
+				agent: "claude",
+				frames: []string{
+					"✻ Whirring… (12s · esc to interrupt)\n✻ Whirring… (12s · esc to interrupt)\n❯ ",
+					"✻ Whirring… (12s · esc to interrupt)\n✻ Whirring… (13s · esc to interrupt)\n❯ ",
+				},
+			},
+			{
+				name:  "devin line scrolled into view",
+				agent: "devin",
+				frames: []string{
+					"❭ ",
+					"⠀⡆ Thinking · 3s (esc to interrupt)\n❭ [Pasted text]",
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var calls atomic.Int32
+				inst := newPreviewInstanceWithProgram(t, tc.agent, func() (string, error) {
+					n := int(calls.Add(1))
+					if n > len(tc.frames) {
+						n = len(tc.frames)
+					}
+					return tc.frames[n-1], nil
+				})
+				if submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+					t.Fatal("a row with no earlier self that ticked is transcript text, not a running turn")
+				}
+			})
+		}
+	})
+
+	// The same row is recognised across its own repaint: the spinner frame, the
+	// token count and claude's long-form timer all change as it ticks.
+	t.Run("a long-running row ticks through its repaint", func(t *testing.T) {
+		var calls atomic.Int32
+		spinner := []string{"✻", "✶", "✳", "✢"}
+		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+			n := int(calls.Add(1))
+			return fmt.Sprintf("transcript\n%s Whirring… (1m %ds · ↑ %d.%dk tokens · esc to interrupt)\n❯ ",
+				spinner[n%len(spinner)], 5+n, 1+n, n%10), nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("a row whose timer advances is the same row, whatever else repaints on it")
 		}
 	})
 
