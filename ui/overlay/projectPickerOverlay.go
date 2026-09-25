@@ -246,6 +246,22 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 	p.rebindErr = msg
 }
 
+// SetRebindConflict answers the in-flight rebind with the daemon's "rebound
+// elsewhere" refusal (#4822): another rebind moved the registration after this
+// picker read it. currentRoot is where the registry, re-read by the caller,
+// binds it now; it becomes the root the next submission expects, so the re-armed
+// form retries against what the user was just told rather than being refused
+// again on the root it was opened with.
+func (p *ProjectPickerOverlay) SetRebindConflict(msg, currentRoot string) {
+	p.rebindTarget.RegistryRoot = currentRoot
+	for i := range p.all {
+		if p.all[i].RegistryID != "" && p.all[i].RegistryID == p.rebindTarget.RegistryID {
+			p.all[i].RegistryRoot = currentRoot
+		}
+	}
+	p.SetRebindError(msg)
+}
+
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal
 // message (shown on entry and re-shown on Enter). The caller sets it when a
 // rebind could not act on the same daemon host the picker's records and the

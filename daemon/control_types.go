@@ -250,6 +250,7 @@ type RestoreSessionResponse struct {
 	MutationOutcome
 }
 
+ (fix(projects): make RebindProject a compare-and-set on the expected root (#4822))
 type SendPromptRequest struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`

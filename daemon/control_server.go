@@ -664,6 +664,7 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	return nil
 }
 
+ (fix(projects): make RebindProject a compare-and-set on the expected root (#4822))
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through

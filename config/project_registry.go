@@ -244,13 +244,43 @@ func sameProjectIdentity(leftCheckoutID, leftRelativeRoot, rightCheckoutID, righ
 	return leftCheckoutID != "" && leftCheckoutID == rightCheckoutID && leftRelativeRoot == rightRelativeRoot
 }
 
-// RebindProject moves an existing stable project identity to path. It refuses
-// to steal a root already owned by another project. When path belongs to a
-// checkout already present in the registry, its marker is reused unless that
-// would duplicate another project binding. A whole-checkout move carries its
-// marker and therefore its checkout ID; a genuine new clone receives a new
-// checkout ID.
+// ProjectReboundError is RebindProjectIfRoot's refusal when the project's
+// recorded root is no longer the one the caller observed: another rebind landed
+// between the caller reading the record and its request reaching the registry
+// (#4822). It is definitive — nothing was written — and names the root the
+// registry holds now, so the caller can show it and let the user decide again.
+type ProjectReboundError struct {
+	ID       string
+	Expected string
+	Current  string
+}
+
+func (e *ProjectReboundError) Error() string {
+	return fmt.Sprintf("project %s was rebound elsewhere: it is now bound to %s, not %s — refresh and retry", e.ID, e.Current, e.Expected)
+}
+
+// RebindProject moves an existing stable project identity to path with no
+// precondition on where it points now: last writer wins. See
+// RebindProjectIfRoot for the compare-and-set form interactive callers use.
 func RebindProject(id, path string) (Project, error) {
+	return RebindProjectIfRoot(id, "", path)
+}
+
+// RebindProjectIfRoot moves an existing stable project identity to path. It
+// refuses to steal a root already owned by another project. When path belongs
+// to a checkout already present in the registry, its marker is reused unless
+// that would duplicate another project binding. A whole-checkout move carries
+// its marker and therefore its checkout ID; a genuine new clone receives a new
+// checkout ID.
+//
+// A non-empty expectedRoot makes the rebind a compare-and-set (#4822): it is
+// applied only while the record still names expectedRoot — or already names
+// path, so a replay of a rebind that landed is not mistaken for someone else's
+// — and is otherwise refused with a *ProjectReboundError. The check runs under
+// the registry lock, so two rebinds made against the same observed root cannot
+// both apply. An empty expectedRoot skips the check (last writer wins), which is
+// what a caller that predates the precondition sends.
+func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 	if err := ValidateProjectID(id); err != nil {
 		return Project{}, err
 	}
@@ -290,6 +320,9 @@ func RebindProject(id, path string) (Project, error) {
 		}
 
 		record := records[index]
+		if expectedRoot != "" && !sameProjectPath(record.Root, expectedRoot) && !sameProjectPath(record.Root, binding.root) {
+			return &ProjectReboundError{ID: id, Expected: expectedRoot, Current: record.Root}
+		}
 		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
 		if err != nil {
 			return err

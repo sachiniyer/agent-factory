@@ -62,6 +62,9 @@ func interpretEnvelopeError(msg, code string) error {
 	if code == apiproto.ErrorCodeMutationCommitted {
 		return &mutationCommittedError{detail: msg}
 	}
+	if code == apiproto.ErrorCodeProjectRebound {
+		return &ProjectReboundError{Detail: msg}
+	}
 	if m := unknownFieldPattern.FindStringSubmatch(msg); m != nil {
 		return &VersionSkewError{Field: m[1], Detail: msg}
 	}
@@ -93,7 +96,7 @@ func IsMutationCommitted(err error) bool {
 //
 // The inference is sound rather than a guess, and it is the reason this is a
 // separate type from VersionSkewError. The daemon's rpcHandler answers only 200,
-// 400, 405, 413, 500 and 503; a 404 comes from exactly one place, the mux
+// 400, 405, 409, 413, 500 and 503; a 404 comes from exactly one place, the mux
 // catch-all (daemon/httpserver.go), which is reached only by a path no route
 // registers. So a 404 on /v1/<Method> means the method is not served, never that
 // a handler ran and refused.

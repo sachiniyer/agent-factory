@@ -20,6 +20,8 @@ import {
   handoffSession,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  isProjectReboundError,
+  PROJECT_REBOUND_ERROR_CODE,
   killSession,
   listBackends,
   listDirectory,
@@ -1040,6 +1042,32 @@ test("rebindProject posts id + verbatim path to RebindProject", async () => {
   assert.equal(cap.body.id, "prj_0123456789abcdef0123456789abcdef");
   assert.equal(cap.body.path, "~/repos/moved", "the path is forwarded unchanged for the daemon to resolve");
   assert.equal(cap.auth, "Bearer tok");
+});
+
+test("rebindProject sends the expected root as expected_root", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old");
+  assert.equal(cap.body.expected_root, "/old", "the daemon compares the registry against the root the UI showed (#4822)");
+});
+
+test("rebindProject omits expected_root when there is no observed root", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok");
+  assert.ok(!("expected_root" in cap.body), "no observed root sends no precondition, not an empty one");
+});
+
+test("a project_rebound refusal classifies as a definitive rebind conflict", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      data: null,
+      error: { message: "project prj_A was rebound elsewhere", code: PROJECT_REBOUND_ERROR_CODE, daemon_rejected: true },
+    }),
+  });
+  const err = await rebindProject("prj_A", "/new", "tok", "/old").catch((e: unknown) => e);
+  assert.ok(isProjectReboundError(err), "the code identifies the conflict");
+  assert.equal(isMutationOutcomeUncertain(err), false, "a conflict is a refusal, not an unknown outcome");
 });
 
 test("rebindProject returns the rebound project", async () => {
