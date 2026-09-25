@@ -35,6 +35,7 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
+import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
@@ -222,11 +223,13 @@ export interface AppState {
   mutationError?: MutationOutcomeNotice;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
-  /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
-   *  input, beside sessions + tasks, that projectSummaries / pickerProjects union so a
-   *  registered-but-sessionless repo shows in the switcher and is creatable-into.
+  /** the daemon's registered-project records (listProjects, #2456 union) — the
+   *  extra input, beside sessions + tasks, whose ROOTS projectSummaries /
+   *  pickerProjects union so a registered-but-sessionless repo shows in the
+   *  switcher and is creatable-into. The whole record is kept (not just roots)
+   *  because id + path_exists are what the rebind affordance acts on.
    *  Refetched on connect and on every projects.changed event. */
-  registeredProjects: string[];
+  registeredProjects: RegisteredProject[];
   /** the config manifest zipped with the user's live values (GetConfig), the config
    *  view's data. There is no local key list: this IS the description of config, so
    *  a key added to config_types.go arrives here with no change to the bundle. */
@@ -414,6 +417,10 @@ export interface Actions {
   /** Opens the add-project modal (#2456): register a git checkout by path via
    *  RegisterProject so it appears as an empty project you can create into. */
   addProject(): void;
+  /** Opens the rebind-project modal (`af projects rebind`): repoint a registered
+   *  project's stable identity at the checkout it should track now — the repair
+   *  after that checkout was moved or recloned. */
+  rebindProject(id: string, label: string): void;
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
@@ -924,7 +931,7 @@ export class AppShell {
   // highlight; the task set can add/drop a task-only project).
   private lastProjectSessions: SessionData[] | null = null;
   private lastProjectTasks: TaskData[] | null = null;
-  private lastRegisteredProjects: string[] | null = null;
+  private lastRegisteredProjects: RegisteredProject[] | null = null;
   private lastSelectedProject: string | null = null;
 
   // The rail's status filter control (feat: hide archived by default): a rail-head
@@ -1839,7 +1846,7 @@ export class AppShell {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   private renderProjectSwitch(state: AppState): void {
-    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root));
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     // The switcher is ALWAYS openable, even with no projects (#2456): its menu now
@@ -1853,7 +1860,8 @@ export class AppShell {
       children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet — add one below."));
     }
     for (const p of summaries) {
-      children.push(this.projectItem(p, p.root === current));
+      const record = state.registeredProjects.find((r) => r.root === p.root);
+      children.push(this.projectItem(p, p.root === current, record));
     }
 
     // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
@@ -1875,9 +1883,29 @@ export class AppShell {
 
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
+      if (currentRecord) {
+        // Rebind (`af projects rebind`): repoint the registration at the checkout
+        // it should track now — the repair when the recorded root was moved or
+        // recloned. Only a REGISTERED project can rebind — the verb moves a
+        // registry identity, and a session-derived project has none.
+        const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind…");
+        rebind.dataset.projectFocus = "rebind";
+        rebind.setAttribute(
+          "title",
+          `Point ${currentSummary.name} at a different checkout — the repair after it was moved or recloned`,
+        );
+        rebind.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.appControls.dismiss();
+          this.actions.rebindProject(currentRecord.id, currentSummary.name);
+        });
+        footChildren.push(rebind);
+      }
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       del.dataset.projectFocus = "delete";
-      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      const isRegistered = currentRecord !== undefined;
       // Delete-project ARCHIVES the project's regular live sessions (#1735) AND, for
       // a registered project, removes its durable registry record (#2456) so it leaves
       // the switcher. It is a silent no-op ONLY for a project with neither: a task-only,
@@ -1913,8 +1941,11 @@ export class AppShell {
 
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
-   *  switches the active project and closes the menu. */
-  private projectItem(p: ProjectSummary, current: boolean): HTMLElement {
+   *  switches the active project and closes the menu. `record` is the registry
+   *  registration behind the row, when there is one — a registration whose
+   *  recorded root is gone (path_exists=false) is marked missing, the state the
+   *  footer Rebind action repairs. */
+  private projectItem(p: ProjectSummary, current: boolean, record?: RegisteredProject): HTMLElement {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
@@ -1924,7 +1955,15 @@ export class AppShell {
       h("span", { class: "af-project-item-name" }, p.name),
       h("span", { class: "af-project-item-path" }, p.path),
     );
-    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    // The missing marker leads the glance: a dead checkout is the consequential
+    // half, the counts the reassuring one (same order delete results use).
+    const meta = h(
+      "span",
+      { class: "af-project-item-meta" },
+      ...(record && !record.path_exists
+        ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` · ${projectMeta(p)}`]
+        : [projectMeta(p)]),
+    );
     const item = h("button", { type: "button", class: cls }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");

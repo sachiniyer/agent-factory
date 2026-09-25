@@ -28,6 +28,8 @@ import {
   createVSCodeTab,
   deleteProject,
   registerProject,
+  rebindProject,
+  type RegisteredProject,
   errorText,
   fetchSessionSnapshot,
   killSession,
@@ -73,6 +75,7 @@ import {
   markDeliveredModal,
   type ModalHandle,
   newSessionModal,
+  rebindProjectModal,
   removeTaskModal,
 } from "./modals.js";
 import { confirmDeleteTabModal } from "./delete_tab_modal.js";
@@ -429,7 +432,7 @@ async function connect(candidate: string): Promise<void> {
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -466,15 +469,22 @@ async function connect(candidate: string): Promise<void> {
   }
 }
 
-/** Fetches the daemon's registered-project roots for the #2456 union, degrading to
- *  none on a transport failure (like the tasks fetch): the union is additive, so a
+/** The roots of the daemon's registered projects — the #2456 union input the
+ *  derived project lists consume (projectSummaries / pickerProjects /
+ *  reconcileProject take roots; the registry's identity fields are what state
+ *  keeps the RECORDS for, so a stale registration can be rebound). */
+function projectRoots(projects: RegisteredProject[]): string[] {
+  return projects.map((p) => p.root);
+}
+
+/** Fetches the daemon's registered-project records for the #2456 union, degrading
+ *  to none on a transport failure (like the tasks fetch): the union is additive, so a
  *  missing registry just means the derived-from-sessions list until the next
- *  projects.changed resync. Maps the registry records to their roots — the only field
- *  the switcher/picker union consumes. */
-async function fetchRegisteredProjects(tok: string): Promise<{ projects: string[]; error: string }> {
+ *  projects.changed resync. The records — not just their roots — are kept: a
+ *  registration's id + path_exists are what the rebind affordance needs. */
+async function fetchRegisteredProjects(tok: string): Promise<{ projects: RegisteredProject[]; error: string }> {
   try {
-    const projects = (await listProjects(tok)).map((p) => p.root);
-    return { projects, error: "" };
+    return { projects: await listProjects(tok), error: "" };
   } catch (e) {
     return { projects: [], error: errorText(e) };
   }
@@ -488,6 +498,9 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
   store.set({ loginCondition: loginError ? "expired" : undefined });
   connectionGate.invalidate();
   connectionGeneration++;
+  // An in-flight rebind belongs to the connection just torn down; its
+  // completions are fenced off, so its guard goes with it.
+  rebindInFlight = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -864,7 +877,7 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -1185,6 +1198,195 @@ function openAddProject(): void {
         void registerProject(path, tok)
           .then(() => { if (modal === m) closeModal(); })
           .catch((e) => {
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      onCancel: closeModal,
+    }),
+  );
+}
+
+/** The label of the rebind the daemon is deciding right now, or null. It lives
+ *  outside the modal on purpose: Escape disposes the modal while the RPC runs, so a
+ *  guard kept on the modal would let a reopened Rebind submit a second, racing
+ *  registry mutation. */
+let rebindInFlight: string | null = null;
+
+/** The connection generation rebindInFlight was set under. A guard left by a
+ *  previous connection must not block this one: its attempt's completions are
+ *  fenced off (see openRebindProject), so nothing would ever clear it. */
+let rebindInFlightGeneration = 0;
+
+/** How long a rebind may go unanswered before the UI stops waiting on it. The
+ *  mutation is not aborted — the daemon may still commit it — so hitting this
+ *  releases the in-flight guard, reports the outcome as unknown, and re-reads the
+ *  registry rather than claiming success or failure. */
+const REBIND_ANSWER_MS = 30_000;
+
+/** The one notice for a rebind whose outcome is not known — unanswered within
+ *  REBIND_ANSWER_MS, or failed in transport. The selection is left alone; the
+ *  refreshed project list is where the user sees what actually happened. */
+function rebindOutcomeUnknown(label: string): Error {
+  return new Error(`Rebind of ${label} · outcome unknown · check the project list`);
+}
+
+/** Follows a CONFIRMED rebind to where the registry binds the project now: one
+ *  registry read issued after the daemon answered — never the RPC's echo, which a
+ *  newer rebind or delete from another client may already have superseded. The
+ *  read is fenced by the connection and credential it was issued under, a record
+ *  that is gone is not followed, and a fenced refetch afterwards settles anything
+ *  that raced this read. */
+function followConfirmedRebind(projectId: string, tok: string, connection: number): void {
+  void listProjects(tok)
+    .then((projects) => {
+      if (connection !== connectionGeneration || token !== tok) return;
+      const root = projects.find((p) => p.id === projectId)?.root;
+      if (root !== undefined) {
+        store.set({ registeredProjects: projects });
+        switchProject(root);
+      }
+      refreshRegisteredProjects();
+    })
+    .catch(() => {
+      if (connection === connectionGeneration && token === tok) refreshRegisteredProjects();
+    });
+}
+
+/** Opens the rebind-project modal (`af projects rebind`, made reachable from the
+ *  switcher): the repair when the checkout a registration names was moved or
+ *  recloned — the stable project id survives, only where it points changes. Same
+ *  host-path field + directory browser as add-project; the daemon's rejection
+ *  (unknown id, not a git repo, a root another project owns) is shown inline and
+ *  the modal stays open to correct.
+ *
+ *  Outcomes:
+ *  - a confirmed, in-time success follows the project to where the registry now
+ *    binds it (followConfirmedRebind), provided the user is still in this rebind:
+ *    the modal that submitted is still open, or the selection is still the old root;
+ *  - an outcome that is not known — unanswered within REBIND_ANSWER_MS, failed in
+ *    transport — never follows: the registry is re-read, the selection is left
+ *    alone, and one notice says so. A reply that arrives after the wait only
+ *    re-reads the registry;
+ *  - a definitive refusal is shown inline and re-arms the form. */
+function openRebindProject(projectId: string, label: string): void {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+    // Escape dismissed the modal while the daemon was still deciding. A second
+    // submission now would race the first registry mutation, and whichever
+    // landed last would win regardless of which modal appeared to finish.
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running — try again when it finishes.`);
+    return;
+  }
+  // The root the registration points at NOW: a selection still on it is the user
+  // still in this rebind, which a confirmed success may follow.
+  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path: string) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path: string) => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal || (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration)) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
+        // Every completion below is fenced by the connection that submitted it:
+        // after a disconnect or reconnect, this attempt's timer and reply must
+        // not show notices or refetch with the new token.
+        const current = (): boolean => connection === connectionGeneration;
+        // Every outcome goes through settle() exactly once: the reply, or the
+        // bounded wait below, whichever comes first. The guard lives only as long
+        // as this attempt is undecided; a reply after the wait gave up only
+        // re-reads the registry — the notice already said the outcome is unknown.
+        let settled = false;
+        const settle = (): boolean => {
+          if (settled) {
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
+          return true;
+        };
+        // The user is still in this rebind: its modal is open, or the selection
+        // has not left the old root. Decided at reply time — nothing is carried
+        // forward to a later read.
+        const stillHere = (): boolean => modal === m || (oldRoot !== null && store.get().selectedProject === oldRoot);
+        const unknownOutcome = (): void => {
+          if (modal === m) closeModal();
+          refreshRegisteredProjects();
+          surfaceMutationError(rebindOutcomeUnknown(label), "uncertain");
+        };
+        // No client-side timeout on the mutation itself: aborting it cannot undo
+        // a rebind the daemon already committed. Instead the UI stops waiting and
+        // reports the outcome as unknown.
+        const unanswered = window.setTimeout(() => {
+          if (!current() || !settle()) return;
+          unknownOutcome();
+        }, REBIND_ANSWER_MS);
+        void rebindProject(projectId, path, tok)
+          .then(() => {
+            if (!current()) return;
+            if (!settle()) {
+              refreshRegisteredProjects();
+              return;
+            }
+            const follow = stillHere();
+            if (modal === m) closeModal();
+            if (follow) {
+              followConfirmedRebind(projectId, tok, connection);
+            } else {
+              refreshRegisteredProjects();
+            }
+          })
+          .catch((e) => {
+            if (!current()) return;
+            if (!settle()) {
+              refreshRegisteredProjects();
+              return;
+            }
+            if (isMutationCommittedError(e)) {
+              // The daemon committed the rebind and then a follow-up step failed:
+              // the move is confirmed, so it is followed like a success, and the
+              // follow-up failure is reported.
+              const follow = stillHere();
+              if (modal === m) closeModal();
+              if (follow) {
+                followConfirmedRebind(projectId, tok, connection);
+              } else {
+                refreshRegisteredProjects();
+              }
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            if (isMutationOutcomeUncertain(e)) {
+              // The rebind may have landed (a lost reply, an unverified error from
+              // an intermediary). Re-arming the form would invite a second move of
+              // the durable identity. Only a definitive daemon refusal re-arms.
+              unknownOutcome();
+              return;
+            }
+            if (modal !== m) {
+              // The modal was dismissed mid-flight, so its inline error has
+              // nowhere to show — and must not land in whatever modal is open now.
+              surfaceTabError(e);
+              return;
+            }
             m.setBusy(false);
             m.setError(errorText(e));
           });
@@ -1883,7 +2085,7 @@ const tasksRefetcher = createFencedRefetcher({
       tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      store.get().registeredProjects,
+      projectRoots(store.get().registeredProjects),
     );
     store.set({ tasks, selectedProject, tasksError: "" });
   },
@@ -1926,19 +2128,21 @@ function requestTaskResync(): void {
 const projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
-  commit: (projects) => {
-    const registeredProjects = projects.map((p) => p.root);
-    const selectedProject = reconcileProject(
-      store.get().sessions,
-      store.get().tasks,
-      loadProjectChoice(),
-      store.get().selectedProject,
-      registeredProjects,
-    );
-    store.set({ registeredProjects, selectedProject, projectsError: "" });
-  },
+  commit: commitRegisteredProjects,
   onError: (e: unknown) => store.set({ projectsError: errorText(e) }),
 });
+
+/** Commits a fenced registry read, reconciling the selected project against it. */
+function commitRegisteredProjects(projects: RegisteredProject[]): void {
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects),
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+}
 
 function refreshRegisteredProjects(): void {
   projectsRefetcher.refresh();
@@ -1965,7 +2169,7 @@ function openAddTask(): void {
   // follow-on Fix 1), so a TASK-ONLY project is selectable and the default lands on
   // the currently-scoped project — adding a task targets ITS repo, and is never
   // blocked by the absence of a session.
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -2013,7 +2217,7 @@ function openAddTask(): void {
  *  must appear at this exact call site. The unused trigger is cleared to "" — safe on
  *  the HTTP/JSON path, which (unlike the CLI's gob socket) never elides "" to nil. */
 function openEditTask(task: TaskData): void {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -2349,6 +2553,7 @@ const actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
   setTheme,
 };
 
@@ -2524,7 +2729,7 @@ function applySessions(sessions: SessionData[], evidence?: RestoreEvidence,
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects,
+    projectRoots(store.get().registeredProjects),
   );
   let selectedId = pickSelection(sessions, prevSel);
   // Drop a selection that no longer belongs to the scoped project, so the terminal

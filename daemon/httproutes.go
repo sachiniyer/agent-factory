@@ -263,6 +263,16 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(RegisterProjectRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RegisterProject) },
 	},
+	// Not sandboxAllowed, like RegisterProject: it rewrites the daemon host's
+	// registry and resolves a caller-supplied path against the host's
+	// filesystem — both operator-authority operations, not capability discovery.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RebindProject",
+		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns.",
+		requestType: reflect.TypeOf(RebindProjectRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ListProjects",

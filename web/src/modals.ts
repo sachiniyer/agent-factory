@@ -872,11 +872,53 @@ export function addProjectModal(callbacks: {
   loadDirectory?: (path: string) => Promise<DirectoryListing>;
   errorText?: (e: unknown) => string;
 }): ModalHandle {
-  const { handle, body, confirmBtn } = modalChrome({
+  return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
+    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    ...callbacks,
+  });
+}
+
+/** The rebind-project modal: repoints a registered project's stable identity at
+ *  the checkout it should track now (`af projects rebind` — the repair after the
+ *  checkout was moved or recloned). Same path field + #2788 host browser as the
+ *  add modal — a moved checkout is found by browsing exactly the same way. The
+ *  daemon validates (unknown id, not a git repo, a root another project owns)
+ *  and its message renders inline. */
+export function rebindProjectModal(opts: {
+  projectLabel: string;
+  onSubmit: (path: string) => void;
+  onCancel: () => void;
+  loadDirectory?: (path: string) => Promise<DirectoryListing>;
+  errorText?: (e: unknown) => string;
+}): ModalHandle {
+  const { projectLabel, ...shared } = opts;
+  return checkoutPathModal({
+    title: `Rebind project ${projectLabel}`,
+    confirmLabel: "Rebind",
+    hint: "Enter the checkout this project should track now — an absolute repo path on the daemon host (~ works).",
+    ...shared,
+  });
+}
+
+/** The shared body of the add/rebind project modals: a daemon-host path field
+ *  with the #2788 directory browser above it. Both are one path input + a
+ *  submit; what differs is the copy (title, confirm label, hint). */
+function checkoutPathModal(opts: {
+  title: string;
+  confirmLabel: string;
+  hint: string;
+  onSubmit: (path: string) => void;
+  onCancel: () => void;
+  loadDirectory?: (path: string) => Promise<DirectoryListing>;
+  errorText?: (e: unknown) => string;
+}): ModalHandle {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel,
+    onCancel: opts.onCancel,
   });
 
   const pathInput = h("input", {
@@ -887,7 +929,7 @@ export function addProjectModal(callbacks: {
   });
   pathInput.setAttribute("aria-label", "Repository path");
 
-  const { loadDirectory, errorText } = callbacks;
+  const { loadDirectory, errorText } = opts;
   let picker: DirectoryPickerHandle | null = null;
   if (loadDirectory && errorText) {
     picker = directoryPicker({
@@ -920,7 +962,7 @@ export function addProjectModal(callbacks: {
     h(
       "p",
       { class: "af-modal-hint" },
-      "Enter an absolute repo path on the daemon host (~ works).",
+      opts.hint,
     ),
   );
 
@@ -936,7 +978,7 @@ export function addProjectModal(callbacks: {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(path);
+    opts.onSubmit(path);
   });
 
   // With no picker, focus the sole input so the user can type immediately,
