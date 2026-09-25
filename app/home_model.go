@@ -34,8 +34,8 @@ type home struct {
 
 	// -- Storage and Configuration --
 
-	program string
-	repoID  string
+	programChoice
+	repoID string
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
@@ -526,7 +526,7 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 		pauseStatusPoll:             pauseStatusPollThroughDaemon,
 		resumeStatusPoll:            resumeStatusPollThroughDaemon,
 		appConfig:                   appConfig,
-		program:                     program,
+		programChoice:               newProgramChoice(program, appConfig),
 		repoID:                      repoID,
 		repoRoot:                    repoRoot,
 		projectPathResolutions:      make(map[string]projectPathResolution),

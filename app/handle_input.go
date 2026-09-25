@@ -348,7 +348,7 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	if m.repoRoot == "" {
 		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.enterPicksAProject(), m.projectsFocused())))
 	}
-	m.pendingProgram = m.program
+	m.pendingProgram = m.defaultProgram()
 	// Every create starts with an empty prompt field and an unchosen backend. The
 	// cancel paths clear both too, but this is the authoritative reset: it also
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.

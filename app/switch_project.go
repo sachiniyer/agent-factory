@@ -697,6 +697,7 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 		if m.appConfig != nil {
 			m.program = m.appConfig.DefaultProgram
 		}
+		m.programFollowsConfig = true
 		// Tasks are per-project and LoadTasksForCurrentRepo needs a cwd repo,
 		// so with no active project the automations strip is empty — not
 		// errored — until a project is selected, matching the empty session
@@ -811,6 +812,11 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// carried-over value silently runs this project's tasks under the previous
 	// project's agent (#2138). Session creation is separately covered:
 	// preflightSessionCreate re-resolves and blocks.
+	//
+	// Every branch below derives the value from config, so it follows config from
+	// here on (#4889): a launch --program flag scoped the launch project and is
+	// replaced by the incoming project's resolution, exactly as it always was.
+	m.programFollowsConfig = true
 	if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global

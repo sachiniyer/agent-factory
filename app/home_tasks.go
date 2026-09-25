@@ -61,7 +61,7 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
 	if program == "" {
-		program = m.program
+		program = m.defaultProgram()
 	}
 	id, err := task.GenerateID()
 	if err != nil {
