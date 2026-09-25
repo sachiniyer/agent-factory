@@ -149,6 +149,23 @@ func sourceMappedURIComponents(outer View, prov Provenance) ([]viewOut, []Range)
 					unknown = append(unknown, Range{Start: uriStart + pathStart, End: uriStart + pathEnd})
 				}
 			}
+			// A malformed percent escape in the userinfo makes url.Parse
+			// reject the whole URI, landing here, so the userinfo-extraction
+			// block below (gated on a successful parse) is never reached.
+			// Fail-close the userinfo carrier, gated on its own bytes
+			// containing a malformed % — mirroring the path gate above — so a
+			// url.Parse failure for any other reason (e.g. a bad authority
+			// bracket with clean userinfo) still preserves nested-URI
+			// recovery. The authority/userinfo offsets match the extraction
+			// block exactly.
+			if strings.HasPrefix(rawURI[colon-uriStart+1:], "//") {
+				authStart := colon - uriStart + 3
+				if at := strings.LastIndexByte(rawURI[authStart:pathStart], '@'); at >= 0 {
+					if _, malformed := PercentDecode(s[uriStart+authStart:uriStart+authStart+at], false); malformed {
+						unknown = append(unknown, Range{Start: uriStart + authStart, End: uriStart + authStart + at})
+					}
+				}
+			}
 			continue
 		}
 		// An established URI owns scheme-looking bytes inside its path, but not
