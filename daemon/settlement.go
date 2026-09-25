@@ -16,6 +16,22 @@ type settleOwedEntry struct {
 	instance *session.Instance
 }
 
+// dischargeRetryEntry holds a stand-down discharge whose durable marker-CLEAR did
+// not land, so the poll can re-run it. Keyed by stable instance identity like
+// settleOwed but carried in its OWN map (m.dischargeOwed): a generic settlement's
+// recordSettlementWrite must not retire it, since the whole-row write that ret the
+// generic retry re-writes the restored marker along with the row and would lose
+// the clear while disk still carries it. marker is the obligation's identity —
+// the flush re-runs the discharge only while THIS marker is still the one the
+// stand-down failed to clear, so a marker filed after the stand-down is not
+// clobbered.
+type dischargeRetryEntry struct {
+	repoID   string
+	key      string
+	instance *session.Instance
+	marker   *session.PendingOnCompleteData
+}
+
 // A SETTLEMENT is the write that records the outcome of an irreversible step —
 // the class of persist in this package that may not be best-effort.
 //
@@ -112,6 +128,10 @@ func (m *Manager) FlushOwedSettlements() {
 	for _, entry := range m.settleOwed {
 		owed = append(owed, entry)
 	}
+	discharges := make([]dischargeRetryEntry, 0, len(m.dischargeOwed))
+	for _, entry := range m.dischargeOwed {
+		discharges = append(discharges, entry)
+	}
 	m.mu.Unlock()
 
 	for _, entry := range owed {
@@ -131,6 +151,20 @@ func (m *Manager) FlushOwedSettlements() {
 		}
 		if err := m.flushOneOwedSettlement(entry); err != nil {
 			m.warn().Printf("settlement retry for %q: %v", entry.instance.Title, err)
+		}
+	}
+	for _, entry := range discharges {
+		m.mu.Lock()
+		registered := m.instances[entry.key] == entry.instance
+		if !registered {
+			delete(m.dischargeOwed, stableSessionKey(entry.repoID, entry.instance))
+		}
+		m.mu.Unlock()
+		if !registered {
+			continue
+		}
+		if err := m.flushDischargeRetry(entry); err != nil {
+			m.warn().Printf("discharge retry for %q: %v", entry.instance.Title, err)
 		}
 	}
 }

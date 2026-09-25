@@ -444,6 +444,18 @@ type Manager struct {
 	// one survives to the next daemon (#2781, #2883). flushOwedSettlements drains
 	// it on the poll. Guarded by m.mu.
 	settleOwed map[string]settleOwedEntry
+	// dischargeOwed holds stand-down discharges whose durable marker-CLEAR did not
+	// land, so the poll can re-run them (#4738). Keyed by stable instance identity
+	// like settleOwed, but in its OWN map: a generic settlement's
+	// recordSettlementWrite must NOT touch this obligation. The whole-row writes
+	// that retire a settleOwed entry (a status/churn checkpoint, a handoff, a
+	// recovery) re-write the restored marker along with the row, so retiring a
+	// discharge retry on one would lose the clear while disk still carries the
+	// marker and re-arm a teardown the stand-down decided against. The retry is
+	// re-run as a discharge on the poll rather than persisted as a stale snapshot,
+	// and carries the discharged marker so it only clears THAT marker. Guarded by
+	// m.mu; drained by FlushOwedSettlements alongside settleOwed.
+	dischargeOwed map[string]dischargeRetryEntry
 	// remoteLossStates debounces the remote Lost transition (#1794), keyed by
 	// stableSessionKey — the stable instance ID, which is what every writer and
 	// every clearRemoteLoss call site actually passes. This said "daemon instance
@@ -756,6 +768,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		limitResumeStates:         make(map[string]*limitResumeState),
 		handoffRetryDue:           make(map[string]time.Time),
 		settleOwed:                make(map[string]settleOwedEntry),
+		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
