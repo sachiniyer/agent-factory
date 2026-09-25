@@ -951,6 +951,9 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
+  // Reasons only time clears (#4782): reportDecision marks a decision blocked by
+  // nothing else, and the reconciliation pass re-evaluates it once it has aged.
+  const transientReasons = [];
   // A merge-queue batch head carries no reviewable content of its own — the
   // approval and verdict it stands in for live on each constituent PR's own
   // head — so the author gate is replaced by the constituent evaluation below
@@ -993,7 +996,13 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   if (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY") {
     reasons.push(`mergeability is blocked (${pr.mergeable}/${pr.mergeStateStatus})`);
   } else if (pr.mergeable !== "MERGEABLE") {
-    reasons.push(`mergeability is still ${pr.mergeable}`);
+    const reason = `mergeability is still ${pr.mergeable}`;
+    reasons.push(reason);
+    // GitHub computes mergeability asynchronously and sends no event when it
+    // settles (#4782), so only UNKNOWN or an absent value is a transient block.
+    if (pr.mergeable == null || pr.mergeable === "UNKNOWN") {
+      transientReasons.push(reason);
+    }
   }
 
   // The maintainer hold, HERE — among the structural refusals, above every read
@@ -1067,6 +1076,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
+    transientReasons.push(...(requiredChecks.transientReasons || []));
   }
   notes.push(...requiredChecks.notes);
 
@@ -1110,6 +1120,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       workflowsChanged,
       requiredCheckObservations: requiredChecks.observations,
       reasons,
+      transientReasons,
       notes,
     });
   }
@@ -1355,6 +1366,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     workflowsChanged,
     requiredCheckObservations: requiredChecks.observations,
     reasons,
+    transientReasons,
     notes,
   });
 }
@@ -1826,6 +1838,14 @@ async function evaluateMergeQueueBatch({ github, context, pr, constituents, subj
 // constant existed.
 const DECISION_STAMP_PREFIX = "evaluated: ";
 const REQUIRED_CHECK_SNAPSHOT_PREFIX = "<!-- auto-gate-required-check-snapshot:";
+// Written on a failing decision whose every reason is transient (#4782): GitHub
+// mergeability still UNKNOWN, a required check still settling, or a Build/Lint
+// run that has not reported yet. None of those sends an event when it clears, so
+// the reconciliation pass re-evaluates a marked decision once it has aged. The
+// marker is absent whenever any other reason is present — a hold, a failed
+// check, a finding, a missing verdict or approval — and an unmarked decision is
+// never selected, so an untagged new reason fails toward "wait for an event".
+const TRANSIENT_BLOCK_MARKER = "<!-- auto-gate-transient-block -->";
 
 // A decision summary with the evaluation stamp removed, for readers that want the
 // REASON. The stamp is metadata about the write, not part of the decision.
@@ -1841,6 +1861,35 @@ function decisionSummaryBody(summary) {
 function requiredCheckSnapshotText(observations) {
   const payload = JSON.stringify({ version: 2, checks: observations || [] });
   return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
+}
+
+// Whether this result fails ONLY on reasons its producers tagged transient. The
+// manual path is excluded outright: its conclusion comes from
+// manualMergeBlockers, which are all maintainer-answerable, never transient.
+function isTransientOnlyBlock(result) {
+  const reasons = result?.reasons || [];
+  if (result?.shouldMerge || result?.manualMergeRequired || reasons.length === 0) {
+    return false;
+  }
+  const transient = new Set(result.transientReasons || []);
+  return reasons.every((reason) => transient.has(reason));
+}
+
+function decisionIsTransientOnlyBlock(decision) {
+  return String(decision?.output?.text || "")
+    .split("\n")
+    .includes(TRANSIENT_BLOCK_MARKER);
+}
+
+// The time a decision was last evaluated, from the stamp reportDecision writes
+// into its summary. null when the stamp is absent or unreadable.
+function decisionEvaluatedAt(decision) {
+  const summary = String(decision?.output?.summary || decision?.summary || "");
+  if (!summary.startsWith(DECISION_STAMP_PREFIX)) {
+    return null;
+  }
+  const line = summary.slice(DECISION_STAMP_PREFIX.length).split("\n")[0];
+  return parseTimestamp(line.split(" ")[0]);
 }
 
 function decisionRequiredCheckSnapshot(decision) {
@@ -2045,7 +2094,10 @@ async function reportDecision({ github, context, core, result, manual = false })
       // not when this later write happened. The scheduled reconciler compares
       // this identity/state tuple with the current check run and never needs to
       // order clocks owned by different observations (#4242).
-      text: requiredCheckSnapshotText(result.requiredCheckObservations),
+      text: [
+        requiredCheckSnapshotText(result.requiredCheckObservations),
+        ...(isTransientOnlyBlock(result) ? [TRANSIENT_BLOCK_MARKER] : []),
+      ].join("\n"),
     },
   };
   try {
@@ -3454,6 +3506,19 @@ const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
 const REQUIRED_CHECK_RECONCILIATION_DISPATCH = "auto-gate-reconcile";
 const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
+// Transient blocks (#4782). A decision marked TRANSIENT_BLOCK_MARKER, or a fixed
+// aggregate left at AGGREGATE_WAITING_TITLE by a transaction that never finished,
+// clears with time and sends no event when it does. A pass re-evaluates one once
+// it is this old. The age is the spacing: a re-evaluation that still meets the
+// transient state rewrites the stamp, so one PR costs at most one evaluation per
+// window however long the state lasts. The aggregate's bound is longer because a
+// live transaction legitimately holds WAITING while it evaluates.
+const TRANSIENT_BLOCK_RETRY_AFTER_MS = 10 * 60 * 1000;
+const STALE_AGGREGATE_WAITING_AFTER_MS = 15 * 60 * 1000;
+// Transient retries share the pass's REQUIRED_CHECK_REEVALUATION_LIMIT, take only
+// the slots a PR Validation blocker left free, and never more than this many. The
+// oldest go first, so a backlog drains instead of starving.
+const TRANSIENT_BLOCK_REEVALUATION_LIMIT = 5;
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -5170,7 +5235,77 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
   return { pulls, checkRunsByHead, statusesByHead, pages };
 }
 
-async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+// Decisions blocked only by transient state, and heads whose fixed aggregate was
+// left at "WAITING: refreshing", each old enough to retry (#4782). Everything it
+// reads is in the reconciliation snapshot already, so it costs no API call.
+function transientBlockReevaluationCandidates({ pulls, checkRunsByHead, now }) {
+  const candidates = [];
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+    const identity = decisionIdentity(prNumber, headSha);
+    const headChecks = checkRunsByHead.get(headSha) || [];
+    const ownedByActions = (run) => run.app?.id === GITHUB_ACTIONS_APP_ID;
+
+    // An unreadable time counts as old: a redundant evaluation is bounded by the
+    // per-pass limit, and a permanent freeze is the defect this exists to end.
+    const decision = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          ownedByActions(run),
+      ),
+    );
+    if (
+      decision &&
+      decision.status === "completed" &&
+      decision.conclusion !== "success" &&
+      decisionIsTransientOnlyBlock(decision)
+    ) {
+      const evaluatedAt = decisionEvaluatedAt(decision) ?? 0;
+      if (now - evaluatedAt >= TRANSIENT_BLOCK_RETRY_AFTER_MS) {
+        candidates.push({ prNumber, headSha, decisionKey: identity.key, since: evaluatedAt });
+        continue;
+      }
+    }
+
+    const aggregate = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === AUTO_GATE_DECISION_CHECK &&
+          run.external_id === `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${headSha}` &&
+          ownedByActions(run),
+      ),
+    );
+    if (
+      aggregate &&
+      aggregate.status === "completed" &&
+      String(aggregate.output?.title || aggregate.title || "").startsWith(AGGREGATE_WAITING_TITLE)
+    ) {
+      const writtenAt = parseTimestamp(aggregate.completed_at || aggregate.started_at) ?? 0;
+      if (now - writtenAt >= STALE_AGGREGATE_WAITING_AFTER_MS) {
+        candidates.push({ prNumber, headSha, decisionKey: identity.key, since: writtenAt });
+      }
+    }
+  }
+  return candidates.sort(
+    (left, right) => left.since - right.since || left.prNumber - right.prNumber,
+  );
+}
+
+async function listRequiredCheckReevaluationTargets({ github, context, core, now = Date.now() }) {
   // One GraphQL page carries 100 PRs and each head's current check rollup. This
   // makes every open PR eligible on every sweep without one REST read per head,
   // wall-clock page assignment, or mutable cursor state. A truncated rollup is
@@ -5188,12 +5323,32 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
         `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
     );
   }
+  const selected = new Set(targets.map((target) => target.prNumber));
+  const transient = transientBlockReevaluationCandidates({
+    pulls: snapshot.pulls,
+    checkRunsByHead: snapshot.checkRunsByHead,
+    now,
+  }).filter((candidate) => !selected.has(candidate.prNumber));
+  const transientSlots = Math.max(
+    0,
+    Math.min(TRANSIENT_BLOCK_REEVALUATION_LIMIT, REQUIRED_CHECK_REEVALUATION_LIMIT - targets.length),
+  );
+  const transientTargets = transient
+    .slice(0, transientSlots)
+    .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+  if (transient.length > transientTargets.length) {
+    core.warning(
+      `Required-check reconciliation deferred ${transient.length - transientTargets.length} ` +
+        "transiently blocked PR(s) to a later sweep.",
+    );
+  }
   core.notice(
     `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
-      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s), and ` +
-      `selected ${targets.length}.`,
+      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s) and ` +
+      `${transient.length} transient block(s), and selected ` +
+      `${targets.length + transientTargets.length}.`,
   );
-  return targets;
+  return [...targets, ...transientTargets];
 }
 
 function isRequiredCheckReconciliationDispatch(context) {
@@ -5205,8 +5360,9 @@ function isRequiredCheckReconciliationDispatch(context) {
 
 // Called by every Auto Gate run that is not itself a pass (#4571). The request
 // is one repository_dispatch; the run it starts is a full scheduled pass, with
-// the same ten-evaluation cap and the same PR Validation blocker filter, and it
-// serializes with scheduled passes in one concurrency group.
+// the same ten-evaluation cap and the same selection (PR Validation blockers and
+// aged transient blocks), and it serializes with scheduled passes in one
+// concurrency group.
 //
 // Two guards keep this from fanning out:
 //
@@ -5297,9 +5453,10 @@ async function resolveTargets({
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  reconciliationNowMs = Date.now(),
 }) {
   if (context.eventName === "schedule") {
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs });
   }
   if (isRequiredCheckReconciliationDispatch(context)) {
     const source = context.payload?.client_payload || {};
@@ -5309,7 +5466,7 @@ async function resolveTargets({
     if (/^[1-9][0-9]*$/.test(String(source.source_run_id)) && /^[a-z_]+$/.test(String(source.source_event))) {
       core.info(`Required-check reconciliation requested by ${source.source_event} run ${source.source_run_id}.`);
     }
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs });
   }
   const numbers = [];
   const payload = context.payload;
@@ -6108,6 +6265,10 @@ async function evaluateRequiredChecks({
   );
   const notes = [];
   const reasons = [...required.errors];
+  // The subset of `reasons` that only the passage of time clears (#4782). Tagged
+  // here, where the state that produced each reason is still in hand, never by
+  // re-reading the prose later.
+  const transientReasons = [];
   const observations = [];
 
   if (syntheticDecisionSpecs.length > 0) {
@@ -6213,18 +6374,29 @@ async function evaluateRequiredChecks({
         validationDispatch?.dispatched && isPRValidationSpec(spec)
           ? ` — PR Validation had no run for this head, so Auto Gate dispatched it on ${validationRef}`
           : "";
-      reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`);
+      const missing = `required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`;
+      reasons.push(missing);
+      // A missing Build or Lint is transient: every base-repository head gets a
+      // PR Validation run, and this evaluation dispatches one when none exists.
+      // Any other missing check may have no run coming, so it is not.
+      if (isPRValidationSpec(spec)) {
+        transientReasons.push(missing);
+      }
       continue;
     }
 
     notes.push(`${formatCheckSpec(spec)}: ${state.description}`);
     if (!state.ok) {
       const stateDescription = state.waiting ? "is still settling" : "did not succeed";
-      reasons.push(`required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`);
+      const reason = `required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`;
+      reasons.push(reason);
+      if (state.waiting) {
+        transientReasons.push(reason);
+      }
     }
   }
 
-  return { ok: reasons.length === 0, reasons, notes, observations };
+  return { ok: reasons.length === 0, reasons, transientReasons, notes, observations };
 }
 
 function isSyntheticDecisionContext(contextName) {
