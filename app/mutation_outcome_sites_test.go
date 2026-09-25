@@ -204,29 +204,55 @@ func taskOnDisk(t *testing.T) (*home, task.Task) {
 	return h, tk
 }
 
-// An update whose reply was lost is not kept as a dirty draft: the next save
-// would re-send it and could overwrite a newer change. The pane is re-read from
-// disk instead, and the message says the outcome is unknown.
-func TestSaveTaskUpdate_UncertainOutcomeIsNotRetainedAndRereads(t *testing.T) {
-	h, _ := taskOnDisk(t)
-	updates := 0
-	t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
-		updates++
-		return replyLost()
-	}))
-	tp := h.automations.TaskPane()
-	require.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
-	require.False(t, tp.GetTasks()[0].Enabled, "precondition: the edit is in the pane")
+// An update whose reply was lost is kept as a draft, since only a positive
+// not-found may drop one (#4798), but it is not re-sent by the next automatic
+// save (#4824). The same save re-reads the task list: when the update did not
+// land the draft stays, and when it did, the re-read settles it with a notice.
+func TestSaveTaskUpdate_UncertainOutcomeIsKeptNotResentAndRereads(t *testing.T) {
+	t.Run("did not land", func(t *testing.T) {
+		h, _ := taskOnDisk(t)
+		updates := 0
+		t.Cleanup(SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
+			updates++
+			return replyLost()
+		}))
+		tp := h.automations.TaskPane()
+		require.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
 
-	err := h.saveContentPaneState()
-	require.ErrorContains(t, err, outcomeUnknown)
-	assert.NotContains(t, err.Error(), "failed to save task")
-	assert.Nil(t, h.recovery, "no 'your changes are retained' recovery for an edit that may have landed")
-	assert.False(t, tp.IsDirty(), "the edit is not queued for a re-send")
-	assert.True(t, tp.GetTasks()[0].Enabled, "the pane is re-read from disk and shows what the daemon holds")
+		err := h.saveContentPaneState()
+		require.ErrorContains(t, err, outcomeUnknown)
+		assert.NotContains(t, err.Error(), "failed to save task")
+		assert.Nil(t, h.recovery, "no 'cannot save' recovery for an edit that may have landed")
+		assert.True(t, tp.IsDirty(), "the draft is kept")
+		assert.False(t, tp.GetTasks()[0].Enabled, "the edited value is still shown")
+		assert.True(t, h.store.GetTasks()[0].Enabled, "the rail is re-read from disk and shows what the daemon holds")
 
-	require.NoError(t, h.saveContentPaneState())
-	assert.Equal(t, 1, updates, "the next save does not re-send the uncertain update")
+		require.NoError(t, h.saveContentPaneState())
+		assert.Equal(t, 1, updates, "the next automatic save does not re-send the uncertain update")
+		assert.True(t, tp.IsDirty(), "and the draft is still kept")
+
+		_, _ = h.handleQuit()
+		require.False(t, h.quitting, "the first quit stops to say the kept edit is left unsaved")
+		assert.Equal(t, 1, updates, "quitting does not re-send it either")
+		_, _ = h.handleQuit()
+		assert.True(t, h.quitting, "the next quit goes through")
+	})
+	t.Run("landed", func(t *testing.T) {
+		h, _ := taskOnDisk(t)
+		t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+			_, err := task.UpdateTask(id, update, expect)
+			require.NoError(t, err)
+			return replyLost()
+		}))
+		tp := h.automations.TaskPane()
+		require.True(t, tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}))
+
+		err := h.saveContentPaneState()
+		require.ErrorContains(t, err, outcomeUnknown)
+		assert.False(t, tp.IsDirty(), "the re-read carries the edit, so the draft settles as clean")
+		assert.False(t, tp.GetTasks()[0].Enabled)
+		assert.Contains(t, tp.TakeSettledDraftNotice(), `Saved edits to "maybe"`, "and never silently")
+	})
 }
 
 // The control: an update the daemon never saw stays a retained, retryable draft.
