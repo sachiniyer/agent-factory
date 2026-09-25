@@ -166,6 +166,32 @@ func TestResolvingAnIdleOwedMissionEndsTheRunOnTheNextIdlePoll(t *testing.T) {
 		require.False(t, finished.taskRunIdleEdgeHeld)
 	})
 
+	// The upgrade path: a row a pre-fix daemon fenced reloads already Ready, so
+	// the poll only ever sees Ready → Ready. Idle while owed must still hold, or
+	// Mark delivered on that row leaves its run open forever.
+	t.Run("a row that is already Ready holds on its first idle poll", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		inst.liveness = LiveReady
+
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.True(t, inst.TaskRunActive(), "still owed: the run stays open")
+
+		require.NoError(t, inst.ConfirmPendingHandoffDelivery(mission))
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.False(t, inst.TaskRunActive(), "the first idle poll after Mark delivered ends it")
+	})
+
+	// And the birth rule still holds: a session with no owed mission that is
+	// merely observed Ready again has not finished a run.
+	t.Run("Ready to Ready without an owed mission ends nothing", func(t *testing.T) {
+		inst := missionOwingInstance(t)
+		require.True(t, inst.ClearPendingHandoffMission(mission))
+		inst.liveness = LiveReady
+
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.True(t, inst.TaskRunActive())
+	})
+
 	// While the mission is still owed, repeated idle polls keep holding: the
 	// marker must not turn Ready → Ready into an edge on its own.
 	t.Run("idle polls while still owed keep the run open", func(t *testing.T) {

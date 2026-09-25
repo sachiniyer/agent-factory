@@ -653,13 +653,22 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// lets the first idle observation after the obligation clears end the
 			// run in its place. A resend makes the agent work, and that run then
 			// ends on its own idle edge.
-			if to.liveness == LiveReady && (from.liveness != LiveReady || i.taskRunIdleEdgeHeld) {
-				if i.owesMissionDeliveryLocked() {
+			//
+			// ANY idle observation while the mission is owed holds, not only a
+			// transition into Ready. A row that reloads already Ready — every row
+			// a pre-#4429 daemon fenced, on the upgrade that settles it — sees
+			// only Ready → Ready, and would otherwise hold nothing and keep its
+			// run open forever after the confirm. The edge rule exists so a
+			// session born Ready does not end its run at birth; a row owing a
+			// takeover mission is past birth by construction.
+			if to.liveness == LiveReady {
+				switch {
+				case i.owesMissionDeliveryLocked():
 					if !i.taskRunIdleEdgeHeld {
 						i.taskRunIdleEdgeHeld = true
 						i.touchLocked()
 					}
-				} else {
+				case from.liveness != LiveReady || i.taskRunIdleEdgeHeld:
 					i.taskRunActive = false
 					i.taskRunIdleEdgeHeld = false
 					i.touchLocked()
