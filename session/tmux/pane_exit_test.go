@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,60 @@ func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 	require.Equal(t, 7, status)
 	require.True(t, at.Equal(time.Unix(1726000000, 0)), "at = %v", at)
 	require.Equal(t, 3, reads)
+}
+
+// #4682: tmux 3.4 built with utempter can lose the root's SIGCHLD, and then it
+// collects the root only on its next SIGCHLD. The fixture's server behaves that
+// way: it reports the status only once something runs a job through it. The
+// probe must make that happen rather than wait out paneStatusWait.
+func TestProbePaneExitNudgesTheServerToCollectAStrandedRoot(t *testing.T) {
+	uncollected := uncollectedProcess(t)
+	nudges := 0
+	stranded := heldPaneExec(uncollected, "", "", "", nil)
+	collected := heldPaneExec(uncollected, "7", "", "1726000000", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-stranded", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "run-shell") {
+				nudges++
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if nudges == 0 {
+				return stranded.OutputFunc(c)
+			}
+			return collected.OutputFunc(c)
+		},
+	})
+	dead, status, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.True(t, statusKnown, "the probe never got the server to collect the root")
+	require.Equal(t, 7, status)
+	require.Equal(t, 1, nudges, "one nudge collects the root; more are noise")
+}
+
+// A server that never collects the root, however often it is nudged, gets a
+// fixed number of nudges, and the probe still answers within paneStatusWait.
+func TestProbePaneExitCapsItsNudges(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	uncollected := uncollectedProcess(t)
+	nudges := 0
+	stranded := heldPaneExec(uncollected, "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-never-collected", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "run-shell") {
+				nudges++
+			}
+			return nil
+		},
+		OutputFunc: stranded.OutputFunc,
+	})
+	dead, _, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.False(t, statusKnown)
+	require.Equal(t, maxReapNudges, nudges)
 }
 
 // Once a read has established that the root exited, a re-read that cannot

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,50 +45,35 @@ func startHeldPane(t *testing.T, name, command string) {
 	}, 5*time.Second, 20*time.Millisecond, "the pane never died")
 }
 
-// paneStatusDiagnosis says why a probe of a held dead pane had no exit status.
-// startHeldPane waits only for pane_dead, which tmux sets when the terminal
-// closes, possibly before it collects the root (#4682); probeUntilStatusKnown
-// waits for the status. A status tmux reports now means it collected the root
-// only after the last probe gave up; none at all means this tmux does not report
-// it, or never collected the root within the test's deadline.
-func paneStatusDiagnosis(t *testing.T, name string) string {
+// probeHeldExit probes a held dead pane once and requires its exit status. One
+// probe is the contract: ProbePaneExit waits for tmux to collect the root and
+// nudges a tmux that lost the root's SIGCHLD (#4682), so a status missing here
+// is a product failure, not a slow runner. The failure says which of the two
+// states tmux was left in.
+func probeHeldExit(t *testing.T, s *TmuxSession, name string) (status int, at time.Time) {
 	t.Helper()
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name), "#{pane_dead_status}").Output()
-	switch status := strings.TrimSpace(string(out)); {
-	case err != nil:
-		return fmt.Sprintf("the pane could not be re-read: %v", err)
-	case status != "":
-		return fmt.Sprintf("tmux reported status %s only after the last probe's %s wait", status, paneStatusWait)
-	default:
-		return "tmux still reports none: it never collected the root, or does not report pane_dead_status"
-	}
-}
-
-// heldPaneStatusDeadline is how long a test waits for tmux to collect a held
-// pane's exited root. It is the test's own bound, far above the production
-// paneStatusWait: the test asserts that the status is reported, not how fast,
-// and a loaded CI runner can take tmux longer than 2s to collect (#4682).
-const heldPaneStatusDeadline = 30 * time.Second
-
-// probeUntilStatusKnown re-probes a held dead pane until the probe reports its
-// exit status. One probe gives up after paneStatusWait and answers
-// statusKnown=false, which is correct production behaviour but not a failure of
-// the property under test; only the test's own deadline is.
-func probeUntilStatusKnown(t *testing.T, s *TmuxSession, name string) (dead bool, status int, at time.Time) {
-	t.Helper()
-	deadline := time.Now().Add(heldPaneStatusDeadline)
-	for {
-		dead, status, statusKnown, at, known := s.ProbePaneExit()
-		require.True(t, known)
-		if statusKnown {
-			return dead, status, at
+	dead, status, statusKnown, at, known := s.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	if !statusKnown {
+		out, _ := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(name),
+			"#{pane_dead_status}|#{pane_pid}").Output()
+		fields := strings.Split(strings.TrimSpace(string(out)), "|")
+		state := "unreadable"
+		if pid, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
+			_, lookupErr := proctree.Lookup(pid)
+			switch {
+			case errors.Is(lookupErr, proctree.ErrProcessExited):
+				state = "still a zombie: tmux never collected it"
+			case pidGone(pid):
+				state = "gone"
+			default:
+				state = "running"
+			}
 		}
-		require.True(t, dead, "a probe without a status must still see the exited root")
-		if !time.Now().Before(deadline) {
-			t.Fatalf("no exit status within %s: %s", heldPaneStatusDeadline, paneStatusDiagnosis(t, name))
-		}
-		time.Sleep(50 * time.Millisecond)
+		t.Fatalf("no exit status after one probe (tmux now reports %q; root %s)", out, state)
 	}
+	return status, at
 }
 
 func requireSessionGone(t *testing.T, name string) {
@@ -104,8 +90,7 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 	startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
 
 	s := NewTmuxSessionFromSanitizedName(name, "sh")
-	dead, status, at := probeUntilStatusKnown(t, s, name)
-	require.True(t, dead)
+	status, at := probeHeldExit(t, s, name)
 	require.Equal(t, 7, status)
 	require.False(t, at.Before(before), "death time %v predates the pane", at)
 
@@ -115,6 +100,23 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 		"a pane whose command already exited has nothing left to wait for")
 	requireSessionGone(t, name)
 	require.True(t, s.ClosedConclusively(), "the observed close must latch its proof")
+}
+
+// #4682, on real tmux: Ubuntu's tmux 3.4 leaves about one in sixteen of these
+// roots uncollected (25 of 400 measured), so a single pane passes by luck. Many
+// panes on one server make the lost SIGCHLD all but certain to occur, and every
+// probe must still recover its status. On a tmux that loses nothing (3.6+, or a
+// build without utempter) this passes trivially.
+func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
+	testguard.IsolateTmux(t)
+	const panes = 60
+	for i := range panes {
+		name := fmt.Sprintf("af_test_held_exit_%d_%d", time.Now().UnixNano(), i)
+		startHeldPane(t, name, "sh -c 'echo hello; exit 7'")
+		status, _ := probeHeldExit(t, NewTmuxSessionFromSanitizedName(name, "sh"), name)
+		require.Equal(t, 7, status, "pane %d", i)
+		require.NoError(t, exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run())
+	}
 }
 
 // The root exited, but a child it backgrounded is still running: it left the
