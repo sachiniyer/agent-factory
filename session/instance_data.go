@@ -48,6 +48,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Program:                  i.Program,
 		RuntimeProgram:           i.runtimeProgram,
 		Account:                  i.Account,
+		AccountAgent:             i.accountAgent,
 		AccountAutoSelected:      i.accountAutoSelected,
 		AccountLimitObservations: append([]AccountLimitObservationData(nil), i.accountLimitObservations...),
 		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
@@ -129,6 +130,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		if len(tab.Handoffs) > 0 {
 			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
 		}
+		td.Exit = tab.Exit.data()
+		td.AccountScope = tab.accountScope
 		data.Tabs = append(data.Tabs, td)
 	}
 	// An archived off-box row is inert, but the web rail still renders its
@@ -364,6 +367,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Program:                  data.Program,
 		runtimeProgram:           data.RuntimeProgram,
 		Account:                  data.Account,
+		accountAgent:             data.AccountAgent,
 		accountAutoSelected:      data.AccountAutoSelected,
 		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
 		Prompt:                   data.Prompt,
@@ -626,6 +630,13 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 			var ts *tmux.TmuxSession
 			if td.TmuxName != "" {
 				ts = restoreTmuxSession(td.TmuxName, tabProgram(kind, td.Command, data.Program))
+				// Keep the restored handle consistent with a fresh process
+				// tab's: the flag only matters if Start is ever invoked, and
+				// after #4479 nothing invokes it — but the invariant costs
+				// nothing and keeps a future Start caller honest.
+				if ts != nil && kind == TabKindProcess {
+					ts.SetRemainOnExit()
+				}
 			}
 			var conversation AgentConversationData
 			if td.Conversation != nil {
@@ -652,8 +663,10 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				URL:                           td.URL,
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
+				Exit:                          tabExitFromData(td.Exit),
 				tmux:                          ts,
-				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux() && ts != nil,
+				accountScope:                  td.AccountScope,
+				accountScopeProvenanceUnknown: idx > 0 && kind.HasTmux() && ts != nil && siblingScopeUnknown(data.Account, td.AccountScope),
 			})
 		}
 		return

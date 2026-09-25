@@ -197,3 +197,83 @@ func TestTriggerFiresOnCarrier(t *testing.T) {
 		}
 	}
 }
+
+// TestURIMalformedComponentFailClosed asserts that a malformed query pair,
+// fragment, and path all land in unknown (fail-closed by the engine) when
+// percent-encoding includes a trailing malformed %, instead of being
+// silently dropped. A proven percent carrier that cannot be decoded must
+// not ship verbatim — it must fail closed, matching the opaque-body branch.
+func TestURIMalformedComponentFailClosed(t *testing.T) {
+	const pat = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+	single := pctHex(pat)
+
+	// Malformed query pair: a trailing % makes PercentDecode report
+	// malformed; the pair's source range must land in unknown.
+	query := "fetch http://h/?ref=" + single + "%"
+	_, unknownQ := sourceMappedURIComponents(Identity(query), ProvLogRecord)
+	lo := strings.Index(query, single)
+	if !covers(unknownQ, lo, lo+len(single)+1) {
+		t.Errorf("malformed query pair dropped, not fail-closed: unknown=%d (PAT leaks)", len(unknownQ))
+	}
+
+	// Malformed fragment: trailing %.
+	frag := "http://h/p#" + single + "%"
+	_, unknownF := sourceMappedURIComponents(Identity(frag), ProvLogRecord)
+	lo = strings.Index(frag, single)
+	if !covers(unknownF, lo, lo+len(single)+1) {
+		t.Errorf("malformed fragment dropped, not fail-closed: unknown=%d (PAT leaks)", len(unknownF))
+	}
+
+	// Malformed path: trailing %. url.Parse rejects the candidate, so
+	// the fail-close must fire from the path-parse error arm.
+	pathLeak := "http://h/" + single + "%"
+	_, unknownP := sourceMappedURIComponents(Identity(pathLeak), ProvLogRecord)
+	lo = strings.Index(pathLeak, single)
+	if !covers(unknownP, lo, lo+len(single)+1) {
+		t.Errorf("malformed path dropped, not fail-closed: unknown=%d (PAT leaks)", len(unknownP))
+	}
+
+	// Control: well-formed (no trailing %) query pair must produce a
+	// view, not an unknown range.
+	well := "fetch http://h/?ref=" + single
+	views, unknownW := sourceMappedURIComponents(Identity(well), ProvLogRecord)
+	lo = strings.Index(well, single)
+	if covers(unknownW, lo, lo+len(single)) {
+		t.Errorf("well-formed query pair fail-closed by mistake: unknown=%d views=%d", len(unknownW), len(views))
+	}
+	if len(views) == 0 {
+		t.Fatalf("well-formed query pair produced no views: views=%d", len(views))
+	}
+
+	// Recovery control: a url.Parse failure for a NON-malformed-% reason
+	// (bad authority "bad://[" with well-formed path escapes) must still
+	// recover the nested file:// URI. The path-fix gate is keyed on
+	// PercentDecode's malformed flag, so a url.Parse error whose path
+	// escapes are well-formed does not fire it.
+	recovery := "editor bad://[file:///srv/Confidential%43lient/repo%2Dfix-bug-%75rgent"
+	viewsR, unknownR := sourceMappedURIComponents(Identity(recovery), ProvLogRecord)
+	if len(viewsR) == 0 {
+		t.Fatalf("recovery suppressed for non-malformed-%% url.Parse failure: views=%d unknown=%d", len(viewsR), len(unknownR))
+	}
+}
+
+// covers reports whether any Range in rs fully contains [start, end).
+func covers(rs []Range, start, end int) bool {
+	for _, r := range rs {
+		if r.Start <= start && r.End >= end {
+			return true
+		}
+	}
+	return false
+}
+
+func pctHex(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		b.WriteByte('%')
+		b.WriteByte(hex[s[i]>>4])
+		b.WriteByte(hex[s[i]&0xF])
+	}
+	return b.String()
+}

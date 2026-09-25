@@ -97,6 +97,15 @@ type ListAccountsResponse struct {
 	// — dropping it from this map would hide the misconfiguration behind an
 	// "ambient identity" the picker would then be lying about.
 	Defaults map[string]string `json:"defaults,omitempty"`
+	// ResolvedAgents maps every supported agent name to the agent the command it
+	// resolves to actually launches — DetectAgentFromCommand over
+	// program_overrides for RepoPath's repo — falling back to the enum itself
+	// when the command names no supported agent. A handoff picker must classify
+	// a target's account capability by THIS value, not the enum:
+	// `program_overrides.codex = "aider"` means a "codex" handoff launches a
+	// process with no account namespace, so it drops the scope rather than
+	// needing an account no registry could honor (#4430 review).
+	ResolvedAgents map[string]string `json:"resolved_agents,omitempty"`
 }
 
 // RegisterAccountRequest creates an account's credential directory on the

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -437,6 +438,15 @@ func hookHostRecordTitles(raw json.RawMessage) ([]string, error) {
 // sessions. That answer looks complete and is about the wrong machine, so every
 // local pin would read as an orphan. The local socket is the only inventory that
 // can speak for a local directory.
+//
+// A repo the daemon dropped at startup due to a corrupted instances.json is
+// absent from the returned list (#603), so a slug pinned to one of its sessions
+// would read as an orphan here — the same silent truncation the Snapshot wire
+// was fixed to surface. The skip set stays seeded until the daemon's polling
+// refresh drops a repaired repo, so a file fixed on disk is still hidden from
+// this inventory until that refresh runs; refuse the whole read while any repo
+// is still skipped, the same way hookHostStoredTitles refuses on an unreadable
+// store, so --fix arms no removal until the daemon has refreshed.
 func daemonSessionInventory() ([]session.InstanceData, error) {
 	client, err := apiclient.New()
 	if err != nil {
@@ -451,7 +461,19 @@ func daemonSessionInventory() ([]session.InstanceData, error) {
 	// removed.
 	ctx, cancel := context.WithTimeout(context.Background(), hookHostInventoryTimeout)
 	defer cancel()
-	return client.SnapshotCtx(ctx, daemon.SnapshotRequest{})
+	inst, skipped, err := client.SnapshotCtx(ctx, daemon.SnapshotRequest{})
+	if err != nil {
+		return nil, err
+	}
+	if len(skipped) > 0 {
+		repoIDs := make([]string, 0, len(skipped))
+		for _, s := range skipped {
+			repoIDs = append(repoIDs, s.RepoID)
+		}
+		sort.Strings(repoIDs)
+		return nil, fmt.Errorf("the daemon dropped %d repo(s) at startup due to a corrupted instances.json, so the session inventory is incomplete until it refreshes; no removal is armed: %s", len(repoIDs), strings.Join(repoIDs, ", "))
+	}
+	return inst, nil
 }
 
 // hookHostInventoryTimeout bounds the daemon read above. Generous: the answer is

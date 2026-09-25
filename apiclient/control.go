@@ -161,15 +161,31 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 	return resp.Name, nil
 }
 
-// There is deliberately no RenameTab/ReorderTab here (#1813). This is the Go
-// HTTP client, and its only consumer is the TUI; the tab rename/reorder verbs
-// are driven by the web client, which is TypeScript and calls the daemon's
-// /v1/RenameTab and /v1/ReorderTab routes directly (web/src/api.ts), and by the
-// CLI, which goes over the gob control socket (daemon.RenameTab). Adding
-// wrappers here purely for symmetry with CreateTab/CloseTab — which exist
-// because the TUI genuinely calls them (app/session_control.go) — would be dead
-// code whose only caller was its own test. Add them the day the TUI grows a
-// rename/reorder surface.
+// RenameTab asks the daemon to relabel one tab of an existing session and
+// persist the roster (daemon.Manager.RenameTab over /v1/RenameTab). It returns
+// the RESOLVED name — sanitized and collision-suffixed — which is what the
+// caller must render and what the other tab verbs now address the tab by.
+func (c *Client) RenameTab(req daemon.RenameTabRequest) (string, error) {
+	var resp daemon.RenameTabResponse
+	if err := c.call("RenameTab", req, &resp); err != nil {
+		return "", err
+	}
+	return resp.Name, nil
+}
+
+// ReorderTab asks the daemon to move one tab within a session's roster and
+// returns the moved tab's name and resolved final index (#1813). It is the
+// TUI's </> tab-move path — the same /v1/ReorderTab route the web's drag
+// reorder calls (web/src/api.ts) and `af sessions tab-reorder` reaches over the
+// gob control socket (daemon.ReorderTab), so all three surfaces permute one
+// roster through one method.
+func (c *Client) ReorderTab(req daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+	var resp daemon.ReorderTabResponse
+	if err := c.call("ReorderTab", req, &resp); err != nil {
+		return daemon.ReorderTabResponse{}, err
+	}
+	return resp, nil
+}
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
 // one attached session (#1160). Best-effort attach coordination; it rides an

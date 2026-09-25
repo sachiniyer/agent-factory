@@ -1379,7 +1379,7 @@ func TestEnsureVSCodeServer_StopsAnEditorWhoseTabWasClosedMidSpawn(t *testing.T)
 	}
 
 	// Close the vscode tab: this is the state an in-flight spawn returns into.
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo, TabName: "vscode"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo, TabName: "vscode"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 

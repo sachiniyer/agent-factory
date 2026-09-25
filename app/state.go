@@ -70,4 +70,10 @@ const (
 	// stateSelectHandoffAgent it differs only in what submit does — and here the
 	// two answers are NOT interchangeable, which is why the choice exists at all.
 	stateSelectHandoffResolve
+	// stateRenameTab is the `R` rename-tab prompt (#1904's verb reaching the TUI).
+	// Its own state for the same reason stateJumpTab is: it returns to
+	// stateDefault, drives the shared promptOverlay, and owns its Enter/Esc
+	// semantics — a tab name is one line, so Enter submits and Esc cancels,
+	// neither of which is the composer's meaning for them.
+	stateRenameTab
 )

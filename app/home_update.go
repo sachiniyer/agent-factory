@@ -107,6 +107,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
+		// A save since the last poll dropped a draft whose task was deleted;
+		// say so once (#4798).
+		if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
+			cmds = append(cmds, m.showTransientMessage(notice))
+		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
 			// selectionChanged must NOT steal focus onto the selected instance's
@@ -427,9 +432,23 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleMenuHighlighting underlines the menu hint for a mapped key and returns
+// the tick that clears it. The action itself runs in the same Update, right
+// after (handleKeyPress): the underline is paint only — Menu.keyDown has no
+// reader but the menu renderer — so nothing needs it on screen before the
+// action runs.
+//
+// It used to split each mapped keypress into two Update passes — paint the
+// highlight, then re-emit the key through the command pipeline and act on the
+// replay. The next physical key could beat that replay onto the event loop and
+// run in the pre-action state ("/" then "p" lost the "p" before search opened,
+// #4828), and every guard against that race added a new one. One pass has no
+// replay to race. returnEarly reports a key consumed here that must not reach
+// the state dispatch.
 func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly bool) {
-	// Consume physical input before scheduling a replay: the catalog may open
-	// the picker before that replay runs, turning an early Enter into a choice.
+	// A form action while a promised backend picker is still loading answers
+	// with a notice instead of acting: its catalog would otherwise open the
+	// picker over a create the action already submitted or left.
 	if m.state == stateNew && m.backendPickerPending {
 		switch msg.Type {
 		case tea.KeyEnter, tea.KeyTab, tea.KeyShiftTab, tea.KeyCtrlR, tea.KeyCtrlO:
@@ -439,10 +458,6 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 			// can turn this key into merely closing the backend picker.
 			return nil, false
 		}
-	}
-	if m.keySent {
-		m.keySent = false
-		return nil, false
 	}
 	// While naming a new instance the menu only shows the submit-name (enter),
 	// change-program (tab), and cancel (esc) options, so those keys are the only ones
@@ -482,16 +497,12 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		default:
 			return nil, false
 		}
-		m.keySent = true
-		return tea.Batch(
-			func() tea.Msg { return msg },
-			m.keydownCallback(name)), true
+		return m.keydownCallback(name), false
 	}
 	// Any other modal state (help/confirm/search/select-program/hooks): the
-	// overlay owns the keyboard, so no hint highlighting and no re-emit —
-	// this runs BEFORE handleKeyPress's state switch, so without this guard
-	// mapped keys typed into an overlay would take the highlight + re-emit
-	// detour first. A blanket non-default check (rather than enumerating
+	// overlay owns the keyboard, so no hint highlighting — without this guard
+	// mapped keys typed into an overlay would underline hints the overlay
+	// hides. A blanket non-default check (rather than enumerating
 	// states) can't silently miss a future modal state (Greptile on #1083).
 	if m.state != stateDefault {
 		return nil, false
@@ -517,10 +528,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	m.keySent = true
-	return tea.Batch(
-		func() tea.Msg { return msg },
-		m.keydownCallback(name)), true
+	return m.keydownCallback(name), false
 }
 
 func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
@@ -533,11 +541,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleInteractiveKey(msg)
 	}
 
-	cmd, returnEarly := m.handleMenuHighlighting(msg)
+	highlight, returnEarly := m.handleMenuHighlighting(msg)
 	if returnEarly {
-		return m, cmd
+		return m, highlight
 	}
+	mod, cmd = m.dispatchKeyAction(msg)
+	return mod, tea.Batch(highlight, cmd)
+}
 
+// dispatchKeyAction runs a key's action for the current state — the half of
+// handleKeyPress after the menu highlight.
+func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Dispatch to state-specific handlers
 	switch m.state {
 	case stateHelp:
@@ -558,6 +572,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateInitialPrompt(msg)
 	case stateJumpTab:
 		return m.handleStateJumpTab(msg)
+	case stateRenameTab:
+		return m.handleStateRenameTab(msg)
 	case stateSelectHandoffAgent:
 		return m.handleStateSelectHandoffAgent(msg)
 	case stateSelectHandoffResolve:

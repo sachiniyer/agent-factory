@@ -304,7 +304,7 @@ func TestHandoffSession_DeliversMissionBriefNotTheStoredPrompt(t *testing.T) {
 		t.Fatal("limit state still set after a handoff; it belonged to the agent that was just replaced")
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 1 {
 		t.Fatalf("ledger has %d entries, want 1", len(ledger))
 	}
@@ -327,7 +327,7 @@ func TestHandoffSession_RecordsManualReasonWhenNotLimited(t *testing.T) {
 		t.Fatalf("HandoffSession: %v", err)
 	}
 
-	ledger := inst.Handoffs()
+	ledger := inst.Tabs[0].Handoffs
 	if len(ledger) != 1 || ledger[0].Reason != session.HandoffReasonManual {
 		t.Fatalf("ledger = %+v, want a single entry with reason %q", ledger, session.HandoffReasonManual)
 	}
@@ -356,7 +356,7 @@ func TestHandoffSession_RollsBackTheRecordWhenTheSwapFails(t *testing.T) {
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after a failed swap, want %q — the pane still runs the outgoing agent", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("ledger has %d entries after a failed swap, want 0 — a swap that did not happen must not be recorded", len(ledger))
 	}
 	if _, prompts := backend.snapshot(); len(prompts) != 0 {
@@ -434,7 +434,7 @@ func TestHandoffSession_RefusesArchivedSession(t *testing.T) {
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after refused handoff, want %q", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("refused archived handoff wrote %d ledger entries, want 0", len(ledger))
 	}
 	if got := inst.GetLiveness(); got != session.LiveArchived {
@@ -472,7 +472,7 @@ func TestHandoffSession_RefusesTheReservedRootSession(t *testing.T) {
 	if got := inst.AgentProgram(); got != tmux.ProgramClaude {
 		t.Fatalf("Program = %q after refused handoff, want %q", got, tmux.ProgramClaude)
 	}
-	if ledger := inst.Handoffs(); len(ledger) != 0 {
+	if ledger := inst.Tabs[0].Handoffs; len(ledger) != 0 {
 		t.Fatalf("refused root handoff wrote %d ledger entries, want 0", len(ledger))
 	}
 }
@@ -492,9 +492,9 @@ func TestHandoffSession_PreflightFailureLeavesOutgoingAgentUntouched(t *testing.
 	if swaps, prompts := base.snapshot(); swaps != 0 || len(prompts) != 0 {
 		t.Fatalf("failed preflight touched runtime: swaps=%d prompts=%d", swaps, len(prompts))
 	}
-	if inst.AgentProgram() != tmux.ProgramClaude || len(inst.Handoffs()) != 0 || inst.GetInFlightOp() != session.OpNone {
+	if inst.AgentProgram() != tmux.ProgramClaude || len(inst.Tabs[0].Handoffs) != 0 || inst.GetInFlightOp() != session.OpNone {
 		t.Fatalf("failed preflight mutated record: program=%q handoffs=%d op=%v",
-			inst.AgentProgram(), len(inst.Handoffs()), inst.GetInFlightOp())
+			inst.AgentProgram(), len(inst.Tabs[0].Handoffs), inst.GetInFlightOp())
 	}
 }
 
