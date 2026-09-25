@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -270,6 +271,21 @@ var registerProjectThroughDaemon = func(path string) error {
 	})
 }
 
+// rebindProjectThroughDaemon routes the TUI's rebind-project verb — the picker's
+// `b` — through the daemon (the single writer): config.RebindProject moves the
+// registration's stable id to the replacement checkout, refusing a path another
+// project owns, and publishes projects.changed. A package var so the app test
+// suite can stub it without dialing a real daemon.
+var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	var project config.Project
+	err := withDaemonHTTP(func(c *apiclient.Client) error {
+		var e error
+		project, e = c.RebindProject(projectID, path)
+		return e
+	})
+	return project, err
+}
+
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
 // verb (#1146) through the daemon — the single writer (#960) — which re-spawns
 // the agent if it exited, re-delivers the pending prompt, and clears the limit
@@ -278,6 +294,16 @@ var registerProjectThroughDaemon = func(path string) error {
 var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ResumeFromLimit(request)
+	})
+}
+
+// confirmHandoffDeliveryThroughDaemon routes the "mark delivered" half of the
+// resolve-delivery picker (#4429) through the daemon: retire the pending
+// mission on the operator's attestation without a resend. A package var so the
+// app test suite can stub it without dialing a real daemon.
+var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeliveryRequest) error {
+	return withDaemonHTTP(func(c *apiclient.Client) error {
+		return c.ConfirmHandoffDelivery(request)
 	})
 }
 
@@ -639,6 +665,14 @@ func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() 
 	prev := resumeFromLimitThroughDaemon
 	resumeFromLimitThroughDaemon = f
 	return func() { resumeFromLimitThroughDaemon = prev }
+}
+
+// SetHandoffDeliveryConfirmerForTest swaps the resolve-picker's confirm seam
+// (#4429) so a test can assert the mark-delivered arm routes through the daemon.
+func SetHandoffDeliveryConfirmerForTest(f func(daemon.ConfirmHandoffDeliveryRequest) error) func() {
+	prev := confirmHandoffDeliveryThroughDaemon
+	confirmHandoffDeliveryThroughDaemon = f
+	return func() { confirmHandoffDeliveryThroughDaemon = prev }
 }
 
 func SetTabCreatorForTest(f func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error)) func() {

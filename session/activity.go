@@ -188,6 +188,11 @@ type LifecycleView struct {
 	// and task still have to land. Only the limit-resume action may consume it;
 	// competing archive/handoff/restore actions must leave that obligation intact.
 	PendingAccountSwap bool
+	// PendingHandoffMission is an agent handoff whose takeover brief has not been
+	// confirmed delivered. The swap itself is complete — its fence settles on the
+	// incoming runtime's liveness (#4429) — so this obligation, not the op axis,
+	// is what keeps a SECOND handoff from overwriting the first one's mission.
+	PendingHandoffMission bool
 	// StartupStateUnknown is the retained-create fence: the launch may have
 	// succeeded under an identity af could not confirm, so no runtime or workspace
 	// action may infer ordinary LiveReady semantics from this view.
@@ -220,16 +225,17 @@ func (i *Instance) LifecycleView() LifecycleView {
 // cannot observe different lifecycle states.
 func (i *Instance) lifecycleViewLocked() LifecycleView {
 	return LifecycleView{
-		Title:               i.Title,
-		TaskID:              i.TaskID,
-		Liveness:            i.liveness,
-		InFlightOp:          i.inFlightOp,
-		Status:              i.statusLocked(),
-		StateEpoch:          i.stateEpoch,
-		Started:             i.started,
-		UserKilled:          i.userKilled,
-		PendingAccountSwap:  i.pendingAccountSwap != nil,
-		StartupStateUnknown: i.startupStateUnknown,
+		Title:                 i.Title,
+		TaskID:                i.TaskID,
+		Liveness:              i.liveness,
+		InFlightOp:            i.inFlightOp,
+		Status:                i.statusLocked(),
+		StateEpoch:            i.stateEpoch,
+		Started:               i.started,
+		UserKilled:            i.userKilled,
+		PendingAccountSwap:    i.pendingAccountSwap != nil,
+		PendingHandoffMission: i.pendingHandoffMission != "",
+		StartupStateUnknown:   i.startupStateUnknown,
 		// The already-locked variant, NOT Capabilities(): the backend is mutable
 		// (a restore rebinds it in bindProvisionResult), so Capabilities() now
 		// takes i.mu.RLock itself — and calling it while this snapshot holds the

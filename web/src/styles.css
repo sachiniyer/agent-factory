@@ -438,12 +438,20 @@ button:disabled,
  * default min-width:auto floors each at its label, so on a narrow phone the pair
  * wraps to two stacked full-width rows instead of shrinking below/clipping a label. */
 .af-project-add,
+.af-project-rebind,
 .af-project-delete {
   flex: 1 1 0;
   justify-content: center;
 
   font-size: var(--af-type-body);
   white-space: nowrap;
+}
+
+/* A registered project whose recorded checkout is gone (path_exists=false) —
+ * the state the footer Rebind action repairs. The dead-ink marker leads the
+ * row's glance so it survives truncation ahead of the counts. */
+.af-project-missing {
+  color: var(--af-dead);
 }
 
 /* The trailing appbar controls are one semantic group. It stays inline on desktop;
