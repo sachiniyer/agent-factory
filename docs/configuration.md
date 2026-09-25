@@ -463,7 +463,7 @@ tasks = "ctrl+t"
 - **Compatibility binding:** `[keys].new_remote` has no default key. If configured,
   it opens the creation form with the backend field focused, where you choose the
   backend; it no longer forces remote creation or checks local `remote_hooks` first.
-- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `rename_tab`, `tasks`, `search`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
+- **Rebindable actions:** `up`, `down`, `scroll_up`, `scroll_down`, `attach`, `new`, `kill`, `quit`, `help`, `new_remote`, `new_tab`, `close_tab`, `rename_tab`, `move_tab_left`, `move_tab_right`, `tasks`, `search`, `hooks`, `config_agent`, `config_editor`, `open_pane`, `split_pane`, `hide_pane`, `pane_prev`, `pane_next`, `collapse`, `expand`, `next_section`, `prev_section`, `archive`, `restore`, `limit_retry`, `handoff`, `error_details`, `switch_project`. (Run `af keys` to print the full effective table.)
 - `pane_prev` / `pane_next` are contextual: their default `left` / `right` bindings switch panes only while a workspace pane has focus. With tree focus, the same arrows keep the tree's collapse/expand behavior.
 - **Reserved keys** are rejected: binding any action to `enter`, `tab`, `shift+tab`, `esc`, `ctrl+]`, or a digit `1`–`9` is a startup error naming the key and why it's reserved (they drive interaction, the focus ring, overlay cancel, the interactive-mode exit, and the 1–9 tab jump respectively).
 - **`ctrl+c` is a fixed hard exit, not a reserved key.** Validation does *not* reject it — you can write `quit = "ctrl+c"` (or point any action at it) with no error — but `ctrl+c` always quits and is handled before the keymap ever sees the keypress, so binding an action to it has no effect: the hard exit wins. It is therefore not *effectively* rebindable, which is different from the reserved keys above that are outright rejected at load.
@@ -660,6 +660,16 @@ identity_file = "~/.ssh/id_ed25519"
 
 An unknown `backend` value (or `--backend`) is reported when the session's
 runtime is resolved at create time, naming the valid options.
+
+An unknown key inside `[docker]` or `[ssh]` — `runargs` for `run_args`, say — is
+ignored, so the setting it was meant to carry has no effect. af warns about it:
+on stderr when you run an `af` command (except under `--json`, whose stderr is
+reserved for the envelope), as a WARNING in the log (including the daemon's), and
+as a WARN finding in `af doctor`. The warning names the file and the key and,
+when a known key is close, suggests it (`did you mean "run_args"?`). Key case does
+not matter: `Image` and `image` are the same key. A later release will refuse to
+load a file with an unknown `[docker]`/`[ssh]` key, so fix these when you see
+them ([#4845](https://github.com/sachiniyer/agent-factory/issues/4845)).
 
 ### In-repo file name: `config.toml` or `config.json`
 

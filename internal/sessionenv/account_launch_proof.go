@@ -146,6 +146,14 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 		overrideNames[name] = struct{}{}
 	}
 	if commandMutatesAccountEnvironment(command, overrideNames) {
+		if option, ok := accountEnvironmentInvalidSetOptionName(command); ok {
+			return accountCommandValidationErrorf(
+				"account %q cannot scope sibling environment for agent %q: its command gives `set` the "+
+					"option name %q, but %q is not a bash `set -o`/`set +o` option name; bash aborts its "+
+					"option scan at an unrecognized name, so af cannot prove what the shell did with the "+
+					"rest of the `set` line. Use a recognized bash option name such as pipefail or errexit",
+				account.Name, account.Agent, option, option)
+		}
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
 			account.Name, account.Agent)
@@ -207,4 +215,37 @@ func quoteArguments(args []string) string {
 		quoted[idx] = strconv.Quote(arg)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// accountEnvironmentInvalidSetOptionName reports the unrecognized long option
+// name that makes a bare `set -o`/`set +o` (or a cluster containing `o`) fail
+// closed in setOptionTaint, when that bare `set` call is the source of the
+// taint. It reuses the same option scan, so a refusal can name the offending
+// option instead of the generic "sets an identity or shell-startup variable"
+// message, which is false for this class — `set -o extendedglob; npm run dev`
+// sets no variable at all. A `set` reached only through a wrapper
+// (exec/command/env/...) takes the generic refusal unchanged.
+func accountEnvironmentInvalidSetOptionName(command string) (string, bool) {
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			continue
+		}
+		var option string
+		syntax.Walk(file, func(node syntax.Node) bool {
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) < 2 || !isBareName(call.Args[0], "set") {
+				return true
+			}
+			if reason := setOptionTaint(call.Args[1:]); reason.kind == setTaintUnrecognized {
+				option = reason.option
+				return false
+			}
+			return true
+		})
+		if option != "" {
+			return option, true
+		}
+	}
+	return "", false
 }

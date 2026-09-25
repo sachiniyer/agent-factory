@@ -96,6 +96,11 @@ matching the 1-9 jump keys; it was removed in #3023):
   name. Only tabs that display a name can be renamed — web, process, and VS
   Code tabs. The agent tab always shows "Agent" and a Terminal tab always shows
   "Terminal", so they refuse; `af sessions tab-rename` is the CLI equivalent.
+- **`<`** / **`>`** move the focused tab one slot left or right — the same
+  reorder the web tab bar performs by dragging. The agent tab is pinned to the
+  first slot, so nothing moves past it in either direction. Like `t`/`w`, this
+  applies to live local sessions; off-box runtimes own their tab order and
+  archived sessions keep their roster frozen for restore.
 
 Tabs persist across restarts, and each is a real process the daemon tracks.
 (Remote sessions are more limited — see [Remote hooks](remote-hooks.md).)
