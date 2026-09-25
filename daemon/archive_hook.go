@@ -253,21 +253,13 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	return nil
 }
 
+// archiveHookReport names the full output file and quotes only a short excerpt.
+// The report reaches the daemon log and every archive caller's warning, so the
+// hook's whole output must not ride along (#4853).
 func archiveHookReport(path, output string, readErr error) string {
 	report := fmt.Sprintf(" (full output: %s)", path)
-	if suffix := archiveHookOutput(output); suffix != "" {
-		report += suffix
-	}
 	if readErr != nil {
 		report += fmt.Sprintf("; output tail unavailable: %v", readErr)
 	}
-	return report
-}
-
-func archiveHookOutput(output string) string {
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return ""
-	}
-	return ": " + output
+	return report + hooklog.Excerpt(output)
 }
