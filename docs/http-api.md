@@ -44,8 +44,8 @@ $AGENT_FACTORY_HOME/daemon-http.sock
 So on a default install the socket is `~/.agent-factory/daemon-http.sock`. `af
 api` prints the resolved path for your environment.
 
-The socket is created when the daemon starts (on demand whenever `af` runs and
-there is work to host, or via an autostart unit — see
+The socket is created when the daemon starts (on demand — a bare `af` launch
+starts it, or via an autostart unit — see
 [tasks.md](tasks.md#daemon-lifecycle)). If the socket does not exist, the daemon
 is not running.
 
@@ -213,11 +213,15 @@ not list. They fall into three groups:
 
 - **Internal JSON-envelope RPCs**, same shape as the cataloged ones but deliberately
   unadvertised as public API: `POST /v1/Preview` (the TUI's render path),
-  `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination).
+  `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination),
+  and `POST /v1/HandoffSessionV2` (the version-bound account-aware handoff
+  transport).
 - **Non-RPC surfaces**, which speak something other than the envelope: the WebSocket
   planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
-  `GET /v1/events`; the config-assistant trio on `/v1/config-assistant`;
-  `GET /v1/preview-auth`; and the web-tab reverse proxy under `/v1/webtab/`.
+  `GET /v1/events`; the config-assistant trio on `/v1/config-assistant` and the
+  account-login stream `GET /v1/account-login/stream` (bare-session PTY WebSockets
+  that serve no Instance); `GET /v1/preview-auth`; and the web-tab reverse proxy
+  under `/v1/webtab/`.
 - **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
   on. It is **off by default**, is served on **this socket only** and never on
   `network.listen_addr`, and returns the ordinary 404 unknown-route envelope while

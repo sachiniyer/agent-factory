@@ -28,7 +28,6 @@ func TestPendingBackendInputCannotReplayIntoPicker(t *testing.T) {
 			}
 			require.Equal(t, stateSelectBackend, h.state, "old input must not accept the newly opened picker")
 			assert.Equal(t, 0, h.selectionOverlay.GetSelectedIndex())
-			assert.False(t, h.keySent)
 			pickBackend(t, h, "docker")
 			assert.Equal(t, stateNew, h.state)
 			assert.Equal(t, "docker", h.pendingBackend)

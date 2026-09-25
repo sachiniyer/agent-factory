@@ -1135,8 +1135,8 @@
       "id": "session.tab.rename",
       "title": "Rename a tab",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "keys/keys.go KeyRenameTab (R) -> app/handle_tabs.go showRenameTabPrompt/handleStateRenameTab -> app/session_control.go renameTabThroughDaemon -> apiclient/control.go Client.RenameTab -> POST /v1/RenameTab"
       },
       "web": {
         "status": "yes",
@@ -1146,15 +1146,15 @@
         "status": "yes",
         "pointer": "api/sessions_tabs.go:192 tab-rename (+ tabs rename)"
       },
-      "verdict": "unclear",
-      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). The TUI shows tab names as pane labels (#1813) but has no rename affordance — no app/ code calls RenameTab and no keybinding. Whether the TUI should rename tabs is an owner call (the #1904/tab-ux author). Not filed."
+      "verdict": "parity",
+      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). TUI half CLOSED: `R` opens a prompt seeded with the current name of the tab the user is looking at — the focused pane's effective binding, else the tree's active tab, the same target `w` closes — and submits daemon.Manager.RenameTab over the same /v1/RenameTab route the web calls. The request carries stable ids (session ID + TabID) captured at prompt-open, matching the #2358 rule every retained TUI action follows; a pre-#1738 id-less tab is protected by the captured roster generation, the same rule delete consent applies. The daemon's own guards hold on every surface: only kinds that DISPLAY their name are renameable (session.TabKindRenameable — web, process, VS Code), so the agent tab and shell tabs refuse before the prompt opens with the same reason the RPC would give. The resolved (sanitized, collision-suffixed) name is reflected on the local projection and reported in the status bar."
     },
     {
       "id": "session.tab.reorder",
       "title": "Reorder a tab within a session",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "app/handle_tabs.go handleMoveTab (</>; move_tab_left/move_tab_right) → app/session_control.go reorderTabThroughDaemon → apiclient.Client.ReorderTab → POST /v1/ReorderTab"
       },
       "web": {
         "status": "yes",
@@ -1164,8 +1164,8 @@
         "status": "yes",
         "pointer": "api/sessions_tabs.go:264 tab-reorder (+ tabs reorder)"
       },
-      "verdict": "unclear",
-      "notes": "#1904 added tab reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar). No TUI affordance. Same owner call as session.tab.rename. Not filed."
+      "verdict": "parity",
+      "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename — resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence — the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation). Like t/w it is offered only on live locally-managed rosters: off-box backends skip ReconcileTabsFromData (app/sync.go), and the daemon freezes archived rosters for restore)."
     },
     {
       "id": "session.watch",
@@ -1660,6 +1660,8 @@
       "hooks": "worktree.hooks.edit",
       "kill": "session.kill",
       "limit_retry": "session.limit-retry",
+      "move_tab_left": "session.tab.reorder",
+      "move_tab_right": "session.tab.reorder",
       "new": "session.create",
       "new_remote": "session.create.opt.remote",
       "new_tab": "session.tab.create",
@@ -1669,6 +1671,7 @@
       "pane_prev": "tui.panes",
       "prev_section": "tui.navigation",
       "quit": "tui.navigation",
+      "rename_tab": "session.tab.rename",
       "restore": "session.restore",
       "scroll_down": "tui.navigation",
       "scroll_up": "tui.navigation",
@@ -2100,6 +2103,9 @@
           "task.next_run_at": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
           },
+          "task.next_run_far": {
+            "ok": "Derived at READ time and stripped on write (#4843): the daemon stamps it from next_run_at with task.NextRunFarOut (enabled and more than 60 days out), beside the live scheduler entry it reads. saveTasks strips it with the other derived fields, so a surface that sent one would be asserting a verdict rather than requesting a task."
+          },
           "task.overdue": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
           },
@@ -2146,6 +2152,9 @@
           },
           "task.next_run_at": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.next_run_far": {
+            "ok": "Derived at READ time and stripped on write (#4843): the daemon stamps it from next_run_at with task.NextRunFarOut (enabled and more than 60 days out), beside the live scheduler entry it reads. saveTasks strips it with the other derived fields, so a surface that sent one would be asserting a verdict rather than requesting a task."
           },
           "task.overdue": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -2265,6 +2274,11 @@
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
           }
+        },
+        "tui": {
+          "tab_index": {
+            "ok": "The TUI passes the stable TabID captured when the prompt opened (with the captured TabName as the pre-#1738 id-less fallback, gated on an unchanged roster generation); it never needs the shifting ordinal fallback. Same shape as its CloseTabRequest coverage."
+          }
         }
       },
       "ReorderTabRequest": {
@@ -2273,10 +2287,15 @@
             "gap": "wire.id-addressing"
           },
           "tab_id": {
-            "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
+            "ok": "The TAB's stable id (#1971): the web and TUI address tabs by it from their live projections so a reorder can't misroute another client's ordinal; the CLI addresses by --name and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon consults only when TabName is empty (daemon/manager_tabs_arrange.go resolveTabTarget)."
+          }
+        },
+        "tui": {
+          "tab_index": {
+            "ok": "The TUI addresses the tab by its stable TabID captured from the live projection (tab name rides along as the legacy fallback), so the ordinal source field is never needed — tab_index exists for callers like the CLI that address by --name without a projection to read ids from."
           }
         }
       },
@@ -2400,6 +2419,9 @@
         },
         "task.next_run_at": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.next_run_far": {
+          "ok": "Derived at READ time and stripped on write (#4843): the daemon stamps it from next_run_at with task.NextRunFarOut (enabled and more than 60 days out), beside the live scheduler entry it reads. saveTasks strips it with the other derived fields, so a surface that sent one would be asserting a verdict rather than requesting a task."
         },
         "task.overdue": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."

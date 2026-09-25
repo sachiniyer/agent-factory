@@ -324,7 +324,7 @@ func TestLayoutCutover_TaskKeysOpenOverlay(t *testing.T) {
 
 // TestE2E_LayoutCutover_FocusRingAndHooksOverlay drives the real tea.Program
 // through the new workspace: Tab cycles the focus ring end to end (through
-// handleMenuHighlighting's re-emit path), the automations strip expands while
+// handleMenuHighlighting), the automations strip expands while
 // focused, Esc returns to the tree, and e opens/closes the hooks overlay.
 func TestE2E_LayoutCutover_FocusRingAndHooksOverlay(t *testing.T) {
 	eh := newE2EHarness(t)

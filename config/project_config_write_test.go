@@ -89,7 +89,7 @@ func TestSetProjectConfigValueUnregisteredSelector(t *testing.T) {
 	loose := initProjectRegistryRepo(t, filepath.Join(base, "loose"))
 	_, err := SetProjectConfigValue(loose, "default_program", "codex")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "af projects register", "an unregistered target never silently writes")
+	require.Contains(t, err.Error(), "af projects add", "an unregistered target never silently writes")
 }
 
 // TestSetProjectConfigValueEqualToGlobalIsStillOverride pins the distinction
