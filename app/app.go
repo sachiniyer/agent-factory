@@ -9,7 +9,9 @@ import (
 
 var Version string
 
-// Run is the main entrypoint into the application.
+// Run is the main entrypoint into the application. program is the launch
+// --program flag; empty means new sessions follow the configured
+// default_program, re-read each time one is created (#4889).
 func Run(ctx context.Context, program string, repo *config.RepoContext) error {
 	h := newHome(ctx, program, repo)
 	p := tea.NewProgram(
