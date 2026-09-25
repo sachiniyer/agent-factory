@@ -796,13 +796,25 @@ func (m *Menu) renderHints(drop map[keys.KeyName]bool) (string, []hintSpan) {
 		}
 		binding := keys.GlobalKeyBindings[k]
 
+		// A fully-suppressed binding advertises a key no press can hit — its
+		// Help().Key is "" once keys.buildMaps shrinks its active keys to zero
+		// (an override taking the action's only default, #1461). Render nothing
+		// rather than an empty-glyph chip; a surviving partner, if any, falls
+		// through to a normal single-key hint below. This mirrors appendHintSpan,
+		// which already registers no click zone for a zero-key binding.
+		if len(binding.Keys()) == 0 {
+			continue
+		}
+
 		// A pair collapses only when its partner is the very next option, still
-		// rendered, and in the same group — otherwise the chip would claim a key
-		// the row is not actually offering.
+		// rendered, still pressable, and in the same group — otherwise the chip
+		// would claim a key the row is not actually offering (or collapse over
+		// an empty partner glyph, leaving a dangling slash).
 		partner, paired := hintPairs[k]
 		if paired {
 			paired = i+1 < len(m.options) && m.options[i+1] == partner &&
-				!drop[partner] && groupOf(i) == groupOf(i+1)
+				!drop[partner] && groupOf(i) == groupOf(i+1) &&
+				len(keys.GlobalKeyBindings[partner].Keys()) > 0
 		}
 
 		var (
