@@ -7,21 +7,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// LoadTasksForRepoID returns tasks belonging to an already-resolved repo ID
-// and is retained for source compatibility with existing v1 importers.
-//
-// Deprecated: LoadTasksForRepoID silently discards the binding-update slice
-// returned by LoadTasksForRepoIDWithBindingUpdates, leaving the durable
-// binding backfill unpublishable. In-repo callers must call
-// LoadTasksForRepoIDWithBindingUpdates directly and publish the returned
-// updates themselves. This wrapper is kept only so downstream programs
-// importing this package continue to compile, and may be removed in a
-// future major version.
-func LoadTasksForRepoID(repoID string) ([]Task, error) {
-	filtered, _, err := LoadTasksForRepoIDWithBindingUpdates(repoID)
-	return filtered, err
-}
-
 // LoadTasksForRepoIDWithBindingUpdates also returns the authoritative task
 // projections whose legacy ProjectPath bindings this load durably backfilled.
 // Daemon callers publish those commits so push-only clients cannot retain a

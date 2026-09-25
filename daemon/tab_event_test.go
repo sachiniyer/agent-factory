@@ -131,7 +131,7 @@ func TestCloseTab_PublishesSessionUpdated(t *testing.T) {
 
 	// Subscribe only after the create so the close's event is unambiguous.
 	_, ch := manager.events.subscribe()
-	closed, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: created.Name})
+	closed, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: created.Name}, "internal daemon caller")
 	if err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}

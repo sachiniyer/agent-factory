@@ -127,9 +127,6 @@ type home struct {
 	// generated once per naming in startNewInstance and cleared with namingInstance.
 	namingPlaceholder string
 
-	// keySent is used to manage underlining menu items
-	keySent bool
-
 	// -- UI Components --
 
 	// store is the single read-only projection of daemon-owned state that the
