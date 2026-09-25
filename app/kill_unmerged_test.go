@@ -5,7 +5,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -231,7 +233,28 @@ func TestHandleKill_ExternalWorktreeSkipsWorktreeLossWarnings(t *testing.T) {
 	gw, err := git.NewGitWorktreeFromStorage(repoDir, wt, "external", "dev/external", baseSHA, true, false)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
-	_, hm := armKill(t, inst)
+	// Kill leaves an external worktree in place, so there is nothing to check:
+	// the dialog must open final, without the off-loop loss check (#4848).
+	var checks atomic.Int32
+	origCheck := killLossCheck
+	t.Cleanup(func() { killLossCheck = origCheck })
+	killLossCheck = func(session.WorktreeCleanupImpact) killLossAssessment {
+		checks.Add(1)
+		return killLossAssessment{}
+	}
+	h := newTestHome(t)
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	model, cmd := h.handleKill()
+	hm := model.(*home)
+	require.Equal(t, stateConfirm, hm.state, "kill must open the confirmation dialog")
+	require.NotNil(t, hm.confirmationOverlay)
+	assert.Empty(t, hm.confirmationOverlay.Pending(), "an external worktree has nothing to check; the dialog opens final")
+	for _, msg := range drainCmd(t, cmd, 2*time.Second) {
+		_, isResult := msg.(killLossCheckedMsg)
+		assert.False(t, isResult, "an external worktree must not start a loss check")
+	}
+	assert.Zero(t, checks.Load(), "an external worktree must not run the loss check")
 
 	rendered := flatten(hm.confirmationOverlay.Render())
 	assert.Contains(t, rendered, "Delete session 'external'?")
