@@ -10758,6 +10758,7 @@ function openConfigAssistant(opts) {
 // src/events.ts
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
+var AUTH_FAILURE_THRESHOLD = 3;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -10771,6 +10772,18 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
+  // Number of consecutive attempts whose close fired before `onopen` ever did
+  // — a 401-rejected upgrade closes with code 1006 and no onopen, which is the
+  // only visible shape of a revoked credential at the WS layer. Reset to 0 on
+  // every successful open so only an unbroken streak of close-before-opens
+  // trips the escalation, not a single transient drop that recovered.
+  consecutiveCloseBeforeOpen = 0;
+  // Allows firing `onAuthFailure` once per close-before-open streak rather than
+  // on every failed reconnect: the caller's probe is a single authenticated
+  // resync, and a 401 on it -> disconnect() stops the stream, while a transport
+  // failure leaves the loop alone. Reset on every successful open so a later
+  // genuine revocation re-escalates.
+  escalatedAuthFailure = false;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
     this.stopped = false;
@@ -10799,13 +10812,17 @@ var EventStream = class {
     try {
       ws = new WebSocket(url);
     } catch {
-      this.scheduleReconnect();
+      this.handleClose(false);
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.retry = 0;
       this.everOpened = true;
+      this.consecutiveCloseBeforeOpen = 0;
+      this.escalatedAuthFailure = false;
       this.cb.onStatus("open");
       this.cb.onResync();
     };
@@ -10823,13 +10840,26 @@ var EventStream = class {
         this.cb.onEvent(ev);
       }
     };
-    ws.onclose = () => this.scheduleReconnect();
+    ws.onclose = () => this.handleClose(opened);
     ws.onerror = () => {
       try {
         ws.close();
       } catch {
       }
     };
+  }
+  /** Single funnel for every socket end (clean close, onerror-close, or a
+   *  constructor throw). A close counts toward the close-before-open streak
+   *  only when `onopen` never fired for THIS attempt (`opened` is false); a
+   *  normal close of an open socket leaves the streak alone. Always
+   *  schedules the backoff reconnect (the existing behavior) so a transient
+   *  drop still heals through the same path, and past the streak threshold
+   *  escalates once via `onAuthFailure`. */
+  handleClose(opened) {
+    if (!opened) {
+      this.consecutiveCloseBeforeOpen += 1;
+    }
+    this.scheduleReconnect();
   }
   scheduleReconnect() {
     if (this.stopped || this.reconnectTimer !== null) {
@@ -10845,6 +10875,10 @@ var EventStream = class {
         this.open();
       }
     }, delay2);
+    if (!this.escalatedAuthFailure && this.consecutiveCloseBeforeOpen >= AUTH_FAILURE_THRESHOLD) {
+      this.escalatedAuthFailure = true;
+      this.cb.onAuthFailure();
+    }
   }
 };
 
@@ -19268,7 +19302,31 @@ function startStream(tok) {
     onResync: () => {
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s })
+    onStatus: (s) => store.set({ live: s }),
+    // A streak of close-before-opens on the WS upgrade means the daemon is
+    // rejecting our credential (the realistic cause is the operator rotating
+    // the token after a transport drop) — structurally the same auth-rejection
+    // the REST resync .catch below already escalates. The browser's WS API
+    // exposes no HTTP status to JS, so EventStream surfaces the failure via
+    // this callback after a small threshold. Don't probe /v1/auth-info: its
+    // handler answers whether the PEER must present a token, not whether THIS
+    // token is valid, so a healthy client and a stale-token client get an
+    // identical response. Issue an authenticated requestResync instead — its
+    // fetchSessionSnapshot 401 trips shouldForgetToken → disconnect(), the
+    // same path the REST resync uses, returning the SPA to login rather than
+    // looping the WS reconnect on the now-revoked credential forever (#1674
+    // regression). `if (token === null)`: "" is the authorized-tokenless
+    // credential (#1696), so the guard MUST be `=== null` rather than `!tok`;
+    // it also no-ops for an escalation that arrives during a teardown already
+    // begun by a previous probe — stopStream/disconnect null `token` and
+    // stream.stop() drops our handlers so EventStream can't keep firing, but a
+    // close in flight before that settles reaches here.
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    }
   });
   stream.start();
 }

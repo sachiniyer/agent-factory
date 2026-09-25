@@ -2632,6 +2632,30 @@ function startStream(tok: string): void {
       requestResync();
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    // A streak of close-before-opens on the WS upgrade means the daemon is
+    // rejecting our credential (the realistic cause is the operator rotating
+    // the token after a transport drop) — structurally the same auth-rejection
+    // the REST resync .catch below already escalates. The browser's WS API
+    // exposes no HTTP status to JS, so EventStream surfaces the failure via
+    // this callback after a small threshold. Don't probe /v1/auth-info: its
+    // handler answers whether the PEER must present a token, not whether THIS
+    // token is valid, so a healthy client and a stale-token client get an
+    // identical response. Issue an authenticated requestResync instead — its
+    // fetchSessionSnapshot 401 trips shouldForgetToken → disconnect(), the
+    // same path the REST resync uses, returning the SPA to login rather than
+    // looping the WS reconnect on the now-revoked credential forever (#1674
+    // regression). `if (token === null)`: "" is the authorized-tokenless
+    // credential (#1696), so the guard MUST be `=== null` rather than `!tok`;
+    // it also no-ops for an escalation that arrives during a teardown already
+    // begun by a previous probe — stopStream/disconnect null `token` and
+    // stream.stop() drops our handlers so EventStream can't keep firing, but a
+    // close in flight before that settles reaches here.
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    },
   });
   stream.start();
 }
