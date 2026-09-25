@@ -1,5 +1,6 @@
 const { createHash, randomUUID } = require("node:crypto");
 const { goSourcesEquivalent, patchTouchesOnlyCommentLines } = require("./go-inert.js");
+const { isCleanTextMerge } = require("./text-merge.js");
 
 // GitHub renders one GitHub App actor under several logins depending on the
 // surface being read: the detail app has been observed as `app/detail-app` on a
@@ -45,6 +46,17 @@ const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // comment-only (#4477). The proof costs two reads per file on every
 // evaluation, so past this the files simply stay gated.
 const COMMENT_ONLY_PROOF_FILE_LIMIT = 20;
+// Who writes the gate's own update merges (#4886): `PUT update-branch` called with
+// the workflow token commits as this author, with GitHub (`web-flow`) as the
+// committer and a signature GitHub verified. Only such a merge may have a path
+// that BOTH sides changed proven line by line; any other merge keeps the
+// path-level proof, where a both-changed path refuses carry.
+const GATE_UPDATE_MERGE_AUTHOR = "github-actions[bot]";
+const GATE_UPDATE_MERGE_COMMITTER = "web-flow";
+// Bounds on that line-level proof. It reads four blobs per path, so past the
+// path limit, or for a blob past the byte limit, the link is simply unproven.
+const TEXT_MERGE_PROOF_PATH_LIMIT = 20;
+const TEXT_MERGE_PROOF_BLOB_BYTES = 4 * 1024 * 1024;
 // The label a maintainer applies to stop this gate on one pull request (#4576).
 //
 // Before #4576 a maintainer's only stop lever was converting the PR to a draft,
@@ -1162,7 +1174,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   } else if (touchesTui) {
     let playTest;
     try {
-      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, contentHead, subject });
     } catch (error) {
       // An attestation that cannot be verified fails closed as a BLOCKED
       // reason for EVERY author class — never an unhandled error. Re-throwing
@@ -5822,6 +5834,18 @@ function sameTreeEntry(left, right) {
 // the only caller turns null into "keep the gate", which is the safe way to be
 // wrong, and an unreadable blob must not take the whole evaluation down (#4484).
 async function readGoSource({ github, context, sha, subject }) {
+  const bytes = await readVerifiedBlob({ github, context, sha, subject });
+  if (!bytes) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+// A blob's raw bytes, or null — trusted only as far as they hash to the blob
+// that was asked for. Null on every failure, for the same reason as above.
+async function readVerifiedBlob({ github, context, sha, subject }) {
   const { owner, repo } = context.repo;
   try {
     const response = await retryRead(`could not read blob ${sha}`, () =>
@@ -5830,8 +5854,7 @@ async function readGoSource({ github, context, sha, subject }) {
     if (data?.encoding !== "base64" || typeof data.content !== "string") return null;
     const bytes = Buffer.from(data.content, "base64");
     const actual = createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
-    if (actual !== sha) return null;
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    return actual === sha ? bytes : null;
   } catch {
     return null;
   }
@@ -5933,7 +5956,14 @@ async function gatedTuiChanges({ github, context, pr, files, subject }) {
 
 // Like a prose review verdict, the attestation names its commit explicitly.
 // The latest recognized attestation wins; a label alone cannot identify tested code.
-async function evaluatePlayTest({ github, context, pr, comments, subject }) {
+//
+// `contentHead` is the update-branch proof's result for this head (#4886). A head
+// the proof walked back from carries nothing of its own past that chain: each
+// link is the previous one plus master, merged without a hand resolution. So an
+// attestation for any link carries to the head, and so does one whose gated
+// paths match the terminal content head. Gated changes that arrived through a
+// link's second parent are master's, already gated on master, not the PR's.
+async function evaluatePlayTest({ github, context, pr, comments, contentHead = null, subject }) {
   const attestations = comments
     .filter((comment) => isAllowedAuthor(comment.user?.login))
     .map((comment) => ({
@@ -5953,50 +5983,75 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
   if (!testedSha) {
     return { ok: false, message: `play-tested label has no SHA-bound attestation; ${remedy}` };
   }
-  if (testedSha !== pr.headRefOid.toLowerCase()) {
-    // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
-    // diverge and compare's file list can truncate. Tree equality covers adds,
-    // deletes, renames, modes and merge conflict resolutions as well as edits.
-    let tested;
-    try {
-      tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
-    } catch (error) {
-      // A well-formed SHA naming no commit is a bad attestation — user input
-      // with its own blocking reason, not a gate-read failure (#4484).
-      const status = Number(error?.status ?? error?.cause?.status);
-      if (status === 404 || status === 422) {
-        return {
-          ok: false,
-          message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
-        };
-      }
-      throw error;
+  if (testedSha === pr.headRefOid.toLowerCase()) {
+    return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+  }
+  const chain = contentHead ? evidenceHeadShasFor(pr.headRefOid, contentHead) : [];
+  const updateMerges = `${contentHead?.chainLength ?? 0} content-preserving update merge(s)`;
+  if (chain.includes(testedSha)) {
+    return {
+      ok: true,
+      message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
+        `through ${updateMerges}; gated changes since arrived from ${pr.baseRefName}`,
+    };
+  }
+  // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
+  // diverge and compare's file list can truncate. Tree equality covers adds,
+  // deletes, renames, modes and merge conflict resolutions as well as edits.
+  let tested;
+  try {
+    tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
+  } catch (error) {
+    // A well-formed SHA naming no commit is a bad attestation — user input
+    // with its own blocking reason, not a gate-read failure (#4484).
+    const status = Number(error?.status ?? error?.cause?.status);
+    if (status === 404 || status === 422) {
+      return {
+        ok: false,
+        message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
+      };
     }
-    const current = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "play-tested", subject });
+    throw error;
+  }
+  // Whether the tested gated paths still describe `sha`: unchanged, or changed
+  // only in comments (#4477). Any path added, removed, or not provably
+  // comment-only makes the attestation stale for it.
+  const covers = async (sha) => {
+    const current = await readGatedTuiTree({ github, context, sha, role: "play-tested", subject });
     const changed = [...new Set([...tested.keys(), ...current.keys()])]
       .filter((path) => !sameTreeEntry(tested.get(path), current.get(path)))
       .sort();
-    if (changed.length > 0) {
-      // A follow-up that only rewords comments leaves the tested program intact,
-      // so it keeps the evidence (#4477). Any path that is added, removed, or
-      // not provably comment-only still makes the attestation stale.
-      const commentOnly = await everyGoChangeIsInert({
-        github,
-        context,
-        subject,
-        changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
-      });
-      if (!commentOnly) {
-        return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
-      }
+    if (changed.length === 0) return { covered: true, changed };
+    const commentOnly = await everyGoChangeIsInert({
+      github,
+      context,
+      subject,
+      changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
+    });
+    return { covered: commentOnly, changed };
+  };
+  const describe = (changed) => changed.length === 0
+    ? "gated paths unchanged"
+    : `gated paths changed only in comments: ${changed.join(", ")}`;
+  const atHead = await covers(pr.headRefOid);
+  if (atHead.covered) {
+    return {
+      ok: true,
+      message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (${describe(atHead.changed)})`,
+    };
+  }
+  if (contentHead) {
+    const atContent = await covers(contentHead.oid);
+    if (atContent.covered) {
       return {
         ok: true,
-        message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
-          `(gated paths changed only in comments: ${changed.join(", ")})`,
+        message: `TUI path gate passed: play-tested commit ${testedSha} covers content head ${contentHead.oid} ` +
+          `(${describe(atContent.changed)}), and head ${pr.headRefOid} adds only ${pr.baseRefName} ` +
+          `through ${updateMerges}`,
       };
     }
   }
-  return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+  return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
 }
 
 // The raw pulls.listFiles entries: the TUI path gate needs each file's status,
@@ -6575,8 +6630,11 @@ function markerApprovalCounts(approverLogin, prAuthor) {
 // authorization to carry review evidence, because a hand-written conflict
 // resolution has the same parents. For every accepted link, derive the only
 // unambiguous path-level three-way result from the parents and their merge base,
-// then require the merge commit's complete tree to equal it. A truncated tree,
-// same-path conflict, malformed entry or committed-tree mismatch returns null.
+// then require the merge commit's complete tree to equal it. A path BOTH sides
+// changed has no path-level result; on the gate's own update merge it is proven
+// line by line instead (#4886, bothChangedMergeEntries), and on any other merge
+// it refuses. A truncated tree, unproven both-changed path, malformed entry or
+// committed-tree mismatch returns null.
 //
 // The containment test is a compare against the base BRANCH rather than a
 // remembered sha, for the same reason #3752 reads the branch: the question is
@@ -6624,6 +6682,10 @@ async function updateBranchContentHead({
           committedDate: commit?.data?.commit?.committer?.date,
           parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
           treeOid: normalizeHeadSha(commit?.data?.commit?.tree?.sha),
+          gateMade:
+            commit?.data?.author?.login === GATE_UPDATE_MERGE_AUTHOR &&
+            commit?.data?.committer?.login === GATE_UPDATE_MERGE_COMMITTER &&
+            commit?.data?.commit?.verification?.verified === true,
         };
       }, subject));
     }
@@ -6725,6 +6787,7 @@ async function updateBranchContentHead({
     }
 
     const expected = new Map();
+    const bothChanged = [];
     const paths = new Set([...baseTree.keys(), ...firstTree.keys(), ...secondTree.keys()]);
     for (const path of paths) {
       const base = baseTree.get(path);
@@ -6738,16 +6801,81 @@ async function updateBranchContentHead({
       } else if (secondValue === base) {
         merged = firstValue;
       } else {
-        // Both sides changed one leaf differently. Reconstructing a textual
-        // merge would require executing or trusting PR content, so this result
-        // is deliberately unknown and review evidence does not carry.
-        return false;
+        // Both sides changed one leaf differently: the path-level result is
+        // unknown, and only the line-level proof below can settle it.
+        bothChanged.push(path);
+        continue;
       }
       if (merged !== undefined) {
         expected.set(path, merged);
       }
     }
+    if (bothChanged.length > 0) {
+      const provenEntries = await bothChangedMergeEntries(mergeOid, bothChanged, {
+        baseTree, firstTree, secondTree, committedTree,
+      });
+      if (!provenEntries) {
+        return false;
+      }
+      for (const [path, entry] of provenEntries) {
+        expected.set(path, entry);
+      }
+    }
     return sameTree(expected, committedTree);
+  };
+
+  // The committed entries of paths BOTH sides changed, each proven to be the
+  // clean line merge of its two sides against the merge base — or null (#4886).
+  //
+  // Before #4886 any such path refused carry, and a hot file is exactly the one
+  // master and a PR both touch: #4789's `a7705950` and #4825's `52b78a17` each
+  // lost a maintainer approval to `app/home_update.go` alone, on merges that
+  // `git merge-tree --write-tree` reproduces exactly. text-merge.js holds the
+  // proof and says what it does and does not establish.
+  //
+  // Admitted only on the gate's own update merge, and only for a regular file on
+  // all four sides: an add/add, a delete on either side, a symlink, a submodule
+  // or a type change stays unproven. The mode takes the same three-way rule as a
+  // leaf. Every read is verified against the object id the tree named, and any
+  // failure, limit or byte difference refuses the whole link.
+  const bothChangedMergeEntries = async (mergeOid, bothChanged, trees) => {
+    const merge = await readCommit(mergeOid);
+    if (!merge?.gateMade || bothChanged.length > TEXT_MERGE_PROOF_PATH_LIMIT) {
+      return null;
+    }
+    const regularBlob = (entry) => {
+      const [mode, type, sha] = String(entry ?? "").split("\0");
+      return type === "blob" && (mode === "100644" || mode === "100755") ? { mode, sha } : null;
+    };
+    const proven = new Map();
+    for (const path of bothChanged) {
+      const [base, first, second, committed] = [
+        trees.baseTree, trees.firstTree, trees.secondTree, trees.committedTree,
+      ].map((tree) => regularBlob(tree.get(path)));
+      if (!base || !first || !second || !committed) {
+        return null;
+      }
+      const mode = first.mode === second.mode ? first.mode
+        : first.mode === base.mode ? second.mode
+          : second.mode === base.mode ? first.mode
+            : null;
+      if (mode !== committed.mode) {
+        return null;
+      }
+      const [baseBytes, firstBytes, secondBytes, committedBytes] = await Promise.all(
+        [base, first, second, committed].map(({ sha }) =>
+          readVerifiedBlob({ github, context, sha, subject })),
+      );
+      const blobs = { base: baseBytes, first: firstBytes, second: secondBytes, committed: committedBytes };
+      if (
+        Object.values(blobs).some((bytes) => !bytes || bytes.length > TEXT_MERGE_PROOF_BLOB_BYTES) ||
+        !isCleanTextMerge(blobs)
+      ) {
+        return null;
+      }
+      proven.set(path, trees.committedTree.get(path));
+    }
+    return proven;
   };
 
   // Whether these parents are the shape `PUT update-branch` produces: exactly
