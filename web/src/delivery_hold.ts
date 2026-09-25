@@ -309,6 +309,15 @@ export class MidLineHold {
       const payload = data.startsWith(PASTE_START) ? "" : data;
       const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
       this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    } else {
+      // A non-report, non-paste ESC sequence is an editing key (arrows, Delete,
+      // Home/End, history recall). On the live path noteInput routes exactly these
+      // into beginOrRenew as draft-starting edits, so a queued run cannot be the
+      // queued commitment that ends the line. Leaving a prior queued Enter's
+      // queuedEndsLine=true standing here would let noteFlushed release the hold
+      // over a line the flush has just populated with a recalled/edited draft, so
+      // reset it and let the hold survive the flush — matching noteInput (#3025).
+      this.queuedEndsLine = false;
     }
     return this.beginOrRenew(nowMs);
   }

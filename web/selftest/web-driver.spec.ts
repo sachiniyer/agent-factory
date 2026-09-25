@@ -2307,6 +2307,117 @@ test("#3024: a partially typed line takes the daemon's delivery-hold lease", REA
   }
 });
 
+test("#3025: a queued editing key after queued Enter keeps the delivery-hold lease across reconnect", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The live-path #3024 test above proves the browser takes the lease on a half-typed
+  // agent line and stops renewing once it is committed. This one pins the queued path
+  // that #3024 deliberately does not reach: input typed against a DOWN stream is
+  // queued (noteQueued), whose commit tracking `noteQueued` owns separately from the
+  // live `noteInput` path.
+  //
+  // The bug: a queued Enter stamped `queuedEndsLine=true`, and a subsequent queued
+  // editing key (history recall via arrow-up ESC[A) skipped the `queuedEndsLine`
+  // update because it is ESC-prefixed. The stale true survived into `noteFlushed`,
+  // which released the hold over a line the flush had just populated with the recalled
+  // draft. The renew timer then stopped, the daemon's pause lease lapsed, and the
+  // next automated delivery could paste+Enter into the same PTY (#1586/#1638).
+  //
+  // Observed through the PauseStatusPoll RPC, exactly as #3024: a hold that survives
+  // the flush keeps renewing the lease; one that was false-released stops. The live
+  // path treats ESC[A as a draft-starting edit, so the queued path must agree and the
+  // renewals must continue past the reconnect.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  let forwardStream = false;
+
+  try {
+    await p.routeWebSocket(
+      (url) => url.pathname.includes("/stream"),
+      (ws) => {
+        if (forwardStream) {
+          ws.connectToServer();
+          return;
+        }
+        // Refuse this attempt. onclose → scheduleReconnect, so the agent terminal
+        // stays "reconnecting" and every keystroke takes the queued path.
+        ws.close();
+      },
+    );
+
+    let pauses = 0;
+    await p.route("**/v1/PauseStatusPoll", async (route) => {
+      pauses += 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+    });
+
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+
+    const main = p.locator(".af-main");
+    const host = p.locator(".af-term-host .af-pane").first();
+    // Deterministic precondition, and the whole point of this test: the agent stream
+    // is NOT open before a single key is typed. A duration would only make this
+    // likely; the status seam makes it certain, so every keystroke takes the queued
+    // path the bug lives in rather than the live one #3024 covers.
+    await expect(main, "the stream must be down before typing, or the queued path is untested").toHaveAttribute(
+      "data-term-status",
+      "reconnecting",
+      { timeout: 30_000 },
+    );
+
+    await host.click();
+    pauses = 0;
+    // The exact failing sequence: a draft, a queued Enter, then a queued history-recall
+    // (arrow-up). All three are queued while the stream is down, so none reaches the
+    // PTY until the flush on reconnect.
+    await p.keyboard.type("ls");
+    await p.keyboard.press("Enter");
+    await p.keyboard.press("ArrowUp");
+
+    // Let one through and the flush lands — this is where the bug fired. onopen calls
+    // onStatus("open") BEFORE flushPendingInput, so once the attribute reads "open"
+    // the flush has run and the hold's post-flush state is settled.
+    forwardStream = true;
+    await expect(main, "the stream must come back so the queued input can be flushed").toHaveAttribute(
+      "data-term-status",
+      "open",
+      { timeout: 45_000 },
+    );
+
+    // The renew timer fires every 500ms and tick re-pauses every ~1s. Over this
+    // window a hold that survived the flush adds several renewals; one that was
+    // false-released (the bug) stops the timer during the flush and adds none. The
+    // +2 floor absorbs a single residual renewal in flight at the flush boundary.
+    await p.waitForTimeout(500);
+    const pausesAtOpen = pauses;
+    await expect
+      .poll(() => pauses, {
+        message: "the hold must survive the flush of [Enter, arrow-up]: renewals keep the daemon lease alive",
+        timeout: 10_000,
+      })
+      .toBeGreaterThanOrEqual(pausesAtOpen + 2);
+
+    // Liveness: a REAL Enter on the now-open stream commits the recalled line and
+    // must stop the renewals, so the lease lapses and a held delivery can land —
+    // the fix bounds the hold, it does not pin it. Same contract as #3024 above.
+    const afterSurvived = pauses;
+    await p.keyboard.press("Enter");
+    await p.waitForTimeout(2_000);
+    expect(pauses, "a real Enter on the open stream must stop renewing the lease").toBe(afterSurvived);
+  } finally {
+    forwardStream = true;
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
 test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_FIXTURE, async ({ browser }) => {
   // The defect this pins is invisible to a unit test, which is how it shipped: the
   // old unit test asserted only that our handler declined Cmd+C, under a NAME that
