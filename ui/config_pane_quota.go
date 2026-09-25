@@ -76,8 +76,14 @@ func (c *ConfigPane) SetQuotaLoading() {
 
 // appendQuotaRows appends the Usage heading and one row per agent. The section
 // renders even when the read failed: an unavailable section that says so beats
-// a silently absent one, which would look like "no usage to report".
+// a silently absent one, which would look like "no usage to report". But a
+// pane whose host never kicked a read off renders NO section — SetEntries alone
+// is used by flows that have no quota fetcher, and a permanent "Loading
+// usage…" there would be a worse lie than absence.
 func (c *ConfigPane) appendQuotaRows() {
+	if !c.quota.loading && !c.quota.loaded {
+		return
+	}
 	c.rows = append(c.rows, configRow{heading: quotaHeading})
 	for i := range c.quota.rows {
 		c.rows = append(c.rows, configRow{quota: &c.quota.rows[i]})

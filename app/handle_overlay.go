@@ -415,13 +415,15 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	// since this TUI started must show as it is now rather than as af remembers.
 	accountsCmd := m.loadAccountsIntoPane()
 	// The Usage section (#2983) for the same reason: a session parked at a limit
-	// since the TUI started is exactly the signal the report exists to show.
-	quotaCmd := m.loadQuotaIntoPane()
+	// since the TUI started is exactly the signal the report exists to show. On
+	// a remote target its read is fired by the accounts read's completion, so
+	// the returned cmd stays the accounts one.
+	m.loadQuotaIntoPane()
 	m.showAccountRegisterPending()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateConfigEditor
-	return m, tea.Batch(accountsCmd, quotaCmd)
+	return m, accountsCmd
 }
 
 // handleStateConfigEditor routes key events to the config editor overlay. Esc

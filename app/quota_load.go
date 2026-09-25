@@ -19,17 +19,19 @@ type quotaLoadedMsg struct {
 // Accounts read it is made on every open: a session parked at a limit since the
 // TUI started must show as it is now, not as af last remembered.
 //
-// The local read answers synchronously over the gob control socket; the remote
-// one is a real HTTP round trip, so it runs as a cmd and a stale response is
-// discarded by the generation the way accountsLoadedMsg's is.
-func (m *home) loadQuotaIntoPane() tea.Cmd {
+// The local read answers synchronously over the gob control socket. The remote
+// one is a real HTTP round trip, so it is fired when the opening's accounts
+// read lands (handleAccountsLoaded → remoteQuotaLoadCmd): that keeps one
+// remote read in flight per opening and leaves showConfigEditor returning the
+// accounts cmd alone — the single-cmd shape the UI-loop tests drive. A stale
+// response is discarded by the generation the way accountsLoadedMsg's is.
+func (m *home) loadQuotaIntoPane() {
 	m.configPane.SetQuotaLoading()
 	if apiclient.IsRemoteTarget() {
-		return m.remoteQuotaLoadCmd()
+		return
 	}
 	resp, err := targetedQuotaReport()
 	m.applyQuotaToPane(resp, err)
-	return nil
 }
 
 func (m *home) remoteQuotaLoadCmd() tea.Cmd {

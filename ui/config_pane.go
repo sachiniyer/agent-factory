@@ -581,9 +581,6 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("Loading usage…", configHintStyle), "\n"), "\n")...)
 				case c.quota.unavailable != "":
 					lines = append(lines, strings.Split(c.renderQuotaUnavailable(), "\n")...)
-				case !c.quota.loaded:
-					// Never fetched — the read has not run since the pane opened.
-					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("Loading usage…", configHintStyle), "\n"), "\n")...)
 				default:
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaHeadingNote, configHintStyle), "\n"), "\n")...)
 					if len(c.quota.rows) == 0 {
