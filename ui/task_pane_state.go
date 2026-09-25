@@ -43,6 +43,7 @@ import (
 // It reports whether the rows or the selection changed. A list from a
 // different scope, which nothing held belongs to, goes through ResetTasks.
 func (s *TaskPane) SetTasks(tasks []task.Task) bool {
+	s.settleConfirmedDrafts(tasks)
 	held := s.heldRows()
 	queued := make(map[string]bool, len(s.deleted))
 	for _, d := range s.deleted {
@@ -132,6 +133,7 @@ func (s *TaskPane) selectTaskID(id string) {
 // through SetTasks.
 func (s *TaskPane) ResetTasks(tasks []task.Task) {
 	s.dirtyIDs = nil
+	s.unconfirmedIDs = nil
 	s.deleted = nil
 	s.editing = false
 	s.tasks = nil
@@ -207,6 +209,9 @@ func (s *TaskPane) markTaskDirty(id string) {
 	}
 	s.dirtyIDs[id] = true
 	s.dirty = true
+	// An edit the user makes is theirs to send, even on a task whose last
+	// save could not be confirmed (#4824).
+	delete(s.unconfirmedIDs, id)
 }
 
 // ConsumeDirty returns a field-level patch for each task the user actually
@@ -227,7 +232,7 @@ func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 	}
 	var edits []task.TaskEdit
 	for _, t := range s.tasks {
-		if !s.dirtyIDs[t.ID] {
+		if !s.dirtyIDs[t.ID] || s.unconfirmedIDs[t.ID] {
 			continue
 		}
 		update := task.DiffTask(s.originals[t.ID], t)
@@ -245,7 +250,7 @@ func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 			Expect: task.ExpectProject(s.originals[t.ID]),
 		})
 	}
-	s.dirtyIDs = nil
+	s.dirtyIDs = s.keepUnconfirmedDirty()
 	return edits
 }
 
@@ -263,6 +268,7 @@ func (s *TaskPane) AcknowledgeSavedEdit(id string) {
 		}
 		s.originals[id] = current
 		delete(s.dirtyIDs, id)
+		delete(s.unconfirmedIDs, id)
 		return
 	}
 }
@@ -315,6 +321,7 @@ func (s *TaskPane) DiscardDeletedDraft(id string) {
 	}
 	s.tasks = kept
 	delete(s.dirtyIDs, id)
+	delete(s.unconfirmedIDs, id)
 	delete(s.originals, id)
 	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
 	s.selectTaskID(selectedID)
