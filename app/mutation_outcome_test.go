@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // replyLost is the error withDaemonHTTPMutation returns when the daemon may have
@@ -139,4 +140,21 @@ func TestHandleTaskCreate_UncertainOutcomeClosesFormAndRereads(t *testing.T) {
 	require.Len(t, h.store.GetTasks(), 1, "the list is re-read from disk and shows the task the daemon saved")
 	assert.Contains(t, h.errBox.FullError(), "could not be confirmed")
 	assert.NotContains(t, h.errBox.FullError(), "failed to save task")
+}
+
+// A move whose reply was lost is not projected locally and not reported as a
+// refusal; the snapshot shows where the tab ended up.
+func TestMoveTab_UncertainOutcomeIsNotAFailure(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	h.focusRegion(layout.RegionTree)
+	h.store.SetActiveTab(1)
+	before := tabNames(alpha)
+	t.Cleanup(SetTabReordererForTest(func(daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
+		return daemon.ReorderTabResponse{}, replyLost()
+	}))
+
+	pressNav(t, h, ">")
+
+	require.Equal(t, before, tabNames(alpha), "nothing is projected locally for an unconfirmed move")
+	assert.Contains(t, h.errBox.FullError(), "could not be confirmed")
 }

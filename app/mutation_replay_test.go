@@ -93,6 +93,10 @@ func tuiMutations() map[string]func() error {
 			return err
 		},
 		"/v1/CloseTab": func() error { return closeTabThroughDaemon(daemon.CloseTabRequest{ID: "i"}) },
+		"/v1/ReorderTab": func() error {
+			_, err := reorderTabThroughDaemon(daemon.ReorderTabRequest{ID: "i"})
+			return err
+		},
 		"/v1/RenameTab": func() error {
 			_, err := renameTabThroughDaemon(daemon.RenameTabRequest{ID: "i"})
 			return err
@@ -142,8 +146,10 @@ func TestMutationCommittedThenReplyLost_SentExactlyOnce(t *testing.T) {
 	pointDaemonHTTPAt(t, sock)
 
 	mutations := tuiMutations()
-	if len(mutations) != 17 {
-		t.Fatalf("expected the 17 TUI mutation seams #4820 enumerates, got %d", len(mutations))
+	// #4820 enumerated 17; ReorderTab (#1813) landed on master while the fix was
+	// in review. TestReadWrapperCallsOnlyReads is what catches the next one.
+	if len(mutations) != 18 {
+		t.Fatalf("expected 18 TUI mutation seams, got %d", len(mutations))
 	}
 	for route, call := range mutations {
 		t.Run(strings.TrimPrefix(route, "/v1/"), func(t *testing.T) {

@@ -601,6 +601,12 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 
 	resp, err := reorderTabThroughDaemon(target.reorderTabRequest(tab.ID, tab.Name, to))
 	if err != nil {
+		// A move that may have landed is not projected locally or reported as
+		// refused (#4820): the next snapshot shows where the tab ended up.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("moving tab %q", tab.Name), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	if tab.ID != "" {

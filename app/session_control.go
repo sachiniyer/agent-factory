@@ -419,7 +419,7 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 // its own arithmetic.
 var reorderTabThroughDaemon = func(request daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
 	var response daemon.ReorderTabResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		response, e = c.ReorderTab(request)
 		return e
