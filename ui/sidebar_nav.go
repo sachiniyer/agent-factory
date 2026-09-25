@@ -419,9 +419,49 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 		return false
 	}
 
+	// Capture the previously selected instance BEFORE SetSelectedInstance
+	// mutates it, and the RAW cursor, because an explicit h/← collapse
+	// (treeCollapsed) must survive a Down that stays on THIS instance's row
+	// but must NOT survive a move that left the row for a header or an
+	// archived row. pushSelection skips header rows, so after a second h/←
+	// folds the Instances header the store's sticky selection and
+	// treeCollapsed both still name this instance while the cursor is on the
+	// header; keying the override off the store alone would pin every
+	// subsequent Down on the header. c4757da9 routed Down/Up through
+	// selectTabStop and dropped this guard, turning a single Down off the
+	// collapsed row into an unconditional re-expand.
+	prev := s.proj.GetSelectedInstance()
+	cur := s.rawSelection()
+	onInstRow := cur.Kind == SectionInstances && !cur.IsHeader && !cur.IsTab &&
+		cur.ItemIndex == stop.itemIndex
+	// When the target tab belongs to the instance the cursor already rests on
+	// AND that instance is explicitly collapsed (h/←), the rebuilt list omits
+	// its tab rows, so the loop below could not land and would return false —
+	// but only after SetActiveTab reset the active tab to tab 0, silently
+	// retargeting the preview pane while the fold visually persists, and the
+	// false return makes moveVerticalNavStop fall through to expand the
+	// Archived section. Treat the move as a consumed no-op before any store
+	// mutation: the fold, active tab and cursor are unchanged. liveTabStops()
+	// emits these stops regardless of treeCollapsed, so this guard is reached
+	// on a normal cross-row Down, not a stale one. The onInstRow gate is
+	// load-bearing: without it, a Down from the Instances header (store still
+	// sticky on this collapsed instance) is consumed here and neither the
+	// section nor the instance ever re-expands. Navigation from a header or an
+	// archived row falls through to select its target tab normally.
+	if prev != nil && prev.Title == inst.Title && s.treeCollapsed == inst.Title && onInstRow {
+		return true
+	}
 	s.proj.SetSelectedInstance(inst)
 	s.proj.SetActiveTab(stop.tabIndex)
-	s.treeCollapsed = ""
+	// Clear the override on any move that is NOT a same-row, same-instance
+	// move: a cross-instance move (so every newly selected instance starts
+	// auto-expanded, mirroring pushSelection), and — the case the store-only
+	// test missed — a move whose cursor left the instance row for a header or
+	// an archived row, where the sticky store selection still names this
+	// instance but the target tab must be revealed and selected normally.
+	if prev == nil || prev.Title != inst.Title || !onInstRow {
+		s.treeCollapsed = ""
+	}
 	for i, sec := range s.sections {
 		if sec.Kind == SectionInstances {
 			s.sections[i].Expanded = true
