@@ -6513,6 +6513,7 @@ function isDaemonRejection(err, status) {
   return err?.daemon_rejected === true && status !== 502 && status !== 504 && envelopeErrorCode(err) !== MUTATION_COMMITTED_ERROR_CODE;
 }
 var MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
+var PROJECT_REBOUND_ERROR_CODE = "project_rebound";
 var ApiError = class extends Error {
   status;
   code;
@@ -6528,6 +6529,9 @@ var ApiError = class extends Error {
 };
 function isMutationCommittedError(e) {
   return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE && e.status !== 502 && e.status !== 504;
+}
+function isProjectReboundError(e) {
+  return e instanceof ApiError && e.daemonRejected && e.code === PROJECT_REBOUND_ERROR_CODE;
 }
 function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
@@ -6688,8 +6692,12 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
-async function rebindProject(id, path, token2) {
-  const resp = await af("RebindProject", { id, path }, token2);
+async function rebindProject(id, path, token2, expectedRoot = null) {
+  const request = { id, path };
+  if (expectedRoot !== null && expectedRoot !== "") {
+    request.expected_root = expectedRoot;
+  }
+  const resp = await af("RebindProject", request, token2);
   return resp.project;
 }
 async function listProjects(token2) {
@@ -18379,6 +18387,7 @@ function openRebindProject(projectId, label) {
     return;
   }
   const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  let expectedRoot = oldRoot;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -18415,6 +18424,28 @@ function openRebindProject(projectId, label) {
           return true;
         };
         const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
+        const reArmAfterRebound = (e) => {
+          refreshRegisteredProjects();
+          void listProjects(tok).then((projects) => {
+            if (!current()) return;
+            const now = token === tok ? projects.find((p) => p.id === projectId)?.root : void 0;
+            if (now !== void 0) expectedRoot = now;
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(now !== void 0 ? `Rebound elsewhere, to ${now} \xB7 submit again to move it from there` : errorText(e));
+          }).catch(() => {
+            if (!current()) return;
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+        };
         const unknownOutcome = () => {
           if (modal === m) closeModal();
           refreshRegisteredProjects();
@@ -18424,7 +18455,7 @@ function openRebindProject(projectId, label) {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok).then(() => {
+        void rebindProject(projectId, path, tok, expectedRoot).then(() => {
           if (!current()) return;
           if (!settle()) {
             refreshRegisteredProjects();
@@ -18456,6 +18487,10 @@ function openRebindProject(projectId, label) {
           }
           if (isMutationOutcomeUncertain(e)) {
             unknownOutcome();
+            return;
+          }
+          if (isProjectReboundError(e)) {
+            reArmAfterRebound(e);
             return;
           }
           if (modal !== m) {

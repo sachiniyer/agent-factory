@@ -47,7 +47,7 @@ func submitPickerRebind(t *testing.T, h *home, path string) tea.Cmd {
 func stubRebind(t *testing.T, err error) {
 	t.Helper()
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, path string) (config.Project, error) {
 		if err != nil {
 			return config.Project{}, err
 		}
@@ -200,7 +200,7 @@ func activeRebindHome(t *testing.T) (*home, string) {
 func stubRebindThrough(t *testing.T, after func()) {
 	t.Helper()
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, path string) (config.Project, error) {
 		project, err := config.RebindProject(projectID, path)
 		if err == nil && after != nil {
 			after()
@@ -281,7 +281,7 @@ func TestUnknownRebindOutcomeNeverFollows(t *testing.T) {
 	h, _ := activeRebindHome(t)
 	rootBefore := h.repoRoot
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, path string) (config.Project, error) {
 		if _, err := config.RebindProject(projectID, path); err != nil {
 			return config.Project{}, err
 		}
@@ -301,7 +301,7 @@ func TestUnknownRebindOutcomeNeverFollows(t *testing.T) {
 func TestCommittedRebindFollowsAndReports(t *testing.T) {
 	h, _ := activeRebindHome(t)
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, path string) (config.Project, error) {
 		if _, err := config.RebindProject(projectID, path); err != nil {
 			return config.Project{}, err
 		}

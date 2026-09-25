@@ -36,6 +36,7 @@ import {
   getConfig,
   isMutationCommittedError,
   isMutationOutcomeUncertain,
+  isProjectReboundError,
   handoffSession,
   listBackends,
   listDirectory,
@@ -1266,7 +1267,11 @@ function followConfirmedRebind(projectId: string, tok: string, connection: numbe
  *    transport — never follows: the registry is re-read, the selection is left
  *    alone, and one notice says so. A reply that arrives after the wait only
  *    re-reads the registry;
- *  - a definitive refusal is shown inline and re-arms the form. */
+ *  - a definitive refusal is shown inline and re-arms the form. The request
+ *    carries the root this modal was opened on, so a rebind that another client
+ *    beat to the registry is refused rather than silently overwriting it (#4822);
+ *    that refusal re-reads the registry first and re-arms against the root the
+ *    project is bound to now. */
 function openRebindProject(projectId: string, label: string): void {
   if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
     // Escape dismissed the modal while the daemon was still deciding. A second
@@ -1278,6 +1283,10 @@ function openRebindProject(projectId: string, label: string): void {
   // The root the registration points at NOW: a selection still on it is the user
   // still in this rebind, which a confirmed success may follow.
   const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  // The root the next submission tells the daemon it expects. It starts as the
+  // one the switcher showed, and moves only when a "rebound elsewhere" refusal
+  // re-reads the registry and tells the user where the project is now.
+  let expectedRoot = oldRoot;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -1325,6 +1334,35 @@ function openRebindProject(projectId: string, label: string): void {
         // has not left the old root. Decided at reply time — nothing is carried
         // forward to a later read.
         const stillHere = (): boolean => modal === m || (oldRoot !== null && store.get().selectedProject === oldRoot);
+        // Another rebind moved the project after this modal read it: nothing was
+        // written. Re-read the registry, then re-arm the form against the root it
+        // reports now, so the user decides again knowing where the project is.
+        const reArmAfterRebound = (e: unknown): void => {
+          refreshRegisteredProjects();
+          void listProjects(tok)
+            .then((projects) => {
+              if (!current()) return;
+              // A read under a credential this page no longer holds says nothing
+              // it may act on; the form still re-arms, on the daemon's message.
+              const now = token === tok ? projects.find((p) => p.id === projectId)?.root : undefined;
+              if (now !== undefined) expectedRoot = now;
+              if (modal !== m) {
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(now !== undefined ? `Rebound elsewhere, to ${now} · submit again to move it from there` : errorText(e));
+            })
+            .catch(() => {
+              if (!current()) return;
+              if (modal !== m) {
+                surfaceTabError(e);
+                return;
+              }
+              m.setBusy(false);
+              m.setError(errorText(e));
+            });
+        };
         const unknownOutcome = (): void => {
           if (modal === m) closeModal();
           refreshRegisteredProjects();
@@ -1337,7 +1375,7 @@ function openRebindProject(projectId: string, label: string): void {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok)
+        void rebindProject(projectId, path, tok, expectedRoot)
           .then(() => {
             if (!current()) return;
             if (!settle()) {
@@ -1377,6 +1415,10 @@ function openRebindProject(projectId: string, label: string): void {
               // an intermediary). Re-arming the form would invite a second move of
               // the durable identity. Only a definitive daemon refusal re-arms.
               unknownOutcome();
+              return;
+            }
+            if (isProjectReboundError(e)) {
+              reArmAfterRebound(e);
               return;
             }
             if (modal !== m) {

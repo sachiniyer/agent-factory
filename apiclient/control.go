@@ -378,10 +378,32 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 // path through the daemon — the single writer (#960) — which resolves the path
 // on its own filesystem, refuses a root another project owns, and publishes
 // projects.changed. HTTP twin of RebindProject.
-func (c *Client) RebindProject(id, path string) (config.Project, error) {
+//
+// expectedRoot is the root the caller showed the user; the daemon applies the
+// rebind only while the registry still records it, and otherwise answers with a
+// *ProjectReboundError (#4822). Empty means no precondition.
+func (c *Client) RebindProject(id, expectedRoot, path string) (config.Project, error) {
 	var resp daemon.RebindProjectResponse
-	if err := c.call("RebindProject", daemon.RebindProjectRequest{ID: id, Path: path}, &resp); err != nil {
+	req := daemon.RebindProjectRequest{ID: id, Path: path, ExpectedRoot: expectedRoot}
+	if err := c.call("RebindProject", req, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil
+}
+
+// ProjectReboundError is the daemon's definitive refusal of a rebind whose
+// expected root no longer matched the registry: another rebind landed first
+// (apiproto.ErrorCodeProjectRebound, #4822). Nothing was written. Detail is the
+// daemon's message, which names the root the project is bound to now.
+type ProjectReboundError struct {
+	Detail string
+}
+
+func (e *ProjectReboundError) Error() string { return e.Detail }
+
+// IsProjectRebound reports whether err (or anything it wraps) is a
+// ProjectReboundError.
+func IsProjectRebound(err error) bool {
+	var rebound *ProjectReboundError
+	return errors.As(err, &rebound)
 }

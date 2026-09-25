@@ -753,7 +753,7 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 	if err != nil {
 		return fmt.Errorf("rebind %w", err)
 	}
-	project, err := config.RebindProject(req.ID, path)
+	project, err := rebindRegisteredProject(req.ID, req.ExpectedRoot, path)
 	if err != nil {
 		return err
 	}

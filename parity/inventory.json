@@ -1950,6 +1950,13 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "RebindProjectRequest": {
+        "cli": {
+          "expected_root": {
+            "ok": "The compare-and-set precondition (#4822) protects a root a UI DISPLAYED from a rebind that landed after the user read it; the TUI and web send the root they showed. `af projects rebind <id> <path>` shows nothing first — reading the registry and echoing its root back in the same process would only narrow the window, not close any race the user could see — so it keeps the documented last-writer-wins behaviour, which is also the contract for any client that omits the field (docs/http-api.md)."
+          }
+        }
+      },
       "SnapshotRequest": {
         "cli": {
           "created_after": {

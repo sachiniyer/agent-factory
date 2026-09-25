@@ -257,7 +257,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/RebindProject",
-		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns.",
+		Description: "Move a registered project's stable identity (id, a prj_… registry id) to the checkout at path — the repair after that checkout was moved or recloned elsewhere. Path resolves on the daemon's filesystem; the rebind refuses a root another project already owns. With expected_root (the root the caller last saw), it applies only if the registry still records that root, and otherwise answers 409 project_rebound; omitted, last writer wins.",
 		requestType: reflect.TypeOf(RebindProjectRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.RebindProject) },
 	},

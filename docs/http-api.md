@@ -123,6 +123,11 @@ retrying the completed mutation. The daemon omits `daemon_rejected` from these
 committed-outcome envelopes. CLI `--json` ordinary errors retain their existing
 shape without the HTTP provenance marker.
 
+`error.code: "project_rebound"` (status `409`, with `daemon_rejected: true`) is
+`POST /v1/RebindProject`'s refusal of a compare-and-set rebind — see
+[Rebinding a project](#rebinding-a-project). Nothing was written, so it is a
+definitive refusal, not an uncertain outcome.
+
 ## Status codes
 
 | Status | Meaning |
@@ -131,6 +136,7 @@ shape without the HTTP provenance marker.
 | `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
+| `409 Conflict` | `POST /v1/RebindProject` only: the request's `expected_root` no longer matches the project's recorded root, because another rebind landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 
@@ -206,6 +212,38 @@ fields accepts an empty body (`-d '{}'` or no `-d` at all).
 `GET /v1/health` is the one non-POST route: a liveness probe (alias for the
 internal `Ping` RPC) that answers even while the daemon is restoring sessions,
 with response `data` of `{ "ok": true }`.
+
+### Rebinding a project
+
+`POST /v1/RebindProject` moves a registered project's stable `id` to the
+checkout at `path`. It accepts an optional `expected_root`, the root the caller
+last saw the project bound to (the `root` from `POST /v1/ListProjects`):
+
+```bash
+curl --unix-socket ~/.agent-factory/daemon-http.sock \
+    -X POST http://af/v1/RebindProject -d '{"id":"prj_…","path":"/home/me/src/repo","expected_root":"/home/me/old/repo"}'
+```
+
+With `expected_root`, the rebind is a compare-and-set. The daemon applies it
+only if the registry still records that root when the registry lock is taken,
+so of two rebinds made from the same observed root, exactly one applies. The
+other gets `409` with `error.code: "project_rebound"`, and its message names the
+root the project is bound to now. Re-read the registry, show the user the
+current root, and retry with that as `expected_root` if they still want the
+move. A request whose `path` is already the recorded root also succeeds, so a
+retried request that already landed is not refused.
+
+`expected_root` is optional. A request that omits it (or sends it empty) is
+applied whatever the project is bound to, so the last writer wins. This is what
+clients written before the field existed get, and they are never refused
+because the field is missing. The TUI and web client send the root they displayed. `af
+projects rebind` does not; it rebinds unconditionally, as before.
+
+A daemon that predates the field treats it like any unknown field (see
+[Unknown fields](#unknown-fields)). It rejects a hand-authored request with `400`.
+For a request with `X-AF-Client-Version`, such as the TUI's, it ignores the field
+and applies the rebind without the check. A client that needs the guarantee must
+run against a daemon at least as new as itself.
 
 **Not in the catalog.** The generated table is `af api`'s discovery surface — the
 client-facing session and task RPCs — so the daemon serves several routes it does

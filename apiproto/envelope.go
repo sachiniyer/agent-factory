@@ -48,6 +48,12 @@ type EnvelopeError struct {
 // happened.
 const ErrorCodeMutationCommitted = "mutation_committed"
 
+// ErrorCodeProjectRebound says a RebindProject request carrying expected_root
+// was refused because the project's recorded root no longer matched it:
+// another rebind landed first (#4822). Nothing was written; the caller should
+// re-read the registry and let the user decide again.
+const ErrorCodeProjectRebound = "project_rebound"
+
 // Success wraps a payload as a successful Envelope (Error nil).
 func Success(data any) Envelope {
 	return Envelope{Data: data, Error: nil}
