@@ -719,7 +719,7 @@ func (s *TaskPane) renderListMode() string {
 			parts = append(parts, tsk.Name)
 		}
 		if tsk.Enabled && tsk.NextRunAt != nil {
-			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+			parts = append(parts, "next "+nextRunLabel(tsk, s.now()))
 		}
 		header := strings.Join(parts, "  ")
 
