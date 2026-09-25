@@ -30,6 +30,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync/atomic"
 	"time"
 
@@ -48,7 +49,21 @@ import (
 // daemon boot order), so a call fired in that window sees connection-refused.
 // Callers distinguish the two with IsTransportError so they can retry a bind
 // race without ever masking a real daemon error by retrying it.
-type TransportError struct{ Err error }
+//
+// A transport error is not proof that nothing happened. A read that fails
+// mid-response comes after the daemon ran the handler, so a MUTATION may have
+// committed (#4820). NotSent separates the two: it is true only when the client
+// never obtained a connection, so no request byte left this process. The zero
+// value is false — "may have been received" — so a TransportError built anywhere
+// without that proof fails safe. Mutation callers retry only NotSent failures;
+// see IsMutationOutcomeUncertain.
+type TransportError struct {
+	Err error
+	// NotSent reports that the request provably never reached the daemon: the
+	// round-trip failed before any connection was obtained (a refused dial, a
+	// missing socket during the daemon-HTTP bind race).
+	NotSent bool
+}
 
 func (e *TransportError) Error() string { return e.Err.Error() }
 func (e *TransportError) Unwrap() error { return e.Err }
@@ -271,16 +286,29 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 	// local unix socket carries no token (trusted transport) and this is a no-op.
 	c.setAuth(httpReq.Header)
 
+	// Record whether the transport ever handed this request a connection. Until
+	// it does, not one byte of the request can have been written, so a failure
+	// in that window is a request the daemon never saw — the only transport
+	// failure a mutation may safely re-send (#4820). Once a connection exists the
+	// request may be on the wire, and the daemon may run the handler even if the
+	// reply is lost. GotConn fires before the write begins, so the classification
+	// errs toward "may have been received".
+	var gotConn atomic.Bool
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(httpReq.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) },
+	}))
 	httpResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		// The round-trip never reached a daemon handler — refused dial, missing
-		// socket, etc. Tag it so a caller can tell a bind race from a real error.
-		return &TransportError{Err: err}
+		// The round-trip failed without a daemon answer. Tag it so a caller can
+		// tell a bind race from a real error, and say whether the request can
+		// have reached the daemon at all.
+		return &TransportError{Err: err, NotSent: !gotConn.Load()}
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	raw, err := io.ReadAll(httpResp.Body)
 	if err != nil {
+		// The daemon has already answered with a status line, so the handler ran.
 		return &TransportError{Err: fmt.Errorf("apiclient: read response body: %w", err)}
 	}
 
@@ -307,7 +335,7 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		Error *apiproto.EnvelopeError `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("apiclient: malformed response envelope: %w", err)
+		return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response envelope: %w", err)}
 	}
 	if env.Error != nil {
 		// Surface the daemon's message verbatim — byte-identical to what the
@@ -318,7 +346,7 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {
-			return fmt.Errorf("apiclient: malformed response data: %w", err)
+			return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response data: %w", err)}
 		}
 	}
 	return committedFromResponse(resp)

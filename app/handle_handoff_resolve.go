@@ -155,6 +155,13 @@ func (m *home) confirmHandoffDeliveryCmd(target sessionActionTarget) tea.Cmd {
 // success-with-warning rather than failure.
 func (m *home) handleHandoffDeliveryConfirmed(msg handoffDeliveryConfirmedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil && !apiclient.IsMutationCommitted(msg.err) {
+		// The mission may already be retired with only the reply lost (#4820).
+		// Reporting that as a failure invites "resend" from the same picker, which
+		// would deliver the mission a second time; the next snapshot shows which.
+		if mutationMayHaveLanded(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("confirming delivery for '%s'", msg.target.title), "the session before resending", msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("failed to confirm delivery for '%s': %w", msg.target.title, msg.err))
 	}
 	if msg.err != nil {
