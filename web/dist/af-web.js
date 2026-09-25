@@ -19028,10 +19028,13 @@ function toggleTask(task) {
   if (tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
+    const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
       refreshTasks();
     }
+    if (stale) return;
     surfaceTabError(e);
   });
 }
@@ -19040,7 +19043,11 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  const requestGeneration = connectionGeneration;
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    surfaceTabError(e);
+  });
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -19048,7 +19055,9 @@ function doRetryLimit() {
   if (!sel || tok === null) {
     return;
   }
+  const requestGeneration = connectionGeneration;
   void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+    if (requestGeneration !== connectionGeneration || token !== tok) return;
     if (isMutationCommittedError(e)) {
       surfaceMutationError(e, "confirmed");
       return;
