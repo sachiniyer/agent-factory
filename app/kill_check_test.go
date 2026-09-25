@@ -17,9 +17,14 @@ import (
 // withheld, and that only the result for the dialog still open completes it.
 
 // settleKillCheck runs the cmd a kill keypress returned and delivers its loss
-// check result through Update, as the event loop would.
+// check result through Update, as the event loop would. A dialog that opened
+// complete (no worktree the kill would remove) must produce no result.
 func settleKillCheck(t *testing.T, h *home, cmd tea.Cmd) {
 	t.Helper()
+	want := 0
+	if h.confirmationOverlay != nil && h.confirmationOverlay.Pending() != "" {
+		want = 1
+	}
 	delivered := 0
 	for _, msg := range drainCmd(t, cmd, 10*time.Second) {
 		if res, ok := msg.(killLossCheckedMsg); ok {
@@ -27,7 +32,7 @@ func settleKillCheck(t *testing.T, h *home, cmd tea.Cmd) {
 			delivered++
 		}
 	}
-	require.Equal(t, 1, delivered, "a kill on a local worktree must produce exactly one loss check result")
+	require.Equal(t, want, delivered, "exactly one loss check result per pending kill dialog, none otherwise")
 }
 
 // stubKillLossCheck swaps killLossCheck for a fake that blocks on seam and then

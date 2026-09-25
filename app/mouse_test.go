@@ -828,10 +828,12 @@ func TestMouse_ConfirmOverlayClicks(t *testing.T) {
 	assert.Equal(t, stateDefault, h.state, "clicking n cancels the dialog")
 	assert.NotEqual(t, session.Deleting, alpha.GetStatus(), "cancel must not kill")
 
-	// Re-open and click "y/enter to confirm".
+	// Re-open and click "y/enter to confirm" once the loss checks have landed:
+	// a pending dialog has no confirm zone to click (#4848).
 	clock.advance(time.Second)
-	_, _ = h.handleKill()
+	_, checkCmd := h.handleKill()
 	require.Equal(t, stateConfirm, h.state)
+	settleKillCheck(t, h, checkCmd)
 	cmd := clickZone(t, h, zones.OverlayConfirmYes)
 	assert.Equal(t, stateDefault, h.state)
 	assert.Equal(t, session.Deleting, alpha.GetStatus(),
