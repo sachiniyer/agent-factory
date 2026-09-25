@@ -45,16 +45,31 @@ const (
 // higher-level mutation and snapshot-fetch seams, including all-repos discovery,
 // so its incidental snapshot polls never reach this launcher. Tests exercising
 // this transport must explicitly replace it or provide an isolated daemon.
+//
+// It is for READS only. It retries every transport failure, including one that
+// arrives after the request was sent — harmless for a read, a duplicate or an
+// overwrite for a mutation. Mutations use withDaemonHTTPMutation (#4820).
 var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
-	// A remote target's daemon runs on another machine — EnsureDaemon would spawn
-	// a superfluous LOCAL daemon we never talk to, so skip it and dial the remote
-	// directly (#1592 Phase 3 PR4). The local default is unchanged: ensure + dial.
-	if !apiclient.IsRemoteTarget() {
-		if err := daemon.EnsureDaemon(); err != nil {
-			return err
-		}
-	}
-	c, err := apiclient.NewTargeted()
+	return callDaemonHTTP(fn, httpCallRetryable)
+}
+
+// withDaemonHTTPMutation is withDaemonHTTP for a call that changes daemon state.
+// It retries only while the daemon provably never received the request — a
+// refused dial or a missing socket during the bind race, or a lifecycle
+// admission refusal the daemon answers before running the handler. A failure
+// after the request may have been received is returned at once, never re-sent:
+// the daemon may have committed it and lost only the reply (#4820). Callers
+// classify that error with apiclient.IsMutationOutcomeUncertain. A package var
+// for the same reason as withDaemonHTTP.
+var withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
+	return callDaemonHTTP(fn, mutationCallRetryable)
+}
+
+// callDaemonHTTP is the shared body of withDaemonHTTP and withDaemonHTTPMutation:
+// ensure a daemon, dial it, call fn, and repeat fn while retryable says the
+// failure is transient, up to daemonHTTPRetryWait.
+func callDaemonHTTP(fn func(*apiclient.Client) error, retryable func(error) bool) error {
+	c, err := daemonHTTPClient()
 	if err != nil {
 		return err
 	}
@@ -74,11 +89,26 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 	defer c.CloseIdleConnections()
 	err = fn(c)
 	deadline := time.Now().Add(daemonHTTPRetryWait)
-	for httpCallRetryable(err) && time.Now().Before(deadline) {
+	for retryable(err) && time.Now().Before(deadline) {
 		time.Sleep(daemonHTTPRetryPoll)
 		err = fn(c)
 	}
 	return err
+}
+
+// daemonHTTPClient ensures a daemon and returns a Client targeting it. A package
+// var so a test can point the production retry policy at a socket it owns,
+// without EnsureDaemon; tests that swap it must not run in parallel.
+var daemonHTTPClient = func() (*apiclient.Client, error) {
+	// A remote target's daemon runs on another machine — EnsureDaemon would spawn
+	// a superfluous LOCAL daemon we never talk to, so skip it and dial the remote
+	// directly (#1592 Phase 3 PR4). The local default is unchanged: ensure + dial.
+	if !apiclient.IsRemoteTarget() {
+		if err := daemon.EnsureDaemon(); err != nil {
+			return nil, err
+		}
+	}
+	return apiclient.NewTargeted()
 }
 
 // httpCallRetryable reports whether an HTTP control error is transient: a
@@ -100,6 +130,16 @@ func httpCallRetryable(err error) bool {
 	return daemon.IsDaemonAdmissionRetryable(err) || apiclient.IsTransportError(err)
 }
 
+// mutationCallRetryable is httpCallRetryable narrowed to failures the daemon
+// provably never acted on. Any outcome apiclient.IsMutationOutcomeUncertain
+// reports — a transport failure after the request may have been received, a
+// committed error, an unverifiable reply — is final, so what is left to retry
+// is a transport failure that never sent the request and the daemon's own
+// admission refusal, which it answers without running the handler (#4820).
+func mutationCallRetryable(err error) bool {
+	return !apiclient.IsMutationOutcomeUncertain(err) && httpCallRetryable(err)
+}
+
 type sessionStartRequest struct {
 	Title     string
 	TitleBase string
@@ -119,7 +159,7 @@ type sessionStartRequest struct {
 
 var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartRequest) (*session.Instance, error) {
 	var data *session.InstanceData
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		data, e = c.CreateSession(daemon.CreateSessionRequest{
 			Title:     req.Title,
@@ -165,7 +205,7 @@ var errDaemonUnresponsive = errors.New("daemon did not respond")
 var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
 	defer cancel()
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.KillSession(ctx, request)
 	})
 	// A deadline here means the daemon took the request and went quiet, so this
@@ -186,7 +226,7 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 // test suite can stub them without dialing a real daemon.
 var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
 	var path string
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		path, e = c.ArchiveSession(request)
 		return e
@@ -196,7 +236,7 @@ var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (st
 
 var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {
 	var path string
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		path, e = c.RestoreSession(request)
 		return e
@@ -210,7 +250,7 @@ var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (st
 // A package var so the app test suite can stub it without dialing a real daemon.
 var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeleteProjectResponse, error) {
 	var resp daemon.DeleteProjectResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		resp, e = c.DeleteProject(daemon.DeleteProjectRequest{RepoPath: repoRoot, RepoID: repoID})
 		return e
@@ -225,7 +265,7 @@ var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeletePro
 // and switches on its own, so only the error matters here. A package var so the
 // app test suite can stub it without dialing a real daemon.
 var registerProjectThroughDaemon = func(path string) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		_, e := c.RegisterProject(path)
 		return e
 	})
@@ -238,7 +278,7 @@ var registerProjectThroughDaemon = func(path string) error {
 // suite can stub it without dialing a real daemon.
 var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
 	var project config.Project
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		project, e = c.RebindProject(projectID, path)
 		return e
@@ -252,7 +292,7 @@ var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, e
 // state. A package var so the app test suite can stub it without dialing a real
 // daemon.
 var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ResumeFromLimit(request)
 	})
 }
@@ -262,7 +302,7 @@ var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) e
 // mission on the operator's attestation without a resend. A package var so the
 // app test suite can stub it without dialing a real daemon.
 var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeliveryRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ConfirmHandoffDelivery(request)
 	})
 }
@@ -275,7 +315,7 @@ var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeli
 // A package var so the app test suite can stub it without dialing a real daemon.
 var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	var response daemon.HandoffSessionResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		resp, e := c.HandoffSession(req)
 		response = resp
 		if e != nil {
@@ -305,7 +345,7 @@ func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (daemon.Hando
 // package var so the app test suite can stub the trigger without dialing a real
 // daemon.
 var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectation) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.TriggerTask(taskID, expect)
 	})
 }
@@ -334,16 +374,16 @@ var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectatio
 // the snapshot fetcher / poll-pause seams).
 var (
 	addTaskThroughDaemon = func(t task.Task) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t, task.ActorTUI) })
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error { return c.AddTask(t, task.ActorTUI) })
 	}
 	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error {
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 			_, err := c.UpdateTask(id, update, expect, task.ActorTUI)
 			return err
 		})
 	}
 	removeTaskThroughDaemon = func(id string, expect task.ProjectExpectation) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id, expect) })
+		return withDaemonHTTPMutation(func(c *apiclient.Client) error { return c.RemoveTask(id, expect) })
 	}
 )
 
@@ -360,13 +400,13 @@ var (
 // race). The seams live per-home instead; tests assign a fake to
 // h.pauseStatusPoll / h.resumeStatusPoll directly.
 func pauseStatusPollThroughDaemon(request daemon.PauseStatusPollRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.PauseStatusPoll(request)
 	})
 }
 
 func resumeStatusPollThroughDaemon(request daemon.ResumeStatusPollRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ResumeStatusPoll(request)
 	})
 }
@@ -378,7 +418,7 @@ func resumeStatusPollThroughDaemon(request daemon.ResumeStatusPollRequest) error
 // between the transport and the local projection.
 var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 	var response daemon.CreateTabResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		response, e = c.CreateTab(req)
 		return e
@@ -390,7 +430,7 @@ var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTab
 // which kills the tab's tmux session and persists the shrunk list. The TUI drops
 // the now-dead tab locally via Instance.DropClosedTab.
 var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		_, e := c.CloseTab(request)
 		return e
 	})
@@ -405,7 +445,7 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 // its own arithmetic.
 var reorderTabThroughDaemon = func(request daemon.ReorderTabRequest) (daemon.ReorderTabResponse, error) {
 	var response daemon.ReorderTabResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		response, e = c.ReorderTab(request)
 		return e
@@ -420,7 +460,7 @@ var reorderTabThroughDaemon = func(request daemon.ReorderTabRequest) (daemon.Reo
 // local projection so the bar reads it before the next snapshot lands.
 var renameTabThroughDaemon = func(request daemon.RenameTabRequest) (string, error) {
 	var resolved string
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		resolved, e = c.RenameTab(request)
 		return e
