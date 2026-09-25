@@ -1002,10 +1002,11 @@ func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T)
 // TestMissingPromptAfterPromptSpecificRenderingStaysLoud protects the genuine
 // #1982 signal. The pane renders a new prefix from this exact prompt but never
 // its disjoint completion tail. That is terminal observed-absent regardless of
-// agent identity and must remain actionable at ERROR — once per attempt, since
-// #3293 redelivers an observed-absent prompt once before reporting it. The mock
-// resets its per-attempt state on each load-buffer so both attempts strand the
-// same way.
+// agent identity and must remain actionable at ERROR. Here the pane changes
+// to an unrelated frame at Enter, which cannot prove the prompt stayed absent
+// through the submit, so there is exactly one attempt and the caller hears
+// sent-unverified (#4884); the redelivery path's own loudness is pinned in
+// submit_redeliver_test.go.
 func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
@@ -1050,12 +1051,12 @@ func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 
 	status, err := session.SendKeysCommandObserved(prompt)
 	require.NoError(t, err)
-	require.Equal(t, PromptNotDelivered, status,
-		"an observed-absent prompt must be reported to the caller, not collapsed into success")
+	require.Equal(t, PromptSentUnverified, status,
+		"an observed-absent prompt the boundary cannot uphold must be reported unconfirmed, not collapsed into success")
 	require.True(t, enterSent, "observed-absent must retain the best-effort Enter")
 	got := errors.String()
-	require.Equal(t, 2, strings.Count(got, "prompt delivery observed absent"),
-		"a genuine missing prompt should emit one actionable ERROR per stranded attempt (#3293 redelivers once), got %q", got)
+	require.Equal(t, 1, strings.Count(got, "prompt delivery observed absent"),
+		"a genuine missing prompt should emit one actionable ERROR for its one attempt, got %q", got)
 	require.Contains(t, got, "pane rendered this prompt's prefix but not its completion tail")
 	require.Contains(t, got, "Enter sent best-effort")
 	require.Contains(t, got, "run bash -lc 'printf started",

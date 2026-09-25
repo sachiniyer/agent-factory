@@ -214,8 +214,8 @@ func TestCouldNotConfirmIsNotRedelivered(t *testing.T) {
 // prefix (observed absent), but by the time Enter was enqueued the paste had
 // visibly drained: the boundary frame — captured in the same tmux command queue
 // as Enter — shows the completion tail. That Enter may well have submitted the
-// full prompt, so the redelivery must be withheld: one paste, and the honest
-// not-delivered report stands on its authorizing pre-Enter frame.
+// full prompt, so the redelivery must be withheld: one paste, reported as
+// sent-unverified because absence was not proven through the submit (#4884).
 //
 // The styled case matters separately: the boundary capture preserves ANSI
 // escapes (capture-pane -e), so a colorized composer interleaves styling
@@ -247,8 +247,8 @@ func TestObservedAbsentWithDrainedBoundaryFrameIsNotRedelivered(t *testing.T) {
 
 			status, err := session.SendKeysCommandObserved(redeliverPrompt)
 			require.NoError(t, err)
-			require.Equal(t, PromptNotDelivered, status,
-				"the pre-Enter frame authorized observed-absent and remains the reported evidence")
+			require.Equal(t, PromptSentUnverified, status,
+				"absence did not hold through the submit, so the caller must hear unconfirmed, never a retryable not-delivered (#4884)")
 
 			_, pastes, _ := model.counts()
 			require.Equal(t, 1, pastes,
@@ -280,7 +280,7 @@ func TestScrolledOffBaselineTailCannotAuthorizeRedelivery(t *testing.T) {
 
 	status, err := session.SendKeysCommandObserved(redeliverPrompt)
 	require.NoError(t, err)
-	require.Equal(t, PromptNotDelivered, status)
+	require.Equal(t, PromptSentUnverified, status)
 
 	_, pastes, _ := model.counts()
 	require.Equal(t, 1, pastes,
