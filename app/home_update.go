@@ -326,14 +326,39 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
 		userStillWatching := m.state == stateDefault && m.sidebar.GetSelectedInstance() == msg.instance
-		// A mutation-committed create (#3357, b4ab324c) durably persisted the
-		// session and returned the retained row alongside the committed error —
-		// startSessionThroughDaemon surfaces both, exactly as the daemon +
-		// apiclient contract intends. Classify it as "created, with warning" the
-		// way every sibling mutation handler does, instead of a clean failure.
-		committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 
-		if msg.err != nil && !committedWarning {
+		if msg.err != nil {
+			// A mutation-committed create durably persisted the session and
+			// returned the retained row alongside the committed error (#3357,
+			// b4ab324c); startSessionThroughDaemon surfaces it (msg.started is
+			// that row). Treat it as "created, with warning" the way every
+			// sibling mutation handler does, through the shared
+			// mutationOutcomeError: keep the durable row (replacing the Loading
+			// placeholder in place, the way the success path does), preserve
+			// the daemon's liveness (do NOT ConfirmLive — the row already
+			// carries running/indeterminate/tombstoned state from
+			// FromInstanceData), and surface the warning via handleError — NOT
+			// the recovery screen or a retained draft, which would tell the
+			// user a successfully-persisted session failed and invite a retry
+			// that races the daemon's title-uniqueness reservation. The
+			// retained row is the one create-specific piece (only create
+			// returns a durable row); the wording lives in the shared helper,
+			// not duplicated here (#4824).
+			if msg.started != nil && apiclient.IsMutationCommitted(msg.err) {
+				started := msg.started
+				if !m.store.ReplaceInstance(msg.instance, started) && !m.store.ContainsInstance(started) {
+					if !m.store.ReplaceInstanceByTitle(started.Title, started) {
+						m.store.AddInstance(started)
+					}
+				}
+				var accountSkew tea.Cmd
+				if err := accountSkewRefusal(msg.account, started); err != nil {
+					accountSkew = m.handleError(err)
+				}
+				return m, tea.Batch(accountSkew, m.handleError(mutationOutcomeError(
+					fmt.Sprintf("created session %q", started.Title), "the sidebar", msg.err)),
+					m.selectionChanged())
+			}
 			// Remove the *specific* instance that failed, by title. The old
 			// code did m.sidebar.Kill() after SelectInstance(msg.instance),
 			// which would have killed whatever the user was currently
@@ -413,17 +438,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.store.AddInstance(started)
 		}
 
-		// ConfirmLive flips a clean start from Loading/Creating to Running. A
-		// mutation-committed create is NOT a clean start: the daemon retained and
-		// durably recorded the row with its own liveness (running, indeterminate,
-		// or tombstoned-for-cleanup-retry — daemon/manager_create.go), and
-		// FromInstanceData already materialized that liveness onto `started`.
-		// Forcing LiveRunning here would mislabel a tombstoned row as live until
-		// the next snapshot reconciled it, so preserve the daemon's truth on the
-		// committed path and let the snapshot reconcile.
-		if !committedWarning {
-			_ = started.Transition(session.ConfirmLive())
-		}
+		_ = started.Transition(session.ConfirmLive())
 		if !swapped && started.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 			m.store.RegisterRepoForInstance(started)
 		}
@@ -438,22 +453,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var accountSkew tea.Cmd
 		if err := accountSkewRefusal(msg.account, started); err != nil {
 			accountSkew = m.handleError(err)
-		}
-		if committedWarning {
-			// The daemon committed the create but could not confirm a follow-up
-			// (teardown/startup uncertainty — daemon/manager_create.go). The row
-			// is durable, so keep the projection (the placeholder was already
-			// replaced above) and surface the committed error as a transient
-			// warning — NOT the recovery screen, the retained draft, or "Cannot
-			// create session": a clean-failure framing would tell the user a
-			// successfully-persisted session failed, drop its row, and invite a
-			// retry that races the daemon's title-uniqueness reservation. Mirrors
-			// the committed branches in handleInstanceArchived /
-			// handleInstanceRestored (handleError, not showRecovery). The
-			// success-path help screen and pane-window fanfare are skipped: a
-			// retained row is not a cleanly running session, so opening its pane
-			// would mislead.
-			return m, tea.Batch(accountSkew, m.handleError(fmt.Errorf("created session %q, with warning: %w", started.Title, msg.err)), m.selectionChanged())
 		}
 		if !userStillWatching {
 			// User moved on — update status silently and keep their current
