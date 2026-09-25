@@ -69,12 +69,13 @@ func (m *Manager) refreshLocked() error {
 	m.ghostTaskRuns = ghosts
 	// Trim repaired repos from the startup skip set without ever adding a
 	// mid-life-corrupted one. A startup-skipped repo drops out only when this
-	// poll re-read and parsed its instances.json, so list/get/whoami stop
-	// refusing the now-complete snapshot (#603 closed over the wire); one that is
-	// still corrupt, now unreadable, or absent from disk stays skipped (#4783). A
-	// repo that newly fails mid-life keeps its prior in-memory rows via the
-	// re-hydration above, so its sessions stay in the snapshot and it is
-	// correctly NOT reported as skipped until the daemon restarts and re-runs
+	// poll re-read and parsed its instances.json INTO at least one loadable row,
+	// so list/get/whoami stop refusing the now-complete snapshot (#603 closed
+	// over the wire); one that is still corrupt, now unreadable, absent from
+	// disk, or parses-but-yields-zero-loadable-rows stays skipped (#4783, #4812).
+	// A repo that newly fails mid-life keeps its prior in-memory rows via the
+	// re-hydration above, so its sessions stay in the snapshot and it is correctly
+	// NOT reported as skipped until the daemon restarts and re-runs
 	// startup. Guarded by m.mu (refreshLocked's caller holds it).
 	m.skippedRepos = retainStillSkipped(m.skippedRepos, skipped, reread)
 	m.registerLoadRuntimeSettlementsLocked(owed)

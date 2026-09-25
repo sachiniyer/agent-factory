@@ -444,10 +444,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // projection discipline as the rest of the count.
 //
 // The fifth return, reread, names every repo whose instances.json this call
-// read AND parsed. It is the only evidence that clears a repo from the skip set
-// (retainStillSkipped): a repo the loader could not read, or that is absent from
-// disk altogether, is not in it, so an omission is never mistaken for a repair
-// (#4783).
+// read AND parsed into a loadable row. It is the only evidence that clears a
+// repo from the skip set (retainStillSkipped): a repo the loader could not
+// read, that is absent from disk, or that parses-but-nothing-loadable (retracted
+// below) is not in it, so neither an omission nor a zero-rows file is a repair (#4783, #4812).
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
 		return existing, nil, nil, nil, err
@@ -520,7 +520,10 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			continue
 		}
 		reread[repoID] = true
-
+		// Retractable below: a parses-but-zero-rows file is not a repair, or
+		// list/get/whoami silently serve [] as the complete answer the skip set
+		// exists to prevent (#4812, the "read AND parsed" trim left open here).
+		materialized := 0
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
 			if item.ID == "" && !isLegacyTransientGhost(item) {
@@ -589,6 +592,13 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				continue
 			}
 			next[key] = instance
+			materialized++
+		}
+		// Parsed but nothing loadable: retract the "repaired" signal so the repo
+		// stays skipped (a non-repair, #4812); a genuinely-empty file keeps reread
+		// and still clears, and a later poll that materializes a row re-arms and drops it.
+		if len(data) > 0 && materialized == 0 {
+			delete(reread, repoID)
 		}
 	}
 

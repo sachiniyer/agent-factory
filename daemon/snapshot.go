@@ -274,12 +274,15 @@ func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []
 // startup.
 //
 // Leaving the set takes positive evidence: the repo is in reread, meaning this
-// refresh read AND parsed its instances.json. Absence from fresh is not enough
-// (#4783). A repo can be missing from fresh because the loader could not read
-// it, or because its directory is gone, and neither is a repair; treating the
-// omission as one served a truncated snapshot as complete again. A repo fresh
-// still reports is kept with fresh's entry, so the reason tracks the file's
-// current state (a startup-corrupt file that is now unreadable says so).
+// refresh read AND parsed its instances.json into at least one loadable row —
+// refreshDaemonInstances retracts a repo from reread when its file parses but
+// every row fails fromInstanceDataForRefresh, so a parses-but-nothing-loadable
+// file stays a non-repair too (#4812). Absence from fresh is not enough (#4783).
+// A repo can be missing from fresh because the loader could not read it, or
+// because its directory is gone, and neither is a repair; treating the omission
+// as one served a truncated snapshot as complete again. A repo fresh still
+// reports is kept with fresh's entry, so the reason tracks the file's current
+// state (a startup-corrupt file that is now unreadable says so).
 func retainStillSkipped(prev, fresh []SkippedRepo, reread map[string]bool) []SkippedRepo {
 	if len(prev) == 0 {
 		return nil
