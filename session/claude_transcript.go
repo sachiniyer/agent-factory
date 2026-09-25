@@ -32,9 +32,24 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-	transcripts, err := claudeProjectTranscripts(filepath.Join(configDir, "projects", claudeProjectName(launchDir)))
-	if err != nil {
-		return ClaudeProjectConversationState{}, err
+	// Claude names a project after the directory it was launched in. A symlinked
+	// env -C chdir records the link as the launch directory, but on chdir the
+	// kernel resolves it and Claude's getcwd reports the resolved path, so its
+	// transcripts land under the resolved path's project name. Scan both
+	// candidates, matching conversationCarry.locateClaude, so the verifier the
+	// root-agent restore and live poller gate on finds the transcript the carry
+	// feature already knew to look for.
+	launchDirs := []string{launchDir}
+	if resolved, err := filepath.EvalSymlinks(launchDir); err == nil && resolved != launchDir {
+		launchDirs = append(launchDirs, resolved)
+	}
+	var transcripts []claudeTranscript
+	for _, dir := range launchDirs {
+		ts, err := claudeProjectTranscripts(filepath.Join(configDir, "projects", claudeProjectName(dir)))
+		if err != nil {
+			return ClaudeProjectConversationState{}, err
+		}
+		transcripts = append(transcripts, ts...)
 	}
 	conversation := func(id string) AgentConversationData {
 		return AgentConversationData{
