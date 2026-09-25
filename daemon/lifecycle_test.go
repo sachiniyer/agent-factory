@@ -276,8 +276,15 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// in, and a section that cannot read reports "af could not look", which is a
 	// worse answer than the true one.
 	"ListAccounts": allowedDuringProbation,
-	"TriggerTask":  blockedDuringProbation,
-	"UpdateTask":   blockedDuringProbation,
+	// QuotaReport is a read of the daemon host's session records (#2983): no
+	// manager state, nothing an upgrade window is protecting. It sits with
+	// ListAccounts for the same reason — the usage section a client builds out
+	// of it must not have to wait on a probation it has no stake in, and a
+	// section that cannot read reports "af could not look", which is a worse
+	// answer than the true one.
+	"QuotaReport": allowedDuringProbation,
+	"TriggerTask": blockedDuringProbation,
+	"UpdateTask":  blockedDuringProbation,
 	// ApplyConfig was allowed during probation on the reasoning that a blocked
 	// SetConfigValue kept the file from changing, so an apply could only re-read
 	// unchanged bytes. #3231 disproved the premise: pre-#3231 CLIs and hand-edits

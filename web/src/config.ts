@@ -33,6 +33,11 @@ import {
   emptyAccountsState,
   renderAccountsSection,
 } from "./accounts.js";
+import {
+  type QuotaState,
+  emptyQuotaState,
+  renderQuotaSection,
+} from "./quota.js";
 import { h } from "./dom.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 import { rebuildKeepingScroll } from "./scrollkeep.js";
@@ -257,6 +262,9 @@ export class ConfigPane {
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
   private accounts: AccountsState = emptyAccountsState();
+  /** The Usage section's data (#2983) — daemon's QuotaReport, rendered below
+   *  Accounts. Same "not config" rule: see quota.ts. */
+  private quota: QuotaState = emptyQuotaState();
   private showAdvanced = false;
   /** The key whose field is open, if any. Only one row edits at a time: a config
    *  write is per-key (like `af config set`), so a multi-row "save all" would
@@ -276,6 +284,7 @@ export class ConfigPane {
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
+  private lastQuota: QuotaState | null = null;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -284,8 +293,8 @@ export class ConfigPane {
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState): void {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
+  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState, quota: QuotaState): void {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota) {
       return;
     }
     // Captured before `lastStatus` is overwritten below: it is the EDGE that
@@ -300,11 +309,13 @@ export class ConfigPane {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastQuota = quota;
     // Retired web appearance keys from older daemons are never editable here.
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    this.quota = quota;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -490,12 +501,13 @@ export class ConfigPane {
               "No settings available. Try Configure with assistant.",
             ),
           ];
-    // Accounts LAST: the config keys are what this view is for, and a credential
-    // section above them would push them below the fold.
+    // Accounts LAST, then Usage (#2983): the config keys are what this view is
+    // for, and daemon-reported sections above them would push them below the fold.
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...content),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderQuotaSection(this.quota),
     );
   }
 
