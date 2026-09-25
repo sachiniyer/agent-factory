@@ -532,20 +532,20 @@
       "id": "project.rebind",
       "title": "Rebind a stable project identity to a replacement checkout",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/overlay/projectPickerOverlay.go rebind mode (b on a registry-backed row) → app/switch_project.go handleRebindProject → rebindProjectThroughDaemon (apiclient RebindProject)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/ui.ts renderProjectSwitch footer 'Rebind…' + 'checkout missing' row marker → web/src/modals.ts rebindProjectModal → web/src/api.ts rebindProject (POST /v1/RebindProject)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsRebindCmd"
+        "pointer": "api/projects.go projectsRebindCmd (af projects rebind) → daemon RebindProject RPC"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#2216",
-      "notes": "The CLI exposes the explicit repair required after a reclone. TUI/web status and repair actions remain part of the later #2216 project-identity integration."
+      "notes": "Rebind is now daemon-backed like register (#2456): POST /v1/RebindProject + the gob control-socket method wrap config.RebindProject (the single writer, #960) and publish projects.changed, so all three surfaces share one mutation path. The CLI resolves its path arg against the caller's cwd before sending — the same contract as `af projects add`. The TUI offers it in the project picker: registry-backed rows carry their prj_ id, a row whose path_exists is false shows a 'missing' marker, and `b` opens a path-prompt mode whose daemon rejection is corrected inline (mirroring the add flow). The web switcher keeps full registry records in state, marks a missing checkout on the row, and offers 'Rebind…' in the menu footer for the selected registered project via rebindProjectModal (same host-path field + directory browser as add-project). The stable prj_ id, checkout-marker checks, and ownership refusal all live in config.RebindProject — no surface reimplements them."
     },
     {
       "id": "project.switch",
@@ -859,6 +859,25 @@
       "verdict": "parity",
       "issue": "#1934",
       "notes": "Closed across all three surfaces. #1934 promoted ResumeFromLimit into the public catalog and added the web Retry action; `af sessions retry-limit <title>` closes the remaining CLI half using the same daemon controlServer and Manager.resumeFromLimit action. The CLI follows the established repo-scoped title contract and leaves stable-id addressing to the all-project web client (wire.id-addressing). Every surface therefore shares the daemon-owned respawn, pending-prompt delivery, and durable liveness transition instead of implementing recovery client-side."
+    },
+    {
+      "id": "session.handoff-delivery-confirm",
+      "title": "Retire an ambiguous pending handoff mission on the operator's attestation that it already landed, without resending",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/handle_handoff_resolve.go — the `c` resolve picker's \"Mark delivered\" row -> app/session_control.go confirmHandoffDeliveryThroughDaemon"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/ui.ts markDeliveredActionForSession -> web/src/index.ts doMarkDelivered -> web/src/api.ts confirmHandoffDelivery (markDeliveredModal is the deliberate confirm)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_limit_retry.go (af sessions retry-limit <title> --delivered)"
+      },
+      "verdict": "parity",
+      "issue": "#4429",
+      "notes": "A handoff whose mission delivery reports sent-unverified or could-not-confirm may already have landed: resending can double-deliver, doing nothing leaves a durable obligation no verb used to retire. ConfirmHandoffDelivery is the attestation half of the exit — a separate verb rather than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead of silently resending. The daemon probes that a runtime answers at the binding, then settles the leftover replacement/startup-unknown state and clears the mission in one commit. Automatic recovery still owns only positive mission-scoped non-delivery (PromptNotDelivered); ambiguous verdicts stay operator-resolved. The TUI surfaces it inside the `c` resolve picker (no new binding — the same key now chooses between resend and mark-delivered when a confirmable verdict exists); the web grows a second head action with a confirmation modal; the CLI spells it as a flag on the same recovery command."
     },
     {
       "id": "session.list",
@@ -1595,6 +1614,7 @@
       "POST /v1/AccountLogin": "session.account-login",
       "POST /v1/ArchiveSession": "session.archive",
       "POST /v1/CloseTab": "session.tab.close",
+      "POST /v1/ConfirmHandoffDelivery": "session.handoff-delivery-confirm",
       "POST /v1/CreateSession": "session.create",
       "POST /v1/CreateTab": "session.tab.create",
       "POST /v1/DeleteProject": "project.delete",
@@ -1611,6 +1631,7 @@
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
+      "POST /v1/RebindProject": "project.rebind",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",
@@ -1643,6 +1664,7 @@
       "fixed:cancel": "session.create",
       "fixed:change program": "session.create.opt.program",
       "fixed:delete project": "project.delete",
+      "fixed:rebind project": "project.rebind",
       "fixed:focus": "tui.navigation",
       "fixed:focus prev": "tui.navigation",
       "fixed:initial prompt": "session.create.opt.prompt",
@@ -1688,6 +1710,7 @@
       "AddTask": "task.add",
       "ArchiveSession": "session.archive",
       "CloseTab": "session.tab.close",
+      "ConfirmHandoffDelivery": "session.handoff-delivery-confirm",
       "CreateSession": "session.create",
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
@@ -1702,6 +1725,7 @@
       "ListTasks": "task.list",
       "PauseStatusPoll": "-",
       "RegisterProject": "project.add",
+      "RebindProject": "project.rebind",
       "RemoveTask": "task.remove",
       "RenameTab": "session.tab.rename",
       "ReorderTab": "session.tab.reorder",
@@ -1839,6 +1863,7 @@
       "af sessions preview --tab-name": "session.preview-tab",
       "af sessions restore --force-reap": "session.restore",
       "af sessions restore --help": "meta.discovery",
+      "af sessions retry-limit --delivered": "session.handoff-delivery-confirm",
       "af sessions retry-limit --help": "meta.discovery",
       "af sessions send-prompt --all": "session.send-prompt.broadcast",
       "af sessions send-prompt --all-repos": "session.send-prompt.broadcast",
@@ -2303,6 +2328,13 @@
         "cli": {
           "id": {
             "ok": "The CLI resolves sessions by title under --repo scoping, exactly as kill/archive/send-prompt do; the stable id is the all-project web client's collision-proof key."
+          }
+        }
+      },
+      "ConfirmHandoffDeliveryRequest": {
+        "cli": {
+          "id": {
+            "ok": "Same resolution contract as retry-limit: the CLI resolves the target by title under --repo scoping; the stable id is the TUI/web client's collision-proof key for a confirmable row captured before snapshot drift."
           }
         }
       },

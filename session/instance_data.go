@@ -100,6 +100,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// reintroduce the bug it fixes — a session whose run is live must read as active
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
+	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
 	// discharge. Any other state may legitimately carry the obligation across a
@@ -305,15 +306,31 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// PendingHandoffMission is the one operation marker that IS durable: it says
 	// an irreversible runtime swap completed but its takeover brief did not. Disk
 	// still scrubs the generic op enum, then this specific proof reconstructs the
-	// replacement fence so status polling cannot call the idle incoming composer a
-	// completed task before recovery delivers its mission. A kill tombstone
-	// outranks every process-local op, including one carried by a live snapshot;
-	// startup-unknown likewise prevents synthesizing a replacement fence. Both
-	// terminal markers must retain an explicit teardown handle rather than load as
-	// an in-flight replacement.
+	// replacement fence — but only for the verdicts that still own an in-flight
+	// obligation the daemon resolves itself (#4429): positive non-delivery (the
+	// automatic replay) and the delivered crash window (the recovery settle).
+	//
+	// An ambiguous verdict loads without the fence. The send path writes its
+	// could-not-confirm attempt marker only after readiness has proved the
+	// incoming runtime, and before the composer is touched. A crash inside the
+	// readiness wait therefore reloads the verdict that admitted the attempt,
+	// fence included. An ambiguous verdict can also come from a readiness
+	// failure, which a fenced attempt records together with startup-unknown
+	// (refused below either way), or from a legacy record that had no verdict.
+	// However it arose, the row is in the same position: nothing resends the
+	// mission automatically, and both operator exits prove the runtime before
+	// acting — confirm probes the pane, and retry probes a startup-unknown row
+	// and then re-runs readiness. Rebuilding the fence would only make the row
+	// inert, which is the wedge this issue fixes.
+	//
+	// A kill tombstone outranks every process-local op, including one carried by
+	// a live snapshot; startup-unknown likewise prevents synthesizing a
+	// replacement fence. Both terminal markers must retain an explicit teardown
+	// handle rather than load as an in-flight replacement.
 	if data.UserKilled {
 		inFlightOp = OpNone
-	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone {
+	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && inFlightOp == OpNone &&
+		pendingHandoffMissionNeedsFence(data.HandoffDeliveryStatus) {
 		inFlightOp = OpReplacing
 	}
 	// Legacy records retain their last save time. Only truly missing timestamps
@@ -334,6 +351,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
+		taskRunIdleEdgeHeld:      data.TaskRunActive && data.TaskRunIdleEdgeHeld,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
