@@ -321,18 +321,11 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 			p.addRequested = true
 		}
 		return false
-	case tea.KeyBackspace:
-		if len(p.pathInput) > 0 {
-			runes := []rune(p.pathInput)
-			p.pathInput = string(runes[:len(runes)-1])
+	default:
+		if path, ok := ui.EditLine(p.pathInput, msg); ok && path != p.pathInput {
+			p.pathInput = path
 			p.addErr = ""
 		}
-	case tea.KeySpace:
-		p.pathInput += " "
-		p.addErr = ""
-	case tea.KeyRunes:
-		p.pathInput += string(msg.Runes)
-		p.addErr = ""
 	}
 	return false
 }
@@ -362,18 +355,11 @@ func (p *ProjectPickerOverlay) handleRebindKey(msg tea.KeyMsg) bool {
 			p.rebindRequested = true
 		}
 		return false
-	case tea.KeyBackspace:
-		if len(p.rebindInput) > 0 {
-			runes := []rune(p.rebindInput)
-			p.rebindInput = string(runes[:len(runes)-1])
+	default:
+		if path, ok := ui.EditLine(p.rebindInput, msg); ok && path != p.rebindInput {
+			p.rebindInput = path
 			p.rebindErr = ""
 		}
-	case tea.KeySpace:
-		p.rebindInput += " "
-		p.rebindErr = ""
-	case tea.KeyRunes:
-		p.rebindInput += string(msg.Runes)
-		p.rebindErr = ""
 	}
 	return false
 }
