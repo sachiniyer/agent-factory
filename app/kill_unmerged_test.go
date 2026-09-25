@@ -96,17 +96,21 @@ func flatten(s string) string {
 	return strings.Join(strings.Fields(repl.Replace(s)), " ")
 }
 
-// armKill selects the instance, presses kill, and returns the resulting home and
-// its (non-nil) confirmation overlay.
+// armKill selects the instance, presses kill, lets the off-loop loss checks
+// (#4848) land, and returns the resulting home and its (non-nil), complete
+// confirmation overlay.
 func armKill(t *testing.T, inst *session.Instance) (*home, *home) {
 	t.Helper()
 	h := newTestHome(t)
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
-	model, _ := h.handleKill()
+	model, cmd := h.handleKill()
 	hm := model.(*home)
 	require.Equal(t, stateConfirm, hm.state, "kill must open the confirmation dialog")
 	require.NotNil(t, hm.confirmationOverlay)
+	settleKillCheck(t, hm, cmd)
+	require.Equal(t, stateConfirm, hm.state, "the loss checks must leave the dialog open")
+	require.Empty(t, hm.confirmationOverlay.Pending(), "the loss checks must complete the dialog")
 	return h, hm
 }
 

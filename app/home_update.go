@@ -195,6 +195,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.killInstanceCmd(msg.target)
 	case instanceKilledMsg:
 		return m.handleInstanceKilled(msg)
+	case killLossCheckedMsg:
+		// The kill confirmation's git checks finished off the event loop (#4848);
+		// complete the dialog they were started for, if it is still open.
+		return m.handleKillLossChecked(msg)
 	case daemonRestartRequestedMsg:
 		// The restart confirm was accepted; run it off the event loop (it stops a
 		// daemon and respawns one), mirroring the kill/archive async dispatch.

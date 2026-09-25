@@ -218,3 +218,21 @@ func TestSearchOverlayScrolledWindowRegistersVisibleRows(t *testing.T) {
 func sessionTitle(i int) string {
 	return "session-" + string(rune('0'+i/10)) + string(rune('0'+i%10))
 }
+
+// TestConfirmationOverlayPendingRegistersOnlyCancel: while pending (#4848) the
+// hint carries no confirm words, so no yes zone may exist for a click to hit;
+// the cancel zone stays.
+func TestConfirmationOverlayPendingRegistersOnlyCancel(t *testing.T) {
+	c := NewConfirmationOverlay("Delete session 'alpha'?")
+	c.SetWidth(60)
+	c.SetPending("Checking for unsaved work…")
+	reg := zones.NewRegistry()
+	c.RegisterZones(reg, layout.Point{})
+
+	_, ok := reg.Find(zones.OverlayConfirmYes)
+	assert.False(t, ok, "a pending dialog must not register a confirm zone")
+	no, ok := reg.Find(zones.OverlayConfirmNo)
+	require.True(t, ok, "the cancel zone stays clickable")
+	line := strings.Split(c.Render(), "\n")[no.Y]
+	assert.Equal(t, "n/esc cancel", cellSliceAt(line, no.X, no.W))
+}
