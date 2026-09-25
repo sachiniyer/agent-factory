@@ -48,7 +48,7 @@ func TestCloseTab_RemovesNonAgentTabAndPersists(t *testing.T) {
 		t.Fatalf("expected 2 tabs after AddProcessTab, got %d", inst.TabCount())
 	}
 
-	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "btop"})
+	name, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "btop"}, "internal daemon caller")
 	if err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
@@ -126,9 +126,9 @@ func TestCloseTab_PersistFailureKeepsTmuxTabForRetry(t *testing.T) {
 		t.Fatalf("corrupting the instances file: %v", err)
 	}
 
-	_, err = manager.CloseTab(CloseTabRequest{
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabID: created.ID,
-	})
+	}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("CloseTab succeeded despite a persist failure; the test's premise is wrong")
 	}
@@ -158,7 +158,7 @@ func TestCloseTab_RejectsAgentTab(t *testing.T) {
 	const title = "worker"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 0})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 0}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("expected error closing the agent tab, got nil")
 	}
@@ -203,7 +203,7 @@ func TestCloseTab_RejectsArchivedSession(t *testing.T) {
 		{Title: title, RepoID: repo.ID, TabIndex: 1},
 		{Title: title, RepoID: repo.ID, TabName: "webpreview"},
 	} {
-		_, err = manager.CloseTab(req)
+		_, err = manager.closeTabRequestedBy(req, "internal daemon caller")
 		if err == nil {
 			t.Fatalf("expected error closing a tab on an archived session (req %+v), got nil", req)
 		}
@@ -223,7 +223,7 @@ func TestCloseTab_RejectsArchivedSession(t *testing.T) {
 
 	// Restored: the tab is closable again — the gate is state, not a tombstone.
 	inst.SetStatusForTest(session.Running)
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 1}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 1}, "internal daemon caller"); err != nil {
 		t.Fatalf("closing the web tab of a restored session: %v", err)
 	}
 	if got := len(inst.GetTabs()); got != 1 {
@@ -266,7 +266,7 @@ func TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 1})
+		_, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabIndex: 1}, "internal daemon caller")
 		done <- err
 	}()
 
@@ -324,7 +324,7 @@ func TestCloseTab_RejectsAgentTabByName(t *testing.T) {
 	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 	agentTab := inst.GetTabs()[0].Name
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: agentTab})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: agentTab}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("expected error closing the agent tab by name, got nil")
 	}
@@ -346,7 +346,7 @@ func TestCloseTab_RejectsUnknownSession(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: "ghost", TabName: "watcher"})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: "ghost", TabName: "watcher"}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("expected error for unknown session, got nil")
 	}
@@ -373,7 +373,7 @@ func TestCloseTab_RejectsUnknownTab(t *testing.T) {
 	const title = "worker"
 	startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "ghost"})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "ghost"}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("expected error for unknown tab, got nil")
 	}
@@ -431,7 +431,7 @@ func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
 
 	// A tab that does not exist is still a plain not-found, not a capability
 	// refusal: the rejection moved, it did not disappear.
-	_, err = manager.CloseTab(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: "shell"})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: "shell"}, "internal daemon caller")
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "fixed by its runtime",
 		"the blanket runtime refusal is gone; what remains is that no such tab is there")
@@ -566,7 +566,7 @@ func TestCloseTab_SerializedWithInFlightKillDoesNotCloseStaleTab(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "btop"})
+		name, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "btop"}, "internal daemon caller")
 		done <- result{name: name, err: err}
 	}()
 
@@ -724,7 +724,7 @@ func TestCloseTab_RefusesTheDisplayedLabelButNamesTheTab(t *testing.T) {
 	}
 
 	// The displayed label must NOT resolve — the tab stays untouched.
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Terminal"})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Terminal"}, "internal daemon caller")
 	if err == nil {
 		t.Fatalf("CloseTab by the displayed label %q succeeded; the label is presentation-only "+
 			"and must never resolve (#1986).", "Terminal")
@@ -740,7 +740,7 @@ func TestCloseTab_RefusesTheDisplayedLabelButNamesTheTab(t *testing.T) {
 	}
 
 	// And the canonical name still closes it.
-	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "shell"})
+	name, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "shell"}, "internal daemon caller")
 	if err != nil {
 		t.Fatalf("CloseTab by the canonical name %q failed: %v", "shell", err)
 	}
@@ -772,7 +772,7 @@ func TestCloseTab_StillAcceptsTheCanonicalName(t *testing.T) {
 		t.Fatalf("AddShellTab: %v", err)
 	}
 
-	name, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "shell"})
+	name, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "shell"}, "internal daemon caller")
 	if err != nil {
 		t.Fatalf("CloseTab by the canonical name %q failed: %v\n"+
 			"The label alias must ADD a spelling, never replace one — scripts depend on this.", "shell", err)
@@ -804,7 +804,7 @@ func TestCloseTab_UnknownNameListsTheValidOnes(t *testing.T) {
 		t.Fatalf("AddShellTab: %v", err)
 	}
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Termnial"})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "Termnial"}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("CloseTab with a typo'd name should fail")
 	}
