@@ -314,6 +314,15 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 		if errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget() {
 			return m, m.offerDaemonRestart(msg.target.title)
 		}
+		// The daemon may have torn the session down with only the reply lost
+		// (#4824). The fence still reverts above — holding it would strand the
+		// row if the kill never ran — but the row is not "retained" as far as
+		// anyone knows: the next snapshot removes it if the kill landed. Say so,
+		// rather than invite a second kill of a session that may be gone.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("killing session '%s'", msg.target.title), "the sidebar", msg.err))
+		}
 		return m, m.showRecovery("Cannot kill session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
 
@@ -461,10 +470,17 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 	inst := m.resolveSessionActionTarget(msg.target)
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
-		// Archive failed: clear the optimistic op so the row reverts to its
-		// underlying daemon liveness rather than stranding as archiving.
+		// Archive failed or may have: clear the optimistic op so the row reverts
+		// to its underlying daemon liveness rather than stranding as archiving.
+		// The next snapshot then shows it Archived if the daemon did archive it.
 		if inst != nil && inst.GetInFlightOp() == session.OpArchiving {
 			_ = inst.Transition(session.ClearOp())
+		}
+		// An archive whose reply was lost is not "retained" (#4824): the
+		// snapshot decides, and the user checks before archiving again.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("archiving session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		return m, m.showRecovery("Cannot archive session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
 	}
@@ -560,6 +576,14 @@ func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
+		// The resume re-delivers the pending prompt, so one that may have landed
+		// is not reported as a failure to retry (#4824): a second `c` could
+		// deliver the prompt twice. The limit badge stays until the snapshot
+		// clears it.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("resuming session '%s'", msg.target.title), "the session's pane", msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.target.title, msg.err))
 	}
 	if inst := m.resolveSessionActionTarget(msg.target); inst != nil {
@@ -591,8 +615,15 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 	inst := m.resolveSessionActionTarget(msg.target)
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
+		// Clearing the overlay is right for an unknown outcome too: it leaves
+		// liveness alone, so a restore that did land still reaches the
+		// reconcile's Archived→live rebuild on the next snapshot (#1203).
 		if inst != nil && inst.GetInFlightOp() == session.OpRestoring {
 			_ = inst.Transition(session.ClearOp())
+		}
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("restoring session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.target.title, msg.err))
 	}
