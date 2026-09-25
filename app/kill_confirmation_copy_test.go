@@ -64,7 +64,6 @@ func TestKillConfirmationWarningUsesSentenceCaseAtCompactSizes(t *testing.T) {
 
 				killKey := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")}
 				_, _ = h.Update(killKey)
-				_, _ = h.Update(killKey)
 				require.Equal(t, stateConfirm, h.state, "D opens the production kill confirmation")
 				require.NotNil(t, h.confirmationOverlay)
 

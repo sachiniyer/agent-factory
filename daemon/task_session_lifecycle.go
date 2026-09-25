@@ -659,8 +659,13 @@ func (m *Manager) persistOwedTaskLifecycle(repoID string, instance *session.Inst
 // fenced teardown the dropped worker was driving. Runs under m.mu, immediately
 // after m.instances is published, from both restoreInstances and refreshLocked.
 //
-// Two marked-row shapes are NOT parked. A tombstoned row belongs to the kill
-// that will finish it — the row delete takes the marker with it. An inert row
+// Three marked-row shapes are NOT parked. A tombstoned row belongs to the kill
+// that will finish it — the row delete takes the marker with it. An archived
+// row has already discharged it: archive's own persist drops the marker (the
+// serialize gate), and only the in-memory copy is left for the lifecycle worker
+// to clear once the archive call returns. A refresh inside that window — any
+// session lookup refreshes — is the ordinary order of an on_complete=archive
+// run, not a fault, so it is settled in memory at INFO (#4853). An inert row
 // (never started, or settled startup-unknown) can never reach the drain because
 // the poll returns before it; that marker is settled instead, by a detached
 // writer because the discharge performs storage I/O and m.mu is held.
@@ -675,8 +680,15 @@ func (m *Manager) armOwedTaskLifecyclesLocked() {
 		switch {
 		case inst.UserKilled():
 			// finishUserKill owns this row now; the delete takes the marker.
+		case inst.IsArchived():
+			// Checked before the inert case: SetArchived clears started, so an
+			// archived row would otherwise read as inert and warn on every
+			// archived task run.
+			inst.SetOwedOnComplete(nil)
+			m.info().Printf("task %s: session %q is archived; its on_complete obligation filed at %s is settled",
+				marker.TaskID, inst.Title, marker.FiledAt.Format(time.RFC3339))
 		case !inst.Started() || inst.StartupStateUnknown():
-			m.warn().Printf("task %s: session %q still carries an on_complete obligation filed at %s, but its record is inert — settling the obligation and leaving the session in place",
+			m.warn().Printf("task %s: session %q is owed an on_complete teardown filed at %s, but af cannot confirm its runtime (it never started, or its startup state is unknown), so the teardown will not run; the obligation is dropped and the session left in place — check it and archive or kill it by hand if its work is done",
 				marker.TaskID, inst.Title, marker.FiledAt.Format(time.RFC3339))
 			m.launchBackgroundMutation(func(<-chan struct{}) {
 				m.dischargeOwedTaskLifecycle(repoID, inst.ID, inst.Title)
