@@ -1,14 +1,11 @@
 package app
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -125,15 +122,15 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 }
 
 // rebindOutcomeUnknown reports whether a failed rebind's outcome is not known:
-// the reply was lost in transport (the daemon may have written the registry
-// and then exited), or the request was cancelled mid-flight. An error the
-// daemon returned in its envelope is a definitive refusal, and a committed
-// error (apiproto.IsMutationCommitted) is a known, landed move — neither is
-// unknown.
+// the shared mutationMayHaveLanded classification (#4820) — a reply lost after
+// the daemon may have received the request, an unverifiable or undecodable
+// reply, or a cancelled request — minus a committed error, which this handler
+// treats as a known, landed move. An error the daemon returned in its envelope
+// is a definitive refusal, and so is a transport failure that provably never
+// reached the daemon: withDaemonHTTPMutation retried it, nothing was sent, and
+// the picker can safely re-arm.
 func rebindOutcomeUnknown(err error) bool {
-	return apiclient.IsTransportError(err) ||
-		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, context.Canceled)
+	return mutationMayHaveLanded(err) && !apiproto.IsMutationCommitted(err)
 }
 
 // followActiveRebind moves the TUI's scope after a CONFIRMED rebind of the

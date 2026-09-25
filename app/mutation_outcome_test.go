@@ -158,3 +158,47 @@ func TestMoveTab_UncertainOutcomeIsNotAFailure(t *testing.T) {
 	require.Equal(t, before, tabNames(alpha), "nothing is projected locally for an unconfirmed move")
 	assert.Contains(t, h.errBox.FullError(), "could not be confirmed")
 }
+
+// #4789's rebind handler now classifies through mutationMayHaveLanded. A rebind
+// that never reached the daemon is a definitive failure the owning picker
+// re-arms inline; an unverifiable reply (a proxy's unmarked 404 after the
+// request went out) is an unknown outcome, which closes the picker. The
+// zero-value TransportError cases are pinned in rebind_project_test.go.
+func TestRebindOutcomeClassification(t *testing.T) {
+	t.Run("never sent re-arms the picker", func(t *testing.T) {
+		h := newTestHome(t)
+		// A short message: the picker truncates its error line to its width.
+		stubRebind(t, &apiclient.TransportError{Err: errors.New("dial refused"), NotSent: true})
+		picker := openRebindPicker(h)
+		h.Update(submitPickerRebind(t, h, "/new/project")())
+
+		require.Same(t, picker, h.projectPickerOverlay, "nothing reached the daemon; the picker stays for a retry")
+		assert.False(t, picker.RebindPending(), "a never-sent rebind re-arms the form")
+		assert.Contains(t, picker.Render(), "dial refused")
+	})
+	t.Run("unverifiable reply is unknown", func(t *testing.T) {
+		h := newTestHome(t)
+		stubRebind(t, &apiclient.UnconfirmedHTTPResponseError{Route: "/v1/RebindProject", Status: 404, Detail: "proxy"})
+		picker := openRebindPicker(h)
+		h.Update(submitPickerRebind(t, h, "/new/project")())
+
+		assert.True(t, picker.RebindPending(), "an unverifiable outcome must not re-arm the rebind form")
+		assert.Nil(t, h.projectPickerOverlay)
+		assert.Equal(t, "Rebind of old-project · outcome unknown · check the project list", h.errBox.FullError())
+	})
+}
+
+// An uncertain "mark delivered" must not read as a failure: the picker's other
+// choice is "resend", which would deliver a mission the daemon may already have
+// retired.
+func TestHandoffDeliveryConfirmed_UncertainOutcomeIsNotAFailure(t *testing.T) {
+	h := newTestHome(t)
+	target := sessionActionTarget{title: "s"}
+
+	_, _ = h.handleHandoffDeliveryConfirmed(handoffDeliveryConfirmedMsg{target: target, err: replyLost()})
+	assert.Contains(t, h.errBox.FullError(), "could not be confirmed")
+	assert.NotContains(t, h.errBox.FullError(), "failed to confirm")
+
+	_, _ = h.handleHandoffDeliveryConfirmed(handoffDeliveryConfirmedMsg{target: target, err: neverSent()})
+	assert.Contains(t, h.errBox.FullError(), "failed to confirm", "a confirm the daemon never saw is a plain failure")
+}

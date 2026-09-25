@@ -278,7 +278,7 @@ var registerProjectThroughDaemon = func(path string) error {
 // suite can stub it without dialing a real daemon.
 var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
 	var project config.Project
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		project, e = c.RebindProject(projectID, path)
 		return e
@@ -302,7 +302,7 @@ var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) e
 // mission on the operator's attestation without a resend. A package var so the
 // app test suite can stub it without dialing a real daemon.
 var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeliveryRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ConfirmHandoffDelivery(request)
 	})
 }

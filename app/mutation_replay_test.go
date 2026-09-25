@@ -108,6 +108,13 @@ func tuiMutations() map[string]func() error {
 			return triggerTaskThroughDaemon("t", expect)
 		},
 		"/v1/RegisterProject": func() error { return registerProjectThroughDaemon("/r") },
+		"/v1/RebindProject": func() error {
+			_, err := rebindProjectThroughDaemon("prj", "/r")
+			return err
+		},
+		"/v1/ConfirmHandoffDelivery": func() error {
+			return confirmHandoffDeliveryThroughDaemon(daemon.ConfirmHandoffDeliveryRequest{ID: "i"})
+		},
 		"/v1/DeleteProject": func() error {
 			_, err := deleteProjectThroughDaemon("/r", "repo")
 			return err
@@ -146,10 +153,11 @@ func TestMutationCommittedThenReplyLost_SentExactlyOnce(t *testing.T) {
 	pointDaemonHTTPAt(t, sock)
 
 	mutations := tuiMutations()
-	// #4820 enumerated 17; ReorderTab (#1813) landed on master while the fix was
-	// in review. TestReadWrapperCallsOnlyReads is what catches the next one.
-	if len(mutations) != 18 {
-		t.Fatalf("expected 18 TUI mutation seams, got %d", len(mutations))
+	// #4820 enumerated 17. ReorderTab (#1813), RebindProject (#4789) and
+	// ConfirmHandoffDelivery (#4528) landed on master while the fix was in
+	// review. TestReadWrapperCallsOnlyReads is what catches the next one.
+	if len(mutations) != 20 {
+		t.Fatalf("expected 20 TUI mutation seams, got %d", len(mutations))
 	}
 	for route, call := range mutations {
 		t.Run(strings.TrimPrefix(route, "/v1/"), func(t *testing.T) {
