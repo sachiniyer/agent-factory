@@ -119,3 +119,17 @@ func TestApplyLiveArming_CarriesNextRunFar(t *testing.T) {
 	require.NotNil(t, got[0].NextRunAt)
 	assert.True(t, got[0].NextRunFar)
 }
+
+// TestFarOutAtAgreesWithNextRunFarOut pins #4855's shared predicate: the task
+// editor's preview has only a computed time, and it must flag exactly what the
+// lists flag for the same next run.
+func TestFarOutAtAgreesWithNextRunFarOut(t *testing.T) {
+	day := 24 * time.Hour
+	for _, next := range []time.Duration{59 * day, 60 * day, 60*day + time.Second, 362 * day} {
+		tk := farOutTask(next)
+		assert.Equal(t, NextRunFarOut(tk, farOutNow), FarOutAt(*tk.NextRunAt, farOutNow), next)
+		assert.Equal(t, FarOutNote(tk, farOutNow), FarOutNoteAt(*tk.NextRunAt, farOutNow), next)
+	}
+	assert.Equal(t, "2027-09-21 (in 11 months)",
+		FarOutNoteAt(time.Date(2027, time.September, 21, 7, 0, 0, 0, time.UTC), farOutNow))
+}
