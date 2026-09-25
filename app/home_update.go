@@ -112,6 +112,10 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
 			cmds = append(cmds, m.showTransientMessage(notice))
 		}
+		// A reload showed a kept, unconfirmed edit did land (#4824).
+		if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
+			cmds = append(cmds, m.showTransientMessage(notice))
+		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
 			// selectionChanged must NOT steal focus onto the selected instance's
