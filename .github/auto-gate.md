@@ -648,6 +648,35 @@ plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
 
+**A pass also retries transient blocks (#4782).** Some blocks clear with time
+and send no event when they do, so a decision taken on them used to sit BLOCKED
+until someone ran a manual `workflow_dispatch`. A pass re-evaluates two shapes
+once they have aged, using the same snapshot, so they cost no extra read:
+
+- **A decision blocked only by transient state**, evaluated at least ten minutes
+  ago. There are three transient reasons, tagged where each is produced:
+  mergeability still `UNKNOWN` or absent (GitHub computes it asynchronously), a
+  required check still settling (queued, in progress, a pending status, or
+  CodeQL's interim neutral), and a `Build` or `Lint` check that has not reported
+  yet (every base-repository head gets a PR Validation run, and evaluation
+  dispatches one when none exists). `reportDecision` writes
+  `<!-- auto-gate-transient-block -->` into the decision's output text only when
+  every reason is one of those. Any other reason keeps the marker off,
+  including a hold, a failed check, a conflict, a finding, a missing verdict,
+  a missing approval, an unapproved parked run, or any reason added later
+  without a tag. Manual-merge decisions never carry it. An unmarked decision is
+  never selected.
+- **A fixed aggregate left at `WAITING: refreshing every PR/head decision at
+  this commit`** for at least fifteen minutes. That title belongs to an
+  aggregate transaction in progress, so one this old means the transaction died.
+  Re-evaluating any PR at the head re-applies the aggregate.
+
+The age is the spacing. A retry that still sees the transient state rewrites
+the decision stamp, so one PR costs at most one evaluation per ten minutes,
+however long the state lasts. Transient retries take only the slots that
+PR Validation wakes leave under the pass's ten-evaluation cap, and at most five.
+The oldest go first, so a backlog drains instead of starving.
+
 **A head with no PR Validation run at all gets one dispatched (#4581).**
 Reconciliation wakes a decision when Build or Lint completes, so it cannot help
 a head whose run GitHub never created. #4430's `b63f9752` was an ordinary lane
@@ -703,8 +732,9 @@ the post-merge warning names the gap, the maintainer dispatches that first run,
 and every later merge uses the updated list automatically.
 
 Repository-ruleset changes and mergeability changes caused only by `master`
-advancing have no GitHub event here. Use the same manual PR-number dispatch to
-refresh that observational state. The destructive merge path still reevaluates
+advancing have no GitHub event here. A mergeability still `UNKNOWN` is retried
+by the reconciliation pass (#4782). For anything else, use the same manual
+PR-number dispatch to refresh that observational state. The destructive merge path still reevaluates
 the target PR, every other associated PR, and the association set immediately
 before its write.
 
