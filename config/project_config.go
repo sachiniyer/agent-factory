@@ -545,7 +545,365 @@ func ResolveProjectSelector(selector string) (Project, error) {
 		return Project{}, fmt.Errorf("%q is not a registered project and is not inside a git repository: %w", selector, err)
 	}
 	for _, p := range projects {
-		if sameProjectPath(p.Root, binding.root) {
+		if !sameProjectPath(p.Root, binding.root) {
+			continue
+		}
+		// The marker is the registry's identity evidence; a last-known path
+		// is not proof when another checkout can replace it in place. The
+		// daemon's session resolver (projectForRoot) is marker-first, so the
+		// CLI write path must reconcile the same way RegisterProject already
+		// does — otherwise the two routes can name different project IDs for
+		// the same workspace root and a personal override is written to a
+		// file the daemon never reads there.
+		checkoutID, markerExists, err := readCheckoutID(binding.checkoutMarkerPath)
+		if err != nil {
+			return Project{}, err
+		}
+		switch {
+		case !markerExists:
+			// The absent marker is shared with every worktree that uses this
+			// binding's git common directory. When another registered root
+			// resolves to that same directory, RebindProject's ensureCheckoutID
+			// would write p's new marker into it (project_registry.go:293-303
+			// only rejects records whose CheckoutID matches the new one), so
+			// the suggested rebind reattributes every worktree sharing that
+			// directory to p while leaving the original owner's record stale —
+			// the same takeover the replaced-marker branch below guards
+			// against. Refuse the rebind advice and name the other project
+			// rather than recommend a takeover through a directory this
+			// checkout does not privately own.
+			//
+			// projectRootUsesGitCommonDir suppresses resolution errors, so
+			// its false return conflates the other root resolving to a
+			// different git common directory (this checkout's marker is
+			// private and a rebind is safe) with the other root failing to
+			// resolve at all (removed, renamed, or temporarily wedged while
+			// other linked worktrees still share this checkout's common
+			// directory). The second case is unknown ownership, not a
+			// non-match: if the other registered root still shares this
+			// directory, the suggested rebind writes a new marker into it
+			// and reattributes every surviving worktree to p while leaving
+			// the other registration stale. Resolve other.Root explicitly
+			// and refuse the rebind advice when that resolution fails, so an
+			// unresolvable shared owner is not read as absent.
+			// resolveProjectBinding uses context.Background(), so a root
+			// whose .git file points at a wedged or unavailable mount never
+			// returns and `af config --project <path> set/unset` would hang
+			// on it. Classify the current checkout before probing any
+			// unrelated root: a private main checkout whose <root>/.git is
+			// its own with no linked worktrees git has spawned cannot share
+			// the marker at <binding.gitCommonDir>/af/... with any other
+			// registration — the path is this checkout's alone, so the
+			// fall-through rebind advice is the only outcome and the scan
+			// is skipped outright. A <root>/.git that is a SYMLINK to an
+			// external git directory is another sharing shape both
+			// predicates miss (os.Stat follows the symlink and reads it as
+			// a plain directory, and the canonicalized target need not have
+			// a <commonDir>/worktrees subdir), yet another registered
+			// checkout whose <root>/.git points at the same target shares
+			// the marker — classify the symlinked-<root>/.git case as
+			// possibly-shared so the scan still runs. A <root>/.git that
+			// is a REGULAR "gitdir: <path>" file pointing DIRECTLY at
+			// binding.gitCommonDir is the same shape without a symlink:
+			// two checkouts both using `git init --separate-git-dir` (or
+			// two .git files written by hand to point at the same external
+			// directory) share the marker the same way, and the linked and
+			// main-worktrees predicates both miss it because the gitdir
+			// target IS commonDir (so sharedWorktreeCommonDir rejects it)
+			// and there need not be a <commonDir>/worktrees subdir.
+			// Classify the direct-gitdir-file case as possibly-shared too,
+			// so the scan still runs. A directory-shaped <root>/.git is
+			// not by itself proof the marker is private either: two
+			// checkouts whose <root>/.git are bind-mounted (or
+			// duplicate-mounted) onto the same external directory share
+			// the marker, and each .git reads as an ordinary directory with
+			// no worktrees metadata, so the four shape-based predicates
+			// all miss it. anotherRootSharesGitDir performs the same
+			// inode-identical check the scan loop's sameProjectPath does,
+			// but as a fast stat-only sweep of registered roots so the
+			// predicate can keep the per-root git probe reachable without
+			// paying a per-root git invocation when no inode matches. The
+			// remaining shared-checkout scan is per-root git resolution,
+			// so bound each probe the way the daemon's scan does
+			// (projectForWorkspaceContext): the same
+			// registeredProjectScanTimeout bounds the probe of each other
+			// root, so a wedged unrelated registration no longer hangs af
+			// even when the scan is reachable. Otherwise probe each other
+			// registered root and fail closed when one that could share
+			// this directory cannot be resolved — the same two predicates
+			// the retained-marker branch uses, plus the
+			// symlinked-<root>/.git, direct-gitdir-file, and
+			// bind-mounted-directory cases above.
+			checkoutMarkerCouldBeShared := sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) ||
+				mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) ||
+				gitDirAtRootIsSymlink(binding.root) ||
+				gitDirAtRootPointsAtCommonDir(binding.root, binding.gitCommonDir) ||
+				anotherRootSharesGitDir(binding, projects)
+			scanCtx, scanCancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+			defer scanCancel()
+			for _, other := range projects {
+				if sameProjectPath(other.Root, binding.root) {
+					continue
+				}
+				if !checkoutMarkerCouldBeShared {
+					continue
+				}
+				otherBinding, otherErr := resolveProjectBindingContext(scanCtx, other.Root)
+				if otherErr != nil {
+					return Project{}, fmt.Errorf(
+						"path %s is already the last-known root of project %s, but this checkout has no checkout marker; "+
+							"another registered root %s (project %s) could not be resolved (%s) and may share this checkout's git directory; "+
+							"if it does, rebinding project %s here would write a new marker into that shared directory and reattribute every worktree it shares with while leaving project %s's registration stale; "+
+							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
+						binding.root, p.ID, other.Root, other.ID, otherErr, p.ID, other.ID, other.ID, other.ID)
+				}
+				// resolveProjectBinding resolves git through ancestor
+				// fallback: when other.Root used to be a nested repository
+				// under this checkout's root and its nested .git directory
+				// was removed (leaving the directory present), git -C
+				// other.Root resolves the enclosing repository — which may
+				// be binding.root — and returns that enclosing repo's common
+				// directory. The common-directory comparison below would
+				// then match binding's and falsely name the stale nested
+				// registration as a shared owner, blocking the rebind
+				// recovery even though no linked worktree exists. Require
+				// otherBinding.root to still name other.Root before treating
+				// its common directory as ownership evidence, the same
+				// exact-root guard ResolveRegisteredProjectRepo uses to keep
+				// a nested registration's personal config from leaking to
+				// an enclosing ancestor.
+				if !sameProjectPath(otherBinding.root, other.Root) {
+					continue
+				}
+				if !sameProjectPath(otherBinding.gitCommonDir, binding.gitCommonDir) {
+					continue
+				}
+				return Project{}, fmt.Errorf(
+					"path %s is already the last-known root of project %s, but this checkout has no checkout marker and shares its git directory with project %s's registered root %s; "+
+						"rebinding project %s here would write a new marker into that shared directory and reattribute every worktree it shares with while leaving project %s's registration stale; "+
+						"move this checkout to a path that does not share its git directory, or remove the linked worktree from project %s",
+					binding.root, p.ID, other.ID, other.Root, p.ID, other.ID, other.ID)
+			}
+			return Project{}, fmt.Errorf(
+				"path %s is already the last-known root of project %s, but this checkout has no checkout marker — "+
+					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+				binding.root, p.ID, p.ID, ShellQuotePath(binding.root))
+		case checkoutID != p.CheckoutID:
+			// The marker at binding.checkoutMarkerPath belongs to another
+			// registered project. When this checkout is a linked worktree of
+			// that project, the binding's git common directory matches the
+			// owner's — so the marker is the owner's own registry-record
+			// marker, not a copied one (cp -R) at a private .git. Removing it
+			// would delete it for every one of the owner's worktrees sharing
+			// that common directory, and a rebind here would leave the
+			// owner's record referencing a checkout ID the marker no longer
+			// carries. Detect this before recommending deletion: in the
+			// shared case the checkout cannot replace p without disrupting
+			// the owner, so af refuses rather than call the marker copied.
+			//
+			// Track whether any registered owner claims the marker's checkout
+			// identity: a marker no record claims is a normal state after
+			// `af projects remove` (DeregisterProject leaves the marker
+			// behind), and a direct rebind reuses that durable id without
+			// collision (RebindProject rejects only when another record
+			// claims the identity). Telling the user to delete it first
+			// would needlessly destroy that identity.
+			matchedRegisteredOwner := false
+			// The owner probe here used to call resolveProjectBinding
+			// directly, which uses context.Background() internally. When
+			// the owner's recorded root has its git metadata on a wedged
+			// or unavailable mount, that probe never returned and
+			// `af config --project <path> set/unset` hung on this branch
+			// instead of producing the fail-closed refusal below. The
+			// absent-marker scan above already bounds each per-root probe
+			// to registeredProjectScanTimeout the same way
+			// projectForWorkspaceContext bounds the daemon's scan; bound
+			// this probe the same way so an unavailable owner fails
+			// closed within that deadline rather than hanging the CLI.
+			ownerScanCtx, ownerScanCancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+			defer ownerScanCancel()
+			for _, owner := range projects {
+				if !sameProjectIdentity(checkoutID, binding.relativeRoot, owner.CheckoutID, owner.RelativeRoot) {
+					continue
+				}
+				matchedRegisteredOwner = true
+				// projectRootUsesGitCommonDir suppresses resolution errors, so
+				// its false return conflates two cases: the owner's root
+				// resolves to a different git common directory (the marker is
+				// a private cp -R copy, safe to remove), and the owner's root
+				// cannot be resolved at all (removed, renamed, or temporarily
+				// wedged while other linked worktrees of that owner still share
+				// this checkout's git common directory). In the second case
+				// the marker at this binding's path may still be the owner's
+				// own shared registry marker — deleting it on the
+				// "copied marker" remedy would break identity resolution for
+				// every remaining worktree and leave the owner's record
+				// referencing a checkout ID the marker no longer carries.
+				// Resolve the owner's binding explicitly and treat the
+				// unresolvable case as unknown: refuse deletion advice rather
+				// than call the marker private.
+				ownerBinding, ownerErr := resolveProjectBindingContext(ownerScanCtx, owner.Root)
+				if ownerErr != nil {
+					return Project{}, fmt.Errorf(
+						"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+							"the marker belongs to project %s, whose registered root %s could not be resolved (%s); "+
+							"the marker may still be shared with this checkout through a linked worktree, so af will not recommend removing it — "+
+							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
+						binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, ownerErr, owner.ID, owner.ID)
+				}
+				// resolveProjectBinding resolves git through ancestor
+				// fallback: when owner.Root used to be a nested repository
+				// under binding.root whose nested .git directory was
+				// removed (leaving the directory present), git -C owner.Root
+				// resolves the enclosing repository and returns its root and
+				// common directory. The marker checks below would then treat
+				// the unrelated ancestor as the owner: its common directory
+				// may coincide with binding's, so the linked-worktree refusal
+				// at the fall-through below would fire with a misleading
+				// "shared through its git directory" message naming a worktree
+				// this checkout is not, and the deletion-advice branch would
+				// probe the ancestor's marker rather than the owner's. Require
+				// ownerBinding.root to still name owner.Root before using the
+				// binding, the same exact-root guard the absent-marker scan
+				// uses at lines 637-639; an owner root that resolves to a
+				// different root is treated as unknown, and the deletion
+				// advice is refused.
+				if !sameProjectPath(ownerBinding.root, owner.Root) {
+					return Project{}, fmt.Errorf(
+						"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+							"the marker belongs to project %s, whose registered root %s no longer resolves to itself (now resolves to %s) and may be a stale nested registration whose git directory was removed; "+
+							"the marker at this checkout may still be project %s's own shared marker, so af will not recommend removing it — "+
+							"resolve project %s's root (restore or re-clone it), then either move this checkout to a path that does not share its git directory or remove the linked worktree from project %s",
+						binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, ownerBinding.root, owner.ID, owner.ID, owner.ID)
+				}
+				if !sameProjectPath(ownerBinding.gitCommonDir, binding.gitCommonDir) {
+					// The owner's recorded root resolves to a different git
+					// common directory than this checkout. Before treating the
+					// marker at binding.checkoutMarkerPath as a private cp -R
+					// copy (safe to remove), prove the owner's recorded root
+					// still carries its recorded marker: the recorded root is
+					// only last-known, and if another repository has replaced
+					// it (a fresh clone, a new project registered over it, or
+					// its marker stripped), the marker at this checkout may
+					// still be the owner's own shared marker through a linked
+					// worktree sharing binding's git common directory. Deleting
+					// it would break identity resolution for every remaining
+					// worktree sharing that directory and leave the owner's
+					// record stale. A common-directory mismatch justifies
+					// deletion only after the owner root has proven its own
+					// marker; otherwise treat ownership as unknown and refuse
+					// deletion rather than call the marker private.
+					ownerMarkerID, ownerMarkerExists, ownerMarkerErr := readCheckoutID(ownerBinding.checkoutMarkerPath)
+					if ownerMarkerErr != nil {
+						return Project{}, ownerMarkerErr
+					}
+					if !ownerMarkerExists || ownerMarkerID != owner.CheckoutID {
+						return Project{}, fmt.Errorf(
+							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+								"the marker belongs to project %s, whose registered root %s now resolves to a different git directory and no longer carries project %s's checkout marker; "+
+								"the marker at this checkout may still be project %s's own shared marker through a linked worktree, so af will not recommend removing it — "+
+								"move this checkout to a path that does not share its git directory, or remove the linked worktree from project %s",
+							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.Root, owner.ID, owner.ID, owner.ID)
+					}
+					// The owner's recorded root still carries a marker matching
+					// owner.CheckoutID. That alone does NOT prove the marker at
+					// binding.checkoutMarkerPath is a private cp -R copy safe to
+					// remove: the owner's root may ITSELF have been replaced by a
+					// copy/restore that RETAINED the marker, while another linked
+					// worktree (this checkout) still shares the owner's ORIGINAL
+					// common directory at binding.gitCommonDir. In that shape the
+					// marker here is the owner's real shared marker and the
+					// owner's recorded root carries the copy — deleting here would
+					// break identity resolution for every worktree sharing
+					// binding.gitCommonDir, and matching owner.CheckoutID cannot
+					// distinguish which of the two duplicated markers is the copy.
+					// A LINKED WORKTREE's marker lives in the bare's shared common
+					// directory, so when this checkout is a linked worktree refuse
+					// deletion rather than fall through to the copied-marker
+					// remedy. A MAIN checkout that has spawned linked worktrees of
+					// its own shares its <root>/.git the same way, so the same
+					// refusal applies; the mainCheckoutHasLinkedWorktrees guard
+					// below catches that.
+					if sharedWorktreeCommonDir(binding.root, binding.gitCommonDir) {
+						return Project{}, fmt.Errorf(
+							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+								"the marker belongs to project %s, and project %s's registered root %s still carries a matching marker, "+
+								"but this checkout is a linked worktree whose git directory is shared with every worktree on that bare, "+
+								"and the marker here may be project %s's own shared marker rather than a private copy; "+
+								"af cannot tell which marker is the copy, so it will not recommend removing this one — "+
+								"move this checkout to a path that does not share its git directory, or remove the linked worktree from project %s",
+							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, owner.Root, owner.ID, owner.ID)
+					}
+					// sharedWorktreeCommonDir only catches the linked-worktree
+					// side of a shared marker: a MAIN checkout's <root>/.git lives
+					// inside the root, so the predicate returns false even when
+					// that .git has spawned linked worktrees of its own. git stores
+					// every linked worktree it creates under <commonDir>/worktrees,
+					// so a non-empty worktrees directory proves this main's git
+					// common directory backs more than this single checkout, and
+					// the marker here is no more private than the linked-worktree
+					// case above. Matching owner.CheckoutID cannot tell which of
+					// the two duplicated markers is the copy in that shape, and
+					// recommending removal would break identity resolution for
+					// every worktree git has spawned from this main. Refuse the
+					// deletion advice and name the shared directory, the same
+					// remedy as the linked-worktree case.
+					if mainCheckoutHasLinkedWorktrees(binding.gitCommonDir) {
+						return Project{}, fmt.Errorf(
+							"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+								"the marker belongs to project %s, and project %s's registered root %s still carries a matching marker, "+
+								"but this checkout is a main working tree that has spawned linked worktrees sharing its git directory, "+
+								"and the marker here may be project %s's own shared marker rather than a private copy; "+
+								"af cannot tell which marker is the copy, so it will not recommend removing this one — "+
+								"move this checkout to a path that does not share its git directory, or remove the linked worktrees this main has spawned",
+							binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, owner.Root, owner.ID)
+					}
+					// <root>/.git may be a symlink to an external git
+					// directory another registration shares; the two main
+					// sharing predicates both miss that shape, so refuse
+					// the deletion advice via the symlink guard rather than
+					// fall through to the copied-marker remedy.
+					if err := symlinkedRootMarkerRefusal(binding, p, checkoutID, owner); err != nil {
+						return Project{}, err
+					}
+					// <root>/.git may instead be a regular "gitdir: <path>"
+					// file pointing DIRECTLY at binding.gitCommonDir — the
+					// separate-git-dir layout two checkouts may share. The
+					// same two main predicates miss this shape (target == commonDir
+					// gives the rel ".." the linked-worktree predicate rejects,
+					// and the common dir need not have a worktrees subdir), so
+					// refuse the deletion advice the same way as the symlink
+					// guard rather than fall through to the copied-marker remedy.
+					if err := directGitDirFileMarkerRefusal(binding, p, checkoutID, owner); err != nil {
+						return Project{}, err
+					}
+					// The owner's recorded root still carries its marker and this
+					// checkout is a main checkout whose git common directory is its
+					// own <root>/.git with no linked worktrees sharing it, so the
+					// marker at binding.checkoutMarkerPath is a private cp -R
+					// copy; fall through to the deletion remedy.
+					continue
+				}
+				return Project{}, fmt.Errorf(
+					"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+						"the marker belongs to project %s and is shared with this checkout through its git directory (a linked worktree); "+
+						"removing it would delete it for every checkout sharing that directory and a rebind here would leave project %s's registry record stale; "+
+						"this checkout cannot replace %s without disrupting project %s — move it to a path that does not share the directory, or remove the linked worktree from project %s",
+					binding.root, p.ID, checkoutID, p.CheckoutID, owner.ID, owner.ID, p.ID, owner.ID, owner.ID)
+			}
+			if matchedRegisteredOwner {
+				return Project{}, fmt.Errorf(
+					"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+						"the marker belongs to another registered project, so `af projects rebind` would reject it; "+
+						"remove the copied checkout marker at %s, then run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+					binding.root, p.ID, checkoutID, p.CheckoutID, binding.checkoutMarkerPath, p.ID, ShellQuotePath(binding.root))
+			}
+			return Project{}, fmt.Errorf(
+				"path %s is already the last-known root of project %s, but this checkout has marker %s instead of %s — "+
+					"no registered project claims this checkout marker (it is typically a marker `af projects remove` left behind); "+
+					"run `af projects rebind %s %s` if this checkout replaces it; otherwise move the new checkout",
+				binding.root, p.ID, checkoutID, p.CheckoutID, p.ID, ShellQuotePath(binding.root))
+		default:
 			return p, nil
 		}
 	}
