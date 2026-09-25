@@ -444,10 +444,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // projection discipline as the rest of the count.
 //
 // The fifth return, reread, names every repo whose instances.json this call
-// read AND parsed. It is the only evidence that clears a repo from the skip set
-// (retainStillSkipped): a repo the loader could not read, or that is absent from
-// disk altogether, is not in it, so an omission is never mistaken for a repair
-// (#4783).
+// read AND parsed INTO a fully loadable row set. It is the only evidence that
+// clears a repo from the skip set (retainStillSkipped): a repo the loader
+// could not read, that is absent from disk, or that parses-but-yields-any-
+// unloadable-row (retracted below) is not in it, so neither an omission, a
+// zero-rows file, nor a partial loss is a repair (#4783, #4812, #4876).
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
 		return existing, nil, nil, nil, err
@@ -520,7 +521,12 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			continue
 		}
 		reread[repoID] = true
-
+		// Retractable below: a parses-but-any-row-unloadable file is not a
+		// repair, or list/get/whoami silently serve a partial list as the
+		// complete answer the skip set exists to prevent — a partial loss is
+		// the same lie as a total one (#4812, #4876, the "read AND parsed" trim
+		// left open here).
+		materialized, failedRows := 0, 0
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
 			if item.ID == "" && !isLegacyTransientGhost(item) {
@@ -553,6 +559,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 			instance, err := fromInstanceDataForRefresh(item)
 			if err != nil {
+				failedRows++
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
 				// A marked row that cannot materialize still owes its teardown
 				// (#4162) — the obligation is durable but nothing in memory can
@@ -589,7 +596,13 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				continue
 			}
 			next[key] = instance
+			materialized++
 		}
+		// Parsed but not fully loadable is NOT a repair: retract the "repaired"
+		// signal so the repo stays skipped, and on poll record a rows-failed
+		// skip entry whose reason rewrites the stale one (#4812, #4876). The
+		// partial-loss and self-healing rationale lives in the helper.
+		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, existing != nil, skipped)
 	}
 
 	// Preserve in-memory instances whose repo directory vanished from disk
