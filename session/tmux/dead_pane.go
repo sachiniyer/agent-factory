@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -195,6 +196,16 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 // an unknown status. A process tab's immediate-failure check and its durable
 // exit record both read this answer.
 //
+// It also asks the server to collect the root (nudgeReap), because the root's
+// own SIGCHLD may never reach tmux. tmux before 3.6 built with utempter (Ubuntu
+// and Debian) loses it: closing the pane's terminal runs libutempter's helper
+// with SIGCHLD set to SIG_DFL, and a root that exits in that window stays a
+// zombie, with no status, until the server's next SIGCHLD, which on a quiet
+// server never comes. Measured on Ubuntu 24.04's tmux 3.4: 25 of 400 held
+// `exit 7` panes, and 0 of 400 with utempter stubbed out. Upstream fixed it in
+// fa5f3cef3d (tmux/tmux#4559, released in 3.6); the nudge can go once 3.6 is
+// the oldest tmux af supports.
+//
 // The known contract matches ProbeSession: known=false means tmux could not
 // answer (timeout, socket policy), never that the pane is alive. status is
 // meaningful only when statusKnown: a signal death, a tmux too old to report
@@ -206,7 +217,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 	// stalls mid-wait cannot hold the caller for a whole command timeout.
 	deadline := time.Now().Add(paneStatusWait)
 	pause := 5 * time.Millisecond
+	nudges := 0
 	for uncollected {
+		if nudges < maxReapNudges {
+			nudges++
+			t.nudgeReap(time.Until(deadline))
+		}
 		time.Sleep(pause)
 		pause = min(2*pause, 50*time.Millisecond)
 		budget := time.Until(deadline)
@@ -221,6 +237,10 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 		}
 		exit, uncollected = next, stillUncollected
 	}
+	if nudges > 0 {
+		log.InfoLog.Printf("tmux session %s: pane root exited but %s had not collected it; nudged the server %d time(s), status known after: %t",
+			t.sanitizedName, tmuxVersionForLog(), nudges, exit.statusKnown)
+	}
 	return exit.dead, exit.status, exit.statusKnown, exit.at, exit.known
 }
 
@@ -229,6 +249,33 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 // normally milliseconds; the bound only matters when tmux is stalled. var, not
 // const, so tests can lower it.
 var paneStatusWait = 2 * time.Second
+
+// maxReapNudges caps how many times one probe nudges the server. One is enough
+// unless the nudge's own SIGCHLD lands in another pane's utempter window.
+const maxReapNudges = 3
+
+// nudgeReap makes the pane's tmux server run a trivial job. The job's exit
+// delivers a SIGCHLD, and tmux's handler collects every exited child with
+// waitpid(WAIT_ANY), so it collects the stranded pane root too and records its
+// status. On a tmux that lost nothing, the job just runs and exits. It goes
+// through the same executor as the probe's reads, so it reaches the same
+// server. A failure is ignored, and the probe falls back to waiting.
+func (t *TmuxSession) nudgeReap(budget time.Duration) {
+	ctx, cancel := tmuxTimeoutContextWithin(budget)
+	defer cancel()
+	_ = t.runTmuxBounded(ctx, "run-shell", "-b", "true")
+}
+
+// tmuxVersionForLog reports the tmux client version for a diagnostic line.
+func tmuxVersionForLog() string {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
+	if err != nil {
+		return "tmux (version unknown)"
+	}
+	return strings.TrimSpace(string(out))
+}
 
 // paneExit is one reading of ProbePaneExit's answer.
 type paneExit struct {
