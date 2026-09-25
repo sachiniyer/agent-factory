@@ -11,8 +11,10 @@ import (
 // It lives in the config overlay for the same reason the Accounts section does
 // (#3385): it is daemon-reported per-agent state, not a config key, so it rides
 // under the manifest as a labelled section rather than impersonating a row you
-// can edit. Its rows are never selectable — there is nothing to act on, the
-// detail line under each agent carries the whole answer.
+// can edit. Its rows take the cursor without offering an action — selection is
+// the list's only scroll driver, so a row the cursor cannot land on is a row
+// the window cannot reach; enter does nothing because the row has no config
+// entry. The detail line under each agent carries the whole answer.
 const (
 	quotaHeading     = "Usage"
 	quotaHeadingNote = "What af can honestly say about each agent's quota — read on every open. " +
@@ -82,17 +84,31 @@ func (c *ConfigPane) appendQuotaRows() {
 	}
 }
 
-// renderQuotaRow draws one agent line: name, "quota · observed" on the row and
-// the daemon's detail sentence indented under it. The row is never the
-// selection — quota rows are not selectable — so the detail is always visible,
-// which is where the reset time lives.
-func (c *ConfigPane) renderQuotaRow(row QuotaRow) string {
+// renderQuotaRow draws one agent line: cursor, name, "quota · observed" on the
+// row and the daemon's detail sentence indented under it. The detail stays
+// visible whether or not the row is selected — that is where the reset time
+// lives, and hiding it behind selection would cost a parked session its answer.
+func (c *ConfigPane) renderQuotaRow(i int, row QuotaRow) string {
 	var b strings.Builder
-	b.WriteString("  ")
-	b.WriteString(configKeyStyle.Render(row.Program))
+	selected := i == c.selectedIdx
+
+	cursor := "  "
+	if selected {
+		cursor = SelectionMarker("› ")
+	}
+	b.WriteString(cursor)
+
+	programStyle := configKeyStyle
+	if selected {
+		programStyle = configSelectedStyle
+	}
+	b.WriteString(programStyle.Render(row.Program))
 	b.WriteString(configValueStyle.Render("  " + row.Quota + " · "))
 	stateStyle := configValueStyle
-	if row.LimitedSessions > 0 {
+	switch {
+	case selected:
+		stateStyle = configSelectedStyle
+	case row.LimitedSessions > 0:
 		// A parked session is the report's whole point; it gets the dedicated
 		// limit color the rail already uses for the same state.
 		stateStyle = configLimitStyle

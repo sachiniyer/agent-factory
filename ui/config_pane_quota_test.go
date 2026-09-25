@@ -5,15 +5,18 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/config"
 )
 
 // The Usage section of the config overlay (#2983). What these pin is the part
-// a screenshot cannot: that a quota row is not a config row — the cursor cannot
-// land on it and nothing on it opens the editor — and that the report's honesty
-// rules survive the surface change: "not reported" never reads as a zero, a
-// failed read never renders as an empty section, and a partial report always
-// carries its warning.
+// a screenshot cannot: that a quota row is not a config row — nothing on it
+// opens the editor — but the cursor MUST reach it, because selection is the
+// list's only scroll driver and a row the cursor cannot land on is a section
+// the user can never scroll to. And that the report's honesty rules survive
+// the surface change: "not reported" never reads as a zero, a failed read
+// never renders as an empty section, and a partial report always carries its
+// warning.
 
 // quotaPane builds a pane with one config key and a populated Usage section.
 func quotaPane(t *testing.T, rows []QuotaRow, warnings []string) *ConfigPane {
@@ -44,27 +47,48 @@ func TestConfigPaneQuota_RendersEveryAgentRowWithItsDetail(t *testing.T) {
 	}
 }
 
-// A quota row must never take the cursor: it is a report line, and letting the
-// selection land on it would either dead-end the keypress or imply an editor
-// the section does not have.
-func TestConfigPaneQuota_RowsAreNotSelectable(t *testing.T) {
+// Quota rows are selectable purely so the window can reach them: the cursor is
+// the only scroll driver this list has, so a Usage section the cursor cannot
+// land on below the last editable row renders but never scrolls into view.
+// Reproduced in the play-test container — the cursor dead-ended on the last
+// Accounts register row with the whole Usage section under "↓ n more".
+func TestConfigPaneQuota_RowsAreSelectableSoTheWindowCanReachThem(t *testing.T) {
 	pane := quotaPane(t, []QuotaRow{
 		{Program: "claude", Quota: "not reported", Observed: "no sessions", Detail: "configured, but af has no sessions running it"},
 	}, nil)
 
+	var quotaIdx = -1
 	for i, row := range pane.rows {
-		if row.quota != nil && row.isSelectable() {
-			t.Fatalf("quota row %d is selectable: a report line must never take the cursor", i)
+		if row.quota != nil {
+			if !row.isSelectable() {
+				t.Fatalf("quota row %d is not selectable: the cursor could never scroll the Usage section into view", i)
+			}
+			if quotaIdx < 0 {
+				quotaIdx = i
+			}
 		}
 	}
-	// And navigation must skip them rather than stall: the last selectable row
-	// stays reachable from the first.
-	pane.selectedIdx = 0
-	for i := 0; i < len(pane.rows); i++ {
-		pane.move(1)
+	if quotaIdx < 0 {
+		t.Fatal("no quota rows")
 	}
-	if pane.selectedIdx >= len(pane.rows) || !pane.rows[pane.selectedIdx].isSelectable() {
-		t.Fatalf("navigation landed on index %d, a non-selectable row", pane.selectedIdx)
+	// Navigation must be able to land on them, not just declare them.
+	pane.selectedIdx = 0
+	for pane.selectedIdx < quotaIdx {
+		before := pane.selectedIdx
+		pane.move(1)
+		if pane.selectedIdx == before {
+			t.Fatalf("navigation stalled at %d before reaching quota row %d", before, quotaIdx)
+		}
+	}
+	// Selecting a quota row opens nothing: there is no entry to edit and no
+	// account to log into.
+	pane.selectedIdx = quotaIdx
+	if pane.selectedEntry() != nil || pane.selectedAccount() != nil {
+		t.Fatal("a quota row must carry neither a config entry nor an account")
+	}
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if pane.IsEditing() {
+		t.Fatal("enter on a quota row must not open the editor")
 	}
 }
 

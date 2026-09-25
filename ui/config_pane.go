@@ -108,7 +108,8 @@ type configRow struct {
 	// quota is meaningful on any row.
 	account *AccountRow
 	// quota is set for a row of the Usage section (#2983) — a daemon-rendered
-	// report line. It is never selectable: there is nothing on it to act on.
+	// report line. It takes the cursor so the scroll window can reach it, but
+	// nothing on it opens for editing.
 	quota *QuotaRow
 }
 
@@ -118,8 +119,14 @@ type configRow struct {
 // rejection stays visible in this real field. Turning the row read-only would
 // restore the class #3345 explicitly removed, while a local-write fallback
 // would bypass the running daemon's lifecycle admission gate.
+//
+// Quota rows take the cursor even though there is nothing to edit on them
+// (#2983): the selection is the only scroll driver this list has — window()
+// scrolls just far enough to reveal it — so a non-selectable Usage section
+// below the last editable row would render but never scroll into view. Enter
+// on one is a no-op because selectedEntry returns nil for it.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil
+	return r.entry != nil || r.account != nil || r.quota != nil
 }
 
 var (
@@ -550,7 +557,7 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 			rendered := c.renderAccountRow(i, *row.account)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.quota != nil:
-			rendered := c.renderQuotaRow(*row.quota)
+			rendered := c.renderQuotaRow(i, *row.quota)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
