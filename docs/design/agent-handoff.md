@@ -468,7 +468,12 @@ now carried by the obligation they are actually about (#4528):
 - An idle incoming pane is not a finished task run while its mission is owed.
   That edge is what hands a task session to its `on_complete` policy, so the
   run marker now stays set until the mission is resolved — otherwise an
-  unresolved handoff could be archived or killed by policy.
+  unresolved handoff could be archived or killed by policy. The held edge is
+  recorded durably (`task_run_idle_edge_held`), because Mark delivered leaves
+  the pane exactly as idle as it was and no fresh edge would ever arrive: the
+  first idle poll after the mission is retired ends the run in its place. A
+  resend drops the held edge instead — the resent turn ends the run on its own
+  idle edge.
 - A second handoff may not start while the first one's mission is unresolved.
   `SetPendingHandoffMission` would overwrite the mission and its verdict, and
   nothing else records that obligation, so `ValidateRuntimeAction` refuses the
