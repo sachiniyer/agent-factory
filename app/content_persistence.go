@@ -124,6 +124,17 @@ func (m *home) saveContentPaneState() error {
 				// failed. Keep surfacing that failure, but advance this task's
 				// baseline so a later edit is diffed against durable state.
 				sp.AcknowledgeSavedEdit(edit.ID)
+			} else if mutationOutcomeUnknown(err) {
+				// The update may have landed with only its reply lost (#4824).
+				// Retaining the draft would re-send it on the next save and could
+				// overwrite a change another writer made in between, so the edit
+				// is not kept dirty: the reload below shows what the daemon holds,
+				// and the message tells the user to check it before editing again.
+				sp.AcknowledgeSavedEdit(edit.ID)
+				log.WarningLog.Printf("task update outcome unknown: %v", err)
+				saveErr = errors.Join(saveErr, mutationOutcomeError(
+					fmt.Sprintf("saving task %q", edit.ID), "the task list", err))
+				continue
 			} else {
 				sp.RestoreFailedEdit(edit.ID)
 				failedEdit = true
@@ -146,6 +157,14 @@ func (m *home) saveContentPaneState() error {
 				log.WarningLog.Printf("task removal committed but schedule refresh failed: %v", err)
 				saveErr = errors.Join(saveErr, fmt.Errorf(
 					"task %q was removed, but the daemon could not refresh its schedules: %w", tsk.Name, err))
+				continue
+			}
+			// A removal that may have landed is not reported as a failure
+			// (#4824); the reload below shows whether the task is still there.
+			if mutationOutcomeUnknown(err) {
+				log.WarningLog.Printf("task removal outcome unknown: %v", err)
+				saveErr = errors.Join(saveErr, mutationOutcomeError(
+					fmt.Sprintf("removing task %q", tsk.Name), "the task list", err))
 				continue
 			}
 			log.ErrorLog.Printf("failed to remove task: %v", err)
