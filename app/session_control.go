@@ -173,6 +173,21 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 		return e
 	})
 	if err != nil {
+		// apiclient.CreateSession keeps the payload on a mutation-committed
+		// outcome: a retained failed create (#3233/#3357, b4ab324c) still has a
+		// durable row the caller may need to address, so the daemon returns it on
+		// the wire alongside the committed error. Surface that retained row here
+		// so the handler can classify the create as "created, with warning"
+		// (mirroring every sibling mutation handler's IsMutationCommitted
+		// branch). Returning (nil, err) discarded that row, which made the TUI
+		// treat a durably-persisted create as a clean refusal.
+		if apiclient.IsMutationCommitted(err) && data != nil {
+			inst, ierr := session.FromInstanceData(*data)
+			if ierr != nil {
+				return nil, err
+			}
+			return inst, err
+		}
 		return nil, err
 	}
 	return session.FromInstanceData(*data)
