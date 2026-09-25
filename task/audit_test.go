@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -460,4 +462,518 @@ func TestAudit_ARealRebindIsTheUsersChange(t *testing.T) {
 	require.Len(t, trail, 2, "the create, and the user's move — not a third for the derived id")
 	assert.Equal(t, ActorCLI, trail[1].Actor)
 	assert.Equal(t, []string{"project_path"}, trail[1].Fields)
+}
+
+// These pin the destructive inverse of TestAudit_SamePathBackfillIsRecorded: a
+// same-path ProjectPath reassertion over a path that has SINCE stopped resolving
+// must not erase the retained RepoID. The recompute stays — it backs the legacy
+// backfill where the retained id is "" and the path resolves — but an empty
+// re-resolution over a retained, non-empty id strands the task from its own
+// project's scope, the exact harm Task.RepoID exists to prevent. See
+// Task.RepoID's PURPOSE and the contract contemplation of subdirectory and
+// linked-worktree bindings at task/task.go:103-108.
+
+// bindMainWithLinkedWorktree creates a main git repo and a linked worktree at a
+// SIBLING path, the contract-contemplated binding whose owning repo root is not
+// a directory-tree ancestor of the recorded path. Returns the symlink-resolved
+// main root and worktree path. A commit is made so `git worktree add` can branch.
+func bindMainWithLinkedWorktree(t *testing.T) (mainRoot, worktree string) {
+	t.Helper()
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "main")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	for _, args := range [][]string{
+		{"-C", mainRoot, "config", "user.email", "test@example.com"},
+		{"-C", mainRoot, "config", "user.name", "Test User"},
+		{"-C", mainRoot, "commit", "--allow-empty", "-m", "init"},
+	} {
+		require.NoError(t, exec.Command("git", args...).Run(), "git %v", args)
+	}
+	wtRaw := filepath.Join(base, "linked")
+	out, err := exec.Command("git", "-C", mainRoot, "worktree", "add", "-b", "feature", wtRaw).CombinedOutput()
+	require.NoError(t, err, "git worktree add: %s", out)
+	worktree, err = filepath.EvalSymlinks(wtRaw)
+	require.NoError(t, err)
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+	return mainRoot, worktree
+}
+
+// bindMainWithSubdir creates a main git repo and a subdirectory inside it, the
+// other contract-contemplated binding: the TUI records the subdirectory the user
+// typed. Returns the symlink-resolved main root and the subdirectory path.
+func bindMainWithSubdir(t *testing.T) (mainRoot, sub string) {
+	t.Helper()
+	base := t.TempDir()
+	mainRoot = filepath.Join(base, "repo")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	sub = filepath.Join(mainRoot, "services", "dlq")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	var err error
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+	sub, err = filepath.EvalSymlinks(sub)
+	require.NoError(t, err)
+	return mainRoot, sub
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoID is the simplest shape: a plain `git
+// init` whose recorded path IS its own root. This shape does NOT surface a scope
+// divergence (the retained id and the dead-path fallback hash the same cleaned
+// path), so this test pins only that the field is NOT erased and that NO
+// daemon-upgrade audit entry fires for the destructive direction — the inverse
+// of TestAudit_SamePathBackfillIsRecorded, where a same-path patch FILLS a
+// retained id and the daemon-upgrade entry correctly fires.
+func TestAudit_SamePathDeadPatchRetainsRepoID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	require.NoError(t, exec.Command("git", "init", repo).Run())
+	resolved, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	repo = resolved
+
+	created, err := AddTaskChecked(Task{
+		ID: "own00001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	require.NoError(t, os.RemoveAll(filepath.Join(repo, ".git")))
+	require.Empty(t, repoIDForPath(repo), "precondition: the path no longer resolves to a repo")
+
+	same := repo
+	_, err = UpdateTaskChecked("own00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("own00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires: the destructive clear is neither performed nor recorded")
+}
+
+// TestAudit_SamePathDeadPatchRetainsWorktreeBinding: the sibling-worktree shape
+// the Task.RepoID contract names directly. The recorded path is a worktree at a
+// sibling of the main repo, so once its .git dies an ancestor walk from the
+// recorded path never crosses the lateral main repo and re-derivation invents an
+// id that matches nothing. Erasing RepoID on a same-path re-patch strandts the
+// task from its own project's scoped list; the fix retains the id.
+func TestAudit_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the worktree task is visible in its project's scoped list")
+
+	// Kill the worktree's .git: the recorded path no longer resolves, and the
+	// lateral main repo is unreachable by the ancestor walk (the stranding shape).
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	require.Empty(t, repoIDForPath(worktree), "precondition: the worktree path no longer resolves to a repo")
+	dead := config.ResolveProjectPath(worktree)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	same := worktree
+	_, err = UpdateTaskChecked("wtd00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("wtd00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires for the un-resolving re-bind")
+
+	// The retained id short-circuits scope matching before the dead path is
+	// re-derived, so the task stays in its own project's scoped list.
+	vis, err = LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project after a dead-path re-patch")
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling: the daemon does
+// not normalize project_path, so a remote caller can reassert the SAME dead path
+// with an equivalent spelling (a trailing separator or a "."/".." leaf) whose raw
+// string differs from the recorded one. Before the cleaned-path compare that raw
+// inequality read as a rebind and the empty re-resolution erased the retained
+// RepoID, stranding the worktree task from its own project's scoped list. The fix
+// recognizes the equivalent spellings as same-path and keeps the binding. Pairs
+// with TestAudit_SamePathDeadPatchRetainsWorktreeBinding, the exact-spelling twin.
+func TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wte00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the worktree task is visible in its project's scoped list")
+
+	// Kill the worktree's .git: the recorded path no longer resolves, and the
+	// lateral main repo is unreachable by the ancestor walk (the stranding shape).
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	require.Empty(t, repoIDForPath(worktree), "precondition: the worktree path no longer resolves to a repo")
+	dead := config.ResolveProjectPath(worktree)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	// Built as raw strings rather than filepath.Join, which would Clean away the
+	// very difference this test exercises. Each differs from worktree as a raw
+	// string yet cleans back to it, so each is an equivalent dead-path reassertion.
+	sep := string(filepath.Separator)
+	spellings := []string{
+		worktree + sep,       // trailing separator
+		worktree + sep + ".", // trailing "." leaf
+		worktree + sep + ".." + sep + filepath.Base(worktree), // ".." then back to the leaf
+	}
+	for _, spelling := range spellings {
+		require.NotEqual(t, worktree, spelling, "precondition: the spelling differs as a raw string: %q", spelling)
+		require.Equal(t, filepath.Clean(worktree), filepath.Clean(spelling), "precondition: but is equivalent once cleaned: %q", spelling)
+		require.Empty(t, repoIDForPath(spelling), "precondition: the equivalent spelling is also a dead path: %q", spelling)
+
+		_, err := UpdateTaskChecked("wte00001", TaskUpdate{ProjectPath: &spelling}, ProjectExpectation{}, ActorCLI, nil)
+		require.NoError(t, err)
+
+		stored, err := GetTask("wte00001")
+		require.NoError(t, err)
+		assert.Equal(t, retained, stored.RepoID, "an equivalent spelling of a dead path must not erase the retained RepoID: %q", spelling)
+		for _, e := range stored.Audit {
+			assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "no daemon-upgrade entry fires for an equivalent dead-path reassertion: %q", spelling)
+		}
+
+		vis, err := LoadTasksForRepo(mainRoot)
+		require.NoError(t, err)
+		require.Len(t, vis, 1, "the retained binding keeps the task visible in its own project across an equivalent dead-path reassertion: %q", spelling)
+	}
+}
+
+// TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass:
+// the daemon's startup re-binding pass must not disturb the retained binding
+// either. It backfills only rows whose ProjectPath still resolves (Root != "");
+// the dead worktree path does not, so the loader skips the row and the retained
+// id stays authoritative on disk.
+func TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00003", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	retained := created.RepoID
+
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	same := worktree
+	_, err = UpdateTaskChecked("wtd00003", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	// The daemon's loader pass: commits backfills for legacy rows whose path
+	// resolves and returns the authoritative list plus what it rewrote.
+	loaded, updated, err := LoadTasksForRepoIDWithBindingUpdates(retained)
+	require.NoError(t, err)
+	assert.Empty(t, updated, "the loader rewrites nothing: the retained id is already non-empty")
+	require.Len(t, loaded, 1, "the retained id keeps the task in its project's authoritative list")
+	assert.Equal(t, retained, loaded[0].RepoID)
+
+	stored, err := GetTask("wtd00003")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained id survives the loader pass on disk")
+	assert.Len(t, stored.Audit, 1, "the loader adds no daemon-upgrade entry for an already-bound row")
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the task remains visible in its project's scoped list after the loader pass")
+}
+
+// TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding: the subdirectory
+// shape. The TUI records the subdirectory the user typed; git resolves it back
+// to the main repo while it lives. Once the repo's .git dies the ancestor walk
+// from the subdir finds nothing, so re-derivation invents sha256(subdir), which
+// differs from the retained sha256(repo) — erasing RepoID strands the task.
+func TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, sub := bindMainWithSubdir(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "sub00001", Name: "subdir-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: sub, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID)
+	retained := created.RepoID
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "precondition: the subdir task is visible in its project while the repo lives")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(mainRoot, ".git")))
+	require.Empty(t, repoIDForPath(sub), "precondition: the dead subdir no longer resolves to a repo")
+	dead := config.ResolveProjectPath(sub)
+	require.Empty(t, dead.Root, "precondition: no surviving ancestor — the loader's known-gate cannot restore")
+	require.NotEqual(t, retained, dead.ID, "precondition: re-derivation diverges from the retained id (the stranding condition)")
+
+	same := sub
+	_, err = UpdateTaskChecked("sub00001", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sub00001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a dead-path same-path re-patch must not erase the retained RepoID")
+	assert.Len(t, stored.Audit, 1, "no daemon-upgrade entry fires for the un-resolving re-bind")
+
+	vis, err = LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the retained binding keeps the task visible in its project after the owning repo dies")
+}
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField: the realistic
+// trigger — an operator re-applies task config that includes --project-path
+// while editing another field, without knowing the path is already dead on the
+// daemon host. The other field's change is recorded as the user's; RepoID is
+// retained and no daemon-upgrade repo_id entry fires.
+func TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	mainRoot, worktree := bindMainWithLinkedWorktree(t)
+
+	created, err := AddTaskChecked(Task{
+		ID: "wtd00004", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	retained := created.RepoID
+
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+
+	same := worktree
+	prompt := "sweep harder"
+	_, err = UpdateTaskChecked("wtd00004", TaskUpdate{ProjectPath: &same, Prompt: &prompt}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("wtd00004")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained RepoID survives a same-path dead re-patch that also edits a field")
+	require.Len(t, stored.Audit, 2, "the create, and the user's prompt change — no daemon-upgrade repo_id entry")
+	assert.Equal(t, ActorCLI, stored.Audit[1].Actor)
+	assert.Equal(t, []string{"prompt"}, stored.Audit[1].Fields, "the trail records the user's prompt change, not a derived repo_id")
+
+	vis, err := LoadTasksForRepo(mainRoot)
+	require.NoError(t, err)
+	require.Len(t, vis, 1, "the task stays visible in its project after the combined re-patch")
+}
+
+// TestAudit_SymlinkDivergentRebindIsDetectedNotRetained pins the filesystem
+// semantics sameProjectPathReassertion adds: two spellings that clean lexically
+// equal but resolve through a symlink to DIFFERENT directories are a real
+// rebind, not the same-path reassertion the dead-path protection retains. This
+// is the inverse of TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling,
+// whose equivalent spellings all resolve to the SAME directory and so retain.
+//
+// base/link -> other/child (a symlink), so base/link/../task resolves physically
+// to other/task while it cleans lexically to base/task; base/task is a different,
+// non-repo directory. Rebinding base/link/../task -> base/task with the new
+// target non-Git must clear the retained RepoID rather than preserve it and
+// leave the task scoped to its former project.
+func TestAudit_SymlinkDivergentRebindIsDetectedNotRetained(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other is a git repo; the recorded path resolves into it through the link.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	require.NoError(t, exec.Command("git", "init", other).Run())
+	// base/task is a plain non-Git dir — the rebind target.
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// Built as raw strings rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	recorded := base + sep + "link" + sep + ".." + sep + "task"
+	rebind := filepath.Join(base, "task")
+
+	// Precondition: the two spellings are lexically equal but physically
+	// distinct — the exact pair a cleaned-path compare misreads as same-path.
+	require.Equal(t, filepath.Clean(recorded), filepath.Clean(rebind))
+	resolvedRecorded, err := filepath.EvalSymlinks(recorded)
+	require.NoError(t, err)
+	resolvedRebind, err := filepath.EvalSymlinks(rebind)
+	require.NoError(t, err)
+	require.NotEqual(t, resolvedRecorded, resolvedRebind, "the two paths are physically distinct")
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00001", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
+
+	// The rebind target is non-Git, so its re-resolution is empty.
+	require.Empty(t, repoIDForPath(rebind), "precondition: the rebind target is not a repo")
+
+	_, err = UpdateTaskChecked("sym00001", TaskUpdate{ProjectPath: &rebind}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00001")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind to a non-Git path is a real rebind, not a same-path reassertion: the binding clears")
+}
+
+// TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath is the dead-recorded
+// twin of TestAudit_SymlinkDivergentRebindIsDetectedNotRetained. There the two
+// spellings both resolved, so EvalSymlinks caught the divergence on the physical
+// branch; here the RECORDED path no longer exists (EvalSymlinks fails on it),
+// driving sameProjectPathReassertion into the lexical Clean fallback — the path
+// the ".." restriction now guards.
+//
+// base/link -> other/child, so base/link/../task resolves physically to
+// other/task (a non-Git directory) while it cleans lexically to base/task. The
+// recorded base/task is removed entirely, so EvalSymlinks cannot answer for it
+// and the fallback must decide. A ".." segment can cross a symlink Clean cannot
+// see, so the patch is read as a real rebind and re-resolved (to empty, the
+// non-Git target) rather than retained as a same-path reassertion — the inverse
+// of the dead-path retain cases, whose spellings resolve and so never reach
+// this branch.
+func TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other/task is the non-Git directory the patch resolves to through the
+	// link; other/child exists so the symlink target is reachable.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// base/task starts as its own git repo so the task binds to it and retains a
+	// RepoID; it is then removed entirely so the recorded path no longer exists
+	// and EvalSymlinks fails on it — the dead-recorded-path shape this test
+	// exists for.
+	recorded := filepath.Join(base, "task")
+	require.NoError(t, os.MkdirAll(recorded, 0o755))
+	require.NoError(t, exec.Command("git", "init", recorded).Run())
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00002", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID from base/task's own repo")
+	retained := created.RepoID
+
+	require.NoError(t, os.RemoveAll(recorded))
+	_, err = filepath.EvalSymlinks(recorded)
+	require.Error(t, err, "precondition: the recorded path is gone, so the physical comparison is unavailable")
+	require.Empty(t, repoIDForPath(recorded), "precondition: the removed path no longer resolves to a repo")
+
+	// Built as a raw string rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	patch := base + sep + "link" + sep + ".." + sep + "task"
+	require.Equal(t, filepath.Clean(patch), filepath.Clean(recorded), "precondition: the two spellings clean lexically equal")
+	resolvedPatch, err := filepath.EvalSymlinks(patch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(other, "task"), resolvedPatch, "precondition: but the patch resolves physically to other/task")
+	require.Empty(t, repoIDForPath(patch), "precondition: the patch resolves to a non-Git directory, so the re-resolution is empty")
+
+	_, err = UpdateTaskChecked("sym00002", TaskUpdate{ProjectPath: &patch}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00002")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind against a dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
+	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed base/task is not retained across a \"..\"-divergent rebind")
+}
+
+// TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath is the inverse of
+// TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath: there the ".." lived
+// in the (live) patch and the recorded path was removed; here the RECORDED path
+// carries the ".." and is the one that dies, while the patch is a plain non-Git
+// directory with no "..". The recorded base/link/../task binds through the link
+// to other/task (inside other's repo) and retains other's id; once other/task is
+// removed EvalSymlinks cannot answer for the recorded spelling, so the decision
+// falls to the lexical Clean compare. Both spellings clean to base/task, so
+// before the guard covered the recorded spelling's ".." the cleaned compare
+// read a real rebind as a same-path reassertion and the retained id survived —
+// leaving the task scoped to a repository it no longer binds to. The guard now
+// checks both spellings, so the recorded ".." drives a rebind and the (non-Git)
+// patch re-resolves to empty, clearing the binding.
+func TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+
+	// other is a git repo; the recorded path resolves into it through the link.
+	other := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "child"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(other, "task"), 0o755))
+	require.NoError(t, exec.Command("git", "init", other).Run())
+	// base/task is a plain non-Git dir — the patch (rebind target).
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "task"), 0o755))
+	// base/link -> other/child, so base/link/../task resolves physically to
+	// other/task, not to base/task.
+	require.NoError(t, os.Symlink(filepath.Join(other, "child"), filepath.Join(base, "link")))
+
+	// Built as a raw string rather than via filepath.Join, which would Clean
+	// away the "link/.." that this test exercises.
+	sep := string(filepath.Separator)
+	recorded := base + sep + "link" + sep + ".." + sep + "task"
+	patch := filepath.Join(base, "task")
+
+	created, err := AddTaskChecked(Task{
+		ID: "sym00003", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
+	retained := created.RepoID
+
+	// Kill the recorded path's resolution: other/task is removed, so
+	// EvalSymlinks(recorded) can no longer answer, and re-derivation from the raw
+	// recorded string also finds no repo.
+	require.NoError(t, os.RemoveAll(filepath.Join(other, "task")))
+	_, err = filepath.EvalSymlinks(recorded)
+	require.Error(t, err, "precondition: the recorded path is gone, so the physical comparison is unavailable")
+	require.Empty(t, repoIDForPath(recorded), "precondition: the dead recorded path no longer resolves to a repo")
+
+	// The patch is a live non-Git directory with no "..": before the guard
+	// covered the recorded spelling this was the pair that cleaned equal and
+	// retained a stale id.
+	require.Equal(t, filepath.Clean(recorded), filepath.Clean(patch), "precondition: the two spellings clean lexically equal")
+	resolvedPatch, err := filepath.EvalSymlinks(patch)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "task"), resolvedPatch, "precondition: the patch resolves physically to base/task, a live non-Git dir")
+	require.Empty(t, repoIDForPath(patch), "precondition: the patch resolves to a non-Git directory, so the re-resolution is empty")
+
+	_, err = UpdateTaskChecked("sym00003", TaskUpdate{ProjectPath: &patch}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("sym00003")
+	require.NoError(t, err)
+	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind whose \"..\" is in the dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
+	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed other/task is not retained across a \"..\"-divergent rebind whose \"..\" is in the recorded path")
 }

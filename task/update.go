@@ -8,6 +8,8 @@ package task
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -274,7 +276,37 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				}
 				merged = update.apply(existing)
 				if update.ProjectPath != nil {
-					merged.RepoID = rebindRepoID
+					// A patch that rebinds the task overwrites RepoID with the freshly
+					// re-resolved id (rebindRepoID). The exception is a same-path
+					// reassertion whose re-resolution is empty: the path stopped
+					// resolving (its .git died, or the recorded leaf was a sibling
+					// worktree or subdirectory whose owning repo is no longer reachable
+					// by an ancestor walk), so overwriting with "" would erase the binding
+					// apply already preserved from existing and strand the task from its
+					// own project's scope the moment that path was reasserted — the exact
+					// harm RepoID exists to prevent (see Task.RepoID's PURPOSE). The
+					// recompute itself stays: a legacy row whose retained RepoID is "" is
+					// still filled in by a same-path patch that DOES resolve.
+					//
+					// sameProjectPathReassertion recognizes the same path across the
+					// equivalent spellings a remote caller can reassert without the
+					// daemon normalizing project_path (a trailing separator or a "."
+					// leaf). It compares filesystem-resolved paths when both sides
+					// still resolve, so a symlink-divergent spelling that cleans
+					// lexically equal — e.g. base/link/../task, where base/link points
+					// elsewhere, cleans to base/task but resolves to a different
+					// directory — is read as a real rebind rather than a same-path
+					// reassertion. It falls back to lexical Clean only for a path the
+					// filesystem can no longer resolve (the dead-path case this
+					// protection exists for), where EvalSymlinks fails and a genuine
+					// rebind cannot be proven either — and only when neither spelling
+					// has a ".." segment, since ".." can cross a symlink Clean cannot
+					// see against a dead path on either side, so it is treated as a
+					// rebind (the conservative outcome) rather than risk retaining a
+					// stale RepoID.
+					if rebindRepoID != "" || !sameProjectPathReassertion(existing.ProjectPath, *update.ProjectPath) {
+						merged.RepoID = rebindRepoID
+					}
 				}
 				if err := merged.ValidateTrigger(); err != nil {
 					return err
@@ -349,4 +381,77 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 		return Task{}, lockErr
 	}
 	return merged, nil
+}
+
+// sameProjectPathReassertion reports whether patched is the same recorded path
+// the task is already bound to, so an otherwise-empty re-resolution does not
+// erase the retained RepoID. See UpdateTaskChecked for the stranding this
+// prevents.
+//
+// The comparison respects filesystem semantics where it can: lexical Clean
+// alone misreads a symlink-divergent spelling as the same path — base/link/../task
+// cleans to base/task while base/link resolves elsewhere, so the two are
+// physically distinct. Evaluate symlinks on both sides when the filesystem can
+// answer, and fall back to lexical Clean only for a form the filesystem cannot
+// resolve (a path that has since been removed, the dead-path case this
+// comparison protects), where EvalSymlinks fails and a genuine rebind cannot be
+// proven either. The fallback is restricted to cases where neither spelling
+// has a ".." segment: ".." can cross a symlink to a directory Clean cannot
+// reach, so against a dead path on either side the cleaned compare would read
+// a real rebind as same-path and retain a stale RepoID; a ".." in either
+// spelling is treated as a rebind instead (the conservative outcome).
+func sameProjectPathReassertion(recorded, patched string) bool {
+	if recorded == patched {
+		return true
+	}
+	// EvalSymlinks is the physical, kernel-traversal resolver here, not a
+	// lexical one — Go's walk resolves each symlink component before applying
+	// the next "..", so base/link/../task with base/link -> other/child resolves
+	// to other/task, NOT to the lexically cleaned base/task. A symlink-divergent
+	// ".." rebind is therefore detected and re-resolved (RepoID cleared) rather
+	// than retained — pinned by TestAudit_SymlinkDivergentRebindIsDetectedNotRetained.
+	// The lexical ".." guard belongs only in the dead-path fallback below, where
+	// EvalSymlinks cannot answer and a ".." could cross a symlink Clean cannot
+	// see; rejecting ".." HERE would instead strand the up-and-back equivalent
+	// spelling <dir>/../<leaf>, which a directory that still lives resolves back
+	// to itself — pinned by TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling.
+	resolvedPatched, errPatched := filepath.EvalSymlinks(patched)
+	resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
+	if errPatched == nil && errRecorded == nil {
+		return resolvedPatched == resolvedRecorded
+	}
+	// Lexical Clean is only a safe fallback for spellings that cannot cross a
+	// symlink. A ".." segment resolves physically somewhere Clean cannot see —
+	// base/link/../task cleans to base/task but, with base/link pointing at
+	// other/child, resolves to other/task — so when either spelling has a ".."
+	// and the other side is a path the filesystem can no longer answer
+	// (EvalSymlinks failed, the dead-recorded or dead-patched case) the cleaned
+	// compare would read a real rebind as a same-path reassertion and retain a
+	// now-stale RepoID. Fall back only when neither spelling has a ".." segment
+	// (a trailing "/" or "." leaf is safe to clean); otherwise treat the patch
+	// as a rebind and let the caller re-resolve, the conservative outcome.
+	if hasDotDotSegment(patched) || hasDotDotSegment(recorded) {
+		return false
+	}
+	return filepath.Clean(patched) == filepath.Clean(recorded)
+}
+
+// hasDotDotSegment reports whether path contains a ".." path segment after
+// trimming a trailing separator. Such a segment can resolve through a symlink
+// to a directory filepath.Clean does not reach, so the lexical compare is
+// unsafe as a same-path test against a path the filesystem can no longer answer
+// for; a trailing "/" or "." leaf never crosses a symlink and is left to the
+// Clean compare. Both the recorded and patched spellings are checked, since a
+// ".." in either can cross a symlink the cleaned compare would misread.
+func hasDotDotSegment(path string) bool {
+	trimmed := strings.TrimRight(path, string(filepath.Separator))
+	if trimmed == "" {
+		return false
+	}
+	for _, seg := range strings.Split(trimmed, string(filepath.Separator)) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
