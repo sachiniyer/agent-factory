@@ -79,10 +79,17 @@ when timestamps share a second.
 Existing labeled PRs need a comment identifying their actual tested commit.
 Do not substitute the current head unless that is the code you exercised.
 
-An attestation for the current head passes directly. For an older commit, the
-gate compares complete Git tree snapshots of the tested commit and current
-head, restricted to the same gated paths and excluding `_test.go` files.
-Evidence survives a master merge or rebase when those files are unchanged.
+An attestation for the current head passes directly. So does one for any
+commit on the head's proven update-merge chain (the content head and every
+update merge the proof walked; see the approval section below): each link is its
+first parent plus master, merged with no hand resolution, so gated changes that
+arrived through a link's second parent are master's, already gated on master,
+not the PR's (#4886). For any other commit, the gate compares complete Git tree
+snapshots of the tested commit and current head, restricted to the same gated
+paths and excluding `_test.go` files, and, when the head is such a chain, also
+the tested commit and the content head: the attestation carries if either
+matches. Evidence survives a master merge or rebase when those files are
+unchanged.
 Content, path, or file-mode changes require another play-test and a new comment,
 except a comment-only change to a `.go` file (below);
 merge shape alone cannot exempt a conflict resolution. A gated file edited and
@@ -207,7 +214,25 @@ The carry check is the complete-tree proof itself: it reads the merge base and
 both parent trees, derives the only path-level three-way result from each
 path's leaf entry (mode, type and object id — the only place blob identity
 enters the decision), and requires the merge commit's tree to match it exactly —
-a truncated, malformed, same-path-conflicting or mismatched tree refuses carry.
+a truncated, malformed or mismatched tree refuses carry.
+
+A path BOTH sides changed has no path-level result (#4886). On the gate's own
+update merge (author `github-actions[bot]`, committer `web-flow`, a signature
+GitHub verified) the gate proves it line by line instead: it reads the four blobs
+(merge base, both parents, the committed file), checks each against the object
+id its tree named, and requires the committed file to be exactly the merge base
+with every hunk of each side applied, the two sides' hunks neither overlapping
+nor adjacent (`.github/scripts/text-merge.js`). That is what `git merge-tree
+--write-tree p1 p2` equality stands for: nothing in the merged file is a line
+neither side wrote. A binary file, an add/add, a delete on either side, a
+symlink or submodule, a mode conflict, more than 20 such paths, a blob over
+4 MiB, a failed read or any byte difference refuses carry. A merge the gate did
+not write keeps the path-level rule, where such a path refuses. Before #4886
+this refusal was the whole reason a maintainer approval failed to carry across
+some update merges and not others: #4789's `a7705950` and #4825's `52b78a17`
+each had one file (`app/home_update.go`) that master and the PR had both
+touched, on merges `merge-tree` reproduces exactly.
+
 When the proof passes, the approval and every Codex artifact bind
 to the merge's FIRST parent — the content head — because the reviewed change did
 not move. Otherwise the gate's own update-branch would void the approval it had
