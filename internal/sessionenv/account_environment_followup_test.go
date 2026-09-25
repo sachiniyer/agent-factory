@@ -456,9 +456,10 @@ func TestValidateAccountEnvironmentCommand_RefusesDynamicWaitOptionAfterTarget(t
 // none of the identity names keep working.
 func TestValidateAccountEnvironmentCommand_FollowupsStayNarrow(t *testing.T) {
 	for _, command := range []string{
-		"(( counter[index] ))",
-		"(( arr[i=42] )); npm run dev",
-		"let 'total += 1'",
+		// Note: arithmetic commands with variable operands such as
+		// `(( counter[index] ))`, `(( arr[i=42] ))`, and `let 'total += 1'`
+		// are refused by the inverted arithmetic guard as accepted false positives
+		// (documented in TestValidateAccountEnvironmentCommand_InvertedArithGuardFalsePositives).
 		"nice -n 10 npm run dev",
 		// The new wrappers must UNWRAP, not blanket-refuse: the command they
 		// schedule is inspected, and an ordinary one still runs.

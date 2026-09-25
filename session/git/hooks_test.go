@@ -57,12 +57,24 @@ func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T
 	}
 }
 
-func TestPostWorktreeHookFailureSurfacesBoundedTailAndLogPath(t *testing.T) {
+// A failed hook is ONE log entry (#4853): the command, the full-output path and
+// the exit status, then at most hooklog.ExcerptLines of the output's end, each
+// behind hooklog.ExcerptPrefix so none of them — least of all a build tool's own
+// "ERROR" line — can be read as an entry of its own. The whole output still
+// lands in the per-hook file the entry names.
+func TestPostWorktreeHookFailureLogsOneEntryWithBoundedPrefixedTail(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	payloadPath := filepath.Join(t.TempDir(), "hook-output")
-	payload := "discarded beginning\n" + strings.Repeat("x", hooklog.TailLimit) + "\nkept ending\n"
-	if err := os.WriteFile(payloadPath, []byte(payload), 0o600); err != nil {
+	var payload strings.Builder
+	payload.WriteString("discarded beginning\n")
+	payload.WriteString(strings.Repeat("x", hooklog.TailLimit) + "\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&payload, "build progress line %d\n", i)
+	}
+	payload.WriteString(" ERROR  @scope/backend#build: command exited (1)\n\n")
+	payload.WriteString("kept ending\n")
+	if err := os.WriteFile(payloadPath, []byte(payload.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	repoPath := filepath.Join(t.TempDir(), "repo")
@@ -83,23 +95,52 @@ func TestPostWorktreeHookFailureSurfacesBoundedTailAndLogPath(t *testing.T) {
 	if len(logs) != 1 {
 		t.Fatalf("found %d post-worktree logs, want 1", len(logs))
 	}
-	got := errors.String()
-	for _, want := range []string{"exit status 23", logs[0], "[output truncated to last 65536 bytes]", "kept ending"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("post-worktree failure omitted %q:\n%s", want, got)
+	// Other ERROR entries (a defaulted config, say) may precede the hook's, so
+	// find its single entry and read what the logger wrote after it.
+	lines := strings.Split(strings.TrimSuffix(errors.String(), "\n"), "\n")
+	at := -1
+	for i, line := range lines {
+		if strings.Contains(line, "post-worktree hook") {
+			if at >= 0 {
+				t.Fatalf("post-worktree failure logged more than one entry:\n%s", errors.String())
+			}
+			at = i
 		}
 	}
-	if strings.Contains(got, "discarded beginning") {
-		t.Fatalf("post-worktree failure surfaced more than the bounded tail:\n%s", got)
+	if at < 0 {
+		t.Fatalf("post-worktree failure was not logged:\n%s", errors.String())
+	}
+	entry := lines[at]
+	for _, want := range []string{"exit status 23", "(full output: " + logs[0] + ")"} {
+		if !strings.Contains(entry, want) {
+			t.Fatalf("post-worktree failure entry omitted %q:\n%s", want, entry)
+		}
+	}
+	tail := lines[at+1:]
+	if len(tail) == 0 || len(tail) > hooklog.ExcerptLines {
+		t.Fatalf("post-worktree failure quoted %d output lines, want 1..%d:\n%s", len(tail), hooklog.ExcerptLines, errors.String())
+	}
+	for _, line := range tail {
+		if !strings.HasPrefix(line, hooklog.ExcerptPrefix) {
+			t.Fatalf("quoted output line %q lacks the %q prefix, so it reads as a log entry of its own:\n%s", line, hooklog.ExcerptPrefix, errors.String())
+		}
+	}
+	for _, want := range []string{hooklog.ExcerptPrefix + "kept ending", hooklog.ExcerptPrefix + "ERROR  @scope/backend#build"} {
+		if !strings.Contains(errors.String(), want) {
+			t.Fatalf("post-worktree failure omitted the output's end %q:\n%s", want, errors.String())
+		}
+	}
+	for _, unwanted := range []string{"discarded beginning", "build progress line 0", "[output truncated"} {
+		if strings.Contains(errors.String(), unwanted) {
+			t.Fatalf("post-worktree failure quoted %q, more than the bounded tail:\n%s", unwanted, errors.String())
+		}
 	}
 	full, err := os.ReadFile(logs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"discarded beginning", "kept ending"} {
-		if !strings.Contains(string(full), want) {
-			t.Fatalf("full hook log omitted %q", want)
-		}
+	if string(full) != payload.String() {
+		t.Fatalf("full hook log holds %d bytes, want the hook's complete %d-byte output", len(full), payload.Len())
 	}
 }
 
