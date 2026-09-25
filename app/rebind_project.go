@@ -40,7 +40,9 @@ func (m *home) handleRebindProject(req overlay.RebindRequest) (tea.Model, tea.Cm
 // apart from a reply to any other picker.
 func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 	return func() tea.Msg {
-		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Path)
+		// The registration's recorded root as the picker read it: the rebind
+		// applies only if no other rebind has moved it since (#4822).
+		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Project.RegistryRoot, req.Path)
 		root := project.Root
 		if root == "" {
 			root = req.Path
@@ -75,14 +77,24 @@ func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 //     the user sees what happened.
 //   - A definitive refusal: fed back inline to the picker that owns it, which
 //     re-arms. An unowned one changed nothing; over a different picker it is
-//     logged rather than shown, else it goes to the error box.
+//     logged rather than shown, else it goes to the error box. The "rebound
+//     elsewhere" refusal (#4822) first re-reads the registry, so the re-armed
+//     form names — and next expects — the root the project is bound to now.
 func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	pickerOpen := m.projectPickerOverlay != nil && m.state == stateSwitchProject
 	owned := pickerOpen && m.projectPickerOverlay.OwnsRebindReply(msg.token)
 	committed := msg.err != nil && apiproto.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committed {
 		if !rebindOutcomeUnknown(msg.err) {
+			if apiclient.IsProjectRebound(msg.err) {
+				m.refreshSidebarProjects()
+			}
 			if owned {
+				if root, ok := registeredProjectRoot(msg.projectID); ok && apiclient.IsProjectRebound(msg.err) {
+					m.projectPickerOverlay.SetRebindConflict(
+						fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root), root)
+					return m, nil
+				}
 				m.projectPickerOverlay.SetRebindError(msg.err.Error())
 				return m, nil
 			}

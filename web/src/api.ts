@@ -200,6 +200,10 @@ function isDaemonRejection(err: EnvelopeError | null | undefined, status: number
 
 export const MUTATION_COMMITTED_ERROR_CODE = "mutation_committed";
 
+/** apiproto.ErrorCodeProjectRebound: a rebind carrying expected_root was refused
+ *  because another rebind moved the project first (#4822). Nothing was written. */
+export const PROJECT_REBOUND_ERROR_CODE = "project_rebound";
+
 /**
  * A failed API call. `status` is the HTTP status (0 for a network/transport
  * failure), while `code` preserves an optional machine-readable daemon outcome.
@@ -221,6 +225,12 @@ export class ApiError extends Error {
 export function isMutationCommittedError(e: unknown): e is ApiError {
   return e instanceof ApiError && e.code === MUTATION_COMMITTED_ERROR_CODE &&
     e.status !== 502 && e.status !== 504;
+}
+
+/** The daemon refused a rebind because the project is no longer bound to the
+ *  root the caller expected — a definitive refusal, never an unknown outcome. */
+export function isProjectReboundError(e: unknown): e is ApiError {
+  return e instanceof ApiError && e.daemonRejected && e.code === PROJECT_REBOUND_ERROR_CODE;
 }
 
 /** Only a definitive daemon refusal permits an immediate mutation retry. */
@@ -665,9 +675,22 @@ export async function registerProject(path: string, token: string): Promise<Regi
  *  root another project already owns. A rejection (unknown id, not a git repo,
  *  ownership conflict) throws an ApiError carrying the daemon's actionable
  *  message for inline display; on success the echoed projects.changed refetches
- *  the registry and the rebound root lands in the switcher union. */
-export async function rebindProject(id: string, path: string, token: string): Promise<RegisteredProject> {
-  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", { id, path }, token);
+ *  the registry and the rebound root lands in the switcher union.
+ *
+ *  `expectedRoot` is the root the UI showed for the project. The daemon applies
+ *  the rebind only while the registry still records it, and otherwise refuses
+ *  with PROJECT_REBOUND_ERROR_CODE (#4822). Null sends no precondition. */
+export async function rebindProject(
+  id: string,
+  path: string,
+  token: string,
+  expectedRoot: string | null = null,
+): Promise<RegisteredProject> {
+  const request: { id: string; path: string; expected_root?: string } = { id, path };
+  if (expectedRoot !== null && expectedRoot !== "") {
+    request.expected_root = expectedRoot;
+  }
+  const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
   return resp.project;
 }
 

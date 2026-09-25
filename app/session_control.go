@@ -234,13 +234,15 @@ var registerProjectThroughDaemon = func(path string) error {
 // rebindProjectThroughDaemon routes the TUI's rebind-project verb — the picker's
 // `b` — through the daemon (the single writer): config.RebindProject moves the
 // registration's stable id to the replacement checkout, refusing a path another
-// project owns, and publishes projects.changed. A package var so the app test
-// suite can stub it without dialing a real daemon.
-var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, error) {
+// project owns, and publishes projects.changed. expectedRoot is the root the
+// picker showed; the daemon refuses the rebind if the registry has moved on
+// since (#4822). A package var so the app test suite can stub it without
+// dialing a real daemon.
+var rebindProjectThroughDaemon = func(projectID, expectedRoot, path string) (config.Project, error) {
 	var project config.Project
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
-		project, e = c.RebindProject(projectID, path)
+		project, e = c.RebindProject(projectID, expectedRoot, path)
 		return e
 	})
 	return project, err

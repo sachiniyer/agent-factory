@@ -336,9 +336,17 @@ type RegisterProjectResponse struct {
 // access to the caller's working directory. The CLI resolves its argument
 // against the user's cwd before sending (api/projects.go); the web only ever
 // supplies daemon-host paths.
+//
+// ExpectedRoot, when set, is the root the caller last saw the project bound to,
+// and turns the rebind into a compare-and-set (#4822): the daemon applies it only
+// while the registry still records that root, and otherwise refuses with
+// apiproto.ErrorCodeProjectRebound (HTTP 409). Omitted, the rebind applies
+// whatever the project points at now — last writer wins, which is what a client
+// that predates the field gets.
 type RebindProjectRequest struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
+	ID           string `json:"id"`
+	Path         string `json:"path"`
+	ExpectedRoot string `json:"expected_root,omitempty"`
 }
 
 // RebindProjectResponse carries the re-bound durable identity: the same ID,
