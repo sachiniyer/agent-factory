@@ -92,7 +92,7 @@ The check is deliberately code-derived on all four halves:
 | CLI | `commands.NewRootCommand()` — the real cobra tree, walked for verbs and flags **after `initCobraDefaults` finishes building it** (see below) |
 | API | `daemon.HTTPRoutes()` — the same table that builds the live mux, with request fields reflected off the wire structs |
 | TUI | `keys.EffectiveBindings(nil)` — the canonical binding table |
-| Web | the `af<T>(method, body, token)` call sites in `web/src/api.ts` — `af()` is POST-only, so it is the chokepoint for the SPA's POST RPCs, and a static read of those call sites is what the audit derives. A few non-POST control-plane calls hand-roll `fetch` instead (e.g. the config-assistant reap's `DELETE /v1/config-assistant`, since `af()` cannot express a DELETE) and are NOT derived here; those routes are also kept out of `daemon.HTTPRoutes()` (registered directly on the mux like the stream routes), so the audit stays consistent |
+| Web | the `af<T>(method, body, token)` call sites across `web/src/` — `af()` is exported, so any module can reach a daemon RPC through it; `af()` is POST-only, so it is the chokepoint for the SPA's POST RPCs, and a static read of those call sites is what the audit derives. A few non-POST control-plane calls hand-roll `fetch` instead (e.g. the config-assistant reap's `DELETE /v1/config-assistant`, since `af()` cannot express a DELETE) and are NOT derived here; those routes are also kept out of `daemon.HTTPRoutes()` (registered directly on the mux like the stream routes), so the audit stays consistent |
 
 A hand-maintained table would drift, which is the failure this exists to catch.
 So the only hand-maintained part is the **verdict** — the judgment a machine
@@ -511,7 +511,7 @@ moment to decide what the other two do about it, which is the whole point.
 
 ## Updating the parser
 
-If `web/src/api.ts` is restructured so its calls no longer match
+If `web/src` is restructured so its calls no longer match
 `webCallRe`, the check fails loudly via `minWebCalls` rather than quietly
-concluding the web calls nothing. Fix the parser in `parity/derive_test.go`;
+concluding the web calls nothing. Fix the parser in `parity/web_rpc_derive_test.go`;
 never lower the floor to make it pass.
