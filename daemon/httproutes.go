@@ -353,6 +353,23 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(AccountLoginRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AccountLogin) },
 	},
+	// The quota/usage report (#2983 Part 1): the daemon serves the same
+	// records→quota.Build read `af quota` makes, so the TUI, the web, and a
+	// remote `af quota` all render one report. The served rows are pre-rendered
+	// display rows — "not reported" is the daemon's own word, never a client
+	// guessing what an empty cell means.
+	//
+	// Not sandboxAllowed: it reports the operator's fleet-wide session health
+	// (which agents are running, which are parked at limits, when they reset)
+	// with no per-session owner to narrow to, so a sandbox credential does not
+	// earn it — the same class as ListTasks, not the owner-scoped Snapshot.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/QuotaReport",
+		Description: "Report per-agent provider quota (what the provider exposes — today \"not reported\" everywhere) alongside what af's own sessions have observed: running counts, sessions parked at a usage limit, and the earliest recorded reset.",
+		requestType: reflect.TypeOf(QuotaReportRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.QuotaReport) },
+	},
 
 	// Config. The read/write pair behind the web config editor; both are thin
 	// wrappers over the same config package calls the TUI and `af config set`

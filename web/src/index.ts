@@ -46,6 +46,7 @@ import {
   listTasks,
   setConfigValue,
   listAccounts,
+  quotaReport,
   registerAccount as registerAccountRPC,
   startAccountLogin,
   loadToken,
@@ -63,6 +64,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue, saveNotice } from "./config.js";
 import { emptyAccountsState } from "./accounts.js";
+import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
@@ -152,6 +154,7 @@ const store = new Store<AppState>({
   configPath: "",
   configStatus: null,
   accounts: emptyAccountsState(),
+  quota: emptyQuotaState(),
   selectedProject: null,
   authRequired: true,
   // Start in the connecting state: mount() immediately probes /v1/auth-info, and
@@ -665,6 +668,9 @@ function switchView(view: View): void {
     // section shows them as they are NOW, including an account registered from
     // the CLI or logged in from the TUI since this tab was opened.
     refreshAccounts();
+    // And the usage report (#2983): a session parked at a limit since this tab
+    // was opened is exactly the signal the section exists to show.
+    refreshQuota();
   }
 }
 
@@ -1884,6 +1890,30 @@ const accountsRefetcher = createFencedRefetcher({
 
 function refreshAccounts(): void {
   accountsRefetcher.refresh();
+}
+
+/** The usage/quota read (#2983), fenced like the accounts read and for the same
+ *  reason: entering the view fetches, and an older response must not land after
+ *  a newer one and redisplay a parked session that has since resumed.
+ *
+ *  A failure becomes the SECTION's own message rather than a tab error, matching
+ *  accounts: an empty section would read as "no usage to report", which is the
+ *  fabricated-answer shape this report exists to refuse. */
+const quotaRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: quotaReport,
+  commit: (resp) => {
+    store.set({
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true },
+    });
+  },
+  onError: (err: unknown) => {
+    store.set({ quota: { ...store.get().quota, error: errorText(err) } });
+  },
+});
+
+function refreshQuota(): void {
+  quotaRefetcher.refresh();
 }
 
 /** Records the outcome of an account action on the row that produced it. */

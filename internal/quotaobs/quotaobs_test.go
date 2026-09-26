@@ -1,19 +1,20 @@
-package commands
+package quotaobs
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// quotaAgentName exists because of a bug that only appeared when the command was
+// agentName exists because of a bug that only appeared when the command was
 // run against a real AF home: InstanceData.Program is the RESOLVED command, not
 // the agent enum, so with program_overrides configured the table grew a row
 // titled "/home/…/claude --dangerously-skip-permissions" beside the real
 // "claude" row — the same agent, reported twice, each undercounted.
-func TestQuotaAgentName_CollapsesResolvedCommandsToTheAgentEnum(t *testing.T) {
+func TestAgentName_CollapsesResolvedCommandsToTheAgentEnum(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		program string
@@ -28,8 +29,8 @@ func TestQuotaAgentName_CollapsesResolvedCommandsToTheAgentEnum(t *testing.T) {
 		{"unrelated command", "/opt/claude-wrapper/run", "/opt/claude-wrapper/run"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := quotaAgentName(tc.program); got != tc.want {
-				t.Fatalf("quotaAgentName(%q) = %q, want %q", tc.program, got, tc.want)
+			if got := agentName(tc.program); got != tc.want {
+				t.Fatalf("agentName(%q) = %q, want %q", tc.program, got, tc.want)
 			}
 		})
 	}
@@ -37,7 +38,7 @@ func TestQuotaAgentName_CollapsesResolvedCommandsToTheAgentEnum(t *testing.T) {
 
 // Archived and tombstoned rows are not running an agent, so they must not pad
 // the session counts the report presents as current usage.
-func TestQuotaSessionStates_ExcludesInertRowsAndCarriesLimitState(t *testing.T) {
+func TestSessionStates_ExcludesInertRowsAndCarriesLimitState(t *testing.T) {
 	reset := time.Unix(1_700_000_000, 0).UTC()
 	raw, err := json.Marshal([]session.InstanceData{
 		{Title: "live", Program: "claude", Liveness: session.LiveRunning},
@@ -49,7 +50,7 @@ func TestQuotaSessionStates_ExcludesInertRowsAndCarriesLimitState(t *testing.T) 
 		t.Fatalf("marshal: %v", err)
 	}
 
-	states, unreadable := quotaSessionStates(map[string]json.RawMessage{"repo": raw})
+	states, unreadable := sessionStates(map[string]json.RawMessage{"repo": raw})
 	if unreadable != 0 {
 		t.Fatalf("unreadable = %d, want 0", unreadable)
 	}
@@ -77,7 +78,7 @@ func TestQuotaSessionStates_ExcludesInertRowsAndCarriesLimitState(t *testing.T) 
 // must resolve liveness through the ROLLFORWARD — a pre-#1195 record carries the
 // zero Liveness while its real state lives in the legacy status field, so reading
 // data.Liveness directly counts an old archived row as a running session.
-func TestQuotaSessionStates_ExcludesVanishedAgentsAndLegacyArchivedRecords(t *testing.T) {
+func TestSessionStates_ExcludesVanishedAgentsAndLegacyArchivedRecords(t *testing.T) {
 	raw, err := json.Marshal([]session.InstanceData{
 		{Title: "running", Program: "claude", Liveness: session.LiveRunning},
 		{Title: "ready", Program: "claude", Liveness: session.LiveReady},
@@ -99,7 +100,7 @@ func TestQuotaSessionStates_ExcludesVanishedAgentsAndLegacyArchivedRecords(t *te
 		t.Fatalf("marshal: %v", err)
 	}
 
-	states, _ := quotaSessionStates(map[string]json.RawMessage{"repo": raw})
+	states, _ := sessionStates(map[string]json.RawMessage{"repo": raw})
 	if len(states) != 4 {
 		t.Fatalf("states = %d, want 4 (running, ready, limit-reached, legacy-running): lost/dead have "+
 			"no agent, the legacy ARCHIVED row must resolve to archived, and the legacy RUNNING row "+
@@ -118,19 +119,19 @@ func TestQuotaSessionStates_ExcludesVanishedAgentsAndLegacyArchivedRecords(t *te
 
 // A state nobody considered must not become evidence of a healthy account, which
 // is why the running check is an allowlist.
-func TestQuotaAgentIsRunning_UnsetLivenessIsNotRunning(t *testing.T) {
-	if quotaAgentIsRunning(session.LivenessUnset) {
+func TestAgentIsRunning_UnsetLivenessIsNotRunning(t *testing.T) {
+	if agentIsRunning(session.LivenessUnset) {
 		t.Fatal("an unresolvable liveness was treated as a running agent; it is not evidence of anything")
 	}
-	if !quotaAgentIsRunning(session.LiveLimitReached) {
+	if !agentIsRunning(session.LiveLimitReached) {
 		t.Fatal("a limit-reached session has an agent parked at the wall and must count")
 	}
 }
 
 // A record blob that will not parse is COUNTED, never silently dropped: it might
 // have been the parked one, and a report that hides it reads as authoritative.
-func TestQuotaSessionStates_CountsUnparseableRecordsRatherThanHidingThem(t *testing.T) {
-	states, unreadable := quotaSessionStates(map[string]json.RawMessage{
+func TestSessionStates_CountsUnparseableRecordsRatherThanHidingThem(t *testing.T) {
+	states, unreadable := sessionStates(map[string]json.RawMessage{
 		"broken": json.RawMessage(`{"not":"an array"}`),
 	})
 	if unreadable != 1 {
@@ -138,5 +139,23 @@ func TestQuotaSessionStates_CountsUnparseableRecordsRatherThanHidingThem(t *test
 	}
 	if len(states) != 0 {
 		t.Fatalf("states = %d, want 0", len(states))
+	}
+}
+
+// The caveat sentences are the load-bearing part of an incomplete report: a UI
+// that drops them turns a partial read into a wrong answer.
+func TestResultWarnings_SayIncompleteWhenReadsFailed(t *testing.T) {
+	r := Result{SkippedRepos: []string{"repo-a", "repo-b"}, UnreadableRecords: 1}
+	warnings := r.Warnings()
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %d, want 2 (skipped + unreadable)", len(warnings))
+	}
+	for _, w := range warnings {
+		if !strings.Contains(w, "INCOMPLETE") {
+			t.Fatalf("warning %q does not say the report is INCOMPLETE", w)
+		}
+	}
+	if (Result{}).Warnings() != nil {
+		t.Fatal("a complete read must carry no warnings")
 	}
 }

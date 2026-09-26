@@ -33,6 +33,7 @@ import type {
   AccountsResponse,
   ConfigResponse,
   ConfigSetResponse,
+  QuotaReportResponse,
   RegisterAccountResponse,
   ProjectExpectation,
   SessionData,
@@ -1262,6 +1263,15 @@ export async function listAccounts(token: string, repoPath = ""): Promise<Accoun
   // targets by the agent the resolved command launches, and dropping the map
   // here would silently return them to enum semantics (#4430 review round 5).
   return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
+}
+
+/** Reads the daemon's per-agent usage/quota report (#2983): the same
+ *  records→quota.Build read `af quota` makes, with the words rendered
+ *  server-side — so this surface shows exactly what the CLI prints rather than
+ *  re-deriving vocabulary from fields. */
+export async function quotaReport(token: string): Promise<QuotaReportResponse> {
+  const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.
