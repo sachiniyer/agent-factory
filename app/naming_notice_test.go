@@ -1,10 +1,12 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,4 +73,70 @@ func TestNamingFormCtrlEOpensNoticeDetailsAndReturns(t *testing.T) {
 	assert.Same(t, naming, h.namingInstance, "the form's input survives reading why it was refused")
 	assert.Equal(t, "todo-core-with-a-longer-title", naming.Title)
 	assert.Contains(t, h.errBox.FullError(), want)
+}
+
+// deliverFormKey presses a naming-form key and hands every message it produced
+// back through Update, the way the event loop delivers a daemon answer.
+func deliverFormKey(t *testing.T, h *home, msg tea.KeyMsg) {
+	t.Helper()
+	for _, produced := range pressFormKey(t, h, msg) {
+		_, _ = h.Update(produced)
+	}
+}
+
+// TestNamingFormNestedFieldNoticesStayWhileFormOpen: a nested field refuses a
+// pick, or finds nothing to offer, by closing back to the form and raising the
+// reason — from its own key handler or from the daemon answer it waited on.
+// That reason is about the form still open, so it stays too (#4123).
+func TestNamingFormNestedFieldNoticesStayWhileFormOpen(t *testing.T) {
+	registrationOnly := daemon.ListAccountsResponse{
+		Entries: []daemon.AccountEntry{{Agent: "claude", Name: "unproven",
+			Dir: "/h/accounts/claude/unproven", RegistrationOnly: true, LoggedIn: true}},
+		Agents: []string{"claude"},
+	}
+	cases := []struct {
+		name  string
+		raise func(t *testing.T, h *home)
+		want  string
+	}{
+		{"unavailable backend picked", func(t *testing.T, h *home) {
+			stubBackends(t, twoUsableBackends(), nil)
+			deliverFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlR})
+			pickBackend(t, h, "ssh")
+		}, "ssh.host"},
+		{"backend catalog failed", func(t *testing.T, h *home) {
+			stubBackends(t, daemon.ListBackendsResponse{}, errors.New("daemon is not running"))
+			deliverFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlR})
+		}, "cannot list backends"},
+		{"registration-only account picked", func(t *testing.T, h *home) {
+			stubAccounts(t, registrationOnly, nil)
+			deliverFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlO})
+			pickAccount(t, h, "unproven")
+		}, "cannot scope a session"},
+		{"no account registered", func(t *testing.T, h *home) {
+			stubAccounts(t, daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{}, Agents: []string{"claude"}}, nil)
+			deliverFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlO})
+		}, "af accounts add claude"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.errBox.SetSize(300, 1)
+			startNaming(t, h, "nested-field-notice")
+
+			tc.raise(t, h)
+			require.Equal(t, stateNew, h.state, "precondition: back on the form, still open")
+			require.Contains(t, h.errBox.FullError(), tc.want, "precondition: the notice is up")
+
+			_, cmd := h.Update(hideErrMsg{noticeID: h.transientNoticeID})
+			assert.Contains(t, h.errBox.FullError(), tc.want,
+				"the 3s timer must not expire a notice a nested field raised onto the open form")
+			assert.NotNil(t, cmd, "the timer re-arms, so the notice expires once the form closes")
+
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+			require.Nil(t, h.namingInstance, "precondition: esc closed the form")
+			_, _ = h.Update(hideErrMsg{noticeID: h.transientNoticeID})
+			assert.Empty(t, h.errBox.FullError(), "with the form gone the notice expires as usual")
+		})
+	}
 }

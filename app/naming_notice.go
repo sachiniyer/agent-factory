@@ -37,8 +37,18 @@ func (m *home) handleNamingFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.namingNotice.returnFromDetails = m.state == stateHelp
 		return mod, cmd
 	}
+	return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateNew(msg) })
+}
+
+// pinningNamingNotice runs a handler that belongs to the naming form and pins
+// any notice it raised, if the form is open once it returns. Every handler that
+// can raise a notice onto the form goes through here — the form's own keys, its
+// nested fields (program, backend, account, prompt), and the daemon answers
+// those fields wait on — because a nested field refuses a pick by closing back
+// to the form and raising the reason, and that reason must not expire either.
+func (m *home) pinningNamingNotice(handle func() (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
 	before := m.transientNoticeID
-	mod, cmd := m.handleStateNew(msg)
+	mod, cmd := handle()
 	if m.transientNoticeID != before && m.namingInstance != nil {
 		m.namingNotice = namingFormNotice{id: m.transientNoticeID, instance: m.namingInstance}
 	}
