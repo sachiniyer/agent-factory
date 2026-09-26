@@ -192,10 +192,10 @@ func TestArgvIsLaunchShim(t *testing.T) {
 		argv []string
 		want bool
 	}{
-		{[]string{"zsh", "-c", "/opt/af __af-session-env-exec-account-environment claude 0 work '' 0 ./deploy.sh"}, true},
-		{[]string{"/opt/af", "__af-session-env-exec-account-environment", "claude", "0", "work", "", "0", "./deploy.sh"}, true},
+		{[]string{"zsh", "-c", "/opt/af __af-session-env-exec-account-environment claude 0 work ./deploy.sh"}, true},
+		{[]string{"/opt/af", "__af-session-env-exec-account-environment", "claude", "0", "work", "./deploy.sh"}, true},
 		{[]string{"/opt/af", "__af-session-env-exec", "claude", "0", "claude"}, true},
-		{[]string{"/opt/af", "__af-session-env-exec-account", "claude", "0", "work", "", "0", "claude"}, true},
+		{[]string{"/opt/af", "__af-session-env-exec-account", "claude", "0", "work", "claude"}, true},
 		{[]string{"/bin/sh", "-c", "./deploy.sh"}, false},
 		{[]string{"/bin/sh", "./deploy.sh"}, false},
 		{[]string{"sleep", "300"}, false},

@@ -1,6 +1,8 @@
 package sessionenv
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -17,6 +19,182 @@ import (
 type AccountLaunchProof struct {
 	TrustedExecutable string
 	GeneratedArgs     []string
+}
+
+// accountLaunchProofEnvVar carries the launcher's proof OUT OF BAND, through
+// the pane environment. A shell re-invoking af can WRITE the variable just as
+// easily as it could append an argv element, so a value read from the env var
+// alone is not evidence af authored this invocation. The shim therefore ALSO
+// re-derives what af's launcher would have produced (AccountLaunchProofResolver
+// below) and refuses an env-supplied proof that does not match it: an env var
+// the child can read is also an env var the child's parent shell can write, so
+// a plaintext token in the environment cannot carry that evidence (#3123, #4731
+// review).
+//
+// The marker argv is fully forgeable: a program_overrides value can re-invoke af
+// as `af __af-session-env-exec-account <agent> <count> <account> <command>` and
+// name any TrustedExecutable it likes, because nothing in that argv proves af
+// authored it. The proof therefore no longer rides in argv at all. The launcher
+// (session/tmux) installs this variable in the account-scoped pane's tmux
+// session environment; the pane child inherits it, the shim reads it before
+// exec, and FilterForCommand strips it again so it never reaches the agent or a
+// subshell. The re-derivation, not the env var, is what an overwriting shell
+// cannot reproduce.
+//
+// The value is not secret: TrustedExecutable and GeneratedArgs are already
+// visible in the pane command a launcher wrote. base64 wrap keeps the JSON
+// clear of any quoting concern at the tmux/env boundary.
+const accountLaunchProofEnvVar = "__AF_ACCOUNT_LAUNCH_PROOF"
+
+// errAccountLaunchProofAbsent is the sentinel a missing/empty proof resolves to,
+// so the shim can name the cause without echoing any value.
+var errAccountLaunchProofAbsent = errors.New("launcher account launch proof is absent")
+
+// errAccountLaunchProofMismatch is the sentinel returned when the env-supplied
+// proof does not match what af's launcher would have produced for this
+// invocation. Naming the cause lets the caller surface "the proof channel was
+// overwritten" without echoing any value the attacker wrote into the env.
+var errAccountLaunchProofMismatch = errors.New("launcher account launch proof does not match what af would have produced for this invocation")
+
+// AccountLaunchProofResolver re-derives the launch proof the launcher would
+// have produced for an account-scoped pane whose command is `command`, the same
+// way the launcher derives it in session/launch_program.go — by resolving the
+// operator's config from the pane's working directory and feeding base+final to
+// GenerateAccountLaunchProof. The shim uses it to refuse an env-supplied proof
+// that an overwriting shell wrote into the env var (#3123, #4731 review): the
+// env value is forgeable by a same-uid re-invocation, a config re-derivation is
+// not, because nothing the attacker runs in the pane has write access to the
+// resolved-operator-config the resolver reads.
+//
+// It returns (proof, nil) when a derivation is available for this (agent,
+// command) pair, or (zero, err) when it cannot decide. The shim treats any
+// resolver error as a REFUSAL — a repository-controlled parent can
+// deliberately make re-derivation fail (e.g. by removing the pane's CWD from
+// a sibling shell), and a forged env var is then the only "proof" left, so
+// bypassing the cross-check on a resolver error re-opens the forgeable-env
+// channel this gate closed (#4731 review, Codex P1 on f903b934). A nil
+// resolver short-circuits the matcher: the shim falls back to the
+// env-supplied proof alone, which is the form this hook replaced and the
+// form tests exercise directly. main.go wires the production resolver;
+// tests install their own.
+var AccountLaunchProofResolver func(agent, account, command string) (AccountLaunchProof, error)
+
+// accountLaunchProofsMatch reports whether two proofs describe the same
+// launcher-authored invocation. Slices are compared positionally and by
+// length, never as values the caller could reorder.
+func accountLaunchProofsMatch(a, b AccountLaunchProof) bool {
+	if a.TrustedExecutable != b.TrustedExecutable {
+		return false
+	}
+	if len(a.GeneratedArgs) != len(b.GeneratedArgs) {
+		return false
+	}
+	for i := range a.GeneratedArgs {
+		if a.GeneratedArgs[i] != b.GeneratedArgs[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// AccountLaunchProofEnvEntry encodes proof as a NAME=VALUE environment entry for
+// the account-scoped pane's session environment. It always emits an entry,
+// including for an empty proof (a bare agent command), because the shim must
+// distinguish "launcher set the proof, and it describes a bare invocation" from
+// "no launcher was here at all". Returns "" only on an internal encode failure.
+//
+// Each string field is base64-wrapped BEFORE it enters the JSON envelope so the
+// wire format preserves the arbitrary non-NUL bytes Unix executable and path
+// strings may carry. encoding/json replaces invalid UTF-8 in a Go string with
+// U+FFFD, so a TrustedExecutable or generated path containing such a byte would
+// decode to a different string than the resolver derived byte-for-byte, and
+// accountLaunchProofsMatch would then reject an otherwise-valid account-scoped
+// launch (#review, Codex P2 on 458eb57 — account_launch_proof.go:109). Base64
+// keeps the envelope ASCII for the tmux/env boundary and round-trips the raw
+// bytes, so the decoded proof compares byte-exact against the resolver's.
+func AccountLaunchProofEnvEntry(proof AccountLaunchProof) (string, error) {
+	data, err := json.Marshal(accountLaunchProofWire{
+		TrustedExecutable: encodeLaunchProofField(proof.TrustedExecutable),
+		GeneratedArgs:     encodeLaunchProofArgs(proof.GeneratedArgs),
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode account launch proof: %w", err)
+	}
+	return accountLaunchProofEnvVar + "=" + base64.StdEncoding.EncodeToString(data), nil
+}
+
+// decodeAccountLaunchProofEnv is the shim-side counterpart. An empty value
+// means the variable was not set by the launcher, which the caller treats as a
+// refusal rather than as a bare-invocation proof. Anything that fails to
+// round-trip is also a refusal: the credential boundary fails closed, and a
+// forged value is not evidence that af authored it.
+func decodeAccountLaunchProofEnv(value string) (AccountLaunchProof, error) {
+	if value == "" {
+		return AccountLaunchProof{}, errAccountLaunchProofAbsent
+	}
+	data, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	var wire accountLaunchProofWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	trusted, err := decodeLaunchProofField(wire.TrustedExecutable)
+	if err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	args, err := decodeLaunchProofArgs(wire.GeneratedArgs)
+	if err != nil {
+		return AccountLaunchProof{}, fmt.Errorf("decode account launch proof: %w", err)
+	}
+	return AccountLaunchProof{TrustedExecutable: trusted, GeneratedArgs: args}, nil
+}
+
+// encodeLaunchProofField base64-wraps the raw bytes of s for the JSON wire
+// format; decodeLaunchProofField is the inverse. The envelope cannot carry the
+// strings directly — see AccountLaunchProofEnvEntry.
+func encodeLaunchProofField(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+func decodeLaunchProofField(s string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func encodeLaunchProofArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = encodeLaunchProofField(a)
+	}
+	return out
+}
+
+func decodeLaunchProofArgs(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(args))
+	for i, a := range args {
+		decoded, err := decodeLaunchProofField(a)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = decoded
+	}
+	return out, nil
+}
+
+type accountLaunchProofWire struct {
+	TrustedExecutable string   `json:"t"`
+	GeneratedArgs     []string `json:"g,omitempty"`
 }
 
 type accountCommandValidationError struct {
