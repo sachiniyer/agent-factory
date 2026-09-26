@@ -388,6 +388,8 @@ type home struct {
 	handoffChoices  []string
 	handoffAccounts []string
 	handoffWarnings []string
+	// handoffResolvedAgents is the picker load's resolved_agents, kept for the confirm step's carry-intended judgment (#4367/#4504); nil -> enum like resolvedFor.
+	handoffResolvedAgents map[string]string
 	// handoffTarget is the immutable session identity that opened the picker.
 	// Background snapshots may move the sidebar cursor or replace a same-title
 	// row while the modal owns the keyboard; submit must never re-read that
