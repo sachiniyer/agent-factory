@@ -312,6 +312,19 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		{"xargs -i env {} codex", true},
 		{"xargs --replace={} env -u{} codex", true},
 		{"xargs -I{} cmd env {} z", true},
+		// A replace marker that itself contains '=' can synthesize or move
+		// the assignment boundary env re-parses, so the literal namePart
+		// test is unsound and the guard must fail closed. The bare '='
+		// marker sits in env's command slot; -i=, --replace==, and -IX=
+		// are the same shape under a different spelling.
+		{"xargs -I= env = codex", true},
+		{"xargs -i= env = codex", true},
+		{"xargs --replace== env = codex", true},
+		{"xargs -IX= env CODEX_HOMEX= codex", true},
+		// The '=' marker reaches env's operand region even when an
+		// unmodeled wrapper sits in front of env: xargs substitutes the
+		// marked word, then the wrapper runs `env NAME=value codex`.
+		{"xargs -I= strace env = codex", true},
 		// A marker spelled by a non-literal option argument is unprovable.
 		{`xargs -I "$M" env x codex`, true},
 		// --process-slot-var sets a variable on every exec'd command.
@@ -331,6 +344,12 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 		{"xargs -I{} env PORT={} codex", false},
 		{"xargs --process-slot-var=PORT env codex", false},
 		{"xargs --version", false},
+		// An '='-containing marker with no env in the command has no
+		// re-parser to turn a substituted word into NAME=value, so the
+		// fail-closed rule does not fire.
+		{"xargs -I= ls", false},
+		{"xargs -I= echo hi", false},
+		{"xargs --replace== printf =", false},
 		// A terminal option no longer drops the tail: --help/--version now
 		// inspect the words after them exactly as the default branch does.
 		{"xargs --help env CODEX_HOME=/other codex", true},
@@ -342,5 +361,78 @@ func TestCommandMutatesAccountEnvironment_XargsModel(t *testing.T) {
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, codex),
 			"command %q", test.command)
+	}
+}
+
+// A GNU xargs replace marker that itself contains '=' (e.g. '-I=', '-i=',
+// '--replace==', '-IX=') defeats the substituting-marker scan in unwrapXargs:
+// strings.Cut(operandWord, "=") eats the '=' out of the pre-'=' namePart, so
+// strings.Contains(namePart, marker) cannot match the very marker that holds
+// env's command slot. At runtime xargs substitutes that marker with an input
+// line spelling NAME=value, and env re-parses the re-formed word as an
+// assignment that overrides an identity or shell-startup variable af installed
+// — exactly the mutation the guard exists to prevent. Verified against the
+// installed GNU xargs/findutils and coreutils env before this test was written:
+// `printf 'CODEX_HOME=/pwn\n' | xargs -I= -t env = printenv CODEX_HOME` prints
+// /pwn, and the same shape injects OPENAI_API_KEY.
+func TestValidateAccountEnvironmentCommand_RefusesXargsEqualsMarkerBypass(t *testing.T) {
+	for _, command := range []string{
+		// The exact shapes from the report, all previously accepted because
+		// the '=' marker is invisible to the cut-then-contains test.
+		"xargs -I= env = codex",
+		"xargs -i= env = codex",
+		"xargs --replace== env = codex",
+		// A non-bare '='-containing marker: 'X=' plus the operand word
+		// 'CODEX_HOMEX=' re-forms 'CODEX_HOME=/pwn' when the trailing 'X='
+		// is replaced by an input line `=/pwn`.
+		"xargs -IX= env CODEX_HOMEX= codex",
+		// The same bypass when an unmodeled wrapper sits in front of env:
+		// xargs substitutes the marked word, the wrapper runs env.
+		"xargs -I= strace env = codex",
+		"xargs -I= nohup env = codex",
+		// A credential name and a shell-startup name are injected the same
+		// way, not just the config-dir root.
+		"xargs -I= env = printenv OPENAI_API_KEY",
+		"xargs -I= env = codex",
+		// Quoted forms reduce to the same argv after quote removal.
+		`xargs -I= env = "codex"`,
+		"xargs -I= env '=' codex",
+		// An absolute-path xargs is still xargs.
+		"/usr/bin/xargs -I= env = codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q bypasses the guard via an '=' replace marker", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}
+
+// The fail-closed rule must stay narrow: it fires only when an '='-containing
+// marker is in play AND env is present to re-parse the substituted word. With
+// no env in the command there is no re-parser, so a legitimate '=' marker used
+// purely as a placeholder into a non-env command keeps working. The existing
+// '='-free marker value-position allowance (`xargs -I{} env PORT={} codex`)
+// must also keep working, since the rule guards only '='-bearing markers.
+func TestValidateAccountEnvironmentCommand_XargsEqualsMarkerStaysNarrow(t *testing.T) {
+	for _, command := range []string{
+		// '=' marker with no env in the command: nothing re-parses the
+		// substituted word as NAME=value.
+		"xargs -I= ls",
+		"xargs -I= echo hi",
+		"xargs -I= printf =",
+		"xargs -i= make",
+		"xargs --replace== npm run dev",
+		// '='-free marker value-position allowance is unchanged: a marker
+		// in an assignment's value feeds data env cannot reinterpret.
+		"xargs -I{} env PORT={} codex",
+		"xargs -i env PORT={} codex",
+		"xargs --replace={} env PORT={} codex",
+		// The default {} marker (bare -i / --replace) is unaffected.
+		"xargs -i env codex {}",
+		// No substitution and no env override path stays allowed.
+		"xargs -I{} env codex {}",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q carries no env operand-region '=' marker and must stay allowed", command)
 	}
 }

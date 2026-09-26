@@ -129,6 +129,16 @@ func xargsEnvOperandsFedAt(words []*syntax.Word, state xargsLoopState, names map
 		if !state.markerKnown {
 			return true
 		}
+		// A marker containing '=' can synthesize or move the assignment
+		// boundary env re-parses as a NAME=value, so the namePart test in
+		// xargsWordCarriesMarker (which cuts each word at its first '=') is
+		// unsound: '-I=' places '=' in env's command slot and strings.Cut
+		// eats the delimiter, leaving an empty namePart the contains check
+		// never matches. Fail closed rather than reasoning around the moved
+		// boundary.
+		if strings.Contains(state.marker, "=") {
+			return true
+		}
 		remaining := memo.xargsMarkerWord(words, state.marker)
 		return remaining > 0 && len(words)-remaining < operandEnd
 	}
