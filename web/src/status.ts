@@ -31,7 +31,7 @@ export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
 /** The state bucket a row READS AS — every DotKind plus the dotless working row.
  *  Unlike DotKind this is TOTAL over sessions (rowKind never returns null), which is
  *  what makes it the key the status filter (filter.ts) partitions the rail by. */
-export type RowKind = DotKind | "working";
+type RowKind = DotKind | "working";
 
 /** The operator-level vocabulary for scanning the rail. It deliberately groups the
  * daemon's finer mechanical reasons by the next action, while keeping Archived as a
@@ -52,7 +52,7 @@ export const OPERATOR_KIND_LABELS: Record<OperatorKind, string> = {
  *  own aria/title label (rowStatus) and the filter menu's checkbox labels both read
  *  this map, so the two surfaces cannot drift into calling the same state different
  *  things. Sentence case per the repo copy convention. */
-export const ROW_KIND_LABELS: Record<RowKind, string> = {
+const ROW_KIND_LABELS: Record<RowKind, string> = {
   ready: "Ready",
   working: "Working",
   lost: "Lost",
@@ -170,7 +170,7 @@ export function isCreating(s: SessionData): boolean {
  * dotless working row on screen) and reveal one they are not — the filter must
  * partition by what the eye sees, so it stays the single mapping in rowStatus.
  */
-export function rowKind(s: SessionData): RowKind {
+function rowKind(s: SessionData): RowKind {
   return rowStatus(s).kind ?? "working";
 }
 
@@ -414,7 +414,7 @@ export function canHandoff(s: SessionData): boolean {
  * re-implement it" discipline as can_kill/can_handoff/lifecycle_action. Absence or
  * false fails closed (treated as not root).
  */
-export function isRootSession(s: SessionData): boolean {
+function isRootSession(s: SessionData): boolean {
   return s.is_root === true;
 }
 
@@ -505,7 +505,7 @@ export function archiveWarningText(s: SessionData): string {
  *  prior conversation (#2629). The switch is exhaustive over the values af writes
  *  and returns "" for anything else, so a value a newer daemon adds renders no
  *  note rather than a guessed one. */
-export function rootRecreateNote(s: SessionData): string {
+function rootRecreateNote(s: SessionData): string {
   switch (s.root_recreate_context) {
     case "fresh":
       return "fresh context";

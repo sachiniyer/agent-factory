@@ -61,7 +61,7 @@ export function shouldShowInstall(state: InstallVisibility): boolean {
 /** Reads the persisted dismissal, treating blocked storage as "not dismissed" —
  *  matching theme.ts, where an unavailable store degrades to the default rather than
  *  taking anything down. */
-export function readInstallDismissed(): boolean {
+function readInstallDismissed(): boolean {
   try {
     return localStorage.getItem(DISMISS_KEY) === "1";
   } catch {
@@ -71,7 +71,7 @@ export function readInstallDismissed(): boolean {
 
 /** Persists the dismissal (best-effort; a blocked store just means it may reappear
  *  next load, which is a nag but not a break). */
-export function persistInstallDismissed(): void {
+function persistInstallDismissed(): void {
   try {
     localStorage.setItem(DISMISS_KEY, "1");
   } catch {

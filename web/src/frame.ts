@@ -28,9 +28,9 @@ export enum Op {
 }
 
 /** The fixed body size of a RESIZE frame: two big-endian uint16s (rows, cols). */
-export const RESIZE_PAYLOAD_LEN = 4;
+const RESIZE_PAYLOAD_LEN = 4;
 /** The fixed body size of a HELLO frame: one big-endian uint64 (start seq). */
-export const HELLO_PAYLOAD_LEN = 8;
+const HELLO_PAYLOAD_LEN = 8;
 
 /**
  * A decoded binary PTY frame. Mirrors Go's agentproto.Frame: `data` carries the
