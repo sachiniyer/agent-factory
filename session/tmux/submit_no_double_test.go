@@ -23,6 +23,9 @@ const heartbeatPrompt = "[lanes heartbeat] Run: python3 /srv/monitors/lanes/lane
 	"If its goal is paused/complete, or it has been idle >15 min, keep it going per " +
 	"the RUNBOOK 'Coordinator keep-going' section. Reply in one or two lines."
 
+// claudeFooter is the persistent status row claude draws under its composer.
+const claudeFooter = "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab"
+
 // claudeWidth is the production pane's width; claude wraps its composer and
 // transcript to it.
 const claudeWidth = 52
@@ -116,7 +119,7 @@ func (p *slidingClaudePane) rows() []string {
 	all := append([]string{}, p.transcript...)
 	all = append(all, rule)
 	all = append(all, composer...)
-	all = append(all, rule, "", "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab")
+	all = append(all, rule, "", claudeFooter)
 	if len(all) > p.height {
 		all = all[len(all)-p.height:]
 	}
@@ -301,4 +304,49 @@ func TestDroppedPasteInClaudePaneIsRedeliveredExactlyOnce(t *testing.T) {
 	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
 	require.Equal(t, PromptDelivered, status)
 	require.Equal(t, 1, strings.Count(errors.String(), "prompt delivery observed absent"))
+}
+
+// TestTruncatedPasteEndingInFooterTextIsNotDelivered is the Codex review
+// fail-first on #4885. The prompt ends with text claude already shows in its
+// persistent footer, so the completion tail sits BELOW the composer before any
+// paste. The first paste strands truncated and its Enter is absorbed. The
+// footer's copy of the tail follows the newly rendered prefix, but it is
+// pre-existing chrome, not this render's tail: the attempt must read as
+// absent, and the one redelivery must land the prompt. Accepting any
+// completion after the newest prefix would call the strand delivered, send
+// Enter into it and never redeliver — the prompt would never be submitted.
+func TestTruncatedPasteEndingInFooterTextIsNotDelivered(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	prompt := "Summarize the permission mode shown in the footer, which currently reads: " +
+		strings.TrimSpace(claudeFooter)
+	probe := newDeliveryProbe(prompt)
+	require.Contains(t, normalizeDelivery(claudeFooter), probe.completion,
+		"fixture: the prompt's completion tail must already be on screen in the footer")
+
+	pane := &slidingClaudePane{height: 49, transcript: []string{"● earlier work"}}
+	pane.onPaste = func(n int, payload string) []string {
+		if n == 1 {
+			return wrapClaude(payload)[:1]
+		}
+		return wrapClaude(payload)
+	}
+	submitted := 0
+	pane.onEnter = func(p *slidingClaudePane, n int) {
+		if n == 1 {
+			return // absorbed: the composer keeps the stranded text
+		}
+		submitted++
+		p.submitComposerAs(strings.Join(p.composer, " "), "", "✻ Crunching… (esc to interrupt)")
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+
+	pastes, _ := pane.counts()
+	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
+	require.Equal(t, 2, pastes,
+		"the stranded first paste must be recognized as absent and redelivered once, not confirmed by the footer's copy of its tail")
+	require.Equal(t, PromptDelivered, status)
 }

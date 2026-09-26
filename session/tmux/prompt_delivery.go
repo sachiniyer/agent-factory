@@ -56,22 +56,27 @@ type absenceProof struct {
 }
 
 // newestRender locates this payload's NEWEST render in a normalized frame — the
-// last occurrence of its render witness — and reports whether a completion tail
-// ends at or after it, i.e. whether that render is whole. Position, not count,
-// is what makes this sound on a history-less pane, where scrolling can remove
-// an older identical copy in the same frame that adds this one (#4884). Testing
-// where the completion ENDS also covers a tail that itself contains the
-// witness text.
+// last occurrence of its render witness — and reports whether that render is
+// whole: one contiguous copy of the entire payload covers it. Position, not
+// count, is what makes this sound on a history-less pane, where scrolling can
+// remove an older identical copy in the same frame that adds this one (#4884).
+//
+// Contiguity is the point. A completion tail found anywhere after the newest
+// witness is not enough: text already on screen below the composer — a footer
+// the prompt happens to quote — would vouch for a truncated render, send Enter
+// into the strand and suppress its redelivery. Covering, rather than starting
+// at, the newest witness keeps a payload that repeats its own opening text
+// whole.
 func (p deliveryProbe) newestRender(normalized string) (witnessed, whole bool) {
-	if p.renderWitness == "" || p.completion == "" {
+	if p.renderWitness == "" || p.payload == "" {
 		return false, false
 	}
 	w := strings.LastIndex(normalized, p.renderWitness)
 	if w < 0 {
 		return false, false
 	}
-	c := strings.LastIndex(normalized, p.completion)
-	return true, c >= 0 && c+len(p.completion) >= w+len(p.renderWitness)
+	c := strings.LastIndex(normalized, p.payload)
+	return true, c >= 0 && c <= w && c+len(p.payload) >= w+len(p.renderWitness)
 }
 
 // absenceAt returns proof of absence when the frame's newest render of this
