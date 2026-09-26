@@ -188,6 +188,85 @@ func TestActivity_UserKilledOutranksPendingHandoff(t *testing.T) {
 	})
 }
 
+// TestPendingHandoffMissionActivityMirrorsRecord pins the contract this bug
+// broke: LifecycleView.Activity() must carry the undelivered-takeover-mission
+// marker through to ClassifyActivity's PendingHandoffMission arm, which is
+// ordered before the liveness switch. Without the propagation a session owing
+// a mission falls through to the liveness-derived answer — Idle for LiveReady,
+// Terminal for LiveLost/Dead/Archived — so the live view the #1892 cap reads
+// disagrees with the record path and frees (or fails to hold) a concurrency
+// slot. The companion TestPendingAccountSwapActivityRemainsPending covers the
+// analogous PendingAccountSwap propagation; this is its handoff half.
+func TestPendingHandoffMissionActivityMirrorsRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		liveness Liveness
+	}{
+		// LiveReady is the idle-edge breach: the agent went idle but the mission
+		// is still undelivered, so the run must not release its #1892 slot.
+		{"LiveReady", LiveReady},
+		// Lost/Dead/Archived are the unrecoverable cap-impact variant: the
+		// Pending arm is the only thing holding the slot once Recoverable is
+		// false, so the live path must not collapse onto the terminal answer.
+		{"LiveLost", LiveLost},
+		{"LiveDead", LiveDead},
+		{"LiveArchived", LiveArchived},
+		// Running/LimitReached are Pending on the liveness axis too, so they
+		// agree regardless; included to confirm the fix does not regress them.
+		{"LiveRunning", LiveRunning},
+		{"LiveLimitReached", LiveLimitReached},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := LifecycleView{Liveness: tc.liveness, PendingHandoffMission: true}
+
+			// The record path feeds ClassifyActivity the real mission string.
+			record, _ := ClassifyActivity(InstanceData{
+				Liveness:              tc.liveness,
+				PendingHandoffMission: "continue inherited work",
+			})
+			// The arm fires before the liveness switch, so an owed mission fences
+			// the record onto Pending across every liveness.
+			require.Equal(t, ActivityPending, record,
+				"the record path fences an owed mission across every liveness")
+			// The live projection must agree — the bug dropped the marker so the
+			// live path fell through to the liveness-derived answer.
+			require.Equal(t, record, view.Activity(),
+				"the live and record paths must agree for a session owing a handoff mission")
+		})
+	}
+}
+
+// TestLifecycleViewActivityAgreesWithRecordOnOwedHandoffMission drives the real
+// transition sequence that reaches the breach state in-process — no restart,
+// no record reload — and pins the documented invariant that the live instance
+// and its persisted record never disagree about whether a session is busy. The
+// #1892 watch-task cap reads v.Activity(); if it diverges from the record path
+// here it can release a slot for a session whose handoff mission is still
+// undelivered.
+func TestLifecycleViewActivityAgreesWithRecordOnOwedHandoffMission(t *testing.T) {
+	inst := missionOwingInstance(t) // LiveRunning, OpNone, mission owed, taskRunActive
+	require.Equal(t, LiveRunning, inst.GetLiveness())
+	require.Equal(t, OpNone, inst.GetInFlightOp())
+	require.True(t, inst.TaskRunActive(), "precondition: the run is in flight")
+
+	// The idle edge the owed mission holds open; the cap reads this exact view.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.Equal(t, LiveReady, inst.GetLiveness())
+	require.True(t, inst.TaskRunActive(),
+		"an idle pane with an unresolved mission has not finished its run")
+
+	v := inst.LifecycleView()
+	require.True(t, v.PendingHandoffMission, "the live view carries the marker")
+	require.True(t, v.TaskRunActive, "and the cap's precondition holds")
+
+	// The contract the file's docstring states: live and record never disagree.
+	record, _ := ClassifyActivity(inst.ToInstanceData())
+	require.Equal(t, ActivityPending, record,
+		"the record path fences an owed mission at idle liveness")
+	require.Equal(t, record, v.Activity(),
+		"the live and record paths must agree for a session owing a handoff mission")
+}
+
 // TestLifecycleViewIsInternallyConsistent: the whole point of the view is that
 // every field describes the SAME instant. A caller reaching a verdict from two
 // accessor calls can have a concurrent restore land between them and see a state
