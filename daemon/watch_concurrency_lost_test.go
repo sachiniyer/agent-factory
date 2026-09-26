@@ -700,6 +700,27 @@ func TestInFlightRunIsCountedInEveryReachableView(t *testing.T) {
 			TaskRunActive: true, Started: true, Recoverable: true,
 			Liveness: session.LiveLimitReached, Status: session.Ready,
 		}},
+		// An agent that went idle while it still owes an undelivered handoff
+		// mission: the op axis has cleared (the fence settled on the incoming
+		// runtime, #4429), so the durable marker is the only thing holding the
+		// run open. Without it propagated to v.Activity(), the live view the cap
+		// reads frees the #1892 slot for a run whose mission is still undelivered.
+		{"idle pane owing an undelivered handoff mission", session.LifecycleView{
+			TaskRunActive: true, Started: true, Recoverable: true,
+			Liveness: session.LiveReady, Status: session.Ready,
+			PendingHandoffMission: true,
+		}},
+		// The unrecoverable cap-impact variant: Lost, mission owed, and a backend
+		// that cannot be revived in place. canAutoRestoreLostSession is false
+		// (Recoverable is false), so the slot is held solely by the Pending arm of
+		// v.Activity() — the arm the bug disabled. A non-recoverable dead backend
+		// leaves no second arm to fall back on, so this is the view that actually
+		// releases the cap.
+		{"unrecoverable lost pane owing an undelivered handoff mission", session.LifecycleView{
+			TaskRunActive: true, Started: true, Recoverable: false,
+			Liveness: session.LiveLost, Status: session.Lost,
+			PendingHandoffMission: true, LostRestoreGaveUp: false,
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !holdsTaskRunSlot(tc.view) {
