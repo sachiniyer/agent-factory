@@ -819,6 +819,16 @@ options:
 			if !markerKnown {
 				return nil, true
 			}
+			// A marker containing '=' can synthesize or move the assignment
+			// boundary env re-parses as a NAME=value, so the namePart test
+			// below (which cuts each word at its first '=') is unsound: '-I='
+			// places '=' in env's command slot and strings.Cut eats the
+			// delimiter, leaving an empty namePart the contains check never
+			// matches. Fail closed rather than reasoning around the moved
+			// boundary.
+			if strings.Contains(marker, "=") {
+				return nil, true
+			}
 			for k := 0; k < operandEnd; k++ {
 				lit, ok := literalShellWord(words[j+1+k])
 				if !ok {
