@@ -610,7 +610,16 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 	// Publish the identity the manager actually resolved, not the request's
 	// potentially stale title/repo pair. This is the same one-shot resolution the
 	// restore body used, so the event cannot name a same-title sibling.
-	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	// Publish only when the restore actually completed. A committed-but-unfinished
+	// restore (err recorded above, a mutationCommittedError) did NOT restore the
+	// session — its own marker tells the caller "the session is NOT restored; retry
+	// the restore" — so session.restored, which means the synchronous restore call
+	// completed, must not fire. Unlike killSession there is no late worker that owns
+	// this event, so an abandoned committed-but-unfinished restore yields zero
+	// restored events — correct, because the operation did not complete.
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	}
 	return nil
 }
 
@@ -635,7 +644,18 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	// Publish only when the restore actually completed. A committed-but-unfinished
+	// restore (err recorded above, a mutationCommittedError) did NOT restore the
+	// session — its own marker tells the caller "the session is NOT restored; retry
+	// the restore" — so session.restored, which means the synchronous restore call
+	// completed, must not fire. Unlike killSession there is no late worker that owns
+	// this event, so an abandoned committed-but-unfinished restore yields zero
+	// restored events — correct, because the operation did not complete. The auto
+	// Lost-restore loop's EndRecoverFence publishes session.updated with the true Lost
+	// liveness (restore.go) as the runtime-status substitute.
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	}
 	return nil
 }
 
