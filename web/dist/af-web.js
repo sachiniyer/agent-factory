@@ -15755,6 +15755,9 @@ function connectingView() {
   ));
 }
 function noAuthLoginView(state, actions2) {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions2);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -15771,6 +15774,50 @@ function noAuthLoginView(state, actions2) {
       "p",
       { class: "af-subtitle" },
       "No token needed."
+    ),
+    form
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+function expiredTokenlessView(state, actions2) {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting\u2026" : "Connect"
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token2 = input.value.trim();
+    if (token2 !== "") {
+      actions2.connect(token2);
+    }
+  });
+  const children = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host."
     ),
     form
   ];
@@ -17875,8 +17922,10 @@ async function connect(candidate) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
       clearToken();
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
