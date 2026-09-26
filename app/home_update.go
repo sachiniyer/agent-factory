@@ -24,6 +24,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		if msg.noticeID == m.transientNoticeID {
+			if m.namingNoticePinned(msg.noticeID) {
+				return m, m.clearTransientMessageAfterDelay(msg.noticeID)
+			}
 			// Expire, not Clear: the notice leaves the bar but stays readable
 			// through `E details`. Clearing here is what made that key dead 3
 			// seconds after every notice (#2618).
@@ -580,7 +583,7 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case stateHelp:
 		return m.handleHelpState(msg)
 	case stateNew:
-		return m.handleStateNew(msg)
+		return m.handleNamingFormKey(msg)
 	case stateConfirm:
 		return m.handleStateConfirm(msg)
 	case stateSearch:

@@ -238,6 +238,7 @@ func (m *home) View() string {
 		viewParts = append(viewParts, banner)
 	}
 	m.menu.SetStatusText(m.dragStatusText())
+	m.errBox.SetDetailsHint(m.noticeDetailsHint())
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := layout.JoinVertical(viewParts...)
 
