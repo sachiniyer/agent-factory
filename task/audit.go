@@ -133,7 +133,9 @@ func auditUpdate(before, after *Task, actor Actor, at time.Time) bool {
 // enable/disable entries this exists for straight out of the bounded window.
 // RepoID is absent for the same reason: it is derived from ProjectPath, which is
 // already listed, and the daemon also backfills it on legacy rows without any
-// user asking.
+// user asking. target_session and on_complete are diffed canonical-to-canonical
+// rather than raw for the same store-normalization reason — see the inline notes
+// on those lines.
 func changedFields(before, after Task) []string {
 	var fields []string
 	add := func(changed bool, name string) {
@@ -145,9 +147,19 @@ func changedFields(before, after Task) []string {
 	add(before.Prompt != after.Prompt, "prompt")
 	add(before.CronExpr != after.CronExpr, "cron_expr")
 	add(before.WatchCmd != after.WatchCmd, "watch_cmd")
-	add(before.TargetSession != after.TargetSession, "target_session")
+	// target_session and on_complete are diffed CANONICAL-TO-CANONICAL, not raw.
+	// apply canonicalizes both unconditionally on every write (to repair legacy or
+	// hand-edited rows the caller never asked to repair), so a raw `!=` between the
+	// freshly-loaded record and the merged one would record a store normalization
+	// ("Archive"→"archive", whitespace-only target→"") as a field the caller
+	// moved. The caller's entry must name only fields whose POLICY changed, so a
+	// genuine patch (keep→kill) is still attributed to the caller while a
+	// canonical-equivalent byte-change is not. The byte-change itself is recorded
+	// separately by UpdateTaskChecked as an ActorDaemonUpgrade entry, mirroring the
+	// repo_id backfill — see that block for the precedent.
+	add(CanonicalTargetSession(before.TargetSession) != CanonicalTargetSession(after.TargetSession), "target_session")
 	add(before.MaxConcurrentRuns != after.MaxConcurrentRuns, "max_concurrent_runs")
-	add(before.OnComplete != after.OnComplete, "on_complete")
+	add(CanonicalOnComplete(before.OnComplete) != CanonicalOnComplete(after.OnComplete), "on_complete")
 	add(before.ProjectPath != after.ProjectPath, "project_path")
 	add(before.Program != after.Program, "program")
 	add(before.Enabled != after.Enabled, "enabled")
