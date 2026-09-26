@@ -1,6 +1,7 @@
 package task
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -460,4 +461,230 @@ func TestAudit_ARealRebindIsTheUsersChange(t *testing.T) {
 	require.Len(t, trail, 2, "the create, and the user's move — not a third for the derived id")
 	assert.Equal(t, ActorCLI, trail[1].Actor)
 	assert.Equal(t, []string{"project_path"}, trail[1].Fields)
+}
+
+// handEditedStore plants a v1 envelope of exactly these tasks on a scratch path
+// and pins getTasksPath at it. It is how a non-canonical row reaches the audit
+// diff in the first place: every in-process writer canonicalizes on write
+// (AddTaskChecked, apply), so on_complete="Archive" or target_session="   " can
+// only land on disk through a hand-edit or a dotfiles import of tasks.json — the
+// reachable shape the existing canonical-only fixtures never exercised. The
+// returned rewriter overwrites the same path so a test can reset the disk
+// between independent probes.
+func handEditedStore(t *testing.T, tasks []Task) (path string, rewrite func([]Task)) {
+	t.Helper()
+	dir := t.TempDir()
+	path = filepath.Join(dir, tasksFileName)
+	write := func(tasks []Task) {
+		envelope := struct {
+			SchemaVersion int    `json:"schema_version"`
+			Tasks         []Task `json:"tasks"`
+		}{SchemaVersion: TasksSchemaVersion, Tasks: tasks}
+		data, err := json.Marshal(envelope)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, data, 0644))
+	}
+	write(tasks)
+	origGetPath := getTasksPathFn
+	getTasksPathFn = func() (string, error) { return path, nil }
+	t.Cleanup(func() { getTasksPathFn = origGetPath })
+	return path, write
+}
+
+// handEditedCronTask is a minimal enabled cron task with the requested
+// on_complete and target_session, in exactly the byte shape a hand-edit would
+// plant. The two are mutually exclusive in these fixtures: a non-keep lifecycle
+// with a target session is a shape ValidateTrigger rejects, so the two
+// canonicalization paths are seeded on separate rows.
+func handEditedCronTask(id, onComplete, targetSession string) Task {
+	return Task{
+		ID:            id,
+		Name:          "x",
+		Prompt:        "orig",
+		CronExpr:      "0 9 * * *",
+		ProjectPath:   "/tmp",
+		Program:       "claude",
+		Enabled:       true,
+		CreatedAt:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		OnComplete:    onComplete,
+		TargetSession: targetSession,
+	}
+}
+
+// TestAudit_CanonicalizationIsNotAttributedToTheCaller is the headline regression
+// for the misattribution: apply canonicalizes on_complete/target_session on every
+// write, and changedFields must not fold that store normalization into the
+// caller's entry. A hand-edited "Archive" row, patched through an empty
+// TaskUpdate{} or a prompt-only patch, must NOT record on_complete as a field the
+// caller moved. The byte-change is recorded separately as ActorDaemonUpgrade,
+// mirroring the repo_id backfill — the store wrote bytes the caller never asked
+// for, and the trail says so under the store's own actor.
+func TestAudit_CanonicalizationIsNotAttributedToTheCaller(t *testing.T) {
+	_, rewrite := handEditedStore(t, []Task{handEditedCronTask("hand0001", "Archive", "")})
+
+	// Empty patch — a write the caller did not request. apply canonicalizes
+	// "Archive"→"archive" and writeTasks persists it; the audit must attribute
+	// that byte-change to the store, not to the undeclared (ActorUnknown) caller.
+	_, err := UpdateTask("hand0001", TaskUpdate{}, ProjectExpectation{})
+	require.NoError(t, err)
+
+	trail := auditOf(t, "hand0001")
+	require.Len(t, trail, 1, "the empty patch changed only a store-normalized byte")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor,
+		"the canonicalization is the store's repair, not a field the caller moved")
+	assert.Equal(t, AuditUpdated, trail[0].Action)
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	stored, err := GetTask("hand0001")
+	require.NoError(t, err)
+	assert.Equal(t, OnCompleteArchive, stored.OnComplete,
+		"the canonicalization really did land on disk — a real byte-change was recorded")
+
+	// Prompt-only patch — the CLI moved prompt, not on_complete. Reset the disk to
+	// the non-canonical "Archive" so the canonicalization fires again, then prove
+	// the CLI's entry names prompt only, and on_complete is a separate
+	// daemon-upgrade line the CLI never asked for.
+	rewrite([]Task{handEditedCronTask("hand0001", "Archive", "")})
+	np := "changed"
+	_, err = UpdateTaskChecked("hand0001", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail = auditOf(t, "hand0001")
+	require.Len(t, trail, 2,
+		"the CLI's move, and the store's canonicalization — not one entry attributing both to the CLI")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor, "the store's canonicalization is recorded first, as repo_id is")
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor, "the CLI's entry is the prompt it moved")
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields,
+		"on_complete is the store's canonicalization, not the CLI's change — an operator chasing an on_complete regression must not be sent to a CLI edit that never touched it")
+}
+
+// TestAudit_OnCompleteCanonicalizationVariants covers the normalizations
+// CanonicalOnComplete performs (lowercase, trim, and the keep-stored-as-empty
+// rule). Each is a canonical-equivalent byte-change on a hand-edited row, so
+// each must record exactly one ActorDaemonUpgrade entry and never attribute the
+// field to the caller.
+func TestAudit_OnCompleteCanonicalizationVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		raw      string
+		wantDisk string
+	}{
+		{"capitalized archive", "Archive", OnCompleteArchive},
+		{"capitalized kill", "Kill", OnCompleteKill},
+		{"padded archive", "  archive  ", OnCompleteArchive},
+		{"capitalized keep stored as empty", "Keep", ""},
+		{"whitespace keep stored as empty", "   ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handEditedStore(t, []Task{handEditedCronTask("hand01", tc.raw, "")})
+
+			_, err := UpdateTask("hand01", TaskUpdate{}, ProjectExpectation{})
+			require.NoError(t, err)
+
+			trail := auditOf(t, "hand01")
+			require.Len(t, trail, 1, "a store canonicalization and nothing else")
+			assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+			assert.Equal(t, AuditUpdated, trail[0].Action)
+			assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+
+			stored, err := GetTask("hand01")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDisk, stored.OnComplete, "the canonicalization landed on disk")
+		})
+	}
+}
+
+// TestAudit_TargetSessionCanonicalizationIsNotAttributedToTheCaller: a
+// whitespace-only target_session canonicalizes to "" (no target session) on
+// every write. A hand-edited row holding "   " must record that byte-change as
+// ActorDaemonUpgrade, not as a field the caller moved — the same rule as
+// on_complete, for the other canonicalizing field.
+func TestAudit_TargetSessionCanonicalizationIsNotAttributedToTheCaller(t *testing.T) {
+	_, rewrite := handEditedStore(t, []Task{handEditedCronTask("hand0002", "", "   ")})
+
+	_, err := UpdateTask("hand0002", TaskUpdate{}, ProjectExpectation{})
+	require.NoError(t, err)
+
+	trail := auditOf(t, "hand0002")
+	require.Len(t, trail, 1, "the empty patch changed only a store-normalized byte")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"target_session"}, trail[0].Fields)
+	stored, err := GetTask("hand0002")
+	require.NoError(t, err)
+	assert.Empty(t, stored.TargetSession, "the whitespace target was canonicalized to no target on disk")
+
+	// An unrelated patch on the same hand-edited row: the caller moved prompt, and
+	// the whitespace-target canonicalization is a separate daemon-upgrade line.
+	rewrite([]Task{handEditedCronTask("hand0002", "", "   ")})
+	np := "changed"
+	_, err = UpdateTaskChecked("hand0002", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	trail = auditOf(t, "hand0002")
+	require.Len(t, trail, 2)
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"target_session"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields,
+		"the CLI moved prompt; the target_session canonicalization is not its change")
+}
+
+// TestAudit_GenuineOnCompleteMoveIsAttributedToTheCaller guards the other half:
+// canonical-to-canonical diffing must not swallow a real policy change. A CLI
+// patch from keep to kill canonical-differs, so on_complete is in the CLI's
+// entry, and no daemon-upgrade line is written.
+func TestAudit_GenuineOnCompleteMoveIsAttributedToTheCaller(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	kill := OnCompleteKill
+	_, err := UpdateTaskChecked(id, TaskUpdate{OnComplete: &kill}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, id)
+	require.Len(t, trail, 2, "the create, and the CLI's move — no daemon-upgrade line for a real policy change")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[1].Fields,
+		"a keep→kill move is the caller's change, recorded as such")
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor,
+			"a genuine policy move is not a store normalization")
+	}
+}
+
+// TestAudit_GenuineTargetSessionMoveIsAttributedToTheCaller: a real retarget
+// (no target → "real") canonical-differs, so target_session is the caller's
+// field and no daemon-upgrade line is written.
+func TestAudit_GenuineTargetSessionMoveIsAttributedToTheCaller(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	target := "real"
+	_, err := UpdateTaskChecked(id, TaskUpdate{TargetSession: &target}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, id)
+	require.Len(t, trail, 2, "the create, and the CLI's retarget — no daemon-upgrade line")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"target_session"}, trail[1].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor)
+	}
+}
+
+// TestAudit_CanonicalRowNoOpAddsNoDaemonUpgradeEntry: on a row that is already
+// canonical, the daemon-upgrade condition (canonical-equal AND raw-differ) does
+// not fire — there is no byte-change to record. A no-op patch leaves the trail
+// at the create, with neither a caller entry nor a daemon-upgrade line.
+func TestAudit_CanonicalRowNoOpAddsNoDaemonUpgradeEntry(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	// An explicit patch to the same canonical keep the row already stores ("").
+	keep := ""
+	_, err := UpdateTaskChecked(id, TaskUpdate{OnComplete: &keep}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	// And an empty patch, which apply canonicalizes to exactly the stored bytes.
+	_, err = UpdateTaskChecked(id, TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, id)
+	require.Len(t, trail, 1, "a canonical row with no-op patches gains no entry of any kind")
+	assert.Equal(t, AuditCreated, trail[0].Action)
 }
