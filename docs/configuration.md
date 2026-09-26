@@ -296,8 +296,8 @@ header preference and follows OS appearance for System. The CLI edits the TUI
 preference; it has no persistent visual renderer and does not set the browser
 preference. Agent-owned ANSI output remains unchanged.
 
-Legacy global config migrates once on a normal config read, without a separate
-`af config migrate` command:
+Legacy global config migrates once on a normal config read — no separate
+`af config migrate` invocation is needed for this retirement:
 
 | Legacy value | Saved replacement |
 | --- | --- |
