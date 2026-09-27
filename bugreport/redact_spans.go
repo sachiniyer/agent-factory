@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/internal/redactspan"
@@ -370,6 +371,15 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 	s string,
 	bareBoundary, siblingBoundary pathBoundary,
 ) []redactionSpan {
+	if r.logOnlyPathBlanksSaturated {
+		// Fail-closed: the registered set is capped, so the per-needle scan
+		// cannot reach records registered past the cap anyway. Skip it and
+		// blank every absolute-path token in this view in a single O(text)
+		// pass, so a private path past the cap does not survive the daemon log
+		// verbatim while the scan stays bounded by the text size, not the
+		// rejected-record count.
+		return r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
+	}
 	if len(r.logOnlyPathBlanks) == 0 {
 		return spans
 	}
@@ -457,6 +467,57 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 func (r *redactor) logOnlyPathBlank(path string) bool {
 	_, ok := r.logOnlyPathBlanks[path]
 	return ok
+}
+
+// appendSaturatedLogOnlyPathBlankSpans is the fail-closed scan the log-only
+// path cap switches to once noteLogOnlyPathRedaction reaches maxLogOnlyPathBlanks.
+// The capped per-needle scan cannot reach records registered past the cap, so
+// dropping them would let a daemon-log tail line for an omitted record ship its
+// private path verbatim (the fallback JSON redaction protects a separate
+// section). This single O(text) pass blanks every absolute-path token at a
+// path-text boundary instead, so no untracked path survives the log while the
+// scan stays bounded by the text size.
+//
+// It is deliberately more aggressive than the registered pass: a registered
+// root that sits inside an untracked absolute path also blanks here, because
+// once the cap is saturated the redactor can no longer tell which absolute
+// paths are safe to keep — exactly the fail-closed trade #3588 makes across
+// sections. The degenerate case that saturates the cap (more than 4096
+// distinct spellings from a hand-edited or corrupted archive) already forgoes
+// the typed path's per-root layout, so erring toward the marker preserves the
+// privacy contract at the cost of layout only that case ever had. Non-absolute
+// values (relative branch refs, agent names, status labels) are not touched,
+// so triage outside the path bytes survives.
+func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s string) []redactionSpan {
+	i := 0
+	for i < len(s) {
+		if s[i] != '/' {
+			i++
+			continue
+		}
+		end := i
+		for end < len(s) {
+			c, size := utf8.DecodeRuneInString(s[end:])
+			if isPathTextDelimiter(c) {
+				break
+			}
+			end += size
+		}
+		// A real absolute path has at least one byte after the leading slash; a
+		// lone "/" is not a path value and is left alone. knownRootTextBoundary
+		// reuses the same start/end boundary the registered pass uses, so a
+		// relative path glued to a word byte ("abc/def") and a path mid-token are
+		// not promoted to a blank.
+		if end-i >= 2 && knownRootTextBoundary(s, i, end) {
+			spans = append(spans, redactionSpan{
+				start: i, end: end, replacement: redactedMarker, priority: spanQuotedValue,
+			})
+			i = end
+			continue
+		}
+		i++
+	}
+	return spans
 }
 
 // isWorktreeTitleSiblingNeedle reports whether path is exactly a registered

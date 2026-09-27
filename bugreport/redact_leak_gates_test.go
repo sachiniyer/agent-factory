@@ -256,3 +256,77 @@ func TestLogOnlyPathBlanksCapBoundsRegistration(t *testing.T) {
 			overflow, len(r.logOnlyPathBlanks))
 	}
 }
+
+// TestLogOnlyPathBlanksFailClosedPastCap pins the fail-closed half of the
+// log-only path cap the #4938 review asked for: once the registry cap is
+// reached, noteLogOnlyPathRedaction stops registering further spellings (so the
+// per-needle scan stays bounded), but that must not be fail-open — a daemon-log
+// tail line for an omitted record would otherwise ship its private path
+// verbatim, and the fallback JSON redaction protects a separate section. Once
+// the cap is saturated appendLogOnlyPathBlankSpans switches to a single O(text)
+// pass that blanks every absolute-path token, so an unregistered past-the-cap
+// path still does not survive scrubLog.
+func TestLogOnlyPathBlanksFailClosedPastCap(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	// A path registered past the cap is still a no-op for the registry (the
+	// bounded scan never sees it) — only the fail-closed pass covers it.
+	const overflow = "/past-the-cap-omitted/ConfidentialClient"
+	r.noteLogOnlyPathRedaction(overflow)
+	if r.logOnlyPathBlank(overflow) {
+		t.Fatalf("overflow path %q should not be registered past the cap", overflow)
+	}
+	// No AF home, no registered roots, no tasks: the overflow path is reachable
+	// only by the fail-closed pass, so blanking it isolates that this is what
+	// closed the leak.
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q worktree_path=%q`,
+		overflow, overflow+"/wt")
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scrubLog out:\n%s", got)
+	for _, secret := range []string{overflow, "ConfidentialClient", "past-the-cap-omitted"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the cap (fail-open):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestWorktreePathTitlesCapBoundsRegistration pins the perf bound the #4938
+// review asked for on the sibling worktree-title matcher: rejected records
+// sharing one repo_path but carrying thousands of distinct titles used to
+// populate an unbounded worktreePathTitles map, and each pair scanned the up
+// to 2 MiB daemon-log tail once. noteWorktreeTitle now caps the map so both
+// appendWorktreePathTitleSpans and the sibling-prefix loop iterate a fixed
+// budget rather than the rejected-record count.
+func TestWorktreePathTitlesCapBoundsRegistration(t *testing.T) {
+	r := &redactor{}
+	const repoPath = "/srv/repo"
+	for i := 0; i < maxWorktreePathTitles+100; i++ {
+		r.noteWorktreeTitle(repoPath, fmt.Sprintf("title-%d", i))
+	}
+	// The map is bounded: a single repo_path admits at most a couple of
+	// spellings, so crossing the cap can overshoot by one call's worth, but no
+	// further.
+	if len(r.worktreePathTitles) > maxWorktreePathTitles+2 {
+		t.Fatalf("worktreePathTitles grew to %d, want <= %d+2 (cap + one path's spellings)",
+			len(r.worktreePathTitles), maxWorktreePathTitles)
+	}
+	// A title pair registered once the cap is reached is a no-op: it is not a
+	// scan needle, which is what holds the per-call scan to the fixed budget.
+	before := len(r.worktreePathTitles)
+	r.noteWorktreeTitle(repoPath, "overflow-title-noop")
+	if len(r.worktreePathTitles) != before {
+		t.Fatalf("overflow title pair got registered past the cap (map size %d -> %d)",
+			before, len(r.worktreePathTitles))
+	}
+}

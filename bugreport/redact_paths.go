@@ -82,6 +82,15 @@ func (r *redactor) noteAFHome(path string) {
 }
 
 func (r *redactor) noteWorktreeTitle(repoPath, title string) {
+	if len(r.worktreePathTitles) >= maxWorktreePathTitles {
+		// Cap reached: further title pairs are a no-op so the per-pair
+		// daemon-log-tail scan stays bounded. The sibling-shape redaction past
+		// the cap degrades to the bare path blank (a registered repo_path still
+		// blanks verbatim) rather than the per-title segment, and the redacted
+		// instances.json still drops every title field wholesale, so the cap
+		// narrows only the log-tail segment scan (#4938 review).
+		return
+	}
 	for _, spelling := range absolutePathSpellings(repoPath) {
 		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
 		if segment == "" {
@@ -132,6 +141,17 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 // instance set with large margin and bounds the pathological CPU.
 const maxLogOnlyPathBlanks = 4096
 
+// maxWorktreePathTitles caps the distinct (repo_path, title-segment) pairs
+// noteWorktreeTitle registers for the sibling worktree-path title redaction.
+// appendWorktreePathTitleSpans and the sibling-prefix loop in
+// appendLogOnlyPathBlankSpans each scan the (up to 2 MiB) daemon-log tail once
+// per registered pair, so a single repo_path with thousands of distinct
+// rejected titles made those scans unbounded even with the path-blank cap in
+// place. The map dedupes, so this is a bound on distinct pairs rather than on
+// records; realistic single-repo instance sets stay far below it (#4938
+// review).
+const maxWorktreePathTitles = 4096
+
 // noteLogOnlyPathRedaction registers an absolute repo path gathered from the
 // generic fallback (noteUnknownJSONRecord) for log-scope blanking only. The
 // typed path registers the same value as a named root via noteRepoRoot so it
@@ -146,12 +166,25 @@ const maxLogOnlyPathBlanks = 4096
 //
 // Registration is capped at maxLogOnlyPathBlanks distinct spellings; once the
 // cap is reached further paths are a no-op, bounding the log-tail scan to a
-// fixed budget instead of to the rejected-record count.
+// fixed budget instead of to the rejected-record count. The cap is fail-closed
+// rather than fail-open: once it is saturated, appendLogOnlyPathBlankSpans
+// switches from the per-needle scan to a single-pass blank of every absolute
+// path, so a record registered past the cap does not survive the daemon log
+// verbatim either.
 func (r *redactor) noteLogOnlyPathRedaction(path string) {
 	if r.logOnlyPathBlanks == nil {
 		r.logOnlyPathBlanks = make(map[string]struct{})
 	}
 	if len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {
+		// Cap reached: stop registering further distinct spellings so
+		// appendLogOnlyPathBlankSpans scans a fixed budget rather than one
+		// needle per rejected record. Dropping them silently would be
+		// fail-open — a daemon-log tail line for an omitted record would ship
+		// its private path verbatim, and the fallback JSON redaction protects
+		// a separate section — so record saturation; the scan then switches to
+		// a single-pass fail-closed blank of every absolute path (#4938
+		// review).
+		r.logOnlyPathBlanksSaturated = true
 		return
 	}
 	for _, spelling := range absolutePathSpellings(path) {

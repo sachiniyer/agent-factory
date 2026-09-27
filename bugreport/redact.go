@@ -110,6 +110,14 @@ type redactor struct {
 	// so the untyped value gets no structural role anywhere in the bundle while
 	// the log section still does not ship the private directory name verbatim.
 	logOnlyPathBlanks map[string]struct{}
+	// logOnlyPathBlanksSaturated records that noteLogOnlyPathRedaction reached
+	// maxLogOnlyPathBlanks and is now a no-op for further call. Dropping
+	// registration past the cap would be fail-open — a daemon-log tail line for
+	// an omitted record would ship its private path verbatim, and the
+	// fallback JSON redaction protects a separate section — so the scan
+	// switches to a single-pass, fail-closed blank of every absolute path
+	// (appendSaturatedLogOnlyPathBlankSpans) once this is set (#4938 review).
+	logOnlyPathBlanksSaturated bool
 	// engine is this run's share of the shared normalization stage
 	// (internal/redactx): the transform registry plus this redactor's match
 	// policy. Built lazily because tests construct redactor literals directly.
