@@ -570,30 +570,51 @@ func (r *redactor) collapsePathField(path string) string {
 }
 
 // scrubCollapsedWorktreeSubdirectoryTitles removes the title-derived leaf below
-// "[af-home]/worktrees" from a root-tokenized value. It mirrors
-// appendWorktreeSubdirectoryTitleSpans but keys its needle on the [af-home] token
-// instead of the literal <afHome> spelling, because collapsePathField has
-// already replaced the latter with the former. The boundary, segment set, and
-// span shape are identical to the text-pass matcher, so the two close the same
-// leak class for the same shape — only the parent prefix they anchor on differs.
+// "<afHome>/worktrees" from a root-tokenized value. It mirrors
+// appendWorktreeSubdirectoryTitleSpans but keys its needle on the collapsed form
+// of "<afHome>/worktrees" rather than the literal <afHome> spelling, because
+// collapsePathField has already replaced the latter with a token. The boundary,
+// segment set, and span shape are identical to the text-pass matcher, so the two
+// close the same leak class for the same shape — only the parent prefix they
+// anchor on differs.
 //
 // collapsePathField calls this BEFORE its bare-title rewrite, on the root-tokenized
 // value with its title-derived leaf still intact, so a bare title that overlaps
 // the leaf cannot pre-rewrite the leaf out from under this scrub's needle.
 //
-// Scrubbing only the [af-home]/worktrees parent (and not, say, [repo:N]/worktrees
-// or [worktree:N]/worktrees) matches the text-pass scope: the sanitized leaf
-// segments are placed only below <afHome>/worktrees by resolveWorktreePlacement,
-// so a depth-1 collision under any other root is coincidental and must be left
-// for triage. A path that already collapsed to a registered worktree token
-// ("[worktree:1]") does not contain the needle's parent prefix, so this is a
-// no-op there — the worktree-root collapse owns that shape unchanged.
+// The <afHome>/worktrees directory can collapse under either of two tokens, and
+// the scrub anchors on both. When no session registered it as a root, a path
+// below it collapses to "[af-home]/worktrees". When another session registered
+// <afHome>/worktrees itself as a repository root, longest-root-first collapsing
+// replaces the whole parent with that root's token (e.g. "[repo:N]") before this
+// scrub runs; anchoring only on "[af-home]/worktrees" would then miss the leaf and
+// ship the sanitized title segment. The scrub therefore also anchors on the token
+// of every registered root whose path is "<afHomeSpelling>/worktrees" — the SAME
+// directory appearing under a registered-root token, not a coincidental
+// "/worktrees" below some unrelated [repo:N]. The segment set still owns which
+// leaves to redact; this only widens which prefix carries them.
+//
+// A path that already collapsed to a registered worktree token ("[worktree:1]")
+// does not contain any of the needles' parent prefixes, so this is a no-op there —
+// the worktree-root collapse owns that shape unchanged.
 func (r *redactor) scrubCollapsedWorktreeSubdirectoryTitles(collapsed string) string {
 	if r.afHome == "" || len(r.worktreeSubdirectoryTitles) == 0 {
 		return collapsed
 	}
-	parent := filepath.Join(afHomeToken, "worktrees")
-	spans := appendWorktreeSubdirectoryTitleSpansBelow(nil, collapsed, parent, r.worktreeSubdirectoryTitles, derivedWorktreePathBoundary)
+	parents := []string{filepath.Join(afHomeToken, "worktrees")}
+	seen := map[string]struct{}{parents[0]: {}}
+	for _, afHome := range r.afHomeSpellings {
+		if token, ok := r.rootTokens[normalizeRoot(filepath.Join(afHome, "worktrees"))]; ok {
+			if _, dup := seen[token]; !dup {
+				seen[token] = struct{}{}
+				parents = append(parents, token)
+			}
+		}
+	}
+	var spans []redactionSpan
+	for _, parent := range parents {
+		spans = appendWorktreeSubdirectoryTitleSpansBelow(spans, collapsed, parent, r.worktreeSubdirectoryTitles, derivedWorktreePathBoundary)
+	}
 	return applyRedactionSpans(collapsed, spans)
 }
 

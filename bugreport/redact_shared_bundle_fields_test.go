@@ -710,3 +710,65 @@ func TestCollapsePathFieldScrubSubdirectoryLeafBeforeBareTitleRewrite(t *testing
 		t.Errorf("the title-derived segment reached the bundle verbatim: %q", got)
 	}
 }
+
+// TestCollapsePathFieldRedactsWorktreeSubdirectoryTitleUnderNestedRoot closes
+// the nested-root gap. When another session registers <afHome>/worktrees itself
+// as a repository root (an in-place repo at that location), longest-root-first
+// collapsing rewrites the whole parent to that root's token (e.g. "[repo:1]")
+// before the depth-1 leaf scrub runs. <afHome>/worktrees is still the directory
+// the sanitized title segments live below — only its token changed — so the
+// scrub must anchor on that root token too, or the leaf ships verbatim as
+// "[repo:1]/<segment>".
+func TestCollapsePathFieldRedactsWorktreeSubdirectoryTitleUnderNestedRoot(t *testing.T) {
+	const (
+		afHome       = "/srv/ConfidentialClient/af"
+		title        = "fix bug (urgent)"
+		segment      = "fix-bug-urgent" // == sessiongit.DerivedWorktreeSubdirectoryTitleSegment(title)
+		depth1       = afHome + "/worktrees/" + segment
+		depth1Suffix = depth1 + "-2"
+		depth2       = depth1 + "/subdir/file"
+	)
+	if got, want := sessiongit.DerivedWorktreeSubdirectoryTitleSegment(title), segment; got != want {
+		t.Fatalf("title derivation mismatch: got %q want %q (test fixture must match the registered segment)", got, want)
+	}
+
+	r := &redactor{}
+	r.noteAFHome(afHome)
+	// Another session registers <afHome>/worktrees itself as a repo root, so a
+	// path below it collapses to [repo:1]/... rather than [af-home]/worktrees/...
+	// — the exact shape a [af-home]/worktrees-only scrub would miss.
+	r.noteRepoRoot(afHome + "/worktrees")
+	r.noteWorktreeSubdirectoryTitle(title)
+
+	if got, want := r.collapsePathField(depth1), "[repo:1]/"+redactedMarker; got != want {
+		t.Errorf("collapsePathField(nested-root depth-1 leaf) = %q, want %q (the [repo:1] token replaced <afHome>/worktrees; the leaf must still redact under it)", got, want)
+	}
+	// firstFreeWorktreePath's "-N" collision suffix is AF-authored and survives,
+	// matching the text-pass scrubber and the non-nested [af-home]/worktrees case.
+	if got, want := r.collapsePathField(depth1Suffix), "[repo:1]/"+redactedMarker+"-2"; got != want {
+		t.Errorf("collapsePathField(nested-root depth-1 leaf with collision suffix) = %q, want %q (collision suffix must survive)", got, want)
+	}
+	// A deeper path preserves the subdirectory layout; only the title-derived
+	// depth-1 component is redacted.
+	if got, want := r.collapsePathField(depth2), "[repo:1]/"+redactedMarker+"/subdir/file"; got != want {
+		t.Errorf("collapsePathField(nested-root deeper subdirectory) = %q, want %q (only the title-derived segment should be redacted)", got, want)
+	}
+	if got := r.collapsePathField(depth1); strings.Contains(got, segment) {
+		t.Errorf("the title-derived segment reached the bundle verbatim: %q", got)
+	}
+
+	// Scrubbing the nested-root parent must not redact a "/worktrees" leaf that
+	// belongs to an UNRELATED root: [repo:2]/worktrees/<segment> would be a
+	// different directory and the sanitized segments are never placed there, so
+	// the leaf stays for triage. (other-repo is registered first, so it is
+	// [repo:1]; <afHome>/worktrees is [repo:2].)
+	const unrelatedRepo = "/srv/ConfidentialClient/other-repo"
+	unrelated := &redactor{}
+	unrelated.noteRepoRoot(unrelatedRepo)
+	unrelated.noteAFHome(afHome)
+	unrelated.noteRepoRoot(afHome + "/worktrees")
+	unrelated.noteWorktreeSubdirectoryTitle(title)
+	if got, want := unrelated.collapsePathField(unrelatedRepo+"/worktrees/"+segment), "[repo:1]/worktrees/"+segment; got != want {
+		t.Errorf("collapsePathField(unrelated repo /worktrees leaf) = %q, want %q (a /worktrees leaf below a different root is not the <afHome>/worktrees directory and must not be redacted)", got, want)
+	}
+}
