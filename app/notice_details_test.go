@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/stretchr/testify/assert"
@@ -144,4 +145,28 @@ func TestNoticeDetailsHintOnlyWhereDispatchOpensTheDetails(t *testing.T) {
 			assert.True(t, hide, "state %d (naming form open: %v) must advertise no details key", s, naming)
 		}
 	}
+}
+
+// TestNoticeDetailsHintNeverAdvertisesTheHardExit: ctrl+c quits before any
+// binding is consulted, so an error_details rebind that includes it must
+// advertise only the keys that open the details, and one made of nothing else
+// advertises none (Codex on #4941).
+func TestNoticeDetailsHintNeverAdvertisesTheHardExit(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"error_details": {"ctrl+c", "X"}}))
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	raiseClippedNotice(t, h)
+	bar := renderedBar(h)
+	assert.Contains(t, bar, "X details", "the key that opens the details is advertised")
+	assert.NotContains(t, bar, "ctrl+c", "ctrl+c quits, so the bar must not offer it")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("X")})
+	assert.True(t, detailsOpen(h), "the advertised key opens the details")
+
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"error_details": {"ctrl+c"}}))
+	h = newTestHome(t)
+	resizeHome(h, 80, 24)
+	raiseClippedNotice(t, h)
+	assert.NotContains(t, renderedBar(h), "details", "no key but the hard exit, so no hint")
 }
