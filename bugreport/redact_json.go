@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -44,12 +45,16 @@ func (r *redactor) noteUnknownJSON(v any) {
 // (#4115), so the same values are blanked in the daemon log tail instead.
 //
 // repo_path is gathered separately (it additionally bounds the worktree-title
-// needle prefix via noteWorktreeTitle) and alternate_path is intentionally
-// absent: the worktree-title machinery already redacts the title segment of
-// its "<repo_path>-<title>" shape and the log-only prefix blank covers the
-// repo prefix, so registering the whole alternate_path would blank across the
-// preserved "-<title>" layout the typed path keeps as "[token]-[redacted]".
-var logOnlyPathBlankJSONKeys = map[string]bool{"worktree_path": true, "path": true}
+// needle prefix via noteWorktreeTitle). alternate_path is included so a
+// rejected record whose alternate is NOT the typed "<repo_path>-<title>"
+// sibling shape — or a malformed record that carries no usable title — still
+// has the verbatim value blanked from the daemon log: worktreeRecoveryLocation
+// interpolates the alternate into recover_error verbatim, and only the sibling
+// shape is reached by the worktree-title needle. When alternate_path IS the
+// registered sibling shape the bare blank in appendLogOnlyPathBlankSpans defers
+// to that pass, preserving the typed path's "[token]-[redacted]" / fallback
+// "[redacted]-[redacted]" layout instead of folding it to one marker.
+var logOnlyPathBlankJSONKeys = map[string]bool{"worktree_path": true, "path": true, "alternate_path": true}
 
 func (r *redactor) noteUnknownJSONRecord(v any) {
 	titles := make(map[string]struct{})
@@ -73,6 +78,19 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 				case key == "repo_path":
 					repoPaths[s] = struct{}{}
 					pathBlanks[s] = struct{}{}
+				case key == "worktree_path":
+					pathBlanks[s] = struct{}{}
+					// The missing-worktree emitter also logs parent_path as
+					// filepath.Dir of the worktree path (DiagnoseMissingWorktree),
+					// so the same daemon-log record carries the private directory
+					// one level up verbatim. Register that parent spelling for
+					// log-scope blanking too. "/" (or a one-level path whose Dir is
+					// itself) would blank a separator or rewrite the whole value, so
+					// skip the trivial parent; the full worktree_path is already
+					// registered above for the complete-value case.
+					if parent := filepath.Dir(s); parent != "/" && parent != s {
+						pathBlanks[parent] = struct{}{}
+					}
 				case logOnlyPathBlankJSONKeys[key]:
 					pathBlanks[s] = struct{}{}
 				}

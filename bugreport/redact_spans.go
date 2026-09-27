@@ -373,9 +373,19 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 	// Bare path: blank wherever it appears as a complete path value at a text
 	// boundary. A registered root is not required; the value is blanked, not
 	// collapsed, so no token grant is made. Skip any path a registered root
-	// already covers so the root's token-and-remainder form survives.
+	// already covers so the root's token-and-remainder form survives. Also skip
+	// a path that is exactly a registered worktree-title sibling needle
+	// (repo_path + "-" + title segment): the worktree-title pass redacts the
+	// segment and the root span or the sibling-prefix blank redacts the repo
+	// prefix, together preserving the typed path's layout. This only defers the
+	// proven-sibling shape; a malformed or non-sibling alternate_path is not a
+	// needle, so it is still blanked here — which is the case the worktree-title
+	// machinery cannot reach.
 	for path := range r.logOnlyPathBlanks {
 		if r.pathUnderRegisteredRoot(path) {
+			continue
+		}
+		if r.isWorktreeTitleSiblingNeedle(path) {
 			continue
 		}
 		scan := 0
@@ -436,6 +446,23 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 func (r *redactor) logOnlyPathBlank(path string) bool {
 	_, ok := r.logOnlyPathBlanks[path]
 	return ok
+}
+
+// isWorktreeTitleSiblingNeedle reports whether path is exactly a registered
+// worktree-title sibling needle — repo_path + "-" + the title segment
+// noteWorktreeTitle stored. Such a path is redacted in pieces by the
+// worktree-title pass (the segment) and the sibling-prefix blank or a
+// registered root span (the repo_path prefix), which preserves the typed
+// path's "[token]-[redacted]" layout (or "[redacted]-[redacted]" when no root is
+// registered). A non-sibling or malformed-record alternate_path is not a
+// needle, so it falls through to the bare blank instead of being deferred here.
+func (r *redactor) isWorktreeTitleSiblingNeedle(path string) bool {
+	for title := range r.worktreePathTitles {
+		if title.repoPath+"-"+title.segment == path {
+			return true
+		}
+	}
+	return false
 }
 
 // pathUnderRegisteredRoot reports whether a registered root (the AF home, a
