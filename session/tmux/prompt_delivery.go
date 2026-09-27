@@ -116,12 +116,17 @@ func (p deliveryProbe) newestRender(normalized string) (witnessed, whole bool) {
 // newest.
 //
 // It can only turn an observation into "landed", which never retries, so it
-// cannot add a paste. Its risk is the opposite one, a strand called landed and
-// its #3293 redelivery lost, and every step errs against that: renderRegion keeps
+// cannot add a paste. Its risk is the opposite one, a paste that never rendered
+// called landed: Enter then goes early, a strand loses its #3293 redelivery, and
+// the caller hears delivered. Every step errs against that. renderRegion keeps
 // chrome the prompt ends with from completing a truncated render (#4885 review),
-// and scrolledOff drops baseline copies only when it can prove they left.
+// and scrolledOff drops baseline copies only when it can prove they left. And
+// only a payload distinctive enough to carry a render witness counts: a short or
+// common one ("ok") can appear in any row that happens to read the same, so a
+// copy of it proves nothing about the paste (#4943 review). Those payloads have
+// no witness for chrome to steal either, so they never needed this rule.
 func (p deliveryProbe) freshWholeRender(normalized string) bool {
-	if !p.baselineCaptured || p.payload == "" {
+	if !p.baselineCaptured || p.renderWitness == "" {
 		return false
 	}
 	now := strings.Count(p.renderRegion(normalized), p.payload)

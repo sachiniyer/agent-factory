@@ -132,3 +132,43 @@ func TestFreshWholeRenderCountsOnlyProvenScrollOff(t *testing.T) {
 	strand := normalizeDelivery(payload[10:] + reply + payload[:30] + footer)
 	require.False(t, probe.freshWholeRender(strand))
 }
+
+// TestShortPayloadInUnrelatedRowIsNotAFreshRender is the Codex review
+// fail-first on #4943. The payload is short and common ("ok"), an older copy of
+// it sits on the top row, and the paste renders only a collapsed placeholder:
+// the composer's growth scrolls the old copy off while a status row that
+// changed at paste time happens to read "ok". Nothing in the pane rendered the
+// paste, so the observation must not read as landed. A fresh whole copy is
+// render evidence only for a payload distinctive enough to carry a render
+// witness; short text anywhere on screen proves nothing.
+func TestShortPayloadInUnrelatedRowIsNotAFreshRender(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	const prompt = "ok"
+	pane := &slidingClaudePane{
+		height:           8,
+		transcript:       []string{"ok", "● the previous turn finished", "  with nothing further to add"},
+		footer:           "  state: idle",
+		footerAfterPaste: "  ok",
+	}
+	pane.onPaste = func(int, string) []string {
+		return []string{"❯ [Pasted text #1 +0 lines]", "  "}
+	}
+	pane.onEnter = func(*slidingClaudePane, int) {}
+	baseline := normalizeDelivery(pane.frame())
+	require.Equal(t, 1, strings.Count(baseline, prompt), "fixture: one old copy, on the top row")
+	pane.composer = pane.onPaste(0, prompt)
+	pane.footer = pane.footerAfterPaste
+	require.Equal(t, 1, strings.Count(normalizeDelivery(pane.frame()), prompt),
+		"fixture: the old copy scrolls off as the status row draws one, so the count is flat")
+	pane.composer, pane.footer = nil, "  state: idle"
+
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+
+	pastes, _ := pane.counts()
+	require.Equal(t, 1, pastes)
+	require.NotEqual(t, PromptDelivered, status,
+		"a status row that happens to read the short payload is not a render of the paste")
+}
