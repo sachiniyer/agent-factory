@@ -81,6 +81,10 @@ func TestConfigScopeSubmitReadsTheProject(t *testing.T) {
 	h := newTestHome(t)
 
 	repo := initTestGitRepo(t)
+	// Register it so the picker offers the row; an unregistered repo is only
+	// reachable when a session's worktree names it.
+	_, err := config.RegisterProject(repo)
+	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".agent-factory"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(repo, ".agent-factory", config.TomlConfigFileName),
@@ -108,6 +112,11 @@ func TestConfigScopeSubmitReadsTheProject(t *testing.T) {
 
 	require.Equal(t, stateConfigEditor, hm.state, "submit returns to the editor")
 	assert.Equal(t, repo, hm.configPane.ScopeRoot())
+	// The pane shows the in-repo override, not the global file — a scoped read
+	// that silently answered global would render "claude" here.
+	hm.configPane.SetSize(160, 60)
+	assert.Contains(t, hm.configPane.String(), "codex")
+	assert.Contains(t, hm.configPane.String(), "read-only")
 }
 
 // TestConfigScopeCancelLeavesTheEditor: Esc closes only the picker — the pane
