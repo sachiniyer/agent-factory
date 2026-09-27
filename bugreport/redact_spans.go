@@ -520,16 +520,22 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 // accepted for closing the parent_path leak (#4938 review).
 //
 // quoteStructural is the saturated scan's '"' handling threaded from
-// produceSpans: only a decoded single %q scalar (ProvLogValue) carries a '"' as
-// filename content. When logOnlyPathBareNames saturates the per-needle pass
-// can no longer reach a dropped name and the slash-bearing saturated scan
-// cannot reach it either (no '/'), so fail-closed-blank the whole decoded
-// scalar when it carries no '/' (the shape of a past-the-cap bare name) on
-// that view only. A scalar carrying a '/' is a real path and stays under the
-// slash-bearing scan; a whole-record or URI view keeps its quote structural,
-// so unrelated prose is not blanked. The over-blank — a non-path scalar such
-// as a branch name or classification blanking whole in the degenerate archive
-// that saturates the bare-name set (more than maxLogOnlyPathBlanks distinct
+// produceSpans. When logOnlyPathBareNames saturates the per-needle pass can no
+// longer reach a dropped name, and the slash-bearing saturated scan cannot
+// reach it either (no '/'), so fail-closed-blank the whole view when it
+// carries no '/' (the shape of a past-the-cap bare name). On the decoded
+// ProvLogValue view (!quoteStructural) that is a decoded %q scalar such as
+// repo_path="ConfidentialClient4097"; on a whole daemon-log record (and the
+// other quoteStructural views) it is a record that carries no '/' at all — a
+// bare path logged UNQUOTED via %s (e.g. backend_local_respawn.go's "at %s")
+// is the only path-shaped content such a record can hold, and the unquoted
+// shape was the leak the decoded-scalar-only blank left open, so the blank
+// fires there too. A scalar or record carrying a '/' is left for the
+// slash-bearing scan and the per-needle pass: a '/'-bearing scalar is a real
+// path and a '/'-bearing record keeps its prose. The over-blank — a non-path
+// scalar such as a branch name or classification blanking whole, and a
+// no-'/' daemon-log record blanking whole, in the degenerate archive that
+// saturates the bare-name set (more than maxLogOnlyPathBlanks distinct
 // single-segment relative spellings) — is the privacy side of the same
 // fail-closed trade the slash-bearing saturated scan already makes for every
 // '/'-bearing token (#4938 review).
@@ -539,15 +545,22 @@ func (r *redactor) appendBareNameLogOnlyPathBlankSpans(
 	bareBoundary pathBoundary,
 	quoteStructural bool,
 ) []redactionSpan {
-	if r.logOnlyPathBareNamesSaturated && !quoteStructural && s != "" && !strings.ContainsRune(s, filepath.Separator) {
+	if r.logOnlyPathBareNamesSaturated && s != "" && !strings.ContainsRune(s, filepath.Separator) {
 		// Fail-closed for the bare-name cap: the per-needle scan below and
 		// the slash-bearing saturated scan both cannot reach a past-the-cap
 		// bare name (no '/'), so a daemon-tail record such as
-		// repo_path="ConfidentialClient4097" would ship the private name
-		// verbatim. Blank the whole decoded %q scalar — it carries no '/',
-		// which is the shape of a dropped bare name — on the decoded
-		// ProvLogValue view only. Return: the whole-value blank subsumes any
-		// registered bare name this scalar may also contain.
+		// repo_path="ConfidentialClient4097" — or a bare path logged unquoted
+		// via %s in the whole record (e.g. "at ConfidentialClient4097") — would
+		// ship the private name verbatim. Blank the whole view when it carries
+		// no '/': on the decoded ProvLogValue view that is the bare %q scalar,
+		// and on a whole daemon-log record (or any other quoteStructural view)
+		// that is the whole no-'/' record. A '/'-bearing view is left for the
+		// slash-bearing scan and the per-needle pass. Return: the whole-value
+		// blank subsumes any registered bare name this scalar or record may
+		// also contain. quoteStructural no longer gates this blank — the
+		// quoted and unquoted shapes are both fail-closed — but stays a
+		// parameter so the saturated-scan sibling below keeps threading '"'
+		// handling from produceSpans (#4938 review).
 		return append(spans, redactionSpan{
 			start: 0, end: len(s), replacement: redactedMarker, priority: spanQuotedValue,
 		})

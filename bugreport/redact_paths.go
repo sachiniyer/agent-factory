@@ -417,10 +417,12 @@ func originalAbsolutePathSpelling(path string) string {
 // worktree_path="ConfidentialClient/wt", or a single-segment repo_path of the
 // same shape) is no more "prose" than the path itself, so blanking the bare
 // directory name is the same privacy contract the typed and slash-bearing
-// fallback already make. Trivially-empty spellings (".", "..") are skipped:
-// they name no private directory and the bare-blank boundary check would
-// sweep the lone-dot path separators out of the log rather than redacting a
-// private value.
+// fallback already make. Trivially-empty cleaned spellings (".", "..") are
+// skipped — they name no private directory — but the RAW spelling that
+// filepath.Clean collapses to one (e.g. "ConfidentialClient/..") is kept,
+// because the daemon log emits that raw value via %q and the cleaned alias
+// names nothing private while the raw spelling still names a directory the
+// fallback JSON redacts in a separate section (#4938 review).
 //
 // The bare-blank boundary check matches any word-boundary occurrence, so a
 // single-bare-word directory name also blanks the same word appearing in
@@ -432,8 +434,28 @@ func originalAbsolutePathSpelling(path string) string {
 // fail-closed over-blank of absolute paths past the slash-bearing cap.
 func relativePathSpellings(path string) []string {
 	cleaned := filepath.Clean(path)
-	if cleaned == "" || cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) {
+	if cleaned == "" || filepath.IsAbs(cleaned) {
 		return nil
+	}
+	if cleaned == "." || cleaned == ".." {
+		// The cleaned form names nothing private, but the RAW spelling can:
+		// a rejected record may carry a relative path such as
+		// "ConfidentialClient/.." (or "ConfidentialClient/./..",
+		// "a/b/../..") that filepath.Clean collapses to "." or "..", and
+		// logVanishedWorktreeOnce emits that raw value via %q, so a
+		// daemon-tail line such as repo_path="ConfidentialClient/.." ships
+		// the private directory name verbatim even though the cleaned alias
+		// is the harmless lone dot. Keep the raw spelling — it carries a
+		// separator, so it routes to the slash-bearing log-only blank — so
+		// the verbatim value does not survive the daemon log; skip the
+		// cleaned alias, which names no private directory. A raw spelling
+		// that already equals the cleaned trivial form (path is literally
+		// "." or "..", or any no-separator spelling that Clean did not
+		// rewrite) names nothing private and stays dropped (#4938 review).
+		if path == cleaned || !strings.ContainsRune(path, filepath.Separator) {
+			return nil
+		}
+		return []string{path}
 	}
 	spellings := []string{cleaned}
 	if path != cleaned {

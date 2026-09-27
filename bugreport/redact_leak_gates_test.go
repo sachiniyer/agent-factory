@@ -1144,3 +1144,78 @@ func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// TestLogOnlyPathBareNamesSaturatedFailsClosedUnquotedRecord pins the #4938
+// review fix on the bare-name cap's overflow for a bare path that the daemon
+// log emits UNQUOTED. The earlier fail-closed blanked only a decoded %q scalar
+// (ProvLogValue), so a past-the-cap bare name logged via %s —
+// session/backend_local_respawn.go:129 and :132 log workDir with %s, so a tail
+// line such as "recover: rebuilt missing worktree for session %q at %s from
+// branch main" carries the bare name verbatim in the whole daemon-log record
+// (quoteStructural), where the per-needle pass has no entry for the dropped
+// name and the slash-bearing saturated scan cannot anchor on a '/' the bare
+// name does not have. The fail-closed now blanks the whole view when it
+// carries no '/' — the shape of a bare-name-only record — so the unquoted bare
+// name does not survive the daemon log either, while a '/'-bearing record is
+// still left to the slash-bearing scan and the per-needle pass (#4938 review).
+func TestLogOnlyPathBareNamesSaturatedFailsClosedUnquotedRecord(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("bare-name-%d", i))
+	}
+	if r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated set before the cap was reached (cap %d)", maxLogOnlyPathBlanks)
+	}
+	const secret = "ConfidentialClient4097"
+	r.noteLogOnlyPathRedaction(secret)
+	if !r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated not set after a new bare name past the cap (cap %d)", maxLogOnlyPathBlanks)
+	}
+	if _, ok := r.logOnlyPathBareNames[secret]; ok {
+		t.Fatalf("past-the-cap bare name %q was registered into the capped set (set size %d)",
+			secret, len(r.logOnlyPathBareNames))
+	}
+	// The bare name is logged via %s (NOT %q), so it stays in the whole
+	// daemon-log record rather than entering as a decoded %q scalar, and the
+	// record carries no '/' at all — the shape a bare-name-only record has.
+	logLine := fmt.Sprintf(`recover: rebuilt missing worktree for session %q at %s from branch main`,
+		"fix-bug-urgent", secret)
+	got := r.scrubLog(logLine)
+	t.Logf("unquoted bare-name-saturated scrubLog out:\n%s", got)
+	if strings.Contains(got, secret) {
+		t.Errorf("scrubLog leaked past-the-cap unquoted bare name %q on the whole-record view:\n%s", secret, got)
+	}
+}
+
+// TestLogOnlyPathBlankRelativeRawSpellingCleansToDot pins the #4938 review fix
+// on a relative path whose filepath.Clean collapses to "." or "..".
+// relativePathSpellings used to return nil for such a path, discarding the
+// raw spelling along with the cleaned trivial alias, so a rejected record
+// carrying repo_path="ConfidentialClient/.." registered nothing: the cleaned
+// "." names nothing private, but logVanishedWorktreeOnce emits the raw value
+// via %q, so a daemon-tail line repo_path="ConfidentialClient/.." shipped the
+// private directory name verbatim even though the fallback JSON redacts that
+// field wholesale. relativePathSpellings now keeps the raw spelling (it
+// carries a separator, so it routes to the slash-bearing log-only blank) and
+// skips only the cleaned trivial alias, so the verbatim raw value does not
+// survive the daemon log (#4938 review).
+func TestLogOnlyPathBlankRelativeRawSpellingCleansToDot(t *testing.T) {
+	r := &redactor{}
+	const repoPath = "ConfidentialClient/.."
+	r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(
+		`[{"status":"legacy","repo_path":%q}]`,
+		repoPath)))
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q`, repoPath)
+	got := r.scrubLog(logLine)
+	t.Logf("clean-to-dot raw relative scrubLog out:\n%s", got)
+	for _, secret := range []string{repoPath, "ConfidentialClient"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked clean-to-dot raw relative spelling %q:\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scrubLog removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}
