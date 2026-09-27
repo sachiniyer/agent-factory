@@ -107,8 +107,21 @@ func TestCloseAndWaitForPaneExit_TearsDownAHeldDeadPane(t *testing.T) {
 // panes on one server make the lost SIGCHLD all but certain to occur, and every
 // probe must still recover its status. On a tmux that loses nothing (3.6+, or a
 // build without utempter) this passes trivially.
+//
+// An anchor session holds the server for the whole loop. Without it, killing
+// each pane's session left the server with none, so it exited (exit-empty) and
+// every pane got a fresh server; the next new-session could also reach a server
+// already on its way out and fail with "server exited unexpectedly" (#4217).
 func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
 	testguard.IsolateTmux(t)
+	const anchor = "af_test_held_exit_anchor"
+	require.NoError(t, exec.Command("tmux", "new-session", "-d", "-s", anchor, "sleep 3600").Run())
+	serverPID := func() string {
+		out, err := exec.Command("tmux", "display-message", "-p", "-t", exactTarget(anchor), "#{pid}").Output()
+		require.NoError(t, err)
+		return strings.TrimSpace(string(out))
+	}
+	server := serverPID()
 	const panes = 60
 	for i := range panes {
 		name := fmt.Sprintf("af_test_held_exit_%d_%d", time.Now().UnixNano(), i)
@@ -117,6 +130,7 @@ func TestProbePaneExitRecoversTheStatusOfEveryHeldExit(t *testing.T) {
 		require.Equal(t, 7, status, "pane %d", i)
 		require.NoError(t, exec.Command("tmux", "kill-session", "-t", exactTarget(name)).Run())
 	}
+	require.Equal(t, server, serverPID(), "every pane must be probed on the same tmux server")
 }
 
 // The root exited, but a child it backgrounded is still running: it left the
