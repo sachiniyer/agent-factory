@@ -74,7 +74,7 @@ func TestUpdatedAtUnchangedWritesAndCaches(t *testing.T) {
 			require.False(t, i.RecordPromptAttempt(PromptDelivered, at))
 		},
 		"duplicate pane churn": func(i *Instance) { i.lastPaneChurnAt = at; require.False(t, i.RecordPaneChurnAtEpoch(at, 0)) },
-		"rename unchanged":     func(i *Instance) { _, err := i.RenameTab(1, "web"); require.NoError(t, err) },
+		"rename unchanged":     func(i *Instance) { _, err := i.RenameTabByID("web", "web"); require.NoError(t, err) },
 		"reorder unchanged":    func(i *Instance) { require.NoError(t, i.ReorderTab(1, 1)) },
 		"rejected title":       func(i *Instance) { i.started = true; require.Error(t, i.SetTitle("different")) },
 		"empty evidence":       func(i *Instance) { i.ClearIdleEvidence() },
