@@ -118,7 +118,7 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 	for title := range titles {
 		r.noteWorktreeSubdirectoryTitle(title)
 		for repoPath := range repoPaths {
-			r.noteWorktreeTitle(repoPath, title)
+			r.noteFallbackWorktreeTitle(repoPath, title)
 		}
 	}
 }

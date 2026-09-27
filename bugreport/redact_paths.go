@@ -81,16 +81,18 @@ func (r *redactor) noteAFHome(path string) {
 	r.noteRoot(path, afHomeToken)
 }
 
+// noteWorktreeTitle registers a typed (accepted) record's sibling worktree
+// path-title pair. It is the noteSession entry point and is deliberately
+// UNCAPPED: a valid instances.json already registers every accepted record,
+// and the typed repo_path is a registered root, so the title-derived segment is
+// the only thing the sibling redaction must reach. Capping it here would let a
+// daemon-log path collapse the repo to a token but ship the past-the-cap title
+// segment verbatim beside it (e.g. "[repo:n]-Private-title"). The CPU bound the
+// #4938 review asked for belongs to the fallback entry point
+// (noteFallbackWorktreeTitle), which a single malformed field can turn into
+// thousands of pairs when it falls a whole archive back from the typed decode;
+// the typed path has no such explosion, so it keeps redacting every record.
 func (r *redactor) noteWorktreeTitle(repoPath, title string) {
-	if len(r.worktreePathTitles) >= maxWorktreePathTitles {
-		// Cap reached: further title pairs are a no-op so the per-pair
-		// daemon-log-tail scan stays bounded. The sibling-shape redaction past
-		// the cap degrades to the bare path blank (a registered repo_path still
-		// blanks verbatim) rather than the per-title segment, and the redacted
-		// instances.json still drops every title field wholesale, so the cap
-		// narrows only the log-tail segment scan (#4938 review).
-		return
-	}
 	for _, spelling := range absolutePathSpellings(repoPath) {
 		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
 		if segment == "" {
@@ -101,6 +103,27 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 		}
 		r.worktreePathTitles[worktreePathTitle{repoPath: spelling, segment: segment}] = struct{}{}
 	}
+}
+
+// noteFallbackWorktreeTitle registers a fallback (rejected-record) sibling
+// worktree path-title pair, capped at maxWorktreePathTitles. The bound is on
+// this entry point and not on noteWorktreeTitle because the typed path
+// (noteSession) redacts every accepted record's title and must not lose a
+// segment past the cap, while the fallback only runs when instances.json
+// rejects the typed decode — and a single bad field can fall the whole archive
+// back, registering every record's title here. Past the cap registration is a
+// no-op so the per-pair daemon-log-tail scan in appendWorktreePathTitleSpans
+// and the sibling-prefix loop in appendLogOnlyPathBlankSpans each iterate a
+// fixed budget rather than the rejected-record count. The sibling-shape
+// redaction past the cap degrades to the bare path blank (a registered
+// repo_path still blanks verbatim) rather than the per-title segment, and the
+// redacted instances.json still drops every title field wholesale, so the cap
+// narrows only the log-tail segment scan (#4938 review).
+func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
+	if len(r.worktreePathTitles) >= maxWorktreePathTitles {
+		return
+	}
+	r.noteWorktreeTitle(repoPath, title)
 }
 
 func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
@@ -141,15 +164,19 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 // instance set with large margin and bounds the pathological CPU.
 const maxLogOnlyPathBlanks = 4096
 
-// maxWorktreePathTitles caps the distinct (repo_path, title-segment) pairs
-// noteWorktreeTitle registers for the sibling worktree-path title redaction.
-// appendWorktreePathTitleSpans and the sibling-prefix loop in
-// appendLogOnlyPathBlankSpans each scan the (up to 2 MiB) daemon-log tail once
-// per registered pair, so a single repo_path with thousands of distinct
-// rejected titles made those scans unbounded even with the path-blank cap in
-// place. The map dedupes, so this is a bound on distinct pairs rather than on
-// records; realistic single-repo instance sets stay far below it (#4938
-// review).
+// maxWorktreePathTitles caps the distinct (repo_path, title-segment) pairs the
+// FALLBACK entry point (noteFallbackWorktreeTitle) registers for the sibling
+// worktree-path title redaction. appendWorktreePathTitleSpans and the
+// sibling-prefix loop in appendLogOnlyPathBlankSpans each scan the (up to 2 MiB)
+// daemon-log tail once per registered pair, so a single repo_path with
+// thousands of distinct rejected titles made those scans unbounded even with
+// the path-blank cap in place. The map dedupes, so this is a bound on distinct
+// pairs rather than on records; realistic single-repo instance sets stay far
+// below it. The cap is on the fallback only: the typed entry point
+// (noteWorktreeTitle, called by noteSession) is uncapped so a valid large
+// archive keeps redacting every sibling title segment rather than letting a
+// daemon-log path such as "[repo:n]-Private-title" ship the segment verbatim
+// once it crosses the cap (#4938 review).
 const maxWorktreePathTitles = 4096
 
 // noteLogOnlyPathRedaction registers an absolute repo path gathered from the

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -305,14 +306,18 @@ func TestLogOnlyPathBlanksFailClosedPastCap(t *testing.T) {
 // review asked for on the sibling worktree-title matcher: rejected records
 // sharing one repo_path but carrying thousands of distinct titles used to
 // populate an unbounded worktreePathTitles map, and each pair scanned the up
-// to 2 MiB daemon-log tail once. noteWorktreeTitle now caps the map so both
+// to 2 MiB daemon-log tail once. The fallback entry point
+// (noteFallbackWorktreeTitle) now caps the map so both
 // appendWorktreePathTitleSpans and the sibling-prefix loop iterate a fixed
-// budget rather than the rejected-record count.
+// budget rather than the rejected-record count. The typed entry point
+// (noteWorktreeTitle) is separately uncapped — see
+// TestWorktreePathTitlesTypedRecordsNotCapped — so the cap falls on the
+// fallback explosion only.
 func TestWorktreePathTitlesCapBoundsRegistration(t *testing.T) {
 	r := &redactor{}
 	const repoPath = "/srv/repo"
 	for i := 0; i < maxWorktreePathTitles+100; i++ {
-		r.noteWorktreeTitle(repoPath, fmt.Sprintf("title-%d", i))
+		r.noteFallbackWorktreeTitle(repoPath, fmt.Sprintf("title-%d", i))
 	}
 	// The map is bounded: a single repo_path admits at most a couple of
 	// spellings, so crossing the cap can overshoot by one call's worth, but no
@@ -324,9 +329,57 @@ func TestWorktreePathTitlesCapBoundsRegistration(t *testing.T) {
 	// A title pair registered once the cap is reached is a no-op: it is not a
 	// scan needle, which is what holds the per-call scan to the fixed budget.
 	before := len(r.worktreePathTitles)
-	r.noteWorktreeTitle(repoPath, "overflow-title-noop")
+	r.noteFallbackWorktreeTitle(repoPath, "overflow-title-noop")
 	if len(r.worktreePathTitles) != before {
-		t.Fatalf("overflow title pair got registered past the cap (map size %d -> %d)",
+		t.Fatalf("overflow fallback title pair got registered past the cap (map size %d -> %d)",
 			before, len(r.worktreePathTitles))
+	}
+}
+
+// TestWorktreePathTitlesTypedRecordsNotCapped pins the #4938 review fix on the
+// TYPED path. noteSession calls noteWorktreeTitle for every accepted record,
+// so a valid instances.json with more than maxWorktreePathTitles distinct
+// titles must still redact every sibling title segment. The cap belongs to the
+// fallback entry point (noteFallbackWorktreeTitle); capping the typed path let a
+// daemon-log path collapse the registered repo to [repo:n] but ship the
+// past-the-cap title segment verbatim beside it.
+func TestWorktreePathTitlesTypedRecordsNotCapped(t *testing.T) {
+	const repo = "/srv/repo"
+	r := &redactor{}
+	r.noteRepoRoot(repo)
+
+	// Register many more distinct typed title segments than the fallback cap.
+	// The typed path (noteSession) calls noteWorktreeTitle for every accepted
+	// record, so a large valid archive must not lose a title segment past the
+	// cap the fallback introduced.
+	const overflow = maxWorktreePathTitles + 100
+	for i := 0; i < overflow; i++ {
+		r.noteWorktreeTitle(repo, fmt.Sprintf("Private-title-%d", i))
+	}
+	if len(r.worktreePathTitles) <= maxWorktreePathTitles {
+		t.Fatalf("typed title registration was capped at %d, want > %d (the typed path (noteSession) must not be bounded by the fallback cap)",
+			len(r.worktreePathTitles), maxWorktreePathTitles)
+	}
+
+	// A past-the-cap typed title's sibling worktree path in the daemon log must
+	// still redact the segment and collapse the registered repo to its token.
+	pastCapTitle := fmt.Sprintf("Private-title-%d", overflow-1)
+	segment := sessiongit.DerivedWorktreePathTitleSegment(repo, pastCapTitle)
+	if segment == "" {
+		t.Fatalf("DerivedWorktreePathTitleSegment returned empty for %q", pastCapTitle)
+	}
+	line := repo + "-" + segment + " failed: WORKTREE_MISSING_DETECTED"
+	got := r.scrubLog(line)
+	if strings.Contains(got, segment) {
+		t.Errorf("scrubLog leaked the past-the-cap typed title segment %q:\n%s", segment, got)
+	}
+	if !strings.Contains(got, "[repo:1]") {
+		t.Errorf("scrubLog did not collapse the registered repo root to its token:\n%s", got)
+	}
+	if strings.Contains(got, repo) {
+		t.Errorf("scrubLog leaked the repo path %q:\n%s", repo, got)
+	}
+	if !strings.Contains(got, "WORKTREE_MISSING_DETECTED") {
+		t.Errorf("scrubLog removed non-title triage value:\n%s", got)
 	}
 }
