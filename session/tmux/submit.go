@@ -856,7 +856,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 			// cut short means absent.
 			witnessNew := probe.baselineCaptured && probe.renderWitness != "" &&
 				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline
-			_, _, newestWhole := probe.newestRender(normalized)
+			_, newestWhole := probe.newestRender(normalized)
 			if probe.baselineCaptured &&
 				(strings.Count(normalized, probe.completion) > probe.completionBaseline ||
 					witnessNew && newestWhole) {

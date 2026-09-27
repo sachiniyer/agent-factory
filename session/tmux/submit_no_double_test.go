@@ -102,6 +102,10 @@ type slidingClaudePane struct {
 	lastLoaded string
 	pastes     int
 	enters     int
+	// footer overrides claudeFooter; footerAfterPaste, when set, replaces it at
+	// the first paste and then stays put (chrome that changes once and settles).
+	footer           string
+	footerAfterPaste string
 	// onPaste returns the composer rows attempt n renders for payload.
 	onPaste func(n int, payload string) []string
 	// onEnter runs after the boundary capture (tmux captures in the same command
@@ -119,7 +123,11 @@ func (p *slidingClaudePane) rows() []string {
 	all := append([]string{}, p.transcript...)
 	all = append(all, rule)
 	all = append(all, composer...)
-	all = append(all, rule, "", claudeFooter)
+	footer := p.footer
+	if footer == "" {
+		footer = claudeFooter
+	}
+	all = append(all, rule, "", footer)
 	if len(all) > p.height {
 		all = all[len(all)-p.height:]
 	}
@@ -154,6 +162,9 @@ func (p *slidingClaudePane) exec() cmd_test.MockCmdExec {
 				p.composer = nil
 			case strings.Contains(joined, "paste-buffer"):
 				p.pastes++
+				if p.footerAfterPaste != "" {
+					p.footer = p.footerAfterPaste
+				}
 				p.composer = p.onPaste(p.pastes, p.lastLoaded)
 			}
 			return nil
@@ -294,7 +305,12 @@ func TestDroppedPasteInClaudePaneIsRedeliveredExactlyOnce(t *testing.T) {
 	submitted := 0
 	pane.onEnter = func(p *slidingClaudePane, n int) {
 		if n == 1 {
-			return // absorbed: the composer keeps the stranded text
+			// Absorbed as a newline: the composer keeps the stranded text and grows
+			// by an empty row, scrolling the frame's top row away — measured on a
+			// real tmux pane. The pre-retry check must accept that as "nothing new
+			// was drawn".
+			p.composer = append(p.composer, "  ")
+			return
 		}
 		submitted++
 		p.submitComposerAs(strings.Join(p.composer, " "), "", "✻ Crunching… (esc to interrupt)")
@@ -393,4 +409,46 @@ func TestPromptQuotingFooterIsNotRedeliveredAfterSubmit(t *testing.T) {
 	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
 	require.Equal(t, 1, pastes, "a prompt that landed whole and submitted must never be pasted again")
 	require.Equal(t, PromptDelivered, status)
+}
+
+// TestPromptQuotingChangedFooterIsNotRedeliveredAfterSubmit is the third Codex
+// review fail-first on #4885. A status row changes when the paste arrives
+// (state=idle -> state=busy) and then stays put, and the prompt begins with that
+// row's text. Because the row changed, it is not unchanged-since-baseline
+// chrome, so the render search still finds the prompt's witness in it, below
+// the whole composer render: the paste reads as cut short and the absence
+// proof starts at the now-stable row. The pre-retry check must not be satisfied
+// by a stationary strip below the anchor while the prompt was submitted above
+// it — the whole pane has to stand still.
+func TestPromptQuotingChangedFooterIsNotRedeliveredAfterSubmit(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	const busyRow = "  LANESMONITOR-HEARTBEAT-STATUS state=busy"
+	prompt := strings.TrimSpace(busyRow) + " is what the status row says; " + heartbeatPrompt
+	probe := newDeliveryProbe(prompt)
+	require.Contains(t, normalizeDelivery(busyRow), probe.renderWitness,
+		"fixture: the prompt's render witness must appear in the changed status row")
+
+	pane := newAlignedPane(t, prompt)
+	pane.footer = "  LANESMONITOR-HEARTBEAT-STATUS state=idle"
+	pane.footerAfterPaste = busyRow
+	pane.onPaste = func(_ int, payload string) []string { return wrapClaude(payload) }
+	submitted := 0
+	pane.onEnter = func(p *slidingClaudePane, _ int) {
+		submitted++
+		p.submitComposerAs(strings.Join(p.composer, " "), "", "✻ Crunching… (esc to interrupt)")
+	}
+	idle := normalizeDelivery(pane.frame())
+	require.Equal(t, 2, strings.Count(idle, probe.completion),
+		"fixture: the idle frame holds the older copy's tail row and the newer copy")
+
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+
+	pastes, _ := pane.counts()
+	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
+	require.Equal(t, 1, pastes, "a prompt that submitted must never be pasted again")
+	require.NotEqual(t, PromptNotDelivered, status,
+		"a submitted prompt must never be reported as retryable not-delivered")
 }

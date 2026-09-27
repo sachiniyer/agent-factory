@@ -48,12 +48,11 @@ func (o deliveryOutcome) promptDeliveryStatus() PromptDeliveryStatus {
 
 // absenceProof is the evidence that authorizes the one #3293 redelivery: the
 // pane showed this payload's newest render cut short — its render witness with
-// no completion tail after it — at the Enter boundary. input is the normalized
-// pane text from that newest witness to the bottom of the frame: the stranded
-// render and everything drawn below it.
+// no completion tail after it — at the Enter boundary. frame is that whole
+// boundary frame, normalized.
 type absenceProof struct {
 	probe deliveryProbe
-	input string
+	frame string
 }
 
 // renderRegion returns the part of a normalized frame a paste can have drawn
@@ -77,7 +76,7 @@ func (p deliveryProbe) renderRegion(normalized string) string {
 
 // newestRender locates this payload's NEWEST render in a normalized frame — the
 // last occurrence of its render witness above the unchanged chrome — and
-// reports its offset and whether it is whole: one contiguous copy of the entire
+// reports whether it is whole: one contiguous copy of the entire
 // payload covers it. Position, not count, is what makes this sound on a
 // history-less pane, where scrolling can remove an older identical copy in the
 // same frame that adds this one (#4884).
@@ -89,48 +88,58 @@ func (p deliveryProbe) renderRegion(normalized string) string {
 // cut short and the absence proof sat on chrome that never changes. Covering,
 // rather than starting at, the newest witness keeps a payload that repeats its
 // own opening text whole.
-func (p deliveryProbe) newestRender(normalized string) (at int, witnessed, whole bool) {
+func (p deliveryProbe) newestRender(normalized string) (witnessed, whole bool) {
 	if p.renderWitness == "" || p.payload == "" {
-		return -1, false, false
+		return false, false
 	}
 	region := p.renderRegion(normalized)
 	w := strings.LastIndex(region, p.renderWitness)
 	if w < 0 {
-		return -1, false, false
+		return false, false
 	}
 	c := strings.LastIndex(region, p.payload)
-	return w, true, c >= 0 && c <= w && c+len(p.payload) >= w+len(p.renderWitness)
+	return true, c >= 0 && c <= w && c+len(p.payload) >= w+len(p.renderWitness)
 }
 
 // absenceAt returns proof of absence when the frame's newest render of this
 // payload is cut short, and nil when the frame holds no render of it or a whole
-// one. Nil means "not proven", never "delivered". The proof's input runs from
-// that render to the very bottom of the frame, chrome included, so a change
-// anywhere below the anchor breaks it.
+// one. Nil means "not proven", never "delivered".
 func (p deliveryProbe) absenceAt(normalized string) *absenceProof {
-	at, witnessed, whole := p.newestRender(normalized)
+	witnessed, whole := p.newestRender(normalized)
 	if !witnessed || whole {
 		return nil
 	}
-	return &absenceProof{probe: p, input: normalized[at:]}
+	return &absenceProof{probe: p, frame: normalized}
 }
 
 // absenceStillProven re-reads the pane immediately before a redelivery and
-// requires that nothing happened to the stranded render since the Enter
-// boundary: the same newest render, still cut short, with exactly the same text
-// from it to the bottom of the frame. Anything else is possible evidence of
-// receipt — the render completing, the prompt echoing into the transcript, the
-// agent's working indicator or reply appearing under it, the render vanishing —
-// or a pane that cannot be read, and none of those proves absence (#4884). The
-// test is deliberately agent-agnostic: it asks only whether the strand stood
-// still, never what a given agent's spinner looks like.
+// requires that, since the Enter boundary, NOTHING NEW WAS DRAWN: the pane may
+// only have lost rows off its top, and its newest render must still be cut
+// short. In normalized form, the current frame must be a suffix of the boundary
+// frame. A composer that absorbed the Enter as a newline passes — it grows by
+// an empty row and scrolls the top away, the canonical #1982 strand. A received
+// prompt does not: the composer clears, the prompt echoes, a working indicator,
+// reply or changed status row appears, and every one of those draws new text at
+// the bottom. A pane that cannot be read proves nothing. Any of those vetoes the
+// retry (#4884).
+//
+// The whole frame, not a region below the chosen render, is the safety
+// property. Which render is "newest" is inferred from pane text, and chrome
+// that quotes the prompt can win that inference and sit BELOW the real render;
+// a comparison limited to the text under it would watch only the chrome and
+// miss the receipt above it (#4885 review, three times over). Judging every row
+// makes the anchor matter only for classification: a wrong one can mislabel
+// the status but can no longer authorize a second paste. The cost is that a
+// genuine strand on a pane with any live animation is reported sent-unverified
+// instead of retried — recoverable, unlike a double prompt. The test stays
+// agent-agnostic: it never asks what a spinner looks like.
 func (t *TmuxSession) absenceStillProven(proof *absenceProof) bool {
 	pane, ok := t.capturePaneForDelivery()
 	if !ok {
 		return false
 	}
-	now := proof.probe.absenceAt(normalizeDelivery(pane))
-	return now != nil && now.input == proof.input
+	normalized := normalizeDelivery(pane)
+	return strings.HasSuffix(proof.frame, normalized) && proof.probe.absenceAt(normalized) != nil
 }
 
 // SendKeysCommand sends text to the tmux pane using the reliable command path.
