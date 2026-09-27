@@ -101,7 +101,12 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 		if r.worktreePathTitles == nil {
 			r.worktreePathTitles = make(map[worktreePathTitle]struct{})
 		}
-		r.worktreePathTitles[worktreePathTitle{repoPath: spelling, segment: segment}] = struct{}{}
+		pair := worktreePathTitle{repoPath: spelling, segment: segment}
+		if _, ok := r.worktreePathTitles[pair]; ok {
+			continue
+		}
+		r.worktreePathTitles[pair] = struct{}{}
+		r.noteWorktreeTitleSiblingNeedle(spelling, segment)
 	}
 }
 
@@ -152,8 +157,22 @@ func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
 	// (noteWorktreeTitle, called by noteSession), so a fallback call for a
 	// pair the typed path already registered must not saturate either
 	// (#4938 review).
+	//
+	// A rejected record can carry a RELATIVE repo_path (NewGitWorktreeFromStorage
+	// only rejects empty paths), and absolutePathSpellings returns nil for one,
+	// so the loop used to register no pair for it and a daemon recovery path
+	// such as "<relative-repo_path>-<segment>" (e.g. "private/client-fix-bug-urgent"
+	// for title "fix bug (urgent)") survived the sibling redaction verbatim. The
+	// bare relative spelling is already a log-only blank
+	// (noteLogOnlyPathRedaction), but it is immediately followed by '-', so the
+	// bare blank rejects it and only a registered sibling pair reaches it. The
+	// relative spellings complement the absolute ones here for the same reason
+	// noteLogOnlyPathRedaction registers them, so the sibling needle is built on
+	// the same spelling the daemon log carries (#4938 review).
 	var newPairs []worktreePathTitle
-	for _, spelling := range absolutePathSpellings(repoPath) {
+	spellings := absolutePathSpellings(repoPath)
+	spellings = append(spellings, relativePathSpellings(repoPath)...)
+	for _, spelling := range spellings {
 		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
 		if segment == "" {
 			continue
@@ -188,7 +207,21 @@ func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
 	for _, pair := range newPairs {
 		r.worktreePathTitles[pair] = struct{}{}
 		r.worktreePathTitlesFallback++
+		r.noteWorktreeTitleSiblingNeedle(pair.repoPath, pair.segment)
 	}
+}
+
+// noteWorktreeTitleSiblingNeedle indexes one complete sibling needle
+// (repoPath + "-" + segment) into worktreeTitleSiblingNeedles so
+// isWorktreeTitleSiblingNeedle is a single map lookup. The set mirrors
+// worktreePathTitles exactly: every pair the per-needle loops iterate is also
+// indexed here, and a pair dropped at the fallback cap is added to neither, so
+// the lookup and the scan stay in sync (#4938 review).
+func (r *redactor) noteWorktreeTitleSiblingNeedle(repoPath, segment string) {
+	if r.worktreeTitleSiblingNeedles == nil {
+		r.worktreeTitleSiblingNeedles = make(map[string]struct{})
+	}
+	r.worktreeTitleSiblingNeedles[repoPath+"-"+segment] = struct{}{}
 }
 
 func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {

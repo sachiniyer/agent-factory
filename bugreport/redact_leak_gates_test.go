@@ -1083,17 +1083,22 @@ func TestLogOnlyPathBlanksFailClosedSaturatedQuotedFilenameChar(t *testing.T) {
 // daemon-tail record for a past-the-cap bare name such as
 // repo_path="ConfidentialClient4097" shipped the private name verbatim.
 // noteLogOnlyPathRedaction now sets logOnlyPathBareNamesSaturated at the cap,
-// and the matcher fail-closed-blanks the whole decoded single %q scalar when
-// it carries no '/' (the shape of a past-the-cap bare name), so the dropped
-// name does not survive the daemon log.
+// and the matcher fail-closed-blanks the dropped name: on the decoded %q
+// scalar it blanks the whole no-'/' scalar (repo_path here), and on the whole
+// daemon-log record appendSaturatedBareNameSpans blanks every unquoted
+// bare-name-shaped token, so the dropped name does not survive the daemon log
+// even when the record also carries a '/' (a branch ref beside an unquoted
+// workDir, the session/backend_local_respawn.go "at %s" shape).
 //
-// The fail-closed runs only on the decoded ProvLogValue view: a scalar that
-// carries a '/' is a real path and stays under the slash-bearing scan (which
-// is NOT saturated here), so an unrelated absolute path in recover_error
-// survives unblanked. A non-path scalar such as classification blanks whole
-// in this degenerate case — the privacy side of the same fail-closed trade
-// the slash-bearing saturated scan already makes for every '/'-bearing token
-// (#4938 review).
+// A '/'-bearing scalar is a real path and stays under the slash-bearing scan
+// (which is NOT saturated here), so the unrelated absolute path in
+// recover_error survives: the per-scalar pass leaves it alone and the
+// whole-record scan leaves the quoted scalar to that per-scalar pass. The
+// unquoted emitter label and field names on the same record ARE bare-name-shaped
+// tokens, so the whole-record fail-closed blanks them too — the privacy side
+// of the same fail-closed trade the slash-bearing saturated scan already makes
+// for every '/'-bearing token in the degenerate archive that saturates the
+// bare-name set (#4938 review).
 func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
 	r := &redactor{}
 	// Register maxLogOnlyPathBlanks distinct single-segment bare names (the cap
@@ -1127,10 +1132,13 @@ func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
 		t.Fatalf("a duplicate bare name changed the set size (%d -> %d)", dupBefore, len(r.logOnlyPathBareNames))
 	}
 	// A daemon-tail line for the omitted bare name. repo_path is a bare scalar
-	// (no '/') so the bare-name fail-closed blanks it whole; recover_error
-	// carries a '/' so the bare fail-closed leaves it alone and (with the
-	// slash-bearing registry empty and not saturated) the unrelated path
-	// survives verbatim, proving the fail-closed touches only no-'/' scalars.
+	// (no '/') so the per-scalar bare-name fail-closed blanks it whole; the
+	// whole-record scan blanks the unquoted emitter label and field names
+	// (bare-name-shaped tokens) but leaves the quoted recover_error scalar to
+	// the per-scalar pass, which — recover_error carrying a '/' and the
+	// slash-bearing registry empty and not saturated — leaves the unrelated
+	// path verbatim. So the secret is gone, the '/'-bearing quoted path
+	// survives, and only the unquoted bare tokens of the record blank.
 	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q recover_error=%q`,
 		secret, "recovery location: /srv/unrelated/repo")
 	got := r.scrubLog(logLine)
@@ -1138,10 +1146,14 @@ func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
 	if strings.Contains(got, secret) {
 		t.Errorf("scrubLog leaked past-the-cap bare name %q:\n%s", secret, got)
 	}
-	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "/srv/unrelated/repo", "recovery location"} {
+	for _, want := range []string{"/srv/unrelated/repo", "recovery location"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("scrubLog removed %q that the bare-name fail-closed must not touch:\n%s", want, got)
+			t.Errorf("scrubLog removed %q that the '/'-bearing quoted scalar must keep (#4938 review):\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "WORKTREE_MISSING_DETECTED") {
+		t.Errorf("scrubLog left the unquoted emitter label %q blankable by the whole-record bare-name fail-closed:\n%s",
+			"WORKTREE_MISSING_DETECTED", got)
 	}
 }
 
@@ -1217,5 +1229,169 @@ func TestLogOnlyPathBlankRelativeRawSpellingCleansToDot(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("scrubLog removed non-path triage value %q:\n%s", want, got)
 		}
+	}
+}
+
+// TestFallbackWorktreeTitleRegistersRelativeRepoPath pins the #4938 review fix
+// on the sibling-title pair the fallback registers for a RELATIVE repo_path.
+// noteFallbackWorktreeTitle used to iterate only absolutePathSpellings, which
+// returns nil for a relative path, so a rejected record carrying a relative
+// repo_path registered no (repo_path, title) pair. A daemon recovery path such
+// as "<repo_path>-<segment>" (e.g. "private/client-fix-bug-urgent" for title
+// "fix bug (urgent)") then survived the sibling redaction verbatim: the bare
+// relative spelling IS a log-only blank, but it is immediately followed by '-',
+// so knownRootTextBoundary rejects the occurrence (a sibling dash is not a text
+// delimiter), and with no registered pair the sibling-prefix loop has nothing to
+// match. noteFallbackWorktreeTitle now iterates the relative spellings too, so
+// the sibling needle is built on the same spelling the daemon log carries and
+// the sibling-prefix blank reaches it (#4938 review).
+//
+// Fail-first: without the relative spellings the sibling-prefix loop has no
+// registered pair, the bare blank rejects "private/client" before the '-', and
+// "private/client" ships verbatim beside the segment.
+func TestFallbackWorktreeTitleRegistersRelativeRepoPath(t *testing.T) {
+	r := &redactor{}
+	const (
+		repoPath = "private/client"
+		title    = "fix bug (urgent)"
+	)
+	// noteUnknownJSONRecord registers the relative repo_path as a slash-bearing
+	// log-only blank (so the sibling-prefix loop's logOnlyPathBlank gate opens)
+	// AND as a fallback sibling pair. Drive both exactly as the fallback does.
+	r.noteLogOnlyPathRedaction(repoPath)
+	r.noteFallbackWorktreeTitle(repoPath, title)
+
+	segment := sessiongit.DerivedWorktreePathTitleSegment(repoPath, title)
+	if segment == "" {
+		t.Fatalf("DerivedWorktreePathTitleSegment returned empty for repoPath=%q title=%q", repoPath, title)
+	}
+	needle := repoPath + "-" + segment
+	if !r.isWorktreeTitleSiblingNeedle(needle) {
+		t.Fatalf("relative sibling needle %q is not registered (worktreeTitleSiblingNeedles=%v)",
+			needle, r.worktreeTitleSiblingNeedles)
+	}
+
+	// A daemon recovery line carrying the sibling spelling in the open
+	// (unquoted) record. The bare blank rejects the relative repo_path before
+	// the sibling dash, so only the registered pair redacts it.
+	logLine := "recover: rebuilt missing worktree for session %q at %s from branch main"
+	got := r.scrubLog(fmt.Sprintf(logLine, "other-session", needle))
+	t.Logf("relative sibling scrubLog out:\n%s", got)
+	for _, secret := range []string{repoPath, segment} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked the relative sibling %q:\n%s", secret, got)
+		}
+	}
+}
+
+// TestLogOnlyPathBareNamesSaturatedFailsClosedUnquotedRecordWithSlash pins the
+// #4938 review fix on the bare-name cap's overflow when the daemon-log record
+// that carries the past-the-cap bare name ALSO carries a '/'. The earlier
+// fail-closed blanked the whole record only when it carried no '/', so a bare
+// name logged unquoted via %s — session/backend_local_respawn.go:129 and :132
+// print workDir beside "branch %s" — leaked verbatim once the common branch
+// value contained a '/' (feature/foo): the '/' gate suppressed the whole-record
+// fallback, the per-needle pass had no entry for the dropped name, and the
+// slash-bearing saturated scan (not saturated here) cannot anchor on a '/' a
+// bare name does not have. appendSaturatedBareNameSpans now walks the record
+// and blanks every unquoted bare-name-shaped token, so the workDir is redacted
+// in a '/'-bearing record too. The branch's '/' survives, so the slash-bearing
+// shape is not destroyed, and the over-blank is the privacy side of the same
+// fail-closed trade the slash-bearing saturated scan already makes (#4938
+// review).
+//
+// Fail-first: with the no-'/' whole-record blank, the '/' in "feature/foo"
+// suppresses the fallback and "ConfidentialClient4097" ships verbatim.
+func TestLogOnlyPathBareNamesSaturatedFailsClosedUnquotedRecordWithSlash(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("bare-name-%d", i))
+	}
+	if r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated set before the cap was reached (cap %d)", maxLogOnlyPathBlanks)
+	}
+	const secret = "ConfidentialClient4097"
+	r.noteLogOnlyPathRedaction(secret)
+	if !r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated not set after a new bare name past the cap (cap %d)", maxLogOnlyPathBlanks)
+	}
+	if _, ok := r.logOnlyPathBareNames[secret]; ok {
+		t.Fatalf("past-the-cap bare name %q was registered into the capped set (set size %d)",
+			secret, len(r.logOnlyPathBareNames))
+	}
+	// The bare name is logged via %s (NOT %q), so it stays in the whole
+	// daemon-log record rather than entering as a decoded %q scalar, and the
+	// SAME record carries a '/' from the common branch value feature/foo.
+	logLine := fmt.Sprintf(`recover: rebuilt missing worktree for session %q at %s from recorded base and recreated branch %s`,
+		"fix-bug-urgent", secret, "feature/foo")
+	got := r.scrubLog(logLine)
+	t.Logf("unquoted + slash-bearing bare-name-saturated scrubLog out:\n%s", got)
+	if strings.Contains(got, secret) {
+		t.Errorf("scrubLog leaked past-the-cap unquoted bare name %q on a '/'-bearing whole-record view:\n%s", secret, got)
+	}
+	// The branch's '/' survives the bare-name fail-closed (the scan splits at
+	// the separator; only the segment that starts at a text boundary blanks),
+	// so the slash-bearing shape of the record is not destroyed.
+	if !strings.Contains(got, "/") {
+		t.Errorf("scrubLog lost every '/' of the '/'-bearing record, the bare-name scan must preserve slash-bearing shape:\n%s", got)
+	}
+}
+
+// TestWorktreeTitleSiblingNeedleIndexed pins the #4938 review fix on
+// isWorktreeTitleSiblingNeedle. The membership test runs once per registered
+// path in appendLogOnlyPathBlankSpans and appendBareNameLogOnlyPathBlankSpans,
+// and the linear scan it used to make built and compared the full needle for
+// every worktree-path-title pair on every call — a ~16M comparison cross-product
+// when both fallback registries sit near their 4096-entry caps. The needles are
+// now indexed in worktreeTitleSiblingNeedles alongside the pairs, so the test is
+// a single map lookup, and the set mirrors worktreePathTitles exactly: every
+// pair the per-needle loops iterate is indexed, and a pair dropped at the
+// fallback cap is added to neither (#4938 review).
+func TestWorktreeTitleSiblingNeedleIndexed(t *testing.T) {
+	r := &redactor{}
+	const (
+		typedRepo  = "/srv/typed-repo"
+		fbRepoPath = "private/client"
+	)
+	typedTitle := "Typed title one"
+	fbTitle := "fix bug (urgent)"
+
+	// A typed pair (noteWorktreeTitle) and a fallback pair
+	// (noteFallbackWorktreeTitle) each index their needle. The fallback pair
+	// also needs the repo_path registered as a log-only blank for the
+	// sibling-prefix loop, mirroring noteUnknownJSONRecord; that is not what
+	// this test asserts, only the needle index.
+	r.noteWorktreeTitle(typedRepo, typedTitle)
+	r.noteLogOnlyPathRedaction(fbRepoPath)
+	r.noteFallbackWorktreeTitle(fbRepoPath, fbTitle)
+
+	typedSegment := sessiongit.DerivedWorktreePathTitleSegment(typedRepo, typedTitle)
+	fbSegment := sessiongit.DerivedWorktreePathTitleSegment(fbRepoPath, fbTitle)
+	if typedSegment == "" || fbSegment == "" {
+		t.Fatalf("DerivedWorktreePathTitleSegment empty: typed=%q fb=%q", typedSegment, fbSegment)
+	}
+	typedNeedle := typedRepo + "-" + typedSegment
+	fbNeedle := fbRepoPath + "-" + fbSegment
+
+	for _, needle := range []string{typedNeedle, fbNeedle} {
+		if _, ok := r.worktreeTitleSiblingNeedles[needle]; !ok {
+			t.Errorf("needle %q missing from worktreeTitleSiblingNeedles (set %v)",
+				needle, r.worktreeTitleSiblingNeedles)
+		}
+		if !r.isWorktreeTitleSiblingNeedle(needle) {
+			t.Errorf("isWorktreeTitleSiblingNeedle(%q) = false, want true", needle)
+		}
+	}
+	// A non-needle (the repo_path alone, or a wrong segment) is not a sibling
+	// needle, so it falls through to the bare blank in the matcher.
+	for _, non := range []string{typedRepo, fbRepoPath, typedRepo + "-no-such-segment", fbRepoPath + "-no-such-segment"} {
+		if r.isWorktreeTitleSiblingNeedle(non) {
+			t.Errorf("isWorktreeTitleSiblingNeedle(%q) = true, want false", non)
+		}
+	}
+	// The set mirrors worktreePathTitles: one needle per distinct pair.
+	if len(r.worktreeTitleSiblingNeedles) != len(r.worktreePathTitles) {
+		t.Fatalf("worktreeTitleSiblingNeedles size %d != worktreePathTitles size %d (the index must mirror the map)",
+			len(r.worktreeTitleSiblingNeedles), len(r.worktreePathTitles))
 	}
 }

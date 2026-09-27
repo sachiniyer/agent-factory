@@ -522,48 +522,72 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 // quoteStructural is the saturated scan's '"' handling threaded from
 // produceSpans. When logOnlyPathBareNames saturates the per-needle pass can no
 // longer reach a dropped name, and the slash-bearing saturated scan cannot
-// reach it either (no '/'), so fail-closed-blank the whole view when it
-// carries no '/' (the shape of a past-the-cap bare name). On the decoded
-// ProvLogValue view (!quoteStructural) that is a decoded %q scalar such as
-// repo_path="ConfidentialClient4097"; on a whole daemon-log record (and the
-// other quoteStructural views) it is a record that carries no '/' at all — a
-// bare path logged UNQUOTED via %s (e.g. backend_local_respawn.go's "at %s")
-// is the only path-shaped content such a record can hold, and the unquoted
-// shape was the leak the decoded-scalar-only blank left open, so the blank
-// fires there too. A scalar or record carrying a '/' is left for the
-// slash-bearing scan and the per-needle pass: a '/'-bearing scalar is a real
-// path and a '/'-bearing record keeps its prose. The over-blank — a non-path
-// scalar such as a branch name or classification blanking whole, and a
-// no-'/' daemon-log record blanking whole, in the degenerate archive that
-// saturates the bare-name set (more than maxLogOnlyPathBlanks distinct
-// single-segment relative spellings) — is the privacy side of the same
-// fail-closed trade the slash-bearing saturated scan already makes for every
-// '/'-bearing token (#4938 review).
+// reach it either (no '/'), so fail-closed-blank is required. Two shapes:
+//
+//   - A decoded single %q scalar (ProvLogValue, !quoteStructural) that carries
+//     no '/' IS the bare name (e.g. repo_path="ConfidentialClient4097"), so
+//     blank it whole. A '/'-bearing scalar is a real path and stays under the
+//     slash-bearing scan (which is NOT saturated here), so it survives the
+//     bare-name fail-closed and falls through to the registered per-needle pass.
+//
+//   - A whole daemon-log record (or any other quoteStructural view) where a
+//     past-the-cap bare name is logged UNQUOTED via %s has no decoded %q view,
+//     so the scalar blank above does not reach it. The earlier whole-record
+//     fail-closed fired only when the record carried no '/', so a record that
+//     ALSO carried a '/' — the real shape at
+//     session/backend_local_respawn.go:129-132, where "at %s" prints the workDir
+//     beside a "branch %s" such as feature/foo — left the private name verbatim
+//     while the '/' gate suppressed the fallback and the per-needle pass had no
+//     entry for the dropped name. appendSaturatedBareNameSpans now walks the
+//     record and blanks every unquoted bare-name-shaped token (a maximal run of
+//     path-text-legal bytes with no '/') at a bareBoundary, leaving quoted
+//     scalar content to the per-scalar pass and '/'-bearing tokens to the
+//     slash-bearing scan. The first segment of an unquoted '/'-bearing token
+//     (the "feature" of "feature/foo") blanks too — it starts at a text
+//     boundary and names a private root segment the cap may have dropped;
+//     deeper segments (preceded by '/', which is not a text delimiter) survive.
+//
+// The over-blank — a non-path scalar such as a branch name or classification
+// blanking whole on the scalar view, and the emitter labels and first segments
+// blanking in a '/'-bearing record, in the degenerate archive that saturates
+// the bare-name set (more than maxLogOnlyPathBlanks distinct single-segment
+// relative spellings, an implausible count for any realistic rejected-record
+// stream) — is the privacy side of the same fail-closed trade the
+// slash-bearing saturated scan already makes for every '/'-bearing token
+// (#4938 review).
 func (r *redactor) appendBareNameLogOnlyPathBlankSpans(
 	spans []redactionSpan,
 	s string,
 	bareBoundary pathBoundary,
 	quoteStructural bool,
 ) []redactionSpan {
-	if r.logOnlyPathBareNamesSaturated && s != "" && !strings.ContainsRune(s, filepath.Separator) {
-		// Fail-closed for the bare-name cap: the per-needle scan below and
-		// the slash-bearing saturated scan both cannot reach a past-the-cap
-		// bare name (no '/'), so a daemon-tail record such as
-		// repo_path="ConfidentialClient4097" — or a bare path logged unquoted
-		// via %s in the whole record (e.g. "at ConfidentialClient4097") — would
-		// ship the private name verbatim. Blank the whole view when it carries
-		// no '/': on the decoded ProvLogValue view that is the bare %q scalar,
-		// and on a whole daemon-log record (or any other quoteStructural view)
-		// that is the whole no-'/' record. A '/'-bearing view is left for the
-		// slash-bearing scan and the per-needle pass. Return: the whole-value
-		// blank subsumes any registered bare name this scalar or record may
-		// also contain. quoteStructural no longer gates this blank — the
-		// quoted and unquoted shapes are both fail-closed — but stays a
-		// parameter so the saturated-scan sibling below keeps threading '"'
-		// handling from produceSpans (#4938 review).
-		return append(spans, redactionSpan{
-			start: 0, end: len(s), replacement: redactedMarker, priority: spanQuotedValue,
-		})
+	if r.logOnlyPathBareNamesSaturated && s != "" {
+		if quoteStructural {
+			// Fail-closed for the bare-name cap on a quoteStructural view: a
+			// past-the-cap bare name logged unquoted via %s (no decoded %q
+			// view) survives the scalar blank below and the '/'-bearing
+			// saturated scan (no '/'), and the earlier no-'/' whole-record
+			// blank missed it once the record also carried a '/'. Blank every
+			// unquoted bare-name-shaped token at a text boundary, leaving quoted
+			// scalars to the per-scalar pass and '/'-bearing tokens to the
+			// slash-bearing scan. Return: the scan covers every unquoted bare
+			// token (registered or dropped), so the per-needle loop below adds
+			// nothing on this view (#4938 review).
+			return r.appendSaturatedBareNameSpans(spans, s, bareBoundary)
+		}
+		if !strings.ContainsRune(s, filepath.Separator) {
+			// Fail-closed for the bare-name cap on a decoded %q scalar that
+			// carries no '/': the scalar IS the past-the-cap bare name, so
+			// blank it whole. The slash-bearing saturated scan cannot anchor
+			// on a '/' the scalar does not have, and the per-needle pass has no
+			// entry for the dropped name (#4938 review).
+			return append(spans, redactionSpan{
+				start: 0, end: len(s), replacement: redactedMarker, priority: spanQuotedValue,
+			})
+		}
+		// A '/'-bearing decoded scalar is a real path: leave it to the
+		// slash-bearing scan (which is not saturated here) and fall through to
+		// the per-needle pass for any registered bare name it may also contain.
 	}
 	if len(r.logOnlyPathBareNames) == 0 {
 		return spans
@@ -843,13 +867,17 @@ func saturatedPathContinuationEnd(s string, delimiterEnd int, quoteStructural bo
 // path's "[token]-[redacted]" layout (or "[redacted]-[redacted]" when no root is
 // registered). A non-sibling or malformed-record alternate_path is not a
 // needle, so it falls through to the bare blank instead of being deferred here.
+//
+// The membership test runs once per registered path in
+// appendLogOnlyPathBlankSpans and appendBareNameLogOnlyPathBlankSpans, and the
+// linear scan it used to make built and compared the full needle for every
+// worktree-path-title pair on every call. With both fallback registries near
+// their 4096-entry caps that is a ~16M comparison cross-product per redact, so
+// the needles are indexed in worktreeTitleSiblingNeedles alongside the pairs
+// and the test is a single map lookup (#4938 review).
 func (r *redactor) isWorktreeTitleSiblingNeedle(path string) bool {
-	for title := range r.worktreePathTitles {
-		if title.repoPath+"-"+title.segment == path {
-			return true
-		}
-	}
-	return false
+	_, ok := r.worktreeTitleSiblingNeedles[path]
+	return ok
 }
 
 // registeredRootEquals reports whether a registered root (the AF home, a

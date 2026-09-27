@@ -97,6 +97,17 @@ type redactor struct {
 	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
 	// in that path context, so an equal structural value elsewhere stays useful.
 	worktreePathTitles map[worktreePathTitle]struct{}
+	// worktreeTitleSiblingNeedles is the lookup set of every complete sibling
+	// needle (repoPath + "-" + segment) the worktree-title machinery registered,
+	// mirroring worktreePathTitles so isWorktreeTitleSiblingNeedle is a single
+	// map lookup rather than an O(pairs) scan. appendLogOnlyPathBlankSpans and
+	// appendBareNameLogOnlyPathBlankSpans each call that membership test once per
+	// registered path, so the linear scan made the two near-the-cap fallback
+	// registries (4096 path blanks × 4096 title pairs) a ~16M comparison
+	// cross-product on every redact. The set is populated alongside the map in
+	// noteWorktreeTitle and noteFallbackWorktreeTitle, so it never holds a needle
+	// the per-needle loops do not also iterate (#4938 review).
+	worktreeTitleSiblingNeedles map[string]struct{}
 	// worktreePathTitlesFallback counts only the pairs the FALLBACK entry point
 	// (noteFallbackWorktreeTitle) added to worktreePathTitles. The shared map
 	// also holds uncapped typed-record pairs (noteWorktreeTitle, called by
