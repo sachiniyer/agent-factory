@@ -667,6 +667,7 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.returnToNamingFormAfterDetails() {
 			m.state = stateNew
 			m.menu.SetState(ui.StateNewInstance)
+			dismissCmd = tea.Batch(dismissCmd, m.replayDeferredNamingReplies())
 		} else {
 			m.state = stateDefault
 			m.menu.SetState(ui.StateDefault)

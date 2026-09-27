@@ -140,3 +140,99 @@ func TestNamingFormNestedFieldNoticesStayWhileFormOpen(t *testing.T) {
 		})
 	}
 }
+
+// TestNamingFormDetailsHoldsInFlightReplies: a daemon reply for the form that
+// lands while ctrl+e has its details open is held and delivered on the way
+// back, not dropped by the reply's own form-state guard. A dropped backend
+// catalog promised by new_remote left backendPickerPending set, so the form
+// answered "Loading backends…" to every submit until the user discarded it.
+func TestNamingFormDetailsHoldsInFlightReplies(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(h *home)
+		reply func(naming *session.Instance) tea.Msg
+		check func(t *testing.T, h *home)
+	}{
+		{"backend catalog promised by new_remote", func(h *home) { h.backendPickerPending = true },
+			func(naming *session.Instance) tea.Msg {
+				return backendCatalogMsg{naming: naming, catalog: twoUsableBackends()}
+			}, func(t *testing.T, h *home) {
+				assert.Equal(t, stateSelectBackend, h.state, "the promised picker opens once the form is back")
+				assert.False(t, h.backendPickerPending, "the form must not stay stuck loading")
+			}},
+		{"account registry", func(*home) {},
+			func(naming *session.Instance) tea.Msg {
+				return accountRegistryMsg{naming: naming, agent: "claude", resp: twoAgentsWithAccounts()}
+			}, func(t *testing.T, h *home) {
+				assert.Equal(t, stateSelectAccount, h.state, "the requested picker opens once the form is back")
+			}},
+		{"project default account", func(*home) {},
+			func(naming *session.Instance) tea.Msg {
+				return accountDefaultMsg{naming: naming, agent: "claude", resp: withDefaults(map[string]string{"claude": "work"})}
+			}, func(t *testing.T, h *home) {
+				assert.Equal(t, stateNew, h.state)
+				assert.Equal(t, "work", h.pendingAccount, "the default must still be preselected")
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.errBox.SetSize(300, 1)
+			naming := startNaming(t, h, "details-mid-fetch")
+			_ = h.handleNotice(errors.New("an earlier notice to read"))
+			tc.setup(h)
+
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlE})
+			require.Equal(t, stateHelp, h.state, "precondition: the details are open over the form")
+			_, _ = h.Update(tc.reply(naming))
+			require.Equal(t, stateHelp, h.state, "the reply must not act while the details are open")
+
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+			require.Same(t, naming, h.namingInstance, "precondition: back on the same form")
+			tc.check(t, h)
+		})
+	}
+}
+
+// TestNamingFormNestedFieldsAdvertiseNoDetailsKey: the pinned notice stays on
+// the bar while a nested field is open, but no key opens the details there —
+// the prompt types E and uses ctrl+e as end-of-line, the pickers answer
+// neither — so the clipped notice must not advertise one.
+func TestNamingFormNestedFieldsAdvertiseNoDetailsKey(t *testing.T) {
+	cases := []struct {
+		name  string
+		open  func(t *testing.T, h *home)
+		state state
+	}{
+		{"program", func(t *testing.T, h *home) {
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
+		}, stateSelectProgram},
+		{"prompt", func(t *testing.T, h *home) {
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyShiftTab})
+		}, statePromptInput},
+		{"backend", func(t *testing.T, h *home) {
+			stubBackends(t, twoUsableBackends(), nil)
+			deliverFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlR})
+		}, stateSelectBackend},
+		{"account", func(t *testing.T, h *home) {
+			stubAccounts(t, twoAgentsWithAccounts(), nil)
+			deliverFormKey(t, h, tea.KeyMsg{Type: tea.KeyCtrlO})
+		}, stateSelectAccount},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _ := namingFormWithConflict(t)
+			tc.open(t, h)
+			require.Equal(t, tc.state, h.state, "precondition: the nested field is open")
+			_ = h.View()
+			bar := h.errBox.String()
+			assert.Contains(t, bar, "conflicts with", "the pinned notice stays visible")
+			assert.NotContains(t, bar, "details", "no details key works in a nested field")
+
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+			require.Equal(t, stateNew, h.state, "precondition: esc returns to the form")
+			_ = h.View()
+			assert.Contains(t, h.errBox.String(), "ctrl+e details", "back on the form, ctrl+e is advertised again")
+		})
+	}
+}

@@ -313,16 +313,25 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backendCatalogMsg:
 		// The naming form's backend field asked the daemon which backends this repo
 		// can use (#1933); open the picker over the answer, if the form is still open.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleBackendCatalog(msg) })
 	case accountRegistryMsg:
 		// The naming form's account field asked the daemon which credential accounts
 		// it holds (#3844); open the picker over the answer, if the form is still
 		// open ON THE SAME PROGRAM — see handleAccountRegistry.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountRegistry(msg) })
 	case accountDefaultMsg:
 		// The naming form asked which account this PROJECT would apply to a create
 		// that names none (#3386); preselect it, so the default is visible and
 		// changeable rather than applied in silence.
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
 		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was

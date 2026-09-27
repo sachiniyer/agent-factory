@@ -300,4 +300,13 @@ func TestErrBoxDetailsHintOverride(t *testing.T) {
 	if got := e.String(); !strings.Contains(got, "E details") || strings.Contains(got, "ctrl+e") {
 		t.Errorf("clearing the override must restore E details, got %q", got)
 	}
+
+	e.HideDetailsHint(true)
+	if got := e.String(); strings.Contains(got, "details") {
+		t.Errorf("a hidden hint must advertise no details key, got %q", got)
+	}
+	e.HideDetailsHint(false)
+	if got := e.String(); !strings.Contains(got, "E details") {
+		t.Errorf("unhiding must restore the hint, got %q", got)
+	}
 }

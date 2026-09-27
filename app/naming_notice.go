@@ -27,6 +27,9 @@ type namingFormNotice struct {
 	instance *session.Instance
 	// returnFromDetails sends the details overlay back to the form on dismissal.
 	returnFromDetails bool
+	// deferred holds the form's daemon replies that arrived while its details
+	// overlay was open, to be replayed once the form is back.
+	deferred []tea.Msg
 }
 
 // handleNamingFormKey is the naming form's key entry point. It opens the
@@ -50,9 +53,24 @@ func (m *home) pinningNamingNotice(handle func() (tea.Model, tea.Cmd)) (tea.Mode
 	before := m.transientNoticeID
 	mod, cmd := handle()
 	if m.transientNoticeID != before && m.namingInstance != nil {
-		m.namingNotice = namingFormNotice{id: m.transientNoticeID, instance: m.namingInstance}
+		m.namingNotice.id, m.namingNotice.instance = m.transientNoticeID, m.namingInstance
 	}
 	return mod, cmd
+}
+
+// deferNamingReply holds a daemon reply for the naming form that lands while
+// the form's details overlay is open, and reports whether it did. Each reply's
+// handler drops it unless the form has the keyboard, so without this a ctrl+e
+// at the wrong moment loses the answer — and a backend picker promised by the
+// new_remote binding stays pending, with the form answering "Loading backends…"
+// to every submit.
+func (m *home) deferNamingReply(msg tea.Msg, naming *session.Instance) bool {
+	if m.state != stateHelp || !m.namingNotice.returnFromDetails ||
+		naming == nil || naming != m.namingInstance {
+		return false
+	}
+	m.namingNotice.deferred = append(m.namingNotice.deferred, msg)
+	return true
 }
 
 // namingNoticePinned reports whether noticeID was raised by the naming form
@@ -67,14 +85,39 @@ func (m *home) namingNoticePinned(noticeID uint64) bool {
 func (m *home) returnToNamingFormAfterDetails() bool {
 	back := m.namingNotice.returnFromDetails && m.namingInstance != nil
 	m.namingNotice.returnFromDetails = false
+	if !back {
+		m.namingNotice.deferred = nil
+	}
 	return back
 }
 
-// noticeDetailsHint is the details hint for the current state; "" means the
-// error_details binding's own.
-func (m *home) noticeDetailsHint() string {
-	if m.state == stateNew && m.namingInstance != nil {
-		return namingFormDetailsHint
+// replayDeferredNamingReplies delivers, in arrival order, the replies held
+// while the form's details overlay was open. It runs once the form has the
+// keyboard again, synchronously, so no key can reach the form ahead of them.
+func (m *home) replayDeferredNamingReplies() tea.Cmd {
+	deferred := m.namingNotice.deferred
+	m.namingNotice.deferred = nil
+	cmds := make([]tea.Cmd, 0, len(deferred))
+	for _, msg := range deferred {
+		_, cmd := m.Update(msg)
+		cmds = append(cmds, cmd)
 	}
-	return ""
+	return tea.Batch(cmds...)
+}
+
+// noticeDetailsHint is the details hint for the current state; "" means the
+// error_details binding's own. hide drops the hint inside the form's nested
+// fields: the prompt types E and uses ctrl+e as end-of-line, and the pickers
+// answer neither, so no key opens the details there.
+func (m *home) noticeDetailsHint() (hint string, hide bool) {
+	if m.namingInstance == nil {
+		return "", false
+	}
+	switch m.state {
+	case stateNew:
+		return namingFormDetailsHint, false
+	case stateSelectProgram, stateSelectBackend, stateSelectAccount, statePromptInput:
+		return "", true
+	}
+	return "", false
 }
