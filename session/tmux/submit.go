@@ -89,8 +89,9 @@ type deliveryObservation struct {
 // suffix whose appearance proves the whole paste drained; renderWitness is a
 // disjoint prefix whose appearance proves the pane DID render this payload and
 // can therefore support a terminal negative when completion is still absent.
-// payload is the whole normalized text, which only the positional newest-render
-// check reads (#4884). Baselines prefer the capture after the pre-submit clear (and conservatively
+// payload is the whole normalized text and baselineText the normalized baseline
+// frame; only the positional newest-render check reads them (#4884). Baselines
+// prefer the capture after the pre-submit clear (and conservatively
 // fall back to the pre-clear frame if that capture fails), so old prompt text
 // in scrollback cannot be mistaken for evidence from this paste. If neither
 // capture succeeds, baselineCaptured stays false and no count comparison may
@@ -102,6 +103,7 @@ type deliveryProbe struct {
 	renderWitness         string
 	renderWitnessBaseline int
 	payload               string
+	baselineText          string
 }
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -721,6 +723,7 @@ func newDeliveryProbe(text string) deliveryProbe {
 func (p deliveryProbe) withBaseline(content string) deliveryProbe {
 	normalized := normalizeDelivery(content)
 	p.baselineCaptured = true
+	p.baselineText = normalized
 	if p.completion != "" {
 		p.completionBaseline = strings.Count(normalized, p.completion)
 	}
@@ -853,7 +856,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 			// cut short means absent.
 			witnessNew := probe.baselineCaptured && probe.renderWitness != "" &&
 				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline
-			_, newestWhole := probe.newestRender(normalized)
+			_, _, newestWhole := probe.newestRender(normalized)
 			if probe.baselineCaptured &&
 				(strings.Count(normalized, probe.completion) > probe.completionBaseline ||
 					witnessNew && newestWhole) {

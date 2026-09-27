@@ -188,6 +188,12 @@ func (p *slidingClaudePane) counts() (pastes, enters int) {
 // scrolled away; the newer copy is whole.
 func newHeartbeatPane(t *testing.T) *slidingClaudePane {
 	t.Helper()
+	return newAlignedPane(t, heartbeatPrompt)
+}
+
+// newAlignedPane is newHeartbeatPane for an arbitrary repeated prompt.
+func newAlignedPane(t *testing.T, heartbeatPrompt string) *slidingClaudePane {
+	t.Helper()
 	older := claudeTurn(heartbeatPrompt)
 	newer := claudeTurn(heartbeatPrompt)
 	p := &slidingClaudePane{transcript: append(append([]string{"● earlier work"}, older...), newer...)}
@@ -348,5 +354,43 @@ func TestTruncatedPasteEndingInFooterTextIsNotDelivered(t *testing.T) {
 	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
 	require.Equal(t, 2, pastes,
 		"the stranded first paste must be recognized as absent and redelivered once, not confirmed by the footer's copy of its tail")
+	require.Equal(t, PromptDelivered, status)
+}
+
+// TestPromptQuotingFooterIsNotRedeliveredAfterSubmit is the second Codex review
+// fail-first on #4885. The prompt BEGINS with text claude shows in its
+// persistent footer, so the render witness already sits below the composer,
+// and the #4884 alignment keeps the completion count flat. The paste lands
+// whole and Enter submits it. Anchoring on the frame's last witness picks the
+// footer copy: the whole composer render reads as cut short, the absence proof
+// is taken from the footer to the bottom, and because the footer never changes
+// the pre-retry check sees a "stationary strand" and pastes the submitted
+// prompt a second time. The anchor must be the render this paste produced.
+func TestPromptQuotingFooterIsNotRedeliveredAfterSubmit(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	prompt := strings.TrimSpace(claudeFooter) + " is the mode line; " + heartbeatPrompt
+	probe := newDeliveryProbe(prompt)
+	require.Contains(t, normalizeDelivery(claudeFooter), probe.renderWitness,
+		"fixture: the prompt's render witness must already be on screen in the footer")
+
+	pane := newAlignedPane(t, prompt)
+	pane.onPaste = func(_ int, payload string) []string { return wrapClaude(payload) }
+	submitted := 0
+	pane.onEnter = func(p *slidingClaudePane, _ int) {
+		submitted++
+		p.submitComposerAs(strings.Join(p.composer, " "), "", "✻ Crunching… (esc to interrupt)")
+	}
+	idle := normalizeDelivery(pane.frame())
+	require.Equal(t, 2, strings.Count(idle, probe.completion),
+		"fixture: the idle frame holds the older copy's tail row and the newer copy")
+
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+
+	pastes, _ := pane.counts()
+	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
+	require.Equal(t, 1, pastes, "a prompt that landed whole and submitted must never be pasted again")
 	require.Equal(t, PromptDelivered, status)
 }

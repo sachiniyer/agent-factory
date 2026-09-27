@@ -3,6 +3,7 @@ package tmux
 import (
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -55,39 +56,63 @@ type absenceProof struct {
 	input string
 }
 
+// renderRegion returns the part of a normalized frame a paste can have drawn
+// into: everything above the frame's trailing text that is still identical to
+// the pre-paste baseline. That unchanged bottom is chrome under the composer —
+// a footer, a status line — and text in it predates this paste, so it can
+// neither vouch for a render nor BE the render (#4885 review). Trimming too much
+// only hides content, which can only make a frame read as unproven.
+func (p deliveryProbe) renderRegion(normalized string) string {
+	b := p.baselineText
+	n := 0
+	for n < len(normalized) && n < len(b) && normalized[len(normalized)-1-n] == b[len(b)-1-n] {
+		n++
+	}
+	end := len(normalized) - n
+	for end < len(normalized) && !utf8.RuneStart(normalized[end]) {
+		end++
+	}
+	return normalized[:end]
+}
+
 // newestRender locates this payload's NEWEST render in a normalized frame — the
-// last occurrence of its render witness — and reports whether that render is
-// whole: one contiguous copy of the entire payload covers it. Position, not
-// count, is what makes this sound on a history-less pane, where scrolling can
-// remove an older identical copy in the same frame that adds this one (#4884).
+// last occurrence of its render witness above the unchanged chrome — and
+// reports its offset and whether it is whole: one contiguous copy of the entire
+// payload covers it. Position, not count, is what makes this sound on a
+// history-less pane, where scrolling can remove an older identical copy in the
+// same frame that adds this one (#4884).
 //
-// Contiguity is the point. A completion tail found anywhere after the newest
-// witness is not enough: text already on screen below the composer — a footer
-// the prompt happens to quote — would vouch for a truncated render, send Enter
-// into the strand and suppress its redelivery. Covering, rather than starting
-// at, the newest witness keeps a payload that repeats its own opening text
-// whole.
-func (p deliveryProbe) newestRender(normalized string) (witnessed, whole bool) {
+// Both anchors are restricted to renderRegion. A completion found anywhere
+// after the newest witness would let a footer the prompt ENDS with vouch for a
+// truncated render; a witness found anywhere would let a footer the prompt
+// BEGINS with become the "newest render", so a whole composer render read as
+// cut short and the absence proof sat on chrome that never changes. Covering,
+// rather than starting at, the newest witness keeps a payload that repeats its
+// own opening text whole.
+func (p deliveryProbe) newestRender(normalized string) (at int, witnessed, whole bool) {
 	if p.renderWitness == "" || p.payload == "" {
-		return false, false
+		return -1, false, false
 	}
-	w := strings.LastIndex(normalized, p.renderWitness)
+	region := p.renderRegion(normalized)
+	w := strings.LastIndex(region, p.renderWitness)
 	if w < 0 {
-		return false, false
+		return -1, false, false
 	}
-	c := strings.LastIndex(normalized, p.payload)
-	return true, c >= 0 && c <= w && c+len(p.payload) >= w+len(p.renderWitness)
+	c := strings.LastIndex(region, p.payload)
+	return w, true, c >= 0 && c <= w && c+len(p.payload) >= w+len(p.renderWitness)
 }
 
 // absenceAt returns proof of absence when the frame's newest render of this
 // payload is cut short, and nil when the frame holds no render of it or a whole
-// one. Nil means "not proven", never "delivered".
+// one. Nil means "not proven", never "delivered". The proof's input runs from
+// that render to the very bottom of the frame, chrome included, so a change
+// anywhere below the anchor breaks it.
 func (p deliveryProbe) absenceAt(normalized string) *absenceProof {
-	witnessed, whole := p.newestRender(normalized)
+	at, witnessed, whole := p.newestRender(normalized)
 	if !witnessed || whole {
 		return nil
 	}
-	return &absenceProof{probe: p, input: normalized[strings.LastIndex(normalized, p.renderWitness):]}
+	return &absenceProof{probe: p, input: normalized[at:]}
 }
 
 // absenceStillProven re-reads the pane immediately before a redelivery and
