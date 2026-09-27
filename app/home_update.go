@@ -24,6 +24,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		if msg.noticeID == m.transientNoticeID {
+			if m.namingNoticePinned(msg.noticeID) {
+				return m, m.clearTransientMessageAfterDelay(msg.noticeID)
+			}
 			// Expire, not Clear: the notice leaves the bar but stays readable
 			// through `E details`. Clearing here is what made that key dead 3
 			// seconds after every notice (#2618).
@@ -310,17 +313,26 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backendCatalogMsg:
 		// The naming form's backend field asked the daemon which backends this repo
 		// can use (#1933); open the picker over the answer, if the form is still open.
-		return m.handleBackendCatalog(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleBackendCatalog(msg) })
 	case accountRegistryMsg:
 		// The naming form's account field asked the daemon which credential accounts
 		// it holds (#3844); open the picker over the answer, if the form is still
 		// open ON THE SAME PROGRAM — see handleAccountRegistry.
-		return m.handleAccountRegistry(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountRegistry(msg) })
 	case accountDefaultMsg:
 		// The naming form asked which account this PROJECT would apply to a create
 		// that names none (#3386); preselect it, so the default is visible and
 		// changeable rather than applied in silence.
-		return m.handleAccountDefault(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -580,7 +592,7 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case stateHelp:
 		return m.handleHelpState(msg)
 	case stateNew:
-		return m.handleStateNew(msg)
+		return m.handleNamingFormKey(msg)
 	case stateConfirm:
 		return m.handleStateConfirm(msg)
 	case stateSearch:
@@ -588,11 +600,11 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case stateSwitchProject:
 		return m.handleStateSwitchProject(msg)
 	case stateSelectProgram:
-		return m.handleStateSelectProgram(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectProgram(msg) })
 	case stateSelectTabKind:
 		return m.handleStateSelectTabKind(msg)
 	case statePromptInput:
-		return m.handleStateInitialPrompt(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateInitialPrompt(msg) })
 	case stateJumpTab:
 		return m.handleStateJumpTab(msg)
 	case stateRenameTab:
@@ -602,9 +614,9 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case stateSelectHandoffResolve:
 		return m.handleStateSelectHandoffResolve(msg)
 	case stateSelectBackend:
-		return m.handleStateSelectBackend(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectBackend(msg) })
 	case stateSelectAccount:
-		return m.handleStateSelectAccount(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectAccount(msg) })
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:
