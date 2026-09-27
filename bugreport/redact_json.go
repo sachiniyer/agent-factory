@@ -36,9 +36,25 @@ func (r *redactor) noteUnknownJSON(v any) {
 	r.noteUnknownJSONRecord(v)
 }
 
+// logOnlyPathBlankJSONKeys are the path-bearing keys whose string values the
+// generic fallback registers for log-scope blanking. The typed path collapses
+// every one of these to a root token (noteRepoRoot for repo_path,
+// noteWorktreeRoot for worktree_path) or, failing a registered root, to the
+// marker via collapsePathField; on the untyped fallback no root can be trusted
+// (#4115), so the same values are blanked in the daemon log tail instead.
+//
+// repo_path is gathered separately (it additionally bounds the worktree-title
+// needle prefix via noteWorktreeTitle) and alternate_path is intentionally
+// absent: the worktree-title machinery already redacts the title segment of
+// its "<repo_path>-<title>" shape and the log-only prefix blank covers the
+// repo prefix, so registering the whole alternate_path would blank across the
+// preserved "-<title>" layout the typed path keeps as "[token]-[redacted]".
+var logOnlyPathBlankJSONKeys = map[string]bool{"worktree_path": true, "path": true}
+
 func (r *redactor) noteUnknownJSONRecord(v any) {
 	titles := make(map[string]struct{})
 	repoPaths := make(map[string]struct{})
+	pathBlanks := make(map[string]struct{})
 	var walk func(any)
 	walk = func(value any) {
 		switch t := value.(type) {
@@ -56,6 +72,9 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 					r.noteTmuxName(s)
 				case key == "repo_path":
 					repoPaths[s] = struct{}{}
+					pathBlanks[s] = struct{}{}
+				case logOnlyPathBlankJSONKeys[key]:
+					pathBlanks[s] = struct{}{}
 				}
 			}
 		case []any:
@@ -68,6 +87,16 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 	// repo_path is already a sensitive fallback key and is dropped below. Use
 	// it only to reproduce the worktree layer's repo-dependent title bound; do
 	// not register an untyped value as a path root or give it a structural role.
+	// Blank the verbatim path values in the daemon log tail so the
+	// separately-collected log section does not ship them bare (#3588's
+	// cross-section parity guarantee, which the typed path upholds via
+	// noteRepoRoot/noteWorktreeRoot and #4115 left unaddressed on the
+	// fallback). The blank is log-scope-only: no noteRepoRoot, no token, and
+	// no consultation by the generic/config arm, so the untyped value has no
+	// structural role anywhere else in the bundle.
+	for path := range pathBlanks {
+		r.noteLogOnlyPathRedaction(path)
+	}
 	for title := range titles {
 		r.noteWorktreeSubdirectoryTitle(title)
 		for repoPath := range repoPaths {

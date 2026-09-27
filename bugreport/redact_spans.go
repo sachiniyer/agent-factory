@@ -143,6 +143,7 @@ func (r *redactor) knownBaseTextSpans(s string) []redactionSpan {
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
+	spans = r.appendLogOnlyPathBlankSpans(spans, s)
 	return spans
 }
 
@@ -168,7 +169,9 @@ func (r *redactor) knownURIPathTextSpans(s string) []redactionSpan {
 	spans = r.appendTmuxNameSpans(spans, s)
 	spans = r.appendWorktreePathTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
 	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
-	return r.appendKnownRootSpansWithBoundary(spans, s, uriKnownRootBoundary)
+	spans = r.appendKnownRootSpansWithBoundary(spans, s, uriKnownRootBoundary)
+	spans = r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, uriKnownRootBoundary, uriWorktreePathBoundary)
+	return spans
 }
 
 func (r *redactor) appendKnownLabelSpans(spans []redactionSpan, s string) []redactionSpan {
@@ -329,6 +332,129 @@ func (r *redactor) appendWorktreeSubdirectoryTitleSpansWithBoundary(
 
 func (r *redactor) appendKnownRootSpans(spans []redactionSpan, s string) []redactionSpan {
 	return r.appendKnownRootSpansWithBoundary(spans, s, knownRootTextBoundary)
+}
+
+// appendLogOnlyPathBlankSpans blanks the verbatim repo paths the generic fallback
+// gathered (noteUnknownJSONRecord → noteLogOnlyPathRedaction) to the marker in
+// log and diagnostic text only — never in the generic/config arm, and never as a
+// numbered root. The typed path collapses the same value to a root token via
+// appendKnownRootSpans; #4115 deliberately registered no root here, so this is the
+// fallback's substitute for the daemon log tail, preserving #4115's "no structural
+// role" while closing #3588's "hold across every section at once" gap.
+//
+// Two contexts are blanked:
+//
+//   - The bare path as a complete value (e.g. repo_path="<path>"), matched at a
+//     known-root text boundary so an unrelated prefix survives.
+//   - The repo-path prefix of a proven sibling worktree path. appendWorktreePathTitleSpans
+//     already redacts the registered title SEGMENT; this blanks the prefix that the
+//     typed path's root-token span would have covered, so the verbatim path does
+//     not survive beside its own redacted title segment.
+//
+// A path a registered root already names — exactly or as an ancestor — is left to
+// appendKnownRootSpans and the worktree-title pass: the root collapse produces the
+// typed path's token-and-layout form (e.g. "[af-home]/archived/<hash>/[redacted]"),
+// which a marker over the same bytes would only destroy. $HOME is deliberately not
+// a "registered root" for this test: collapsing $HOME to "~" rewrites only the
+// prefix and leaves the private repo leaf, so an in-$HOME repo still needs the
+// blank to keep its leaf out of the log.
+func (r *redactor) appendLogOnlyPathBlankSpans(spans []redactionSpan, s string) []redactionSpan {
+	return r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, knownRootTextBoundary, derivedWorktreePathBoundary)
+}
+
+func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
+	spans []redactionSpan,
+	s string,
+	bareBoundary, siblingBoundary pathBoundary,
+) []redactionSpan {
+	if len(r.logOnlyPathBlanks) == 0 {
+		return spans
+	}
+	// Bare path: blank wherever it appears as a complete path value at a text
+	// boundary. A registered root is not required; the value is blanked, not
+	// collapsed, so no token grant is made. Skip any path a registered root
+	// already covers so the root's token-and-remainder form survives.
+	for path := range r.logOnlyPathBlanks {
+		if r.pathUnderRegisteredRoot(path) {
+			continue
+		}
+		scan := 0
+		for scan <= len(s)-len(path) {
+			rel := strings.Index(s[scan:], path)
+			if rel < 0 {
+				break
+			}
+			start := scan + rel
+			end := start + len(path)
+			if bareBoundary(s, start, end) {
+				spans = append(spans, redactionSpan{
+					start: start, end: end, replacement: redactedMarker, priority: spanQuotedValue,
+				})
+				scan = end
+				continue
+			}
+			scan = start + 1
+		}
+	}
+	// Sibling prefix: a registered worktree-title needle proves the bytes after
+	// the dash are title data appendWorktreePathTitleSpans is already redacting.
+	// Blank the repo-path prefix the typed path would have collapsed to a root
+	// token, so the verbatim path does not survive next to its redacted title.
+	for title := range r.worktreePathTitles {
+		if !r.logOnlyPathBlank(title.repoPath) {
+			continue
+		}
+		// A registered root already owns this prefix — exactly or as an ancestor —
+		// so appendKnownRootSpans produces its token form there. Leaving the prefix
+		// to the root pass keeps one redaction per byte range and preserves layout.
+		if r.pathUnderRegisteredRoot(title.repoPath) {
+			continue
+		}
+		needle := title.repoPath + "-" + title.segment
+		scan := 0
+		for scan <= len(s)-len(needle) {
+			rel := strings.Index(s[scan:], needle)
+			if rel < 0 {
+				break
+			}
+			start := scan + rel
+			end := start + len(needle)
+			if siblingBoundary(s, start, end) {
+				spans = append(spans, redactionSpan{
+					start: start, end: start + len(title.repoPath),
+					replacement: redactedMarker, priority: spanQuotedValue,
+				})
+				scan = end
+				continue
+			}
+			scan = start + 1
+		}
+	}
+	return spans
+}
+
+func (r *redactor) logOnlyPathBlank(path string) bool {
+	_, ok := r.logOnlyPathBlanks[path]
+	return ok
+}
+
+// pathUnderRegisteredRoot reports whether a registered root (the AF home, a
+// session's repo, or a worktree) names path exactly or as an ancestor. Such a
+// path is left to appendKnownRootSpans and the worktree-title pass, which
+// produce the typed path's token-and-layout form; a marker over the same bytes
+// would only destroy it.
+//
+// $HOME is deliberately excluded: collapsing it to "~" rewrites only the
+// prefix, leaving the private repo leaf, so an in-$HOME repo still needs the
+// log-only blank (a typed path gets the same effect by registering the repo as
+// a root, which the fallback declines per #4115).
+func (r *redactor) pathUnderRegisteredRoot(path string) bool {
+	for _, root := range r.roots {
+		if _, ok := underRoot(path, root.path); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *redactor) appendKnownRootSpansWithBoundary(

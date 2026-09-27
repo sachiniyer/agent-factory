@@ -105,6 +105,26 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 	r.worktreeSubdirectoryTitles[segment] = struct{}{}
 }
 
+// noteLogOnlyPathRedaction registers an absolute repo path gathered from the
+// generic fallback (noteUnknownJSONRecord) for log-scope blanking only. The
+// typed path registers the same value as a named root via noteRepoRoot so it
+// collapses to a numbered token everywhere; #4115 deliberately declines to
+// trust an untyped repo_path that way. This is the fallback's substitute: the
+// verbatim string is blanked to the marker in the daemon log tail (and any
+// diagnostic provenance that feeds the same matchers) without ever entering
+// r.roots or r.rootTokens, so the value has no structural role in any other
+// section. It mirrors the spellings noteWorktreeTitle stores for the same
+// value, so the sibling-prefix blank and the worktree-title-segment
+// redaction recognize the same occurrence.
+func (r *redactor) noteLogOnlyPathRedaction(path string) {
+	for _, spelling := range absolutePathSpellings(path) {
+		if r.logOnlyPathBlanks == nil {
+			r.logOnlyPathBlanks = make(map[string]struct{})
+		}
+		r.logOnlyPathBlanks[spelling] = struct{}{}
+	}
+}
+
 // noteRoot registers one root under an exact token, reporting whether it was
 // new. A path already registered keeps its FIRST token — two sessions in one
 // repo must read as one repo, and an AF home that is also some session's repo

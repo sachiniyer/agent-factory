@@ -101,6 +101,15 @@ type redactor struct {
 	// only by legacy subdirectory restores with no persisted branch. They are
 	// scrubbed solely below the registered AF-home worktrees directory.
 	worktreeSubdirectoryTitles map[string]struct{}
+	// logOnlyPathBlanks are absolute repo paths gathered from the generic
+	// fallback path (noteUnknownJSONRecord), where the untyped value must not be
+	// trusted as a registered path root (#4115) but still must not survive the
+	// separately-collected daemon log tail (#3588). Each is blanked to the marker
+	// in log and diagnostic text only — noteRepoRoot is never called on it, no
+	// token is granted, and it is never consulted by the generic/config arm —
+	// so the untyped value gets no structural role anywhere in the bundle while
+	// the log section still does not ship the private directory name verbatim.
+	logOnlyPathBlanks map[string]struct{}
 	// engine is this run's share of the shared normalization stage
 	// (internal/redactx): the transform registry plus this redactor's match
 	// policy. Built lazily because tests construct redactor literals directly.
