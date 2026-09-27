@@ -314,8 +314,7 @@ func TestRestartSurvival_HumanCreatedShellTab(t *testing.T) {
 
 	loadStore, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
-	loaded, err := loadStore.LoadInstances()
-	require.NoError(t, err)
+	loaded := loadInstancesForTest(t, loadStore)
 	require.Len(t, loaded, 1)
 
 	restored := loaded[0]

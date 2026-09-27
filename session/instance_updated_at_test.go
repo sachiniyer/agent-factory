@@ -123,8 +123,7 @@ func TestUpdatedAtStorageLoadAndSave(t *testing.T) {
 				ms.data["stored-repo"] = raw
 				storage, err := NewStorage(ms, "")
 				require.NoError(t, err)
-				loaded, err := storage.LoadInstances()
-				require.NoError(t, err)
+				loaded := loadInstancesForTest(t, storage)
 				require.Len(t, loaded, 1)
 				want := updated
 				if want.IsZero() {
