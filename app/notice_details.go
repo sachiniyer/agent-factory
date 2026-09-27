@@ -41,18 +41,29 @@ func (m *home) noticeDetailsKey() (key.Binding, bool) {
 		return key.Binding{}, false
 	}
 	b := keys.GlobalKeyBindings[keys.KeyErrorDetails]
-	return b, b.Enabled() && !onlyHardExit(b)
+	if !b.Enabled() {
+		return key.Binding{}, false
+	}
+	return withoutHardExit(b)
 }
 
-// onlyHardExit reports whether every key of b is ctrl+c, which always quits
-// before any binding is consulted, so b can never open anything.
-func onlyHardExit(b key.Binding) bool {
+// withoutHardExit narrows b to the keys that can reach a binding at all: ctrl+c
+// always quits before any binding is consulted, so a rebind that includes it
+// must neither advertise nor match it. It reports false when nothing is left.
+func withoutHardExit(b key.Binding) (key.Binding, bool) {
+	var rest []string
 	for _, k := range b.Keys() {
 		if k != "ctrl+c" {
-			return false
+			rest = append(rest, k)
 		}
 	}
-	return true
+	if len(rest) == 0 {
+		return key.Binding{}, false
+	}
+	if len(rest) == len(b.Keys()) {
+		return b, true
+	}
+	return key.NewBinding(key.WithKeys(rest...), key.WithHelp(keys.HelpLabel(rest), b.Help().Desc)), true
 }
 
 // noticeDetailsHint is the hint a clipped notice carries in the current state,
@@ -73,7 +84,7 @@ func (m *home) noticeDetailsHint() (hint string, hide bool) {
 // before any state's handler; it is the only way a key opens the details.
 func (m *home) openNoticeDetails(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	b, ok := m.noticeDetailsKey()
-	if !ok || msg.String() == "ctrl+c" || !key.Matches(msg, b) {
+	if !ok || !key.Matches(msg, b) {
 		return m, nil, false
 	}
 	fromForm := m.state == stateNew
