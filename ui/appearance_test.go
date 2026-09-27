@@ -38,7 +38,7 @@ func TestAppearanceOverridesAndSystemDetection(t *testing.T) {
 
 func TestAppearanceHidesRetiredPaletteFromOlderManifest(t *testing.T) {
 	pane := NewConfigPane()
-	pane.SetEntries([]config.ConfigEntry{{Key: "theme"}, {Key: "theme.accent"}, {Key: "appearance", Value: "system", Type: "string", Tier: 1, TierName: "Essentials", Enum: []string{"light", "dark", "system"}}}, "")
+	pane.SetEntries([]config.ConfigEntry{{Key: "theme"}, {Key: "theme.accent"}, {Key: "appearance", Value: "system", Type: "string", Tier: 1, TierName: "Essentials", Enum: []string{"light", "dark", "system"}}}, "", "")
 	require.Len(t, pane.entries, 1)
 	require.Equal(t, "appearance", pane.entries[0].Key)
 }

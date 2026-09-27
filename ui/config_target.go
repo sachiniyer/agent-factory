@@ -53,24 +53,32 @@ import (
 
 // ReadConfigForEditor reads the config the `,` overlay edits, from whichever
 // daemon this af session is attached to. It returns the manifest rows zipped
-// with live values, and the location label the pane puts in its header.
+// with live values, the location label the pane puts in its header, and the
+// resolved project root — "" when the rows are the global view.
 //
 // The app calls it (rather than the pane calling it itself) so the app keeps
 // deciding WHEN to re-read: reopening the editor must show the file as it is
 // now, including a hand-edit or an `af config set` made since the TUI started.
-func ReadConfigForEditor() ([]config.ConfigEntry, string, error) {
+//
+// repoSelector selects the scope: "" is the global config, anything else is a
+// repository path to read the PROJECT-effective stack for — the same layers
+// `af config list --repo` resolves (built-in < global < in-repo < personal
+// project). A project read is pure inspection: the pane renders it read-only
+// (project writes are config.write-project, a separate seam), and the selector
+// resolves on the DAEMON's filesystem, so a remote session reads remote repos.
+func ReadConfigForEditor(repoSelector string) ([]config.ConfigEntry, string, string, error) {
 	if !apiclient.IsRemoteTarget() {
-		return localConfigForEditor()
+		return localConfigForEditor(repoSelector)
 	}
 	client, err := apiclient.NewTargeted()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	defer client.CloseIdleConnections()
 
-	resp, err := client.GetConfig(daemon.GetConfigRequest{})
+	resp, err := client.GetConfig(daemon.GetConfigRequest{RepoPath: repoSelector})
 	if err != nil {
-		return nil, "", remoteConfigRefusal(client, "read config from", "GetConfig", "Nothing was read", err)
+		return nil, "", "", remoteConfigRefusal(client, "read config from", "GetConfig", "Nothing was read", err)
 	}
 	// A real daemon always answers with the whole manifest — GetConfig takes no
 	// key filter. But a REMOTE target is whatever answers the URL, and an empty
@@ -78,28 +86,52 @@ func ReadConfigForEditor() ([]config.ConfigEntry, string, error) {
 	// to edit, on a machine the operator cannot see, is worse than a refusal that
 	// says the URL may not name an af daemon.
 	if len(resp.Entries) == 0 {
-		return nil, "", fmt.Errorf("the config editor read no config keys from the daemon at %s; "+
+		return nil, "", "", fmt.Errorf("the config editor read no config keys from the daemon at %s; "+
 			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
 	}
-	return resp.Entries, remoteConfigLocation(resp.Path), nil
+	if resp.ProjectRoot != "" {
+		// Label the scope the daemon actually resolved — its echo, not the
+		// selector it was sent, so a respelled root is still the honest one.
+		return resp.Entries, fmt.Sprintf("%s · project %s", apiclient.RemoteTargetURL(), resp.ProjectRoot), resp.ProjectRoot, nil
+	}
+	return resp.Entries, remoteConfigLocation(resp.Path), "", nil
 }
 
 // localConfigForEditor is the unchanged local read, moved here verbatim from
-// app.showConfigEditor so both halves of the target decision sit together.
+// app.showConfigEditor so both halves of the target decision sit together —
+// extended with the same repoSelector the remote half sends: "" keeps the
+// global manifest read, a path resolves the project-effective stack through
+// config.ManifestWithRepoValues, the same resolver `af config list --repo`
+// uses in-process.
 //
 // A config that will not load is surfaced rather than swallowed: opening an
 // editor onto a broken file and letting the user "fix" one key would write the
 // rest of the broken state back.
-func localConfigForEditor() ([]config.ConfigEntry, string, error) {
+func localConfigForEditor(repoSelector string) ([]config.ConfigEntry, string, string, error) {
+	if repoSelector != "" {
+		abs, err := config.ResolveUserPath(repoSelector)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("cannot read project config for %q: %w", repoSelector, err)
+		}
+		repo, err := config.RepoFromPath(abs)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("cannot read project config for %q: %w", repoSelector, err)
+		}
+		entries, err := config.ManifestWithRepoValues(repo)
+		if err != nil {
+			return nil, "", "", fmt.Errorf("cannot read project config for %q: %w", repoSelector, err)
+		}
+		return entries, "project " + repo.Root, repo.Root, nil
+	}
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot open the config editor: %w", err)
+		return nil, "", "", fmt.Errorf("cannot open the config editor: %w", err)
 	}
 	configDir, err := config.GetConfigDir()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	return config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName), nil
+	return config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName), "", nil
 }
 
 // applyingConfigSet writes one global config key on whichever daemon this

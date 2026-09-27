@@ -114,7 +114,7 @@ func TestConfigSelectionStylesValueAndAccountState(t *testing.T) {
 		lipgloss.SetHasDarkBackground(mode)
 		pane := NewConfigPane()
 		pane.SetSize(100, 20)
-		pane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "claude", Type: "string", Settable: true, Tier: 1, TierName: "Essentials"}}, "")
+		pane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "claude", Type: "string", Settable: true, Tier: 1, TierName: "Essentials"}}, "", "")
 		require.Contains(t, pane.String(), configSelectedStyle.Render("claude"))
 		for _, loggedIn := range []bool{false, true} {
 			state := "not logged in"

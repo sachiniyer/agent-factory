@@ -189,17 +189,37 @@ func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksRespo
 // would appear to revert.
 //
 // The gap between those two is exactly why every entry carries RequiresRestart.
-func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) error {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return fmt.Errorf("cannot read config: %w", err)
-	}
+func (s *controlServer) GetConfig(req GetConfigRequest, resp *GetConfigResponse) error {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return err
 	}
-	resp.Entries = config.ManifestWithValues(cfg)
 	resp.Path = filepath.Join(configDir, config.TomlConfigFileName)
+
+	// Project scope (#2216 stage 7): resolve on the DAEMON host's filesystem —
+	// the same RepoFromPath the create/backends routes use — and read through
+	// the same layered resolver `af config list --repo` uses. A path that is
+	// not a repository here is an error, never a silent global answer: the UI
+	// scope selector would otherwise show global values labeled as a project's.
+	if req.RepoPath != "" {
+		repo, err := config.RepoFromPath(req.RepoPath)
+		if err != nil {
+			return fmt.Errorf("cannot resolve project config for %q: %w", req.RepoPath, err)
+		}
+		entries, err := config.ManifestWithRepoValues(repo)
+		if err != nil {
+			return fmt.Errorf("cannot read project config for %q: %w", req.RepoPath, err)
+		}
+		resp.Entries = entries
+		resp.ProjectRoot = repo.Root
+		return nil
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("cannot read config: %w", err)
+	}
+	resp.Entries = config.ManifestWithValues(cfg)
 	return nil
 }
 

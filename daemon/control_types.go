@@ -823,13 +823,27 @@ type ReapConfigAgentResponse struct{}
 // values — every user-facing global key, whether it is settable, and what it is
 // set to now. There is no key filter: the manifest is ~20 entries and the editor
 // renders all of them.
-type GetConfigRequest struct{}
+type GetConfigRequest struct {
+	// RepoPath, when non-empty, asks for the PROJECT-effective read `af config
+	// list --repo` performs: the full manifest (global keys plus the repo-only
+	// ones a global file cannot hold) resolved for the repository at that path
+	// on the daemon host — built-in < global < in-repo < personal project. It is
+	// resolved exactly as ListBackends resolves RepoPath, is a pure read (it
+	// registers nothing and records no load observation), and an unresolvable
+	// path is an error rather than a silent global answer. Empty keeps the
+	// historical global-only answer.
+	RepoPath string `json:"repo_path"`
+}
 type GetConfigResponse struct {
 	Entries []config.ConfigEntry `json:"entries"`
 	// Path is the config.toml the values were read from, so the UI can tell the
 	// user which file it is editing (a user with AF_HOME set is otherwise left
-	// guessing).
+	// guessing). It stays the daemon's global file even on a project read: the
+	// layers a project adds live elsewhere, and ProjectRoot names the scope.
 	Path string `json:"path"`
+	// ProjectRoot is the repository root the entries were resolved for, echoed
+	// so a client can label the scope it asked about. Empty on a global read.
+	ProjectRoot string `json:"project_root,omitempty"`
 }
 
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.

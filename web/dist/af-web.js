@@ -6844,9 +6844,13 @@ async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
   await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token2);
 }
-async function getConfig(token2) {
-  const resp = await af("GetConfig", {}, token2);
-  return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+async function getConfig(token2, repoPath = "") {
+  const body = {};
+  if (repoPath !== "") {
+    body.repo_path = repoPath;
+  }
+  const resp = await af("GetConfig", body, token2);
+  return { entries: resp?.entries ?? [], path: resp?.path ?? "", project_root: resp?.project_root ?? "" };
 }
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
@@ -7609,366 +7613,6 @@ function appendStatus(row, status, agent, name) {
   row.append(h("div", { class: "af-accounts-echo" }, status.message));
 }
 
-// src/scrollkeep.ts
-function listToken(parts) {
-  return parts.map((p) => p ?? "none").join("\0");
-}
-function keptScrollTop(previous, next, before) {
-  return previous !== null && previous === next ? before : 0;
-}
-function rebuildKeepingScroll(el2, previous, next, rebuild) {
-  const before = el2.scrollTop;
-  rebuild();
-  const wanted = keptScrollTop(previous, next, before);
-  if (el2.scrollTop !== wanted) {
-    el2.scrollTop = wanted;
-  }
-}
-
-// src/config.ts
-var CONFIG_LIST_TOKEN = "config";
-function tiersInOrder(entries) {
-  const seen = /* @__PURE__ */ new Map();
-  for (const e of entries) {
-    if (!seen.has(e.tier)) {
-      seen.set(e.tier, e.tier_name);
-    }
-  }
-  return [...seen.entries()].sort((a, b) => a[0] - b[0]).map(([tier, name]) => ({ tier, name }));
-}
-var TIER_ADVANCED = 3;
-function controlKind(e) {
-  if (e.type === "bool") {
-    return "checkbox";
-  }
-  if (e.enum && e.enum.length > 0 && e.type !== "table") {
-    return "select";
-  }
-  return "text";
-}
-function canCommit(shown, current) {
-  return shown !== current;
-}
-function shouldCloseSavedField(status, editing, statusIsNew) {
-  return statusIsNew && status !== null && !status.error && status.key === editing;
-}
-function saveNotice(resp) {
-  const parts = [];
-  const warnings = resp.warnings ?? [];
-  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
-    parts.push(resp.restart_notice);
-  }
-  parts.push(...warnings);
-  const addr = resp.listener_addr ?? "";
-  if (addr !== "") {
-    parts.push(`Daemon now listening at ${addr}`);
-  }
-  return parts.join(" \xB7 ");
-}
-function createKeyedQueue() {
-  const tails = /* @__PURE__ */ new Map();
-  return (key, run) => {
-    const prev = tails.get(key) ?? Promise.resolve();
-    const next = prev.then(run, run).catch(() => {
-    });
-    tails.set(key, next);
-    void next.finally(() => {
-      if (tails.get(key) === next) {
-        tails.delete(key);
-      }
-    });
-    return next;
-  };
-}
-var ConfigPane = class {
-  constructor(actions2) {
-    this.actions = actions2;
-    this.el = h("section", { class: "af-config" });
-    this.el.setAttribute("aria-label", "Config");
-  }
-  el;
-  entries = [];
-  registration = { open: false, agent: "" };
-  path = "";
-  status = null;
-  /** The Accounts section's data (#3385). It is rendered by this view but is not
-   *  config: see accounts.ts. */
-  accounts = emptyAccountsState();
-  showAdvanced = false;
-  /** The key whose field is open, if any. Only one row edits at a time: a config
-   *  write is per-key (like `af config set`), so a multi-row "save all" would
-   *  imply an atomicity across keys that the writer does not offer. */
-  editing = null;
-  draft = "";
-  // The live controls a rebuild replaces, so focus can be handed back to whichever of
-  // them had it (#2933). Null whenever that control is not currently rendered.
-  editingInput = null;
-  /** The config key whose input held DOM focus when the in-progress rebuild started,
-   *  so render() can re-point `editingInput` at that row's replacement even when the
-   *  row is no longer the open edit. Live only for the duration of one render (set
-   *  and cleared around the single `this.render()` call). */
-  restoreKey = null;
-  advancedToggle = null;
-  lastEntries = null;
-  lastStatus = null;
-  lastAccounts = null;
-  /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
-   *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
-      return;
-    }
-    const statusIsNew = status !== this.lastStatus;
-    const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
-    if (registrationSucceeded) {
-      const submitted = this.accountInput(accounts.status.agent);
-      if (submitted) submitted.value = "";
-    }
-    this.lastEntries = entries;
-    this.lastStatus = status;
-    this.lastAccounts = accounts;
-    this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
-    this.path = path;
-    this.status = status;
-    this.accounts = accounts;
-    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
-      this.editing = null;
-      this.draft = "";
-    }
-    this.rerenderKeepingUserState();
-  }
-  /**
-   * Re-renders the pane without throwing away what the user was in the middle of.
-   *
-   * Every rebuild replaces the controls, which costs three things the render itself
-   * cannot recover: the reader's scroll offset, focus, and the caret. The typed text
-   * already survives (render reads `draft`); focus did not, and that is the one that
-   * bites hardest — the app's document-level keys are gated on
-   * `isNativeControl(document.activeElement)` (index.ts), so once focus falls back to
-   * <body> the REST of what the user types stops being a value and starts being
-   * shortcuts: a "[" or "]" in a path cycles the view out from under them mid-edit.
-   *
-   * Focus is handed back only to a control that genuinely HAD it, so a rebuild can
-   * never steal focus from wherever the user actually is. Both re-render paths go
-   * through here — the data update and the advanced-settings toggle — because a toggle
-   * that drops its own focus cannot be operated twice from the keyboard.
-   */
-  rerenderKeepingUserState() {
-    const active = document.activeElement;
-    const accountDrafts = this.readAccountDrafts();
-    const accountAgentFocused = active?.getAttribute("aria-label") === "Account agent";
-    const accountSummaryFocused = active === this.el.querySelector(".af-account-disclosure summary");
-    const focusedAccount = active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
-    const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement ? { start: active.selectionStart, end: active.selectionEnd } : null;
-    const wasEditing = this.editingInput !== null && active === this.editingInput;
-    const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
-    const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
-    const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
-    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
-    rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
-    this.restoreKey = null;
-    this.restoreAccountDrafts(accountDrafts);
-    if (wasEditing && this.editingInput) {
-      this.editingInput.focus({ preventScroll: true });
-      if (caretStart !== null) {
-        this.editingInput.setSelectionRange(caretStart, caretEnd ?? caretStart);
-      }
-    } else if (wasToggle && this.advancedToggle) {
-      this.advancedToggle.focus({ preventScroll: true });
-    } else if (accountAgentFocused) {
-      this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
-    } else if (accountSummaryFocused) {
-      this.el.querySelector(".af-account-disclosure summary")?.focus({ preventScroll: true });
-    } else if (focusedAccount !== null) {
-      const field2 = this.accountInput(focusedAccount);
-      field2?.focus({ preventScroll: true });
-      if (field2 && accountCaret?.start != null) {
-        field2.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
-      }
-    }
-  }
-  /** Every register field's current text, keyed by agent. */
-  readAccountDrafts() {
-    const drafts = /* @__PURE__ */ new Map();
-    for (const field2 of this.el.querySelectorAll(`input[${ACCOUNT_INPUT_ATTR}]`)) {
-      const agent = field2.getAttribute(ACCOUNT_INPUT_ATTR);
-      if (agent !== null && field2.value !== "") {
-        drafts.set(agent, field2.value);
-      }
-    }
-    return drafts;
-  }
-  /** Puts them back on the freshly rendered fields. An agent whose row is gone —
-   *  a roster that shrank between renders — simply drops its draft; there is no
-   *  field left to hold it. */
-  restoreAccountDrafts(drafts) {
-    for (const [agent, value] of drafts) {
-      const field2 = this.accountInput(agent);
-      if (field2) {
-        field2.value = value;
-      }
-    }
-  }
-  accountInput(agent) {
-    return this.el.querySelector(
-      `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`
-    );
-  }
-  render() {
-    this.editingInput = null;
-    this.advancedToggle = null;
-    const head = h(
-      "div",
-      { class: "af-config-head" },
-      h("span", { class: "af-config-title" }, "Config"),
-      h("span", { class: "af-view-count" }, String(this.entries.length))
-    );
-    if (this.path !== "") {
-      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} \xB7 ${this.path}`));
-    }
-    const assistantBtn = h(
-      "button",
-      { type: "button", class: "af-ghost af-config-assistant-btn" },
-      "Configure with assistant"
-    );
-    assistantBtn.addEventListener("click", () => this.actions.openAssistant());
-    head.append(assistantBtn);
-    const sections = [];
-    for (const { tier, name } of tiersInOrder(this.entries)) {
-      const inTier = this.entries.filter((e) => e.tier === tier);
-      if (inTier.length === 0) {
-        continue;
-      }
-      const folded = tier === TIER_ADVANCED && !this.showAdvanced;
-      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name.charAt(0).toUpperCase() + name.slice(1)));
-      if (tier === TIER_ADVANCED) {
-        const toggle = h(
-          "button",
-          { type: "button", class: "af-ghost af-config-toggle" },
-          folded ? `Show ${inTier.length} advanced settings` : "Hide advanced settings"
-        );
-        toggle.addEventListener("click", () => {
-          this.showAdvanced = !this.showAdvanced;
-          this.rerenderKeepingUserState();
-        });
-        this.advancedToggle = toggle;
-        heading.append(toggle);
-      }
-      sections.push(heading);
-      if (folded) {
-        continue;
-      }
-      for (const e of inTier) {
-        sections.push(this.renderRow(e));
-      }
-    }
-    const content = sections.length > 0 ? sections : [
-      h(
-        "p",
-        { class: "af-config-empty" },
-        "No settings available. Try Configure with assistant."
-      )
-    ];
-    this.el.replaceChildren(
-      head,
-      h("div", { class: "af-config-list" }, ...content),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
-    );
-  }
-  /** One key: its name, purpose, control, and — when it is the row just written
-   *  or just refused — the echo or the error. */
-  renderRow(e) {
-    const row = h("div", { class: "af-config-row" });
-    row.setAttribute("data-key", e.key);
-    const label = h(
-      "div",
-      { class: "af-config-label" },
-      h("span", { class: "af-config-key" }, e.key),
-      h("span", { class: "af-config-purpose" }, e.purpose)
-    );
-    row.append(label);
-    row.append(this.renderControl(e));
-    const status = this.status;
-    if (status && status.key === e.key) {
-      if (status.error !== "") {
-        row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
-      } else {
-        row.append(h("div", { class: "af-config-echo" }, `set ${status.key} = ${status.value}`));
-        if (status.notice !== "") {
-          row.append(h("div", { class: "af-config-notice" }, status.notice));
-        }
-      }
-    }
-    return row;
-  }
-  /** The control for one key, chosen from the manifest's own description of it:
-   *  a picker when the values are enumerated, a checkbox for a bool, and a text
-   *  field otherwise. Structured rows use the compact JSON CurrentValue emits.
-   *
-   *  The enum and type come from the manifest; Go-side coverage separately pins
-   *  every global row to the real writer so a rendered field cannot dead-end at
-   *  a save the writer refuses. */
-  renderControl(e) {
-    const kind = controlKind(e);
-    if (kind === "checkbox") {
-      const box = h("input", { type: "checkbox", class: "af-config-check" });
-      box.checked = e.value === "true";
-      box.setAttribute("aria-label", e.key);
-      box.addEventListener("change", () => this.actions.save(e.key, box.checked ? "true" : "false"));
-      return h("div", { class: "af-config-control" }, box);
-    }
-    if (kind === "select") {
-      const select = h("select", { class: "af-input af-config-input" });
-      select.setAttribute("aria-label", e.key);
-      for (const v of e.enum ?? []) {
-        const opt = h("option", { value: v }, v);
-        if (v === e.value) {
-          opt.selected = true;
-        }
-        select.append(opt);
-      }
-      select.addEventListener("change", () => this.actions.save(e.key, select.value));
-      return h("div", { class: "af-config-control" }, select);
-    }
-    const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
-    input.value = this.editing === e.key ? this.draft : e.value;
-    if (this.editing === e.key) {
-      this.editingInput = input;
-    }
-    if (this.restoreKey === e.key && this.editingInput === null) {
-      this.editingInput = input;
-    }
-    input.setAttribute("aria-label", e.key);
-    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
-    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
-    const commit = () => {
-      if (!canCommit(input.value, e.value)) {
-        return;
-      }
-      this.actions.save(e.key, input.value);
-    };
-    const syncSave = () => {
-      save.disabled = !canCommit(input.value, e.value);
-      dirty.hidden = save.disabled;
-    };
-    input.addEventListener("input", () => {
-      this.editing = e.key;
-      this.draft = input.value;
-      this.editingInput = input;
-      syncSave();
-    });
-    input.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") {
-        ev.preventDefault();
-        commit();
-      }
-    });
-    save.addEventListener("click", commit);
-    syncSave();
-    return h("div", { class: "af-config-control" }, input, dirty, save);
-  }
-};
-
 // src/account_scope.ts
 var AMBIENT_ACCOUNT = "";
 function accountAgentFor(program, catalog) {
@@ -8094,6 +7738,1795 @@ function accountSkewMessage(requested, created) {
   }
   return `Session "${created.title}" was created but the daemon applied account "${got}", not the "${want}" that was picked \u2014 it is running as an identity you did not choose. Choose Delete session and create it again.`;
 }
+
+// src/handoff_accounts.ts
+function handoffAccountChoices(accounts, agent, currentAccount = "") {
+  const rows = accountChoices(accounts, agent);
+  return accounts.entries.filter((entry) => entry.agent === agent && entry.name !== currentAccount && !entry.registration_only).map((entry) => ({ ...rows.find((row) => row.value === entry.name), logged_in: entry.logged_in }));
+}
+
+// src/account_selection.ts
+var AccountSelection = class {
+  picked = false;
+  agent = "";
+  value = AMBIENT_ACCOUNT;
+  pick(value) {
+    this.picked = true;
+    this.value = value;
+  }
+  render(accounts, agent, failed = false) {
+    if (accounts === null || !agent && this.namedChoicePending) return AMBIENT_ACCOUNT;
+    const rows = accountChoices(accounts, agent, failed);
+    const changedAgent = agent !== this.agent;
+    this.agent = agent;
+    if (this.picked && (changedAgent || !rows.some((row) => row.value === this.value))) {
+      this.picked = false;
+      this.value = AMBIENT_ACCOUNT;
+      return AMBIENT_ACCOUNT;
+    }
+    const value = this.picked ? this.value : accountDefaultFor(accounts, agent);
+    return rows.some((row) => row.value === value) ? value : AMBIENT_ACCOUNT;
+  }
+  get namedChoicePending() {
+    return this.picked && this.value !== AMBIENT_ACCOUNT;
+  }
+};
+
+// src/backends.ts
+var REPO_DEFAULT = "";
+function backendChoices(catalog) {
+  if (catalog === null) {
+    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
+  }
+  const choices = [
+    {
+      value: REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default:
+      // that is the misconfigured case, where naming a backend would be inventing
+      // one. The reason says what is wrong with the key.
+      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
+      // Taken from the daemon, not inferred here. A repo whose declared default is
+      // broken resolves to that broken backend and FAILS — it does not quietly run
+      // local — so the default is not automatically a safe harbour.
+      status: catalog.default_status,
+      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
+    }
+  ];
+  for (const opt of catalog.backends) {
+    choices.push({
+      value: opt.name,
+      label: opt.label,
+      status: opt.status,
+      reason: opt.status === "available" ? "" : opt.reason ?? ""
+    });
+  }
+  return choices;
+}
+function backendNotice(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 ? "" : choice.reason;
+}
+function backendSelectable(choices, selected) {
+  const choice = choices.find((c) => c.value === selected);
+  return choice === void 0 || choice.status === "available";
+}
+
+// src/dirpicker.ts
+var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
+function pickerLoading(prev) {
+  return { ...prev, loading: true };
+}
+function pickerLoaded(listing) {
+  return { listing, error: null, loading: false };
+}
+function pickerFailed(prev, message) {
+  return { listing: prev.listing, error: message, loading: false };
+}
+function entryNote(entry) {
+  const parts = [];
+  if (entry.is_repo) {
+    parts.push("git repo");
+  }
+  if (entry.is_symlink) {
+    parts.push("link");
+  }
+  return parts.join(" \xB7 ");
+}
+function truncationNote(listing) {
+  if (!listing.truncated) {
+    return "";
+  }
+  return `First ${listing.entries.length} directories \xB7 enter a path for more.`;
+}
+var LAST_DIR_KEY = "af.addproject.dir";
+function loadLastBrowsedDir() {
+  try {
+    return localStorage.getItem(LAST_DIR_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+function persistLastBrowsedDir(path) {
+  try {
+    localStorage.setItem(LAST_DIR_KEY, path);
+  } catch {
+  }
+}
+function directoryPicker(callbacks) {
+  let state = INITIAL_PICKER_STATE;
+  let nav = 0;
+  const upBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-up" }, "Up");
+  upBtn.setAttribute("aria-label", "Go to the parent directory");
+  upBtn.disabled = true;
+  const pathLabel = h("span", { class: "af-dirpicker-path" }, "Loading\u2026");
+  const homeBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-home" }, "Home");
+  homeBtn.setAttribute("aria-label", "Go to the daemon host's home directory");
+  homeBtn.hidden = true;
+  const useHereBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-use-here" }, "Use this");
+  useHereBtn.hidden = true;
+  const head = h("div", { class: "af-dirpicker-head" }, upBtn, pathLabel, homeBtn, useHereBtn);
+  const errorLine = h("p", { class: "af-dirpicker-error", role: "alert" });
+  errorLine.hidden = true;
+  const list = h("div", { class: "af-dirpicker-list" });
+  list.setAttribute("role", "list");
+  const emptyLine = h(
+    "p",
+    { class: "af-dirpicker-empty" },
+    "No subdirectories here \u2014 go up or enter another path."
+  );
+  emptyLine.hidden = true;
+  const note = h("p", { class: "af-dirpicker-note" });
+  const el2 = h("div", { class: "af-dirpicker" }, head, errorLine, list, emptyLine, note);
+  let renderedPath = null;
+  function navigate(path, fallbackToHome = false) {
+    const ticket = ++nav;
+    state = pickerLoading(state);
+    render();
+    void callbacks.load(path).then((listing) => {
+      if (ticket !== nav) {
+        return;
+      }
+      state = pickerLoaded(listing);
+      persistLastBrowsedDir(listing.path);
+      render();
+    }).catch((e) => {
+      if (ticket !== nav) {
+        return;
+      }
+      if (fallbackToHome) {
+        navigate("");
+        return;
+      }
+      state = pickerFailed(state, callbacks.errorText(e));
+      render();
+    });
+  }
+  function render() {
+    const { listing, error, loading } = state;
+    pathLabel.textContent = listing ? listing.path : loading ? "Loading\u2026" : "";
+    pathLabel.title = listing?.path ?? "";
+    upBtn.disabled = loading || !listing || listing.parent === "";
+    homeBtn.hidden = !listing || listing.home === "" || listing.home === listing.path;
+    homeBtn.disabled = loading;
+    useHereBtn.hidden = !listing?.is_repo;
+    if (listing?.is_repo) {
+      useHereBtn.disabled = loading;
+      useHereBtn.title = `Use ${listing.path} as the project`;
+    }
+    if (error) {
+      errorLine.textContent = error;
+      errorLine.hidden = false;
+    } else {
+      errorLine.textContent = "";
+      errorLine.hidden = true;
+    }
+    const scrollTop = list.scrollTop;
+    list.replaceChildren();
+    if (listing) {
+      for (const entry of listing.entries) {
+        list.append(row(entry, loading));
+      }
+    }
+    if (listing && listing.path === renderedPath) {
+      list.scrollTop = scrollTop;
+    }
+    renderedPath = listing?.path ?? null;
+    emptyLine.hidden = !listing || listing.entries.length > 0 || error !== null;
+    note.textContent = listing ? truncationNote(listing) : "";
+  }
+  function row(entry, loading) {
+    const label = h(
+      "span",
+      { class: "af-dirpicker-name" },
+      icon(entry.is_repo ? "folder-git" : "folder"),
+      h("span", { class: "af-dirpicker-text" }, entry.name)
+    );
+    const meta = entryNote(entry);
+    const open = h("button", { type: "button", class: "af-dirpicker-item" }, label);
+    if (meta) {
+      open.append(h("span", { class: "af-dirpicker-meta" }, meta));
+    }
+    open.title = entry.path;
+    open.setAttribute("aria-label", `Open ${entry.path}`);
+    open.disabled = loading;
+    open.addEventListener("click", (e) => {
+      e.stopPropagation();
+      navigate(entry.path);
+    });
+    const item = h("div", { class: "af-dirpicker-row" }, open);
+    item.setAttribute("role", "listitem");
+    if (entry.is_repo) {
+      item.classList.add("af-dirpicker-row-repo");
+      const use = h("button", { type: "button", class: "af-ghost af-dirpicker-use" }, "Use");
+      use.title = `Use ${entry.path} as the project`;
+      use.setAttribute("aria-label", `Use ${entry.path} as the project`);
+      use.disabled = loading;
+      use.addEventListener("click", (e) => {
+        e.stopPropagation();
+        callbacks.onSelect(entry.path);
+      });
+      item.append(use);
+    }
+    return item;
+  }
+  upBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const parent = state.listing?.parent;
+    if (parent) {
+      navigate(parent);
+    }
+  });
+  homeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const home = state.listing?.home;
+    if (home) {
+      navigate(home);
+    }
+  });
+  useHereBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const path = state.listing?.path;
+    if (path) {
+      callbacks.onSelect(path);
+    }
+  });
+  return {
+    el: el2,
+    start() {
+      const remembered = loadLastBrowsedDir();
+      navigate(remembered, remembered !== "");
+    }
+  };
+}
+
+// src/programs.ts
+var PROGRAM_REPO_DEFAULT = "";
+function programChoices(catalog, keep = "") {
+  const choices = [
+    {
+      value: PROGRAM_REPO_DEFAULT,
+      // "Repo default" with no parenthetical when the daemon reports no default —
+      // naming an agent there would be inventing one.
+      label: catalog === null || catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`
+    }
+  ];
+  for (const opt of catalog?.programs ?? []) {
+    choices.push({ value: opt.name, label: opt.name });
+  }
+  const extra = keep.trim();
+  if (extra !== "" && !choices.some((c) => c.value === extra)) {
+    choices.push({ value: extra, label: extra });
+  }
+  return choices;
+}
+function handoffAgentChoices(catalog, current) {
+  const cur = current.trim();
+  const choices = [];
+  for (const opt of catalog?.programs ?? []) {
+    if (opt.name === cur) {
+      continue;
+    }
+    choices.push({ value: opt.name, label: opt.name });
+  }
+  return choices;
+}
+
+// src/modals.ts
+function asForm(card, onSubmit) {
+  const form = h("form", { class: "af-modal-form" });
+  while (card.firstChild) {
+    form.append(card.firstChild);
+  }
+  card.append(form);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    onSubmit();
+  });
+}
+function newSessionModal(projects, defaultProject2, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: "New session",
+    confirmLabel: "Create",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
+  titleInput.setAttribute("aria-label", "Session title");
+  let suggestedName = "";
+  const projectSelect = h("select", { class: "af-input" });
+  projectSelect.setAttribute("aria-label", "Project");
+  if (projects.length === 0) {
+    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
+    opt.disabled = true;
+    opt.selected = true;
+    projectSelect.append(opt);
+    confirmBtn.disabled = true;
+  } else {
+    for (const p of projects) {
+      projectSelect.append(h("option", { value: p }, projectLabel(p)));
+    }
+    if (defaultProject2 && projects.includes(defaultProject2)) {
+      projectSelect.value = defaultProject2;
+    }
+  }
+  const programSelect = h("select", { class: "af-input" });
+  programSelect.setAttribute("aria-label", "Program");
+  let programs = programChoices(null);
+  const backendSelect = h("select", { class: "af-input" });
+  backendSelect.setAttribute("aria-label", "Backend");
+  const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
+  backendHint.setAttribute("role", "status");
+  let choices = backendChoices(null);
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "Account");
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
+  accountHint.setAttribute("role", "status");
+  let accounts = null;
+  let accountsFailed = false;
+  let programCatalog = null;
+  let accountRows = accountChoices(null, "");
+  const accountSelection = new AccountSelection();
+  let programsPending = false;
+  let busy = false;
+  const defaults = defaultsDisclosure();
+  const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
+  const accountSlot = h("div", { class: "af-defaults-account-slot" });
+  const syncSubmitState = () => {
+    backendHint.textContent = backendNotice(choices, backendSelect.value);
+    accountHint.textContent = accountNotice(accountRows, accountSelect.value);
+    if (accountSelection.namedChoicePending && !programsPending && (accountsFailed || programCatalog === null)) {
+      accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
+    }
+    const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace(/^Use configured default \((.*)\)$/, "$1 (default)");
+    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog));
+    defaults.setSummary([
+      `Program: ${choiceLabel(programSelect)}`,
+      `Backend: ${choiceLabel(backendSelect)}`,
+      ...accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`]
+    ]);
+    const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
+    if (accountBlock.parentElement !== accountParent) {
+      const focused = document.activeElement;
+      const ownsFocus = !!focused && accountBlock.contains(focused);
+      accountParent.append(accountBlock);
+      if (ownsFocus) focused.focus();
+    }
+    accountSlot.hidden = !accountNeedsChoice;
+    if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
+    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value) || (accounts === null || programsPending || !accountAgentFor(programSelect.value, programCatalog)) && accountSelection.namedChoicePending;
+  };
+  const chromeSetBusy = handle.setBusy.bind(handle);
+  handle.setBusy = (b) => {
+    busy = b;
+    chromeSetBusy(b);
+    syncSubmitState();
+  };
+  const renderChoices = () => {
+    const previous = backendSelect.value;
+    backendSelect.replaceChildren();
+    for (const choice of choices) {
+      backendSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
+    syncSubmitState();
+  };
+  backendSelect.addEventListener("change", syncSubmitState);
+  const renderAccounts = () => {
+    const agent = accountAgentFor(programSelect.value, programCatalog);
+    const knownAccounts = programsPending ? null : accounts;
+    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
+    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
+    accountSelect.replaceChildren();
+    for (const choice of accountRows) {
+      accountSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    accountSelect.value = selected;
+    syncSubmitState();
+  };
+  accountSelect.addEventListener("change", () => {
+    accountSelection.pick(accountSelect.value);
+    syncSubmitState();
+  });
+  programSelect.addEventListener("change", renderAccounts);
+  const renderPrograms = () => {
+    const previous = programSelect.value;
+    programSelect.replaceChildren();
+    for (const choice of programs) {
+      programSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
+    renderAccounts();
+  };
+  let loadSeq = 0;
+  const loadCatalogsFor = (repoPath) => {
+    const seq = ++loadSeq;
+    accounts = null;
+    programsPending = true;
+    accountsFailed = false;
+    renderAccounts();
+    void callbacks.loadPrograms(repoPath).then((catalog) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      programsPending = false;
+      programCatalog = catalog;
+      programs = programChoices(catalog);
+      renderPrograms();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      programsPending = false;
+      programCatalog = null;
+      programs = programChoices(null);
+      renderPrograms();
+    });
+    void callbacks.loadAccounts(repoPath).then((registry) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      accounts = registry;
+      renderAccounts();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      accounts = null;
+      accountsFailed = true;
+      renderAccounts();
+    });
+    if (repoPath === "") {
+      choices = backendChoices(null);
+      renderChoices();
+      return;
+    }
+    void callbacks.loadBackends(repoPath).then((catalog) => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      choices = backendChoices(catalog);
+      renderChoices();
+    }).catch(() => {
+      if (seq !== loadSeq) {
+        return;
+      }
+      choices = backendChoices(null);
+      renderChoices();
+    });
+  };
+  projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
+  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
+  promptArea.setAttribute("aria-label", "Initial prompt");
+  defaults.body.append(
+    field("Program", programSelect),
+    field("Backend", backendSelect),
+    backendHint,
+    accountBlock
+  );
+  body.append(field("Title", titleInput), field("Project", projectSelect), field("Prompt", promptArea), accountSlot, defaults.el);
+  renderPrograms();
+  renderChoices();
+  renderAccounts();
+  loadCatalogsFor(projectSelect.value);
+  void callbacks.suggestName().then((name) => {
+    if (name !== "") {
+      suggestedName = name;
+      titleInput.placeholder = name;
+    }
+  }).catch(() => {
+  });
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const typed = titleInput.value.trim();
+    const title = typed !== "" ? typed : suggestedName;
+    if (projectSelect.value === "") {
+      handle.setError("A project is required.");
+      return;
+    }
+    if (title === "") {
+      handle.setError("A title is required.");
+      return;
+    }
+    handle.setError(null);
+    callbacks.onSubmit({
+      title,
+      repoPath: projectSelect.value,
+      program: programSelect.value,
+      prompt: promptArea.value,
+      // REPO_DEFAULT ("") when the user did not choose — createSession then omits
+      // `backend` entirely and the repo's config decides (#1933).
+      backend: backendSelect.value,
+      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
+      // `account` entirely and the daemon applies its default, if any (#3844).
+      account: accountSelect.value
+    });
+  });
+  queueMicrotask(() => titleInput.focus());
+  return handle;
+}
+function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: `Hand off ${sessionTitle}`,
+    confirmLabel: "Hand off",
+    confirmClass: "af-primary",
+    onCancel: callbacks.onCancel
+  });
+  let accounts = { entries: [], agents: [] };
+  let accountsLoaded = !callbacks.loadAccounts;
+  let accountsFailed = false;
+  const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  const isCurrentAgent = (agent) => handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
+  const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
+  let accountRows = [];
+  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
+  const accountSelect = h("select", { class: "af-input" });
+  accountSelect.setAttribute("aria-label", "New account");
+  const syncAccountSelection = () => {
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
+    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
+  };
+  const refreshAccounts2 = () => {
+    const agent = agentSelect.value;
+    const choices = handoffAccountChoices(
+      accounts,
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
+    );
+    accountRows = choices;
+    accountSelect.replaceChildren();
+    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
+    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
+    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
+    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
+    accountSelect.value = selected?.value ?? "";
+    accountSelect.disabled = choices.length === 0;
+    syncAccountSelection();
+  };
+  const agentSelect = h("select", { class: "af-input" });
+  agentSelect.setAttribute("aria-label", "New agent");
+  confirmBtn.disabled = true;
+  let catalogChoices = null;
+  const renderChoices = (choices) => {
+    agentSelect.replaceChildren();
+    for (const choice of choices) {
+      agentSelect.append(h("option", { value: choice.value }, choice.label));
+    }
+    confirmBtn.disabled = choices.length === 0;
+  };
+  const refreshAgentChoices = () => {
+    if (catalogChoices === null || !accountsLoaded) return;
+    const hasAccount = (agent) => handoffAccountChoices(
+      accounts,
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
+    ).length > 0;
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map((choice) => choice.value),
+      currentAgent,
+      recordedProgram,
+      accounts.resolved_agents
+    );
+    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
+    }
+    const previous = agentSelect.value;
+    renderChoices(choices);
+    if (choices.some((choice) => choice.value === previous)) agentSelect.value = previous;
+    refreshAccounts2();
+    if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
+  };
+  body.append(
+    field("New agent", agentSelect),
+    field("New account", accountSelect),
+    accountHint,
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "Start a new agent with a summary. Keep the worktree and branch."
+    )
+  );
+  void callbacks.loadPrograms().then((catalog) => {
+    catalogChoices = handoffAgentChoices(catalog, "");
+    refreshAgentChoices();
+  }).catch(() => {
+    renderChoices([]);
+    handle.setError("Could not load the agent list. Try again.");
+  });
+  agentSelect.addEventListener("change", refreshAccounts2);
+  accountSelect.addEventListener("change", syncAccountSelection);
+  if (callbacks.loadAccounts) {
+    void callbacks.loadAccounts().then((result) => {
+      accounts = result;
+      accountsLoaded = true;
+      refreshAgentChoices();
+    }).catch(() => {
+      accountsLoaded = true;
+      accountsFailed = true;
+      refreshAgentChoices();
+      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+    });
+  }
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const target = agentSelect.value;
+    if (target === "") {
+      handle.setError("Pick an agent to hand off to.");
+      return;
+    }
+    handle.setError(null);
+    if (!accountsLoaded || requiresAccount(target) && !accountSelect.value) {
+      handle.setError("Pick another registered account.");
+      return;
+    }
+    callbacks.onSubmit(target, accountSelect.value);
+  });
+  queueMicrotask(() => agentSelect.focus());
+  return handle;
+}
+function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram) {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
+}
+function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, resolvedAgents) {
+  const matched = catalogValues.find((value) => handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== void 0) return matched;
+  return resolvedAgents === void 0 ? currentAgent : void 0;
+}
+function deletionConfirmationBody(opts) {
+  if (opts.archived && opts.offBox) {
+    return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
+  }
+  if (opts.archived && !opts.externalWorktree) {
+    return opts.branchCreatedByUs ? "Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session." : "Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session.";
+  }
+  if (opts.offBox) {
+    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
+  }
+  if (opts.externalWorktree) {
+    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
+  }
+  return opts.branchCreatedByUs ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them." : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
+}
+function confirmModal(opts) {
+  const copy = {
+    kill: {
+      title: `Delete session ${opts.sessionTitle}?`,
+      confirmLabel: "Delete session",
+      confirmClass: "af-danger",
+      body: deletionConfirmationBody(opts)
+    },
+    archive: {
+      title: `Archive ${opts.sessionTitle}?`,
+      confirmLabel: "Archive",
+      confirmClass: "af-primary",
+      body: "Local: move the worktree to the archive. Sandboxes: publish work, then remove the sandbox. Restore anytime."
+    },
+    restore: {
+      title: `Restore ${opts.sessionTitle}?`,
+      confirmLabel: "Restore",
+      confirmClass: "af-primary",
+      body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain."
+    }
+  }[opts.action];
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
+    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
+    confirmClass: copy.confirmClass,
+    onCancel: opts.onCancel
+  });
+  body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
+  const card = handle.el.firstElementChild;
+  if (opts.immediateRestore) {
+    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
+    body.append(progress);
+    card.tabIndex = -1;
+    card.setAttribute("aria-describedby", progress.id);
+    let isBusy = false;
+    card.addEventListener("keydown", (event) => {
+      if (isBusy && event.key === "Tab") {
+        event.preventDefault();
+        event.stopPropagation();
+        card.focus();
+      }
+    });
+    const setBusy = handle.setBusy;
+    handle.setBusy = (busy) => {
+      isBusy = busy;
+      if (busy && card.isConnected) card.focus();
+      setBusy(busy);
+      card.setAttribute("aria-busy", String(busy));
+      progress.textContent = busy ? "Restoring session\u2026" : "";
+      confirmBtn.textContent = busy ? "Restoring\u2026" : "Retry restore";
+    };
+    const setError = handle.setError;
+    handle.setError = (message) => {
+      setError(message);
+      if (message && card.isConnected) confirmBtn.focus();
+    };
+  }
+  let acknowledgment;
+  if (opts.action === "kill" && opts.isRoot) {
+    body.append(h(
+      "p",
+      { class: "af-modal-text af-modal-danger" },
+      `\u201C${opts.sessionTitle}\u201D is the daemon-managed root agent. Deleting it stops scheduled and watch-task delivery to it until it self-heals (usually about two minutes) or you restart the daemon.`
+    ));
+    acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
+    body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
+  }
+  asForm(card, () => {
+    if (acknowledgment && !acknowledgment.checked) {
+      handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
+      return;
+    }
+    handle.setError(null);
+    opts.onConfirm();
+  });
+  if (acknowledgment) {
+    const checkbox = acknowledgment;
+    const focusAcknowledgment = () => {
+      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
+    };
+    card.addEventListener("focus", () => {
+      if (!checkbox.disabled) focusAcknowledgment();
+    });
+    queueMicrotask(focusAcknowledgment);
+  }
+  return handle;
+}
+function confirmDeleteProjectModal(opts) {
+  const word = opts.sessionCount === 1 ? "session" : "sessions";
+  const { handle, body } = modalChrome({
+    title: `Delete project ${opts.projectLabel}?`,
+    confirmLabel: "Delete project",
+    confirmClass: "af-primary",
+    onCancel: opts.onCancel
+  });
+  let message = opts.sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (opts.inPlaceCount > 0) {
+    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
+  body.append(h("p", { class: "af-modal-text" }, message));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    handle.setError(null);
+    opts.onConfirm();
+  });
+  return handle;
+}
+function addProjectModal(callbacks) {
+  return checkoutPathModal({
+    title: "Add project",
+    confirmLabel: "Add project",
+    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    ...callbacks
+  });
+}
+function rebindProjectModal(opts) {
+  const { projectLabel: projectLabel2, ...shared } = opts;
+  return checkoutPathModal({
+    title: `Rebind project ${projectLabel2}`,
+    confirmLabel: "Rebind",
+    hint: "Enter the checkout this project should track now \u2014 an absolute repo path on the daemon host (~ works).",
+    ...shared
+  });
+}
+function checkoutPathModal(opts) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
+    confirmClass: "af-primary",
+    onCancel: opts.onCancel
+  });
+  const pathInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "/path/to/repo  or  ~/repo",
+    autocomplete: "off"
+  });
+  pathInput.setAttribute("aria-label", "Repository path");
+  const { loadDirectory, errorText: errorText2 } = opts;
+  let picker = null;
+  if (loadDirectory && errorText2) {
+    picker = directoryPicker({
+      load: loadDirectory,
+      errorText: errorText2,
+      onSelect: (path) => {
+        pathInput.value = path;
+        handle.setError(null);
+        confirmBtn.focus();
+      }
+    });
+    body.append(
+      h(
+        "div",
+        { class: "af-modal-field" },
+        h("span", { class: "af-modal-label" }, "Browse host"),
+        picker.el
+      )
+    );
+  }
+  body.append(
+    field("Repository path", pathInput),
+    h(
+      "p",
+      { class: "af-modal-hint" },
+      opts.hint
+    )
+  );
+  pathInput.addEventListener("input", () => handle.setError(null));
+  const card = handle.el.firstElementChild;
+  asForm(card, () => {
+    const path = pathInput.value.trim();
+    if (path === "") {
+      handle.setError("Enter or choose a repo path.");
+      return;
+    }
+    handle.setError(null);
+    opts.onSubmit(path);
+  });
+  queueMicrotask(() => {
+    if (picker) {
+      card.focus();
+      picker.start();
+      return;
+    }
+    pathInput.focus();
+  });
+  return handle;
+}
+function projectLabel(root2) {
+  const parts = root2.replace(/\/+$/, "").split("/");
+  const base = parts[parts.length - 1] || root2;
+  const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
+  return parent ? `${base}  (${parent}/${base})` : base;
+}
+function removeTaskModal(name, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
+  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
+}
+function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel
+  });
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. If the pane does not show it, cancel and use Retry instead \u2014 that submits the mission a second time."
+    )
+  );
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
+}
+
+// src/types.ts
+var Liveness = {
+  Unset: 0,
+  Running: 1,
+  Ready: 2,
+  Lost: 3,
+  Dead: 4,
+  Archived: 5,
+  LimitReached: 6
+};
+var TabKind = {
+  Agent: 0,
+  Shell: 1,
+  Process: 2,
+  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
+   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
+   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
+  Web: 3,
+  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
+   *  per-session code-server rooted at the session's worktree, reachable only
+   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
+   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
+   *  lockstep with the Go enum. */
+  VSCode: 4
+};
+var InFlightOp = {
+  None: 0,
+  Creating: 1,
+  Killing: 2,
+  Archiving: 3,
+  Restoring: 4,
+  Replacing: 5,
+  Respawning: 6
+};
+var Status = {
+  Running: 0,
+  Ready: 1,
+  Loading: 2,
+  Deleting: 3,
+  Dead: 4,
+  Lost: 5,
+  Archived: 6
+};
+
+// src/time.ts
+function formatDuration(ms) {
+  const age = Math.max(0, ms);
+  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
+  if (age < minute) return "<1m";
+  if (age < hour) return `${Math.floor(age / minute)}m`;
+  if (age < day) return `${Math.floor(age / hour)}h`;
+  return `${Math.floor(age / day)}d`;
+}
+function formatTime(value, now = /* @__PURE__ */ new Date()) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  const delta = date.getTime() - now.getTime();
+  if (Math.abs(delta) < 24 * 60 * 6e4) {
+    const duration = formatDuration(Math.abs(delta));
+    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
+  }
+  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// src/status.ts
+var OPERATOR_KIND_LABELS = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived"
+};
+var ROW_KIND_LABELS = {
+  ready: "Ready",
+  working: "Working",
+  lost: "Lost",
+  dead: "Dead",
+  limit: "Limit reached",
+  archived: "Archived"
+};
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "restore-gave-up": "restore gave up",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = label;
+  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
+    const { attempts, error } = s.lost_restore_failure;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "attempt" : "attempts";
+      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function formatPaneChurnAge(churn, now) {
+  return formatDuration(now.getTime() - churn.getTime());
+}
+var READY_ICON = "circle";
+var DEAD_ICON = "circle";
+var LOST_ICON = "circle-dashed";
+var ARCHIVED_ICON = "archive";
+var LIMIT_ICON = "diamond";
+var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
+function rowStatus(s) {
+  const op = s.in_flight_op ?? InFlightOp.None;
+  if (op !== InFlightOp.None) {
+    return WORKING;
+  }
+  return dotForLiveness(livenessOf(s));
+}
+function isWorking(s) {
+  return rowStatus(s).kind === null;
+}
+function isCreating(s) {
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
+}
+function rowKind(s) {
+  return rowStatus(s).kind ?? "working";
+}
+function operatorKind(s) {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
+    return "broken";
+  }
+  return "needs-you";
+}
+function livenessOf(s) {
+  const lv = s.liveness ?? Liveness.Unset;
+  if (lv !== Liveness.Unset) {
+    return lv;
+  }
+  switch (s.status) {
+    case Status.Ready:
+      return Liveness.Ready;
+    case Status.Dead:
+      return Liveness.Dead;
+    case Status.Lost:
+      return Liveness.Lost;
+    case Status.Archived:
+      return Liveness.Archived;
+    // Running and the transient values (Loading/Deleting, which never persist)
+    // fall through to the working dot, matching render.go's LivenessUnset arm.
+    default:
+      return Liveness.Running;
+  }
+}
+function dotForLiveness(lv) {
+  switch (lv) {
+    case Liveness.Ready:
+      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
+    case Liveness.Lost:
+      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
+    case Liveness.Dead:
+      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
+    case Liveness.Archived:
+      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
+    case Liveness.LimitReached:
+      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
+    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
+    case Liveness.Running:
+    case Liveness.Unset:
+    default:
+      return WORKING;
+  }
+}
+function isArchived(s) {
+  return livenessOf(s) === Liveness.Archived;
+}
+function isLimitReached(s) {
+  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
+}
+function isPendingManualHandoffDeliveryUnconfirmed(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+}
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
+function isPendingAgentHandoffDeliveryUnconfirmed(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function canHandoff(s) {
+  return s.can_handoff === true;
+}
+function isRootSession(s) {
+  return s.is_root === true;
+}
+function compareSessionsForRail(a, b) {
+  const aArchived = isArchived(a);
+  const aa = aArchived ? 1 : 0;
+  const bb = isArchived(b) ? 1 : 0;
+  if (aa !== bb) {
+    return aa - bb;
+  }
+  const ar = isRootSession(a) ? 0 : 1;
+  const br = isRootSession(b) ? 0 : 1;
+  if (ar !== br) {
+    return ar - br;
+  }
+  const at = a.created_at ?? "";
+  const bt = b.created_at ?? "";
+  if (at !== bt) {
+    const asc = at < bt ? -1 : 1;
+    return aArchived ? -asc : asc;
+  }
+  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+}
+function rowTitle(s) {
+  const lv = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  let title = s.title;
+  if (s.backend_type === "remote") {
+    title = "[remote] " + title;
+  }
+  if (lv === Liveness.Lost) {
+    title = "[lost] " + title;
+  }
+  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
+    title = "[deleting] " + title;
+  }
+  if (lv === Liveness.LimitReached) {
+    title = limitBadgePrefix(s) + title;
+  }
+  const recreate = rootRecreateNote(s);
+  if (recreate) {
+    title = `[${recreate}] ` + title;
+  }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
+  if (s.model_change) {
+    title = "[model changed] " + title;
+  }
+  return title;
+}
+function archiveWarningText(s) {
+  return s.archive_warning?.trim() ?? "";
+}
+function rootRecreateNote(s) {
+  switch (s.root_recreate_context) {
+    case "fresh":
+      return "fresh context";
+    case "unknown":
+      return "context unknown";
+    default:
+      return "";
+  }
+}
+function limitBadgePrefix(s) {
+  if (!s.limit_reset_at) {
+    return "[limit] ";
+  }
+  const reset = new Date(s.limit_reset_at);
+  if (Number.isNaN(reset.getTime())) {
+    return "[limit] ";
+  }
+  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
+}
+function formatLimitReset(reset, now) {
+  const h12 = (reset.getHours() + 11) % 12 + 1;
+  const ampm = reset.getHours() < 12 ? "am" : "pm";
+  const min = reset.getMinutes();
+  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
+  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
+  if (sameDay) {
+    return clock;
+  }
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
+}
+
+// src/project.ts
+var PROJECT_KEY = "af-project";
+function projectName(root2) {
+  const parts = root2.replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || root2;
+}
+function projectSummaries(sessions, tasks, registeredRoots = []) {
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (!root2) {
+      continue;
+    }
+    const arr = byRoot.get(root2) ?? [];
+    arr.push(s);
+    byRoot.set(root2, arr);
+  }
+  const taskCounts = /* @__PURE__ */ new Map();
+  for (const t of tasks) {
+    const root2 = t.project_path;
+    if (!root2) {
+      continue;
+    }
+    taskCounts.set(root2, (taskCounts.get(root2) ?? 0) + 1);
+  }
+  const roots = /* @__PURE__ */ new Set();
+  for (const [root2, rows] of byRoot) {
+    if (rows.some((s) => !isArchived(s))) {
+      roots.add(root2);
+    }
+  }
+  for (const root2 of taskCounts.keys()) {
+    roots.add(root2);
+  }
+  for (const root2 of registeredRoots) {
+    if (root2) {
+      roots.add(root2);
+    }
+  }
+  return [...roots].sort().map((root2) => {
+    const rows = byRoot.get(root2) ?? [];
+    const live = rows.filter((s) => !isArchived(s));
+    const working = live.filter((s) => isWorking(s)).length;
+    return {
+      root: root2,
+      name: projectName(root2),
+      path: root2,
+      liveCount: live.length,
+      workingCount: working,
+      totalCount: rows.length,
+      taskCount: taskCounts.get(root2) ?? 0
+    };
+  });
+}
+function projectMeta(p) {
+  if (p.liveCount === 0) {
+    return p.taskCount > 0 ? `${p.taskCount} task${p.taskCount === 1 ? "" : "s"}` : "no sessions yet";
+  }
+  const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
+  return p.workingCount > 0 ? `${base} \xB7 ${p.workingCount} working` : base;
+}
+function pickerProjects(sessions, tasks, registeredRoots = []) {
+  const roots = /* @__PURE__ */ new Set();
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (root2) {
+      roots.add(root2);
+    }
+  }
+  for (const t of tasks) {
+    if (t.project_path) {
+      roots.add(t.project_path);
+    }
+  }
+  for (const root2 of registeredRoots) {
+    if (root2) {
+      roots.add(root2);
+    }
+  }
+  return [...roots].sort();
+}
+function scopeToProject(sessions, root2) {
+  if (!root2) {
+    return [];
+  }
+  return sessions.filter((s) => s.worktree?.repo_path === root2);
+}
+function validRoots(sessions, tasks, registeredRoots = []) {
+  return new Set(projectSummaries(sessions, tasks, registeredRoots).map((p) => p.root));
+}
+function defaultProject(sessions, tasks, registeredRoots = []) {
+  const summaries = projectSummaries(sessions, tasks, registeredRoots);
+  if (summaries.length === 0) {
+    return null;
+  }
+  const valid = new Set(summaries.map((p) => p.root));
+  let best = null;
+  for (const s of sessions) {
+    const root2 = s.worktree?.repo_path;
+    if (!root2 || isArchived(s) || !valid.has(root2)) {
+      continue;
+    }
+    if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
+      best = s;
+    }
+  }
+  if (best?.worktree?.repo_path) {
+    return best.worktree.repo_path;
+  }
+  let bestTask = null;
+  for (const t of tasks) {
+    if (!t.project_path || !valid.has(t.project_path)) {
+      continue;
+    }
+    if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
+      bestTask = t;
+    }
+  }
+  return bestTask?.project_path ?? summaries[0]?.root ?? null;
+}
+function reconcileProject(sessions, tasks, persisted, current, registeredRoots = []) {
+  const valid = validRoots(sessions, tasks, registeredRoots);
+  if (current && valid.has(current)) {
+    return current;
+  }
+  if (persisted && valid.has(persisted)) {
+    return persisted;
+  }
+  return defaultProject(sessions, tasks, registeredRoots);
+}
+function loadProjectChoice() {
+  try {
+    const v = localStorage.getItem(PROJECT_KEY);
+    return v && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+function persistProjectChoice(root2) {
+  try {
+    localStorage.setItem(PROJECT_KEY, root2);
+  } catch {
+  }
+}
+function projectDeletionBreakdown(sessions, root2) {
+  const live = sessions.filter((s) => s.worktree?.repo_path === root2 && !isArchived(s));
+  const inPlaceCount = live.filter((s) => s.worktree?.external_worktree === true).length;
+  return { sessionCount: live.length - inPlaceCount, inPlaceCount };
+}
+
+// src/scrollkeep.ts
+function listToken(parts) {
+  return parts.map((p) => p ?? "none").join("\0");
+}
+function keptScrollTop(previous, next, before) {
+  return previous !== null && previous === next ? before : 0;
+}
+function rebuildKeepingScroll(el2, previous, next, rebuild) {
+  const before = el2.scrollTop;
+  rebuild();
+  const wanted = keptScrollTop(previous, next, before);
+  if (el2.scrollTop !== wanted) {
+    el2.scrollTop = wanted;
+  }
+}
+
+// src/config.ts
+var CONFIG_LIST_TOKEN = "config";
+function tiersInOrder(entries) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const e of entries) {
+    if (!seen.has(e.tier)) {
+      seen.set(e.tier, e.tier_name);
+    }
+  }
+  return [...seen.entries()].sort((a, b) => a[0] - b[0]).map(([tier, name]) => ({ tier, name }));
+}
+var TIER_ADVANCED = 3;
+function controlKind(e) {
+  if (e.type === "bool") {
+    return "checkbox";
+  }
+  if (e.enum && e.enum.length > 0 && e.type !== "table") {
+    return "select";
+  }
+  return "text";
+}
+function canCommit(shown, current) {
+  return shown !== current;
+}
+function shouldCloseSavedField(status, editing, statusIsNew) {
+  return statusIsNew && status !== null && !status.error && status.key === editing;
+}
+function saveNotice(resp) {
+  const parts = [];
+  const warnings = resp.warnings ?? [];
+  if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
+    parts.push(resp.restart_notice);
+  }
+  parts.push(...warnings);
+  const addr = resp.listener_addr ?? "";
+  if (addr !== "") {
+    parts.push(`Daemon now listening at ${addr}`);
+  }
+  return parts.join(" \xB7 ");
+}
+function createKeyedQueue() {
+  const tails = /* @__PURE__ */ new Map();
+  return (key, run) => {
+    const prev = tails.get(key) ?? Promise.resolve();
+    const next = prev.then(run, run).catch(() => {
+    });
+    tails.set(key, next);
+    void next.finally(() => {
+      if (tails.get(key) === next) {
+        tails.delete(key);
+      }
+    });
+    return next;
+  };
+}
+function scopesEqual(a, b) {
+  if (a === null) {
+    return false;
+  }
+  return a.root === b.root && a.selected === b.selected && a.options.length === b.options.length && a.options.every((opt, i) => opt === b.options[i]);
+}
+var ConfigPane = class {
+  constructor(actions2) {
+    this.actions = actions2;
+    this.el = h("section", { class: "af-config" });
+    this.el.setAttribute("aria-label", "Config");
+  }
+  el;
+  entries = [];
+  registration = { open: false, agent: "" };
+  path = "";
+  /** The scope the ROWS were resolved for and the select's current pick.
+   *  `root` drives the read-only rendering and the header's scope label; the
+   *  two diverge only while a scope change is in flight (see ConfigScopeState). */
+  scope = { root: "", selected: "", options: [] };
+  status = null;
+  /** The Accounts section's data (#3385). It is rendered by this view but is not
+   *  config: see accounts.ts. */
+  accounts = emptyAccountsState();
+  showAdvanced = false;
+  /** The key whose field is open, if any. Only one row edits at a time: a config
+   *  write is per-key (like `af config set`), so a multi-row "save all" would
+   *  imply an atomicity across keys that the writer does not offer. */
+  editing = null;
+  draft = "";
+  // The live controls a rebuild replaces, so focus can be handed back to whichever of
+  // them had it (#2933). Null whenever that control is not currently rendered.
+  editingInput = null;
+  /** The config key whose input held DOM focus when the in-progress rebuild started,
+   *  so render() can re-point `editingInput` at that row's replacement even when the
+   *  row is no longer the open edit. Live only for the duration of one render (set
+   *  and cleared around the single `this.render()` call). */
+  restoreKey = null;
+  advancedToggle = null;
+  lastEntries = null;
+  lastStatus = null;
+  lastAccounts = null;
+  lastScope = null;
+  /** The list token of the last render, so a scope change is a "different list"
+   *  and restarts at the top rather than halfway down another scope's rows. */
+  lastListToken = null;
+  /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
+   *  changed, matching the rest of the shell's patch-in-place model. */
+  update(entries, path, scope, status, accounts) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && scopesEqual(this.lastScope, scope)) {
+      return;
+    }
+    const statusIsNew = status !== this.lastStatus;
+    const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status && accounts.status.name === "" && !accounts.status.error;
+    if (registrationSucceeded) {
+      const submitted = this.accountInput(accounts.status.agent);
+      if (submitted) submitted.value = "";
+    }
+    this.lastEntries = entries;
+    this.lastStatus = status;
+    this.lastAccounts = accounts;
+    this.lastScope = scope;
+    this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
+    this.path = path;
+    this.status = status;
+    this.accounts = accounts;
+    if (scope.root !== this.scope.root) {
+      this.editing = null;
+      this.draft = "";
+    }
+    this.scope = scope;
+    if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
+      this.editing = null;
+      this.draft = "";
+    }
+    this.rerenderKeepingUserState();
+  }
+  /**
+   * Re-renders the pane without throwing away what the user was in the middle of.
+   *
+   * Every rebuild replaces the controls, which costs three things the render itself
+   * cannot recover: the reader's scroll offset, focus, and the caret. The typed text
+   * already survives (render reads `draft`); focus did not, and that is the one that
+   * bites hardest — the app's document-level keys are gated on
+   * `isNativeControl(document.activeElement)` (index.ts), so once focus falls back to
+   * <body> the REST of what the user types stops being a value and starts being
+   * shortcuts: a "[" or "]" in a path cycles the view out from under them mid-edit.
+   *
+   * Focus is handed back only to a control that genuinely HAD it, so a rebuild can
+   * never steal focus from wherever the user actually is. Both re-render paths go
+   * through here — the data update and the advanced-settings toggle — because a toggle
+   * that drops its own focus cannot be operated twice from the keyboard.
+   */
+  rerenderKeepingUserState() {
+    const active = document.activeElement;
+    const accountDrafts = this.readAccountDrafts();
+    const accountAgentFocused = active?.getAttribute("aria-label") === "Account agent";
+    const accountSummaryFocused = active === this.el.querySelector(".af-account-disclosure summary");
+    const focusedAccount = active instanceof HTMLInputElement ? active.getAttribute(ACCOUNT_INPUT_ATTR) : null;
+    const accountCaret = focusedAccount !== null && active instanceof HTMLInputElement ? { start: active.selectionStart, end: active.selectionEnd } : null;
+    const wasEditing = this.editingInput !== null && active === this.editingInput;
+    const caretStart = wasEditing ? this.editingInput?.selectionStart ?? null : null;
+    const caretEnd = wasEditing ? this.editingInput?.selectionEnd ?? null : null;
+    const wasToggle = this.advancedToggle !== null && active === this.advancedToggle;
+    this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
+    const token2 = listToken([CONFIG_LIST_TOKEN, this.scope.root || null]);
+    rebuildKeepingScroll(this.el, this.lastListToken, token2, () => this.render());
+    this.lastListToken = token2;
+    this.restoreKey = null;
+    this.restoreAccountDrafts(accountDrafts);
+    if (wasEditing && this.editingInput) {
+      this.editingInput.focus({ preventScroll: true });
+      if (caretStart !== null) {
+        this.editingInput.setSelectionRange(caretStart, caretEnd ?? caretStart);
+      }
+    } else if (wasToggle && this.advancedToggle) {
+      this.advancedToggle.focus({ preventScroll: true });
+    } else if (accountAgentFocused) {
+      this.el.querySelector('[aria-label="Account agent"]')?.focus({ preventScroll: true });
+    } else if (accountSummaryFocused) {
+      this.el.querySelector(".af-account-disclosure summary")?.focus({ preventScroll: true });
+    } else if (focusedAccount !== null) {
+      const field2 = this.accountInput(focusedAccount);
+      field2?.focus({ preventScroll: true });
+      if (field2 && accountCaret?.start != null) {
+        field2.setSelectionRange(accountCaret.start, accountCaret.end ?? accountCaret.start);
+      }
+    }
+  }
+  /** Every register field's current text, keyed by agent. */
+  readAccountDrafts() {
+    const drafts = /* @__PURE__ */ new Map();
+    for (const field2 of this.el.querySelectorAll(`input[${ACCOUNT_INPUT_ATTR}]`)) {
+      const agent = field2.getAttribute(ACCOUNT_INPUT_ATTR);
+      if (agent !== null && field2.value !== "") {
+        drafts.set(agent, field2.value);
+      }
+    }
+    return drafts;
+  }
+  /** Puts them back on the freshly rendered fields. An agent whose row is gone —
+   *  a roster that shrank between renders — simply drops its draft; there is no
+   *  field left to hold it. */
+  restoreAccountDrafts(drafts) {
+    for (const [agent, value] of drafts) {
+      const field2 = this.accountInput(agent);
+      if (field2) {
+        field2.value = value;
+      }
+    }
+  }
+  accountInput(agent) {
+    return this.el.querySelector(
+      `input[${ACCOUNT_INPUT_ATTR}="${CSS.escape(agent)}"]`
+    );
+  }
+  render() {
+    this.editingInput = null;
+    this.advancedToggle = null;
+    const scoped = this.scope.root !== "";
+    const head = h(
+      "div",
+      { class: "af-config-head" },
+      h("span", { class: "af-config-title" }, "Config"),
+      h("span", { class: "af-view-count" }, String(this.entries.length))
+    );
+    const scopeSelect = h("select", { class: "af-input af-config-scope" });
+    scopeSelect.setAttribute("aria-label", "Config scope");
+    scopeSelect.append(h("option", { value: "" }, "Global configuration"));
+    for (const root2 of this.scope.options) {
+      scopeSelect.append(h("option", { value: root2 }, `${projectName(root2)} \u2014 ${root2}`));
+    }
+    scopeSelect.value = this.scope.selected;
+    scopeSelect.addEventListener("change", () => this.actions.selectScope(scopeSelect.value));
+    head.append(scopeSelect);
+    if (scoped) {
+      head.append(h("span", { class: "af-config-readonly" }, "read-only"));
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} \xB7 project ${this.scope.root}`));
+    } else if (this.path !== "") {
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} \xB7 ${this.path}`));
+    }
+    const assistantBtn = h(
+      "button",
+      { type: "button", class: "af-ghost af-config-assistant-btn" },
+      "Configure with assistant"
+    );
+    assistantBtn.addEventListener("click", () => this.actions.openAssistant());
+    head.append(assistantBtn);
+    const sections = [];
+    for (const { tier, name } of tiersInOrder(this.entries)) {
+      const inTier = this.entries.filter((e) => e.tier === tier);
+      if (inTier.length === 0) {
+        continue;
+      }
+      const folded = tier === TIER_ADVANCED && !this.showAdvanced;
+      const heading = h("div", { class: "af-config-tier" }, h("span", { class: "af-config-tier-name" }, name.charAt(0).toUpperCase() + name.slice(1)));
+      if (tier === TIER_ADVANCED) {
+        const toggle = h(
+          "button",
+          { type: "button", class: "af-ghost af-config-toggle" },
+          folded ? `Show ${inTier.length} advanced settings` : "Hide advanced settings"
+        );
+        toggle.addEventListener("click", () => {
+          this.showAdvanced = !this.showAdvanced;
+          this.rerenderKeepingUserState();
+        });
+        this.advancedToggle = toggle;
+        heading.append(toggle);
+      }
+      sections.push(heading);
+      if (folded) {
+        continue;
+      }
+      for (const e of inTier) {
+        sections.push(this.renderRow(e));
+      }
+    }
+    const content = sections.length > 0 ? sections : [
+      h(
+        "p",
+        { class: "af-config-empty" },
+        "No settings available. Try Configure with assistant."
+      )
+    ];
+    const parts = [head];
+    if (scoped) {
+      parts.push(h(
+        "p",
+        { class: "af-config-scope-note" },
+        "Project values are the effective stack for this repo (built-in < global < in-repo < personal). They are read-only here \u2014 write overrides with `af config set --project`, or pick the global scope."
+      ));
+    }
+    parts.push(
+      h("div", { class: "af-config-list" }, ...content),
+      renderAccountsSection(this.accounts, this.actions.accounts, this.registration)
+    );
+    this.el.replaceChildren(...parts);
+  }
+  /** One key: its name, purpose, control, and — when it is the row just written
+   *  or just refused — the echo or the error. */
+  renderRow(e) {
+    const row = h("div", { class: "af-config-row" });
+    row.setAttribute("data-key", e.key);
+    const label = h(
+      "div",
+      { class: "af-config-label" },
+      h("span", { class: "af-config-key" }, e.key),
+      h("span", { class: "af-config-purpose" }, e.purpose)
+    );
+    row.append(label);
+    row.append(this.renderControl(e));
+    const status = this.status;
+    if (status && status.key === e.key) {
+      if (status.error !== "") {
+        row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
+      } else {
+        row.append(h("div", { class: "af-config-echo" }, `set ${status.key} = ${status.value}`));
+        if (status.notice !== "") {
+          row.append(h("div", { class: "af-config-notice" }, status.notice));
+        }
+      }
+    }
+    return row;
+  }
+  /** The control for one key, chosen from the manifest's own description of it:
+   *  a picker when the values are enumerated, a checkbox for a bool, and a text
+   *  field otherwise. Structured rows use the compact JSON CurrentValue emits.
+   *
+   *  The enum and type come from the manifest; Go-side coverage separately pins
+   *  every global row to the real writer so a rendered field cannot dead-end at
+   *  a save the writer refuses. */
+  renderControl(e) {
+    const kind = controlKind(e);
+    const readOnly = this.scope.root !== "";
+    if (kind === "checkbox") {
+      const box = h("input", { type: "checkbox", class: "af-config-check" });
+      box.checked = e.value === "true";
+      box.setAttribute("aria-label", e.key);
+      if (readOnly) {
+        box.disabled = true;
+      } else {
+        box.addEventListener("change", () => this.actions.save(e.key, box.checked ? "true" : "false"));
+      }
+      return h("div", { class: "af-config-control" }, box);
+    }
+    if (kind === "select") {
+      const select = h("select", { class: "af-input af-config-input" });
+      select.setAttribute("aria-label", e.key);
+      for (const v of e.enum ?? []) {
+        const opt = h("option", { value: v }, v);
+        if (v === e.value) {
+          opt.selected = true;
+        }
+        select.append(opt);
+      }
+      if (readOnly) {
+        select.disabled = true;
+      } else {
+        select.addEventListener("change", () => this.actions.save(e.key, select.value));
+      }
+      return h("div", { class: "af-config-control" }, select);
+    }
+    const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
+    input.value = this.editing === e.key ? this.draft : e.value;
+    if (readOnly) {
+      input.readOnly = true;
+      return h("div", { class: "af-config-control" }, input);
+    }
+    if (this.editing === e.key) {
+      this.editingInput = input;
+    }
+    if (this.restoreKey === e.key && this.editingInput === null) {
+      this.editingInput = input;
+    }
+    input.setAttribute("aria-label", e.key);
+    const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
+    const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
+    const commit = () => {
+      if (!canCommit(input.value, e.value)) {
+        return;
+      }
+      this.actions.save(e.key, input.value);
+    };
+    const syncSave = () => {
+      save.disabled = !canCommit(input.value, e.value);
+      dirty.hidden = save.disabled;
+    };
+    input.addEventListener("input", () => {
+      this.editing = e.key;
+      this.draft = input.value;
+      this.editingInput = input;
+      syncSave();
+    });
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        commit();
+      }
+    });
+    save.addEventListener("click", commit);
+    syncSave();
+    return h("div", { class: "af-config-control" }, input, dirty, save);
+  }
+};
 
 // src/stream_endpoint.ts
 function wsScheme() {
@@ -10848,949 +12281,6 @@ var EventStream = class {
   }
 };
 
-// src/handoff_accounts.ts
-function handoffAccountChoices(accounts, agent, currentAccount = "") {
-  const rows = accountChoices(accounts, agent);
-  return accounts.entries.filter((entry) => entry.agent === agent && entry.name !== currentAccount && !entry.registration_only).map((entry) => ({ ...rows.find((row) => row.value === entry.name), logged_in: entry.logged_in }));
-}
-
-// src/account_selection.ts
-var AccountSelection = class {
-  picked = false;
-  agent = "";
-  value = AMBIENT_ACCOUNT;
-  pick(value) {
-    this.picked = true;
-    this.value = value;
-  }
-  render(accounts, agent, failed = false) {
-    if (accounts === null || !agent && this.namedChoicePending) return AMBIENT_ACCOUNT;
-    const rows = accountChoices(accounts, agent, failed);
-    const changedAgent = agent !== this.agent;
-    this.agent = agent;
-    if (this.picked && (changedAgent || !rows.some((row) => row.value === this.value))) {
-      this.picked = false;
-      this.value = AMBIENT_ACCOUNT;
-      return AMBIENT_ACCOUNT;
-    }
-    const value = this.picked ? this.value : accountDefaultFor(accounts, agent);
-    return rows.some((row) => row.value === value) ? value : AMBIENT_ACCOUNT;
-  }
-  get namedChoicePending() {
-    return this.picked && this.value !== AMBIENT_ACCOUNT;
-  }
-};
-
-// src/backends.ts
-var REPO_DEFAULT = "";
-function backendChoices(catalog) {
-  if (catalog === null) {
-    return [{ value: REPO_DEFAULT, label: "Repo default", status: "available", reason: "" }];
-  }
-  const choices = [
-    {
-      value: REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default:
-      // that is the misconfigured case, where naming a backend would be inventing
-      // one. The reason says what is wrong with the key.
-      label: catalog.default === "" ? "Repo default" : `Repo default (${catalog.backends.find((opt) => opt.name === catalog.default)?.label ?? catalog.default})`,
-      // Taken from the daemon, not inferred here. A repo whose declared default is
-      // broken resolves to that broken backend and FAILS — it does not quietly run
-      // local — so the default is not automatically a safe harbour.
-      status: catalog.default_status,
-      reason: catalog.default_status === "available" ? "" : catalog.default_reason ?? ""
-    }
-  ];
-  for (const opt of catalog.backends) {
-    choices.push({
-      value: opt.name,
-      label: opt.label,
-      status: opt.status,
-      reason: opt.status === "available" ? "" : opt.reason ?? ""
-    });
-  }
-  return choices;
-}
-function backendNotice(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 ? "" : choice.reason;
-}
-function backendSelectable(choices, selected) {
-  const choice = choices.find((c) => c.value === selected);
-  return choice === void 0 || choice.status === "available";
-}
-
-// src/dirpicker.ts
-var INITIAL_PICKER_STATE = { listing: null, error: null, loading: false };
-function pickerLoading(prev) {
-  return { ...prev, loading: true };
-}
-function pickerLoaded(listing) {
-  return { listing, error: null, loading: false };
-}
-function pickerFailed(prev, message) {
-  return { listing: prev.listing, error: message, loading: false };
-}
-function entryNote(entry) {
-  const parts = [];
-  if (entry.is_repo) {
-    parts.push("git repo");
-  }
-  if (entry.is_symlink) {
-    parts.push("link");
-  }
-  return parts.join(" \xB7 ");
-}
-function truncationNote(listing) {
-  if (!listing.truncated) {
-    return "";
-  }
-  return `First ${listing.entries.length} directories \xB7 enter a path for more.`;
-}
-var LAST_DIR_KEY = "af.addproject.dir";
-function loadLastBrowsedDir() {
-  try {
-    return localStorage.getItem(LAST_DIR_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-function persistLastBrowsedDir(path) {
-  try {
-    localStorage.setItem(LAST_DIR_KEY, path);
-  } catch {
-  }
-}
-function directoryPicker(callbacks) {
-  let state = INITIAL_PICKER_STATE;
-  let nav = 0;
-  const upBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-up" }, "Up");
-  upBtn.setAttribute("aria-label", "Go to the parent directory");
-  upBtn.disabled = true;
-  const pathLabel = h("span", { class: "af-dirpicker-path" }, "Loading\u2026");
-  const homeBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-home" }, "Home");
-  homeBtn.setAttribute("aria-label", "Go to the daemon host's home directory");
-  homeBtn.hidden = true;
-  const useHereBtn = h("button", { type: "button", class: "af-ghost af-dirpicker-use-here" }, "Use this");
-  useHereBtn.hidden = true;
-  const head = h("div", { class: "af-dirpicker-head" }, upBtn, pathLabel, homeBtn, useHereBtn);
-  const errorLine = h("p", { class: "af-dirpicker-error", role: "alert" });
-  errorLine.hidden = true;
-  const list = h("div", { class: "af-dirpicker-list" });
-  list.setAttribute("role", "list");
-  const emptyLine = h(
-    "p",
-    { class: "af-dirpicker-empty" },
-    "No subdirectories here \u2014 go up or enter another path."
-  );
-  emptyLine.hidden = true;
-  const note = h("p", { class: "af-dirpicker-note" });
-  const el2 = h("div", { class: "af-dirpicker" }, head, errorLine, list, emptyLine, note);
-  let renderedPath = null;
-  function navigate(path, fallbackToHome = false) {
-    const ticket = ++nav;
-    state = pickerLoading(state);
-    render();
-    void callbacks.load(path).then((listing) => {
-      if (ticket !== nav) {
-        return;
-      }
-      state = pickerLoaded(listing);
-      persistLastBrowsedDir(listing.path);
-      render();
-    }).catch((e) => {
-      if (ticket !== nav) {
-        return;
-      }
-      if (fallbackToHome) {
-        navigate("");
-        return;
-      }
-      state = pickerFailed(state, callbacks.errorText(e));
-      render();
-    });
-  }
-  function render() {
-    const { listing, error, loading } = state;
-    pathLabel.textContent = listing ? listing.path : loading ? "Loading\u2026" : "";
-    pathLabel.title = listing?.path ?? "";
-    upBtn.disabled = loading || !listing || listing.parent === "";
-    homeBtn.hidden = !listing || listing.home === "" || listing.home === listing.path;
-    homeBtn.disabled = loading;
-    useHereBtn.hidden = !listing?.is_repo;
-    if (listing?.is_repo) {
-      useHereBtn.disabled = loading;
-      useHereBtn.title = `Use ${listing.path} as the project`;
-    }
-    if (error) {
-      errorLine.textContent = error;
-      errorLine.hidden = false;
-    } else {
-      errorLine.textContent = "";
-      errorLine.hidden = true;
-    }
-    const scrollTop = list.scrollTop;
-    list.replaceChildren();
-    if (listing) {
-      for (const entry of listing.entries) {
-        list.append(row(entry, loading));
-      }
-    }
-    if (listing && listing.path === renderedPath) {
-      list.scrollTop = scrollTop;
-    }
-    renderedPath = listing?.path ?? null;
-    emptyLine.hidden = !listing || listing.entries.length > 0 || error !== null;
-    note.textContent = listing ? truncationNote(listing) : "";
-  }
-  function row(entry, loading) {
-    const label = h(
-      "span",
-      { class: "af-dirpicker-name" },
-      icon(entry.is_repo ? "folder-git" : "folder"),
-      h("span", { class: "af-dirpicker-text" }, entry.name)
-    );
-    const meta = entryNote(entry);
-    const open = h("button", { type: "button", class: "af-dirpicker-item" }, label);
-    if (meta) {
-      open.append(h("span", { class: "af-dirpicker-meta" }, meta));
-    }
-    open.title = entry.path;
-    open.setAttribute("aria-label", `Open ${entry.path}`);
-    open.disabled = loading;
-    open.addEventListener("click", (e) => {
-      e.stopPropagation();
-      navigate(entry.path);
-    });
-    const item = h("div", { class: "af-dirpicker-row" }, open);
-    item.setAttribute("role", "listitem");
-    if (entry.is_repo) {
-      item.classList.add("af-dirpicker-row-repo");
-      const use = h("button", { type: "button", class: "af-ghost af-dirpicker-use" }, "Use");
-      use.title = `Use ${entry.path} as the project`;
-      use.setAttribute("aria-label", `Use ${entry.path} as the project`);
-      use.disabled = loading;
-      use.addEventListener("click", (e) => {
-        e.stopPropagation();
-        callbacks.onSelect(entry.path);
-      });
-      item.append(use);
-    }
-    return item;
-  }
-  upBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const parent = state.listing?.parent;
-    if (parent) {
-      navigate(parent);
-    }
-  });
-  homeBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const home = state.listing?.home;
-    if (home) {
-      navigate(home);
-    }
-  });
-  useHereBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const path = state.listing?.path;
-    if (path) {
-      callbacks.onSelect(path);
-    }
-  });
-  return {
-    el: el2,
-    start() {
-      const remembered = loadLastBrowsedDir();
-      navigate(remembered, remembered !== "");
-    }
-  };
-}
-
-// src/programs.ts
-var PROGRAM_REPO_DEFAULT = "";
-function programChoices(catalog, keep = "") {
-  const choices = [
-    {
-      value: PROGRAM_REPO_DEFAULT,
-      // "Repo default" with no parenthetical when the daemon reports no default —
-      // naming an agent there would be inventing one.
-      label: catalog === null || catalog.default === "" ? "Repo default" : `Repo default (${catalog.default})`
-    }
-  ];
-  for (const opt of catalog?.programs ?? []) {
-    choices.push({ value: opt.name, label: opt.name });
-  }
-  const extra = keep.trim();
-  if (extra !== "" && !choices.some((c) => c.value === extra)) {
-    choices.push({ value: extra, label: extra });
-  }
-  return choices;
-}
-function handoffAgentChoices(catalog, current) {
-  const cur = current.trim();
-  const choices = [];
-  for (const opt of catalog?.programs ?? []) {
-    if (opt.name === cur) {
-      continue;
-    }
-    choices.push({ value: opt.name, label: opt.name });
-  }
-  return choices;
-}
-
-// src/modals.ts
-function asForm(card, onSubmit) {
-  const form = h("form", { class: "af-modal-form" });
-  while (card.firstChild) {
-    form.append(card.firstChild);
-  }
-  card.append(form);
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    onSubmit();
-  });
-}
-function newSessionModal(projects, defaultProject2, callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
-    title: "New session",
-    confirmLabel: "Create",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
-  });
-  const titleInput = h("input", { type: "text", class: "af-input", placeholder: "Session title", autocomplete: "off" });
-  titleInput.setAttribute("aria-label", "Session title");
-  let suggestedName = "";
-  const projectSelect = h("select", { class: "af-input" });
-  projectSelect.setAttribute("aria-label", "Project");
-  if (projects.length === 0) {
-    const opt = h("option", { value: "" }, "No projects yet \u2014 add one from the project switcher first");
-    opt.disabled = true;
-    opt.selected = true;
-    projectSelect.append(opt);
-    confirmBtn.disabled = true;
-  } else {
-    for (const p of projects) {
-      projectSelect.append(h("option", { value: p }, projectLabel(p)));
-    }
-    if (defaultProject2 && projects.includes(defaultProject2)) {
-      projectSelect.value = defaultProject2;
-    }
-  }
-  const programSelect = h("select", { class: "af-input" });
-  programSelect.setAttribute("aria-label", "Program");
-  let programs = programChoices(null);
-  const backendSelect = h("select", { class: "af-input" });
-  backendSelect.setAttribute("aria-label", "Backend");
-  const backendHint = h("p", { class: "af-modal-hint af-backend-hint" });
-  backendHint.setAttribute("role", "status");
-  let choices = backendChoices(null);
-  const accountSelect = h("select", { class: "af-input" });
-  accountSelect.setAttribute("aria-label", "Account");
-  const accountHint = h("p", { class: "af-modal-hint af-account-hint" });
-  accountHint.setAttribute("role", "status");
-  let accounts = null;
-  let accountsFailed = false;
-  let programCatalog = null;
-  let accountRows = accountChoices(null, "");
-  const accountSelection = new AccountSelection();
-  let programsPending = false;
-  let busy = false;
-  const defaults = defaultsDisclosure();
-  const accountBlock = h("div", { class: "af-defaults-account" }, field("Account", accountSelect), accountHint);
-  const accountSlot = h("div", { class: "af-defaults-account-slot" });
-  const syncSubmitState = () => {
-    backendHint.textContent = backendNotice(choices, backendSelect.value);
-    accountHint.textContent = accountNotice(accountRows, accountSelect.value);
-    if (accountSelection.namedChoicePending && !programsPending && (accountsFailed || programCatalog === null)) {
-      accountHint.textContent = "Cannot verify the selected account. Reopen this form to try again.";
-    }
-    const choiceLabel = (select) => (select.selectedOptions[0]?.textContent ?? "Loading\u2026").replace(/^Repo default \((.*)\)$/, "$1 (default)").replace(/^Use configured default \((.*)\)$/, "$1 (default)");
-    const accountNeedsChoice = !!accountHint.textContent || accountSelection.picked || accountRows.length > 2 && !accountDefaultFor(accounts, accountAgentFor(programSelect.value, programCatalog));
-    defaults.setSummary([
-      `Program: ${choiceLabel(programSelect)}`,
-      `Backend: ${choiceLabel(backendSelect)}`,
-      ...accountNeedsChoice ? [] : [`Account: ${choiceLabel(accountSelect)}`]
-    ]);
-    const accountParent = accountNeedsChoice ? accountSlot : defaults.body;
-    if (accountBlock.parentElement !== accountParent) {
-      const focused = document.activeElement;
-      const ownsFocus = !!focused && accountBlock.contains(focused);
-      accountParent.append(accountBlock);
-      if (ownsFocus) focused.focus();
-    }
-    accountSlot.hidden = !accountNeedsChoice;
-    if (backendHint.textContent || programSelect.value !== PROGRAM_REPO_DEFAULT || backendSelect.value !== REPO_DEFAULT) defaults.el.open = true;
-    confirmBtn.disabled = busy || projects.length === 0 || !backendSelectable(choices, backendSelect.value) || !accountSelectable(accountRows, accountSelect.value) || (accounts === null || programsPending || !accountAgentFor(programSelect.value, programCatalog)) && accountSelection.namedChoicePending;
-  };
-  const chromeSetBusy = handle.setBusy.bind(handle);
-  handle.setBusy = (b) => {
-    busy = b;
-    chromeSetBusy(b);
-    syncSubmitState();
-  };
-  const renderChoices = () => {
-    const previous = backendSelect.value;
-    backendSelect.replaceChildren();
-    for (const choice of choices) {
-      backendSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    backendSelect.value = choices.some((c) => c.value === previous) ? previous : REPO_DEFAULT;
-    syncSubmitState();
-  };
-  backendSelect.addEventListener("change", syncSubmitState);
-  const renderAccounts = () => {
-    const agent = accountAgentFor(programSelect.value, programCatalog);
-    const knownAccounts = programsPending ? null : accounts;
-    accountRows = accountChoices(knownAccounts, agent, accountsFailed);
-    const selected = accountSelection.render(knownAccounts, agent, accountsFailed);
-    accountSelect.replaceChildren();
-    for (const choice of accountRows) {
-      accountSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    accountSelect.value = selected;
-    syncSubmitState();
-  };
-  accountSelect.addEventListener("change", () => {
-    accountSelection.pick(accountSelect.value);
-    syncSubmitState();
-  });
-  programSelect.addEventListener("change", renderAccounts);
-  const renderPrograms = () => {
-    const previous = programSelect.value;
-    programSelect.replaceChildren();
-    for (const choice of programs) {
-      programSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    programSelect.value = programs.some((c) => c.value === previous) ? previous : PROGRAM_REPO_DEFAULT;
-    renderAccounts();
-  };
-  let loadSeq = 0;
-  const loadCatalogsFor = (repoPath) => {
-    const seq = ++loadSeq;
-    accounts = null;
-    programsPending = true;
-    accountsFailed = false;
-    renderAccounts();
-    void callbacks.loadPrograms(repoPath).then((catalog) => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      programsPending = false;
-      programCatalog = catalog;
-      programs = programChoices(catalog);
-      renderPrograms();
-    }).catch(() => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      programsPending = false;
-      programCatalog = null;
-      programs = programChoices(null);
-      renderPrograms();
-    });
-    void callbacks.loadAccounts(repoPath).then((registry) => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      accounts = registry;
-      renderAccounts();
-    }).catch(() => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      accounts = null;
-      accountsFailed = true;
-      renderAccounts();
-    });
-    if (repoPath === "") {
-      choices = backendChoices(null);
-      renderChoices();
-      return;
-    }
-    void callbacks.loadBackends(repoPath).then((catalog) => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      choices = backendChoices(catalog);
-      renderChoices();
-    }).catch(() => {
-      if (seq !== loadSeq) {
-        return;
-      }
-      choices = backendChoices(null);
-      renderChoices();
-    });
-  };
-  projectSelect.addEventListener("change", () => loadCatalogsFor(projectSelect.value));
-  const promptArea = h("textarea", { class: "af-input af-textarea", placeholder: "Initial prompt (optional)", rows: 3 });
-  promptArea.setAttribute("aria-label", "Initial prompt");
-  defaults.body.append(
-    field("Program", programSelect),
-    field("Backend", backendSelect),
-    backendHint,
-    accountBlock
-  );
-  body.append(field("Title", titleInput), field("Project", projectSelect), field("Prompt", promptArea), accountSlot, defaults.el);
-  renderPrograms();
-  renderChoices();
-  renderAccounts();
-  loadCatalogsFor(projectSelect.value);
-  void callbacks.suggestName().then((name) => {
-    if (name !== "") {
-      suggestedName = name;
-      titleInput.placeholder = name;
-    }
-  }).catch(() => {
-  });
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const typed = titleInput.value.trim();
-    const title = typed !== "" ? typed : suggestedName;
-    if (projectSelect.value === "") {
-      handle.setError("A project is required.");
-      return;
-    }
-    if (title === "") {
-      handle.setError("A title is required.");
-      return;
-    }
-    handle.setError(null);
-    callbacks.onSubmit({
-      title,
-      repoPath: projectSelect.value,
-      program: programSelect.value,
-      prompt: promptArea.value,
-      // REPO_DEFAULT ("") when the user did not choose — createSession then omits
-      // `backend` entirely and the repo's config decides (#1933).
-      backend: backendSelect.value,
-      // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
-      // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value
-    });
-  });
-  queueMicrotask(() => titleInput.focus());
-  return handle;
-}
-function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
-    title: `Hand off ${sessionTitle}`,
-    confirmLabel: "Hand off",
-    confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
-  });
-  let accounts = { entries: [], agents: [] };
-  let accountsLoaded = !callbacks.loadAccounts;
-  let accountsFailed = false;
-  const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
-  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
-  const isCurrentAgent = (agent) => handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
-  const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
-  let accountRows = [];
-  const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
-  const accountSelect = h("select", { class: "af-input" });
-  accountSelect.setAttribute("aria-label", "New account");
-  const syncAccountSelection = () => {
-    const target = agentSelect.value;
-    const resolved = resolvedAgent(target);
-    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
-    confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
-  };
-  const refreshAccounts2 = () => {
-    const agent = agentSelect.value;
-    const choices = handoffAccountChoices(
-      accounts,
-      resolvedAgent(agent),
-      isCurrentAgent(agent) ? callbacks.currentAccount : ""
-    );
-    accountRows = choices;
-    accountSelect.replaceChildren();
-    if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
-    else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
-    for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[resolvedAgent(agent)];
-    const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
-    accountSelect.value = selected?.value ?? "";
-    accountSelect.disabled = choices.length === 0;
-    syncAccountSelection();
-  };
-  const agentSelect = h("select", { class: "af-input" });
-  agentSelect.setAttribute("aria-label", "New agent");
-  confirmBtn.disabled = true;
-  let catalogChoices = null;
-  const renderChoices = (choices) => {
-    agentSelect.replaceChildren();
-    for (const choice of choices) {
-      agentSelect.append(h("option", { value: choice.value }, choice.label));
-    }
-    confirmBtn.disabled = choices.length === 0;
-  };
-  const refreshAgentChoices = () => {
-    if (catalogChoices === null || !accountsLoaded) return;
-    const hasAccount = (agent) => handoffAccountChoices(
-      accounts,
-      resolvedAgent(agent),
-      isCurrentAgent(agent) ? callbacks.currentAccount : ""
-    ).length > 0;
-    const currentTarget = handoffSameAgentTarget(
-      catalogChoices.map((choice) => choice.value),
-      currentAgent,
-      recordedProgram,
-      accounts.resolved_agents
-    );
-    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
-    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
-      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
-    }
-    const previous = agentSelect.value;
-    renderChoices(choices);
-    if (choices.some((choice) => choice.value === previous)) agentSelect.value = previous;
-    refreshAccounts2();
-    if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
-  };
-  body.append(
-    field("New agent", agentSelect),
-    field("New account", accountSelect),
-    accountHint,
-    h(
-      "p",
-      { class: "af-modal-text" },
-      "Start a new agent with a summary. Keep the worktree and branch."
-    )
-  );
-  void callbacks.loadPrograms().then((catalog) => {
-    catalogChoices = handoffAgentChoices(catalog, "");
-    refreshAgentChoices();
-  }).catch(() => {
-    renderChoices([]);
-    handle.setError("Could not load the agent list. Try again.");
-  });
-  agentSelect.addEventListener("change", refreshAccounts2);
-  accountSelect.addEventListener("change", syncAccountSelection);
-  if (callbacks.loadAccounts) {
-    void callbacks.loadAccounts().then((result) => {
-      accounts = result;
-      accountsLoaded = true;
-      refreshAgentChoices();
-    }).catch(() => {
-      accountsLoaded = true;
-      accountsFailed = true;
-      refreshAgentChoices();
-      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
-    });
-  }
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const target = agentSelect.value;
-    if (target === "") {
-      handle.setError("Pick an agent to hand off to.");
-      return;
-    }
-    handle.setError(null);
-    if (!accountsLoaded || requiresAccount(target) && !accountSelect.value) {
-      handle.setError("Pick another registered account.");
-      return;
-    }
-    callbacks.onSubmit(target, accountSelect.value);
-  });
-  queueMicrotask(() => agentSelect.focus());
-  return handle;
-}
-function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram) {
-  if (resolved !== "") {
-    return currentAgent !== "" && resolved === currentAgent;
-  }
-  return recordedProgram !== "" && recordedProgram === target;
-}
-function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, resolvedAgents) {
-  const matched = catalogValues.find((value) => handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
-  if (matched !== void 0) return matched;
-  return resolvedAgents === void 0 ? currentAgent : void 0;
-}
-function deletionConfirmationBody(opts) {
-  if (opts.archived && opts.offBox) {
-    return "Permanently deletes the session record. Its branch stays published from the archive. Restore instead to use the session again.";
-  }
-  if (opts.archived && !opts.externalWorktree) {
-    return opts.branchCreatedByUs ? "Permanently deletes the session, archived worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Restore instead to keep the session." : "Permanently deletes the session and archived worktree. Your branch and its commits stay. Uncommitted changes are lost. Restore instead to keep the session.";
-  }
-  if (opts.offBox) {
-    return "Permanently removes the sandbox. Unpushed commits and uncommitted changes are lost. Archive publishes the branch first.";
-  }
-  if (opts.externalWorktree) {
-    return "Permanently deletes the session record and runtime. Your checkout and branch stay.";
-  }
-  return opts.branchCreatedByUs ? "Permanently deletes the session, its af-owned worktree and af-created branch. Uncommitted changes and unpushed commits are lost. Archive to keep them." : "Permanently deletes the session and its worktree. Your branch and its commits stay. Uncommitted changes are lost. Archive to keep them.";
-}
-function confirmModal(opts) {
-  const copy = {
-    kill: {
-      title: `Delete session ${opts.sessionTitle}?`,
-      confirmLabel: "Delete session",
-      confirmClass: "af-danger",
-      body: deletionConfirmationBody(opts)
-    },
-    archive: {
-      title: `Archive ${opts.sessionTitle}?`,
-      confirmLabel: "Archive",
-      confirmClass: "af-primary",
-      body: "Local: move the worktree to the archive. Sandboxes: publish work, then remove the sandbox. Restore anytime."
-    },
-    restore: {
-      title: `Restore ${opts.sessionTitle}?`,
-      confirmLabel: "Restore",
-      confirmClass: "af-primary",
-      body: "Restore the worktree and agent. Sandboxes push work before replacement; restore refuses if preservation is uncertain."
-    }
-  }[opts.action];
-  const { handle, body, confirmBtn } = modalChrome({
-    title: opts.immediateRestore ? `Restore ${opts.sessionTitle}` : copy.title,
-    confirmLabel: opts.immediateRestore ? "Retry restore" : copy.confirmLabel,
-    confirmClass: copy.confirmClass,
-    onCancel: opts.onCancel
-  });
-  body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
-  const card = handle.el.firstElementChild;
-  if (opts.immediateRestore) {
-    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
-    body.append(progress);
-    card.tabIndex = -1;
-    card.setAttribute("aria-describedby", progress.id);
-    let isBusy = false;
-    card.addEventListener("keydown", (event) => {
-      if (isBusy && event.key === "Tab") {
-        event.preventDefault();
-        event.stopPropagation();
-        card.focus();
-      }
-    });
-    const setBusy = handle.setBusy;
-    handle.setBusy = (busy) => {
-      isBusy = busy;
-      if (busy && card.isConnected) card.focus();
-      setBusy(busy);
-      card.setAttribute("aria-busy", String(busy));
-      progress.textContent = busy ? "Restoring session\u2026" : "";
-      confirmBtn.textContent = busy ? "Restoring\u2026" : "Retry restore";
-    };
-    const setError = handle.setError;
-    handle.setError = (message) => {
-      setError(message);
-      if (message && card.isConnected) confirmBtn.focus();
-    };
-  }
-  let acknowledgment;
-  if (opts.action === "kill" && opts.isRoot) {
-    body.append(h(
-      "p",
-      { class: "af-modal-text af-modal-danger" },
-      `\u201C${opts.sessionTitle}\u201D is the daemon-managed root agent. Deleting it stops scheduled and watch-task delivery to it until it self-heals (usually about two minutes) or you restart the daemon.`
-    ));
-    acknowledgment = h("input", { type: "checkbox", class: "af-config-check", required: true });
-    body.append(h("label", { class: "af-modal-text" }, acknowledgment, " I understand that deleting this root session interrupts task delivery."));
-  }
-  asForm(card, () => {
-    if (acknowledgment && !acknowledgment.checked) {
-      handle.setError("Acknowledge the interruption to root task delivery before deleting this session.");
-      return;
-    }
-    handle.setError(null);
-    opts.onConfirm();
-  });
-  if (acknowledgment) {
-    const checkbox = acknowledgment;
-    const focusAcknowledgment = () => {
-      if (card.isConnected) (checkbox.disabled ? card : checkbox).focus({ preventScroll: true });
-    };
-    card.addEventListener("focus", () => {
-      if (!checkbox.disabled) focusAcknowledgment();
-    });
-    queueMicrotask(focusAcknowledgment);
-  }
-  return handle;
-}
-function confirmDeleteProjectModal(opts) {
-  const word = opts.sessionCount === 1 ? "session" : "sessions";
-  const { handle, body } = modalChrome({
-    title: `Delete project ${opts.projectLabel}?`,
-    confirmLabel: "Delete project",
-    confirmClass: "af-primary",
-    onCancel: opts.onCancel
-  });
-  let message = opts.sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
-  if (opts.inPlaceCount > 0) {
-    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
-    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
-    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
-    message += " Remove the project; the repo stays.";
-  }
-  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
-    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
-  }
-  body.append(h("p", { class: "af-modal-text" }, message));
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    handle.setError(null);
-    opts.onConfirm();
-  });
-  return handle;
-}
-function addProjectModal(callbacks) {
-  return checkoutPathModal({
-    title: "Add project",
-    confirmLabel: "Add project",
-    hint: "Enter an absolute repo path on the daemon host (~ works).",
-    ...callbacks
-  });
-}
-function rebindProjectModal(opts) {
-  const { projectLabel: projectLabel2, ...shared } = opts;
-  return checkoutPathModal({
-    title: `Rebind project ${projectLabel2}`,
-    confirmLabel: "Rebind",
-    hint: "Enter the checkout this project should track now \u2014 an absolute repo path on the daemon host (~ works).",
-    ...shared
-  });
-}
-function checkoutPathModal(opts) {
-  const { handle, body, confirmBtn } = modalChrome({
-    title: opts.title,
-    confirmLabel: opts.confirmLabel,
-    confirmClass: "af-primary",
-    onCancel: opts.onCancel
-  });
-  const pathInput = h("input", {
-    type: "text",
-    class: "af-input",
-    placeholder: "/path/to/repo  or  ~/repo",
-    autocomplete: "off"
-  });
-  pathInput.setAttribute("aria-label", "Repository path");
-  const { loadDirectory, errorText: errorText2 } = opts;
-  let picker = null;
-  if (loadDirectory && errorText2) {
-    picker = directoryPicker({
-      load: loadDirectory,
-      errorText: errorText2,
-      onSelect: (path) => {
-        pathInput.value = path;
-        handle.setError(null);
-        confirmBtn.focus();
-      }
-    });
-    body.append(
-      h(
-        "div",
-        { class: "af-modal-field" },
-        h("span", { class: "af-modal-label" }, "Browse host"),
-        picker.el
-      )
-    );
-  }
-  body.append(
-    field("Repository path", pathInput),
-    h(
-      "p",
-      { class: "af-modal-hint" },
-      opts.hint
-    )
-  );
-  pathInput.addEventListener("input", () => handle.setError(null));
-  const card = handle.el.firstElementChild;
-  asForm(card, () => {
-    const path = pathInput.value.trim();
-    if (path === "") {
-      handle.setError("Enter or choose a repo path.");
-      return;
-    }
-    handle.setError(null);
-    opts.onSubmit(path);
-  });
-  queueMicrotask(() => {
-    if (picker) {
-      card.focus();
-      picker.start();
-      return;
-    }
-    pathInput.focus();
-  });
-  return handle;
-}
-function projectLabel(root2) {
-  const parts = root2.replace(/\/+$/, "").split("/");
-  const base = parts[parts.length - 1] || root2;
-  const parent = parts.length >= 2 ? parts[parts.length - 2] : "";
-  return parent ? `${base}  (${parent}/${base})` : base;
-}
-function removeTaskModal(name, onConfirm, onCancel) {
-  const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
-  body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
-  asForm(handle.el.firstElementChild, onConfirm);
-  return handle;
-}
-function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
-  const { handle, body } = modalChrome({
-    title: `Mark ${sessionTitle} delivered?`,
-    confirmLabel: "Mark delivered",
-    confirmClass: "af-primary",
-    onCancel
-  });
-  body.append(
-    h(
-      "p",
-      { class: "af-modal-text" },
-      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. If the pane does not show it, cancel and use Retry instead \u2014 that submits the mission a second time."
-    )
-  );
-  asForm(handle.el.firstElementChild, onConfirm);
-  return handle;
-}
-
-// src/types.ts
-var Liveness = {
-  Unset: 0,
-  Running: 1,
-  Ready: 2,
-  Lost: 3,
-  Dead: 4,
-  Archived: 5,
-  LimitReached: 6
-};
-var TabKind = {
-  Agent: 0,
-  Shell: 1,
-  Process: 2,
-  /** A URL/iframe tab (no PTY): rendered as an iframe, not an xterm. A loopback
-   *  target is reverse-proxied by the daemon (/v1/webtab/...); an external URL is
-   *  iframed directly. Mirrors session.TabKindWeb (session/tab.go). */
-  Web: 3,
-  /** A VS Code editor tab (no PTY, and no URL either): a daemon-managed
-   *  per-session code-server rooted at the session's worktree, reachable only
-   *  through the daemon proxy (/v1/webtab/...). Mirrors session.TabKindVSCode
-   *  (session/tab.go) — the kind travels as a bare int, so this MUST stay in
-   *  lockstep with the Go enum. */
-  VSCode: 4
-};
-var InFlightOp = {
-  None: 0,
-  Creating: 1,
-  Killing: 2,
-  Archiving: 3,
-  Restoring: 4,
-  Replacing: 5,
-  Respawning: 6
-};
-var Status = {
-  Running: 0,
-  Ready: 1,
-  Loading: 2,
-  Deleting: 3,
-  Dead: 4,
-  Lost: 5,
-  Archived: 6
-};
-
 // src/delete_tab_modal.ts
 function confirmDeleteTabModal(opts) {
   const { handle, body, cancelBtn } = modalChrome({
@@ -11904,286 +12394,6 @@ function restoreShortcutFocus(navigationTarget, rail) {
   document.activeElement?.blur();
 }
 
-// src/time.ts
-function formatDuration(ms) {
-  const age = Math.max(0, ms);
-  const minute = 6e4, hour = 60 * minute, day = 24 * hour;
-  if (age < minute) return "<1m";
-  if (age < hour) return `${Math.floor(age / minute)}m`;
-  if (age < day) return `${Math.floor(age / hour)}h`;
-  return `${Math.floor(age / day)}d`;
-}
-function formatTime(value, now = /* @__PURE__ */ new Date()) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Unknown time";
-  const delta = date.getTime() - now.getTime();
-  if (Math.abs(delta) < 24 * 60 * 6e4) {
-    const duration = formatDuration(Math.abs(delta));
-    return delta >= 0 ? `in ${duration}` : `${duration} ago`;
-  }
-  return date.toLocaleString(void 0, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
-// src/status.ts
-var OPERATOR_KIND_LABELS = {
-  "needs-you": "Needs you",
-  working: "Working",
-  "waiting-limit": "Waiting on a limit",
-  broken: "Broken",
-  archived: "Archived"
-};
-var ROW_KIND_LABELS = {
-  ready: "Ready",
-  working: "Working",
-  lost: "Lost",
-  dead: "Dead",
-  limit: "Limit reached",
-  archived: "Archived"
-};
-var IDLE_REASON_LABELS = {
-  "usage-limit": "usage limit",
-  "process-exited": "process exited",
-  "restore-gave-up": "restore gave up",
-  "recreate-pending": "recreate notice pending",
-  "prompt-not-delivered": "prompt not delivered",
-  "delivery-unconfirmed": "delivery unknown",
-  "no-pane-change-since-delivery": "no change after delivery",
-  "settled-after-pane-change": "pane changed"
-};
-function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
-  const label = idleReasonLabel(s.idle_reason);
-  if (!label) {
-    return "";
-  }
-  let detail = label;
-  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
-    const { attempts, error } = s.lost_restore_failure;
-    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
-      const noun = attempts === 1 ? "attempt" : "attempts";
-      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
-    }
-  }
-  if (s.last_pane_churn_at) {
-    const churn = new Date(s.last_pane_churn_at);
-    if (!Number.isNaN(churn.getTime())) {
-      const age = `${formatPaneChurnAge(churn, now)} ago`;
-      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
-    }
-  }
-  return detail;
-}
-function idleReasonLabel(reason) {
-  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
-}
-function formatPaneChurnAge(churn, now) {
-  return formatDuration(now.getTime() - churn.getTime());
-}
-var READY_ICON = "circle";
-var DEAD_ICON = "circle";
-var LOST_ICON = "circle-dashed";
-var ARCHIVED_ICON = "archive";
-var LIMIT_ICON = "diamond";
-var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
-function rowStatus(s) {
-  const op = s.in_flight_op ?? InFlightOp.None;
-  if (op !== InFlightOp.None) {
-    return WORKING;
-  }
-  return dotForLiveness(livenessOf(s));
-}
-function isWorking(s) {
-  return rowStatus(s).kind === null;
-}
-function isCreating(s) {
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Creating;
-}
-function rowKind(s) {
-  return rowStatus(s).kind ?? "working";
-}
-function operatorKind(s) {
-  const displayed = rowKind(s);
-  if (displayed === "working") {
-    return "working";
-  }
-  if (displayed === "archived") {
-    return "archived";
-  }
-  if (displayed === "limit" || s.idle_reason === "usage-limit") {
-    return "waiting-limit";
-  }
-  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
-    return "broken";
-  }
-  return "needs-you";
-}
-function livenessOf(s) {
-  const lv = s.liveness ?? Liveness.Unset;
-  if (lv !== Liveness.Unset) {
-    return lv;
-  }
-  switch (s.status) {
-    case Status.Ready:
-      return Liveness.Ready;
-    case Status.Dead:
-      return Liveness.Dead;
-    case Status.Lost:
-      return Liveness.Lost;
-    case Status.Archived:
-      return Liveness.Archived;
-    // Running and the transient values (Loading/Deleting, which never persist)
-    // fall through to the working dot, matching render.go's LivenessUnset arm.
-    default:
-      return Liveness.Running;
-  }
-}
-function dotForLiveness(lv) {
-  switch (lv) {
-    case Liveness.Ready:
-      return { icon: READY_ICON, kind: "ready", label: ROW_KIND_LABELS.ready };
-    case Liveness.Lost:
-      return { icon: LOST_ICON, kind: "lost", label: ROW_KIND_LABELS.lost };
-    case Liveness.Dead:
-      return { icon: DEAD_ICON, kind: "dead", label: ROW_KIND_LABELS.dead };
-    case Liveness.Archived:
-      return { icon: ARCHIVED_ICON, kind: "archived", label: ROW_KIND_LABELS.archived };
-    case Liveness.LimitReached:
-      return { icon: LIMIT_ICON, kind: "limit", label: ROW_KIND_LABELS.limit };
-    // LiveRunning and LivenessUnset both render as working (render.go:285, 297).
-    case Liveness.Running:
-    case Liveness.Unset:
-    default:
-      return WORKING;
-  }
-}
-function isArchived(s) {
-  return livenessOf(s) === Liveness.Archived;
-}
-function isLimitReached(s) {
-  return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
-}
-function isPendingManualHandoffDeliveryUnconfirmed(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
-}
-function ambiguousHandoffDelivery(status) {
-  return status === "sent-unverified" || status === "could-not-confirm";
-}
-function confirmableHandoffDelivery(status) {
-  return ambiguousHandoffDelivery(status) || status === "delivered";
-}
-function isPendingAgentHandoffDeliveryUnconfirmed(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
-}
-function isPendingAgentHandoffDeliveryConfirmable(s) {
-  const liveness = livenessOf(s);
-  const status = s.pending_handoff_delivery_status;
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function isPendingManualSwapDeliveryConfirmable(s) {
-  const pending = s.pending_account_swap;
-  const liveness = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  const status = pending?.mission_delivery_status;
-  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
-}
-function canHandoff(s) {
-  return s.can_handoff === true;
-}
-function isRootSession(s) {
-  return s.is_root === true;
-}
-function compareSessionsForRail(a, b) {
-  const aArchived = isArchived(a);
-  const aa = aArchived ? 1 : 0;
-  const bb = isArchived(b) ? 1 : 0;
-  if (aa !== bb) {
-    return aa - bb;
-  }
-  const ar = isRootSession(a) ? 0 : 1;
-  const br = isRootSession(b) ? 0 : 1;
-  if (ar !== br) {
-    return ar - br;
-  }
-  const at = a.created_at ?? "";
-  const bt = b.created_at ?? "";
-  if (at !== bt) {
-    const asc = at < bt ? -1 : 1;
-    return aArchived ? -asc : asc;
-  }
-  return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
-}
-function rowTitle(s) {
-  const lv = livenessOf(s);
-  const op = s.in_flight_op ?? InFlightOp.None;
-  let title = s.title;
-  if (s.backend_type === "remote") {
-    title = "[remote] " + title;
-  }
-  if (lv === Liveness.Lost) {
-    title = "[lost] " + title;
-  }
-  if (op === InFlightOp.Killing || op === InFlightOp.Archiving) {
-    title = "[deleting] " + title;
-  }
-  if (lv === Liveness.LimitReached) {
-    title = limitBadgePrefix(s) + title;
-  }
-  const recreate = rootRecreateNote(s);
-  if (recreate) {
-    title = `[${recreate}] ` + title;
-  }
-  if (archiveWarningText(s) !== "") {
-    title = "[archive incomplete] " + title;
-  }
-  if (s.model_change) {
-    title = "[model changed] " + title;
-  }
-  return title;
-}
-function archiveWarningText(s) {
-  return s.archive_warning?.trim() ?? "";
-}
-function rootRecreateNote(s) {
-  switch (s.root_recreate_context) {
-    case "fresh":
-      return "fresh context";
-    case "unknown":
-      return "context unknown";
-    default:
-      return "";
-  }
-}
-function limitBadgePrefix(s) {
-  if (!s.limit_reset_at) {
-    return "[limit] ";
-  }
-  const reset = new Date(s.limit_reset_at);
-  if (Number.isNaN(reset.getTime())) {
-    return "[limit] ";
-  }
-  return `[limit] resets ${formatLimitReset(reset, /* @__PURE__ */ new Date())} `;
-}
-function formatLimitReset(reset, now) {
-  const h12 = (reset.getHours() + 11) % 12 + 1;
-  const ampm = reset.getHours() < 12 ? "am" : "pm";
-  const min = reset.getMinutes();
-  const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, "0")}${ampm}`;
-  const sameDay = reset.getFullYear() === now.getFullYear() && reset.getMonth() === now.getMonth() && reset.getDate() === now.getDate();
-  if (sameDay) {
-    return clock;
-  }
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${months[reset.getMonth()]} ${reset.getDate()} ${clock}`;
-}
-
 // src/filter.ts
 var FILTER_KEY = "af-status-filter";
 var FILTER_KINDS = ["needs-you", "working", "waiting-limit", "broken", "archived"];
@@ -12267,156 +12477,6 @@ function persistFilter(filter) {
     localStorage.setItem(FILTER_KEY, JSON.stringify(filter));
   } catch {
   }
-}
-
-// src/project.ts
-var PROJECT_KEY = "af-project";
-function projectName(root2) {
-  const parts = root2.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || root2;
-}
-function projectSummaries(sessions, tasks, registeredRoots = []) {
-  const byRoot = /* @__PURE__ */ new Map();
-  for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
-    if (!root2) {
-      continue;
-    }
-    const arr = byRoot.get(root2) ?? [];
-    arr.push(s);
-    byRoot.set(root2, arr);
-  }
-  const taskCounts = /* @__PURE__ */ new Map();
-  for (const t of tasks) {
-    const root2 = t.project_path;
-    if (!root2) {
-      continue;
-    }
-    taskCounts.set(root2, (taskCounts.get(root2) ?? 0) + 1);
-  }
-  const roots = /* @__PURE__ */ new Set();
-  for (const [root2, rows] of byRoot) {
-    if (rows.some((s) => !isArchived(s))) {
-      roots.add(root2);
-    }
-  }
-  for (const root2 of taskCounts.keys()) {
-    roots.add(root2);
-  }
-  for (const root2 of registeredRoots) {
-    if (root2) {
-      roots.add(root2);
-    }
-  }
-  return [...roots].sort().map((root2) => {
-    const rows = byRoot.get(root2) ?? [];
-    const live = rows.filter((s) => !isArchived(s));
-    const working = live.filter((s) => isWorking(s)).length;
-    return {
-      root: root2,
-      name: projectName(root2),
-      path: root2,
-      liveCount: live.length,
-      workingCount: working,
-      totalCount: rows.length,
-      taskCount: taskCounts.get(root2) ?? 0
-    };
-  });
-}
-function projectMeta(p) {
-  if (p.liveCount === 0) {
-    return p.taskCount > 0 ? `${p.taskCount} task${p.taskCount === 1 ? "" : "s"}` : "no sessions yet";
-  }
-  const base = `${p.liveCount} session${p.liveCount === 1 ? "" : "s"}`;
-  return p.workingCount > 0 ? `${base} \xB7 ${p.workingCount} working` : base;
-}
-function pickerProjects(sessions, tasks, registeredRoots = []) {
-  const roots = /* @__PURE__ */ new Set();
-  for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
-    if (root2) {
-      roots.add(root2);
-    }
-  }
-  for (const t of tasks) {
-    if (t.project_path) {
-      roots.add(t.project_path);
-    }
-  }
-  for (const root2 of registeredRoots) {
-    if (root2) {
-      roots.add(root2);
-    }
-  }
-  return [...roots].sort();
-}
-function scopeToProject(sessions, root2) {
-  if (!root2) {
-    return [];
-  }
-  return sessions.filter((s) => s.worktree?.repo_path === root2);
-}
-function validRoots(sessions, tasks, registeredRoots = []) {
-  return new Set(projectSummaries(sessions, tasks, registeredRoots).map((p) => p.root));
-}
-function defaultProject(sessions, tasks, registeredRoots = []) {
-  const summaries = projectSummaries(sessions, tasks, registeredRoots);
-  if (summaries.length === 0) {
-    return null;
-  }
-  const valid = new Set(summaries.map((p) => p.root));
-  let best = null;
-  for (const s of sessions) {
-    const root2 = s.worktree?.repo_path;
-    if (!root2 || isArchived(s) || !valid.has(root2)) {
-      continue;
-    }
-    if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
-      best = s;
-    }
-  }
-  if (best?.worktree?.repo_path) {
-    return best.worktree.repo_path;
-  }
-  let bestTask = null;
-  for (const t of tasks) {
-    if (!t.project_path || !valid.has(t.project_path)) {
-      continue;
-    }
-    if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
-      bestTask = t;
-    }
-  }
-  return bestTask?.project_path ?? summaries[0]?.root ?? null;
-}
-function reconcileProject(sessions, tasks, persisted, current, registeredRoots = []) {
-  const valid = validRoots(sessions, tasks, registeredRoots);
-  if (current && valid.has(current)) {
-    return current;
-  }
-  if (persisted && valid.has(persisted)) {
-    return persisted;
-  }
-  return defaultProject(sessions, tasks, registeredRoots);
-}
-function loadProjectChoice() {
-  try {
-    const v = localStorage.getItem(PROJECT_KEY);
-    return v && v !== "" ? v : null;
-  } catch {
-    return null;
-  }
-}
-function persistProjectChoice(root2) {
-  try {
-    localStorage.setItem(PROJECT_KEY, root2);
-  } catch {
-  }
-}
-function projectDeletionBreakdown(sessions, root2) {
-  const live = sessions.filter((s) => s.worktree?.repo_path === root2 && !isArchived(s));
-  const inPlaceCount = live.filter((s) => s.worktree?.external_worktree === true).length;
-  return { sessionCount: live.length - inPlaceCount, inPlaceCount };
 }
 
 // src/sessions.ts
@@ -15919,6 +15979,7 @@ var AppShell = class {
     });
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
+      selectScope: (repoPath) => this.actions.selectConfigScope(repoPath),
       openAssistant: () => this.actions.openConfigAssistant(),
       accounts: {
         register: (agent, name) => this.actions.registerAccount(agent, name),
@@ -16253,7 +16314,11 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    this.configPane.update(state.config, state.configPath, {
+      root: state.configProjectRoot,
+      selected: state.configScope,
+      options: pickerProjects(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root))
+    }, state.configStatus, state.accounts);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -17722,6 +17787,8 @@ var store = new Store({
   view: "sessions",
   config: [],
   configPath: "",
+  configScope: "",
+  configProjectRoot: "",
   configStatus: null,
   accounts: emptyAccountsState(),
   selectedProject: null,
@@ -18772,20 +18839,31 @@ function clearTabError() {
 }
 var configRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: getConfig,
+  // The scope is read at fetch time: the commit of an answer for a scope the
+  // user has since left is exactly what the fence exists to drop.
+  fetch: (tok) => getConfig(tok, store.get().configScope),
   commit: (resp) => {
-    store.set({ config: resp.entries, configPath: resp.path });
+    const root2 = resp.project_root ?? "";
+    store.set({ config: resp.entries, configPath: resp.path, configProjectRoot: root2, configScope: root2 });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
   // settings" rather than "the read failed". Under the fence like the commit — an
   // older request's transport blip must not paint an error over the fresher answer
   // already on screen, which is the same "the older one commits nothing" rule.
   onError: (err) => {
+    store.set({ configScope: store.get().configProjectRoot });
     surfaceTabError(err);
   }
 });
 function refreshConfig() {
   configRefetcher.refresh();
+}
+function selectConfigScope(repoPath) {
+  if (repoPath === store.get().configScope) {
+    return;
+  }
+  store.set({ configScope: repoPath, configStatus: null });
+  refreshConfig();
 }
 var accountsRefetcher = createFencedRefetcher({
   readToken: () => token,
@@ -19215,6 +19293,7 @@ var actions = {
   dropTabOnPaneAt: (x, y, drag) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  selectConfigScope,
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

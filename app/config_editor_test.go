@@ -16,7 +16,7 @@ import (
 func openConfigEditorForTest(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
-	h.configPane.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	h.configPane.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	h.configPane.SetFocus(true)
 	h.state = stateConfigEditor
 	return h

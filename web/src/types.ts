@@ -480,8 +480,13 @@ export interface ConfigEntry {
 export interface ConfigResponse {
   entries: ConfigEntry[];
   /** The config.toml the values were read from, so the UI can name the file it
-   *  is editing rather than leaving an AF_HOME user guessing. */
+   *  is editing rather than leaving an AF_HOME user guessing. It stays the
+   *  daemon's global file even on a project read — the layers a project adds
+   *  live elsewhere, and project_root names the scope. */
   path: string;
+  /** The repository root the entries were resolved for, echoed so the view can
+   *  label the scope it asked about. Absent on a global read. */
+  project_root?: string;
 }
 
 /** config.SetResult (config/configset.go), as returned by SetConfigValue. */

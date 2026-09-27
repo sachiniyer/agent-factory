@@ -665,6 +665,17 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.selectionOverlay.SetSelectedIndex(idx)
 			return m.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// And the config scope picker — the same overlay a sixth time, so the same
+	// click routing. A list that answers the keyboard and ignores the mouse is
+	// the #1819 class.
+	case stateConfigScope:
+		if m.selectionOverlay == nil {
+			return m, nil
+		}
+		if idx, ok := zones.OverlaySelectIdx(id); ok {
+			m.selectionOverlay.SetSelectedIndex(idx)
+			return m.handleStateConfigScope(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case stateSearch:
 		if m.searchOverlay == nil {
 			return m, nil

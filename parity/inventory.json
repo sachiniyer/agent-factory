@@ -167,20 +167,20 @@
       "id": "config.read-project",
       "title": "Read the effective config for a selected project",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane.go p key -> app/config_scope.go stateConfigScope picker -> ui/config_target.go ReadConfigForEditor(repoSelector) (in-process config.ManifestWithRepoValues, or the targeted daemon's GetConfig repo_path)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/config.ts scope select -> web/src/index.ts selectConfigScope -> web/src/api.ts getConfig(token, repoPath) -> POST /v1/GetConfig repo_path"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/configcmd.go config get/list --repo (with deprecated --project alias)"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#2216",
-      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
+      "notes": "The daemon's GetConfig now takes repo_path and answers the project-effective stack through the same config.ManifestWithRepoValues the CLI's `af config list --repo` resolves in-process (built-in < global < in-repo < personal project, with root_agent's four-layer special case). The TUI editor's `p` opens a scope picker over the still-open pane (global plus the targeted daemon's registry and session roots); the web view carries a scope select in its header fed by the same pickerProjects union as the new-session modal. Both render a project scope READ-ONLY: project-scoped writes stay with config.write-project, so an effective value can never be written into the global file it was not read from. Both resolve on the daemon host — a remote TUI sends repo_path over GetConfig (an old daemon rejects the unknown field rather than answering global), and an unresolvable path is an error, never a silent global read."
     },
     {
       "id": "appearance.select",

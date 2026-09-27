@@ -3065,6 +3065,41 @@ button:disabled,
   padding: var(--af-space-1) var(--af-space-2);
 }
 
+/* The scope picker in the config header (#2216 stage 7): which config the rows
+ * are — the global file or a project's effective stack. Compact like the other
+ * header controls; the list under it scrolls, this does not. */
+.af-config-scope {
+  font-size: var(--af-type-caption);
+  padding: var(--af-space-1) var(--af-space-2);
+  max-width: 40%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The read-only marker a project scope carries (#2216 stage 7): inspection
+ * only, so the label is small and quiet rather than a warning color — nothing
+ * is wrong, the scope just is not writable here. */
+.af-config-readonly {
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+  padding: 0 var(--af-space-1);
+  white-space: nowrap;
+}
+
+/* The project-scope explanation under the header: where the values come from
+ * and where an override is written (af config set --project). */
+.af-config-scope-note {
+  margin: 0;
+  padding: var(--af-space-2) var(--af-space-3);
+  color: var(--af-ink-muted);
+  font-size: var(--af-type-caption);
+  line-height: 1.5;
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+
 /* The "Configure with assistant" button in the config header (#2467). Sits at the
  * right of the header; when the config path is present it follows it, otherwise the
  * auto margin carries it to the edge on its own. */
@@ -3439,6 +3474,7 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 .af-login-form input { background: var(--af-surface-raised); min-height: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
 @media (max-width: 768px) {
   .af-config-head { flex-wrap: wrap; }
+  .af-config-scope { order: 2; max-width: none; flex: 1 1 auto; }
   .af-config-path { order: 3; flex-basis: 100%; max-width: 100%; margin-left: 0; }
   .af-config-assistant-btn { margin-left: auto; }
 }

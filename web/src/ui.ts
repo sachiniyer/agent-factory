@@ -34,7 +34,7 @@ import {
   kindCounts,
   type StatusFilter,
 } from "./filter.js";
-import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
+import { pickerProjects, projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
@@ -237,6 +237,15 @@ export interface AppState {
   /** the config.toml the values were read from, named in the config view so an
    *  AF_HOME user knows which file they are editing. */
   configPath: string;
+  /** the scope the config view's scope select currently shows: "" for the
+   *  global file, a project root for that repo's effective read (#2216 stage 7).
+   *  The user's pick lands here immediately; the ROWS' scope is
+   *  configProjectRoot, which moves only when the daemon's answer does. */
+  configScope: string;
+  /** the repository root the config ROWS were resolved for ("" = global). The
+   *  daemon echoes it as GetConfig's project_root — never the requested path —
+   *  so a respelled root still labels the scope the values actually came from. */
+  configProjectRoot: string;
   /** the outcome of the last config write — the daemon's echo and restart notice,
    *  or the validator's message when it refused — or null when there is none. */
   configStatus: ConfigStatus | null;
@@ -344,6 +353,10 @@ export interface Actions {
    *  in the browser: a second copy of the rules is how a UI accepts a value the
    *  loader later rejects at startup. */
   setConfigValue(key: string, value: string): void;
+  /** Switches which scope the config view reads (#2216 stage 7): "" for the
+   *  global file, a project root for that repo's effective stack — the same
+   *  `af config list --repo` read the TUI's `p` scope picker opens. */
+  selectConfigScope(repoPath: string): void;
   /** Opens the conversational config assistant (#2467): index.ts spawns-or-reuses
    *  the daemon-owned assistant, streams it into a chat overlay, and reaps it on
    *  close. The config pane only reports the intent; the shell owns the token and the
@@ -1249,6 +1262,7 @@ export class AppShell {
     });
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
+      selectScope: (repoPath: string) => this.actions.selectConfigScope(repoPath),
       openAssistant: () => this.actions.openConfigAssistant(),
       accounts: {
         register: (agent: string, name: string) => this.actions.registerAccount(agent, name),
@@ -1429,10 +1443,16 @@ export class AppShell {
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
 
-    // The config pane mirrors the manifest. Global config is NOT project-scoped —
-    // config.toml applies to every repo — so unlike the tasks pane it re-renders on
-    // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts);
+    // The config pane mirrors the manifest plus the scope the user picked from
+    // its scope select (#2216 stage 7): global config is NOT project-scoped, but
+    // a project read is the project-effective stack `af config list --repo`
+    // resolves. The scope options are the project pickers' union, so a
+    // registered-but-sessionless repo is offered exactly as it is in `n`.
+    this.configPane.update(state.config, state.configPath, {
+      root: state.configProjectRoot,
+      selected: state.configScope,
+      options: pickerProjects(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root)),
+    }, state.configStatus, state.accounts);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

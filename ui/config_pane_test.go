@@ -25,7 +25,7 @@ func newTestConfigPane(t *testing.T) *ConfigPane {
 	// start failing because a key scrolled off, which reads as "the manifest
 	// drifted" when nothing drifted at all.
 	c.SetSize(100, 200)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -82,7 +82,7 @@ func TestConfigPaneRendersEveryManifestKey(t *testing.T) {
 func TestConfigPaneRendersEveryTierAndFoldsAdvanced(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(100, 40)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 
 	folded := c.String()
@@ -408,7 +408,7 @@ const paneHeight = 20
 func TestConfigPaneKeepsTheSelectionVisible(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(64, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -459,7 +459,7 @@ func TestConfigPaneKeepsTheSelectionVisible(t *testing.T) {
 func TestConfigPaneWindowSaysWhatIsHidden(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(64, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -503,7 +503,7 @@ func TestConfigPaneClosingClearsTheLastWritesStatus(t *testing.T) {
 	}
 
 	// Reopen the way showConfigEditor reopens it.
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 
 	view := c.String()
@@ -557,7 +557,7 @@ func TestConfigPaneNeverRendersALineWiderThanThePane(t *testing.T) {
 	const w = 72
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -603,7 +603,7 @@ func openPaneOn(t *testing.T, path, key string) *ConfigPane {
 	}
 	c := NewConfigPane()
 	c.SetSize(72, paneHeight)
-	c.SetEntries(config.ManifestWithValues(cfg), path)
+	c.SetEntries(config.ManifestWithValues(cfg), path, "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -718,7 +718,7 @@ func TestConfigPaneWindowsWithAZeroBudget(t *testing.T) {
 	for _, h := range []int{1, 2, 5, 8} {
 		c := NewConfigPane()
 		c.SetSize(72, h)
-		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 		c.SetFocus(true)
 		c.showAdvanced = true
 		c.rebuildRows()
@@ -758,7 +758,7 @@ func TestConfigPaneWindowsWithAZeroBudget(t *testing.T) {
 // of zero. It must not panic, and it must not hide anything.
 func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
 	c := NewConfigPane()
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -803,7 +803,7 @@ func TestConfigPaneFitsItsBoxAtEveryWidth(t *testing.T) {
 		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
 			c := NewConfigPane()
 			c.SetSize(w, paneHeight)
-			c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+			c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml", "")
 			c.SetFocus(true)
 			c.showAdvanced = true
 			c.rebuildRows()
@@ -845,7 +845,7 @@ func TestConfigPaneHintsAlwaysAdvertiseTheExit(t *testing.T) {
 	for _, w := range append([]int{4, 9, 12, 20, 23, 32, 43}, configPaneSweepWidths...) {
 		c := NewConfigPane()
 		c.SetSize(w, paneHeight)
-		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 		c.SetFocus(true)
 		c.rebuildRows()
 
@@ -878,7 +878,7 @@ func TestConfigPaneEditFieldFitsItsRowWithoutClipping(t *testing.T) {
 	for _, w := range configPaneSweepWidths {
 		c := NewConfigPane()
 		c.SetSize(w, paneHeight)
-		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 		c.SetFocus(true)
 		c.showAdvanced = true
 		c.rebuildRows()
@@ -932,7 +932,7 @@ func TestConfigPaneDisplayRowsStayOneLine(t *testing.T) {
 
 	c := NewConfigPane()
 	c.SetSize(72, paneHeight)
-	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetEntries(entries, "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -970,7 +970,7 @@ func TestConfigPaneEditFieldSurvivesTheTightestRow(t *testing.T) {
 	)
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1072,7 +1072,7 @@ func TestConfigPaneEditFieldReflowsOnResize(t *testing.T) {
 
 			c := NewConfigPane()
 			c.SetSize(72, paneHeight)
-			c.SetEntries(entries, "/tmp/config.toml")
+			c.SetEntries(entries, "/tmp/config.toml", "")
 			c.SetFocus(true)
 			c.showAdvanced = true
 			c.rebuildRows()
@@ -1123,7 +1123,7 @@ func TestConfigPaneEditFieldUnboundedWhileUnsized(t *testing.T) {
 
 	// No SetSize at all.
 	c := NewConfigPane()
-	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetEntries(entries, "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1186,7 +1186,7 @@ func TestConfigPaneNeverOverflowsOnWideCharacterValues(t *testing.T) {
 
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(entries, "~/.agent-factory/config.toml")
+	c.SetEntries(entries, "~/.agent-factory/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1200,5 +1200,98 @@ func TestConfigPaneNeverOverflowsOnWideCharacterValues(t *testing.T) {
 			}
 		}
 		c.move(1)
+	}
+}
+
+// The `p` scope request (config.read-project): the pane cannot open the project
+// picker itself — the overlay is app-owned — so it records the intent for the
+// app to take, exactly like the assistant request.
+func TestConfigPaneScopeRequestIsTakenOnce(t *testing.T) {
+	c := newTestConfigPane(t)
+	if c.TakeScopeRequest() {
+		t.Fatal("no scope request before the key was pressed")
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if !c.TakeScopeRequest() {
+		t.Fatal("p must record a scope request for the app")
+	}
+	if c.TakeScopeRequest() {
+		t.Fatal("the scope request must clear when taken — a stale intent cannot reopen the picker")
+	}
+	if !c.hasFocus {
+		t.Error("the pane keeps focus: the picker is a nested modal, not a close")
+	}
+}
+
+// A project-scoped pane is an inspector: Enter must refuse the edit and say
+// where the write DOES go, never open a field that would write an effective
+// value into the global file it was not read from (config.write-project is the
+// separate seam).
+func TestConfigPaneProjectScopeRefusesEdits(t *testing.T) {
+	c := NewConfigPane()
+	c.SetSize(100, 200)
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "project /repo", "/repo")
+	c.SetFocus(true)
+
+	screen := c.String()
+	if !strings.Contains(screen, "read-only") {
+		t.Error("a scoped pane must mark itself read-only in the header, before the location clip can lose it")
+	}
+	if !strings.Contains(screen, "project /repo") {
+		t.Error("a scoped pane must name the project the rows were resolved for")
+	}
+	if strings.Contains(screen, "↵ edit") {
+		t.Error("a read-only scope must not advertise an edit that cannot happen")
+	}
+	if !strings.Contains(screen, "p scope") {
+		t.Error("the scope picker must be advertised in the hints")
+	}
+
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if c.editing {
+		t.Fatal("a project-scoped row must not enter edit mode")
+	}
+	if c.status == "" || !strings.Contains(c.status, "read-only") {
+		t.Errorf("Enter on a scoped row must explain the refusal; status=%q", c.status)
+	}
+	if !strings.Contains(c.status, "af config set --project") {
+		t.Errorf("the refusal must name where the write DOES go; status=%q", c.status)
+	}
+}
+
+// The global scope is untouched: `p scope` is advertised alongside `↵ edit`,
+// and Enter edits as it always has.
+func TestConfigPaneGlobalScopeStillEdits(t *testing.T) {
+	c := newTestConfigPane(t)
+	screen := c.String()
+	if !strings.Contains(screen, "↵ edit") || !strings.Contains(screen, "p scope") {
+		t.Error("the global scope advertises both edit and the scope picker")
+	}
+	if strings.Contains(screen, "read-only") {
+		t.Error("the global scope must not claim to be read-only")
+	}
+	if c.ScopeRoot() != "" {
+		t.Errorf("the global scope reports no root, got %q", c.ScopeRoot())
+	}
+}
+
+// A scope switch is a different LIST: a write echo from the old scope must not
+// linger under rows it was not read with.
+func TestConfigPaneScopeChangeDropsTheOldScopesStatus(t *testing.T) {
+	c := newTestConfigPane(t)
+	c.status = "set default_program = codex"
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "project /repo", "/repo")
+	if c.status != "" {
+		t.Error("a scope change must clear the previous scope's write echo")
+	}
+	if got := c.ScopeRoot(); got != "/repo" {
+		t.Errorf("ScopeRoot reports the new scope: got %q", got)
+	}
+	// Same scope, fresh rows: the status stays — a refetch of the SAME scope is
+	// the write echo's legitimate refresh.
+	c.status = "validator error"
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "project /repo", "/repo")
+	if c.status != "validator error" {
+		t.Error("a refetch of the SAME scope must not clear a live status")
 	}
 }
