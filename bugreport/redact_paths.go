@@ -317,50 +317,58 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 	if r.logOnlyPathBareNames == nil {
 		r.logOnlyPathBareNames = make(map[string]struct{})
 	}
+	// Once the slash-bearing registry is saturated the cap drops every
+	// slash-bearing spelling this call would collect and the matcher already
+	// switched to the single-pass fail-closed scan, so re-resolving (EvalSymlinks
+	// per spelling) is wasted work — skip it, still collecting the bare-name
+	// registry below (#4938 review).
+	slashSaturated := r.logOnlyPathBlanksSaturated
 	// Collect this call's slash-bearing spellings (cleaned + raw absolute,
 	// and multi-segment relative) and keep only the ones not already
 	// registered, so a duplicate is a no-op even at the cap instead of
 	// switching the log scrubber to a blank-every-path pass (#4938 review).
 	var newSlashSpellings []string
-	for _, spelling := range absolutePathSpellings(path) {
-		if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
-			newSlashSpellings = append(newSlashSpellings, spelling)
+	if !slashSaturated {
+		for _, spelling := range absolutePathSpellings(path) {
+			if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
+				newSlashSpellings = append(newSlashSpellings, spelling)
+			}
+		}
+		if raw := originalAbsolutePathSpelling(path); raw != "" {
+			// Persisted worktrees keep the raw path string verbatim (double
+			// separators, trailing slashes, un-resolved "."/".." segments);
+			// DiagnoseMissingWorktree logs those raw strings, and
+			// absolutePathSpellings cleans its input, so a raw spelling like
+			// "/srv//ConfidentialClient/repo" would otherwise register only
+			// "/srv/ConfidentialClient/repo" and miss the verbatim log value.
+			// Keep the original absolute spelling too, as a log-only blank.
+			if _, ok := r.logOnlyPathBlanks[raw]; !ok {
+				newSlashSpellings = append(newSlashSpellings, raw)
+			}
 		}
 	}
-	if raw := originalAbsolutePathSpelling(path); raw != "" {
-		// Persisted worktrees keep the raw path string verbatim (double
-		// separators, trailing slashes, un-resolved "."/".." segments and the
-		// like) and DiagnoseMissingWorktree logs those raw strings.
-		// absolutePathSpellings cleans its input, so a raw spelling like
-		// "/srv//ConfidentialClient/repo" would otherwise register only
-		// "/srv/ConfidentialClient/repo" and the log-only matcher could not
-		// find the verbatim value in the daemon log. Keep the original
-		// absolute spelling too, matched only as a log-only blank.
-		if _, ok := r.logOnlyPathBlanks[raw]; !ok {
-			newSlashSpellings = append(newSlashSpellings, raw)
-		}
-	}
-	// NewGitWorktreeFromStorage only rejects empty paths, so a rejected
-	// record can carry a relative repo_path/worktree_path (e.g.
-	// "private-client/repo"); absolutePathSpellings returns nil for it,
-	// and logVanishedWorktreeOnce then writes the stored value with %q,
-	// shipping the verbatim relative path in a tail line such as
-	// repo_path="private-client/repo" even though the fallback JSON masks
-	// that field in a separate section. Register the slash-bearing
-	// relative spelling for log-scope blanking too so the verbatim value
-	// does not survive the daemon log tail (#4938 review).
+	// NewGitWorktreeFromStorage only rejects empty paths, so a rejected record
+	// can carry a relative repo_path/worktree_path (e.g. "private-client/repo");
+	// absolutePathSpellings returns nil for it, and logVanishedWorktreeOnce
+	// writes the stored value with %q, so the verbatim relative path would
+	// survive the daemon log tail. Register the slash-bearing relative spelling
+	// for log-scope blanking too (#4938 review).
 	//
 	// Single-segment relative spellings (no path separator after cleaning)
-	// are routed to a separate set (logOnlyPathBareNames) — the saturated
-	// scan anchors on '/', so it cannot reach them once the slash-bearing
-	// path cap saturates. The bare-name set's own per-needle scan reaches
-	// them regardless of saturation; see relativeBareNameSpellings for the
-	// over-blank trade-off the #4938 review accepted (#4938 review).
+	// route to a separate set (logOnlyPathBareNames) since the saturated scan
+	// anchors on '/' and cannot reach them once the slash-bearing cap
+	// saturates; the bare-name per-needle scan reaches them regardless (see
+	// relativeBareNameSpellings for the over-blank trade). A multi-segment
+	// relative spelling is slash-bearing, dropped at the cap once saturated
+	// and not collected here either; the single-segment bare-name spelling is
+	// still collected under its own cap.
 	var newBareNameSpellings []string
 	for _, spelling := range relativePathSpellings(path) {
 		if strings.ContainsRune(spelling, filepath.Separator) {
-			if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
-				newSlashSpellings = append(newSlashSpellings, spelling)
+			if !slashSaturated {
+				if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
+					newSlashSpellings = append(newSlashSpellings, spelling)
+				}
 			}
 			continue
 		}

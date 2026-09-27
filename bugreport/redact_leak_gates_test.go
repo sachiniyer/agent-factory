@@ -1134,11 +1134,16 @@ func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
 	// A daemon-tail line for the omitted bare name. repo_path is a bare scalar
 	// (no '/') so the per-scalar bare-name fail-closed blanks it whole; the
 	// whole-record scan blanks the unquoted emitter label and field names
-	// (bare-name-shaped tokens) but leaves the quoted recover_error scalar to
-	// the per-scalar pass, which — recover_error carrying a '/' and the
-	// slash-bearing registry empty and not saturated — leaves the unrelated
-	// path verbatim. So the secret is gone, the '/'-bearing quoted path
-	// survives, and only the unquoted bare tokens of the record blank.
+	// (bare-name-shaped tokens). The quoted recover_error scalar is decoded to a
+	// '/'-bearing ProvLogValue; the bare-name cap is saturated but the
+	// slash-bearing cap is not, so the slash-bearing saturated scan does not
+	// run, and the per-scalar '/'-bearing bare-name fail-closed now blanks the
+	// bare-name-shaped (no '/') tokens in it too (the prose "recovery"/
+	// "location") while leaving the '/'-bearing "/srv/unrelated/repo" to the
+	// slash-bearing per-needle pass, which is not saturated and leaves the
+	// unrelated path verbatim. So the secret is gone, the '/'-bearing path
+	// survives, the prose around it blanks to close the bare-name-in-'/'-scalar
+	// leak, and the unquoted bare tokens of the record blank.
 	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q recover_error=%q`,
 		secret, "recovery location: /srv/unrelated/repo")
 	got := r.scrubLog(logLine)
@@ -1146,9 +1151,17 @@ func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
 	if strings.Contains(got, secret) {
 		t.Errorf("scrubLog leaked past-the-cap bare name %q:\n%s", secret, got)
 	}
-	for _, want := range []string{"/srv/unrelated/repo", "recovery location"} {
+	for _, want := range []string{"/srv/unrelated/repo"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("scrubLog removed %q that the '/'-bearing quoted scalar must keep (#4938 review):\n%s", want, got)
+		}
+	}
+	// The prose tokens of the '/'-bearing recover_error blank under the
+	// bare-name-saturated per-scalar fail-closed (they carry no '/'), closing
+	// the bare-name-in-'/'-scalar leak; only the '/'-bearing path survives.
+	for _, prose := range []string{"recovery location", "recovery"} {
+		if strings.Contains(got, prose) {
+			t.Errorf("scrubLog left prose %q of the '/'-bearing recover_error that the bare-name fail-closed must blank:\n%s", prose, got)
 		}
 	}
 	if strings.Contains(got, "WORKTREE_MISSING_DETECTED") {
