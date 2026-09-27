@@ -121,6 +121,19 @@ type redactor struct {
 	// so the untyped value gets no structural role anywhere in the bundle while
 	// the log section still does not ship the private directory name verbatim.
 	logOnlyPathBlanks map[string]struct{}
+	// logOnlyPathBareNames holds single-segment relative spellings (no path
+	// separator after cleaning) that the generic fallback registered for
+	// log-scope blanking. Slash-bearing spellings live in logOnlyPathBlanks,
+	// but a single-segment relative name such as "ConfidentialClient" — the
+	// bare value of a rejected record's repo_path, or the parent_path derived
+	// from worktree_path="ConfidentialClient/wt" — carries no '/', so the
+	// saturated scan (which anchors on '/') cannot reach it once the
+	// slash-bearing path cap saturates. Keeping bare names in their own set
+	// lets a bounded per-needle pass reach them regardless of saturation
+	// (#4938 review). The set is capped at maxLogOnlyPathBlanks; past it,
+	// names drop silently, which is a small fail-open window for bare names
+	// in a degenerate archive that saturates the bare-name set itself.
+	logOnlyPathBareNames map[string]struct{}
 	// logOnlyPathBlanksSaturated records that noteLogOnlyPathRedaction reached
 	// maxLogOnlyPathBlanks and is now a no-op for further call. Dropping
 	// registration past the cap would be fail-open — a daemon-log tail line for

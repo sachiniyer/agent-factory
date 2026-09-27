@@ -871,3 +871,167 @@ func TestWorktreePathTitlesTypedEntriesDoNotConsumeFallbackCap(t *testing.T) {
 			r.worktreePathTitlesFallback)
 	}
 }
+
+// TestLogOnlyPathBlanksSingleSegmentRelativeRejectedRecord pins the #4938
+// review fix on the generic fallback's handling of a SINGLE-SEGMENT relative
+// path in a rejected record. NewGitWorktreeFromStorage only rejects empty
+// paths, so a hand-edited or legacy instances.json can carry a bare directory
+// name — either directly as a single-segment repo_path="ConfidentialClient",
+// or as the parent_path the missing-worktree emitter writes for a multi-
+// segment worktree_path="ConfidentialClient/wt" (parent_path=filepath.Dir).
+// relativePathSpellings used to discard the single-segment name to avoid
+// over-blanking prose for a private directory whose name is one bare word,
+// shipping the verbatim private directory name through the daemon-log
+// section even though the fallback JSON redacts that field wholesale. The
+// #4938 review accepted the over-blank trade-off found; the bare directory
+// name now registers for log-scope blanking in a separate bounded set
+// (logOnlyPathBareNames) whose per-needle scan reaches it.
+func TestLogOnlyPathBlanksSingleSegmentRelativeRejectedRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		repoPath string
+		worktree string
+		secret   string
+		logKey   string
+	}{
+		{
+			name:     "single-segment repo_path",
+			repoPath: "ConfidentialClient",
+			worktree: "ConfidentialClient/wt",
+			secret:   "ConfidentialClient",
+			logKey:   "repo_path",
+		},
+		{
+			name:     "single-segment parent_path",
+			repoPath: "key/repo",
+			worktree: "ConfidentialClient/wt",
+			secret:   "ConfidentialClient",
+			logKey:   "parent_path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &redactor{}
+			r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(
+				`[{"status":"legacy","repo_path":%q,"worktree_path":%q}]`,
+				tc.repoPath, tc.worktree)))
+			if _, ok := r.logOnlyPathBareNames[tc.secret]; !ok {
+				t.Fatalf("logOnlyPathBareNames did not register the single-segment name %q (set %v)",
+					tc.secret, r.logOnlyPathBareNames)
+			}
+			logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q worktree_path=%q parent_path=%q`,
+				tc.repoPath, tc.worktree, filepath.Dir(tc.worktree))
+			got := r.scrubLog(logLine)
+			t.Logf("single-segment relative scrubLog out:\n%s", got)
+			if strings.Contains(got, tc.secret) {
+				t.Errorf("scrubLog leaked single-segment relative %q:\n%s", tc.secret, got)
+			}
+			for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestLogOnlyPathBlanksSingleSegmentRelativeRejectedRecordSaturated pins the
+// saturated half of the #4938 review fix for a single-segment relative path.
+// Once the slash-bearing path cap saturates the per-needle scan against
+// logOnlyPathBlanks is replaced by the saturated scan, which anchors on '/'
+// and cannot reach a single-segment name with no separator. The bare-name
+// set is independent of the slash-bearing cap, so the per-needle pass
+// against logOnlyPathBareNames still reaches the bare name even after the
+// slash-bearing registry has saturated (#4938 review).
+func TestLogOnlyPathBlanksSingleSegmentRelativeRejectedRecordSaturated(t *testing.T) {
+	const secret = "ConfidentialClient"
+	for _, tc := range []struct {
+		name     string
+		repoPath string
+		worktree string
+	}{
+		{"single-segment repo_path", "ConfidentialClient", "ConfidentialClient/wt"},
+		{"single-segment parent_path", "key/repo", "ConfidentialClient/wt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &redactor{}
+			for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+				r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+			}
+			if !r.logOnlyPathBlanksSaturated {
+				t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations", maxLogOnlyPathBlanks+16)
+			}
+			r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(
+				`[{"status":"legacy","repo_path":%q,"worktree_path":%q}]`,
+				tc.repoPath, tc.worktree)))
+			if _, ok := r.logOnlyPathBareNames[secret]; !ok {
+				t.Fatalf("logOnlyPathBareNames did not register the bare name %q after the slash-bearing cap saturated (set %v)",
+					secret, r.logOnlyPathBareNames)
+			}
+			logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q worktree_path=%q parent_path=%q`,
+				tc.repoPath, tc.worktree, filepath.Dir(tc.worktree))
+			got := r.scrubLog(logLine)
+			t.Logf("saturated single-segment relative scrubLog out:\n%s", got)
+			if strings.Contains(got, secret) {
+				t.Errorf("scrubLog leaked single-segment relative %q past the saturated scan:\n%s", secret, got)
+			}
+			for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestLogOnlyPathBlanksRelativeSaturatedDelimiterBeforeFirstSlash pins the
+// #4938 review fix on the saturated scanner's backward walk for a relative
+// path whose first segment carries a filename-legal delimiter before the
+// first slash (e.g. "private:client/repo" or "private client/repo"). The
+// prior walk-back stopped at ':' or the space and blanked only the suffix
+// "client/repo", shipping the private "private" prefix in the %q-decoded
+// log value even though the saturated scan is supposed to be fail-closed.
+// A delimiter flanked by path-legal bytes is interior to a relative path's
+// first segment, so the saturated scan now extends the walk-back through
+// it; a delimiter next to a structural separator (the ':' in
+// "location: /srv") is the prose-to-path boundary, so prose like
+// "recovery location:" survives while the embedded relative path blanks
+// whole (#4938 review).
+func TestLogOnlyPathBlanksRelativeSaturatedDelimiterBeforeFirstSlash(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"colon", "private:client/repo"},
+		{"space", "private client/repo"},
+		{"semicolon", "private;client/repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &redactor{}
+			for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+				r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+			}
+			if !r.logOnlyPathBlanksSaturated {
+				t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+					maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+			}
+			r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(
+				`[{"status":"legacy","repo_path":%q,"worktree_path":%q}]`,
+				tc.path, tc.path+"-wt")))
+			logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q worktree_path=%q`,
+				tc.path, tc.path+"-wt")
+			got := r.scrubLog(logLine)
+			t.Logf("saturated relative with %q delimiter scrubLog out:\n%s", tc.name, got)
+			for _, secret := range []string{tc.path, "private", "client", tc.path + "-wt"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("scrubLog leaked %q past the saturated scan (delimiter %q):\n%s",
+						secret, tc.name, got)
+				}
+			}
+			for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}

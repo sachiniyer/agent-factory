@@ -377,8 +377,13 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 		// blank every absolute-path token in this view in a single O(text)
 		// pass, so a private path past the cap does not survive the daemon log
 		// verbatim while the scan stays bounded by the text size, not the
-		// rejected-record count.
-		return r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
+		// rejected-record count. Bare names (single-segment relative, no '/')
+		// are not reached by the saturated scan, so a bounded per-needle pass
+		// against logOnlyPathBareNames runs after it; the cap on that set
+		// bounds the work, and single-segment rejected-record names are rare
+		// (#4938 review).
+		spans = r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
+		return r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary)
 	}
 	if r.worktreePathTitlesSaturated {
 		// Fail-closed for the sibling shape: noteFallbackWorktreeTitle dropped
@@ -395,10 +400,12 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 		// (more than 4096 distinct rejected titles sharing one repo_path)
 		// already forgoes the typed per-title layout, so erring toward the
 		// marker preserves the privacy contract at the cost of layout only
-		// that case ever had (#4938 review).
-		return r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
+		// that case ever had (#4938 review). Bare names that the saturated
+		// scan cannot reach still get the per-needle pass below.
+		spans = r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
+		return r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary)
 	}
-	if len(r.logOnlyPathBlanks) == 0 {
+	if len(r.logOnlyPathBlanks) == 0 && len(r.logOnlyPathBareNames) == 0 {
 		return spans
 	}
 	// Bare path: blank wherever it appears as a complete path value at a text
@@ -441,6 +448,7 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 			scan = start + 1
 		}
 	}
+	spans = r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary)
 	// Sibling prefix: a registered worktree-title needle proves the bytes after
 	// the dash are title data appendWorktreePathTitleSpans is already redacting.
 	// Blank the repo-path prefix the typed path would have collapsed to a root
@@ -472,6 +480,53 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 				spans = append(spans, redactionSpan{
 					start: start, end: start + len(title.repoPath),
 					replacement: redactedMarker, priority: spanQuotedValue,
+				})
+				scan = end
+				continue
+			}
+			scan = start + 1
+		}
+	}
+	return spans
+}
+
+// appendBareNameLogOnlyPathBlankSpans blanks the verbatim single-segment
+// relative names that the generic fallback registered in logOnlyPathBareNames.
+// The saturated scan anchors on '/', so it cannot reach a single-segment name
+// such as the bare value of a rejected record's repo_path or the parent_path
+// derived from worktree_path="ConfidentialClient/wt"; the bare-name set's own
+// per-needle pass against the registered names reaches them at a bounded O(set
+// size × text) cost, where the set is capped at maxLogOnlyPathBlanks and
+// single-segment rejected-record names are rare. The bareBoundary is the same
+// path-text boundary the slash-bearing blank uses, so a bare name blanks only
+// at a word-boundary occurrence — exactly the over-blank trade #4938 review
+// accepted for closing the parent_path leak (#4938 review).
+func (r *redactor) appendBareNameLogOnlyPathBlankSpans(
+	spans []redactionSpan,
+	s string,
+	bareBoundary pathBoundary,
+) []redactionSpan {
+	if len(r.logOnlyPathBareNames) == 0 {
+		return spans
+	}
+	for path := range r.logOnlyPathBareNames {
+		if r.registeredRootEquals(path) {
+			continue
+		}
+		if r.isWorktreeTitleSiblingNeedle(path) {
+			continue
+		}
+		scan := 0
+		for scan <= len(s)-len(path) {
+			rel := strings.Index(s[scan:], path)
+			if rel < 0 {
+				break
+			}
+			start := scan + rel
+			end := start + len(path)
+			if bareBoundary(s, start, end) {
+				spans = append(spans, redactionSpan{
+					start: start, end: end, replacement: redactedMarker, priority: spanQuotedValue,
 				})
 				scan = end
 				continue
@@ -527,19 +582,45 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 			continue
 		}
 		// Begin the blank at the start of the path-shaped token. Walk back
-		// from this '/' through the previous path-legal bytes to the previous
-		// path-text delimiter (or the start of the view): a relative path
-		// embedded mid-value (recover_error="... private-client/repo ...")
+		// from this '/' through the previous filename-legal bytes to the
+		// previous path-text delimiter (or the start of the view): a relative
+		// path embedded mid-value (recover_error="... private-client/repo ...")
 		// doesn't open with '/', so the leading-slash whole-value blank below
 		// doesn't reach it; for an absolute path the byte before the '/' is
-		// already a delimiter (or the start of the view) so this walk is a
-		// no-op. The walkthrough never crosses a '"': the saturated scan also
-		// runs on whole-record views where a '"' is the structural terminator
-		// of a %q value, and isPathTextDelimiter recognizes it (#4938 review).
+		// already a structural separator (or the start of the view) so this
+		// walk is a no-op. The walkthrough never crosses a '"' or a NUL: the
+		// saturated scan also runs on whole-record views where a '"' is the
+		// structural terminator of a %q value, and NUL cannot appear inside a
+		// Unix filename (#4938 review).
+		//
+		// A walk-back that stops at any isPathTextDelimiter (the prior
+		// behaviour) stranding the prefix of a relative path whose first
+		// segment carries a filename-legal delimiter before the first slash,
+		// such as "private:client/repo" or "private client/repo": the walk
+		// stops at ':' or the space and the blank covers only "client/repo",
+		// shipping the private "private" prefix in the %q-decoded log value.
+		// isPathTextDelimiter classifies ':' and space as terminators even
+		// though Unix permits them in a filename, so a delimiter flanked by
+		// path-legal bytes is interior to a relative path's first segment and
+		// the walkback continues through it; a delimiter whose neighbour is
+		// itself a structural separator (the ':' in "recovery location:
+		// /srv/Acme", which the SPACE before "/srv" follows on) is the
+		// prose-to-path boundary, so the walk stops there and the prose
+		// survives. NUL and '"' never pass the interior test even when
+		// flanked, so they always terminate the walk (#4938 review).
 		start := i
 		for start > 0 {
 			before, size := utf8.DecodeLastRuneInString(s[:start])
-			if isPathTextDelimiter(before) {
+			if before == '\x00' || before == '"' {
+				break
+			}
+			if !isPathTextDelimiter(before) {
+				start -= size
+				continue
+			}
+			afterRune, _ := utf8.DecodeRuneInString(s[start:])
+			preBefore, _ := utf8.DecodeLastRuneInString(s[:start-size])
+			if isPathTextDelimiter(afterRune) || isPathTextDelimiter(preBefore) {
 				break
 			}
 			start -= size
@@ -549,20 +630,22 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 		// value (ProvLogValue) as well as on a whole log record. When the
 		// blank starts at the very first byte of the view, the whole view is
 		// one %q-decoded path scalar — a relative path opened by the walk-back
-		// above (e.g. "private-client/repo"), or an absolute path that opened
-		// with '/' (the original i==0 case) — whose interior may carry
-		// filename-legal bytes that isPathTextDelimiter treats as boundaries,
-		// notably spaces, which Go's %q leaves literal (a value such as
-		// `/srv/Acme Project/SecretRepo` is emitted as
+		// above (e.g. "private-client/repo", or "private:client/repo" once the
+		// walk-back extends through the interior ':'), or an absolute path
+		// that opened with '/' (the original i==0 case) — whose interior may
+		// carry filename-legal bytes that isPathTextDelimiter treats as
+		// boundaries, notably spaces, which Go's %q leaves literal (a value
+		// such as `/srv/Acme Project/SecretRepo` is emitted as
 		// `repo_path="/srv/Acme Project/SecretRepo"`). Scanning to the first
 		// such delimiter would blank only the prefix and ship the private
 		// suffix, so blank the entire decoded value instead of its first
 		// delimiter-free token (#4938 review). A whole-record view that
-		// walked back to its first byte still rare-cases this branch: a record
-		// that opens with a path-shaped token rather than the emitter label is
-		// already malformed, and fail-closed errs toward the marker; a prose
-		// %q value such as recover_error never reaches here because the
-		// walk-back stops at the leading delimiter before its first '/'.
+		// walked back to its first byte still rare-cases this branch: a
+		// record that opens with a path-shaped token rather than the emitter
+		// label is already malformed, and fail-closed errs toward the marker;
+		// a prose %q value such as recover_error never reaches here because
+		// the walk-back stops at the structural separator (a delimiter not
+		// flanked by path-legal bytes) before its first '/'.
 		if start == 0 {
 			end = len(s)
 		} else {

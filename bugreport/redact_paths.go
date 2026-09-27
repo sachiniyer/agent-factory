@@ -270,13 +270,17 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 	if r.logOnlyPathBlanks == nil {
 		r.logOnlyPathBlanks = make(map[string]struct{})
 	}
-	// Collect this call's spellings and keep only the ones not already
-	// registered, so a duplicate path is a no-op even at the cap instead of
+	if r.logOnlyPathBareNames == nil {
+		r.logOnlyPathBareNames = make(map[string]struct{})
+	}
+	// Collect this call's slash-bearing spellings (cleaned + raw absolute,
+	// and multi-segment relative) and keep only the ones not already
+	// registered, so a duplicate is a no-op even at the cap instead of
 	// switching the log scrubber to a blank-every-path pass (#4938 review).
-	var newSpellings []string
+	var newSlashSpellings []string
 	for _, spelling := range absolutePathSpellings(path) {
 		if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
-			newSpellings = append(newSpellings, spelling)
+			newSlashSpellings = append(newSlashSpellings, spelling)
 		}
 	}
 	if raw := originalAbsolutePathSpelling(path); raw != "" {
@@ -289,42 +293,73 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 		// find the verbatim value in the daemon log. Keep the original
 		// absolute spelling too, matched only as a log-only blank.
 		if _, ok := r.logOnlyPathBlanks[raw]; !ok {
-			newSpellings = append(newSpellings, raw)
+			newSlashSpellings = append(newSlashSpellings, raw)
 		}
 	}
+	// NewGitWorktreeFromStorage only rejects empty paths, so a rejected
+	// record can carry a relative repo_path/worktree_path (e.g.
+	// "private-client/repo"); absolutePathSpellings returns nil for it,
+	// and logVanishedWorktreeOnce then writes the stored value with %q,
+	// shipping the verbatim relative path in a tail line such as
+	// repo_path="private-client/repo" even though the fallback JSON masks
+	// that field in a separate section. Register the slash-bearing
+	// relative spelling for log-scope blanking too so the verbatim value
+	// does not survive the daemon log tail (#4938 review).
+	//
+	// Single-segment relative spellings (no path separator after cleaning)
+	// are routed to a separate set (logOnlyPathBareNames) — the saturated
+	// scan anchors on '/', so it cannot reach them once the slash-bearing
+	// path cap saturates. The bare-name set's own per-needle scan reaches
+	// them regardless of saturation; see relativeBareNameSpellings for the
+	// over-blank trade-off the #4938 review accepted (#4938 review).
+	var newBareNameSpellings []string
 	for _, spelling := range relativePathSpellings(path) {
-		// NewGitWorktreeFromStorage only rejects empty paths, so a rejected
-		// record can carry a relative repo_path/worktree_path (e.g.
-		// "private-client/repo"); absolutePathSpellings returns nil for it,
-		// and logVanishedWorktreeOnce then writes the stored value with %q,
-		// shipping the verbatim relative path in a tail line such as
-		// repo_path="private-client/repo" even though the fallback JSON masks
-		// that field in a separate section. Register the relative spelling
-		// for log-scope blanking too so the verbatim value does not survive
-		// the daemon log tail (#4938 review).
-		if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
-			newSpellings = append(newSpellings, spelling)
+		if strings.ContainsRune(spelling, filepath.Separator) {
+			if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
+				newSlashSpellings = append(newSlashSpellings, spelling)
+			}
+			continue
+		}
+		if _, ok := r.logOnlyPathBareNames[spelling]; !ok {
+			newBareNameSpellings = append(newBareNameSpellings, spelling)
 		}
 	}
-	if len(newSpellings) == 0 {
+	if len(newSlashSpellings) == 0 && len(newBareNameSpellings) == 0 {
 		// Every spelling was already registered: this duplicate adds no
 		// needle, so do not touch the saturation flag.
 		return
 	}
-	if len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {
-		// Cap reached: stop registering further distinct spellings so
-		// appendLogOnlyPathBlankSpans scans a fixed budget rather than one
-		// needle per rejected record. Dropping them silently would be
-		// fail-open — a daemon-log tail line for an omitted record would ship
-		// its private path verbatim, and the fallback JSON redaction protects
-		// a separate section — so record saturation; the scan then switches to
-		// a single-pass fail-closed blank of every absolute path (#4938
-		// review).
+	if len(newSlashSpellings) > 0 && len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {
+		// Slash-bearing cap reached: stop registering further distinct
+		// slash-bearing spellings so appendLogOnlyPathBlankSpans scans a
+		// fixed budget rather than one needle per rejected record. Dropping
+		// them silently would be fail-open — a daemon-log tail line for an
+		// omitted record would ship its private path verbatim, and the
+		// fallback JSON redaction protects a separate section — so record
+		// saturation; the scan then switches to a single-pass fail-closed
+		// blank of every absolute path (#4938 review).
 		r.logOnlyPathBlanksSaturated = true
-		return
+	} else {
+		for _, spelling := range newSlashSpellings {
+			r.logOnlyPathBlanks[spelling] = struct{}{}
+		}
 	}
-	for _, spelling := range newSpellings {
-		r.logOnlyPathBlanks[spelling] = struct{}{}
+	// Bare names are bounded by a separate cap on logOnlyPathBareNames.
+	// Saturating the bare-name set itself (more than maxLogOnlyPathBlanks
+	// distinct single-segment relative spellings, an implausible count for
+	// any realistic rejected-record stream) silently drops further such
+	// spellings; the saturated scan cannot reach them either, so this is a
+	// small fail-open window for the degenerate bare-name case, traded for
+	// the privacy win on the common single-segment parent_path leak (#4938
+	// review).
+	for _, spelling := range newBareNameSpellings {
+		if len(r.logOnlyPathBareNames) >= maxLogOnlyPathBlanks {
+			break
+		}
+		if _, ok := r.logOnlyPathBareNames[spelling]; ok {
+			continue
+		}
+		r.logOnlyPathBareNames[spelling] = struct{}{}
 	}
 }
 
@@ -364,27 +399,32 @@ func originalAbsolutePathSpelling(path string) string {
 // absolute spelling: a daemon log can carry the raw bytes and the cleaned
 // needle would miss them.
 //
-// Single-segment relative names (no path separator after cleaning) are
-// deliberately NOT registered: the bare-blank boundary check matches any
-// word-boundary occurrence, so a private directory named "foo" would blank
-// every "foo" the daemon log prints in prose. A multi-segment relative path
-// carries a path separator and the shape of a path, so its over-blank risk in
-// ordinary prose is far lower than a single bare word. Trivially-empty
-// spellings (".", "..") are skipped for the same reason single-segment names
-// are.
+// Single-segment relative names (no path separator after cleaning) ARE
+// registered, on the privacy side of the #4938 review's trade-off. The
+// saturated scan anchors on '/' and cannot reach them once the slash-bearing
+// path cap saturates, so noteLogOnlyPathRedaction routes them to a separate
+// set (logOnlyPathBareNames) whose bounded per-needle pass always runs; and a
+// daemon log line that names a private directory of the codebase verbatim
+// (e.g. parent_path="ConfidentialClient" derived from
+// worktree_path="ConfidentialClient/wt", or a single-segment repo_path of the
+// same shape) is no more "prose" than the path itself, so blanking the bare
+// directory name is the same privacy contract the typed and slash-bearing
+// fallback already make. Trivially-empty spellings (".", "..") are skipped:
+// they name no private directory and the bare-blank boundary check would
+// sweep the lone-dot path separators out of the log rather than redacting a
+// private value.
+//
+// The bare-blank boundary check matches any word-boundary occurrence, so a
+// single-bare-word directory name also blanks the same word appearing in
+// unrelated prose; the alternative the #4938 review rejected was shipping
+// the verbatim private directory name through the daemon log section, which
+// is the leak the fallback JSON redaction exists to prevent in a separate
+// section. The over-blank in prose of a single private directory name is the
+// privacy side of that fail-closed trade, mirroring the saturated scan's
+// fail-closed over-blank of absolute paths past the slash-bearing cap.
 func relativePathSpellings(path string) []string {
 	cleaned := filepath.Clean(path)
 	if cleaned == "" || cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) {
-		return nil
-	}
-	if !strings.ContainsRune(cleaned, filepath.Separator) {
-		// Single-segment relative name: too risky to register for log-scope
-		// blanking. The bare-blank scan matches any delimiter-bounded
-		// occurrence, so a private directory whose name is one bare word
-		// would blank every prose occurrence of that word. A path-shaped
-		// multi-segment relative value carries a separator and a much lower
-		// over-blank risk; a relative single-segment parent_path leak is the
-		// residual cost of not blanking prose (#4938 review).
 		return nil
 	}
 	spellings := []string{cleaned}
