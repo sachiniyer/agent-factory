@@ -157,7 +157,7 @@ func TestCloseTab_FreesNameAndTmuxToken(t *testing.T) {
 	first, err := inst.AddProcessTab("btop", "fresh")
 	require.NoError(t, err)
 	require.Equal(t, "af_1957_close__fresh", first.tmux.SanitizedName())
-	require.NoError(t, inst.CloseTab(1))
+	require.NoError(t, inst.CloseTabByID(first.ID))
 
 	second, err := inst.AddProcessTab("btop", "fresh")
 	require.NoError(t, err)
