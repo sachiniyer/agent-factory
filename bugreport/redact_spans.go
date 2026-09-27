@@ -540,6 +540,27 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 				}
 				end += size
 			}
+			// A path embedded in a prose %q value (recover_error="recovery
+			// location: /srv/Acme Project/SecretRepo") never opens with '/',
+			// so the i==0 whole-value blank above does not apply. The per-token
+			// scan stops at the space inside "Acme Project" and would blank only
+			// "/srv/Acme", shipping the private "Project/SecretRepo" suffix —
+			// WORKTREE_MISSING_DETECTED emits recover_error with %q in
+			// daemon/lostrestore.go, so recovery messages are prose-valued
+			// quoted fields, not path-valued scalars. A space is the one
+			// isPathTextDelimiter that is filename-legal and so genuinely legal
+			// INSIDE a path; the other delimiters (", ',', ';') are unambiguous
+			// terminators. When the token stops at a space, keep extending the
+			// blank through the path-with-spaces run — path-legal bytes and
+			// single spaces — until a real terminator (a non-space delimiter,
+			// the end of the decoded value, or a second consecutive space), so
+			// the saturated scan covers the whole path rather than its first
+			// space-broken token (#4938 review).
+			if end < len(s) {
+				if c, _ := utf8.DecodeRuneInString(s[end:]); c == ' ' {
+					end = saturatedPathWithSpacesEnd(s, end)
+				}
+			}
 		}
 		// A real absolute path has at least one byte after the leading slash; a
 		// lone "/" is not a path value and is left alone. knownRootTextBoundary
@@ -556,6 +577,42 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 		i++
 	}
 	return spans
+}
+
+// saturatedPathWithSpacesEnd extends a saturated-scan path token that stopped at
+// a space delimiter through the rest of a path-with-spaces run, returning the
+// index just past the run's last path byte. A space is the one
+// isPathTextDelimiter that is filename-legal and may sit INSIDE a single path
+// (e.g. "/srv/Acme Project/SecretRepo"), so the per-token scan that stops at
+// the first space would blank only "/srv/Acme" and strand the private
+// "Project/SecretRepo" suffix in a prose %q value such as recover_error. The
+// run continues through path-legal bytes and single spaces and ends at a
+// non-space delimiter (", ',', ';' — unambiguous terminators), a second
+// consecutive space (a sentence separator, not a filename byte), or the end of
+// the decoded value. This is fail-closed: in the saturated case the redactor can
+// no longer tell an embedded space-bearing path from a path followed by prose,
+// so erring toward the marker preserves the privacy contract at the cost of
+// layout only that degenerate case ever had (#4938 review).
+func saturatedPathWithSpacesEnd(s string, spaceEnd int) int {
+	end := spaceEnd
+	sawSpace := false
+	for end < len(s) {
+		c, size := utf8.DecodeRuneInString(s[end:])
+		if c == ' ' {
+			if sawSpace {
+				break // second consecutive space: a sentence separator
+			}
+			sawSpace = true
+			end += size
+			continue
+		}
+		if isPathTextDelimiter(c) {
+			break
+		}
+		sawSpace = false
+		end += size
+	}
+	return end
 }
 
 // isWorktreeTitleSiblingNeedle reports whether path is exactly a registered

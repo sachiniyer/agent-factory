@@ -524,3 +524,96 @@ func TestLogOnlyPathBlanksFailClosedSaturatedQuotedSpace(t *testing.T) {
 		}
 	}
 }
+
+// TestLogOnlyPathBlanksFailClosedSaturatedRecoveryError pins the #4938 review
+// fix on the saturated scanner's handling of a prose %q value such as
+// recover_error: WORKTREE_MISSING_DETECTED emits recover_error with %q in
+// daemon/lostrestore.go, and a recovery message is prose ("recovery location:
+// /srv/Acme Project/SecretRepo") rather than a path-valued scalar, so the
+// leading-slash whole-value blank does not apply — the path is mid-value (i>0)
+// and its first space-broken token ("/srv/Acme") is blanked while the private
+// suffix ("Project") survives. The saturated scan must extend the blank through
+// the path-with-spaces run so the whole path is redacted, not just its first
+// token.
+func TestLogOnlyPathBlanksFailClosedSaturatedRecoveryError(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	const path = "/srv/Acme Project/SecretRepo"
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" recover_error=%q`,
+		"recovery location: "+path)
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scan with prose recover_error path out:\n%s", got)
+	for _, secret := range []string{path, "Acme Project", "Project/SecretRepo", "Project", "SecretRepo"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the saturated scan (prose recover_error space-broken path):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing", "recovery location"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestWorktreePathTitlesDuplicateDoesNotSaturate pins the #4938 review fix on
+// the fallback title duplicate case: noteFallbackWorktreeTitle used to set
+// worktreePathTitlesSaturated whenever the map already held maxWorktreePathTitles
+// pairs, even if the call was an already-registered (repo_path, title) pair
+// that added no matcher. Rejected records commonly repeat the same
+// (repo_path, title), and the shared worktreePathTitles map also holds uncapped
+// typed-record pairs (noteWorktreeTitle, called by noteSession), so once the
+// map filled a duplicate would flip the sibling scrubber to blanking every
+// absolute path and drop unrelated diagnostic paths from the entire log.
+// Saturation must be recorded only when the fallback call would actually add a
+// new pair.
+func TestWorktreePathTitlesDuplicateDoesNotSaturate(t *testing.T) {
+	r := &redactor{}
+	const repoPath = "/srv/repo"
+	// Register distinct titles until the map first reaches the cap. The call
+	// that crosses maxWorktreePathTitles registers under the cap, so the map
+	// is at (or just over) the cap and not yet saturated.
+	var registered string
+	for i := 0; ; i++ {
+		registered = fmt.Sprintf("title-%d", i)
+		r.noteFallbackWorktreeTitle(repoPath, registered)
+		if r.worktreePathTitlesSaturated {
+			t.Fatalf("registry saturated while registering the distinct title that reached the cap (map %d)",
+				len(r.worktreePathTitles))
+		}
+		if len(r.worktreePathTitles) >= maxWorktreePathTitles {
+			break
+		}
+	}
+	if len(r.worktreePathTitles) < maxWorktreePathTitles {
+		t.Fatalf("registry did not reach the cap (map %d, want >= %d)",
+			len(r.worktreePathTitles), maxWorktreePathTitles)
+	}
+	// A duplicate of an already-registered fallback title is the realistic
+	// case: rejected records commonly repeat the same (repo_path, title). It
+	// adds no new pair, so it must not flip the sibling scrubber to blanking
+	// every absolute path.
+	before := len(r.worktreePathTitles)
+	r.noteFallbackWorktreeTitle(repoPath, registered)
+	if r.worktreePathTitlesSaturated {
+		t.Fatalf("a duplicate fallback title set worktreePathTitlesSaturated even though it added no new pair (map %d)",
+			len(r.worktreePathTitles))
+	}
+	if len(r.worktreePathTitles) != before {
+		t.Fatalf("a duplicate fallback title changed the map size (map %d -> %d)",
+			before, len(r.worktreePathTitles))
+	}
+	// A new distinct title past the cap still saturates (fail-closed): the
+	// cap must still drop new pairs and switch to the single-pass blank so a
+	// past-the-cap sibling spelling does not ship the private path verbatim.
+	r.noteFallbackWorktreeTitle(repoPath, "beyond-the-cap-new-title")
+	if !r.worktreePathTitlesSaturated {
+		t.Fatalf("a new distinct fallback title past the cap did not saturate (map %d)",
+			len(r.worktreePathTitles))
+	}
+}

@@ -125,12 +125,56 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 // which cannot happen for a pair the cap dropped). The redacted instances.json
 // still drops every title field wholesale, so the cap narrows only the
 // log-tail scan (#4938 review).
+//
+// Saturation is recorded only when a call would actually add a new pair:
+// rejected records commonly repeat the same (repo_path, title), and the shared
+// map also holds uncapped typed-record pairs (noteWorktreeTitle, called by
+// noteSession), so a duplicate that adds no matcher must not flip the scrubber
+// to blanking every absolute path (#4938 review).
 func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
+	if r.worktreePathTitles == nil {
+		r.worktreePathTitles = make(map[worktreePathTitle]struct{})
+	}
+	// Collect only the pairs this call would add that are not already
+	// registered, so a duplicate (repo_path, title) at the cap is a no-op
+	// instead of flipping the sibling scrubber to blanking every absolute path.
+	// The shared worktreePathTitles map also holds uncapped typed-record pairs
+	// (noteWorktreeTitle, called by noteSession), so a fallback call for a pair
+	// the typed path already registered must not saturate either (#4938
+	// review).
+	var newPairs []worktreePathTitle
+	for _, spelling := range absolutePathSpellings(repoPath) {
+		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
+		if segment == "" {
+			continue
+		}
+		pair := worktreePathTitle{repoPath: spelling, segment: segment}
+		if _, ok := r.worktreePathTitles[pair]; ok {
+			continue
+		}
+		newPairs = append(newPairs, pair)
+	}
+	if len(newPairs) == 0 {
+		// Every pair was already registered: this duplicate adds no matcher,
+		// so do not touch the saturation flag.
+		return
+	}
 	if len(r.worktreePathTitles) >= maxWorktreePathTitles {
+		// Cap reached: stop registering further distinct pairs so
+		// appendWorktreePathTitleSpans and the sibling-prefix loop scan a
+		// fixed budget rather than one pair per rejected record. Dropping
+		// them silently would be fail-open — a daemon-log sibling spelling
+		// for an omitted past-the-cap pair would ship the verbatim repo path
+		// and private title segment, and the fallback JSON redaction protects
+		// a separate section — so record saturation; the scan then switches
+		// to a single-pass fail-closed blank of every absolute-path token
+		// (#4938 review).
 		r.worktreePathTitlesSaturated = true
 		return
 	}
-	r.noteWorktreeTitle(repoPath, title)
+	for _, pair := range newPairs {
+		r.worktreePathTitles[pair] = struct{}{}
+	}
 }
 
 func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
