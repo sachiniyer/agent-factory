@@ -221,14 +221,19 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 	// The designed guard for a user typing in a pane is the daemon's attach
 	// defer (#1586), applied where attach state lives; no keystroke-sound
 	// suppression exists at this layer (#2065/#2225).
-	log.WarningLog.Printf("submit: redelivering prompt to session %q once in %s; delivery was observed absent through the submit boundary and the pre-paste clear makes redelivery safe (#3293)",
-		t.sanitizedName, redeliverAfterAbsentDelay)
+	//
+	// Each branch logs only what it did, after the check has decided it: a
+	// "redelivering" line written before the check would claim a second paste
+	// that the check may then withhold, and anyone auditing the daemon log for a
+	// double submit would find one that never happened (#4934).
 	time.Sleep(redeliverAfterAbsentDelay)
 	if !t.absenceStillProven(proof) {
-		log.WarningLog.Printf("submit: withholding redelivery to session %q and reporting sent-unverified: the stranded render changed or could not be read during the wait, so the prompt may have been received (#4884)",
-			t.sanitizedName)
+		log.WarningLog.Printf("submit: withholding redelivery to session %q and reporting sent-unverified: the stranded render changed or could not be read during the %s wait, so the prompt may have been received (#4884)",
+			t.sanitizedName, redeliverAfterAbsentDelay)
 		return PromptSentUnverified, nil
 	}
+	log.WarningLog.Printf("submit: redelivering prompt to session %q once after %s; delivery was observed absent through the submit boundary, the stranded render stood still through the wait, and the pre-paste clear makes redelivery safe (#3293)",
+		t.sanitizedName, redeliverAfterAbsentDelay)
 	status, _, err = t.sendKeysPasteBuffer(text)
 	return status, err
 }
