@@ -3,6 +3,7 @@ package tmux
 import (
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -62,16 +63,22 @@ type absenceProof struct {
 // neither vouch for a render nor BE the render (#4885 review). Trimming too much
 // only hides content, which can only make a frame read as unproven.
 func (p deliveryProbe) renderRegion(normalized string) string {
+	return normalized[:len(normalized)-p.chromeLen(normalized)]
+}
+
+// chromeLen is the byte length of the trailing text a frame shares with the
+// baseline, shortened to a rune boundary. The two sides are byte-identical
+// there, so the same length trims the chrome off either one.
+func (p deliveryProbe) chromeLen(normalized string) int {
 	b := p.baselineText
 	n := 0
 	for n < len(normalized) && n < len(b) && normalized[len(normalized)-1-n] == b[len(b)-1-n] {
 		n++
 	}
-	end := len(normalized) - n
-	for end < len(normalized) && !utf8.RuneStart(normalized[end]) {
-		end++
+	for n > 0 && !utf8.RuneStart(normalized[len(normalized)-n]) {
+		n--
 	}
-	return normalized[:end]
+	return n
 }
 
 // newestRender locates this payload's NEWEST render in a normalized frame — the
@@ -121,24 +128,53 @@ func (p deliveryProbe) newestRender(normalized string) (witnessed, whole bool) {
 // the caller hears delivered. Every step errs against that. renderRegion keeps
 // chrome the prompt ends with from completing a truncated render (#4885 review),
 // and scrolledOff drops baseline copies only when it can prove they left. And
-// only a payload distinctive enough to carry a render witness counts: a short or
-// common one ("ok") can appear in any row that happens to read the same, so a
-// copy of it proves nothing about the paste (#4943 review). Those payloads have
-// no witness for chrome to steal either, so they never needed this rule.
+// only a distinctive payload counts: one with a render witness and at least
+// minDistinctiveFragment letters or digits. A short or common payload ("ok"), or
+// a long one made of rule glyphs (a row of hyphens), can appear in any row that
+// happens to read the same, so a copy of it proves nothing about the paste
+// (#4943 review). Short payloads have no witness for chrome to steal, so #4934
+// never reached them.
+//
+// Both sides of the comparison leave out the same unchanged trailing chrome: a
+// persistent row that quotes the whole prompt is not a render in either frame
+// (#4943 review).
 func (p deliveryProbe) freshWholeRender(normalized string) bool {
-	if !p.baselineCaptured || p.renderWitness == "" {
+	if !p.baselineCaptured || p.renderWitness == "" || lettersAndDigits(p.payload) < minDistinctiveFragment {
 		return false
 	}
 	now := strings.Count(p.renderRegion(normalized), p.payload)
 	if now == 0 {
 		return false
 	}
-	return now > strings.Count(p.baselineText[p.scrolledOff(normalized):], p.payload)
+	baselineRegion := p.baselineText[:len(p.baselineText)-p.chromeLen(normalized)]
+	off := p.scrolledOff(normalized)
+	if off > len(baselineRegion) {
+		off = len(baselineRegion)
+	}
+	return now > strings.Count(baselineRegion[off:], p.payload)
 }
+
+func lettersAndDigits(s string) int {
+	n := 0
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			n++
+		}
+	}
+	return n
+}
+
+// minScrollAnchor is the shortest run of the frame's top that may place it in
+// the baseline. It is fixed rather than scaled to the payload: a long prompt
+// can scroll an old copy wholly off and leave only a few short rows above the
+// composer (#4943 review), and those still place the top. Sixty-four bytes of
+// normalized text do not recur by chance; text that recurs by design (identical
+// prompts) resolves to its first occurrence, which is the conservative one.
+const minScrollAnchor = 64
 
 // scrolledOff returns how much of the baseline has left the top of the frame:
 // the offset in the baseline where the frame's top text first appears. The top
-// counts only when it runs on for at least a payload's length, so a short or
+// counts only when it runs on for at least minScrollAnchor bytes, so a short or
 // coincidental match is never taken as a scroll. The FIRST occurrence is the
 // conservative pick on a pane of repeated prompts, whose text recurs at every
 // turn: an earlier offset leaves more baseline copies counted, so the frame
@@ -160,7 +196,7 @@ func (p deliveryProbe) scrolledOff(normalized string) int {
 			hi = mid - 1
 		}
 	}
-	if lo < len(p.payload) {
+	if lo < minScrollAnchor {
 		return 0
 	}
 	return strings.Index(b, normalized[:lo])

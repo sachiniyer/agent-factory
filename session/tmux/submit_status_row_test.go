@@ -172,3 +172,103 @@ func TestShortPayloadInUnrelatedRowIsNotAFreshRender(t *testing.T) {
 	require.NotEqual(t, PromptDelivered, status,
 		"a status row that happens to read the short payload is not a render of the paste")
 }
+
+// TestLowEntropyPayloadInUnrelatedRowIsNotAFreshRender is the second-round
+// Codex fail-first on #4943. The payload is long enough to carry a render
+// witness but is only hyphens, text any divider can draw. Its old copy scrolls
+// off as a collapsed placeholder grows the composer, and a status row that
+// changes at paste time draws the same hyphens, so every count stays flat.
+// The paste never rendered, so it must not read as landed.
+func TestLowEntropyPayloadInUnrelatedRowIsNotAFreshRender(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	prompt := strings.Repeat("-", 40)
+	require.NotEmpty(t, newDeliveryProbe(prompt).renderWitness, "fixture: the payload carries a witness")
+	pane := &slidingClaudePane{
+		height: 10,
+		transcript: []string{
+			"❯ " + prompt,
+			"● the previous turn finished and wrote its reply",
+			"  across a few rows of ordinary transcript text",
+			"  so the top of the frame can be placed again",
+			"  in the baseline after the composer scrolls it",
+		},
+		footer:           "  state: idle",
+		footerAfterPaste: "  " + prompt,
+	}
+	pane.onPaste = func(int, string) []string { return []string{"❯ [Pasted text #1 +0 lines]", "  "} }
+	pane.onEnter = func(*slidingClaudePane, int) {}
+	probe := newDeliveryProbe(prompt).withBaseline(pane.frame())
+	pane.composer, pane.footer = pane.onPaste(0, prompt), pane.footerAfterPaste
+	after := normalizeDelivery(pane.frame())
+	require.Equal(t, 1, strings.Count(after, normalizeDelivery(prompt)), "fixture: old copy gone, status row copy in")
+	require.Equal(t, probe.renderWitnessBaseline, strings.Count(after, probe.renderWitness), "fixture: witness count flat")
+	pane.composer, pane.footer = nil, "  state: idle"
+
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+	require.NotEqual(t, PromptDelivered, status,
+		"a divider that happens to read the payload is not a render of the paste")
+}
+
+// TestFreshRenderIsFoundWhenLittleTranscriptSurvives is the second-round Codex
+// fail-first on #4943. The scroll carries the old copy wholly off and leaves
+// only a few short transcript rows above the new composer, far fewer bytes than
+// the prompt. Those rows still place the frame's top in the baseline, and the
+// prompt that arrived once must end as delivered.
+func TestFreshRenderIsFoundWhenLittleTranscriptSurvives(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	pane, prompt := statusRowQuotingPrompt(t)
+	old := wrapClaude(prompt)
+	short := []string{"● ok, checked the lanes again", "  nothing new since the last", "  heartbeat went through"}
+	pane.transcript = append(append([]string{}, old...), short...)
+	pane.height = len(pane.transcript) + 5
+	pane.onPaste = func(_ int, payload string) []string { return append(wrapClaude(payload), "  ") }
+	submitted := 0
+	pane.onEnter = func(p *slidingClaudePane, _ int) {
+		submitted++
+		p.submitComposerAs(strings.Join(p.composer, " "), "", "✻ Crunching… (esc to interrupt)")
+	}
+	kept := len(normalizeDelivery(strings.Join(short, "")))
+	require.Less(t, kept, len(normalizeDelivery(prompt)), "fixture: fewer surviving bytes than the prompt")
+
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+
+	pastes, _ := pane.counts()
+	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, PromptDelivered, status)
+}
+
+// TestFreshRenderIgnoresPayloadInPersistentChrome is the third second-round
+// Codex fail-first on #4943. A persistent row under the status row shows the
+// whole prompt and never changes. It is chrome, so the frame side of the count
+// leaves it out, and the baseline side has to leave it out too, or the old copy
+// it stands in for hides the fresh composer render.
+func TestFreshRenderIgnoresPayloadInPersistentChrome(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	pane, prompt := statusRowQuotingPrompt(t)
+	persistent := "  last sent: " + prompt
+	pane.footer += "\n" + persistent
+	pane.footerAfterPaste += "\n" + persistent
+	pane.onPaste = func(_ int, payload string) []string { return wrapClaude(payload) }
+	submitted := 0
+	pane.onEnter = func(p *slidingClaudePane, _ int) {
+		submitted++
+		p.submitComposerAs(strings.Join(p.composer, " "), "", "✻ Crunching… (esc to interrupt)")
+	}
+
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), pane.exec())
+	status, err := session.SendKeysCommandObserved(prompt)
+	require.NoError(t, err)
+
+	pastes, _ := pane.counts()
+	require.Equal(t, 1, submitted, "the agent must receive the prompt exactly once")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, PromptDelivered, status)
+}
