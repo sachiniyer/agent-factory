@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -16,9 +17,9 @@ import (
 // ctrl+e is form-local, like ctrl+r and ctrl+o: the title field has no cursor,
 // so readline's end-of-line has nothing to do there.
 
-// namingFormDetailsHint is what a clipped notice advertises while the naming
+// namingFormDetailsKey is the key that opens a clipped notice while the naming
 // form has the keyboard, in place of the global `E details`.
-const namingFormDetailsHint = "ctrl+e details"
+var namingFormDetailsKey = key.NewBinding(key.WithKeys("ctrl+e"), key.WithHelp("ctrl+e", "details"))
 
 // namingFormNotice pins a notice to the naming form that raised it. instance
 // tells a form still open from a new one opened after it.
@@ -32,14 +33,10 @@ type namingFormNotice struct {
 	deferred []tea.Msg
 }
 
-// handleNamingFormKey is the naming form's key entry point. It opens the
-// details on ctrl+e, and pins any notice the form's own handler raises.
+// handleNamingFormKey is the naming form's key entry point. It pins any notice
+// the form's own handler raises; ctrl+e never gets here, because
+// openNoticeDetails claims it first (notice_details.go).
 func (m *home) handleNamingFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.Type == tea.KeyCtrlE && m.namingInstance != nil {
-		mod, cmd := m.showErrorDetails()
-		m.namingNotice.returnFromDetails = m.state == stateHelp
-		return mod, cmd
-	}
 	return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateNew(msg) })
 }
 
@@ -103,23 +100,4 @@ func (m *home) replayDeferredNamingReplies() tea.Cmd {
 		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
-}
-
-// noticeDetailsHint is the details hint for the current state; "" means the
-// error_details binding's own. hide drops the hint inside the form's nested
-// fields: the prompt types E and uses ctrl+e as end-of-line, and the pickers
-// answer neither, so no key opens the details there. The same holds while the
-// details themselves are open over the form: the overlay dismisses on its own
-// keys and never dispatches E.
-func (m *home) noticeDetailsHint() (hint string, hide bool) {
-	if m.namingInstance == nil {
-		return "", false
-	}
-	switch m.state {
-	case stateNew:
-		return namingFormDetailsHint, false
-	case stateSelectProgram, stateSelectBackend, stateSelectAccount, statePromptInput, stateHelp:
-		return "", true
-	}
-	return "", false
 }
