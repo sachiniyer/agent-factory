@@ -853,13 +853,15 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 			// tail can leave the frame as this paste's tail enters it and the
 			// completion count never grows (#4884). Once the render witness has
 			// newly appeared, the NEWEST render decides: whole means landed,
-			// cut short means absent.
+			// cut short means absent. A fresh whole copy of the payload is landed
+			// even when chrome quoting the prompt wins that inference (#4934).
 			witnessNew := probe.baselineCaptured && probe.renderWitness != "" &&
 				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline
 			_, newestWhole := probe.newestRender(normalized)
 			if probe.baselineCaptured &&
 				(strings.Count(normalized, probe.completion) > probe.completionBaseline ||
-					witnessNew && newestWhole) {
+					witnessNew && newestWhole ||
+					probe.freshWholeRender(normalized)) {
 				streak++
 				if streak >= needed {
 					return deliveryObservation{outcome: deliveryObservedLanded, pane: content}

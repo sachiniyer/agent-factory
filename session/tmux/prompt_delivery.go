@@ -101,6 +101,66 @@ func (p deliveryProbe) newestRender(normalized string) (witnessed, whole bool) {
 	return true, c >= 0 && c <= w && c+len(p.payload) >= w+len(p.renderWitness)
 }
 
+// freshWholeRender reports whether the frame, above its unchanged chrome, holds
+// more whole copies of this payload than the part of the baseline still on
+// screen. That is the completion-count rule stated for the whole payload and
+// made scroll-aware: on a history-less pane an older identical copy can leave
+// the top as this paste enters the composer, holding every count flat (#4884),
+// so the baseline copies that scrolled off are subtracted before comparing.
+//
+// It exists for chrome that is not a render but reads like one: a status row
+// that changes at paste time, then stays put, and quotes the prompt's opening.
+// That row is new since the baseline, so renderRegion keeps it, and as the last
+// witness it wins newestRender's inference, which reads a whole composer render
+// as cut short (#4934). A fresh whole copy does not depend on which witness is
+// newest.
+//
+// It can only turn an observation into "landed", which never retries, so it
+// cannot add a paste. Its risk is the opposite one, a strand called landed and
+// its #3293 redelivery lost, and every step errs against that: renderRegion keeps
+// chrome the prompt ends with from completing a truncated render (#4885 review),
+// and scrolledOff drops baseline copies only when it can prove they left.
+func (p deliveryProbe) freshWholeRender(normalized string) bool {
+	if !p.baselineCaptured || p.payload == "" {
+		return false
+	}
+	now := strings.Count(p.renderRegion(normalized), p.payload)
+	if now == 0 {
+		return false
+	}
+	return now > strings.Count(p.baselineText[p.scrolledOff(normalized):], p.payload)
+}
+
+// scrolledOff returns how much of the baseline has left the top of the frame:
+// the offset in the baseline where the frame's top text first appears. The top
+// counts only when it runs on for at least a payload's length, so a short or
+// coincidental match is never taken as a scroll. The FIRST occurrence is the
+// conservative pick on a pane of repeated prompts, whose text recurs at every
+// turn: an earlier offset leaves more baseline copies counted, so the frame
+// must show more to read as fresh. A top that cannot be placed (a redraw, a
+// changed header) returns 0, which is the plain count comparison.
+func (p deliveryProbe) scrolledOff(normalized string) int {
+	b := p.baselineText
+	// The longest prefix of the frame found in the baseline. Containment is
+	// monotone in prefix length, so a binary search finds it.
+	lo, hi := 0, len(normalized)
+	if hi > len(b) {
+		hi = len(b)
+	}
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if strings.Contains(b, normalized[:mid]) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo < len(p.payload) {
+		return 0
+	}
+	return strings.Index(b, normalized[:lo])
+}
+
 // absenceAt returns proof of absence when the frame's newest render of this
 // payload is cut short, and nil when the frame holds no render of it or a whole
 // one. Nil means "not proven", never "delivered".
