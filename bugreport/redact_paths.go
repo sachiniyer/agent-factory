@@ -117,7 +117,7 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 // fixed budget rather than the rejected-record count. The cap is fail-closed
 // rather than fail-open: once it is saturated, appendLogOnlyPathBlankSpans
 // switches the sibling-shape redaction to a single-pass blank of every
-// absolute-path token, so a past-the-cap sibling spelling such as
+// path token, so a past-the-cap sibling spelling such as
 // "<repo_path>-<private-title>" does not survive the daemon log verbatim —
 // the bare-path blank cannot reach it (the registered repo_path is
 // immediately followed by '-', and knownRootTextBoundary accepts that dash
@@ -126,22 +126,32 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 // still drops every title field wholesale, so the cap narrows only the
 // log-tail scan (#4938 review).
 //
+// The cap counts only the fallback pairs added (worktreePathTitlesFallback).
+// The shared worktreePathTitles map also holds uncapped typed-record pairs
+// (noteWorktreeTitle, called by noteSession); counting those typed pairs
+// toward the fallback cap meant a valid large archive that already filled
+// the map with typed titles saturated on a later repository's first
+// rejected record — one new fallback pair flipped the sibling scrubber to
+// blanking every path even though the fallback registry itself never
+// approached the fallback cap. The cap belongs to the fallback entry
+// point, so the bound is on the fallback-only counter rather than on the
+// shared map size (#4938 review).
+//
 // Saturation is recorded only when a call would actually add a new pair:
-// rejected records commonly repeat the same (repo_path, title), and the shared
-// map also holds uncapped typed-record pairs (noteWorktreeTitle, called by
-// noteSession), so a duplicate that adds no matcher must not flip the scrubber
-// to blanking every absolute path (#4938 review).
+// rejected records commonly repeat the same (repo_path, title), and a
+// duplicate that adds no matcher must not flip the scrubber to blanking
+// every path (#4938 review).
 func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
 	if r.worktreePathTitles == nil {
 		r.worktreePathTitles = make(map[worktreePathTitle]struct{})
 	}
 	// Collect only the pairs this call would add that are not already
 	// registered, so a duplicate (repo_path, title) at the cap is a no-op
-	// instead of flipping the sibling scrubber to blanking every absolute path.
-	// The shared worktreePathTitles map also holds uncapped typed-record pairs
-	// (noteWorktreeTitle, called by noteSession), so a fallback call for a pair
-	// the typed path already registered must not saturate either (#4938
-	// review).
+	// instead of flipping the sibling scrubber to blanking every path. The
+	// shared worktreePathTitles map also holds uncapped typed-record pairs
+	// (noteWorktreeTitle, called by noteSession), so a fallback call for a
+	// pair the typed path already registered must not saturate either
+	// (#4938 review).
 	var newPairs []worktreePathTitle
 	for _, spelling := range absolutePathSpellings(repoPath) {
 		segment := sessiongit.DerivedWorktreePathTitleSegment(spelling, title)
@@ -159,21 +169,25 @@ func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
 		// so do not touch the saturation flag.
 		return
 	}
-	if len(r.worktreePathTitles) >= maxWorktreePathTitles {
-		// Cap reached: stop registering further distinct pairs so
+	if r.worktreePathTitlesFallback >= maxWorktreePathTitles {
+		// Cap reached: stop registering further distinct fallback pairs so
 		// appendWorktreePathTitleSpans and the sibling-prefix loop scan a
-		// fixed budget rather than one pair per rejected record. Dropping
-		// them silently would be fail-open — a daemon-log sibling spelling
-		// for an omitted past-the-cap pair would ship the verbatim repo path
-		// and private title segment, and the fallback JSON redaction protects
-		// a separate section — so record saturation; the scan then switches
-		// to a single-pass fail-closed blank of every absolute-path token
-		// (#4938 review).
+		// fixed budget rather than one pair per rejected record. The cap
+		// counts only the fallback pairs added (worktreePathTitlesFallback),
+		// not the typed pairs that share the map, so a valid large archive
+		// that already filled the map with typed titles does not saturate
+		// here. Dropping the new fallback pair silently would be fail-open
+		// — a daemon-log sibling spelling for the omitted record would ship
+		// the verbatim repo path and private title segment, and the fallback
+		// JSON redaction protects a separate section — so record
+		// saturation; the scan then switches to a single-pass fail-closed
+		// blank of every path token (#4938 review).
 		r.worktreePathTitlesSaturated = true
 		return
 	}
 	for _, pair := range newPairs {
 		r.worktreePathTitles[pair] = struct{}{}
+		r.worktreePathTitlesFallback++
 	}
 }
 
@@ -278,6 +292,20 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 			newSpellings = append(newSpellings, raw)
 		}
 	}
+	for _, spelling := range relativePathSpellings(path) {
+		// NewGitWorktreeFromStorage only rejects empty paths, so a rejected
+		// record can carry a relative repo_path/worktree_path (e.g.
+		// "private-client/repo"); absolutePathSpellings returns nil for it,
+		// and logVanishedWorktreeOnce then writes the stored value with %q,
+		// shipping the verbatim relative path in a tail line such as
+		// repo_path="private-client/repo" even though the fallback JSON masks
+		// that field in a separate section. Register the relative spelling
+		// for log-scope blanking too so the verbatim value does not survive
+		// the daemon log tail (#4938 review).
+		if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
+			newSpellings = append(newSpellings, spelling)
+		}
+	}
 	if len(newSpellings) == 0 {
 		// Every spelling was already registered: this duplicate adds no
 		// needle, so do not touch the saturation flag.
@@ -314,6 +342,56 @@ func originalAbsolutePathSpelling(path string) string {
 		return ""
 	}
 	return path
+}
+
+// relativePathSpellings returns the log-scope-blank spellings of a RELATIVE
+// path, complementing absolutePathSpellings (which returns nil for relative
+// paths) and originalAbsolutePathSpelling (which is absolute-only). A rejected
+// record can carry a relative repo_path or worktree_path —
+// NewGitWorktreeFromStorage only rejects empty paths, and a hand-edited or
+// legacy instances.json can hold anything — and logVanishedWorktreeOnce then
+// writes that stored value with %q, so a tail line such as
+// repo_path="private-client/repo" ships the verbatim relative path even though
+// the fallback JSON redacts that field in a separate section. Registering the
+// cleaned spelling lets the log-tail blank reach it the same way an absolute
+// path's spelling is reached (#4938 review).
+//
+// The spellings are not root candidates — they are not absolute, so they have
+// no structural role and never enter r.roots or r.rootTokens — and are matched
+// only as verbatim log-only blanks. A raw spelling that differs from the
+// cleaned one (e.g. "./private-client/repo", "a/./b", "a//b") is kept alongside
+// the cleaned form, the same way originalAbsolutePathSpelling keeps the raw
+// absolute spelling: a daemon log can carry the raw bytes and the cleaned
+// needle would miss them.
+//
+// Single-segment relative names (no path separator after cleaning) are
+// deliberately NOT registered: the bare-blank boundary check matches any
+// word-boundary occurrence, so a private directory named "foo" would blank
+// every "foo" the daemon log prints in prose. A multi-segment relative path
+// carries a path separator and the shape of a path, so its over-blank risk in
+// ordinary prose is far lower than a single bare word. Trivially-empty
+// spellings (".", "..") are skipped for the same reason single-segment names
+// are.
+func relativePathSpellings(path string) []string {
+	cleaned := filepath.Clean(path)
+	if cleaned == "" || cleaned == "." || cleaned == ".." || filepath.IsAbs(cleaned) {
+		return nil
+	}
+	if !strings.ContainsRune(cleaned, filepath.Separator) {
+		// Single-segment relative name: too risky to register for log-scope
+		// blanking. The bare-blank scan matches any delimiter-bounded
+		// occurrence, so a private directory whose name is one bare word
+		// would blank every prose occurrence of that word. A path-shaped
+		// multi-segment relative value carries a separator and a much lower
+		// over-blank risk; a relative single-segment parent_path leak is the
+		// residual cost of not blanking prose (#4938 review).
+		return nil
+	}
+	spellings := []string{cleaned}
+	if path != cleaned {
+		spellings = append(spellings, path)
+	}
+	return spellings
 }
 
 // noteRoot registers one root under an exact token, reporting whether it was

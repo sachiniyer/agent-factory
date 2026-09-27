@@ -617,3 +617,257 @@ func TestWorktreePathTitlesDuplicateDoesNotSaturate(t *testing.T) {
 			len(r.worktreePathTitles))
 	}
 }
+
+// TestLogOnlyPathBlanksFailClosedSaturatedFilenameLegalDelimiters pins the #4938
+// review fix on the saturated scanner's filename-delimiter handling across the
+// full set of bytes a path can carry that isPathTextDelimiter also treats as
+// terminators. The prior fix covered only a single space; on a Unix filesystem
+// only NUL (and the path separator '/', which isPathTextDelimiter deliberately
+// does not include) cannot appear inside a name, so a %q-decoded prose value
+// such as recover_error="recovery location: /srv/Acme;Project/SecretRepo" used
+// to blank only "/srv/Acme" and ship the private "Project/SecretRepo" suffix
+// via the saturated scan because the per-token scan stopped at the ';' and the
+// extension did not apply. The saturated scan now extends the blank through any
+// filename-legal delimiter (space, tab, ';', ',', ':', '=', '\”, '(', ')',
+// '[', ']', '{', '}', '<', '>', '&', '|', '`', and repeated spaces) until a
+// real terminator (NUL, the closing '"' of a %q field, or the end of the
+// decoded value), so the whole path is redacted rather than only its first
+// delimiter-free token.
+func TestLogOnlyPathBlanksFailClosedSaturatedFilenameLegalDelimiters(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	delimiters := []struct {
+		name string
+		ins  string
+	}{
+		{"semicolon", "/srv/Acme;Project/SecretRepo"},
+		{"comma", "/srv/Acme,Project/SecretRepo"},
+		{"colon", "/srv/Acme:Project/SecretRepo"},
+		{"equal", "/srv/Acme=Project/SecretRepo"},
+		{"singleQuote", "/srv/Acme'Project/SecretRepo"},
+		{"parens", "/srv/Acme(Project)/SecretRepo"},
+		{"brackets", "/srv/Acme[Project]/SecretRepo"},
+		{"braces", "/srv/Acme{Project}/SecretRepo"},
+		{"angle", "/srv/Acme<Project>/SecretRepo"},
+		{"amp", "/srv/Acme&Project/SecretRepo"},
+		{"pipe", "/srv/Acme|Project/SecretRepo"},
+		{"backtick", "/srv/Acme`Project/SecretRepo"},
+		{"tab", "/srv/Acme\tProject/SecretRepo"},
+		{"repeatedSpace", "/srv/Acme  Project/SecretRepo"},
+	}
+	for _, tc := range delimiters {
+		t.Run(tc.name, func(t *testing.T) {
+			logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" recover_error=%q`,
+				"recovery location: "+tc.ins)
+			got := r.scrubLog(logLine)
+			t.Logf("saturated scan with delimiter %q out:\n%s", tc.name, got)
+			for _, secret := range []string{tc.ins, "Project", "SecretRepo"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("scrubLog leaked %q past the saturated scan (filename-legal delimiter %q):\n%s",
+						secret, tc.name, got)
+				}
+			}
+			for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing", "recovery location"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestLogOnlyPathBlanksFailClosedSaturatedDoesNotCrossStructuralQuote pins the
+// #4938 review fix on the saturated scanner's '"' boundary: the saturated scan
+// also runs on the whole-record view, where a '"' closes a %q value, so
+// extending the blank past it would blank unrelated fields from a multi-value
+// record. The fail-closed extension excludes '"' specifically (and NUL, which
+// cannot appear in a Unix filename), so a recover_error value containing a
+// path-with-delimiter blanks the whole path, but the unrelated values that
+// follow the closing '"' (the emitter label, classification, repo_path) survive
+// as triage signal — except the absolute paths that the fail-closed scan
+// blankets alongside the path-with-delimiter, which is the intended fail-
+// closed trade the saturated mode already makes.
+func TestLogOnlyPathBlanksFailClosedSaturatedDoesNotCrossStructuralQuote(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	logLine := `WORKTREE_MISSING_DETECTED classification="missing" recover_error="recovery location: /srv/Acme;SecretRepo" branch_name="fix-proj"`
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scan whole-record out:\n%s", got)
+	for _, secret := range []string{"/srv/Acme", "Acme", "SecretRepo"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q across the saturated scan:\n%s", secret, got)
+		}
+	}
+	// A quoted structural value after the saturated recover_error survives as
+	// triage value — this is the case the '"' boundary exists to protect.
+	if !strings.Contains(got, "fix-proj") {
+		t.Errorf("saturated scan crossed a structural quote and blanked an unrelated triage value:\n%s", got)
+	}
+	if !strings.Contains(got, "WORKTREE_MISSING_DETECTED") {
+		t.Errorf("saturated scan removed the emitter label:\n%s", got)
+	}
+}
+
+// TestLogOnlyPathBlanksRelativeRejectedRecord pins the #4938 review fix on the
+// generic fallback's handling of a RELATIVE repo_path or worktree_path in a
+// rejected record. NewGitWorktreeFromStorage only rejects empty paths, so a
+// hand-edited or legacy instances.json can carry a relative value such as
+// "private-client/repo"; absolutePathSpellings returns nil for it, so the
+// registration loop used to discard it and logVanishedWorktreeOnce then wrote
+// the stored value with %q, shipping the verbatim relative path in a tail
+// line such as repo_path="private-client/repo" even though the fallback JSON
+// redacts that field wholesale. noteLogOnlyPathRedaction now registers the
+// cleaned relative spelling (when the path carries a path separator, so a
+// single bare word is not blanked from prose) alongside the absolute spellings
+// it already kept, so the bare-blank scan reaches it the same way an absolute
+// path is reached.
+func TestLogOnlyPathBlanksRelativeRejectedRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		repoPath string
+		worktree string
+	}{
+		{"multi-segment", "private-client/repo", "private-client/repo-wt"},
+		{"raw-dot-slash", "./private-client/repo", "./private-client/repo-wt"},
+		{"double-dot-parent", "../client/repo", "../client/repo-wt"},
+		{"three-segment", "a/b/repo", "a/b/repo-wt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &redactor{}
+			r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(
+				`[{"status":"legacy","repo_path":%q,"worktree_path":%q}]`,
+				tc.repoPath, tc.worktree)))
+			logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q worktree_path=%q`,
+				tc.repoPath, tc.worktree)
+			got := r.scrubLog(logLine)
+			t.Logf("relative rejected-record scrubLog out:\n%s", got)
+			for _, secret := range []string{tc.repoPath, tc.worktree} {
+				if strings.Contains(got, secret) {
+					t.Errorf("scrubLog leaked relative path %q:\n%s", secret, got)
+				}
+			}
+			for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("scrubLog removed non-path triage value %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestLogOnlyPathBlanksRelativeRejectedRecordSaturated pins the fail-closed
+// half of the relative-path #4938 review fix. Once the path cap saturates the
+// per-needle scan is replaced by the fail-closed scan, which must also reach a
+// relative path embedded mid-value: a relative path's '/' is interior, so the
+// scanner walks backward from that '/' through the previous path-legal bytes
+// to the previous delimiter (or the start of the view) and blanks from there.
+// For an absolute path the walk is a no-op (the byte before '/' is already a
+// delimiter), so the existing absolute-path fail-closed behavior is unchanged.
+func TestLogOnlyPathBlanksRelativeRejectedRecordSaturated(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		repoPath string
+		worktree string
+	}{
+		{"multi-segment", "private-client/repo", "private-client/repo-wt"},
+		{"raw-dot-slash", "./private-client/repo", "./private-client/repo-wt"},
+		{"double-dot-parent", "../client/repo", "../client/repo-wt"},
+		{"three-segment", "a/b/repo", "a/b/repo-wt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &redactor{}
+			for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+				r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+			}
+			if !r.logOnlyPathBlanksSaturated {
+				t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations", maxLogOnlyPathBlanks+16)
+			}
+			r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(
+				`[{"status":"legacy","repo_path":%q,"worktree_path":%q}]`,
+				tc.repoPath, tc.worktree)))
+			logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q worktree_path=%q`,
+				tc.repoPath, tc.worktree)
+			got := r.scrubLog(logLine)
+			t.Logf("saturated relative scrubLog out:\n%s", got)
+			for _, secret := range []string{tc.repoPath, tc.worktree} {
+				if strings.Contains(got, secret) {
+					t.Errorf("scrubLog leaked relative path %q past the saturated scan:\n%s", secret, got)
+				}
+			}
+			for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestWorktreePathTitlesTypedEntriesDoNotConsumeFallbackCap pins the #4938
+// review fix on the typed/fallback cap interaction. The shared
+// worktreePathTitles map holds both uncapped typed-record pairs
+// (noteWorktreeTitle, called by noteSession) and capped fallback pairs
+// (noteFallbackWorktreeTitle). Counting the typed pairs toward the fallback
+// cap meant a valid large archive that already filled the map with typed
+// titles saturated on a later repository's first rejected record — one new
+// fallback pair would flip the sibling scrubber to blanking every path and
+// drop unrelated diagnostic paths from the entire log even though the
+// fallback registry itself never approached the fallback cap. The cap now
+// counts only the fallback pairs added (worktreePathTitlesFallback), so the
+// typed archive's per-title layout survives and a later rejected record's
+// first fallback pair registers cleanly instead of saturating.
+func TestWorktreePathTitlesTypedEntriesDoNotConsumeFallbackCap(t *testing.T) {
+	const repo = "/srv/repo"
+	r := &redactor{}
+	r.noteRepoRoot(repo)
+	// A valid large archive fills the map with TYPED titles. The typed path
+	// (noteWorktreeTitle, called by noteSession) is uncapped, so the typed
+	// pairs must NOT count toward the fallback cap; the prior behavior
+	// saturated here, before any fallback call had a chance to register.
+	for i := 0; i < maxWorktreePathTitles+100; i++ {
+		r.noteWorktreeTitle(repo, fmt.Sprintf("Typed-title-%d", i))
+	}
+	if r.worktreePathTitlesSaturated {
+		t.Fatalf("typed pre-population saturated the fallback cap (map %d, fallback count %d)",
+			len(r.worktreePathTitles), r.worktreePathTitlesFallback)
+	}
+	// A later repository with one rejected record arrives. Its FIRST new
+	// fallback pair must not saturate: the fallback registry is still far
+	// below the fallback cap, so blanking every path from the daemon tail
+	// would drop unrelated diagnostic paths from an otherwise valid report.
+	// The shared map holding thousands of typed entries is not a fallback
+	// saturation.
+	const fallbackTitle = "fallback-secret"
+	r.noteFallbackWorktreeTitle(repo, fallbackTitle)
+	if r.worktreePathTitlesSaturated {
+		t.Fatalf("the first fallback pair saturated because the cap counted typed entries (map %d, fallback count %d)",
+			len(r.worktreePathTitles), r.worktreePathTitlesFallback)
+	}
+	// The fallback pair IS registered: the per-needle sibling scan can still
+	// reach it, the same way the typed path reaches a past-the-typed-cap
+	// title.
+	segment := sessiongit.DerivedWorktreePathTitleSegment(repo, fallbackTitle)
+	if segment == "" {
+		t.Fatalf("DerivedWorktreePathTitleSegment returned empty for %q", fallbackTitle)
+	}
+	if _, ok := r.worktreePathTitles[worktreePathTitle{repoPath: repo, segment: segment}]; !ok {
+		t.Fatalf("the first fallback pair was not registered (cap %d, map %d, fallback count %d)",
+			maxWorktreePathTitles, len(r.worktreePathTitles), r.worktreePathTitlesFallback)
+	}
+	if r.worktreePathTitlesFallback != 1 {
+		t.Fatalf("fallback counter = %d, want 1 after registering one new fallback pair",
+			r.worktreePathTitlesFallback)
+	}
+}

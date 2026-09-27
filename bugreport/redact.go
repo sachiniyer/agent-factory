@@ -97,6 +97,17 @@ type redactor struct {
 	// sibling layout. Unlike raw titles, these derived spellings are scrubbed only
 	// in that path context, so an equal structural value elsewhere stays useful.
 	worktreePathTitles map[worktreePathTitle]struct{}
+	// worktreePathTitlesFallback counts only the pairs the FALLBACK entry point
+	// (noteFallbackWorktreeTitle) added to worktreePathTitles. The shared map
+	// also holds uncapped typed-record pairs (noteWorktreeTitle, called by
+	// noteSession); counting those typed pairs toward the fallback cap meant a
+	// valid large archive that already filled the map with typed titles
+	// saturated on a later repository's first rejected record — one new
+	// fallback pair flipped the sibling scrubber to blanking every absolute
+	// path even though the fallback registry itself never approached the
+	// fallback cap. The cap belongs to the fallback entry point; this counter
+	// excludes the typed entries that share the map (#4938 review).
+	worktreePathTitlesFallback int
 	// worktreeSubdirectoryTitles are the standalone title-derived leaves used
 	// only by legacy subdirectory restores with no persisted branch. They are
 	// scrubbed solely below the registered AF-home worktrees directory.
@@ -127,9 +138,12 @@ type redactor struct {
 	// match (knownRootTextBoundary accepts that dash only once the title pass
 	// has already replaced the suffix with -[redacted], which cannot happen for
 	// a pair the cap dropped) — so the scan switches to the same single-pass,
-	// fail-closed blank of every absolute path once this is set. The typed
-	// entry point (noteWorktreeTitle, called by noteSession) is uncapped and
-	// never sets this, so a valid large archive keeps its per-title layout
+	// fail-closed blank of every path once this is set. The cap counts only
+	// the fallback pairs added (worktreePathTitlesFallback); the typed entry
+	// point (noteWorktreeTitle, called by noteSession) is uncapped and never
+	// sets this, so a valid large archive that already filled the shared map
+	// with typed titles keeps its per-title layout and a later repository's
+	// first rejected record does not flip the scrubber to blanking every path
 	// (#4938 review).
 	worktreePathTitlesSaturated bool
 	// engine is this run's share of the shared normalization stage

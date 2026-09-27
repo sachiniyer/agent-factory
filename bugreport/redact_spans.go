@@ -492,20 +492,33 @@ func (r *redactor) logOnlyPathBlank(path string) bool {
 // The capped per-needle scan cannot reach records registered past the cap, so
 // dropping them would let a daemon-log tail line for an omitted record ship its
 // private path verbatim (the fallback JSON redaction protects a separate
-// section). This single O(text) pass blanks every absolute-path token at a
+// section). This single O(text) pass blanks every path-shaped token at a
 // path-text boundary instead, so no untracked path survives the log while the
 // scan stays bounded by the text size.
 //
+// Relative as well as absolute paths are covered. NewGitWorktreeFromStorage
+// only rejects empty paths, so a rejected record can carry a relative
+// repo_path/worktree_path (e.g. "private-client/repo"); when the path cap is
+// saturated the per-needle scan that registered that spelling no longer runs,
+// so the fail-closed scan must reach it too. A relative path embedded mid-value
+// doesn't open with '/', so each '/' the main loop finds walks backward through
+// the previous path-legal bytes to the previous delimiter (or the start of the
+// view); for an absolute path the byte before the '/' is already a delimiter
+// (or the start of the view) so that walk is a no-op, and for a relative path
+// it extends the blank to the path's first byte, the same way the leading-slash
+// whole-value blank covers a path-valued scalar (#4938 review).
+//
 // It is deliberately more aggressive than the registered pass: a registered
-// root that sits inside an untracked absolute path also blanks here, because
-// once the cap is saturated the redactor can no longer tell which absolute
-// paths are safe to keep — exactly the fail-closed trade #3588 makes across
+// root that sits inside an untracked path also blanks here, because
+// once the cap is saturated the redactor can no longer tell which paths
+// are safe to keep — exactly the fail-closed trade #3588 makes across
 // sections. The degenerate case that saturates the cap (more than 4096
 // distinct spellings from a hand-edited or corrupted archive) already forgoes
 // the typed path's per-root layout, so erring toward the marker preserves the
 // privacy contract at the cost of layout only that case ever had. Non-absolute
-// values (relative branch refs, agent names, status labels) are not touched,
-// so triage outside the path bytes survives.
+// values that never carry a path separator (relative branch refs, agent
+// names, status labels) are not touched, so triage outside the path bytes
+// survives.
 func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s string) []redactionSpan {
 	i := 0
 	for i < len(s) {
@@ -513,24 +526,44 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 			i++
 			continue
 		}
-		end := i
+		// Begin the blank at the start of the path-shaped token. Walk back
+		// from this '/' through the previous path-legal bytes to the previous
+		// path-text delimiter (or the start of the view): a relative path
+		// embedded mid-value (recover_error="... private-client/repo ...")
+		// doesn't open with '/', so the leading-slash whole-value blank below
+		// doesn't reach it; for an absolute path the byte before the '/' is
+		// already a delimiter (or the start of the view) so this walk is a
+		// no-op. The walkthrough never crosses a '"': the saturated scan also
+		// runs on whole-record views where a '"' is the structural terminator
+		// of a %q value, and isPathTextDelimiter recognizes it (#4938 review).
+		start := i
+		for start > 0 {
+			before, size := utf8.DecodeLastRuneInString(s[:start])
+			if isPathTextDelimiter(before) {
+				break
+			}
+			start -= size
+		}
+		end := start
 		// The shared stage runs this fail-closed scan on a single decoded
 		// value (ProvLogValue) as well as on a whole log record. When the
-		// view's first byte is a leading slash, the whole view is one
-		// %q-decoded path scalar — repo_path, worktree_path, parent_path —
-		// whose interior may carry filename-legal bytes that
-		// isPathTextDelimiter treats as boundaries, notably spaces, which
-		// Go's %q leaves literal (a value such as `/srv/Acme Project/SecretRepo`
-		// is emitted as `repo_path="/srv/Acme Project/SecretRepo"`). Scanning
-		// to the first such delimiter would blank only the prefix and ship
-		// the private suffix, so blank the entire decoded value instead of
-		// its first delimiter-free token (#4938 review). A whole-record view
-		// never starts with '/' (records open with the emitter label), and a
-		// prose %q value such as recover_error never starts with '/', so this
-		// fires only for path-valued scalars; the degenerate archive that
-		// saturates the cap already forgoes the typed per-root layout this
-		// scan errs toward, matching the fail-closed trade the cap makes.
-		if i == 0 {
+		// blank starts at the very first byte of the view, the whole view is
+		// one %q-decoded path scalar — a relative path opened by the walk-back
+		// above (e.g. "private-client/repo"), or an absolute path that opened
+		// with '/' (the original i==0 case) — whose interior may carry
+		// filename-legal bytes that isPathTextDelimiter treats as boundaries,
+		// notably spaces, which Go's %q leaves literal (a value such as
+		// `/srv/Acme Project/SecretRepo` is emitted as
+		// `repo_path="/srv/Acme Project/SecretRepo"`). Scanning to the first
+		// such delimiter would blank only the prefix and ship the private
+		// suffix, so blank the entire decoded value instead of its first
+		// delimiter-free token (#4938 review). A whole-record view that
+		// walked back to its first byte still rare-cases this branch: a record
+		// that opens with a path-shaped token rather than the emitter label is
+		// already malformed, and fail-closed errs toward the marker; a prose
+		// %q value such as recover_error never reaches here because the
+		// walk-back stops at the leading delimiter before its first '/'.
+		if start == 0 {
 			end = len(s)
 		} else {
 			for end < len(s) {
@@ -541,35 +574,47 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 				end += size
 			}
 			// A path embedded in a prose %q value (recover_error="recovery
-			// location: /srv/Acme Project/SecretRepo") never opens with '/',
+			// location: /srv/Acme;Project/SecretRepo") never opens with '/',
 			// so the i==0 whole-value blank above does not apply. The per-token
-			// scan stops at the space inside "Acme Project" and would blank only
+			// scan stops at the ';' inside "Acme;Project" and would blank only
 			// "/srv/Acme", shipping the private "Project/SecretRepo" suffix —
 			// WORKTREE_MISSING_DETECTED emits recover_error with %q in
 			// daemon/lostrestore.go, so recovery messages are prose-valued
-			// quoted fields, not path-valued scalars. A space is the one
-			// isPathTextDelimiter that is filename-legal and so genuinely legal
-			// INSIDE a path; the other delimiters (", ',', ';') are unambiguous
-			// terminators. When the token stops at a space, keep extending the
-			// blank through the path-with-spaces run — path-legal bytes and
-			// single spaces — until a real terminator (a non-space delimiter,
-			// the end of the decoded value, or a second consecutive space), so
-			// the saturated scan covers the whole path rather than its first
-			// space-broken token (#4938 review).
+			// quoted fields, not path-valued scalars. On a Unix filesystem only
+			// NUL (and the path separator '/', which isPathTextDelimiter
+			// deliberately does not include) cannot appear inside a name, so
+			// every other isPathTextDelimiter rune — space, tab, ';', ',',
+			// ':', '=', single quote, '(', ')', '[', ']', '{', '}', '<', '>', '&',
+			// '|', and '`' — is a filename-legal renderer terminator: a path
+			// could legitimately contain it even though the renderer that
+			// emitted the surrounding prose used the same byte as a separator.
+			// The fail-closed saturated scan therefore extends the blank
+			// through the path-with-delimiters run — path-legal bytes and any
+			// filename-legal delimiter — until a real terminator (NUL, the end
+			// of the decoded value, or a double quote '"' which closes a %q
+			// field in a whole-record view this same scan also runs on).
+			// '"' is excluded because the saturated scan cannot tell a literal
+			// '"' inside a filename from the structural terminator of a %q
+			// value, and crossing it would blank unrelated values from a
+			// whole-record view, so erring toward the closing quote preserves
+			// the privacy contract in the prose-value case without over-
+			// blanking the record case. Repeated spaces are filename-legal
+			// and do not end the run (#4938 review).
 			if end < len(s) {
-				if c, _ := utf8.DecodeRuneInString(s[end:]); c == ' ' {
-					end = saturatedPathWithSpacesEnd(s, end)
+				if c, _ := utf8.DecodeRuneInString(s[end:]); c != '\x00' && c != '"' {
+					end = saturatedPathContinuationEnd(s, end)
 				}
 			}
 		}
-		// A real absolute path has at least one byte after the leading slash; a
-		// lone "/" is not a path value and is left alone. knownRootTextBoundary
-		// reuses the same start/end boundary the registered pass uses, so a
-		// relative path glued to a word byte ("abc/def") and a path mid-token are
-		// not promoted to a blank.
-		if end-i >= 2 && knownRootTextBoundary(s, i, end) {
+		// A real path has at least two bytes (a lone "/" or adjacent-delimiter
+		// "/" is not a path value); a relative path's walk-back produces
+		// "ab/cd"-shaped spans so this still rejects the degenerate single-
+		// byte case. knownRootTextBoundary reuses the same start/end boundary
+		// the registered pass uses, so a relative branch ref glued to a word
+		// byte and a path mid-token are not promoted to a blank.
+		if end-start >= 2 && knownRootTextBoundary(s, start, end) {
 			spans = append(spans, redactionSpan{
-				start: i, end: end, replacement: redactedMarker, priority: spanQuotedValue,
+				start: start, end: end, replacement: redactedMarker, priority: spanQuotedValue,
 			})
 			i = end
 			continue
@@ -579,37 +624,38 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 	return spans
 }
 
-// saturatedPathWithSpacesEnd extends a saturated-scan path token that stopped at
-// a space delimiter through the rest of a path-with-spaces run, returning the
-// index just past the run's last path byte. A space is the one
-// isPathTextDelimiter that is filename-legal and may sit INSIDE a single path
-// (e.g. "/srv/Acme Project/SecretRepo"), so the per-token scan that stops at
-// the first space would blank only "/srv/Acme" and strand the private
-// "Project/SecretRepo" suffix in a prose %q value such as recover_error. The
-// run continues through path-legal bytes and single spaces and ends at a
-// non-space delimiter (", ',', ';' — unambiguous terminators), a second
-// consecutive space (a sentence separator, not a filename byte), or the end of
-// the decoded value. This is fail-closed: in the saturated case the redactor can
-// no longer tell an embedded space-bearing path from a path followed by prose,
-// so erring toward the marker preserves the privacy contract at the cost of
-// layout only that degenerate case ever had (#4938 review).
-func saturatedPathWithSpacesEnd(s string, spaceEnd int) int {
-	end := spaceEnd
-	sawSpace := false
+// saturatedPathContinuationEnd extends a saturated-scan path token that stopped
+// at a delimiter through the rest of a path-bearing run, returning the index
+// just past the run's last byte. On a Unix filesystem only NUL (and the path
+// separator '/', which isPathTextDelimiter deliberately does not include)
+// cannot appear inside a name, so every other isPathTextDelimiter rune is a
+// filename-legal renderer terminator: a path could legitimately contain ';',
+// ',', ':', '=', single quote, '(', ')', '[', ']', '{', '}', '<', '>', '&',
+// '|', '`', space, tab, or any other Unicode whitespace, even though the renderer that
+// emitted the surrounding prose used the same byte as a separator. The
+// per-token scan that stops at the first such delimiter would blank only the
+// prefix and strand the private suffix in a prose %q value such as
+// recover_error (e.g. "/srv/Acme;Project/SecretRepo" stops at ';' and ships
+// "Project/SecretRepo"). The run continues through path-legal bytes AND every
+// filename-legal delimiter, ending only at NUL (the one byte that cannot
+// appear in a Unix filename), a double quote '"' (the structural terminator
+// of a %q value in a daemon log record, which the saturated scan must not
+// cross when it runs on the whole record, since it cannot tell a literal '"'
+// inside a filename from the value's closing quote), or the end of the
+// decoded value. Repeated spaces are filename-legal and do not end the run:
+// the prior single-space-only extension shipped the suffix of a path such as
+// "/srv/Acme  Project/SecretRepo" between the two spaces. This is fail-closed:
+// in the saturated case the redactor can no longer tell an embedded path
+// from prose that merely looks like one, so erring toward the marker preserves
+// the privacy contract at the cost of layout only that degenerate case ever
+// had (#4938 review).
+func saturatedPathContinuationEnd(s string, delimiterEnd int) int {
+	end := delimiterEnd
 	for end < len(s) {
 		c, size := utf8.DecodeRuneInString(s[end:])
-		if c == ' ' {
-			if sawSpace {
-				break // second consecutive space: a sentence separator
-			}
-			sawSpace = true
-			end += size
-			continue
-		}
-		if isPathTextDelimiter(c) {
+		if c == '\x00' || c == '"' {
 			break
 		}
-		sawSpace = false
 		end += size
 	}
 	return end
