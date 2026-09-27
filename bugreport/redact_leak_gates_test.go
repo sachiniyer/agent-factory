@@ -225,3 +225,34 @@ func TestLeakReproRetainsRawPathSpelling(t *testing.T) {
 		}
 	}
 }
+
+// TestLogOnlyPathBlanksCapBoundsRegistration pins the perf bound the perf review
+// of #4938 asked for: the generic fallback registers each rejected record's
+// distinct path spellings for log-scope blanking, and appendLogOnlyPathBlankSpans
+// scans the daemon-log tail once per registered spelling. A malformed field in a
+// large archive falls the whole payload back from the typed decode, so without a
+// cap thousands of distinct worktree paths made af bug-report scan a 2 MiB tail
+// once per record while handling already-corrupted state. noteLogOnlyPathRedaction
+// caps the registry so the scan iterates over a fixed budget rather than the
+// rejected-record count, and once the cap is reached further paths are a no-op.
+func TestLogOnlyPathBlanksCapBoundsRegistration(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+100; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/cap-probe-%d/repo", i))
+	}
+	// The registry is bounded: a single path admits at most a handful of
+	// spellings, so crossing the cap can overshoot by one path's worth, but no
+	// further. +8 covers that headroom with margin.
+	if len(r.logOnlyPathBlanks) > maxLogOnlyPathBlanks+8 {
+		t.Fatalf("logOnlyPathBlanks grew to %d, want <= %d+8 (cap + one path's spellings)",
+			len(r.logOnlyPathBlanks), maxLogOnlyPathBlanks)
+	}
+	// A path registered once the cap is reached is a no-op: it is not a scan
+	// needle, which is what holds the per-call scan to the fixed budget.
+	const overflow = "/beyond-the-cap/repo"
+	r.noteLogOnlyPathRedaction(overflow)
+	if r.logOnlyPathBlank(overflow) {
+		t.Fatalf("overflow path %q got registered past the cap (registry size %d)",
+			overflow, len(r.logOnlyPathBlanks))
+	}
+}

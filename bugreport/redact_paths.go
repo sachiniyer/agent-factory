@@ -105,6 +105,33 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 	r.worktreeSubdirectoryTitles[segment] = struct{}{}
 }
 
+// maxLogOnlyPathBlanks caps the number of distinct verbatim path spellings the
+// generic fallback registers for log-scope blanking. The fallback only runs
+// when instances.json is valid JSON but rejects the typed []InstanceData decode
+// (a hand-edited or legacy shape), and a single repo's instances.json
+// realistically carries at most a few hundred distinct repo/worktree/alternate
+// spellings — each logical path admits at most a handful of spellings (cleaned,
+// resolved, raw), and the map dedupes, so this is a bound on distinct spellings
+// rather than on records.
+//
+// The cap bounds the O(paths × tail) scan in appendLogOnlyPathBlankSpans: one
+// malformed field in an otherwise-large archive used to fall the whole payload
+// back from the typed decode and register every record's distinct
+// worktree_path, so a ten-thousand-record archive plus one type mismatch made
+// af bug-report scan the 2 MiB daemon-log tail once per registered path while
+// handling already-corrupted state. Beyond the cap the registration is a no-op,
+// so the scan iterates over a fixed budget instead of over the record count
+// (#4938 review).
+//
+// This narrows only the LOG-tail verbatim blanking. The redacted instances.json
+// itself still blanks every path field wholesale via sensitiveJSONKeys
+// (redactUnknownJSON), so a path past the cap can survive the daemon log section
+// but the private directory still does not ship in the redacted JSON; the
+// capability the typed path already collapses to a numbered root is unaffected
+// for everything under the cap. The value covers any realistic single-repo
+// instance set with large margin and bounds the pathological CPU.
+const maxLogOnlyPathBlanks = 4096
+
 // noteLogOnlyPathRedaction registers an absolute repo path gathered from the
 // generic fallback (noteUnknownJSONRecord) for log-scope blanking only. The
 // typed path registers the same value as a named root via noteRepoRoot so it
@@ -116,9 +143,16 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 // section. It mirrors the spellings noteWorktreeTitle stores for the same
 // value, so the sibling-prefix blank and the worktree-title-segment
 // redaction recognize the same occurrence.
+//
+// Registration is capped at maxLogOnlyPathBlanks distinct spellings; once the
+// cap is reached further paths are a no-op, bounding the log-tail scan to a
+// fixed budget instead of to the rejected-record count.
 func (r *redactor) noteLogOnlyPathRedaction(path string) {
 	if r.logOnlyPathBlanks == nil {
 		r.logOnlyPathBlanks = make(map[string]struct{})
+	}
+	if len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {
+		return
 	}
 	for _, spelling := range absolutePathSpellings(path) {
 		r.logOnlyPathBlanks[spelling] = struct{}{}
