@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // #4506 review: tmux leaves pane_dead_status EMPTY for a command killed by a
@@ -138,6 +141,40 @@ func TestProbePaneExitCapsItsNudges(t *testing.T) {
 	require.True(t, dead)
 	require.False(t, statusKnown)
 	require.Equal(t, maxReapNudges, nudges)
+}
+
+// #4906 review: the nudge's log line names the version of the SERVER that lost
+// the SIGCHLD, read in the probe's own display-message. It never runs the tmux
+// client: `tmux -V` reports the installed binary, which after an upgrade is not
+// the running server, and it would start a fresh command timeout after the
+// probe's wait had already run out.
+func TestProbePaneExitLogsTheServersVersionWithoutRunningTheClient(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	dir := t.TempDir()
+	ranClient := filepath.Join(dir, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"), []byte(
+		"#!/bin/sh\ntouch "+ranClient+"\necho 'tmux 3.6'\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var info logtest.Buffer
+	previous := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&info)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(previous) })
+
+	stranded := heldPaneExec(uncollectedProcess(t), "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-version", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: stranded.RunFunc,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			last := len(c.Args) - 1
+			c.Args[last] = strings.ReplaceAll(c.Args[last], "#{version}", "3.4")
+			return stranded.OutputFunc(c)
+		},
+	})
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.NoFileExists(t, ranClient, "the probe ran the tmux client for its log line")
+	require.Contains(t, info.String(), "tmux 3.4", "the log line must name the server's version")
+	require.NotContains(t, info.String(), "3.6")
 }
 
 // Once a read has established that the root exited, a re-read that cannot

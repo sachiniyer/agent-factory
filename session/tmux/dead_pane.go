@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
@@ -238,8 +237,12 @@ func (t *TmuxSession) ProbePaneExit() (dead bool, status int, statusKnown bool, 
 		exit, uncollected = next, stillUncollected
 	}
 	if nudges > 0 {
-		log.InfoLog.Printf("tmux session %s: pane root exited but %s had not collected it; nudged the server %d time(s), status known after: %t",
-			t.sanitizedName, tmuxVersionForLog(), nudges, exit.statusKnown)
+		version := exit.version
+		if version == "" {
+			version = "an unknown version"
+		}
+		log.InfoLog.Printf("tmux session %s: pane root exited but its tmux server (tmux %s) had not collected it; nudged the server %d time(s), status known after: %t",
+			t.sanitizedName, version, nudges, exit.statusKnown)
 	}
 	return exit.dead, exit.status, exit.statusKnown, exit.at, exit.known
 }
@@ -266,22 +269,14 @@ func (t *TmuxSession) nudgeReap(budget time.Duration) {
 	_ = t.runTmuxBounded(ctx, "run-shell", "-b", "true")
 }
 
-// tmuxVersionForLog reports the tmux client version for a diagnostic line.
-func tmuxVersionForLog() string {
-	ctx, cancel := tmuxTimeoutContext()
-	defer cancel()
-	out, err := outputTmuxBoundedWith(ctx, cmd.MakeExecutor(), "-V")
-	if err != nil {
-		return "tmux (version unknown)"
-	}
-	return strings.TrimSpace(string(out))
-}
-
 // paneExit is one reading of ProbePaneExit's answer.
 type paneExit struct {
 	dead, statusKnown, known bool
 	status                   int
 	at                       time.Time
+	// version is the tmux SERVER's own version, for the nudge's log line: the
+	// installed client can be newer than a server started before an upgrade.
+	version string
 }
 
 // readPaneExit reads the pane once, within budget. uncollected reports a pane
@@ -305,7 +300,7 @@ func (t *TmuxSession) readPaneExit(budget time.Duration) (exit paneExit, uncolle
 	if field(0) != "1" {
 		return paneExit{known: true}, false
 	}
-	exit = paneExit{dead: true, known: true}
+	exit = paneExit{dead: true, known: true, version: field(5)}
 	if code, perr := strconv.Atoi(field(1)); perr == nil {
 		exit.status, exit.statusKnown = code, true
 	}
@@ -340,9 +335,11 @@ func exitedUncollected(pid int) bool {
 // paneExitFormat keeps the probe's fields positional: tmux leaves
 // pane_dead_status EMPTY for a command killed by a signal while still filling
 // pane_dead_time, so a whitespace-separated answer collapses and reads the death
-// time as the exit status (#4506 review).
+// time as the exit status (#4506 review). The last field is the server's
+// version, for the nudge's log line.
 const paneExitFormat = "#{pane_dead}" + paneFieldSeparator + "#{pane_dead_status}" + paneFieldSeparator +
-	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}"
+	"#{pane_dead_time}" + paneFieldSeparator + "#{pane_dead_signal}" + paneFieldSeparator + "#{pane_pid}" +
+	paneFieldSeparator + "#{version}"
 
 // LaunchPending reports whether the pane's root is still af's launch shim, the
 // environment filter that execs the pane command, so the command itself has
