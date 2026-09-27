@@ -32,7 +32,7 @@ func TestRenameTab_FreesTheOldNameForANewTab(t *testing.T) {
 	firstTmux := first.tmux.SanitizedName()
 	require.Equal(t, "af_1957_agent__fresh", firstTmux)
 
-	renamed, err := inst.RenameTab(1, "fresh-old")
+	renamed, err := inst.RenameTabByID(inst.Tabs[1].ID, "fresh-old")
 	require.NoError(t, err)
 	require.Equal(t, "fresh-old", renamed)
 	require.Equal(t, firstTmux, first.tmux.SanitizedName(),
@@ -89,7 +89,7 @@ func TestRenameTab_CreateRenameRoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "af_1957_round__fresh", first.tmux.SanitizedName())
 
-	name, err := inst.RenameTab(1, "fresh-old")
+	name, err := inst.RenameTabByID(inst.Tabs[1].ID, "fresh-old")
 	require.NoError(t, err)
 	require.Equal(t, "fresh-old", name)
 
@@ -99,7 +99,7 @@ func TestRenameTab_CreateRenameRoundTrips(t *testing.T) {
 	require.Equal(t, "af_1957_round__fresh-2", second.tmux.SanitizedName())
 
 	// Rename the NEW tab away too; "fresh" is free again for a third.
-	name, err = inst.RenameTab(2, "fresh-older")
+	name, err = inst.RenameTabByID(inst.Tabs[2].ID, "fresh-older")
 	require.NoError(t, err)
 	require.Equal(t, "fresh-older", name)
 
@@ -124,7 +124,7 @@ func TestRenameTab_FreedNameIsFreeForATmuxlessTab(t *testing.T) {
 
 	_, err := inst.AddProcessTab("btop", "dashboard")
 	require.NoError(t, err)
-	name, err := inst.RenameTab(1, "dashboard-old")
+	name, err := inst.RenameTabByID(inst.Tabs[1].ID, "dashboard-old")
 	require.NoError(t, err)
 	require.Equal(t, "dashboard-old", name)
 
@@ -135,7 +135,7 @@ func TestRenameTab_FreedNameIsFreeForATmuxlessTab(t *testing.T) {
 	vscode, err := inst.AddVSCodeTab("editor")
 	require.NoError(t, err)
 	require.Equal(t, "editor", vscode.Name)
-	renamedVSCode, err := inst.RenameTab(3, "editor-old")
+	renamedVSCode, err := inst.RenameTabByID(inst.Tabs[3].ID, "editor-old")
 	require.NoError(t, err)
 	require.Equal(t, "editor-old", renamedVSCode)
 
