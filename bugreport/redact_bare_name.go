@@ -35,6 +35,18 @@ import (
 // name never carries a '/' by definition, so the one segment that can be a
 // dropped name is the one this scan reaches (#4938 review).
 //
+// The quoted-region toggle tracks Go %q escaping rather than flipping on every
+// '"' byte: a session title such as `fix"bug` is emitted as the %q value
+// `"fix\"bug"`, so the interior `\"` is an escaped quote that is data, not the
+// structural terminator. A naive toggle treats that escaped quote as the
+// closer and the real closing quote as the next opener, leaving inQuote true
+// for the unquoted bytes that follow (for example `at ConfidentialClient4097`
+// after the title), so the past-the-cap bare name logged beside it survives
+// verbatim instead of being blanked. The escape flag mirrors GoQuotedEnd: a
+// backslash inside the quoted region consumes the next byte as escaped, so an
+// escaped `\"` does not toggle while a real closing `"` still does (#4938
+// review).
+//
 // The over-blank — emitter labels, scheme names, and the first segments of
 // unquoted '/'-bearing tokens blanking in a '/'-bearing record, in the
 // degenerate archive that saturates the bare-name set — is the privacy side
@@ -46,26 +58,51 @@ func (r *redactor) appendSaturatedBareNameSpans(
 	bareBoundary pathBoundary,
 ) []redactionSpan {
 	inQuote := false
+	// escaped tracks Go %q backslash escaping, but only inside a quoted
+	// region: outside a quote a '\' is a filename-legal byte that may start
+	// or continue a bare-name token, so it is not an escape there.
+	escaped := false
 	i := 0
 	for i < len(s) {
 		c, size := utf8.DecodeRuneInString(s[i:])
-		if c == '"' {
-			// A '"' is the structural terminator of a %q value on a
-			// quoteStructural view; the per-scalar pass handles the decoded
-			// scalar, so toggle out of the quoted region and never blank
-			// inside it. The same terminator appendSaturatedLogOnlyPathBlankSpans
-			// stops its walkback at (#4938 review).
-			inQuote = !inQuote
+		if inQuote {
+			if escaped {
+				escaped = false
+				i += size
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				i += size
+				continue
+			}
+			if c == '"' {
+				// The real structural terminator of the %q value: the
+				// per-scalar pass handles the decoded scalar, so leave the
+				// quoted region. An escaped `\"` was consumed above and
+				// never reached this toggle (#4938 review).
+				inQuote = false
+			}
 			i += size
 			continue
 		}
-		if inQuote || isPathTextDelimiter(c) || c == filepath.Separator {
-			// Inside a quoted scalar, or at a path-text delimiter (which a bare
-			// name cannot contain), or at a path separator (which separates a
-			// bare name from a deeper segment this scan must not own): none of
-			// these can begin a bare-name token, so skip. A '/' skipped here
-			// leaves the next segment preceded by '/', which pathStartsAt
-			// rejects, so deeper segments survive (#4938 review).
+		if c == '"' {
+			// A '"' is the structural terminator of a %q value on a
+			// quoteStructural view; the per-scalar pass handles the decoded
+			// scalar, so enter the quoted region and never blank inside it.
+			// The same terminator appendSaturatedLogOnlyPathBlankSpans stops
+			// its walkback at (#4938 review).
+			inQuote = true
+			i += size
+			continue
+		}
+		if isPathTextDelimiter(c) || c == filepath.Separator {
+			// At a path-text delimiter (which a bare name cannot contain), or
+			// at a path separator (which separates a bare name from a deeper
+			// segment this scan must not own): none of these can begin a
+			// bare-name token, so skip. A '/' skipped here leaves the next
+			// segment preceded by '/', which pathStartsAt rejects, so deeper
+			// segments survive (#4938 review).
 			i += size
 			continue
 		}

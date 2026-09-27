@@ -147,6 +147,17 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 // duplicate that adds no matcher must not flip the scrubber to blanking
 // every path (#4938 review).
 func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
+	if r.worktreePathTitlesSaturated {
+		// The fallback pair registry is already capped and the sibling-shape
+		// redaction has switched to the single-pass fail-closed blank, so any
+		// further pairing would only compute spellings and derived segments
+		// and check the map to discover it adds no matcher. Stop here so a
+		// malformed record that nests many title and repo_path string keys
+		// cannot make this fallback pair loop a quadratic cross-product past
+		// the cap — each later combination used to do that work before
+		// discovering registration is saturated (#4938 review).
+		return
+	}
 	if r.worktreePathTitles == nil {
 		r.worktreePathTitles = make(map[worktreePathTitle]struct{})
 	}
@@ -360,6 +371,34 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 	if len(newSlashSpellings) == 0 && len(newBareNameSpellings) == 0 {
 		// Every spelling was already registered: this duplicate adds no
 		// needle, so do not touch the saturation flag.
+		return
+	}
+	// Fail-closed for invalid-UTF-8: encoding/json.Unmarshal replaced each
+	// invalid byte in the rejected record with U+FFFD, so a registered needle
+	// carrying the replacement character cannot match the daemon log's
+	// verbatim raw bytes (Go %q emits 0xff as \xff, decoded back by
+	// goQuoteTransform). A replacement character in a NEW spelling saturates
+	// the registry that spelling belongs to, switching its matcher to the
+	// single-pass saturated scan — the privacy-side fail-closed trade the
+	// #4938 review accepted. The return fires only when THIS call found a
+	// replacement character, so a call that adds a clean spelling while an
+	// UNRELATED registry was already saturated still registers it below.
+	fffd := false
+	for _, sp := range newSlashSpellings {
+		if strings.ContainsRune(sp, '\uFFFD') {
+			r.logOnlyPathBlanksSaturated = true
+			fffd = true
+			break
+		}
+	}
+	for _, sp := range newBareNameSpellings {
+		if strings.ContainsRune(sp, '\uFFFD') {
+			r.logOnlyPathBareNamesSaturated = true
+			fffd = true
+			break
+		}
+	}
+	if fffd {
 		return
 	}
 	if len(newSlashSpellings) > 0 && len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {

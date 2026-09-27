@@ -118,6 +118,22 @@ func (r *redactor) noteUnknownJSONRecord(v any) {
 	for title := range titles {
 		r.noteWorktreeSubdirectoryTitle(title)
 		for repoPath := range repoPaths {
+			// Stop pairing once the fallback title registry is saturated. The
+			// rejected-record walker is shape-agnostic, so one record can nest
+			// many title and repo_path string keys and this cross-product calls
+			// noteFallbackWorktreeTitle once per combination. The cap bounds
+			// the registered pairs, but each later combination still entered
+			// the function to discover it adds nothing. noteFallbackWorktreeTitle
+			// early-returns once saturated, and this break stops the
+			// cross-product itself, so a hand-edited record with thousands of
+			// distinct titles and paths cannot make the fallback a ~quadratic
+			// cross-product while generating a bug report. The capped pairs
+			// switch the sibling-shape redaction to the fail-closed saturated
+			// scan, so the dropped combinations are not left unredacted
+			// (#4938 review).
+			if r.worktreePathTitlesSaturated {
+				break
+			}
 			r.noteFallbackWorktreeTitle(repoPath, title)
 		}
 	}

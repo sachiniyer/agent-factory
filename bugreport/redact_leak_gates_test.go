@@ -1395,3 +1395,92 @@ func TestWorktreeTitleSiblingNeedleIndexed(t *testing.T) {
 			len(r.worktreeTitleSiblingNeedles), len(r.worktreePathTitles))
 	}
 }
+
+// TestSaturatedBareNameBlanksUnquotedNameAfterEscapedQuote pins the #4938
+// review fix on Go %q escaping in appendSaturatedBareNameSpans. A daemon-log
+// record carrying a %q-quoted session title that contains a literal '"'
+// (title fix"bug, which %q renders as "fix\"bug") followed by a past-the-cap
+// bare name logged UNQUOTED via %s — the session/backend_local_respawn.go
+// "at %s" workDir — used to leak the bare name verbatim. The saturated
+// bare-name scan toggled inQuote on every '"' byte, so the escaped '\"' inside
+// the title read as the structural closer and the title's real closing '"'
+// read as the next opener, leaving inQuote true for the bytes that followed;
+// the unquoted bare name then sat inside a phantom quoted region and was
+// skipped, so the dropped name survived the daemon log. The scan now tracks
+// Go %q escaping (mirroring GoQuotedEnd): a backslash inside the quoted
+// region consumes the next byte, so an escaped '\"' does not toggle while the
+// real closing '"' still does, and the unquoted bare name after the title
+// blanks (#4938 review).
+//
+// Fail-first: with the naive toggle, the escaped quote in "fix\"bug" desyncs
+// inQuote and ConfidentialClient4097 ships verbatim after the title.
+func TestSaturatedBareNameBlanksUnquotedNameAfterEscapedQuote(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("bare-name-%d", i))
+	}
+	if r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated set before the cap was reached (cap %d)", maxLogOnlyPathBlanks)
+	}
+	const secret = "ConfidentialClient4097"
+	r.noteLogOnlyPathRedaction(secret)
+	if !r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated not set after a new bare name past the cap (cap %d)", maxLogOnlyPathBlanks)
+	}
+	// A %q-quoted session title containing a literal '"' — %q renders the
+	// interior quote as an escaped '\"' — followed by the past-the-cap bare
+	// name logged unquoted via %s. The escaped quote is exactly the byte the
+	// naive inQuote toggle mishandled.
+	const sessionTitle = `fix"bug`
+	logLine := fmt.Sprintf(`recover: rebuilt missing worktree for session %q at %s from branch %s`,
+		sessionTitle, secret, "feature/foo")
+	got := r.scrubLog(logLine)
+	t.Logf("escaped-quote bare-name-saturated scrubLog out:\n%s", got)
+	if strings.Contains(got, secret) {
+		t.Errorf("scrubLog leaked past-the-cap unquoted bare name %q after the escaped quote in the %q title:\n%s",
+			secret, sessionTitle, got)
+	}
+}
+
+// TestLogOnlyPathBlanksFailClosedInvalidUTF8 pins the #4938 review fix on
+// invalid-UTF-8 fallback paths. encoding/json.Unmarshal, which decoded the
+// rejected record this repo_path came from, replaces each invalid byte with
+// U+FFFD, so the registered needle carries the replacement character while
+// the daemon log — written from the ORIGINAL raw bytes — carries the verbatim
+// byte (Go %q emits 0xff as \xff and goQuoteTransform decodes it back). The
+// exact per-needle scan compared the U+FFFD needle against the raw-byte log
+// and never matched, so the private directory name survived the daemon-log
+// tail while the fallback JSON masked the field in a separate section. A
+// replacement character in a NEW spelling now saturates the slash-bearing
+// registry, switching the matcher to the single-pass saturated scan that
+// blanks every absolute-path token regardless of exact spelling, so the
+// invalid-UTF-8 path does not survive the daemon log (#4938 review).
+//
+// Fail-first: without the U+FFFD saturation the per-needle scan misses and
+// the saturated scan does not run, so ConfidentialClient ships verbatim.
+func TestLogOnlyPathBlanksFailClosedInvalidUTF8(t *testing.T) {
+	r := &redactor{}
+	// A malformed instances.json whose repo_path carries a raw 0xff byte:
+	// the typed decode rejects ("status":"done" where Status is int) so the
+	// fallback runs, and json.Unmarshal replaces the 0xff with U+FFFD in the
+	// registered needle.
+	r.redactInstancesJSON(json.RawMessage(
+		`[{"status":"done","repo_path":"/srv/ConfidentialClient` + "\xff" + `/repo"}]`))
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set for a U+FFFD-bearing fallback path")
+	}
+	// The daemon log carries the ORIGINAL raw bytes: the path with a raw
+	// 0xff, which %q renders as the \xff escape.
+	originalPath := "/srv/ConfidentialClient\xff/repo"
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q`, originalPath)
+	got := r.scrubLog(logLine)
+	t.Logf("invalid-UTF-8 path scrubLog out:\n%s", got)
+	if strings.Contains(got, "ConfidentialClient") {
+		t.Errorf("scrubLog leaked the invalid-UTF-8 path's private segment:\n%s", got)
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scrubLog removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}
