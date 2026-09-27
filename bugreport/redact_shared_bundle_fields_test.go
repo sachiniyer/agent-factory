@@ -520,3 +520,147 @@ func TestCollapsePathFieldKeepsTheTokenIntact(t *testing.T) {
 		t.Errorf("collapsePathField = %q: the title below the root survived", got)
 	}
 }
+
+// TestCollapsePathFieldRedactsWorktreeSubdirectoryTitle closes the
+// structured-field half of the leak class
+// TestScrubbersRedactSanitizedTitleInSubdirectoryRecoveryPath closes for the
+// text pass. A depth-1 leaf below <afHome>/worktrees carries a SANITIZED title
+// segment (DerivedWorktreeSubdirectoryTitleSegment) that differs byte-for-byte
+// from the raw title scrubSessionTitles matches, so the remainder scrub alone
+// ships it verbatim. The downstream JSON text scrubber would redact it via
+// appendWorktreeSubdirectoryTitleSpans, but that matcher keys its needle on the
+// literal <afHome>; collapsePathField has just replaced that with the [af-home]
+// token, so the needle can no longer match. The fix applies the same depth-1
+// subdirectory scrub at the source, keyed on the token.
+func TestCollapsePathFieldRedactsWorktreeSubdirectoryTitle(t *testing.T) {
+	const (
+		afHome       = "/srv/ConfidentialClient/af"
+		repo         = "/srv/ConfidentialClient/repo"
+		title        = "fix bug (urgent)"
+		diskTitle    = "fix-bug-urgent" // == sessiongit.DerivedWorktreeSubdirectoryTitleSegment(title)
+		archiveDest  = afHome + "/archived/0f8fc14cb4d0/fix bug (urgent)"
+		depth1       = afHome + "/worktrees/" + diskTitle
+		depth1Suffix = depth1 + "-2"
+		depth2       = depth1 + "/subdir/file"
+	)
+	if got, want := sessiongit.DerivedWorktreeSubdirectoryTitleSegment(title), diskTitle; got != want {
+		t.Fatalf("title derivation mismatch: got %q want %q (test fixture must match the registered segment)", got, want)
+	}
+
+	r := &redactor{}
+	r.noteAFHome(afHome)
+	r.noteSession(&session.InstanceData{
+		Title: title,
+		Worktree: session.GitWorktreeData{
+			RepoPath:     repo,
+			WorktreePath: archiveDest, // registered worktree root — collapses safely
+			// AlternatePath (the old depth-1 leaf) is NOT registered as a root
+			// anywhere — exactly the production state the bug asks for.
+		},
+	})
+
+	// Depth-1 leaf: the segment must be redacted, not shipped verbatim. The
+	// [af-home]/worktrees layout survives for triage.
+	if got, want := r.collapsePathField(depth1), "[af-home]/worktrees/"+redactedMarker; got != want {
+		t.Errorf("collapsePathField(depth-1 subdirectory leaf) = %q, want %q (segment must be redacted at the source)", got, want)
+	}
+
+	// firstFreeWorktreePath's "-N" collision suffix is AF-authored and survives,
+	// matching the text-pass scrubber's trade.
+	if got, want := r.collapsePathField(depth1Suffix), "[af-home]/worktrees/"+redactedMarker+"-2"; got != want {
+		t.Errorf("collapsePathField(depth-1 leaf with collision suffix) = %q, want %q (collision suffix must survive)", got, want)
+	}
+
+	// A deeper path preserves the subdirectory layout; only the title-derived
+	// depth-1 component is redacted, the rest of the path stays for triage.
+	if got, want := r.collapsePathField(depth2), "[af-home]/worktrees/"+redactedMarker+"/subdir/file"; got != want {
+		t.Errorf("collapsePathField(deeper subdirectory) = %q, want %q (only the title-derived segment should be redacted)", got, want)
+	}
+
+	// A depth-1 leaf that IS a registered worktree root still collapses to that
+	// root's token. The subdirectory scrub must not perturb the worktree-root
+	// collapse: in subdirectory mode the worktree's own WorktreePath is this
+	// exact depth-1 shape, and the root collapse is what other fields
+	// cross-reference via [worktree:N].
+	rooted := &redactor{}
+	rooted.noteAFHome(afHome)
+	rooted.noteSession(&session.InstanceData{
+		Title: title,
+		Worktree: session.GitWorktreeData{
+			RepoPath:     repo,
+			WorktreePath: depth1,
+		},
+	})
+	if got, want := rooted.collapsePathField(depth1), "[worktree:1]"; got != want {
+		t.Errorf("collapsePathField(registered worktree root at the depth-1 leaf) = %q, want %q (subdirectory scrub must not shadow the worktree-root collapse)", got, want)
+	}
+}
+
+// TestRedactInstancesJSONRedactsWorktreeSubdirectoryTitleFromAlternatePath is
+// the end-to-end witness at the bundle level: it runs the production pipeline
+// (redactInstancesJSON → redactInstanceData → collapsePathField → scrubJSON)
+// against the exact state the bug report describes — an interrupted archive
+// whose relocation_recovery.alternate_path still names the old depth-1
+// subdirectory worktree directory. Both the relocation_recovery field and the
+// archive_report.rollback_fence compatibility copy must redact the leaf,
+// because both flow through collapsePathField.
+func TestRedactInstancesJSONRedactsWorktreeSubdirectoryTitleFromAlternatePath(t *testing.T) {
+	const (
+		afHome       = "/srv/ConfidentialClient/af"
+		repo         = "/srv/ConfidentialClient/repo"
+		title        = "fix bug (urgent)"
+		diskTitle    = "fix-bug-urgent"
+		archiveDest  = afHome + "/archived/0f8fc14cb4d0/fix bug (urgent)"
+		alternate    = afHome + "/worktrees/" + diskTitle
+		retainedTree = alternate // the source is retained when the archive move is interrupted
+	)
+	r := &redactor{}
+	r.noteAFHome(afHome)
+	out := redactOneInstance(t, r, session.InstanceData{
+		ID:    "instance-1",
+		Title: title,
+		Worktree: session.GitWorktreeData{
+			RepoPath:     repo,
+			WorktreePath: archiveDest,
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				AlternatePath: alternate,
+			},
+		},
+		ArchiveReport: &sessiongit.ArchiveReport{
+			RetainedTrees: []sessiongit.ArchiveRetainedTree{{Path: retainedTree}},
+			RollbackFence: &sessiongit.ArchiveRollbackFence{
+				OriginalRelocationRecovery: &sessiongit.ArchiveRollbackRelocationRecovery{
+					AlternatePath: alternate,
+				},
+			},
+		},
+	})
+
+	if strings.Contains(out, diskTitle) {
+		t.Errorf("the title-derived subdirectory segment reached the bundle:\n%s", out)
+	}
+	for _, secret := range []string{title, "ConfidentialClient"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("a directory name or raw title reached the bundle (%q):\n%s", secret, out)
+		}
+	}
+
+	// The depth-1 layout below [af-home] survives for triage; the leaf is the
+	// marker, not the segment. Both the relocation_recovery field and the
+	// rollback-fence compatibility copy flow through collapsePathField, so
+	// both must close — assert the redacted value appears at least twice.
+	redactedAlternate := `"alternate_path": "[af-home]/worktrees/` + redactedMarker + `"`
+	if got := strings.Count(out, redactedAlternate); got < 2 {
+		t.Errorf("alternate_path redaction count = %d, want at least 2 (relocation_recovery + rollback_fence):\n%s", got, out)
+	}
+	// The retained tree at the same depth-1 source path also flows through
+	// collapsePathField and must close for the same reason.
+	if !strings.Contains(out, `"path": "[af-home]/worktrees/`+redactedMarker+`"`) {
+		t.Errorf("retained_trees[].path at the depth-1 subdirectory leaf was not redacted:\n%s", out)
+	}
+	// The session's own worktree directory (the registered archive destination)
+	// still collapses to its worktree-root token, unaffected by the new scrub.
+	if !strings.Contains(out, `"worktree_path": "[worktree:1]"`) {
+		t.Errorf("the registered worktree root should collapse to [worktree:1]:\n%s", out)
+	}
+}

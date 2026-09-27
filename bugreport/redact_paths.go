@@ -530,16 +530,53 @@ func isPathTextDelimiter(r rune) bool {
 // REMAINDER goes through that pass, never the token — a session titled "repo"
 // would otherwise rewrite "[repo:1]" itself, since both its neighbours there are
 // non-word runes.
+//
+// The depth-1 leaf below "[af-home]/worktrees" gets an additional scrub. af
+// names a legacy subdirectory-mode worktree after the SANITIZED title segment
+// (DerivedWorktreeSubdirectoryTitleSegment), which differs byte-for-byte from
+// the raw title that scrubSessionTitles matches, so the remainder scrub above
+// leaves it intact. The downstream JSON text scrubber
+// (appendWorktreeSubdirectoryTitleSpans) would redact it, but its needle keys on
+// the LITERAL <afHome> path; collapsePathField has just replaced that with the
+// [af-home] token, so the needle can no longer match. Apply the same depth-1
+// subdirectory scrub here, keyed on the token, or the segment ships verbatim in
+// the structured field (relocation_recovery.alternate_path and the rollback-fence
+// compatibility copy both flow through here).
 func (r *redactor) collapsePathField(path string) string {
 	if path == "" {
 		return ""
 	}
 	for _, root := range r.rootReplacements() {
 		if rest, ok := underRoot(path, root.path); ok {
-			return root.token + r.scrubSessionTitles(rest)
+			collapsed := root.token + r.scrubSessionTitles(rest)
+			return r.scrubCollapsedWorktreeSubdirectoryTitles(collapsed)
 		}
 	}
 	return redactedMarker
+}
+
+// scrubCollapsedWorktreeSubdirectoryTitles removes the title-derived leaf below
+// "[af-home]/worktrees" from a root-tokenized value. It mirrors
+// appendWorktreeSubdirectoryTitleSpans but keys its needle on the [af-home] token
+// instead of the literal <afHome> spelling, because collapsePathField has
+// already replaced the latter with the former. The boundary, segment set, and
+// span shape are identical to the text-pass matcher, so the two close the same
+// leak class for the same shape — only the parent prefix they anchor on differs.
+//
+// Scrubbing only the [af-home]/worktrees parent (and not, say, [repo:N]/worktrees
+// or [worktree:N]/worktrees) matches the text-pass scope: the sanitized leaf
+// segments are placed only below <afHome>/worktrees by resolveWorktreePlacement,
+// so a depth-1 collision under any other root is coincidental and must be left
+// for triage. A path that already collapsed to a registered worktree token
+// ("[worktree:1]") does not contain the needle's parent prefix, so this is a
+// no-op there — the worktree-root collapse owns that shape unchanged.
+func (r *redactor) scrubCollapsedWorktreeSubdirectoryTitles(collapsed string) string {
+	if r.afHome == "" || len(r.worktreeSubdirectoryTitles) == 0 {
+		return collapsed
+	}
+	parent := filepath.Join(afHomeToken, "worktrees")
+	spans := appendWorktreeSubdirectoryTitleSpansBelow(nil, collapsed, parent, r.worktreeSubdirectoryTitles, derivedWorktreePathBoundary)
+	return applyRedactionSpans(collapsed, spans)
 }
 
 // underRoot reports whether path IS root or sits inside it, returning what
