@@ -108,7 +108,9 @@ func (m *home) replayDeferredNamingReplies() tea.Cmd {
 // noticeDetailsHint is the details hint for the current state; "" means the
 // error_details binding's own. hide drops the hint inside the form's nested
 // fields: the prompt types E and uses ctrl+e as end-of-line, and the pickers
-// answer neither, so no key opens the details there.
+// answer neither, so no key opens the details there. The same holds while the
+// details themselves are open over the form: the overlay dismisses on its own
+// keys and never dispatches E.
 func (m *home) noticeDetailsHint() (hint string, hide bool) {
 	if m.namingInstance == nil {
 		return "", false
@@ -116,7 +118,7 @@ func (m *home) noticeDetailsHint() (hint string, hide bool) {
 	switch m.state {
 	case stateNew:
 		return namingFormDetailsHint, false
-	case stateSelectProgram, stateSelectBackend, stateSelectAccount, statePromptInput:
+	case stateSelectProgram, stateSelectBackend, stateSelectAccount, statePromptInput, stateHelp:
 		return "", true
 	}
 	return "", false

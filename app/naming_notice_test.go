@@ -236,3 +236,21 @@ func TestNamingFormNestedFieldsAdvertiseNoDetailsKey(t *testing.T) {
 		})
 	}
 }
+
+// TestNamingFormDetailsOverlayAdvertisesNoDetailsKey: with ctrl+e's details
+// open over the form, the pinned notice is still on the bar behind them, and
+// the overlay never dispatches E, so the bar must not advertise it.
+func TestNamingFormDetailsOverlayAdvertisesNoDetailsKey(t *testing.T) {
+	h, _, _ := namingFormWithConflict(t)
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlE})
+	require.Equal(t, stateHelp, h.state, "precondition: the details are open over the form")
+	_ = h.View()
+	bar := h.errBox.String()
+	assert.Contains(t, bar, "conflicts with", "the pinned notice stays on the bar")
+	assert.NotContains(t, bar, "details", "no details key works while the details are open")
+
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateNew, h.state)
+	_ = h.View()
+	assert.Contains(t, h.errBox.String(), "ctrl+e details", "back on the form, ctrl+e is advertised again")
+}
