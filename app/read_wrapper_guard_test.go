@@ -19,6 +19,7 @@ var readWrapperMethods = map[string]bool{
 	"PreviewSnapshot":    true,
 	"ListAccounts":       true,
 	"ListBackends":       true,
+	"ListProjects":       true,
 }
 
 // TestReadWrapperCallsOnlyReads parses the package's production source and
