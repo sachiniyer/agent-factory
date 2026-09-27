@@ -1035,3 +1035,112 @@ func TestLogOnlyPathBlanksRelativeSaturatedDelimiterBeforeFirstSlash(t *testing.
 		})
 	}
 }
+
+// TestLogOnlyPathBlanksFailClosedSaturatedQuotedFilenameChar pins the #4938 review
+// fix on the saturated scanner's handling of a literal '"' inside a path. A
+// Unix filename may contain '"', and goQuoteTransform recurses over every %q
+// field as ProvLogValue, where the decoded view carries the '"' as filename
+// data rather than as the structural terminator of a %q value. The saturated
+// scan used to refuse the continuation across '"' in every view, so a prose
+// recover_error such as `recovery location: /srv/Acme"SecretRepo` blanked only
+// "/srv/Acme" and shipped the private '"SecretRepo' suffix in the bundled log.
+// On the decoded ProvLogValue view the scan now extends the blank through the
+// '"' (it is content); on the whole-record view it still stops at '"' (it
+// closes the %q field), which TestLogOnlyPathBlanksFailClosedSaturatedDoesNotCrossStructuralQuote
+// pins.
+func TestLogOnlyPathBlanksFailClosedSaturatedQuotedFilenameChar(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	const path = `/srv/Acme"SecretRepo`
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" recover_error=%q`,
+		"recovery location: "+path)
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scan with quoted-filename-char path out:\n%s", got)
+	for _, secret := range []string{path, `Acme"SecretRepo`, `"SecretRepo`, "SecretRepo"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the saturated scan (quoted filename char):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing", "recovery location"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestLogOnlyPathBareNamesSaturatedFailsClosed pins the #4938 review fix on the
+// bare-name cap's overflow. noteLogOnlyPathRedaction's bare-name loop used to
+// break once logOnlyPathBareNames reached maxLogOnlyPathBlanks, silently
+// dropping every later single-segment relative name with no saturation flag.
+// The slash-bearing saturated scan anchors on '/' and cannot reach a bare
+// name, and the per-needle pass has no entry for the dropped name, so a
+// daemon-tail record for a past-the-cap bare name such as
+// repo_path="ConfidentialClient4097" shipped the private name verbatim.
+// noteLogOnlyPathRedaction now sets logOnlyPathBareNamesSaturated at the cap,
+// and the matcher fail-closed-blanks the whole decoded single %q scalar when
+// it carries no '/' (the shape of a past-the-cap bare name), so the dropped
+// name does not survive the daemon log.
+//
+// The fail-closed runs only on the decoded ProvLogValue view: a scalar that
+// carries a '/' is a real path and stays under the slash-bearing scan (which
+// is NOT saturated here), so an unrelated absolute path in recover_error
+// survives unblanked. A non-path scalar such as classification blanks whole
+// in this degenerate case — the privacy side of the same fail-closed trade
+// the slash-bearing saturated scan already makes for every '/'-bearing token
+// (#4938 review).
+func TestLogOnlyPathBareNamesSaturatedFailsClosed(t *testing.T) {
+	r := &redactor{}
+	// Register maxLogOnlyPathBlanks distinct single-segment bare names (the cap
+	// before saturation).
+	for i := 0; i < maxLogOnlyPathBlanks; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("bare-name-%d", i))
+	}
+	if r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated set before the cap was reached (cap %d)", maxLogOnlyPathBlanks)
+	}
+	if len(r.logOnlyPathBareNames) != maxLogOnlyPathBlanks {
+		t.Fatalf("bare-name set did not reach the cap (got %d, want %d)",
+			len(r.logOnlyPathBareNames), maxLogOnlyPathBlanks)
+	}
+	// A new distinct bare name past the cap saturates (fail-closed) and is not
+	// registered: dropping it silently is the leak this fix closes.
+	const secret = "ConfidentialClient4097"
+	r.noteLogOnlyPathRedaction(secret)
+	if !r.logOnlyPathBareNamesSaturated {
+		t.Fatalf("logOnlyPathBareNamesSaturated not set after a new bare name past the cap (cap %d)", maxLogOnlyPathBlanks)
+	}
+	if _, ok := r.logOnlyPathBareNames[secret]; ok {
+		t.Fatalf("past-the-cap bare name %q was registered into the capped set (set size %d)",
+			secret, len(r.logOnlyPathBareNames))
+	}
+	// A duplicate bare name at the cap adds no new needle, so it must not grow
+	// the set or change the saturation flag (#4938 review's duplicate guard).
+	dupBefore := len(r.logOnlyPathBareNames)
+	r.noteLogOnlyPathRedaction("bare-name-0")
+	if len(r.logOnlyPathBareNames) != dupBefore {
+		t.Fatalf("a duplicate bare name changed the set size (%d -> %d)", dupBefore, len(r.logOnlyPathBareNames))
+	}
+	// A daemon-tail line for the omitted bare name. repo_path is a bare scalar
+	// (no '/') so the bare-name fail-closed blanks it whole; recover_error
+	// carries a '/' so the bare fail-closed leaves it alone and (with the
+	// slash-bearing registry empty and not saturated) the unrelated path
+	// survives verbatim, proving the fail-closed touches only no-'/' scalars.
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q recover_error=%q`,
+		secret, "recovery location: /srv/unrelated/repo")
+	got := r.scrubLog(logLine)
+	t.Logf("bare-name-saturated scrubLog out:\n%s", got)
+	if strings.Contains(got, secret) {
+		t.Errorf("scrubLog leaked past-the-cap bare name %q:\n%s", secret, got)
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "/srv/unrelated/repo", "recovery location"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scrubLog removed %q that the bare-name fail-closed must not touch:\n%s", want, got)
+		}
+	}
+}

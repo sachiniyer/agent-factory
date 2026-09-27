@@ -345,21 +345,29 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 		}
 	}
 	// Bare names are bounded by a separate cap on logOnlyPathBareNames.
-	// Saturating the bare-name set itself (more than maxLogOnlyPathBlanks
-	// distinct single-segment relative spellings, an implausible count for
-	// any realistic rejected-record stream) silently drops further such
-	// spellings; the saturated scan cannot reach them either, so this is a
-	// small fail-open window for the degenerate bare-name case, traded for
-	// the privacy win on the common single-segment parent_path leak (#4938
-	// review).
-	for _, spelling := range newBareNameSpellings {
-		if len(r.logOnlyPathBareNames) >= maxLogOnlyPathBlanks {
-			break
+	// Saturating the bare-name set (more than maxLogOnlyPathBlanks distinct
+	// single-segment relative spellings, an implausible count for any
+	// realistic rejected-record stream) used to drop further spellings
+	// silently: the saturated scan anchors on '/' and cannot reach a bare
+	// name, and the per-needle pass has no entry for a dropped name, so a
+	// daemon-tail line for an omitted record such as
+	// repo_path="ConfidentialClient4097" shipped the private name verbatim.
+	// Record saturation (logOnlyPathBareNamesSaturated); the matcher then
+	// fail-closed-blanks every decoded single %q scalar that carries no '/'
+	// in its entirety, so the past-the-cap bare name does not survive the
+	// daemon log (#4938 review).
+	//
+	// Saturation is recorded only when a call would actually add a new
+	// spelling: newBareNameSpellings already excludes names the set holds,
+	// so a duplicate bare name (the common rejected-record repeat) adds no
+	// needle and must not flip the scrubber to the fail-closed blank, the
+	// same guard the slash-bearing cap applies (#4938 review).
+	if len(newBareNameSpellings) > 0 && len(r.logOnlyPathBareNames) >= maxLogOnlyPathBlanks {
+		r.logOnlyPathBareNamesSaturated = true
+	} else {
+		for _, spelling := range newBareNameSpellings {
+			r.logOnlyPathBareNames[spelling] = struct{}{}
 		}
-		if _, ok := r.logOnlyPathBareNames[spelling]; ok {
-			continue
-		}
-		r.logOnlyPathBareNames[spelling] = struct{}{}
 	}
 }
 

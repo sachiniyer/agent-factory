@@ -43,17 +43,28 @@ const (
 // get their path boundaries beside the family matchers, and decoded URI
 // components get their dedicated boundary rules.
 func (r *redactor) produceSpans(text string, prov redactx.Provenance) []redactionSpan {
+	// quoteStructural reports whether a '"' in this view is the structural
+	// terminator of a %q value (the saturated scan stops at it) rather than
+	// filename content (the scan crosses it). Only a decoded single %q
+	// scalar (ProvLogValue) strips its surrounding quotes, so a '"' inside
+	// one is data — goQuoteTransform recurses over every %q field as
+	// ProvLogValue, and a Unix filename may contain a '"'. Every other view
+	// that admits the saturated scan keeps a '"' as a real delimiter (a
+	// whole daemon-log record, a shell command, a diagnostic, a URI), so the
+	// scan never crosses it there and an unrelated value after the closing
+	// quote survives as triage (#4938 review).
+	quoteStructural := prov != redactx.ProvLogValue
 	switch prov {
 	case redactx.ProvLogRecord, redactx.ProvLogValue:
-		return appendLegacyTaskTitleSpans(r.sensitiveBaseTextSpans(text), text)
+		return appendLegacyTaskTitleSpans(r.sensitiveBaseTextSpans(text, quoteStructural), text)
 	case redactx.ProvLogShell:
-		spans := appendLegacyTaskTitleSpans(r.sensitiveBaseTextSpans(text), text)
+		spans := appendLegacyTaskTitleSpans(r.sensitiveBaseTextSpans(text, quoteStructural), text)
 		return append(spans, r.shellBoundarySpans(text)...)
 	case redactx.ProvLogShellRaw:
 		return r.shellBoundarySpans(text)
 	case redactx.ProvDiagnostic, redactx.ProvLogShellLiteral, redactx.ProvANSIPayload,
 		redactx.ProvURIQueryPair, redactx.ProvURIComponent:
-		return r.sensitiveBaseTextSpans(text)
+		return r.sensitiveBaseTextSpans(text, quoteStructural)
 	case redactx.ProvGeneric, redactx.ProvConfigScalar, redactx.ProvConfigShellLiteral:
 		return r.genericBaseTextSpans(text)
 	case redactx.ProvConfigShell:
@@ -121,8 +132,8 @@ func toSharedSpans(spans []redactionSpan) []redactspan.Span {
 	return out
 }
 
-func (r *redactor) sensitiveBaseTextSpans(s string) []redactionSpan {
-	spans := r.knownBaseTextSpans(s)
+func (r *redactor) sensitiveBaseTextSpans(s string, quoteStructural bool) []redactionSpan {
+	spans := r.knownBaseTextSpans(s, quoteStructural)
 	spans = appendCredentialSpans(spans, s)
 	return r.appendUsernameSpans(spans, s)
 }
@@ -137,14 +148,14 @@ func (r *redactor) genericBaseTextSpans(s string) []redactionSpan {
 	return r.appendUsernameSpans(spans, s)
 }
 
-func (r *redactor) knownBaseTextSpans(s string) []redactionSpan {
+func (r *redactor) knownBaseTextSpans(s string, quoteStructural bool) []redactionSpan {
 	spans := make([]redactionSpan, 0)
 	spans = r.appendKnownLabelSpans(spans, s)
 	spans = r.appendTmuxNameSpans(spans, s)
 	spans = r.appendWorktreePathTitleSpans(spans, s)
 	spans = r.appendWorktreeSubdirectoryTitleSpans(spans, s)
 	spans = r.appendKnownRootSpans(spans, s)
-	spans = r.appendLogOnlyPathBlankSpans(spans, s)
+	spans = r.appendLogOnlyPathBlankSpans(spans, s, quoteStructural)
 	return spans
 }
 
@@ -171,7 +182,12 @@ func (r *redactor) knownURIPathTextSpans(s string) []redactionSpan {
 	spans = r.appendWorktreePathTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
 	spans = r.appendWorktreeSubdirectoryTitleSpansWithBoundary(spans, s, uriWorktreePathBoundary)
 	spans = r.appendKnownRootSpansWithBoundary(spans, s, uriKnownRootBoundary)
-	spans = r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, uriKnownRootBoundary, uriWorktreePathBoundary)
+	// A decoded URI path carries no enclosing %q, but a '"' is still treated
+	// as a structural terminator for the saturated scan here: the conservative
+	// choice preserves the prior behavior, and the #4938 quoted-filename-char
+	// finding is about the daemon-log %q recursion (ProvLogValue), not URI
+	// paths.
+	spans = r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, uriKnownRootBoundary, uriWorktreePathBoundary, true)
 	return spans
 }
 
@@ -362,14 +378,15 @@ func (r *redactor) appendKnownRootSpans(spans []redactionSpan, s string) []redac
 // $HOME is deliberately not a "registered root" for this test: collapsing $HOME
 // to "~" rewrites only the prefix and leaves the private repo leaf, so an
 // in-$HOME repo still needs the blank to keep its leaf out of the log.
-func (r *redactor) appendLogOnlyPathBlankSpans(spans []redactionSpan, s string) []redactionSpan {
-	return r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, knownRootTextBoundary, derivedWorktreePathBoundary)
+func (r *redactor) appendLogOnlyPathBlankSpans(spans []redactionSpan, s string, quoteStructural bool) []redactionSpan {
+	return r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, knownRootTextBoundary, derivedWorktreePathBoundary, quoteStructural)
 }
 
 func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 	spans []redactionSpan,
 	s string,
 	bareBoundary, siblingBoundary pathBoundary,
+	quoteStructural bool,
 ) []redactionSpan {
 	if r.logOnlyPathBlanksSaturated {
 		// Fail-closed: the registered set is capped, so the per-needle scan
@@ -382,8 +399,8 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 		// against logOnlyPathBareNames runs after it; the cap on that set
 		// bounds the work, and single-segment rejected-record names are rare
 		// (#4938 review).
-		spans = r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
-		return r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary)
+		spans = r.appendSaturatedLogOnlyPathBlankSpans(spans, s, quoteStructural)
+		return r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary, quoteStructural)
 	}
 	if r.worktreePathTitlesSaturated {
 		// Fail-closed for the sibling shape: noteFallbackWorktreeTitle dropped
@@ -402,8 +419,8 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 		// marker preserves the privacy contract at the cost of layout only
 		// that case ever had (#4938 review). Bare names that the saturated
 		// scan cannot reach still get the per-needle pass below.
-		spans = r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
-		return r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary)
+		spans = r.appendSaturatedLogOnlyPathBlankSpans(spans, s, quoteStructural)
+		return r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary, quoteStructural)
 	}
 	if len(r.logOnlyPathBlanks) == 0 && len(r.logOnlyPathBareNames) == 0 {
 		return spans
@@ -448,7 +465,7 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 			scan = start + 1
 		}
 	}
-	spans = r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary)
+	spans = r.appendBareNameLogOnlyPathBlankSpans(spans, s, bareBoundary, quoteStructural)
 	// Sibling prefix: a registered worktree-title needle proves the bytes after
 	// the dash are title data appendWorktreePathTitleSpans is already redacting.
 	// Blank the repo-path prefix the typed path would have collapsed to a root
@@ -501,11 +518,40 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 // path-text boundary the slash-bearing blank uses, so a bare name blanks only
 // at a word-boundary occurrence — exactly the over-blank trade #4938 review
 // accepted for closing the parent_path leak (#4938 review).
+//
+// quoteStructural is the saturated scan's '"' handling threaded from
+// produceSpans: only a decoded single %q scalar (ProvLogValue) carries a '"' as
+// filename content. When logOnlyPathBareNames saturates the per-needle pass
+// can no longer reach a dropped name and the slash-bearing saturated scan
+// cannot reach it either (no '/'), so fail-closed-blank the whole decoded
+// scalar when it carries no '/' (the shape of a past-the-cap bare name) on
+// that view only. A scalar carrying a '/' is a real path and stays under the
+// slash-bearing scan; a whole-record or URI view keeps its quote structural,
+// so unrelated prose is not blanked. The over-blank — a non-path scalar such
+// as a branch name or classification blanking whole in the degenerate archive
+// that saturates the bare-name set (more than maxLogOnlyPathBlanks distinct
+// single-segment relative spellings) — is the privacy side of the same
+// fail-closed trade the slash-bearing saturated scan already makes for every
+// '/'-bearing token (#4938 review).
 func (r *redactor) appendBareNameLogOnlyPathBlankSpans(
 	spans []redactionSpan,
 	s string,
 	bareBoundary pathBoundary,
+	quoteStructural bool,
 ) []redactionSpan {
+	if r.logOnlyPathBareNamesSaturated && !quoteStructural && s != "" && !strings.ContainsRune(s, filepath.Separator) {
+		// Fail-closed for the bare-name cap: the per-needle scan below and
+		// the slash-bearing saturated scan both cannot reach a past-the-cap
+		// bare name (no '/'), so a daemon-tail record such as
+		// repo_path="ConfidentialClient4097" would ship the private name
+		// verbatim. Blank the whole decoded %q scalar — it carries no '/',
+		// which is the shape of a dropped bare name — on the decoded
+		// ProvLogValue view only. Return: the whole-value blank subsumes any
+		// registered bare name this scalar may also contain.
+		return append(spans, redactionSpan{
+			start: 0, end: len(s), replacement: redactedMarker, priority: spanQuotedValue,
+		})
+	}
 	if len(r.logOnlyPathBareNames) == 0 {
 		return spans
 	}
@@ -574,7 +620,17 @@ func (r *redactor) logOnlyPathBlank(path string) bool {
 // values that never carry a path separator (relative branch refs, agent
 // names, status labels) are not touched, so triage outside the path bytes
 // survives.
-func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s string) []redactionSpan {
+//
+// quoteStructural is the saturated scan's '"' handling, threaded from
+// produceSpans. On a whole daemon-log record (and every non-ProvLogValue view
+// that admits this scan) a '"' is the structural terminator of a %q value and
+// the scan stops at it; on a decoded single %q scalar (ProvLogValue) the
+// surrounding quotes are already stripped, so a '"' inside the value is
+// filename content and the scan crosses it — a Unix filename may contain a
+// '"', and without crossing it a prose recover_error such as
+// `recovery location: /srv/Acme"SecretRepo` blanked only "/srv/Acme" and
+// shipped the private '"SecretRepo' suffix in the bundled log (#4938 review).
+func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s string, quoteStructural bool) []redactionSpan {
 	i := 0
 	for i < len(s) {
 		if s[i] != '/' {
@@ -588,10 +644,11 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 		// doesn't open with '/', so the leading-slash whole-value blank below
 		// doesn't reach it; for an absolute path the byte before the '/' is
 		// already a structural separator (or the start of the view) so this
-		// walk is a no-op. The walkthrough never crosses a '"' or a NUL: the
-		// saturated scan also runs on whole-record views where a '"' is the
-		// structural terminator of a %q value, and NUL cannot appear inside a
-		// Unix filename (#4938 review).
+		// walk is a no-op. The walkthrough never crosses NUL, and never
+		// crosses '"' on a view where '"' closes a %q value (quoteStructural):
+		// the saturated scan also runs on whole-record views where a '"' is
+		// the structural terminator of a %q value, and NUL cannot appear
+		// inside a Unix filename (#4938 review).
 		//
 		// A walk-back that stops at any isPathTextDelimiter (the prior
 		// behaviour) stranding the prefix of a relative path whose first
@@ -606,12 +663,21 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 		// itself a structural separator (the ':' in "recovery location:
 		// /srv/Acme", which the SPACE before "/srv" follows on) is the
 		// prose-to-path boundary, so the walk stops there and the prose
-		// survives. NUL and '"' never pass the interior test even when
-		// flanked, so they always terminate the walk (#4938 review).
+		// survives. NUL never passes the interior test even when flanked, so
+		// it always terminates the walk. On a whole-record view (quoteStructural
+		// is true) a '"' always terminates the walk too, since it closes a %q
+		// value; on a decoded single-%q scalar (quoteStructural is false) a
+		// '"' is filename content, so a '"' flanked by path-legal bytes is
+		// interior to a relative path's first segment and the walkback
+		// continues through it, the same way it continues through ':' or a
+		// space (#4938 review).
 		start := i
 		for start > 0 {
 			before, size := utf8.DecodeLastRuneInString(s[:start])
-			if before == '\x00' || before == '"' {
+			if before == '\x00' {
+				break
+			}
+			if quoteStructural && before == '"' {
 				break
 			}
 			if !isPathTextDelimiter(before) {
@@ -673,19 +739,25 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 			// emitted the surrounding prose used the same byte as a separator.
 			// The fail-closed saturated scan therefore extends the blank
 			// through the path-with-delimiters run — path-legal bytes and any
-			// filename-legal delimiter — until a real terminator (NUL, the end
-			// of the decoded value, or a double quote '"' which closes a %q
-			// field in a whole-record view this same scan also runs on).
-			// '"' is excluded because the saturated scan cannot tell a literal
-			// '"' inside a filename from the structural terminator of a %q
-			// value, and crossing it would blank unrelated values from a
-			// whole-record view, so erring toward the closing quote preserves
-			// the privacy contract in the prose-value case without over-
-			// blanking the record case. Repeated spaces are filename-legal
-			// and do not end the run (#4938 review).
+			// filename-legal delimiter — until a real terminator (NUL or the
+			// end of the decoded value; plus a double quote '"' which closes a
+			// %q field in a whole-record view this same scan also runs on).
+			// '"' terminates the run only on a view where it is structural
+			// (quoteStructural): on the whole record the saturated scan
+			// cannot tell a literal '"' inside a filename from the structural
+			// terminator of a %q value, and crossing it would blank unrelated
+			// values, so erring toward the closing quote preserves the privacy
+			// contract in the prose-value case without over-blanking the
+			// record case. On a decoded single-%q scalar (quoteStructural is
+			// false) the surrounding quotes are already stripped, so a '"' is
+			// filename content and the run crosses it — a prose recover_error
+			// such as `recovery location: /srv/Acme"SecretRepo` otherwise
+			// blanked only "/srv/Acme" and shipped '"SecretRepo'. Repeated
+			// spaces are filename-legal and do not end the run (#4938 review).
 			if end < len(s) {
-				if c, _ := utf8.DecodeRuneInString(s[end:]); c != '\x00' && c != '"' {
-					end = saturatedPathContinuationEnd(s, end)
+				c, _ := utf8.DecodeRuneInString(s[end:])
+				if c != '\x00' && (!quoteStructural || c != '"') {
+					end = saturatedPathContinuationEnd(s, end, quoteStructural)
 				}
 			}
 		}
@@ -720,23 +792,29 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 // prefix and strand the private suffix in a prose %q value such as
 // recover_error (e.g. "/srv/Acme;Project/SecretRepo" stops at ';' and ships
 // "Project/SecretRepo"). The run continues through path-legal bytes AND every
-// filename-legal delimiter, ending only at NUL (the one byte that cannot
-// appear in a Unix filename), a double quote '"' (the structural terminator
-// of a %q value in a daemon log record, which the saturated scan must not
-// cross when it runs on the whole record, since it cannot tell a literal '"'
-// inside a filename from the value's closing quote), or the end of the
-// decoded value. Repeated spaces are filename-legal and do not end the run:
-// the prior single-space-only extension shipped the suffix of a path such as
+// filename-legal delimiter, ending at NUL (the one byte that cannot appear in
+// a Unix filename) or the end of the decoded value. quoteStructural carries
+// the saturated scan's '"' handling: on a whole-record view (quoteStructural
+// is true) a '"' is the structural terminator of a %q value, which the
+// saturated scan must not cross since it cannot tell a literal '"' inside a
+// filename from the value's closing quote, so the run ends at '"' there; on a
+// decoded single-%q scalar (quoteStructural is false) the surrounding quotes
+// are already stripped and a '"' is filename content, so the run crosses it.
+// Repeated spaces are filename-legal and do not end the run: the prior
+// single-space-only extension shipped the suffix of a path such as
 // "/srv/Acme  Project/SecretRepo" between the two spaces. This is fail-closed:
 // in the saturated case the redactor can no longer tell an embedded path
 // from prose that merely looks like one, so erring toward the marker preserves
 // the privacy contract at the cost of layout only that degenerate case ever
 // had (#4938 review).
-func saturatedPathContinuationEnd(s string, delimiterEnd int) int {
+func saturatedPathContinuationEnd(s string, delimiterEnd int, quoteStructural bool) int {
 	end := delimiterEnd
 	for end < len(s) {
 		c, size := utf8.DecodeRuneInString(s[end:])
-		if c == '\x00' || c == '"' {
+		if c == '\x00' {
+			break
+		}
+		if quoteStructural && c == '"' {
 			break
 		}
 		end += size

@@ -131,9 +131,28 @@ type redactor struct {
 	// slash-bearing path cap saturates. Keeping bare names in their own set
 	// lets a bounded per-needle pass reach them regardless of saturation
 	// (#4938 review). The set is capped at maxLogOnlyPathBlanks; past it,
-	// names drop silently, which is a small fail-open window for bare names
-	// in a degenerate archive that saturates the bare-name set itself.
+	// registration is a no-op and logOnlyPathBareNamesSaturated switches the
+	// matcher to a fail-closed whole-scalar blank for bare names (#4938
+	// review).
 	logOnlyPathBareNames map[string]struct{}
+	// logOnlyPathBareNamesSaturated records that noteLogOnlyPathRedaction
+	// reached maxLogOnlyPathBlanks distinct single-segment relative spellings
+	// and is now a no-op for further bare names. Dropping a past-the-cap bare
+	// name would be fail-open: the slash-bearing saturated scan anchors on
+	// '/' and cannot reach a bare name, and the bare-name per-needle scan has
+	// no entry for the dropped name, so a daemon-log tail line for an omitted
+	// record such as repo_path="ConfidentialClient4097" would ship the private
+	// name verbatim. appendBareNameLogOnlyPathBlankSpans therefore switches
+	// to blanking the whole decoded single %q scalar when it carries no '/'
+	// (the shape of a past-the-cap bare name) once this is set, mirroring the
+	// slash-bearing cap's fail-closed blank of every absolute path. The
+	// over-blank — a non-path scalar such as a branch name or classification
+	// blanking whole in the degenerate archive that saturates the bare-name
+	// set (more than 4096 distinct single-segment relative spellings, an
+	// implausible count for any realistic rejected-record stream) — is the
+	// privacy side of the same fail-closed trade the slash-bearing saturated
+	// scan already makes for every '/'-bearing token (#4938 review).
+	logOnlyPathBareNamesSaturated bool
 	// logOnlyPathBlanksSaturated records that noteLogOnlyPathRedaction reached
 	// maxLogOnlyPathBlanks and is now a no-op for further call. Dropping
 	// registration past the cap would be fail-open — a daemon-log tail line for
