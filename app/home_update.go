@@ -587,6 +587,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 // dispatchKeyAction runs a key's action for the current state — the half of
 // handleKeyPress after the menu highlight.
 func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
+	// The details key goes first, so the status bar's hint and this dispatch
+	// answer from the same function (#4940).
+	if mod, cmd, opened := m.openNoticeDetails(msg); opened {
+		return mod, cmd
+	}
 	// Dispatch to state-specific handlers
 	switch m.state {
 	case stateHelp:
