@@ -514,12 +514,32 @@ func (r *redactor) appendSaturatedLogOnlyPathBlankSpans(spans []redactionSpan, s
 			continue
 		}
 		end := i
-		for end < len(s) {
-			c, size := utf8.DecodeRuneInString(s[end:])
-			if isPathTextDelimiter(c) {
-				break
+		// The shared stage runs this fail-closed scan on a single decoded
+		// value (ProvLogValue) as well as on a whole log record. When the
+		// view's first byte is a leading slash, the whole view is one
+		// %q-decoded path scalar — repo_path, worktree_path, parent_path —
+		// whose interior may carry filename-legal bytes that
+		// isPathTextDelimiter treats as boundaries, notably spaces, which
+		// Go's %q leaves literal (a value such as `/srv/Acme Project/SecretRepo`
+		// is emitted as `repo_path="/srv/Acme Project/SecretRepo"`). Scanning
+		// to the first such delimiter would blank only the prefix and ship
+		// the private suffix, so blank the entire decoded value instead of
+		// its first delimiter-free token (#4938 review). A whole-record view
+		// never starts with '/' (records open with the emitter label), and a
+		// prose %q value such as recover_error never starts with '/', so this
+		// fires only for path-valued scalars; the degenerate archive that
+		// saturates the cap already forgoes the typed per-root layout this
+		// scan errs toward, matching the fail-closed trade the cap makes.
+		if i == 0 {
+			end = len(s)
+		} else {
+			for end < len(s) {
+				c, size := utf8.DecodeRuneInString(s[end:])
+				if isPathTextDelimiter(c) {
+					break
+				}
+				end += size
 			}
-			end += size
 		}
 		// A real absolute path has at least one byte after the leading slash; a
 		// lone "/" is not a path value and is left alone. knownRootTextBoundary

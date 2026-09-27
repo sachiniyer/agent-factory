@@ -442,3 +442,85 @@ func TestWorktreePathTitlesFailClosedPastCap(t *testing.T) {
 		}
 	}
 }
+
+// TestLogOnlyPathBlanksDuplicateDoesNotSaturate pins the #4938 review fix on
+// the duplicate case: noteLogOnlyPathRedaction used to set
+// logOnlyPathBlanksSaturated whenever the registry already held
+// maxLogOnlyPathBlanks spellings, even if the call was an already-registered
+// repo_path that added no new spelling. Rejected records commonly repeat the
+// same repo_path, so once the distinct worktree spellings fill the map a
+// duplicate would flip the log scrubber to blanking every absolute path and
+// drop unrelated diagnostic paths. Saturation must be recorded only when the
+// call would actually add a new spelling.
+func TestLogOnlyPathBlanksDuplicateDoesNotSaturate(t *testing.T) {
+	r := &redactor{}
+	// Register distinct paths until the registry first reaches the cap. The
+	// call that crosses maxLogOnlyPathBlanks leaves saturation clear (the cap
+	// check runs before adding), so the registry is at the cap but not yet
+	// saturated.
+	var registered string
+	for i := 0; ; i++ {
+		registered = fmt.Sprintf("/distinct-%d/repo", i)
+		r.noteLogOnlyPathRedaction(registered)
+		if r.logOnlyPathBlanksSaturated {
+			t.Fatalf("registry saturated while registering the distinct path that reached the cap (map %d)",
+				len(r.logOnlyPathBlanks))
+		}
+		if len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {
+			break
+		}
+	}
+	if len(r.logOnlyPathBlanks) < maxLogOnlyPathBlanks {
+		t.Fatalf("registry did not reach the cap (map %d, want >= %d)",
+			len(r.logOnlyPathBlanks), maxLogOnlyPathBlanks)
+	}
+	// A duplicate of an already-registered repo_path is the realistic case:
+	// rejected records commonly repeat the same repo_path. It adds no new
+	// needle, so it must not flip the scrubber to blanking every absolute path.
+	r.noteLogOnlyPathRedaction(registered)
+	if r.logOnlyPathBlanksSaturated {
+		t.Fatalf("a duplicate path set logOnlyPathBlanksSaturated even though it added no new spelling (map %d)",
+			len(r.logOnlyPathBlanks))
+	}
+	// A new distinct path past the cap still saturates (fail-closed): the cap
+	// must still drop new spellings and switch to the single-pass blank so an
+	// omitted record does not ship its private path verbatim.
+	r.noteLogOnlyPathRedaction("/beyond-the-cap/new-path")
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("a new distinct path past the cap did not saturate (map %d)",
+			len(r.logOnlyPathBlanks))
+	}
+}
+
+// TestLogOnlyPathBlanksFailClosedSaturatedQuotedSpace pins the #4938 review fix
+// on the saturated scanner's filename-delimiter handling: Go's %q leaves
+// filename-legal bytes such as spaces literal inside a double-quoted value, so
+// a daemon-log path field emitted as `repo_path=%q` with a value containing a
+// space (e.g. `/srv/Acme Project/SecretRepo`) becomes
+// `repo_path="/srv/Acme Project/SecretRepo"`. The fail-closed scanner used to
+// stop at the space and blank only the prefix, shipping the private suffix;
+// once the path cap is saturated it must blank the whole decoded value.
+func TestLogOnlyPathBlanksFailClosedSaturatedQuotedSpace(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	const path = "/srv/Acme Project/SecretRepo"
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q`, path)
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scan with quoted-space path out:\n%s", got)
+	for _, secret := range []string{path, "Acme Project", "Project/SecretRepo", "SecretRepo"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the saturated scan (space-broken path):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}

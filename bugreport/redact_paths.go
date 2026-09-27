@@ -204,10 +204,40 @@ const maxWorktreePathTitles = 4096
 // rather than fail-open: once it is saturated, appendLogOnlyPathBlankSpans
 // switches from the per-needle scan to a single-pass blank of every absolute
 // path, so a record registered past the cap does not survive the daemon log
-// verbatim either.
+// verbatim either. Saturation is recorded only when a call would actually add
+// a new spelling: rejected records commonly repeat the same repo_path, and a
+// duplicate that adds no needle must not flip the scrubber to blanking every
+// absolute path (#4938 review).
 func (r *redactor) noteLogOnlyPathRedaction(path string) {
 	if r.logOnlyPathBlanks == nil {
 		r.logOnlyPathBlanks = make(map[string]struct{})
+	}
+	// Collect this call's spellings and keep only the ones not already
+	// registered, so a duplicate path is a no-op even at the cap instead of
+	// switching the log scrubber to a blank-every-path pass (#4938 review).
+	var newSpellings []string
+	for _, spelling := range absolutePathSpellings(path) {
+		if _, ok := r.logOnlyPathBlanks[spelling]; !ok {
+			newSpellings = append(newSpellings, spelling)
+		}
+	}
+	if raw := originalAbsolutePathSpelling(path); raw != "" {
+		// Persisted worktrees keep the raw path string verbatim (double
+		// separators, trailing slashes, un-resolved "."/".." segments and the
+		// like) and DiagnoseMissingWorktree logs those raw strings.
+		// absolutePathSpellings cleans its input, so a raw spelling like
+		// "/srv//ConfidentialClient/repo" would otherwise register only
+		// "/srv/ConfidentialClient/repo" and the log-only matcher could not
+		// find the verbatim value in the daemon log. Keep the original
+		// absolute spelling too, matched only as a log-only blank.
+		if _, ok := r.logOnlyPathBlanks[raw]; !ok {
+			newSpellings = append(newSpellings, raw)
+		}
+	}
+	if len(newSpellings) == 0 {
+		// Every spelling was already registered: this duplicate adds no
+		// needle, so do not touch the saturation flag.
+		return
 	}
 	if len(r.logOnlyPathBlanks) >= maxLogOnlyPathBlanks {
 		// Cap reached: stop registering further distinct spellings so
@@ -221,18 +251,8 @@ func (r *redactor) noteLogOnlyPathRedaction(path string) {
 		r.logOnlyPathBlanksSaturated = true
 		return
 	}
-	for _, spelling := range absolutePathSpellings(path) {
+	for _, spelling := range newSpellings {
 		r.logOnlyPathBlanks[spelling] = struct{}{}
-	}
-	// Persisted worktrees keep the raw path string verbatim (double separators,
-	// trailing slashes, un-resolved "."/".." segments and the like) and
-	// DiagnoseMissingWorktree logs those raw strings. absolutePathSpellings
-	// cleans its input, so a raw spelling like "/srv//ConfidentialClient/repo"
-	// would otherwise register only "/srv/ConfidentialClient/repo" and the
-	// log-only matcher could not find the verbatim value in the daemon log.
-	// Keep the original absolute spelling too, matched only as a log-only blank.
-	if raw := originalAbsolutePathSpelling(path); raw != "" {
-		r.logOnlyPathBlanks[raw] = struct{}{}
 	}
 }
 
