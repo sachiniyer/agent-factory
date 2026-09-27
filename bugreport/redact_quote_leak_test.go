@@ -246,3 +246,55 @@ func TestLogOnlyPathBlanksFailClosedSaturatedUnquotedPathWithSpacePrefixedQuote(
 		}
 	}
 }
+
+// TestLogOnlyPathBlanksFailClosedSaturatedUnquotedPathWithInteriorSpaceInQuotePair
+// pins the #4938 review fix on the saturated scan's handling of a filename
+// quote pair whose matching close is followed by a space that is interior to
+// the path. The prior opener-validation fix crossed a pair whose close is
+// followed by filename content (`/srv/Acme "Secret"Client`), but a close
+// followed by a filename-legal delimiter such as a space still made
+// saturatedQuoteIsStructural flag the opener as structural, so the saturated
+// path scan stopped at the opener and stranded the `"Secret" Client` suffix in
+// the daemon tail. A literal delimiter after a quote is also valid filename
+// content (a Unix filename may contain a space), not necessarily a log-field
+// boundary: the workDir `/srv/Acme "Secret" Client` is logged unquoted via %s
+// by session/backend_local_respawn.go, so its `"Secret"` pair sits inside one
+// path on the whole-record view. saturatedPathContinuationEnd now jumps the
+// opener...close pair whole when the close's trailing delimiter is interior to
+// the path (the byte after it is path content), so the scan keeps blanking the
+// unquoted tail instead of stopping at the opener. A real %q closing quote
+// reached directly still stops the scan (its after-byte is a delimiter, so it
+// is not an opener the jump accepts), which
+// TestLogOnlyPathBlanksFailClosedSaturatedDoesNotCrossStructuralQuote pins.
+//
+// Fail-first: without the jump the scan stops at the opener and
+// `"Secret" Client` ships verbatim.
+func TestLogOnlyPathBlanksFailClosedSaturatedUnquotedPathWithInteriorSpaceInQuotePair(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	// The workDir is logged unquoted via %s, so its literal '"' is path data on
+	// the whole-record view. The space after the `"Secret"` pair's close is
+	// interior to the name (the path continues with " Client"), so the pair is
+	// filename content rather than a %q field the scan must stop at.
+	const path = `/srv/Acme "Secret" Client`
+	logLine := fmt.Sprintf(`recover: rebuilt missing worktree for session %q at %s from branch %s`,
+		"fix-bug", path, "main")
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scan with interior-space filename quote pair out:\n%s", got)
+	for _, secret := range []string{path, "Secret", "Acme", "Client"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the saturated scan (interior-space filename quote pair):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"rebuilt", "missing"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q before the path:\n%s", want, got)
+		}
+	}
+}
