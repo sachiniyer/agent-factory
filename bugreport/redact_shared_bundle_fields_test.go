@@ -664,3 +664,49 @@ func TestRedactInstancesJSONRedactsWorktreeSubdirectoryTitleFromAlternatePath(t 
 		t.Errorf("the registered worktree root should collapse to [worktree:1]:\n%s", out)
 	}
 }
+
+// TestCollapsePathFieldScrubSubdirectoryLeafBeforeBareTitleRewrite pins the
+// ordering of the two title scrubs in collapsePathField. A registered bare
+// title ("bug") can be a whole token inside another session's subdirectory-title
+// leaf ("fix-bug-urgent" from "fix bug urgent"): the '-' the sanitizer emits
+// satisfies the bare-title token boundary on both sides of "bug", so a
+// bare-title rewrite that ran FIRST would rewrite the leaf to
+// "fix-[redacted]-urgent" and the depth-1 subdirectory scrub's needle could no
+// longer match — leaving the rest of the title-derived text in the bundle. The
+// subdirectory scrub must run against the ORIGINAL root-tokenized value, before
+// the bare-title rewrite touches the remainder, so one redaction cannot hide the
+// other's evidence.
+func TestCollapsePathFieldScrubSubdirectoryLeafBeforeBareTitleRewrite(t *testing.T) {
+	const (
+		afHome    = "/srv/ConfidentialClient/af"
+		bareTitle = "bug"
+		longTitle = "fix bug urgent"
+		segment   = "fix-bug-urgent" // == sessiongit.DerivedWorktreeSubdirectoryTitleSegment(longTitle)
+		alternate = afHome + "/worktrees/" + segment
+	)
+	if got, want := sessiongit.DerivedWorktreeSubdirectoryTitleSegment(longTitle), segment; got != want {
+		t.Fatalf("title derivation mismatch: got %q want %q (test fixture must match the registered segment)", got, want)
+	}
+
+	// Two registered sessions, mirroring noteSession's title registration: "bug"
+	// (whose own subdirectory segment is "bug") and "fix bug urgent" (whose
+	// subdirectory segment is "fix-bug-urgent"). "bug" is a whole token inside
+	// "fix-bug-urgent" — its neighbours are '-' runes, which isWordRune rejects,
+	// so appendTitleSpans' token boundary accepts it — and a bare-title rewrite
+	// that ran first would rewrite the leaf to "fix-[redacted]-urgent", destroying
+	// the needle the subdirectory scrub keys on.
+	r := &redactor{}
+	r.noteAFHome(afHome)
+	r.noteTitle(bareTitle)
+	r.noteWorktreeSubdirectoryTitle(bareTitle)
+	r.noteTitle(longTitle)
+	r.noteWorktreeSubdirectoryTitle(longTitle)
+
+	got := r.collapsePathField(alternate)
+	if want := "[af-home]/worktrees/" + redactedMarker; got != want {
+		t.Errorf("collapsePathField(overlapping bare title + subdirectory title) = %q, want %q: the bare-title rewrite must not destroy the depth-1 segment the subdirectory scrub keys on", got, want)
+	}
+	if strings.Contains(got, segment) {
+		t.Errorf("the title-derived segment reached the bundle verbatim: %q", got)
+	}
+}
