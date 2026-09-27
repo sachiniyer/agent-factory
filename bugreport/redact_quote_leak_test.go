@@ -190,3 +190,59 @@ func TestWorktreePathTitlesSaturatedFailsClosedBareRepoSibling(t *testing.T) {
 		t.Errorf("scrubLog blanked the quoted session name that the bare-name fail-closed must leave alone:\n%s", got)
 	}
 }
+
+// TestLogOnlyPathBlanksFailClosedSaturatedUnquotedPathWithSpacePrefixedQuote
+// pins the #4938 review fix on the saturated scan's handling of a literal '"'
+// that a path-text delimiter (a space) precedes inside an UNQUOTED %s path. A
+// legal Unix filename can carry a double quote, and
+// session/backend_local_respawn.go logs the workDir with %s, so a past-the-cap
+// worktree such as `/srv/Acme "Secret"Client` reaches the whole daemon-log
+// record verbatim (quoteStructural) rather than a decoded %q scalar. The space
+// before the '"' made saturatedQuoteIsStructural classify it as a structural
+// %q opener (a path-text delimiter on one side), so saturatedPathContinuationEnd
+// stopped there and blanked only "/srv/Acme ", shipping `Secret"Client` in the
+// daemon tail; the quote transform could then also redact "Secret" as an
+// unrelated scalar, but the surrounding filename content still named the
+// private directory. (The finding's `/srv/Acme "Secret"Client/repo` spelling is
+// incidentally saved by the second `/repo` anchor walking back through the
+// non-structural close, but with no trailing slash — or a space inside the
+// pair — the same mechanism leaks the suffix, which is what this test pins.)
+// saturatedQuoteIsStructural now validates a '"' that a path-text delimiter
+// precedes against a real Go %q field: it is structural only when its matching
+// Go %q close is itself followed by a delimiter or view boundary, so a filename
+// quote pair ("Secret") whose close is followed by more filename content
+// ("Client") is path data and the saturated scan crosses the pair whole
+// instead of stranding the suffix after the space-prefixed opener.
+//
+// Fail-first: with the adjacent-character classifier the scan stops at the
+// space-prefixed '"' and `Secret"Client` ships verbatim.
+func TestLogOnlyPathBlanksFailClosedSaturatedUnquotedPathWithSpacePrefixedQuote(t *testing.T) {
+	r := &redactor{}
+	for i := 0; i < maxLogOnlyPathBlanks+16; i++ {
+		r.noteLogOnlyPathRedaction(fmt.Sprintf("/under-cap-%d/repo", i))
+	}
+	if !r.logOnlyPathBlanksSaturated {
+		t.Fatalf("logOnlyPathBlanksSaturated not set after %d registrations (cap %d)",
+			maxLogOnlyPathBlanks+16, maxLogOnlyPathBlanks)
+	}
+	// The workDir is logged unquoted via %s, so its literal '"' is path data on
+	// the whole-record view; the space inside the name precedes the '"' that the
+	// adjacent-character classifier misread as a structural %q opener. No
+	// trailing slash follows the quote pair, so the second-`/` rescue of the
+	// /repo spelling does not apply and the suffix leaks without the fix.
+	const path = `/srv/Acme "Secret"Client`
+	logLine := fmt.Sprintf(`recover: rebuilt missing worktree for session %q at %s from branch %s`,
+		"fix-bug", path, "main")
+	got := r.scrubLog(logLine)
+	t.Logf("saturated scan with space-prefixed filename quote out:\n%s", got)
+	for _, secret := range []string{path, "Secret", "Acme", "Client"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the saturated scan (space-prefixed filename quote):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"rebuilt", "missing"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q before the path:\n%s", want, got)
+		}
+	}
+}

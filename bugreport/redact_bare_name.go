@@ -3,19 +3,40 @@ package bugreport
 import (
 	"path/filepath"
 	"unicode/utf8"
+
+	"github.com/sachiniyer/agent-factory/internal/redactx"
 )
 
 // saturatedQuoteIsStructural reports whether the '"' at i in s is a structural
 // %q delimiter on a quoteStructural view, as opposed to a literal '"' that is
 // filename content in an UNQUOTED %s emitter value (e.g. a workDir
 // /srv/Confidential"Client that session/backend_local_respawn.go logs via %s).
-// A path-data '"' is flanked by filename-legal bytes on both sides; a structural
-// '"' (opening or closing a %q value) has a path-text delimiter or a view
-// boundary on at least one side. The saturated scans cross a '"' only when it
-// is content (both neighbours path-legal) and stop at a value boundary, so an
-// unquoted path blanks whole instead of stranding its suffix after the quote,
-// while a real %q closing quote still protects the triage after it (#4938
-// review).
+// A path-data '"' flanked by filename-legal bytes on both sides is content. A
+// structural '"' is a valid Go %q delimiter: a closing quote followed by a
+// path-text delimiter or a view boundary, or an opening quote (preceded by a
+// path-text delimiter) whose matching Go %q close is itself followed by a
+// delimiter or view boundary. The saturated scans cross a '"' only when it is
+// content (a filename quote pair or a quote flanked by path-legal bytes) and
+// stop at a real value boundary, so an unquoted path blanks whole instead of
+// stranding its suffix after the quote, while a real %q closing quote still
+// protects the triage after it (#4938 review).
+//
+// The opening-quote validation is the #4938 review fix for a space-prefixed
+// filename quote. A legal Unix filename can carry a double quote, and the
+// respawn logger emits the workDir with %s, so a past-the-cap worktree such as
+// `/srv/Acme "Secret"Client` reaches the whole daemon-log record verbatim. The
+// space before the '"' used to make this function classify it as a structural
+// %q opener (a path-text delimiter on one side), so saturatedPathContinuationEnd
+// stopped there and blanked only "/srv/Acme ", shipping `Secret"Client` in the
+// daemon tail — the quote transform could then also redact "Secret" as an
+// unrelated scalar, but the surrounding filename content still named the
+// private directory. A '"' that a path-text delimiter precedes is now the
+// opening of a %q field only when its matching Go %q close (GoQuotedEnd) is
+// itself followed by a delimiter or view boundary, so a filename quote pair
+// such as "Secret" whose close is followed by more filename content ("Client")
+// is path data and the saturated scan crosses the pair whole. GoQuotedEnd
+// terminates at the next newline, so on the line-oriented daemon-log view the
+// look-ahead is bounded by the line (#4938 review).
 func saturatedQuoteIsStructural(s string, i int) bool {
 	if i < 0 || i >= len(s) || s[i] != '"' {
 		return false
@@ -25,7 +46,32 @@ func saturatedQuoteIsStructural(s string, i int) bool {
 	}
 	before, _ := utf8.DecodeLastRuneInString(s[:i])
 	after, _ := utf8.DecodeRuneInString(s[i+1:])
-	return isPathTextDelimiter(before) || isPathTextDelimiter(after)
+	// A '"' followed by a path-text delimiter is the closing quote of a %q
+	// field (e.g. key="value" ) — structural.
+	if isPathTextDelimiter(after) {
+		return true
+	}
+	// A '"' flanked by filename-legal bytes on both sides is filename content
+	// in an unquoted %s value (e.g. /srv/Confidential"Client) — not structural.
+	if !isPathTextDelimiter(before) {
+		return false
+	}
+	// A '"' preceded by a path-text delimiter but followed by filename-legal
+	// bytes is the opening of a %q field only if the matching Go %q close is
+	// itself followed by a delimiter or view boundary. A filename quote pair
+	// such as the "Secret" in `/srv/Acme "Secret"Client` has its close
+	// followed by more filename content ("Client"), so the pair is path data
+	// and the saturated scan must cross it instead of stopping at the
+	// space-prefixed opener and stranding the suffix (#4938 review).
+	end := redactx.GoQuotedEnd(s, i)
+	if end < 0 {
+		return false
+	}
+	if end >= len(s) {
+		return true
+	}
+	afterClose, _ := utf8.DecodeRuneInString(s[end:])
+	return isPathTextDelimiter(afterClose)
 }
 
 // appendSaturatedBareNameSpans is the fail-closed scan the bare-name cap
