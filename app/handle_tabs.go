@@ -277,6 +277,12 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 
 	target := captureSessionActionTarget(inst, m.repoID)
 	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
+		// A close that may have landed is not dropped locally or reported as
+		// refused (#4824): the next snapshot removes the tab if it is gone.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("closing tab %q", tabName), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// The daemon killed the tmux and persisted the shrunk list; drop the
@@ -478,6 +484,13 @@ func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	resolved, err := renameTabThroughDaemon(target.session.renameTabRequest(tab.ID, tab.Name, newName))
 	if err != nil {
+		// A rename that may have landed is not projected locally or reported as
+		// refused (#4824): retrying it could clobber a concurrent rename, so the
+		// user checks the snapshot's name first.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("renaming tab %q", tab.Name), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// Reflect the rename locally so the bar reads it before the next daemon

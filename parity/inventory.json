@@ -95,18 +95,18 @@
       "title": "Open the config agent (the default agent, briefed to help configure af)",
       "tui": {
         "status": "yes",
-        "pointer": "keys/keys.go:186 (C) -> app/config_agent.go:87 handleConfigAgent"
+        "pointer": "keys/keys.go:319 (C) -> app/config_agent.go:97 handleConfigAgent"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/config.ts:447 'Configure with assistant' -> web/src/config_assistant.ts openConfigAssistant -> web/src/api.ts:1204 spawnConfigAssistant (af POST /v1/config-assistant) -> daemon/configassistant_hub.go -> Manager.SpawnConfigAgent"
       },
       "cli": {
         "status": "no",
         "pointer": ""
       },
       "verdict": "unclear",
-      "notes": "A TUI affordance (C) that spawns the user's default agent to help set up config. TUI-only today. Whether a config-helper agent belongs on the web/CLI, or is inherently an interactive TUI flow, is an owner call. Its lifecycle reap is the internal ReapConfigAgent RPC (not a public route). Not filed."
+      "notes": "Spawns the user's default agent to help set up config. The web has had it since #2467: 'Configure with assistant' in the config view POSTs /v1/config-assistant, which builds the same SpawnConfigAgentRequest (configagent.BuildSpawnRequest, ModeChange) the TUI's C drives, and streams the daemon-owned bare tmux session into an overlay. What remains is a CLI-only owner call: whether a public verb should spawn+attach the assistant (the `af accounts login` shape) — a new verb's contract shape is a maintainer decision, not filed. Reap paths differ by surface: TUI via the internal ReapConfigAgent RPC, web via DELETE /v1/config-assistant."
     },
     {
       "id": "config.explain",
@@ -1735,7 +1735,8 @@
       "Snapshot": "session.list",
       "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",
-      "UpdateTask": "task.edit"
+      "UpdateTask": "task.edit",
+      "config-assistant": "config-agent"
     },
     "cli_flags": {
       "af --daemon": "meta.internal",

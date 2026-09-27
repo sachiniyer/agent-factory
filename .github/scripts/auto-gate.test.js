@@ -9770,6 +9770,228 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
   assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
 });
 
+// #4782. Mergeability UNKNOWN, a required check still settling, and an aggregate
+// left at "WAITING: refreshing" all clear with time and send no event when they
+// do, so a decision taken on them sat BLOCKED until a manual workflow_dispatch.
+// The reconciliation pass re-evaluates exactly those, once each has aged, and
+// never a decision with any reason that waiting cannot clear.
+const TRANSIENT_BLOCK_MARKER = "<!-- auto-gate-transient-block -->";
+const AGGREGATE_REFRESHING_TITLE = "WAITING: refreshing every PR/head decision at this commit";
+const TRANSIENT_NOW = Date.parse("2026-09-25T21:30:00Z");
+const minutesBeforeTransientNow = (minutes) =>
+  new Date(TRANSIENT_NOW - minutes * 60 * 1000).toISOString();
+
+function transientDecision({ prNumber, headSha, evaluatedAt, reason, marked = true, conclusion }) {
+  const decision = reconciliationDecision({
+    prNumber,
+    headSha,
+    evaluatedAt,
+    reason: reason || "mergeability is still UNKNOWN",
+    observedChecks: [],
+  });
+  if (conclusion) {
+    decision.conclusion = conclusion;
+  }
+  if (marked) {
+    decision.output.text += `\n${TRANSIENT_BLOCK_MARKER}`;
+  }
+  return decision;
+}
+
+function aggregateCheck({ headSha, title, completedAt, id = 70000 }) {
+  return {
+    id,
+    name: "Auto Gate decision",
+    external_id: `auto-gate:aggregate:head:${headSha}`,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    completed_at: completedAt,
+    output: { title, summary: "" },
+  };
+}
+
+async function reconcileTransient(pulls, checksByHead) {
+  return autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({ pulls, checksByHead }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    reconciliationNowMs: TRANSIENT_NOW,
+  });
+}
+
+async function evaluateAndReport(options) {
+  const github = fakeGateGithub(options);
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.at(-1);
+  return { result, written, marked: String(written.output.text).split("\n").includes(TRANSIENT_BLOCK_MARKER) };
+}
+
+test("#4782: a decision blocked only by transient state is marked, and a permanent block is not", async () => {
+  const settlingBuild = [
+    checkRun({ name: "Lint", conclusion: "success" }),
+    checkRun({ name: "Build", status: "in_progress", conclusion: null }),
+  ];
+  const transient = [
+    ["mergeability UNKNOWN", { mergeable: "UNKNOWN" }],
+    ["a required check still running", { checkRuns: settlingBuild }],
+    ["a PR Validation check not reported yet", {
+      checkRuns: [checkRun({ name: "Lint", conclusion: "success" })],
+    }],
+    ["mergeability UNKNOWN and a running check", { mergeable: "UNKNOWN", checkRuns: settlingBuild }],
+  ];
+  for (const [label, options] of transient) {
+    const { result, marked } = await evaluateAndReport(options);
+    assert.equal(result.shouldMerge, false, label);
+    assert.ok(marked, `${label} must be marked for retry; reasons: ${result.reasons.join("; ")}`);
+  }
+
+  const permanent = [
+    ["a hold beside mergeability UNKNOWN", {
+      mergeable: "UNKNOWN",
+      labels: ["hold"],
+      labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+    }],
+    ["a missing Codex verdict beside mergeability UNKNOWN", { mergeable: "UNKNOWN", issueComments: [] }],
+    ["a conflicting branch", { mergeable: "CONFLICTING" }],
+    ["a failed required check beside a running one", {
+      checkRuns: [
+        checkRun({ name: "Lint", conclusion: "failure" }),
+        checkRun({ name: "Build", status: "in_progress", conclusion: null }),
+      ],
+    }],
+  ];
+  for (const [label, options] of permanent) {
+    const { result, marked } = await evaluateAndReport(options);
+    assert.equal(result.shouldMerge, false, label);
+    assert.equal(marked, false, `${label} must never be retried; reasons: ${result.reasons.join("; ")}`);
+  }
+});
+
+test("#4782: the written transient decision is what the reconciliation pass selects", async () => {
+  const { written } = await evaluateAndReport({ mergeable: "UNKNOWN" });
+  const stamp = String(written.output.summary).split("\n", 1)[0].slice("evaluated: ".length).split(" ")[0];
+  const decision = {
+    id: 1465,
+    name: written.name,
+    external_id: written.external_id,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: written.status,
+    conclusion: written.conclusion,
+    completed_at: stamp,
+    output: written.output,
+  };
+  const at = (nowMs) => autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision] },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    reconciliationNowMs: nowMs,
+  });
+  const evaluatedAt = Date.parse(stamp);
+  assert.deepEqual(await at(evaluatedAt + 60 * 1000), [], "a fresh transient decision is left alone");
+  assert.deepEqual(
+    (await at(evaluatedAt + 11 * 60 * 1000)).map((target) => target.prNumber),
+    [1465],
+    "an aged transient decision is re-evaluated without any other event",
+  );
+});
+
+test("#4782: reconciliation selects aged transient-only blocks and stale refreshing aggregates, nothing else", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  const add = (number, checks) => {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = checks;
+  };
+  // Selected: transient-only, evaluated 30 minutes ago.
+  add(1, [transientDecision({ prNumber: 1, headSha: sha(1), evaluatedAt: minutesBeforeTransientNow(30) })]);
+  // Not yet: transient-only, evaluated two minutes ago. This is the spacing.
+  add(2, [transientDecision({ prNumber: 2, headSha: sha(2), evaluatedAt: minutesBeforeTransientNow(2) })]);
+  // Never: permanent blocks, however old.
+  add(3, [transientDecision({
+    prNumber: 3, headSha: sha(3), evaluatedAt: minutesBeforeTransientNow(300), marked: false,
+    reason: "the maintainer `hold` label is on this pull request",
+  })]);
+  add(4, [transientDecision({
+    prNumber: 4, headSha: sha(4), evaluatedAt: minutesBeforeTransientNow(300), marked: false,
+    reason: "required check Lint (app 15368) did not succeed (check run completed/failure)",
+  })]);
+  // Never: a passing decision has nothing to retry.
+  add(5, [transientDecision({
+    prNumber: 5, headSha: sha(5), evaluatedAt: minutesBeforeTransientNow(300), conclusion: "success",
+  })]);
+  // Selected: the aggregate was left at WAITING: refreshing 40 minutes ago.
+  add(6, [
+    transientDecision({
+      prNumber: 6, headSha: sha(6), evaluatedAt: minutesBeforeTransientNow(40), conclusion: "success", marked: false,
+    }),
+    aggregateCheck({ headSha: sha(6), title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(40) }),
+  ]);
+  // Not yet: a refreshing aggregate a live transaction may still own.
+  add(7, [aggregateCheck({
+    headSha: sha(7), title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(5),
+  })]);
+  // Never: an aggregate that finished, naming a real blocker.
+  add(8, [aggregateCheck({
+    headSha: sha(8),
+    title: "WAITING: PR #8 at this commit is waiting: Codex has not reviewed this head",
+    completedAt: minutesBeforeTransientNow(300),
+  })]);
+
+  const targets = await reconcileTransient(pulls, checksByHead);
+  assert.deepEqual(targets, [
+    { prNumber: 6, headSha: sha(6), decisionKey: `pr-6-head-${sha(6)}` },
+    { prNumber: 1, headSha: sha(1), decisionKey: `pr-1-head-${sha(1)}` },
+  ], "oldest first; the aggregate re-apply runs through the same per-PR target");
+});
+
+test("#4782: transient retries are bounded per pass and never displace a PR Validation wake", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 12; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [transientDecision({
+      prNumber: number,
+      headSha: sha(number),
+      // Higher numbers are older, so the oldest-first order is observable.
+      evaluatedAt: minutesBeforeTransientNow(20 + number),
+    })];
+  }
+  const onlyTransient = await reconcileTransient(pulls, checksByHead);
+  assert.deepEqual(
+    onlyTransient.map((target) => target.prNumber),
+    [12, 11, 10, 9, 8],
+    "at most five transient retries per pass, oldest first",
+  );
+
+  for (let number = 101; number <= 108; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [
+      reconciliationDecision({ prNumber: number, headSha: sha(number), evaluatedAt: "2026-07-09T20:00:00Z" }),
+      reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+    ];
+  }
+  const mixed = await reconcileTransient(pulls, checksByHead);
+  assert.equal(mixed.length, 10, "the pass-wide cap of ten still holds");
+  assert.deepEqual(
+    mixed.map((target) => target.prNumber),
+    [101, 102, 103, 104, 105, 106, 107, 108, 12, 11],
+    "PR Validation wakes go first; transient retries take only the slots left",
+  );
+});
+
 // The schedule is a backstop, not a clock: GitHub delivered the */5 trigger
 // every two to five hours (#4571). Ordinary Auto Gate runs arrive many times an
 // hour, so each one may request the same bounded pass. These fakes stand in for

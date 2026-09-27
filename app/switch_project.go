@@ -498,6 +498,16 @@ func (m *home) addProjectCmd(root string) tea.Cmd {
 // as a warning rather than an error box, matching the pre-#2456 best-effort write.
 func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		// A registration that may have landed is re-read rather than assumed
+		// either way (#4824): the Projects section shows it if the daemon
+		// recorded it, and the message says the outcome is unknown instead of
+		// staying silent the way a definite failure does.
+		if mutationMayHaveLanded(msg.err) {
+			log.WarningLog.Printf("project %s registration outcome unknown: %v", msg.root, msg.err)
+			m.refreshSidebarProjects()
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("adding project %s", msg.root), "the projects list", msg.err))
+		}
 		log.WarningLog.Printf("failed to register project %s in the registry: %v", msg.root, msg.err)
 		return m, nil
 	}
@@ -643,6 +653,15 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
+		// The delete may have archived the project's sessions and dropped its
+		// registration with only the reply lost (#4824). The TUI is not
+		// re-scoped on a guess; the Projects section is re-read, and the user
+		// checks it before deleting again.
+		if mutationOutcomeUnknown(msg.err) {
+			m.refreshSidebarProjects()
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("deleting project '%s'", msg.name), "the projects list", msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("failed to delete project '%s': %w", msg.name, msg.err))
 	}
 	if m.appConfig != nil {

@@ -399,6 +399,13 @@ var (
 // swap under `go test -parallel -race` (the #964 / #960-PR4 snapshot-fetcher
 // race). The seams live per-home instead; tests assign a fake to
 // h.pauseStatusPoll / h.resumeStatusPoll directly.
+//
+// Unlike the other mutations, neither needs uncertain-outcome handling at its
+// call site (#4824). Both are idempotent per holder: a repeated pause renews the
+// same lease, and a repeated resume releases an already-released one. Neither is
+// user-visible — the callers only log a failure. And both self-heal: the attach
+// heartbeat re-sends the pause every statusPollRenewInterval, and a resume that
+// did not land is covered by the lease expiring.
 func pauseStatusPollThroughDaemon(request daemon.PauseStatusPollRequest) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.PauseStatusPoll(request)

@@ -130,7 +130,7 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 // reached the daemon: withDaemonHTTPMutation retried it, nothing was sent, and
 // the picker can safely re-arm.
 func rebindOutcomeUnknown(err error) bool {
-	return mutationMayHaveLanded(err) && !apiproto.IsMutationCommitted(err)
+	return mutationOutcomeUnknown(err)
 }
 
 // followActiveRebind moves the TUI's scope after a CONFIRMED rebind of the
