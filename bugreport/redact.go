@@ -118,6 +118,20 @@ type redactor struct {
 	// switches to a single-pass, fail-closed blank of every absolute path
 	// (appendSaturatedLogOnlyPathBlankSpans) once this is set (#4938 review).
 	logOnlyPathBlanksSaturated bool
+	// worktreePathTitlesSaturated records that noteFallbackWorktreeTitle reached
+	// maxWorktreePathTitles and is now a no-op for further fallback pairs.
+	// Dropping a past-the-cap pair would be fail-open: a daemon-log tail line
+	// for the omitted record carries the sibling spelling "<repo_path>-<title>",
+	// the bare-path blank rejects the repo_path because it is immediately
+	// followed by '-', and the sibling-prefix loop has no registered pair to
+	// match (knownRootTextBoundary accepts that dash only once the title pass
+	// has already replaced the suffix with -[redacted], which cannot happen for
+	// a pair the cap dropped) — so the scan switches to the same single-pass,
+	// fail-closed blank of every absolute path once this is set. The typed
+	// entry point (noteWorktreeTitle, called by noteSession) is uncapped and
+	// never sets this, so a valid large archive keeps its per-title layout
+	// (#4938 review).
+	worktreePathTitlesSaturated bool
 	// engine is this run's share of the shared normalization stage
 	// (internal/redactx): the transform registry plus this redactor's match
 	// policy. Built lazily because tests construct redactor literals directly.

@@ -380,6 +380,24 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 		// rejected-record count.
 		return r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
 	}
+	if r.worktreePathTitlesSaturated {
+		// Fail-closed for the sibling shape: noteFallbackWorktreeTitle dropped
+		// past-cap (repo_path, title) pairs, so the per-needle sibling-prefix
+		// loop and appendWorktreePathTitleSpans cannot reach a daemon-log
+		// sibling spelling such as "<repo_path>-<past-cap-title>" — the
+		// bare-path blank rejects the repo_path because it is immediately
+		// followed by '-', and knownRootTextBoundary accepts that dash only
+		// once the title pass has already replaced the suffix with -[redacted],
+		// which cannot happen for a pair the cap dropped. Blank every
+		// absolute-path token in this view so neither the verbatim repo path
+		// nor the past-cap title segment survives the daemon log, mirroring the
+		// path-cap fail-closed. The degenerate case that saturates the cap
+		// (more than 4096 distinct rejected titles sharing one repo_path)
+		// already forgoes the typed per-title layout, so erring toward the
+		// marker preserves the privacy contract at the cost of layout only
+		// that case ever had (#4938 review).
+		return r.appendSaturatedLogOnlyPathBlankSpans(spans, s)
+	}
 	if len(r.logOnlyPathBlanks) == 0 {
 		return spans
 	}

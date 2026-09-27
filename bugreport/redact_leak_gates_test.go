@@ -383,3 +383,62 @@ func TestWorktreePathTitlesTypedRecordsNotCapped(t *testing.T) {
 		t.Errorf("scrubLog removed non-title triage value:\n%s", got)
 	}
 }
+
+// TestWorktreePathTitlesFailClosedPastCap pins the fail-closed half of the
+// fallback worktree-title cap the #4938 review asked for. Once
+// noteFallbackWorktreeTitle reaches maxWorktreePathTitles it stops registering
+// further pairs (so the per-needle sibling-prefix and worktree-title scans stay
+// bounded), but that must not be fail-open: a daemon-log tail line carrying the
+// sibling spelling for an omitted past-the-cap title ("<repo_path>-<title>")
+// would otherwise leak both the verbatim repo path and the private title
+// segment — the bare-path blank rejects the repo_path because it is
+// immediately followed by '-', and the sibling-prefix loop has no registered
+// pair to match (knownRootTextBoundary accepts that dash only once the title
+// pass has already replaced the suffix with -[redacted], which cannot happen
+// for a pair the cap dropped). Once the cap is saturated
+// appendLogOnlyPathBlankSpans switches to a single O(text) fail-closed pass
+// that blanks every absolute-path token, so an unregistered past-the-cap
+// sibling still does not survive scrubLog.
+func TestWorktreePathTitlesFailClosedPastCap(t *testing.T) {
+	const repoPath = "/srv/ConfidentialClient/repo"
+	r := &redactor{}
+	// The real fallback (noteUnknownJSONRecord) registers the rejected
+	// record's repo_path as a log-only blank alongside the title pairs. The
+	// path cap is far from saturated here (one distinct path); only the title
+	// cap is, so the leak is isolated to the title-cap fail-closed.
+	r.noteLogOnlyPathRedaction(repoPath)
+	for i := 0; i < maxWorktreePathTitles+16; i++ {
+		r.noteFallbackWorktreeTitle(repoPath, fmt.Sprintf("title-%d", i))
+	}
+	if !r.worktreePathTitlesSaturated {
+		t.Fatalf("worktreePathTitlesSaturated not set after %d fallback registrations (cap %d)",
+			maxWorktreePathTitles+16, maxWorktreePathTitles)
+	}
+
+	// A past-the-cap fallback title pair was not registered: the per-needle
+	// sibling-prefix and worktree-title scans cannot reach it. The fail-closed
+	// pass must blank its sibling spelling from the daemon log.
+	const pastCapTitle = "Private-overflow-secret"
+	segment := sessiongit.DerivedWorktreePathTitleSegment(repoPath, pastCapTitle)
+	if segment == "" {
+		t.Fatalf("DerivedWorktreePathTitleSegment returned empty for %q", pastCapTitle)
+	}
+	if _, ok := r.worktreePathTitles[worktreePathTitle{repoPath: repoPath, segment: segment}]; ok {
+		t.Fatalf("past-the-cap title pair %q got registered past the cap", pastCapTitle)
+	}
+	sibling := repoPath + "-" + segment
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q recover_error="recovery location: %s"`,
+		repoPath, sibling)
+	got := r.scrubLog(logLine)
+	t.Logf("saturated-title scrubLog out:\n%s", got)
+	for _, secret := range []string{repoPath, "ConfidentialClient", segment} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q past the title cap (fail-open):\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "missing", "recovery location"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fail-closed pass removed non-path triage value %q:\n%s", want, got)
+		}
+	}
+}

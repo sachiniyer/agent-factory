@@ -114,13 +114,20 @@ func (r *redactor) noteWorktreeTitle(repoPath, title string) {
 // back, registering every record's title here. Past the cap registration is a
 // no-op so the per-pair daemon-log-tail scan in appendWorktreePathTitleSpans
 // and the sibling-prefix loop in appendLogOnlyPathBlankSpans each iterate a
-// fixed budget rather than the rejected-record count. The sibling-shape
-// redaction past the cap degrades to the bare path blank (a registered
-// repo_path still blanks verbatim) rather than the per-title segment, and the
-// redacted instances.json still drops every title field wholesale, so the cap
-// narrows only the log-tail segment scan (#4938 review).
+// fixed budget rather than the rejected-record count. The cap is fail-closed
+// rather than fail-open: once it is saturated, appendLogOnlyPathBlankSpans
+// switches the sibling-shape redaction to a single-pass blank of every
+// absolute-path token, so a past-the-cap sibling spelling such as
+// "<repo_path>-<private-title>" does not survive the daemon log verbatim —
+// the bare-path blank cannot reach it (the registered repo_path is
+// immediately followed by '-', and knownRootTextBoundary accepts that dash
+// only once the title pass has already replaced the suffix with -[redacted],
+// which cannot happen for a pair the cap dropped). The redacted instances.json
+// still drops every title field wholesale, so the cap narrows only the
+// log-tail scan (#4938 review).
 func (r *redactor) noteFallbackWorktreeTitle(repoPath, title string) {
 	if len(r.worktreePathTitles) >= maxWorktreePathTitles {
+		r.worktreePathTitlesSaturated = true
 		return
 	}
 	r.noteWorktreeTitle(repoPath, title)
