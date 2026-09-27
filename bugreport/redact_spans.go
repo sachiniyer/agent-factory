@@ -351,13 +351,16 @@ func (r *redactor) appendKnownRootSpans(spans []redactionSpan, s string) []redac
 //     typed path's root-token span would have covered, so the verbatim path does
 //     not survive beside its own redacted title segment.
 //
-// A path a registered root already names — exactly or as an ancestor — is left to
-// appendKnownRootSpans and the worktree-title pass: the root collapse produces the
-// typed path's token-and-layout form (e.g. "[af-home]/archived/<hash>/[redacted]"),
-// which a marker over the same bytes would only destroy. $HOME is deliberately not
-// a "registered root" for this test: collapsing $HOME to "~" rewrites only the
-// prefix and leaves the private repo leaf, so an in-$HOME repo still needs the
-// blank to keep its leaf out of the log.
+// A path that IS a registered root (exactly) is left to appendKnownRootSpans and
+// the worktree-title pass: the root collapse consumes the whole path as its
+// token, which a marker over the same bytes would only destroy. A path merely
+// UNDER a registered root is NOT deferred: the root collapse rewrites only the
+// ancestor, leaving the private descendant leaf bare — the typed path would
+// register that exact path as its own root, which the fallback declines per
+// #4115, so the log-only blank must still fire to blank the verbatim value.
+// $HOME is deliberately not a "registered root" for this test: collapsing $HOME
+// to "~" rewrites only the prefix and leaves the private repo leaf, so an
+// in-$HOME repo still needs the blank to keep its leaf out of the log.
 func (r *redactor) appendLogOnlyPathBlankSpans(spans []redactionSpan, s string) []redactionSpan {
 	return r.appendLogOnlyPathBlankSpansWithBoundary(spans, s, knownRootTextBoundary, derivedWorktreePathBoundary)
 }
@@ -372,17 +375,21 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 	}
 	// Bare path: blank wherever it appears as a complete path value at a text
 	// boundary. A registered root is not required; the value is blanked, not
-	// collapsed, so no token grant is made. Skip any path a registered root
-	// already covers so the root's token-and-remainder form survives. Also skip
-	// a path that is exactly a registered worktree-title sibling needle
-	// (repo_path + "-" + title segment): the worktree-title pass redacts the
-	// segment and the root span or the sibling-prefix blank redacts the repo
-	// prefix, together preserving the typed path's layout. This only defers the
-	// proven-sibling shape; a malformed or non-sibling alternate_path is not a
-	// needle, so it is still blanked here — which is the case the worktree-title
-	// machinery cannot reach.
+	// collapsed, so no token grant is made. Skip only a path that IS a
+	// registered root (exactly): the root collapse consumes the whole path as
+	// its token. A path merely under a registered root is still blanked — the
+	// root collapse would rewrite only the ancestor and strand the private
+	// descendant leaf, and the typed path registers that exact path as its own
+	// root, which the fallback declines per #4115. Also skip a path that is
+	// exactly a registered worktree-title sibling needle (repo_path + "-" +
+	// title segment): the worktree-title pass redacts the segment and the root
+	// span or the sibling-prefix blank redacts the repo prefix, together
+	// preserving the typed path's layout. This only defers the proven-sibling
+	// shape; a malformed or non-sibling alternate_path is not a needle, so it
+	// is still blanked here — which is the case the worktree-title machinery
+	// cannot reach.
 	for path := range r.logOnlyPathBlanks {
-		if r.pathUnderRegisteredRoot(path) {
+		if r.registeredRootEquals(path) {
 			continue
 		}
 		if r.isWorktreeTitleSiblingNeedle(path) {
@@ -414,10 +421,14 @@ func (r *redactor) appendLogOnlyPathBlankSpansWithBoundary(
 		if !r.logOnlyPathBlank(title.repoPath) {
 			continue
 		}
-		// A registered root already owns this prefix — exactly or as an ancestor —
-		// so appendKnownRootSpans produces its token form there. Leaving the prefix
-		// to the root pass keeps one redaction per byte range and preserves layout.
-		if r.pathUnderRegisteredRoot(title.repoPath) {
+		// A registered root already owns this prefix — exactly — so
+		// appendKnownRootSpans produces its token form there. Leaving the prefix
+		// to the root pass keeps one redaction per byte range and preserves
+		// layout. A repoPath merely under a registered root is NOT deferred: the
+		// root collapse would rewrite only the ancestor and leave the private
+		// descendant leaf beside the redacted title segment, so the
+		// sibling-prefix blank must still fire.
+		if r.registeredRootEquals(title.repoPath) {
 			continue
 		}
 		needle := title.repoPath + "-" + title.segment
@@ -465,19 +476,24 @@ func (r *redactor) isWorktreeTitleSiblingNeedle(path string) bool {
 	return false
 }
 
-// pathUnderRegisteredRoot reports whether a registered root (the AF home, a
-// session's repo, or a worktree) names path exactly or as an ancestor. Such a
-// path is left to appendKnownRootSpans and the worktree-title pass, which
-// produce the typed path's token-and-layout form; a marker over the same bytes
-// would only destroy it.
+// registeredRootEquals reports whether a registered root (the AF home, a
+// session's repo, or a worktree) names path EXACTLY. Such a path is left to
+// appendKnownRootSpans and the worktree-title pass, which collapse the whole
+// path to its token; a marker over the same bytes would only destroy it.
+//
+// A path merely UNDER a registered root is NOT equal and so is not deferred:
+// the root collapse would rewrite only the ancestor and strand the private
+// descendant leaf — the typed path would register that exact path as its own
+// root, which the fallback declines per #4115 — so the log-only blank still
+// fires to blank the verbatim value.
 //
 // $HOME is deliberately excluded: collapsing it to "~" rewrites only the
 // prefix, leaving the private repo leaf, so an in-$HOME repo still needs the
 // log-only blank (a typed path gets the same effect by registering the repo as
 // a root, which the fallback declines per #4115).
-func (r *redactor) pathUnderRegisteredRoot(path string) bool {
+func (r *redactor) registeredRootEquals(path string) bool {
 	for _, root := range r.roots {
-		if _, ok := underRoot(path, root.path); ok {
+		if rest, ok := underRoot(path, root.path); ok && rest == "" {
 			return true
 		}
 	}

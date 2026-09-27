@@ -117,12 +117,38 @@ func (r *redactor) noteWorktreeSubdirectoryTitle(title string) {
 // value, so the sibling-prefix blank and the worktree-title-segment
 // redaction recognize the same occurrence.
 func (r *redactor) noteLogOnlyPathRedaction(path string) {
+	if r.logOnlyPathBlanks == nil {
+		r.logOnlyPathBlanks = make(map[string]struct{})
+	}
 	for _, spelling := range absolutePathSpellings(path) {
-		if r.logOnlyPathBlanks == nil {
-			r.logOnlyPathBlanks = make(map[string]struct{})
-		}
 		r.logOnlyPathBlanks[spelling] = struct{}{}
 	}
+	// Persisted worktrees keep the raw path string verbatim (double separators,
+	// trailing slashes, un-resolved "."/".." segments and the like) and
+	// DiagnoseMissingWorktree logs those raw strings. absolutePathSpellings
+	// cleans its input, so a raw spelling like "/srv//ConfidentialClient/repo"
+	// would otherwise register only "/srv/ConfidentialClient/repo" and the
+	// log-only matcher could not find the verbatim value in the daemon log.
+	// Keep the original absolute spelling too, matched only as a log-only blank.
+	if raw := originalAbsolutePathSpelling(path); raw != "" {
+		r.logOnlyPathBlanks[raw] = struct{}{}
+	}
+}
+
+// originalAbsolutePathSpelling returns the path as AF received it, before
+// absolutePathSpellings cleans it, when the raw spelling is itself absolute and
+// cleaning would change it. It is not a root candidate — it is not normalized,
+// so it has no structural role and never enters r.roots or r.rootTokens — and is
+// matched only as a verbatim log-only blank, so a daemon log that carried the
+// raw double-slash or trailing-slash spelling is blanked too.
+func originalAbsolutePathSpelling(path string) string {
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	if path == filepath.Clean(path) {
+		return ""
+	}
+	return path
 }
 
 // noteRoot registers one root under an exact token, reporting whether it was

@@ -61,7 +61,7 @@ func TestLeakReproInHomeResidualLeaf(t *testing.T) {
 // task whose ProjectPath resolves to the SAME root as the rejected record's
 // repo_path registers that root via redactTasks, so the log line collapses to
 // the typed-path form [repo:1] rather than blanking to [redacted]. The log-only
-// blank must defer to the registered root (pathUnderRegisteredRoot skips it),
+// blank must defer to the registered root (registeredRootEquals skips it),
 // preserving the layout parity the typed path already gives.
 func TestLeakReproDefersToRegisteredTaskRoot(t *testing.T) {
 	r := &redactor{}
@@ -168,6 +168,60 @@ func TestLeakReproWorktreeParentPath(t *testing.T) {
 	for _, secret := range []string{parent, "ConfidentialClient", repoPath, worktreePath, title} {
 		if strings.Contains(got, secret) {
 			t.Errorf("scrubLog leaked %q (worktree parent_path):\n%s", secret, got)
+		}
+	}
+}
+
+// TestLeakReproDescendantOfRegisteredRoot pins the fallback's coverage of a
+// rejected record whose repo_path is merely a DESCENDANT of an already
+// registered root (here the AF home). The AF home root collapse rewrites only
+// the ancestor, so without a log-only blank the private descendant leaf
+// (ConfidentialClient/repo) survives the daemon log — the typed path would
+// register that exact path as its own root, which the fallback declines per
+// #4115. The blank must still fire on the descendant rather than defer to a
+// root that only names its ancestor.
+func TestLeakReproDescendantOfRegisteredRoot(t *testing.T) {
+	const (
+		afHome   = "/srv/af"
+		repoPath = afHome + "/ConfidentialClient/repo"
+	)
+	r := &redactor{}
+	r.noteAFHome(afHome)
+	r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(`[{"status":"legacy","repo_path":%q}]`, repoPath)))
+
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q`, repoPath)
+	got := r.scrubLog(logLine)
+	t.Logf("descendant-of-root scrubLog out:\n%s", got)
+	for _, secret := range []string{repoPath, "ConfidentialClient"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q (descendant of registered root):\n%s", secret, got)
+		}
+	}
+	// The descendant must blank to the marker, not collapse to the root's
+	// token-and-remainder form "[af-home]/ConfidentialClient/repo".
+	if strings.Contains(got, "[af-home]/ConfidentialClient") {
+		t.Errorf("scrubLog left the private descendant leaf under a registered-root ancestor:\n%s", got)
+	}
+}
+
+// TestLeakReproRetainsRawPathSpelling pins the fallback's coverage of a raw
+// path spelling that absolutePathSpellings would clean away. Persisted
+// worktrees keep the raw path string verbatim and DiagnoseMissingWorktree logs
+// those raw strings, so a double-slash spelling like
+// "/srv//ConfidentialClient/repo" must be registered as a log-only blank too —
+// the cleaned spelling does not match it and the private path would otherwise
+// survive the daemon log scrub.
+func TestLeakReproRetainsRawPathSpelling(t *testing.T) {
+	const rawRepo = "/srv//ConfidentialClient/repo"
+	r := &redactor{}
+	r.redactInstancesJSON(json.RawMessage(fmt.Sprintf(`[{"status":"legacy","repo_path":%q}]`, rawRepo)))
+
+	logLine := fmt.Sprintf(`WORKTREE_MISSING_DETECTED classification="missing" repo_path=%q`, rawRepo)
+	got := r.scrubLog(logLine)
+	t.Logf("raw-spelling scrubLog out:\n%s", got)
+	for _, secret := range []string{rawRepo, "/srv/ConfidentialClient/repo", "ConfidentialClient"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q (raw double-slash spelling):\n%s", secret, got)
 		}
 	}
 }
