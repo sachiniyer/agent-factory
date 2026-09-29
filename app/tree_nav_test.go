@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -242,4 +243,158 @@ func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
 	sel = h.sidebar.GetSelection()
 	assert.True(t, sel.IsTab)
 	assert.Equal(t, 1, sel.TabIndex, "cursor must land on the left neighbor's row")
+}
+
+// sidebarRendersExpanded reports whether the sidebar's rendered output draws
+// title's instance row with the expanded (▾) — rather than the folded (▸) —
+// arrow. At the app boundary the sidebar keeps instanceExpanded private, but
+// the rendered arrow is a faithful public proxy: under collapse-by-default
+// only the selected instance renders ▾, and an explicit h/← collapse of the
+// selection flips it back to ▸ even while it stays selected. The title is
+// unique among rendered instance rows, so the substring pins that one row.
+// The instance-tree arrows (▾/▸, the small triangles) are disjoint from the
+// section-header arrows (▼/▲, the large ones), so the header never matches.
+func sidebarRendersExpanded(h *home, title string) bool {
+	return strings.Contains(h.sidebar.View(), "▾  "+title)
+}
+
+// selectTreeInstance wires the sidebar + store selection to the instance at
+// idx and runs the same selectionChanged sync the event loop uses. Mirrors the
+// existing app-test setup (TestTreeNav_TabStopAcrossInstancePreservesParentForActions)
+// without re-adding the instance (addTreeInstance already did).
+func selectTreeInstance(h *home, idx int) {
+	h.sidebar.SetSelectedInstance(idx)
+	h.store.SetSelectedInstance(h.store.GetInstances()[idx])
+	_ = h.selectionChanged()
+}
+
+// TestTreeNav_FoldedInstanceDownLandsOnNextInstance pins the #4770 fix at the
+// real key entry point the running TUI uses (handleKeyPress →
+// handleDefaultKeyPress case KeyDown → sidebar.Down). The model-level tests
+// exercise the sidebar directly; the batch-2 play-test (thread on #4776) could
+// not confirm the head moved past a folded instance in a live TUI, and the
+// review (#4776) asked for a test that drives the same entry point the TUI
+// uses instead of an internal helper. dispatchKey sets keySent to reproduce
+// the second pass after handleMenuHighlighting re-emits the key, so this hits
+// the exact dispatch a real Down takes.
+//
+// Both required properties are pinned:
+//   - the fold survives Down — the explicitly folded instance does NOT re-expand
+//     into its own tab 0 (#4770), and it stays collapsed via collapse-by-default
+//     once the selection moves on;
+//   - Down moves to the next instance — the cursor lands on the next instance
+//     row, that instance is selected and auto-expanded, and a following Down
+//     dives into its tabs (no trap on the folded row).
+func TestTreeNav_FoldedInstanceDownLandsOnNextInstance(t *testing.T) {
+	h := newTestHome(t)
+	addTreeInstance(t, h, "alpha")
+	addTreeInstance(t, h, "bravo")
+	addTreeInstance(t, h, "charlie")
+	resizeHome(h, 120, 40)
+
+	selectTreeInstance(h, 1) // bravo is the middle instance
+	bravo := h.store.GetInstances()[1]
+	require.Same(t, bravo, h.sidebar.GetSelectedInstance(), "bravo selected")
+	require.True(t, sidebarRendersExpanded(h, "bravo"), "bravo auto-expanded")
+	require.False(t, sidebarRendersExpanded(h, "alpha"), "alpha folds by default")
+
+	// h/← folds bravo in place; the cursor stays on its row and the tab
+	// children disappear.
+	dispatchKey(h, runeKey('h'))
+	sel := h.sidebar.GetSelection()
+	require.False(t, sel.IsTab, "cursor on the folded instance row")
+	require.Equal(t, 1, sel.ItemIndex, "still on bravo")
+	require.False(t, sidebarRendersExpanded(h, "bravo"), "bravo folded")
+	require.NotContains(t, h.sidebar.View(), "├ 1 Agent",
+		"no tab rows render while the selected instance is folded")
+
+	// Down off the folded row lands on the NEXT instance — charlie — and
+	// selects it; charlie auto-expands (cross-instance auto-expand survives),
+	// bravo stays folded, the cursor is not trapped. This is the #4770 fix:
+	// the same instance does not re-expand.
+	dispatchKey(h, runeKey('j'))
+	sel = h.sidebar.GetSelection()
+	require.Equal(t, 2, sel.ItemIndex, "Down moves the cursor to the next instance")
+	require.False(t, sel.IsTab, "cursor lands on the next instance's row")
+	require.Same(t, h.store.GetInstances()[2], h.sidebar.GetSelectedInstance(),
+		"the next instance is selected")
+	require.True(t, sidebarRendersExpanded(h, "charlie"),
+		"the newly selected instance auto-expands")
+	require.False(t, sidebarRendersExpanded(h, "bravo"),
+		"the folded instance stays collapsed (collapse-by-default)")
+
+	// A second Down dives into the now-selected instance's tabs — not trapped
+	// on the row above.
+	dispatchKey(h, runeKey('j'))
+	sel = h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the next Down dives into the selected instance's tabs")
+	require.Equal(t, 2, sel.ItemIndex, "still on charlie")
+	require.Equal(t, 0, sel.TabIndex, "lands on its first tab")
+}
+
+// TestTreeNav_FoldedInstanceUpKeepsCrossInstanceExpand pins the cross-instance
+// auto-expand half the review (#4776) required: after an explicit h/← fold, Up
+// off a folded instance row still moves the cursor to the previous instance's
+// tab and auto-expands that instance, exactly as before the fix. The Down
+// side of the fix lives in its own dir>0 branch and does not touch this path
+// — this pins the Up half at the same real key entry point so a future change
+// to the folded-Down guard cannot silently trap the Up direction too.
+func TestTreeNav_FoldedInstanceUpKeepsCrossInstanceExpand(t *testing.T) {
+	h := newTestHome(t)
+	addTreeInstance(t, h, "alpha")
+	addTreeInstance(t, h, "bravo")
+	addTreeInstance(t, h, "charlie")
+	resizeHome(h, 120, 40)
+
+	selectTreeInstance(h, 1)     // bravo
+	dispatchKey(h, runeKey('h')) // fold bravo; cursor on its row
+	require.False(t, sidebarRendersExpanded(h, "bravo"))
+
+	// Up off the folded row lands on alpha's last tab and selects + expands alpha.
+	dispatchKey(h, runeKey('k'))
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "Up off a folded row selects a tab of the previous instance")
+	require.Equal(t, 0, sel.ItemIndex, "lands on alpha")
+	require.Equal(t, 1, sel.TabIndex, "lands on alpha's last (terminal) tab")
+	require.Same(t, h.store.GetInstances()[0], h.sidebar.GetSelectedInstance(), "alpha is selected")
+	require.True(t, sidebarRendersExpanded(h, "alpha"), "the previous instance auto-expands")
+	require.False(t, sidebarRendersExpanded(h, "bravo"),
+		"the folded instance stays folded once the selection moves on")
+}
+
+// TestTreeNav_FoldedLastInstanceDownPreservesFold pins the last-instance case
+// (the original #4770 no-re-expand guarantee) at the same real key entry
+// point. When the folded instance is the LAST one and Down has no next row to
+// move to, the move is a consumed no-op before any store mutation: the fold,
+// the cursor, and the active tab all survive instead of re-expanding and
+// silently resetting the active tab to 0 (the spurious-SetActiveTab case the
+// model-level TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab pins).
+func TestTreeNav_FoldedLastInstanceDownPreservesFold(t *testing.T) {
+	h := newTestHome(t)
+	addTreeInstance(t, h, "alpha")
+	addTreeInstance(t, h, "bravo") // the last instance
+	resizeHome(h, 120, 40)
+
+	selectTreeInstance(h, 1)
+	bravo := h.store.GetInstances()[1]
+	require.Same(t, bravo, h.sidebar.GetSelectedInstance())
+
+	// Drive the active tab to the (nonzero) terminal tab before folding — a
+	// spurious SetActiveTab(0) cannot be told apart from "unchanged" on the
+	// default tab 0.
+	h.store.SetActiveTab(1)
+	require.Equal(t, 1, h.store.ActiveTab(), "active tab is the terminal tab before collapse")
+	dispatchKey(h, runeKey('h')) // fold bravo
+	require.False(t, sidebarRendersExpanded(h, "bravo"))
+	require.False(t, h.sidebar.GetSelection().IsTab, "cursor on the folded instance row")
+
+	// Down at the last folded instance is a consumed no-op.
+	dispatchKey(h, runeKey('j'))
+	sel := h.sidebar.GetSelection()
+	require.False(t, sel.IsTab, "cursor does not dive into folded tabs")
+	require.Equal(t, 1, sel.ItemIndex, "cursor stays on the folded last instance row")
+	require.False(t, sidebarRendersExpanded(h, "bravo"),
+		"the fold survives a Down with no next instance")
+	require.Equal(t, 1, h.store.ActiveTab(),
+		"the nonzero active tab is preserved when Down is a no-op")
 }
