@@ -280,7 +280,7 @@ func TestValidateManualCrossAgentAccountSwapNeverCarries(t *testing.T) {
 	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 	writeCarryFile(t, filepath.Join(home, ".claude"), claudeTranscriptRel(inst.GetWorktreePath(), carryTestID), "{}\n")
 
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex))
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex, true))
 	require.Nil(t, inst.accountSwapLaunch.carry, "providers cannot read each other's transcripts")
 	require.Empty(t, inst.accountSwapLaunch.carryFallback, "a cross-agent brief keeps its own wording")
 	require.Equal(t, HandoffConversation{}, inst.PreparedAccountSwapConversation())
@@ -449,12 +449,12 @@ func TestRespawnForAccountSwapDemotesACarryThatCanNoLongerLand(t *testing.T) {
 			restored.SetLimitReached(time.Time{})
 			require.NoError(t, restored.BeginLimitResume())
 			if manual {
-				require.NoError(t, restored.ValidateManualAccountSwap("work", tmux.ProgramClaude))
+				require.NoError(t, restored.ValidateManualAccountSwap("work", tmux.ProgramClaude, false))
 				require.True(t, restored.PreparedAccountSwapConversation().Carried)
 				brief := MissionBrief{From: tmux.ProgramClaude, To: tmux.ProgramClaude, Goal: "finish it",
 					Conversation: restored.PreparedAccountSwapConversation()}
-				_, err := restored.SelectAccountForHandoff("", "work", tmux.ProgramClaude,
-					HandoffReasonUsageLimit, "", brief.Render())
+				_, err := restored.SelectAccountForHandoff("", "work", tmux.ProgramClaude, tmux.ProgramClaude,
+					false, HandoffReasonUsageLimit, "", brief.Render())
 				require.NoError(t, err)
 			} else {
 				require.NoError(t, restored.ValidateAccountSwap("work"))

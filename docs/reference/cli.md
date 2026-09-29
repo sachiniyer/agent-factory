@@ -1520,6 +1520,11 @@ Rebind a stable project id to a new checkout path.
 The project id is preserved. Rebinding refuses to take a path already owned by
 another registered project.
 
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — the daemon, which owns the registry write, then resolves the
+checkout it lands on.
+
 ```
 af projects rebind <project-id> <path>
 ```
@@ -1839,6 +1844,21 @@ agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
+
 The session keeps its identity, its git worktree, and its branch — only the
 agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
@@ -2065,16 +2085,28 @@ clears the limit state after delivery succeeds.
 
 Before retrying an unconfirmed handoff, inspect its pane: the first submission
 may already have landed, and this command is the operator's explicit decision to
-send the pending mission again. The command fails when neither recovery
-obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
-badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
+send the pending mission again. When the pane shows the incoming agent ALREADY
+acting on its mission, use --delivered instead: it retires the pending
+obligation and clears the leftover operation/startup flags WITHOUT sending the
+mission a second time.
+
+The command fails when neither recovery obligation exists. Use 'af sessions
+list' to find sessions carrying the [limit] badge; the TUI and web expose
+Retry handoff and Mark delivered for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth
+  af sessions retry-limit fix-auth --delivered
 
 ```
-af sessions retry-limit <title>
+af sessions retry-limit <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--delivered` |  | Mark the pending handoff mission as delivered and retire it WITHOUT resending — use after inspecting the pane and confirming the incoming agent already received it |
 
 **Global flags**
 

@@ -17,8 +17,22 @@ on:
   # A writable base-repository context is required to invalidate a stale
   # aggregate when a fork PR appears. Every checkout below is pinned to the
   # default branch; this workflow never checks out or executes pull-request code.
+  #
+  # opened and synchronize are NOT here: auto-gate-head.yml subscribes to them
+  # and calls this workflow, so the jobs, payload, and concurrency keys are
+  # unchanged. The split is about check-suite placement (#4802). GitHub files
+  # the aggregate in the earliest github-actions suite on a head, and the
+  # push-time Auto Gate suite sometimes wins that race. When it did, a later
+  # labeled/edited run of this same workflow on the same head superseded it,
+  # and the ruleset stopped counting the PASS for good. auto-gate-head.yml gets
+  # one suite per head, and the actions below all fire after the push-time
+  # suites exist, so none of them is the placement or can supersede it.
   pull_request_target:
-    types: [opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled]
+    types: [reopened, closed, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled]
+  # auto-gate-head.yml's opened/synchronize runs. github.event_name and the
+  # payload in a called workflow are the caller's, so every expression below
+  # sees the same pull_request_target event it saw before the split.
+  workflow_call:
   status:
   # GitHub suppresses check_suite recursion for Actions-owned suites. The
   # required Lint and Build checks both belong to PR Validation, so its terminal

@@ -222,7 +222,7 @@ func (m *Manager) resumeLimitedSession(
 	incomingManualReset := false
 	if accountSwap != nil && accountSwap.manual && hasReset {
 		limitedAgent, limitedAccount, limited := inst.LimitIdentity()
-		incomingManualReset = limited && limitedAgent == accountSwap.agent && limitedAccount == accountSwap.to
+		incomingManualReset = limited && limitedAgent == accountSwap.accountNamespace() && limitedAccount == accountSwap.to
 	}
 	due := ordinaryDue
 	if accountSwap != nil && !incomingManualReset {
@@ -326,7 +326,7 @@ func (m *Manager) resumeLimitedSession(
 		return
 	}
 	if accountSwap != nil && !accountSwap.fellBack {
-		m.info().Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.agent, accountSwap.to, attempts)
+		m.info().Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.accountNamespace(), accountSwap.to, attempts)
 	} else {
 		// State the trigger that was actually observed (#3240): with a parsed
 		// reset time the daemon scheduled against it; otherwise only the fallback

@@ -269,6 +269,12 @@ func (s *Sidebar) Blur() { s.focused = false }
 // (#1461). Empty restores the default "Agent Factory" label.
 func (s *Sidebar) SetProjectName(name string) { s.projectName = name }
 
+// ProjectName returns the active project's display name set by SetProjectName
+// (empty in registry mode, where the title chip falls back to "Agent Factory").
+// Read-only accessor for tests that assert the sidebar chip follows a project
+// switch or, symmetrically, a delete-of-active-project re-scope that clears it.
+func (s *Sidebar) ProjectName() string { return s.projectName }
+
 // HandleKey implements layout.Pane. Tree navigation stays routed through the
 // root model's global bindings in PR 4 (the keys also work when the workspace
 // pane has focus); per-pane routing arrives with the split (#1024 PR 5).

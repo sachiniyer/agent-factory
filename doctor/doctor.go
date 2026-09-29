@@ -213,6 +213,11 @@ type Options struct {
 	// working directory (defaultRemoteConfig); tests inject a hermetic resolver.
 	remoteConfig func() (*config.RemoteHooks, string, error)
 
+	// inRepoUnknownLeaves lists the unknown [docker]/[ssh] leaves in the
+	// current repo's in-repo config (#4599). Defaults to loading the repo of
+	// the current working directory; tests inject a hermetic list.
+	inRepoUnknownLeaves func() []config.InRepoUnknownLeaf
+
 	// The skew checks' injection points (#1044). Every one of them reaches for
 	// real daemon/system state, so each is a func field the tests replace with
 	// a fake: doctor's own tests must never depend on — let alone disturb — the
@@ -452,6 +457,7 @@ func Run(opts Options) (*Report, error) {
 	}
 
 	cfg := checkConfigAndStorage(ctx, report)
+	checkInRepoUnknownLeaves(ctx, report)
 	checkEnvironment(ctx, report, cfg)
 
 	// A failed snapshot is recorded, never discarded: checkProcessInspection
