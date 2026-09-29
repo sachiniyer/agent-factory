@@ -374,14 +374,22 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 	return resp, nil
 }
 
-// There is deliberately no ListProjects here. The web reads the registry over HTTP
-// (web/src/api.ts listProjects hits the daemon's /v1/ListProjects route directly),
-// but the two GO consumers read it in-process: the TUI's switcher union
-// (app/switch_project.go buildProjectListFrom) and the CLI's `af projects list`
-// (api/projects.go) both call config.ListProjects(), the same file-locked read the
-// daemon writes through — a read of on-disk config needs no round trip. A wrapper
-// here would be dead code whose only caller was its own test. RegisterProject stays
-// because it is a WRITE, which must go through the daemon (the single writer, #960).
+// ListProjects reads the TARGETED daemon's project registry. The web reads the
+// registry over HTTP (web/src/api.ts listProjects hits the daemon's
+// /v1/ListProjects route directly), and the TUI's switcher union plus the CLI's
+// `af projects list` read the same file-locked store in-process via
+// config.ListProjects() — a read of on-disk config needs no round trip WHEN the
+// daemon is this machine's. This wrapper exists for the case where it is not:
+// the config editor's project-scope picker on a --daemon-url session must offer
+// the REMOTE daemon's projects, so observation and the read it feeds come from
+// the same daemon (the #3708 read/write-same-target rule, applied to a read).
+func (c *Client) ListProjects() ([]config.Project, error) {
+	var resp daemon.ListProjectsResponse
+	if err := c.call("ListProjects", daemon.ListProjectsRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Projects, nil
+}
 
 // RegisterProject registers a git checkout as a durable project through the
 // daemon (#2456) — the single-writer path the TUI's add-project action routes

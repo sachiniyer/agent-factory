@@ -300,6 +300,17 @@ func (m *home) View() string {
 		return placeOverlay(m.renderTasksOverlay(), mainView)
 	} else if m.state == stateConfigEditor {
 		return placeOverlay(m.renderConfigOverlay(), mainView)
+	} else if m.state == stateConfigScope {
+		// A nested modal: the picker floats over the still-open editor, so the
+		// user sees which scope they are leaving while they pick the next.
+		base := placeOverlay(m.renderConfigOverlay(), mainView)
+		if m.selectionOverlay == nil {
+			log.ErrorLog.Printf("config scope overlay is nil")
+			return base
+		}
+		fg := m.selectionOverlay.Render()
+		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, base))
+		return placeOverlay(fg, base)
 	}
 
 	return mainView

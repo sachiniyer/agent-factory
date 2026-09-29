@@ -404,11 +404,11 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	m.accountGeneration++ // discard account results from an earlier opening
-	entries, location, err := ui.ReadConfigForEditor()
+	entries, location, projectRoot, err := ui.ReadConfigForEditor("")
 	if err != nil {
 		return m, m.handleError(err)
 	}
-	m.configPane.SetEntries(entries, location)
+	m.configPane.SetEntries(entries, location, projectRoot)
 	// The Accounts section (#3385), read on every open for the same reason the
 	// config is: an account registered from the CLI, or logged in from the web,
 	// since this TUI started must show as it is now rather than as af remembers.
@@ -442,6 +442,12 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.configPane.HandleKeyPress(msg)
+	// The scope request (`p`), taken BEFORE the focus check like the account
+	// verbs: the picker opens over the still-open editor — it is a sub-state
+	// (stateConfigScope), not a close.
+	if m.configPane.TakeScopeRequest() {
+		return m.showConfigScopePicker()
+	}
 	// The Accounts section's verbs (#3385), taken BEFORE the focus check: a login
 	// drops focus as it asks — the overlay is closing so the takeover has a clean
 	// terminal — while a register keeps it, and reading the request first is what

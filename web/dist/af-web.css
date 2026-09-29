@@ -2371,6 +2371,30 @@ button:disabled,
   font-size: var(--af-type-caption);
   padding: var(--af-space-1) var(--af-space-2);
 }
+.af-config-scope {
+  font-size: var(--af-type-caption);
+  padding: var(--af-space-1) var(--af-space-2);
+  max-width: 40%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.af-config-readonly {
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  border: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+  border-radius: var(--af-radius-control);
+  padding: 0 var(--af-space-1);
+  white-space: nowrap;
+}
+.af-config-scope-note {
+  margin: 0;
+  padding: var(--af-space-2) var(--af-space-3);
+  color: var(--af-ink-muted);
+  font-size: var(--af-type-caption);
+  line-height: 1.5;
+  border-bottom: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
 .af-config-assistant-btn {
   margin-left: auto;
   font-size: var(--af-type-caption);
@@ -2890,6 +2914,11 @@ textarea[class] {
 @media (max-width: 768px) {
   .af-config-head {
     flex-wrap: wrap;
+  }
+  .af-config-scope {
+    order: 2;
+    max-width: none;
+    flex: 1 1 auto;
   }
   .af-config-path {
     order: 3;

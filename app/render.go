@@ -25,7 +25,8 @@ func (m *home) renderHooksOverlay() string {
 	)
 }
 
-// renderConfigOverlay frames the global config editor, using the same
+// renderConfigOverlay frames the config editor — global scope, or a project's
+// effective stack while the scope picker selected one — using the same
 // pane-hosted modal framing as the hooks and tasks overlays.
 func (m *home) renderConfigOverlay() string {
 	return m.renderFittedPaneOverlay(

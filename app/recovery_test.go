@@ -55,7 +55,7 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					t.Setenv("AF_DAEMON_URL", "http://buildbox:8443")
 					h.state = stateConfigEditor
 					h.configPane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "codex", Tier: 1}},
-						"http://buildbox:8443 · /srv/af/config.toml")
+						"http://buildbox:8443 · /srv/af/config.toml", "")
 					t.Cleanup(SetAccountSeamsForTest(func(daemon.ListAccountsRequest) (daemon.ListAccountsResponse, error) {
 						return daemon.ListAccountsResponse{Entries: []daemon.AccountEntry{{Agent: "codex", Name: "remote-work"}}, Agents: []string{"codex"}}, nil
 					}, registerAccount, startAccountLogin))

@@ -46,8 +46,13 @@ import (
 var goSurfaces = map[string][]string{
 	// daemon/control_client.go is the CLI's gob control-socket path.
 	"cli": {"api", "daemon/control_client.go"},
-	// apiclient/ is the TUI's HTTP path to the daemon.
-	"tui": {"app", "apiclient"},
+	// apiclient/ is the TUI's HTTP path to the daemon, and ui/ is scanned for the
+	// same reason the wrappers are: the TUI's request-construction does not all
+	// live in app/. The config editor's remote-target seam (ui/config_target.go)
+	// builds GetConfigRequest/SetConfigValueRequest itself — a request type that
+	// grew a field there (GetConfig's repo_path, config.read-project) would go
+	// unaudited if the scan stopped at app/.
+	"tui": {"app", "ui", "apiclient"},
 }
 
 // auditedRequests binds a daemon request type name to its reflect.Type so field
@@ -67,9 +72,11 @@ var auditedRequests = map[string]reflect.Type{
 	"CreateTabRequest":              reflect.TypeOf(daemon.CreateTabRequest{}),
 	"DeleteProjectRequest":          reflect.TypeOf(daemon.DeleteProjectRequest{}),
 	"DeliverPromptRequest":          reflect.TypeOf(daemon.DeliverPromptRequest{}),
+	"GetConfigRequest":              reflect.TypeOf(daemon.GetConfigRequest{}),
 	"HandoffSessionRequest":         reflect.TypeOf(daemon.HandoffSessionRequest{}),
 	"KillSessionRequest":            reflect.TypeOf(daemon.KillSessionRequest{}),
 	"ListBackendsRequest":           reflect.TypeOf(daemon.ListBackendsRequest{}),
+	"ListProjectsRequest":           reflect.TypeOf(daemon.ListProjectsRequest{}),
 	"ListTasksRequest":              reflect.TypeOf(daemon.ListTasksRequest{}),
 	"PauseStatusPollRequest":        reflect.TypeOf(daemon.PauseStatusPollRequest{}),
 	"PingRequest":                   reflect.TypeOf(daemon.PingRequest{}),

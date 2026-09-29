@@ -52,7 +52,7 @@ func TestDesignDriverScenes(t *testing.T) {
 							rows = append(rows, e)
 						}
 					}
-					h.configPane.SetEntries(rows, "Local daemon · /home/operator/.agent-factory/config.toml")
+					h.configPane.SetEntries(rows, "Local daemon · /home/operator/.agent-factory/config.toml", "")
 					h.configPane.SetFocus(true)
 				case "sessions-dense":
 					createdAt := designStillsNow(t)
@@ -82,7 +82,7 @@ func TestDesignDriverScenes(t *testing.T) {
 					}
 				case "config", "config-edit":
 					h.state = stateConfigEditor
-					h.configPane.SetEntries([]config.ConfigEntry{{Key: "default_program", Type: "string", Value: "claude", Purpose: "Agent for new sessions", Tier: 1, TierName: "Essentials", Settable: true, Enum: []string{"claude", "codex"}}}, "Local daemon · /home/operator/.agent-factory/config.toml")
+					h.configPane.SetEntries([]config.ConfigEntry{{Key: "default_program", Type: "string", Value: "claude", Purpose: "Agent for new sessions", Tier: 1, TierName: "Essentials", Settable: true, Enum: []string{"claude", "codex"}}}, "Local daemon · /home/operator/.agent-factory/config.toml", "")
 					h.configPane.SetFocus(true)
 					if scene == "config-edit" {
 						h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})

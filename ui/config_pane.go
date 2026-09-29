@@ -16,12 +16,16 @@ import (
 //
 // It is the DIRECT path to configuration. The config agent (#1928) is the
 // conversational path. They are complementary and deliberately share one
-// description of config — config.ManifestWithValues — so neither can drift from
-// config_types.go or from each other. This pane holds NO key list, no per-key
-// type switch, and no copy of the defaults or validation rules: every row it
-// renders comes from the manifest, and every write goes through the pane's one
-// save seam. Adding a key to config_types.go surfaces it here with no edit to
-// this file, which is what TestConfigPaneRendersEveryManifestKey pins.
+// description of config — config.ManifestWithValues, or its project-scoped
+// counterpart ManifestWithRepoValues when the `p` scope picker has selected a
+// repo — so neither can drift from config_types.go or from each other. This
+// pane holds NO key list, no per-key type switch, and no copy of the defaults
+// or validation rules: every row it renders comes from the manifest, and every
+// write goes through the pane's one save seam — which is exactly why a project
+// scope is read-only here: its rows are effective values, not a file this seam
+// could write back to. Adding a key to config_types.go surfaces it here with
+// no edit to this file, which is what TestConfigPaneRendersEveryManifestKey
+// pins.
 //
 // Both the rows and the save follow --daemon-url/AF_DAEMON_URL since #3708, so
 // `,` administers whichever daemon the session is attached to — the same one
@@ -41,6 +45,16 @@ type ConfigPane struct {
 	// (#3708). Not a path, therefore, and neither the order nor the absence of a
 	// `~` abbreviation is incidental — see remoteConfigLocation for both.
 	location string
+	// scopeRoot is the repository root the entries were resolved for, "" on the
+	// global view. A scoped read is INSPECTION only: project-scoped writes are
+	// a different parity seam (config.write-project), so a scoped pane refuses
+	// edits rather than writing a value nobody read — the same read/write-must-
+	// share-a-scope rule #3708 fixed between machines, applied between layers.
+	scopeRoot string
+	// scopePickRequested records the `p` key: the pane cannot open the project
+	// picker itself (the overlay is an app-owned modal), so it asks the app,
+	// exactly as TakeAssistantRequest does for the config agent.
+	scopePickRequested bool
 
 	// rows is the flattened, currently-visible list: tier headings interleaved
 	// with entries, rebuilt whenever the advanced toggle or the entries change.
@@ -148,16 +162,39 @@ func NewConfigPane() *ConfigPane {
 	}
 }
 
-// SetEntries loads the manifest rows and the location they were read from. The
-// caller supplies them (rather than the pane reading config itself) so the app
-// decides when to re-read — reopening the editor shows config as it is now,
-// including a hand-edit made since — and so the pane stays a form regardless of
-// which daemon answered (ReadConfigForEditor).
-func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
+// SetEntries loads the manifest rows, the location they were read from, and
+// the project root they were resolved for ("" = the global view). The three
+// land together so a frame can never show one scope's rows labeled as
+// another's — a stale scope tag is the same lie as a stale read.
+//
+// The caller supplies the rows (rather than the pane reading config itself) so
+// the app decides when to re-read — reopening the editor shows config as it is
+// now, including a hand-edit made since — and so the pane stays a form
+// regardless of which daemon answered (ReadConfigForEditor).
+func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location, projectRoot string) {
+	if projectRoot != c.scopeRoot {
+		// A scope change is a different LIST: a write echo or validator error
+		// from the old scope belongs to its rows, not these.
+		c.clearStatus()
+	}
 	c.entries = visibleAppearanceEntries(entries)
 	c.location = location
+	c.scopeRoot = projectRoot
 	c.rebuildRows()
 }
+
+// TakeScopeRequest reports whether the user pressed `p` to pick a config scope
+// since the last call, clearing the flag. The app opens the scope picker over
+// the still-open editor; a fresh read lands through SetEntries.
+func (c *ConfigPane) TakeScopeRequest() bool {
+	req := c.scopePickRequested
+	c.scopePickRequested = false
+	return req
+}
+
+// ScopeRoot returns the project root the visible rows were resolved for, or ""
+// on the global view.
+func (c *ConfigPane) ScopeRoot() string { return c.scopeRoot }
 
 func (c *ConfigPane) SetSize(width, height int) {
 	c.width = width
@@ -189,10 +226,12 @@ func (c *ConfigPane) SetFocus(focus bool) {
 		c.accounts.status = ""
 		c.accounts.statusIsError = false
 		c.clearStatus()
-		// A pending request is consumed the moment the app opens the assistant, so
-		// one that survives to a close was never taken (the pane was dismissed
-		// another way). Drop it so the next open cannot inherit a stale intent.
+		// A pending request is consumed the moment the app opens the assistant or
+		// the scope picker, so one that survives to a close was never taken (the
+		// pane was dismissed another way). Drop both so the next open cannot
+		// inherit a stale intent.
 		c.assistantRequested = false
+		c.scopePickRequested = false
 	}
 }
 
@@ -354,6 +393,12 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 		c.SetFocus(false)
 		c.assistantRequested = true
 		return true
+	case "p":
+		// Ask the app to open the scope picker over this overlay (global or a
+		// project's effective stack). The pane keeps focus — the picker is a
+		// nested modal whose submit lands back here through SetEntries.
+		c.scopePickRequested = true
+		return true
 	case "enter":
 		c.beginEdit()
 		return true
@@ -368,6 +413,17 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 func (c *ConfigPane) beginEdit() {
 	entry := c.selectedEntry()
 	if entry == nil {
+		return
+	}
+	if c.scopeRoot != "" {
+		// A project-scoped row shows the EFFECTIVE value for that repo —
+		// possibly a personal or in-repo override the global file never saw.
+		// Writing it through the pane's global save seam would change a file
+		// the row was not read from, the same wrong-target class #3708 fixed
+		// between machines. Until project writes land (config.write-project),
+		// the honest answer names where the write DOES go.
+		c.status = "project scope is read-only — write overrides with `af config set --project`, or press p for the global scope"
+		c.statusIsError = true
 		return
 	}
 	c.editing = true
@@ -512,11 +568,17 @@ func (c *ConfigPane) String() string {
 	return b.String()
 }
 
-// renderHeader renders the title and where the rows came from — a path locally,
-// the daemon URL and then its path under a remote target.
+// renderHeader renders the title, where the rows came from — a path locally,
+// the daemon URL and then its path under a remote target, a `project <root>`
+// label on a scoped read — and, for a scope, that the view is inspection only.
 func (c *ConfigPane) renderHeader() string {
 	var b strings.Builder
 	b.WriteString(configTitleStyle.Render("Config"))
+	if c.scopeRoot != "" {
+		// Before the location, not after: the location is the clipped part of
+		// this line, and a marker that survives the clip is the whole point.
+		b.WriteString(configHintStyle.Render("  read-only"))
+	}
 	if c.location != "" {
 		b.WriteString(configLocationStyle.Render("  " + c.location))
 	}
@@ -759,6 +821,7 @@ func (c *ConfigPane) renderHints() string {
 		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
 			{text: "↑/↓ move", drop: 2},
 			{text: verb, drop: 3},
+			{text: "p scope", drop: 5},
 			{text: "C assistant", drop: 4},
 			{text: "esc close"},
 		})) + "\n"
@@ -772,13 +835,21 @@ func (c *ConfigPane) renderHints() string {
 	// "C assistant" is the button #2453 adds: the discoverable way to open the
 	// config assistant from the config surface. It sits before "esc close" so the
 	// exit stays last, where a reader looks for it.
-	return "\n" + configHintStyle.Render(c.fitHints([]configHint{
-		{text: "↑/↓ move", drop: 2},
-		{text: "↵ edit", drop: 3},
-		{text: advanced, drop: 1},
-		{text: "C assistant", drop: 4},
-		{text: "esc close"},
-	})) + "\n"
+	//
+	// A project scope is inspection only, so it must not promise "↵ edit" —
+	// pressing enter still answers with the read-only notice (beginEdit), but
+	// the hint row does not advertise an edit that cannot happen.
+	hints := []configHint{{text: "↑/↓ move", drop: 2}}
+	if c.scopeRoot == "" {
+		hints = append(hints, configHint{text: "↵ edit", drop: 3})
+	}
+	hints = append(hints,
+		configHint{text: advanced, drop: 1},
+		configHint{text: "p scope", drop: 5},
+		configHint{text: "C assistant", drop: 4},
+		configHint{text: "esc close"},
+	)
+	return "\n" + configHintStyle.Render(c.fitHints(hints)) + "\n"
 }
 
 func (c *ConfigPane) SetEditValueForTest(v string) { c.input.SetValue(v) }

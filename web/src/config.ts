@@ -34,19 +34,41 @@ import {
   renderAccountsSection,
 } from "./accounts.js";
 import { h } from "./dom.js";
+import { projectName } from "./project.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
-import { rebuildKeepingScroll } from "./scrollkeep.js";
+import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 
 /** The config list is ONE global manifest, so every rebuild shows the same list and
- *  the reader's place is always worth keeping — there is no project or filter here to
- *  change what the list contains. */
+ *  the reader's place is always worth keeping — no filter changes what it contains.
+ *  A SCOPE is the exception (#2216 stage 7): a project read is a different list, so
+ *  the token carries it and each scope keeps its own place. */
 const CONFIG_LIST_TOKEN = "config";
+
+/** Which scope the config view is reading, and what the scope picker offers
+ *  (#2216 stage 7 — the web analogue of the TUI's `p` in `,`).
+ *
+ *  `root` is the project the ROWS on screen were resolved for ("" = the global
+ *  scope); `selected` is the scope select's current value. They differ only
+ *  while a scope change is in flight, which is exactly when the distinction
+ *  matters: the rows must keep the label of the scope they were read from until
+ *  the daemon's answer lands. */
+export interface ConfigScopeState {
+  root: string;
+  selected: string;
+  /** The pickable project roots — the project pickers' union (sessions ∪ tasks
+   *  ∪ the daemon's registry), so a registered-but-sessionless repo is offered. */
+  options: string[];
+}
 
 /** What the config view can ask the shell to do. Saving is the shell's job (it
  *  owns the token and the refresh), so the pane reports intent and renders the
  *  outcome it is handed back. */
 export interface ConfigActions {
   save: (key: string, value: string) => void;
+  /** Switches which scope the view reads: "" for the global file, a project
+   *  root for that repo's effective stack (built-in < global < in-repo <
+   *  personal). The shell re-fetches; the pane re-renders when the answer lands. */
+  selectScope: (repoPath: string) => void;
   /** Opens the conversational config assistant (#2467) — the web analogue of the
    *  TUI's config-agent takeover. The shell owns the token and the modal host, so
    *  the pane only reports the intent. */
@@ -247,12 +269,28 @@ export function createKeyedQueue(): (key: string, run: () => Promise<void>) => P
   };
 }
 
+/** Value equality for the scope state: update() skips the rebuild only when the
+ *  scope is UNCHANGED, and options are a fresh array each call, so they compare
+ *  element-wise rather than by identity. */
+function scopesEqual(a: ConfigScopeState | null, b: ConfigScopeState): boolean {
+  if (a === null) {
+    return false;
+  }
+  return a.root === b.root && a.selected === b.selected
+    && a.options.length === b.options.length
+    && a.options.every((opt, i) => opt === b.options[i]);
+}
+
 export class ConfigPane {
   readonly el: HTMLElement;
 
   private entries: ConfigEntry[] = [];
   private registration = { open: false, agent: "" };
   private path = "";
+  /** The scope the ROWS were resolved for and the select's current pick.
+   *  `root` drives the read-only rendering and the header's scope label; the
+   *  two diverge only while a scope change is in flight (see ConfigScopeState). */
+  private scope: ConfigScopeState = { root: "", selected: "", options: [] };
   private status: ConfigStatus | null = null;
   /** The Accounts section's data (#3385). It is rendered by this view but is not
    *  config: see accounts.ts. */
@@ -276,6 +314,10 @@ export class ConfigPane {
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
+  private lastScope: ConfigScopeState | null = null;
+  /** The list token of the last render, so a scope change is a "different list"
+   *  and restarts at the top rather than halfway down another scope's rows. */
+  private lastListToken: string | null = null;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -284,8 +326,8 @@ export class ConfigPane {
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries: ConfigEntry[], path: string, status: ConfigStatus | null, accounts: AccountsState): void {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts) {
+  update(entries: ConfigEntry[], path: string, scope: ConfigScopeState, status: ConfigStatus | null, accounts: AccountsState): void {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && scopesEqual(this.lastScope, scope)) {
       return;
     }
     // Captured before `lastStatus` is overwritten below: it is the EDGE that
@@ -300,11 +342,19 @@ export class ConfigPane {
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
+    this.lastScope = scope;
     // Retired web appearance keys from older daemons are never editable here.
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
     this.status = status;
     this.accounts = accounts;
+    if (scope.root !== this.scope.root) {
+      // A new scope's rows just landed: a draft typed against the previous
+      // scope's value is a different edit now, so it does not carry over.
+      this.editing = null;
+      this.draft = "";
+    }
+    this.scope = scope;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
       this.draft = "";
@@ -362,7 +412,9 @@ export class ConfigPane {
     // answers "where was the user", which is the question restoration is asking.
     // aria-label carries it because render() sets it to `e.key` on every row input.
     this.restoreKey = wasEditing ? this.editingInput?.getAttribute("aria-label") ?? null : null;
-    rebuildKeepingScroll(this.el, CONFIG_LIST_TOKEN, CONFIG_LIST_TOKEN, () => this.render());
+    const token = listToken([CONFIG_LIST_TOKEN, this.scope.root || null]);
+    rebuildKeepingScroll(this.el, this.lastListToken, token, () => this.render());
+    this.lastListToken = token;
     this.restoreKey = null;
     // preventScroll on BOTH: focus() scrolls its target into view by default, which
     // would undo the offset rebuildKeepingScroll just restored. That is not a corner
@@ -427,13 +479,31 @@ export class ConfigPane {
     // one would name a detached node for the rest of this render.
     this.editingInput = null;
     this.advancedToggle = null;
+    const scoped = this.scope.root !== "";
     const head = h(
       "div",
       { class: "af-config-head" },
       h("span", { class: "af-config-title" }, "Config"),
       h("span", { class: "af-view-count" }, String(this.entries.length)),
     );
-    if (this.path !== "") {
+    // The scope picker (#2216 stage 7): the same read the TUI's `p` opens and
+    // `af config list --repo` performs. A project scope is INSPECTION only —
+    // project-scoped writes are the separate config.write-project seam — so the
+    // rows render read-only and the marker sits up front where a clipped line
+    // cannot lose it, the same rule the TUI header follows.
+    const scopeSelect = h("select", { class: "af-input af-config-scope" });
+    scopeSelect.setAttribute("aria-label", "Config scope");
+    scopeSelect.append(h("option", { value: "" }, "Global configuration"));
+    for (const root of this.scope.options) {
+      scopeSelect.append(h("option", { value: root }, `${projectName(root)} — ${root}`));
+    }
+    scopeSelect.value = this.scope.selected;
+    scopeSelect.addEventListener("change", () => this.actions.selectScope(scopeSelect.value));
+    head.append(scopeSelect);
+    if (scoped) {
+      head.append(h("span", { class: "af-config-readonly" }, "read-only"));
+      head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} · project ${this.scope.root}`));
+    } else if (this.path !== "") {
       // Name the file being edited: a user with AF_HOME set is otherwise left
       // guessing which config.toml this is.
       head.append(h("span", { class: "af-config-path" }, `Daemon ${location.host} · ${this.path}`));
@@ -492,11 +562,23 @@ export class ConfigPane {
           ];
     // Accounts LAST: the config keys are what this view is for, and a credential
     // section above them would push them below the fold.
-    this.el.replaceChildren(
-      head,
+    const parts: HTMLElement[] = [head];
+    if (scoped) {
+      // Why the rows cannot be edited, and where the write DOES go — the same
+      // notice the TUI's Enter refusal gives, shown up front rather than on a
+      // gesture a disabled control would never deliver.
+      parts.push(h(
+        "p",
+        { class: "af-config-scope-note" },
+        "Project values are the effective stack for this repo (built-in < global < in-repo < personal). " +
+          "They are read-only here — write overrides with `af config set --project`, or pick the global scope.",
+      ));
+    }
+    parts.push(
       h("div", { class: "af-config-list" }, ...content),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
     );
+    this.el.replaceChildren(...parts);
   }
 
   /** One key: its name, purpose, control, and — when it is the row just written
@@ -539,13 +621,23 @@ export class ConfigPane {
    *  a save the writer refuses. */
   private renderControl(e: ConfigEntry): HTMLElement {
     const kind = controlKind(e);
+    // A project scope is inspection only: the value shown is the EFFECTIVE one
+    // for that repo — possibly an in-repo or personal override the global file
+    // never saw — so the row must not write through the global save path
+    // (config.write-project is the separate seam that will own that). The
+    // controls still render the value; they just do not take edits.
+    const readOnly = this.scope.root !== "";
 
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
       box.checked = e.value === "true";
       box.setAttribute("aria-label", e.key);
-      // A checkbox has no separate commit gesture: toggling IS the edit.
-      box.addEventListener("change", () => this.actions.save(e.key, box.checked ? "true" : "false"));
+      if (readOnly) {
+        box.disabled = true;
+      } else {
+        // A checkbox has no separate commit gesture: toggling IS the edit.
+        box.addEventListener("change", () => this.actions.save(e.key, box.checked ? "true" : "false"));
+      }
       return h("div", { class: "af-config-control" }, box);
     }
 
@@ -562,12 +654,22 @@ export class ConfigPane {
         }
         select.append(opt);
       }
-      select.addEventListener("change", () => this.actions.save(e.key, select.value));
+      if (readOnly) {
+        select.disabled = true;
+      } else {
+        select.addEventListener("change", () => this.actions.save(e.key, select.value));
+      }
       return h("div", { class: "af-config-control" }, select);
     }
 
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     input.value = this.editing === e.key ? this.draft : e.value;
+    if (readOnly) {
+      // readOnly, not disabled: the value stays selectable and copyable — this
+      // is an inspector, and the text is the thing the user came to read.
+      input.readOnly = true;
+      return h("div", { class: "af-config-control" }, input);
+    }
     if (this.editing === e.key) {
       this.editingInput = input;
     }

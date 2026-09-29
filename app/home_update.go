@@ -628,6 +628,8 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleStateTasks(msg)
 	case stateConfigEditor:
 		return m.handleStateConfigEditor(msg)
+	case stateConfigScope:
+		return m.handleStateConfigScope(msg)
 	}
 
 	// The focused in-rail automations section owns its cursor keys; Enter/Esc

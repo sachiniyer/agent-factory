@@ -1154,15 +1154,28 @@ export async function removeTask(task: TaskMutationRef, token: string): Promise<
 }
 
 /** Fetches the config manifest zipped with the user's live values: every
- *  user-facing global key, what it means, and what it is set to now. Returns an
+ *  user-facing key, what it means, and what it is set to now. Returns an
  *  empty list rather than null for a daemon that somehow reports none; throws
  *  ApiError on transport/auth failure so callers share one error path.
  *
+ *  `repoPath` selects the scope: "" is the global file; anything else is a
+ *  repository path on the daemon host to read the PROJECT-effective stack for
+ *  (built-in < global < in-repo < personal project) — the same read `af config
+ *  list --repo` and the TUI's `,` scope picker perform. A path the daemon cannot
+ *  resolve comes back as an ApiError; it is never silently answered as global.
+ *
  *  The manifest is the ONLY description of config the web UI has — there is no
  *  local key list to fall behind config_types.go. */
-export async function getConfig(token: string): Promise<ConfigResponse> {
-  const resp = await af<ConfigResponse>("GetConfig", {}, token);
-  return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+export async function getConfig(token: string, repoPath = ""): Promise<ConfigResponse> {
+  // The parity audit reads request bodies off the AST (parity/derive_test.go's
+  // resolveWebBodyVar), so this is the shape it can see: a literal-initialized
+  // var with a conditional member assignment, never a ternary.
+  const body: Record<string, string> = {};
+  if (repoPath !== "") {
+    body.repo_path = repoPath;
+  }
+  const resp = await af<ConfigResponse>("GetConfig", body, token);
+  return { entries: resp?.entries ?? [], path: resp?.path ?? "", project_root: resp?.project_root ?? "" };
 }
 
 /** Sets one global config key, exactly as `af config set key value` does: the

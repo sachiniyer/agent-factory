@@ -47,7 +47,7 @@ func TestConfigPaneDisplayValueStaysOneLine(t *testing.T) {
 	const w = 72
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetEntries(entries, "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -168,7 +168,7 @@ func TestConfigPaneRowsFitBothWidthMeasures(t *testing.T) {
 
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetEntries(entries, "/tmp/config.toml", "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()

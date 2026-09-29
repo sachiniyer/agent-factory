@@ -39,11 +39,17 @@ const (
 	// summary (#1087 play-test): the full manager gets a centered overlay so
 	// its form is never clamped into the narrow rail.
 	stateTasks
-	// stateConfigEditor is the state when the global config editor overlay is
+	// stateConfigEditor is the state when the config editor overlay is
 	// open (","). Like the hooks and tasks overlays it owns the keyboard while
 	// open, so its value field can take arbitrary text (a listen address, a
 	// branch prefix) without the global key map eating the runes.
 	stateConfigEditor
+	// stateConfigScope is the state when the config editor's scope picker is
+	// open (`p` inside `,`): which scope the pane reads — global, or one
+	// project's effective stack (config.read-project). A sub-state of
+	// stateConfigEditor like stateSelectBackend is of stateNew: closing it
+	// returns to the editor, which stays rendered underneath.
+	stateConfigScope
 	// stateSelectHandoffAgent is the state when the user is picking which agent
 	// to hand the selected session off to (#2013). It reuses the same selection
 	// overlay stateSelectProgram uses at create time; the two differ only in what

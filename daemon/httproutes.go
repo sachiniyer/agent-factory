@@ -360,7 +360,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/GetConfig",
-		Description: "List every user-facing global config key with its purpose, type, default, and current value.",
+		Description: "List every user-facing config key with its purpose, type, default, and current value. With repo_path, resolves the project-effective stack (built-in < global < in-repo < personal) for that repository instead.",
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
 	},

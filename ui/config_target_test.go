@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/rpc"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -191,7 +192,7 @@ func TestConfigEditorReadsTheTargetedDaemon(t *testing.T) {
 		},
 	})
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor("")
 	if err != nil {
 		t.Fatalf("ReadConfigForEditor against a remote target: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestConfigEditorRefusesADaemonThatDoesNotServeGetConfig(t *testing.T) {
 	// daemon whose route table predates the route does.
 	d := serveRemoteDaemon(t, "0.9.1", nil)
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor("")
 	if err == nil {
 		t.Fatalf("a daemon that does not serve GetConfig must be refused; got %d entries at %q", len(entries), location)
 	}
@@ -262,7 +263,7 @@ func TestConfigEditorReadRefusesADaemonServingNoKeys(t *testing.T) {
 		},
 	})
 
-	_, _, err := ReadConfigForEditor()
+	_, _, _, err := ReadConfigForEditor("")
 	if err == nil {
 		t.Fatal("a daemon answering with no config keys must be refused, not rendered as an empty form")
 	}
@@ -279,7 +280,7 @@ func TestConfigEditorLocalTargetIsUnchanged(t *testing.T) {
 	localTarget(t)
 	localPath, _ := seedLocalConfig(t)
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor("")
 	if err != nil {
 		t.Fatalf("ReadConfigForEditor with no remote target: %v", err)
 	}
@@ -300,7 +301,7 @@ func editKeyInPane(t *testing.T, entries []config.ConfigEntry, location, key, va
 	t.Helper()
 	c := NewConfigPane()
 	c.SetSize(100, 200)
-	c.SetEntries(entries, location)
+	c.SetEntries(entries, location, "")
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -405,7 +406,7 @@ func TestConfigPaneEditWithNoTargetStillWritesThisMachine(t *testing.T) {
 	localTarget(t)
 	localPath, _ := seedLocalConfig(t)
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +433,7 @@ func TestConfigPaneEditWithNoTargetStillWritesThisMachine(t *testing.T) {
 func TestConfigPaneHeaderShowsTheDaemonItIsEditing(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(120, 40)
-	c.SetEntries(remoteManifest(), "http://box:8443 · "+remotePath)
+	c.SetEntries(remoteManifest(), "http://box:8443 · "+remotePath, "")
 	c.SetFocus(true)
 
 	screen := c.String()
@@ -765,4 +766,106 @@ func TestRemoteConfigSetFallsBackToResultWarnings(t *testing.T) {
 		t.Errorf("the remote write did not target the stub daemon: got %q want %q", want, got)
 	}
 	assertLocalConfigUntouched(t, localPath, original)
+}
+
+// The project-scope read (config.read-project) over a remote target: the pane
+// must send repo_path to the TARGETED daemon, and the daemon's echoed
+// project_root — not the selector it was sent — is what names the scope. The
+// local file again holds a different agent: a read that resolved locally would
+// show it and fail on the value alone.
+func TestConfigEditorReadsProjectScopeFromTheTargetedDaemon(t *testing.T) {
+	localPath, original := seedLocalConfig(t)
+	const projectRoot = "/srv/repos/website"
+	d := serveRemoteDaemon(t, "9.9.9", map[string]func([]byte) apiproto.Envelope{
+		"/v1/GetConfig": func(body []byte) apiproto.Envelope {
+			var req daemon.GetConfigRequest
+			_ = json.Unmarshal(body, &req)
+			if req.RepoPath != projectRoot {
+				// The remote read MUST carry the selector: an answer without it
+				// would be the global file labeled as a project's.
+				return apiproto.Failure("GetConfig arrived without repo_path")
+			}
+			return apiproto.Success(daemon.GetConfigResponse{
+				Entries:     remoteManifest(),
+				Path:        remotePath,
+				ProjectRoot: projectRoot,
+			})
+		},
+	})
+
+	entries, location, project, err := ReadConfigForEditor(projectRoot)
+	if err != nil {
+		t.Fatalf("ReadConfigForEditor with a project scope: %v", err)
+	}
+	if got := entryValue(t, entries, "default_program"); got != remoteValue {
+		t.Errorf("the remote daemon's project-scoped value must win: got %q want %q", got, remoteValue)
+	}
+	if project != projectRoot {
+		t.Errorf("the pane must label the scope the daemon RESOLVED: got %q want %q", project, projectRoot)
+	}
+	if !strings.Contains(location, projectRoot) || !strings.Contains(location, d.url) {
+		t.Errorf("a remote project read must name BOTH the daemon and the root: got %q", location)
+	}
+	assertLocalConfigUntouched(t, localPath, original)
+}
+
+// The local half of the same read: a repo_selector resolves through
+// config.ManifestWithRepoValues in-process (the same resolver `af config list
+// --repo` uses), and a path that is not a repository is an error — never a
+// global read mislabeled as a project's.
+func TestConfigEditorLocalProjectScope(t *testing.T) {
+	localTarget(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("default_program = '"+localValue+"'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := t.TempDir()
+	entries, location, project, err := ReadConfigForEditor(repo)
+	if err == nil {
+		t.Fatalf("a non-repo selector must be refused, not read as global; got %d entries at %q", len(entries), location)
+	}
+	if project != "" {
+		t.Errorf("a refused read must not report a project root: got %q", project)
+	}
+
+	// A real repo resolves, and its in-repo override beats the global file.
+	repo = filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	init := exec.Command("git", "init", "--quiet")
+	init.Dir = repo
+	init.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	if out, err := init.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s", out)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".agent-factory"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".agent-factory", config.TomlConfigFileName),
+		[]byte("default_program = '"+remoteValue+"'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, location, project, err = ReadConfigForEditor(repo)
+	if err != nil {
+		t.Fatalf("ReadConfigForEditor for a repo: %v", err)
+	}
+	if got := entryValue(t, entries, "default_program"); got != remoteValue {
+		t.Errorf("the in-repo layer must win over the global file: got %q want %q", got, remoteValue)
+	}
+	// RepoFromPath canonicalizes, so compare against the resolved root.
+	repoCtx, err := config.RepoFromPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project != repoCtx.Root {
+		t.Errorf("the project root is the daemon's canonical echo: got %q want %q", project, repoCtx.Root)
+	}
+	if !strings.Contains(location, repoCtx.Root) {
+		t.Errorf("a local project read must name its root: got %q", location)
+	}
 }

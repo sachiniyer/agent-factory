@@ -226,3 +226,92 @@ func commaListValue(field reflect.Value) string {
 	}
 	return strings.Join(parts, ",")
 }
+
+// ManifestWithRepoValues is the project-scoped counterpart of
+// ManifestWithValues: the FULL manifest (AllManifest — the global view plus the
+// repo-only keys a global file cannot hold) zipped with the values that resolve
+// for repo through the same layered read `af config list --repo` performs —
+// built-in < global < in-repo < personal project.
+//
+// It exists so an editor's project scope cannot drift from the CLI's: both
+// describe the same ResolvedConfig and render it through the same editor forms
+// CurrentValue defines. Read-only — ResolveConfigForRepoInspection records no
+// in-repo load observation, so opening an editor over a project writes nothing.
+//
+// root_agent is substituted from the specialized four-layer inspection
+// (built-in/global/legacy root_agents/personal) rather than the generic
+// manifest pass, matching `af config list --repo` so the pane and the CLI
+// cannot disagree about the profile a session would get (#2607).
+func ManifestWithRepoValues(repo *RepoContext) ([]ConfigEntry, error) {
+	resolved, err := ResolveConfigForRepoInspection(repo)
+	if err != nil {
+		return nil, err
+	}
+	// The caller named this project explicitly, so the root-agent lookup is
+	// strict — the same contract `af config list --repo` applies (#3264): an
+	// unreadable project layer is an error, never silently "absent".
+	rootAgent, err := ResolveRootAgentForInspection(repo.Root, true)
+	if err != nil {
+		return nil, err
+	}
+	entries := AllManifest()
+	out := make([]ConfigEntry, 0, len(entries))
+	for _, e := range entries {
+		rv, _ := resolved.ResolvedValue(e.Key)
+		if e.Key == "root_agent" {
+			rv = rootAgent
+		}
+		out = append(out, ConfigEntry{
+			Key:           e.Key,
+			Type:          e.Type,
+			AcceptedTypes: e.AcceptedTypes,
+			Default:       e.Default,
+			Purpose:       e.Purpose,
+			Tier:          int(e.Tier),
+			TierName:      TierName(e.Tier),
+			Editable:      true,
+			Settable:      e.Settable,
+			Enum:          e.Enum,
+			Value:         resolvedEditorValue(e.Key, rv.Value),
+			// Uniformly true — see the field's comment.
+			RequiresRestart: true,
+		})
+	}
+	return out, nil
+}
+
+// resolvedEditorValue renders a RESOLVED manifest value (ResolvedValue.Value)
+// in the same editor form CurrentValue defines for a live field: a string
+// bare, a bool or int in decimal, a comma-list key comma-joined, a composite
+// as compact JSON. An absent or nil value renders as "" — the editor's unset
+// form — rather than "null", matching what an empty field looks like in both
+// panes.
+func resolvedEditorValue(key string, value any) string {
+	if value == nil {
+		return ""
+	}
+	// Same tombstone rule as CurrentValue: an empty command is the on-disk
+	// deletion marker, not a value the user sees.
+	if key == "program_overrides" {
+		if m, ok := value.(map[string]string); ok {
+			visible := make(map[string]string, len(m))
+			for name, command := range m {
+				if command != "" {
+					visible[name] = command
+				}
+			}
+			return editorValue(reflect.ValueOf(visible))
+		}
+	}
+	v := reflect.ValueOf(value)
+	for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return ""
+		}
+		v = v.Elem()
+	}
+	if isCommaListKey(key) {
+		return commaListValue(v)
+	}
+	return editorValue(v)
+}

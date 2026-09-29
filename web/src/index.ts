@@ -150,6 +150,8 @@ const store = new Store<AppState>({
   view: "sessions",
   config: [],
   configPath: "",
+  configScope: "",
+  configProjectRoot: "",
   configStatus: null,
   accounts: emptyAccountsState(),
   selectedProject: null,
@@ -1843,21 +1845,43 @@ function clearTabError(): void {
  *  though it had not taken. */
 const configRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: getConfig,
+  // The scope is read at fetch time: the commit of an answer for a scope the
+  // user has since left is exactly what the fence exists to drop.
+  fetch: (tok) => getConfig(tok, store.get().configScope),
   commit: (resp) => {
-    store.set({ config: resp.entries, configPath: resp.path });
+    // The RESOLVED root names the scope — the daemon's echo, never the request
+    // — and the select lands on it too, so a respelled path still reads back as
+    // the canonical scope the values were resolved for (#2216 stage 7).
+    const root = resp.project_root ?? "";
+    store.set({ config: resp.entries, configPath: resp.path, configProjectRoot: root, configScope: root });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
   // settings" rather than "the read failed". Under the fence like the commit — an
   // older request's transport blip must not paint an error over the fresher answer
   // already on screen, which is the same "the older one commits nothing" rule.
   onError: (err: unknown) => {
+    // The rows on screen are still the previous scope's, so the select must
+    // snap back to them — an unresolved path that stayed selected would label
+    // global rows as a project read, the lie this whole scope exists to prevent.
+    store.set({ configScope: store.get().configProjectRoot });
     surfaceTabError(err);
   },
 });
 
 function refreshConfig(): void {
   configRefetcher.refresh();
+}
+
+/** The config view's scope select (#2216 stage 7): re-reads GetConfig for the
+ *  picked scope, the web analogue of the TUI's `p` picker in `,` and of
+ *  `af config list --repo`. A project scope is a different LIST, so any pending
+ *  write echo is dropped with the rows it belonged to. */
+function selectConfigScope(repoPath: string): void {
+  if (repoPath === store.get().configScope) {
+    return;
+  }
+  store.set({ configScope: repoPath, configStatus: null });
+  refreshConfig();
 }
 
 /** The accounts read (#3385), fenced like the config read and for the same
@@ -2540,6 +2564,7 @@ const actions = {
   dropTabOnPaneAt: (x: number, y: number, drag: DragPayload) => splitView.dropTabAt(x, y, drag),
   switchView,
   setConfigValue: applyConfigValue,
+  selectConfigScope,
   openConfigAssistant: doOpenConfigAssistant,
   registerAccount: doRegisterAccount,
   openAccountLogin: doOpenAccountLogin,

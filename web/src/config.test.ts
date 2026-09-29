@@ -356,3 +356,20 @@ test("a save for another key never closes the field being edited", () => {
   assert.equal(shouldCloseSavedField(okStatus("auto_update"), null, true), false);
   assert.equal(shouldCloseSavedField(null, "network.listen_addr", true), false);
 });
+
+// The project-scope read (config.read-project): getConfig sends repo_path only
+// when a scope is selected, carries the daemon's resolved project_root back for
+// the header's scope label, and the global call is byte-identical to before —
+// {} with no repo_path, so a scopeless caller can never look like a project read.
+test("getConfig sends repo_path only for a project scope", async () => {
+  const cap = stubFetch({ entries: [entry()], path: "/daemon/config.toml", project_root: "/srv/repo" });
+  const resp = await getConfig("tok", "/srv/repo");
+  assert.deepEqual(cap.body, { repo_path: "/srv/repo" });
+  assert.equal(resp.project_root, "/srv/repo");
+  assert.equal(resp.path, "/daemon/config.toml");
+
+  const global = stubFetch({ entries: [entry()], path: "/daemon/config.toml" });
+  const respGlobal = await getConfig("tok");
+  assert.deepEqual(global.body, {}, "the global read sends no repo_path");
+  assert.equal(respGlobal.project_root, "", "a global answer carries no scope");
+});
