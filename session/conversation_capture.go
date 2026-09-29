@@ -65,6 +65,21 @@ type ConversationCaptureSnapshot struct {
 	codexHome   string
 	workingDir  string
 	codexBefore map[string]struct{}
+	// carried is the conversation a same-agent account swap copied into this
+	// store and resumes (#4367). Its rollout is recorded in codexBefore even
+	// though the copy lands after the snapshot, so capture only ever reports a
+	// thread Codex itself minted.
+	carried AgentConversationData
+}
+
+// expectCarriedCodexRollout tells capture that path holds conv's rollout,
+// placed there by af rather than minted by the replacement.
+func (s *ConversationCaptureSnapshot) expectCarriedCodexRollout(conv AgentConversationData, path string) {
+	s.carried = conv
+	if s.codexBefore == nil {
+		s.codexBefore = make(map[string]struct{})
+	}
+	s.codexBefore[path] = struct{}{}
 }
 
 func cloneConversationCaptureSnapshot(snap ConversationCaptureSnapshot) ConversationCaptureSnapshot {
@@ -92,6 +107,14 @@ func BeginConversationCapture() ConversationCaptureSnapshot {
 // before launch and supplied here (#2228 review).
 func BeginConversationCaptureAtCodexHome(home string) ConversationCaptureSnapshot {
 	return beginConversationCaptureAtCodexHomeAndWorkingDir(home, "")
+}
+
+// BeginConversationCaptureAtCodexHomeAndWorkingDir snapshots an exact Codex
+// store and binds later discovery to one launch directory. Account-scoped
+// runtimes share a provider store, so the directory correlation keeps another
+// session's concurrently created rollout from making this capture ambiguous.
+func BeginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) ConversationCaptureSnapshot {
+	return beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir)
 }
 
 func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) ConversationCaptureSnapshot {
@@ -186,6 +209,9 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 	if snap.codexHome == "" {
 		return AgentConversationData{}, nil
 	}
+	if snap.carried.HasID() {
+		return captureCarriedCodexConversation(snap)
+	}
 	start := time.Now()
 	absentDeadline := start.Add(timeout)
 	settleDeadline := start.Add(timeout + codexSessionMetaSettleTimeout)
@@ -204,6 +230,37 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 		}
 		if time.Now().After(deadline) {
 			return conv, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// captureCarriedCodexConversation confirms which thread a replacement that was
+// told to resume a carried rollout is on. Codex resumes in place — same id,
+// same file (measured for #4367) — so no new rollout for this working
+// directory means the carried id stands, and it returns immediately rather
+// than waiting out the absence timeout. If a future Codex forks on resume
+// instead, the fork is the one new rollout for this directory, and capture
+// follows it. It runs after the readiness wait, when a startup fork would
+// already exist.
+//
+// The returned record is freshly stamped even when the id is unchanged: the
+// caller commits it through SetAgentConversationForRuntime, which reports
+// "no change" as a lost runtime.
+func captureCarriedCodexConversation(snap ConversationCaptureSnapshot) (AgentConversationData, error) {
+	settleDeadline := time.Now().Add(codexSessionMetaSettleTimeout)
+	for {
+		conv, _, err := captureCodexConversationOnce(snap)
+		if conv.HasID() {
+			return conv, nil
+		}
+		if err == nil {
+			carried := snap.carried
+			carried.CapturedAt = time.Now()
+			return carried, nil
+		}
+		if !errors.Is(err, errCodexCaptureUndecided) || time.Now().After(settleDeadline) {
+			return AgentConversationData{}, err
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

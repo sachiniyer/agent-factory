@@ -247,7 +247,9 @@ type residueShape struct {
 	why string
 	// The removable entries, deepest first when removed: leaf files, stamps and
 	// sockets, then tmux-<uid> dirs. leaves are a SandboxHome's logs; stamps are
-	// testresidue's owner stamp files, which either kind can hold.
+	// testresidue's owner stamp files, which only the stamped kinds
+	// (SandboxHome, TmuxSocketDir) can hold — never a SandboxUserHome, whose
+	// harness writes no stamp.
 	leaves  []string
 	stamps  []string
 	sockets []string
@@ -260,6 +262,40 @@ var (
 	sandboxLogName  = regexp.MustCompile(`^agent-factory\.log(\.[0-9]+)?$`)
 	tmuxUserDirName = regexp.MustCompile(`^tmux-[0-9]+$`)
 )
+
+// sandboxUserHomeLeaves are the regular files userhome.sandboxUserHome seeds the
+// sandboxed HOME with: an empty .zshrc and the testresidue.SandboxUserHomeMarker
+// it always writes, plus a .gitconfig it writes only when the developer has no
+// GIT_CONFIG_GLOBAL and git includes apply. A leaked af-test-user-home-* holds
+// exactly these and no owner stamp — sandboxUserHome never writes one, so
+// orphansweep cannot attribute it (#4170 sandbox-HOME regression) — so this set,
+// not process ownership, is what authorises doctor to remove it.
+var sandboxUserHomeLeaves = map[string]bool{
+	".zshrc":                          true,
+	testresidue.SandboxUserHomeMarker: true,
+	".gitconfig":                      true,
+}
+
+// sandboxUserHomeRequiredLeaves are the leaves the harness always writes. A dir
+// missing one was not left by a completed sandboxUserHome — its setup never
+// finished, a binary killed between MkdirTemp and the writes — and is reported
+// rather than removed, since content the harness did not leave behind is the
+// one thing this check is never licensed to delete.
+var sandboxUserHomeRequiredLeaves = map[string]bool{
+	".zshrc":                          true,
+	testresidue.SandboxUserHomeMarker: true,
+}
+
+// holdsOpenFile reports whether a harness directory holds a regular file a live
+// process may keep open, so a removal rests on seeing that nothing does. A
+// SandboxHome's package log is held open by its test binary for as long as it
+// runs; a sandboxed HOME's seed files are written once at setup, but a shell
+// pane the test launched into it may keep .zshrc or the .gitconfig open, so it
+// gets the same gate. A tmux socket dir holds nothing to lose via this view —
+// its open files are sockets, judged by probeResidueSockets — so it does not.
+func holdsOpenFile(kind testresidue.Kind) bool {
+	return kind == testresidue.SandboxHome || kind == testresidue.SandboxUserHome
+}
 
 func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 	var shape residueShape
@@ -287,9 +323,12 @@ func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 		}
 		shape.newest = later(shape.newest, entry.ModTime())
 		switch {
-		case isOwnerStamp(e.Name()) && entry.Mode().IsRegular():
+		case (kind == testresidue.SandboxHome || kind == testresidue.TmuxSocketDir) &&
+			isOwnerStamp(e.Name()) && entry.Mode().IsRegular():
 			shape.stamps = append(shape.stamps, path)
 		case kind == testresidue.SandboxHome && sandboxLogName.MatchString(e.Name()) && entry.Mode().IsRegular():
+			shape.leaves = append(shape.leaves, path)
+		case kind == testresidue.SandboxUserHome && entry.Mode().IsRegular() && sandboxUserHomeLeaves[e.Name()]:
 			shape.leaves = append(shape.leaves, path)
 		case kind == testresidue.TmuxSocketDir && tmuxUserDirName.MatchString(e.Name()) && entry.IsDir():
 			if why := shape.addTmuxUserDir(path); why != "" && shape.ok {
@@ -301,14 +340,38 @@ func readResidueShape(dir string, kind testresidue.Kind) residueShape {
 			}
 		}
 	}
+	// A SandboxUserHome that the harness completed always holds .zshrc and the
+	// marker; one missing either was abandoned mid-setup, content this check is
+	// not licensed to delete, so it reads as not-ok even when nothing in it is
+	// foreign. (A sibling kind's "empty dir is removable" rule does not apply:
+	// sandboxUserHome writes its leaves synchronously right after MkdirTemp.)
+	if kind == testresidue.SandboxUserHome && shape.ok {
+		present := make(map[string]bool, len(shape.leaves))
+		for _, p := range shape.leaves {
+			present[filepath.Base(p)] = true
+		}
+		var missing []string
+		for req := range sandboxUserHomeRequiredLeaves {
+			if !present[req] {
+				missing = append(missing, req)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			shape.ok, shape.why = false, fmt.Sprintf("no %s, which the harness always writes into a sandbox HOME", strings.Join(missing, " or "))
+		}
+	}
 	return shape
 }
 
 // isOwnerStamp reports whether name is the owner stamp testguard writes into
-// every harness directory, or that stamp before its rename into place. What
-// testguard writes there is one line identifying the test binary that made the
-// directory — nothing a user could want back once the directory itself is
-// judged removable.
+// the harness directories it stamps (SandboxHome and TmuxSocketDir), or that
+// stamp before its rename into place. A SandboxUserHome is never stamped, so a
+// file named owner/owner.tmp inside one is foreign content, not a stamp — the
+// caller (readResidueShape) gates this on kind before filing a path under
+// shape.stamps. What testguard writes there is one line identifying the test
+// binary that made the directory — nothing a user could want back once the
+// directory itself is judged removable.
 func isOwnerStamp(name string) bool {
 	return name == testresidue.OwnerStampFile || name == testresidue.OwnerStampTempFile
 }
@@ -520,12 +583,18 @@ func assessTestResidueDir(ctx *scanContext, report *Report, dir string, kind tes
 		})
 		return
 	}
-	if kind == testresidue.SandboxHome && (ctx.snap == nil || !refs.openFilesKnown) {
+	if holdsOpenFile(kind) && (ctx.snap == nil || !refs.openFilesKnown) {
+		whatShort := "a test run's sandbox home"
+		thenRisk := "a test binary still writing its log cannot be ruled out"
+		if kind == testresidue.SandboxUserHome {
+			whatShort = "a test run's sandboxed HOME"
+			thenRisk = "a process still using one of its files cannot be ruled out"
+		}
 		report.addAdvisoryFinding(Finding{
 			Check: checkTestResidueDir,
-			Detail: fmt.Sprintf("%s is a test run's sandbox home holding only what the test harness leaves "+
-				"behind, untouched for %s, but this run cannot see which files processes hold open, so a test "+
-				"binary still writing its log cannot be ruled out — reported, not removed", dir, formatAge(age.Seconds())),
+			Detail: fmt.Sprintf("%s is %s holding only what the test harness leaves "+
+				"behind, untouched for %s, but this run cannot see which files processes hold open, so %s — "+
+				"reported, not removed", dir, whatShort, formatAge(age.Seconds()), thenRisk),
 			Severity:    StatusWarn,
 			Remediation: "verify no test run is using it, then `" + shellsuggest.Command("rm", "-r", dir) + "`",
 		})
@@ -543,6 +612,19 @@ func assessTestResidueDir(ctx *scanContext, report *Report, dir string, kind tes
 			what = "a test run's sandbox home holding only its owner stamp"
 		default:
 			what = "an empty sandbox home from a test run"
+		}
+	} else if kind == testresidue.SandboxUserHome {
+		hasGitconfig := false
+		for _, p := range shape.leaves {
+			if filepath.Base(p) == ".gitconfig" {
+				hasGitconfig = true
+				break
+			}
+		}
+		if hasGitconfig {
+			what = "a test run's sandboxed HOME holding only the .zshrc, sandbox-home marker and .gitconfig the harness seeds it with"
+		} else {
+			what = "a test run's sandboxed HOME holding only the .zshrc and sandbox-home marker the harness seeds it with"
 		}
 	}
 	report.addActionableFinding(Finding{
@@ -584,12 +666,14 @@ func testResidueRemoveFix(ctx *scanContext, dir, tempDir, activeHome string, kin
 		if err != nil {
 			return fmt.Errorf("refusing to remove %s: cannot check whether a live tmux session references it: %w", dir, err)
 		}
-		// A SandboxHome removal rests on seeing that nothing has its log open, so
-		// an unreadable table refuses it. A tmux socket dir holds nothing to lose,
-		// so for it the table is only ever a reason to keep — the direction
-		// fixTimeWorkingDirs takes for the same reason.
+		// A removal that rests on seeing nothing has a harness file open — a
+		// SandboxHome's package log, or a sandboxed HOME's seed files a pane may
+		// hold — refuses on an unreadable table, since the one thing that view
+		// would show is exactly the reason to keep it. A tmux socket dir holds
+		// nothing to lose, so for it the table is only ever a reason to keep — the
+		// direction fixTimeWorkingDirs takes for the same reason.
 		refs, err := ctx.fixTimeResidueRefs(tempDir)
-		if kind == testresidue.SandboxHome {
+		if holdsOpenFile(kind) {
 			if err != nil {
 				return fmt.Errorf("refusing to remove %s: %w", dir, err)
 			}

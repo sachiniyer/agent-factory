@@ -224,14 +224,20 @@ func TestGenericTimeoutDoesNotEstablishHandoffProof(t *testing.T) {
 }
 
 // TestCallDaemonHandoffRetryHonorsAdmissionDeadline makes the upgrade-gate
-// probe consume a seven-second internal allowance after the hand-off socket is
-// gone. The client owns a five-second admission budget, so it must pass that
-// earlier deadline into EnsureDaemon and return near five seconds, never wait
+// probe consume an internal allowance past the admission budget after the
+// hand-off socket is gone. The client owns the admission budget, so it must
+// pass that earlier deadline into EnsureDaemon and return near it, never wait
 // for the gate's longer internal timeout and then enter launch/readiness work.
+// Both windows are shrunk together (#4464): what is proven is that the
+// admission deadline wins the ordering, not its production five-second value.
 func TestCallDaemonHandoffRetryHonorsAdmissionDeadline(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	withAutostartTestEnv(t, runtime.GOOS)
 	refuseRealDaemonLaunchForHandoffRetryTest(t)
+
+	previousAdmission := daemonAdmissionRetryWait
+	daemonAdmissionRetryWait = 500 * time.Millisecond
+	t.Cleanup(func() { daemonAdmissionRetryWait = previousAdmission })
 
 	oldSrv := rpc.NewServer()
 	oldControl := &quiesceThenTransitionControl{}

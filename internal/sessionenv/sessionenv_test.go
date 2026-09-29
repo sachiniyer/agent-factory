@@ -374,3 +374,116 @@ func TestWrapCommandNeverRendersEnvironmentValues(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentNamespaceForCommandAcceptsPathQualifiedEnv is the regression test for
+// the #4356 narrowing. Pre-#4356, AgentForCommand matched env by basename, so a
+// session persisted with a path-qualified env wrapper such as
+// /usr/local/bin/env CODEX_HOME=/x codex plus a selected account could still
+// resolve its agent namespace on restore. #4356 replaced that with the strict
+// isTrustedEnvExecutable set (env, /bin/env, /usr/bin/env), so the same program
+// fell to "" and the daemon-spawned VS Code editor refused with
+// ErrUnsupportedAgent for a session the create-time gate
+// tmux.DetectAgentExecutable still accepted. AgentNamespaceForCommand keeps the
+// pre-#4356 basename rule for the namespace-only callers that must agree with
+// the create gate; AgentForCommand stays strict for credential grants.
+func TestAgentNamespaceForCommandAcceptsPathQualifiedEnv(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{name: "bare env", command: "env codex", want: "codex"},
+		{name: "bin env", command: "/bin/env codex", want: "codex"},
+		{name: "usr bin env", command: "/usr/bin/env codex", want: "codex"},
+		{name: "usr local bin env", command: "/usr/local/bin/env CODEX_HOME=/x codex", want: "codex"},
+		{name: "nix store env", command: "/run/current-system/sw/bin/env codex", want: "codex"},
+		{name: "relative env", command: "./env codex", want: "codex"},
+		{name: "tmp env", command: "/tmp/env CODEX_CONFIG_DIR=/y claude", want: "claude"},
+		{name: "env with assignments and flags", command: "/usr/local/bin/env -i HOME=/h GEMINI_HOME=/g gemini --resume latest", want: "gemini"},
+		{name: "bare agent still classified", command: "codex --model o3", want: "codex"},
+		{name: "agent path still classified", command: "/opt/bin/claude --permission-mode plan", want: "claude"},
+		{name: "exec wrapper", command: "exec -- gemini --model flash", want: "gemini"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AgentNamespaceForCommand(test.command); got != test.want {
+				t.Fatalf("AgentNamespaceForCommand(%q) = %q, want %q", test.command, got, test.want)
+			}
+		})
+	}
+}
+
+// TestAgentNamespaceForCommandMatchesAgentForCommandOnStrictSet confirms the two
+// functions agree on every spelling the credential-bearing path still trusts, so
+// a session created with one of the trusted env spellings is classified
+// identically by both surfaces. Disagreement here would mean a session the
+// credential path grants to is classified differently by the editor scope.
+func TestAgentNamespaceForCommandMatchesAgentForCommandOnStrictSet(t *testing.T) {
+	for _, command := range []string{
+		"env codex",
+		"/bin/env codex",
+		"/usr/bin/env codex",
+		"env CLAUDE_CODE_USE_BEDROCK=1 claude",
+		"/usr/bin/env CODEX_HOME=/x codex --model o3",
+		"codex",
+		"claude --permission-mode plan",
+		"/opt/bin/gemini",
+		"exec -- aider",
+		"CODEX_HOME=/tmp codex",
+	} {
+		if got, want := AgentNamespaceForCommand(command), AgentForCommand(command); got != want {
+			t.Errorf("namespace and credential classifiers disagree on trusted command %q: namespace=%q credential=%q",
+				command, got, want)
+		}
+	}
+}
+
+// TestAgentForCommandStillRejectsPathQualifiedEnv guards the #4356 security
+// boundary: the credential-bearing classifier must keep rejecting path-qualified
+// env spellings that AgentNamespaceForCommand now accepts. A regression here
+// reopens the ./env grant leak the narrowing closed.
+func TestAgentForCommandStillRejectsPathQualifiedEnv(t *testing.T) {
+	for _, command := range []string{
+		"/usr/local/bin/env codex",
+		"/run/current-system/sw/bin/env codex",
+		"./env codex",
+		"/tmp/env claude",
+	} {
+		if got := AgentForCommand(command); got != "" {
+			t.Errorf("AgentForCommand(%q) = %q, want \"\": the credential classifier must keep the strict env set from #4356",
+				command, got)
+		}
+		if sc := credentialAgentForCommand(command); sc != "" {
+			t.Errorf("credentialAgentForCommand(%q) = %q, want \"\": path-qualified env must stay credential-free",
+				command, sc)
+		}
+	}
+}
+
+// TestAgentNamespaceForCommandRejectsNonAgentCommands ensures the lenient env
+// rule widens only the env-wrapper recognition, not the supported-agent set.
+// An agent-looking argument to a non-env executable, a compound command, a
+// redirect, a dynamic word, and an unsupported wrapper must all still classify
+// as no agent — the same reject set AgentForCommand keeps.
+func TestAgentNamespaceForCommandRejectsNonAgentCommands(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{name: "agent name as data to another executable", command: "./collect codex"},
+		{name: "agent server lookalike", command: "/srv/af agent-server --listen :43110 --repo /workspace --title codex"},
+		{name: "compound command", command: "collect; codex"},
+		{name: "redirect", command: "codex >output"},
+		{name: "dynamic argument", command: "codex --model $MODEL"},
+		{name: "unsupported wrapper", command: "command codex"},
+		{name: "empty", command: ""},
+		{name: "whitespace", command: "   "},
+		{name: "bare shell", command: "bash"},
+		{name: "env running unknown tool", command: "/usr/local/bin/env unknown-tool --flag"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AgentNamespaceForCommand(test.command); got != "" {
+				t.Errorf("AgentNamespaceForCommand(%q) = %q, want \"\"", test.command, got)
+			}
+		})
+	}
+}

@@ -172,6 +172,13 @@ type TmuxSession struct {
 	// selected account's environment without pretending its shell/process command
 	// is the provider executable guarded by the direct-agent launch proof.
 	accountEnvironmentOnly bool
+	// remainOnExit keeps the pane as a held dead pane after its command exits,
+	// so a process tab's completion is provable through pane_dead /
+	// pane_dead_status instead of the session's absence alone (#4479). Set only
+	// on process-tab siblings — agent and shell panes keep the default
+	// exit-destroys-session semantics their own restore contracts rely on.
+	// Guarded by programMu; read by Start's new-session arguments.
+	remainOnExit bool
 	// accountLoginEnv holds the NAME=VALUE entries that make an account LOGIN
 	// pane browser-free (#3854), or nil for every other pane. It is a resolved
 	// list rather than a bool because the operator's own pass-through wins: a name
@@ -201,6 +208,10 @@ type TmuxSession struct {
 	// safety-buffering intervention can prove it did not select the downgrade.
 	// Access only while inputMu is held.
 	codexSafety codexSafetyBufferingState
+	// codexUpdate prevents a delayed picker repaint from repeating navigation or
+	// confirmation while dismissing Codex's launch-time update prompt.
+	// Access only while inputMu is held.
+	codexUpdate codexUpdatePromptState
 	// claudeTrust remembers whether the folder-trust handler has already
 	// reported a dialog it refuses to answer, so the daemon's per-second poll
 	// logs that once rather than every tick. Access only while inputMu is held.

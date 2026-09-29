@@ -57,7 +57,10 @@ func TestStartRestoresCarriedTabs(t *testing.T) {
 
 	workdir := carryTestRepo(t)
 	const agentName = "af_2628_root"
-	cmdExec := nameKeyedExec(map[string]bool{})
+	// The process tab's tmux session is still live when the replacement starts:
+	// it comes back by reattach, the only path a process tab has — a missing one
+	// would restore inert instead, never re-executing its command (#4479).
+	cmdExec := nameKeyedExec(map[string]bool{agentName + tmuxTabSeparator + "logs": true})
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
 	inst, err := NewInstance(InstanceOptions{

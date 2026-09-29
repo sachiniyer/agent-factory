@@ -522,7 +522,7 @@ func warnLegacyBareCloneSessions(repo *config.RepoContext) {
 // repository may live there and legitimately own these tasks.
 //
 // The scan is a pure read of the task file — no ProjectPath resolution and no
-// binding backfill (LoadTasksForRepoID durably rewrites bindings and hands the
+// binding backfill (LoadTasksForRepoIDWithBindingUpdates durably rewrites bindings and hands the
 // caller a publish obligation, neither of which belongs on a create path).
 // Matching is therefore textual: the retained RepoID, or a legacy row whose
 // RepoID was never written and whose ProjectPath still spells the old parent.

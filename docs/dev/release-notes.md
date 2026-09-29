@@ -8,6 +8,70 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## A project's `branch_prefix` override now names its branches (upcoming release)
+
+- **`af config set --project <p> branch_prefix <value>` now takes effect.**
+  The override was accepted, written, and reported as the winning value by
+  `af config get branch_prefix --repo <p> --explain`, but every session was
+  still named with the global prefix. Now the next session created in that
+  project gets the project's prefix, and projects without an override keep the
+  global one.
+- **`branch_prefix` no longer needs a daemon restart.** A saved change, global
+  or per project, applies to the next session created, and `af config set`
+  and the config panes now say so. Before, the daemon read the global value
+  once at startup.
+- **The naming form checks titles against the same prefix.** The TUI's
+  duplicate-title check reads the active project's prefix when `af` starts or
+  switches projects. The daemon still re-checks every create.
+- Docker and ssh sessions are unchanged: their branch is created inside the
+  sandbox, which uses its own config.
+
+## Sessions stuck in `loading` after a handoff recover on upgrade (upcoming release)
+
+- **Sessions stuck in `loading` recover on their own when you upgrade.** A
+  cross-agent handoff whose mission delivery came back `sent-unverified` or
+  `could-not-confirm` used to leave the session showing `loading` indefinitely,
+  including across daemon restarts. Every action on it was suppressed. Once the
+  upgraded daemon starts, those sessions load as `ready` (or whatever their
+  agent is actually doing), with no action needed (#4429, #4842).
+- **The handoff's mission is still marked as owed.** af cannot tell whether the
+  incoming agent received its takeover brief, so you decide. Look at the pane
+  (`af sessions preview <title>`), then choose one:
+  - **Mark delivered** if the agent already received the brief and acted on it:
+    `af sessions retry-limit <title> --delivered`, the **Mark delivered**
+    choice in the picker `c` opens in the TUI, or the session's **Mark
+    delivered** action on the web. This retires the mission without sending
+    anything.
+  - **Resend** if it did not: `af sessions retry-limit <title>`, the first
+    choice in the same TUI picker, or **Retry handoff** on the web. This sends
+    the mission again, so do not use it on an agent that already did the work.
+
+  These are also the manual exit for a session that does not recover on its
+  own: one whose startup af could not confirm, or one whose mission is still
+  owed after the upgrade. A mission recorded as `not-delivered` is different.
+  af knows that one never landed, so automatic recovery resends it, and the
+  session shows `loading` until that resend lands. These verbs do not apply
+  to it.
+- **Until the mission is resolved, a new handoff on that session is refused.**
+  The error names both verbs. A task-spawned session also keeps its task run
+  open, so its `on_complete` policy waits, and it applies on the first idle
+  poll after you resolve the mission.
+- `--delivered` needs the upgraded daemon. An older daemon refuses it rather
+  than resending.
+
+## Warning: unknown `[docker]`/`[ssh]` keys in in-repo config (upcoming release)
+
+- **A typo'd leaf under `[docker]` or `[ssh]` in `.agent-factory/config.{toml,json}`
+  now warns.** Before, `docker.runargs` (for `run_args`) was dropped without a
+  word, so `docker run` started without the flags. The file still loads exactly
+  as before and the key is still ignored. The warning names the file, the key and
+  the closest known key, and it appears on CLI stderr (not under `--json`), in
+  the log and daemon log as WARNING, and in `af doctor` as an advisory WARN
+  (exit code unchanged) (#4599).
+- **Planned break:** a later release will make an unknown `[docker]`/`[ssh]` key
+  a load error, as unknown top-level in-repo keys already are (#4845). Name that
+  release in its own notes when it lands.
+
 ## Breaking: branch-associated PR integration removed (upcoming release)
 
 - **Session JSON no longer includes `pr_info`.** This includes session records
@@ -32,23 +96,18 @@ consult the relevant notes below when preparing the announcement.
   from your automation or manage PR information outside Agent Factory. Expect
   the missing `pr_info` field and HTTP 404s, rather than a migration to new names.
 
-## A project's `branch_prefix` override now names its branches
+## A caught-up reconnect after a recovery keeps the recovered pane's output (fixed in v1.0.292)
 
-- **`af config set --project <p> branch_prefix <value>` now takes effect.**
-  The override was accepted, written, and reported as the winning value by
-  `af config get branch_prefix --repo <p> --explain`, but every session was
-  still named with the global prefix. Now the next session created in that
-  project gets the project's prefix, and projects without an override keep the
-  global one.
-- **`branch_prefix` no longer needs a daemon restart.** A saved change, global
-  or per project, applies to the next session created, and `af config set`
-  and the config panes now say so. Before, the daemon read the global value
-  once at startup.
-- **The naming form checks titles against the same prefix.** The TUI's
-  duplicate-title check reads the active project's prefix when `af` starts or
-  switches projects. The daemon still re-checks every create.
-- Docker and ssh sessions are unchanged: their branch is created inside the
-  sandbox, which uses its own config.
+- **Fixes a regression shipped in v1.0.290 and v1.0.291.** A client that was
+  caught up at the live tail when it dropped, and reconnected after a
+  pane-replacing session recovery, could lose the recovered pane's buffered
+  output when the screen snapshot failed (or carried no repaint state): its
+  terminal stayed on the dead pane's frozen screen until unrelated output
+  arrived. The reconnect now replays the recovered pane's retained output, so
+  a failed snapshot no longer loses it (#4615).
+- A reconnect whose snapshot succeeds is unchanged (the repaint is delivered,
+  no replay), as is the case where the recovered ring is empty (live output
+  follows as before).
 
 ## `af sessions list` now tells you what its numbers mean
 

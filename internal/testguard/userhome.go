@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/testresidue"
 )
 
 // userRootOverrides are the variables that move per-user state away from
@@ -149,7 +151,7 @@ func sandboxUserHome() (func(), error) {
 	names := append([]string{"DOCKER_CONFIG"}, goToolchainVars...)
 	saved := append(saveEnv(names...), ambient...)
 
-	home, err := os.MkdirTemp("", "af-test-user-home-")
+	home, err := os.MkdirTemp("", testresidue.SandboxUserHomePrefix)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox HOME: %w", err)
 	}
@@ -170,7 +172,7 @@ func sandboxUserHome() (func(), error) {
 	if err := os.WriteFile(filepath.Join(home, ".zshrc"), nil, 0o600); err != nil {
 		return fail(fmt.Errorf("seed sandbox .zshrc: %w", err))
 	}
-	if err := os.WriteFile(filepath.Join(home, sandboxHomeMarker), []byte("testguard.SandboxHome (#4469)\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, testresidue.SandboxUserHomeMarker), []byte("testguard.SandboxHome (#4469)\n"), 0o600); err != nil {
 		return fail(fmt.Errorf("mark sandbox HOME: %w", err))
 	}
 	// git reads its global config from HOME. Include the real files so identity
@@ -212,20 +214,22 @@ func sandboxUserHome() (func(), error) {
 	return restore, nil
 }
 
-// sandboxHomeMarker is a file sandboxUserHome writes into the sandbox HOME, so
-// a child test binary can tell that it runs inside one. It is a file, not an
-// environment variable, because a fixture reaches its child through an af
-// session pane. That pane's environment is an allowlist (internal/sessionenv),
-// which passes HOME and drops any testguard variable. A real home never has
-// this file, since only a fresh MkdirTemp dir ever receives it.
-const sandboxHomeMarker = ".af-testguard-sandbox-home"
+// the sandbox-home marker is a file sandboxUserHome writes into the sandbox
+// HOME, so a child test binary can tell that it runs inside one. It is a file,
+// not an environment variable, because a fixture reaches its child through an
+// af session pane. That pane's environment is an allowlist
+// (internal/sessionenv), which passes HOME and drops any testguard variable. A
+// real home never has this file, since only a fresh MkdirTemp dir ever receives
+// it. The name is testresidue.SandboxUserHomeMarker, shared with doctor so the
+// harness that writes it and the recognizer that keys a removal on it read one
+// definition.
 
 func inheritsSandboxUserHome() bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
-	info, err := os.Lstat(filepath.Join(home, sandboxHomeMarker))
+	info, err := os.Lstat(filepath.Join(home, testresidue.SandboxUserHomeMarker))
 	return err == nil && info.Mode().IsRegular()
 }
 

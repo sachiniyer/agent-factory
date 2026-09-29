@@ -275,7 +275,7 @@ func TestResumeFromLimit_ParkedTaskSessionReDeliversTaskPrompt(t *testing.T) {
 	inst.Prompt = "run the nightly report"
 	inst.SetLimitReached(time.Now())
 
-	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: "nightly-task", RepoID: repoID}); err != nil {
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "nightly-task", RepoID: repoID}); err != nil {
 		t.Fatalf("resume of a parked task session failed: %v", err)
 	}
 

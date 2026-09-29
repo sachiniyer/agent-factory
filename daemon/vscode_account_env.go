@@ -85,21 +85,42 @@ func (s vscodeAccountScope) environment() ([]string, error) {
 // vscodeAccountScopeForInstance gives the daemon-owned editor the same selected
 // credential boundary as the tmux panes whose integrated terminals it hosts.
 //
-// The agent NAMESPACE is derived from the session's configured program, matching
-// refreshSessionEnvironment and every other surface that resolves this session's
-// account. It deliberately does not use CurrentAgentName, which prefers the
-// RUNNING tmux command: an account belongs to an agent's registry, this
-// session's account was validated against its configured program when it was
-// created (resolveAccountForProvision), and a session resolved by
-// program_overrides into a different agent would send the lookup into a registry
-// that never held this account — turning a working editor into a refusal.
+// The agent NAMESPACE is the one the account was selected in — the durable
+// accountAgent record, which a program_overrides edit made after the pin
+// cannot move (#4430 review round 4). It deliberately does not use
+// CurrentAgentName, whose enum fallback would answer the requested program —
+// the enum is exactly what a redirect makes wrong.
+//
+// Only a record older than the field leaves it empty, and for that the chain
+// below remains the fallback: the pane's frozen launch program is the best
+// evidence of what was committed, re-resolving the enum covers a pane that can
+// no longer report it.
+//
+// The LAST resort deliberately uses AgentNamespaceForCommand rather than
+// AgentForCommand: this call names a directory to install into the editor's
+// child environ, it grants no credential, and a pre-#4356 session persisted
+// with a path-qualified env wrapper (for instance /usr/local/bin/env
+// CODEX_HOME=/x codex) plus a selected account must stay classifiable on
+// restore. AgentForCommand's strict env set would return "" for that program
+// and refuse the editor with ErrUnsupportedAgent, breaking a tab that worked
+// before the narrowing — the namespace lookup and the credential grant are
+// different questions and use different rules.
 func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScope {
 	account, _ := instance.AccountSelection()
 	account = strings.TrimSpace(account)
 	if account == "" {
 		return ambientVSCodeScope()
 	}
-	agent := sessionenv.AgentForCommand(instance.AgentProgram())
+	agent := instance.AccountAgent()
+	if agent == "" {
+		agent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
+	}
+	if agent == "" {
+		agent = session.HandoffEffectiveAgentForPath(instance.Path, instance.AgentProgram())
+	}
+	if agent == "" {
+		agent = sessionenv.AgentNamespaceForCommand(instance.AgentProgram())
+	}
 	return vscodeAccountScope{
 		account: account,
 		environ: func() ([]string, error) {

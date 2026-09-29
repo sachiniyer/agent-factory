@@ -126,13 +126,18 @@ func TestUpdatedAtLoadSiblingRuntimeBoundary(t *testing.T) {
 				require.Equal(t, PromptDelivered, i.lastPromptDeliveryStatus)
 				require.Equal(t, before, i.lastPaneChurnAt)
 				enrolled := i.ConsumeLoadRuntimeReplacement()
-				require.Equal(t, !existing, enrolled)
+				// A missing SHELL sibling is respawned — a runtime replacement
+				// the settlement boundary must enroll. A missing PROCESS tab is
+				// restored inert (#4479): its command is never re-executed, so
+				// nothing was replaced and nothing enrolls.
+				wantEnrolled := !existing && kind != TabKindProcess
+				require.Equal(t, wantEnrolled, enrolled)
 				if enrolled {
 					require.NoError(t, storage.SaveInstances([]*Instance{i}))
 				}
 				require.False(t, i.ConsumeLoadRuntimeReplacement(), "settlement is consumed once")
 				want := before
-				if !existing {
+				if wantEnrolled {
 					want = now
 				}
 				require.Equal(t, want, i.ToInstanceData().UpdatedAt)

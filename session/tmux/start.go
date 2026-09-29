@@ -46,6 +46,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
 	// the command string without re-execing the existing pane.
 	t.resetCodexSafetyState()
+	t.resetCodexUpdateState()
 	// Same proven boundary: a key af sent to the PREVIOUS pane process cannot
 	// explain anything the new one does (#3579).
 	t.resetDialogKeystroke()
@@ -72,6 +73,14 @@ func (t *TmuxSession) Start(workDir string) error {
 	args = append(args, wrappedProgram)
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand)
+	}
+	t.programMu.RLock()
+	remainOnExit := t.remainOnExit
+	t.programMu.RUnlock()
+	if remainOnExit {
+		// Atomic with new-session so even a command that exits instantly is
+		// held as a dead pane rather than racing the option (#4479).
+		args = append(args, ";", "set-option", "-w", "-t", exactTarget(t.sanitizedName), "remain-on-exit", "on")
 	}
 	// Bootstrap before deciding whether new-session needs a temporary
 	// update-environment override. Otherwise the no-server probe below omits
@@ -353,6 +362,9 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		t.claudeTrust.firstSeen = time.Time{}
 	case ProgramCodex:
 		if t.handleCodexSafetyBuffering(content) {
+			return true
+		}
+		if t.handleCodexUpdatePrompt(content) {
 			return true
 		}
 		if CodexTrustPromptPresent(content) {
@@ -637,6 +649,34 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// so any earlier absence proof is invalidated. Without this clear, a reattach
 	// through this branch inherits a stale flag and stopForAccountSwap skips its
 	// liveness check for a pane that is still running.
+	return RestoreReattached, t.reattach(workDir, answered, confirmedFresh)
+}
+
+// ReattachOnly performs only the live-session rebind half of
+// RestoreWithResult: it never takes the definitive-absence respawn branch, so
+// it is the restore primitive for a process tab, whose command must run
+// exactly once at creation and never be re-executed by af (#4479). Call it only
+// when the session exists or its state is unknown — a confirmed-absent session
+// gets no rebind and no respawn, because the pane it named is gone either way.
+//
+// answered is the caller's own existence probe's known (ProbeSession): true
+// only when tmux answered that the session exists, false when the probe did not
+// answer. It carries the same meaning as RestoreWithResult's has-session answer
+// and binds the fresh monitor the same way (#4473). The rebind does not probe
+// existence again, so a wedged server costs the caller one bounded has-session,
+// not two.
+//
+// On a pane held by remain-on-exit the rebind is equally correct: the session
+// still exists, the monitor simply never fires, and the pane's retained output
+// stays previewable.
+func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
+	return t.reattach(workDir, answered, false)
+}
+
+// reattach is the live-session rebind shared by restoreWithResult and
+// ReattachOnly. answered is whether the existence probe that routed here
+// answered, and confirmedFresh is restoreWithResult's.
+func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) error {
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
@@ -665,7 +705,7 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		resolved, _ = t.confirmedGeneration()
 	}
 	if err := t.refreshRestoredAccountEnvironment(); err != nil {
-		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+		return fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
 	}
 	// Teardown attribution follows the GENERATION, not the monitor slot: a
 	// resolved id matching the outgoing monitor's generation shares its mark
@@ -684,5 +724,5 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 		answered:   answered || confirmedFresh,
 		startedAt:  resolvedAt,
 	})
-	return RestoreReattached, nil
+	return nil
 }

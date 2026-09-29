@@ -16,7 +16,35 @@ import (
 // process, so an agent-looking argument to an arbitrary executable must never
 // match.
 func AgentForCommand(command string) string {
-	invocation, ok := literalAgentCommand(command)
+	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
+	if !ok {
+		return ""
+	}
+	return invocation.agent
+}
+
+// AgentNamespaceForCommand derives the agent NAMESPACE from a command for the
+// non-credential caller that resolves an already-validated account's directory
+// (vscodeAccountScopeForInstance). Unlike AgentForCommand it recognizes any env
+// wrapper whose basename is env — including operator-supplied path-qualified
+// spellings such as /usr/local/bin/env — using the same env-basename rule the
+// create-time gate tmux.DetectAgentExecutable keeps, so a path-qualified env
+// wrapper the gate accepted onto a pre-#4356 session stays classifiable on
+// restore. This shares only the env-basename rule, not a parser:
+// DetectAgentExecutable and AgentNamespaceForCommand are otherwise independent
+// (the gate uses splitShellTokens + baseCommand, this surface uses mvdan.cc/sh +
+// filepath.Base) and agree on the env-wrapper spellings the #4356 fix targets,
+// not on every command.
+//
+// It grants no credentials. The agent namespace it returns names a directory
+// under the af home the operator already selected an account in; nothing about
+// this call hands a forked process the credentials the directory holds. A
+// caller that filters or installs credentials for an exec must use
+// AgentForCommand (or credentialAgentForCommand) instead, which keep the strict
+// isTrustedEnvExecutable env set so a repository-controlled ./env cannot turn an
+// agent-looking argument into a grant.
+func AgentNamespaceForCommand(command string) string {
+	invocation, ok := literalAgentCommand(command, isEnvExecutableByBase)
 	if !ok {
 		return ""
 	}
@@ -29,7 +57,12 @@ type agentCommand struct {
 	executableResolutionChanged bool
 }
 
-func literalAgentCommand(command string) (agentCommand, bool) {
+// literalAgentCommand parses one literal agent invocation, optionally through an
+// env wrapper. envMatch decides which spellings count as the env wrapper: the
+// strict isTrustedEnvExecutable for credential-bearing callers, and the lenient
+// isEnvExecutableByBase for namespace-only callers that share the env-basename
+// rule tmux.DetectAgentExecutable keeps for env-wrapper spellings.
+func literalAgentCommand(command string, envMatch func(string) bool) (agentCommand, bool) {
 	if strings.TrimSpace(command) == "" {
 		return agentCommand{}, false
 	}
@@ -46,7 +79,7 @@ func literalAgentCommand(command string) (agentCommand, bool) {
 	}
 	executable := args[0]
 	resolutionChanged := shellAssignmentsChangeExecutableResolution(call.Assigns)
-	if isTrustedEnvExecutable(args[0]) {
+	if envMatch(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
 			return agentCommand{}, false
@@ -78,7 +111,7 @@ func literalAgentCommand(command string) (agentCommand, bool) {
 // selects. The command still launches, and an operator can explicitly authorize
 // required names through session_env_passthrough.
 func credentialAgentForCommand(command string) string {
-	invocation, ok := literalAgentCommand(command)
+	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
 	if !ok || strings.Contains(invocation.executable, "/") || invocation.executableResolutionChanged {
 		return ""
 	}
@@ -347,6 +380,17 @@ func isTrustedEnvExecutable(executable string) bool {
 	default:
 		return false
 	}
+}
+
+// isEnvExecutableByBase is the lenient counterpart that matches any spelling
+// whose basename is env, mirroring tmux.DetectAgentExecutable's create-time
+// detection. It is the env rule for AgentNamespaceForCommand's namespace-only
+// callers: those classify operator-controlled input (instance.AgentProgram is
+// stored verbatim from opts.Program) purely to look up an account directory,
+// never to grant a credential, so the overwrite-by-./env threat the strict set
+// closes does not apply.
+func isEnvExecutableByBase(executable string) bool {
+	return strings.EqualFold(filepath.Base(executable), "env")
 }
 
 func literalCommandArgs(words []*syntax.Word) ([]string, bool) {
