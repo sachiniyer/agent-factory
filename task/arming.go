@@ -97,6 +97,7 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 		// observation that produced it. The daemon leaves it nil for anything it
 		// did not observe as armed, so this carries nil in exactly those cases.
 		tasks[i].NextRunAt = o.NextRunAt
+		tasks[i].NextRunFar = o.NextRunFar
 	}
 	return tasks
 }

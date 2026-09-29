@@ -287,11 +287,18 @@ func TestArchiveHook_FailureSurfacesBoundedTailAndLogPath(t *testing.T) {
 	logs, globErr := filepath.Glob(filepath.Join(home, "logs", "hooks", "on-archive-*.log"))
 	require.NoError(t, globErr)
 	require.Len(t, logs, 1)
-	for _, want := range []string{"exit status 23", logs[0], "[output truncated to last 65536 bytes]", "kept ending"} {
+	for _, want := range []string{"exit status 23", logs[0], hooklog.ExcerptPrefix + "kept ending"} {
 		assert.Contains(t, err.Error(), want)
 	}
 	assert.NotContains(t, err.Error(), "discarded beginning",
 		"the surfaced diagnostic must stay bounded")
+	// The report reaches the daemon log and every archive caller (#4853): one
+	// line, then at most ExcerptLines quoted lines, each prefixed.
+	lines := strings.Split(err.Error(), "\n")
+	assert.LessOrEqual(t, len(lines)-1, hooklog.ExcerptLines, "the report quotes a bounded excerpt, not the output")
+	for _, line := range lines[1:] {
+		assert.True(t, strings.HasPrefix(line, hooklog.ExcerptPrefix), "unprefixed quoted line %q", line)
+	}
 	full, readErr := os.ReadFile(logs[0])
 	require.NoError(t, readErr)
 	assert.Contains(t, string(full), "discarded beginning")

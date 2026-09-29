@@ -176,22 +176,39 @@ func validateWatchFlags(interval, timeout time.Duration) error {
 // The second return is getSessionByTitle's ambiguity-widening notice, passed
 // through unchanged; a scoped lookup never runs that check (a single repo
 // cannot be cross-project ambiguous), so it always returns empty.
+//
+// When the daemon dropped THIS repo at startup due to a corrupted instances.json
+// (#603), a miss refuses naming the repo rather than reporting a clean
+// not-found, mirroring the scoped disk path (loadRepoInstanceData's parse-error
+// refusal) — a session hidden behind the corrupted file is not reported absent.
 func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, string, error) {
 	if repoID == "" {
 		return getSessionByTitle(title)
 	}
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
+	data, skipped, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
+	if err == nil {
+		for i := range data {
+			if data[i].Title == title {
+				return &data[i], "", nil
+			}
+		}
+		// Miss within the scope. The daemon reports only this repo's drop
+		// (SkippedRepos is scoped to RepoID), so a non-empty set means THIS repo
+		// was dropped at startup and may be hiding the title.
+		if len(skipped) > 0 {
+			return nil, "", skippedReposError(skipped)
+		}
+		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+	}
+	// Remote target: no local disk fallback; surface the daemon error (e.g. a
+	// 401 from a bad token) instead of masking it as "instance not found" via a
+	// same-machine disk scan (#1679).
+	if !fallBack {
+		return nil, "", err
+	}
+	data, err = diskListSessions(repoID)
 	if err != nil {
-		// Remote target: no local disk fallback; surface the daemon error (e.g. a
-		// 401 from a bad token) instead of masking it as "instance not found" via a
-		// same-machine disk scan (#1679).
-		if !fallBack {
-			return nil, "", err
-		}
-		data, err = diskListSessions(repoID)
-		if err != nil {
-			return nil, "", err
-		}
+		return nil, "", err
 	}
 	for i := range data {
 		if data[i].Title == title {

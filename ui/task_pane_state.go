@@ -2,6 +2,8 @@ package ui
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -41,6 +43,7 @@ import (
 // It reports whether the rows or the selection changed. A list from a
 // different scope, which nothing held belongs to, goes through ResetTasks.
 func (s *TaskPane) SetTasks(tasks []task.Task) bool {
+	s.settleConfirmedDrafts(tasks)
 	held := s.heldRows()
 	queued := make(map[string]bool, len(s.deleted))
 	for _, d := range s.deleted {
@@ -130,6 +133,7 @@ func (s *TaskPane) selectTaskID(id string) {
 // through SetTasks.
 func (s *TaskPane) ResetTasks(tasks []task.Task) {
 	s.dirtyIDs = nil
+	s.unconfirmedIDs = nil
 	s.deleted = nil
 	s.editing = false
 	s.tasks = nil
@@ -205,6 +209,9 @@ func (s *TaskPane) markTaskDirty(id string) {
 	}
 	s.dirtyIDs[id] = true
 	s.dirty = true
+	// An edit the user makes is theirs to send, even on a task whose last
+	// save could not be confirmed (#4824).
+	delete(s.unconfirmedIDs, id)
 }
 
 // ConsumeDirty returns a field-level patch for each task the user actually
@@ -225,7 +232,7 @@ func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 	}
 	var edits []task.TaskEdit
 	for _, t := range s.tasks {
-		if !s.dirtyIDs[t.ID] {
+		if !s.dirtyIDs[t.ID] || s.unconfirmedIDs[t.ID] {
 			continue
 		}
 		update := task.DiffTask(s.originals[t.ID], t)
@@ -243,7 +250,7 @@ func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 			Expect: task.ExpectProject(s.originals[t.ID]),
 		})
 	}
-	s.dirtyIDs = nil
+	s.dirtyIDs = s.keepUnconfirmedDirty()
 	return edits
 }
 
@@ -261,6 +268,7 @@ func (s *TaskPane) AcknowledgeSavedEdit(id string) {
 		}
 		s.originals[id] = current
 		delete(s.dirtyIDs, id)
+		delete(s.unconfirmedIDs, id)
 		return
 	}
 }
@@ -270,6 +278,73 @@ func (s *TaskPane) AcknowledgeSavedEdit(id string) {
 // so retry cannot discard the only copy of the user's changes.
 func (s *TaskPane) RestoreFailedEdit(id string) {
 	s.markTaskDirty(id)
+}
+
+// DiscardDeletedDraft drops the unsaved edit to a task a save has just proved
+// deleted — the daemon answered the update with "not found" (#4798). Keeping it
+// would retry that save, and report the same failure, on every close forever.
+// The row goes with it, and the task's name is queued for
+// TakeDiscardedDraftNotice so the draft is never dropped silently. A row with
+// nothing a save would send is dropped without a notice: no work was lost.
+//
+// Only a positive not-found may call this. Absence from a reload is not one —
+// the reload can be scoped to another project, or simply fail — so SetTasks
+// keeps a draft whose task it cannot see, and any other save failure goes
+// through RestoreFailedEdit.
+func (s *TaskPane) DiscardDeletedDraft(id string) {
+	kept := s.tasks[:0:0]
+	lostWork := false
+	for _, t := range s.tasks {
+		if t.ID != id {
+			kept = append(kept, t)
+			continue
+		}
+		if !s.unedited(t) {
+			lostWork = true
+		}
+	}
+	if len(kept) == len(s.tasks) {
+		return
+	}
+	if lostWork {
+		// The name the task was loaded with, not a rename the draft carries:
+		// it is the name the user last saw on the rail and in `af tasks list`.
+		name := s.originals[id].Name
+		if name == "" {
+			name = id
+		}
+		s.discardedDrafts = append(s.discardedDrafts, name)
+	}
+	selectedID := ""
+	if s.selectedTaskInRange() {
+		selectedID = s.tasks[s.selectedIdx].ID
+	}
+	s.tasks = kept
+	delete(s.dirtyIDs, id)
+	delete(s.unconfirmedIDs, id)
+	delete(s.originals, id)
+	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
+	s.selectTaskID(selectedID)
+}
+
+// TakeDiscardedDraftNotice returns one notice naming every draft
+// DiscardDeletedDraft dropped since the last call, and clears them. It returns
+// "" when nothing was dropped. The save that drops a draft usually runs as the
+// overlay closes, so the app raises this on its own notice bar, not the pane.
+func (s *TaskPane) TakeDiscardedDraftNotice() string {
+	names := s.discardedDrafts
+	s.discardedDrafts = nil
+	if len(names) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = strconv.Quote(name)
+	}
+	if len(quoted) == 1 {
+		return "Discarded unsaved edits to " + quoted[0] + " — the task was deleted"
+	}
+	return "Discarded unsaved edits to " + strings.Join(quoted, ", ") + " — the tasks were deleted"
 }
 
 // ConsumeDeleted returns the tasks pending deletion and clears the pane's

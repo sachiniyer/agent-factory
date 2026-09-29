@@ -498,7 +498,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// and warns against treating this as an untouched, freely retryable request.
 		resultErr = &mutationCommittedError{err: fmt.Errorf(
 			"account handoff for %q committed %s, but startup or mission delivery did not complete; inspect the reported failure before retrying: %w",
-			requestedTitle, accountSwapIdentity(accountSwap.agent, accountSwap.to), resultErr)}
+			requestedTitle, accountSwapIdentity(accountSwap.accountNamespace(), accountSwap.to), resultErr)}
 	}()
 	originalLiveness := instance.GetLiveness()
 	restorePendingLiveness := func(resetAt time.Time) error {

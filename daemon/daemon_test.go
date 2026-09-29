@@ -532,7 +532,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 		t.Fatalf("save corrupted repo: %v", err)
 	}
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances(nil) returned error on corrupted-repo input — daemon startup would fail and orphan every live session: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestRefreshDaemonInstances_BackfillsLegacyIDBeforeMaterialize(t *testing.T)
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refresh legacy row: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("refresh should isolate one legacy backfill failure: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	prior := &session.Instance{}
 	existing := map[string]*session.Instance{priorKey: prior}
 
-	got, _, err := refreshDaemonInstances(existing)
+	got, _, _, _, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances on poll path errored on corrupted-repo input: %v", err)
 	}
@@ -739,7 +739,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 		t.Fatalf("remove missing repo dir: %v", err)
 	}
 
-	got, _, err := refreshDaemonInstances(existing)
+	got, _, _, _, err := refreshDaemonInstances(existing)
 	if err != nil {
 		t.Fatalf("refreshDaemonInstances returned error: %v", err)
 	}
@@ -762,7 +762,7 @@ func TestRefreshDaemonInstances_StartupDoesNotInventMissingRepos(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	silenceWarnings(t)
 
-	got, _, err := refreshDaemonInstances(nil)
+	got, _, _, _, err := refreshDaemonInstances(nil)
 	if err != nil {
 		t.Fatalf("startup refresh errored: %v", err)
 	}
