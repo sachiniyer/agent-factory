@@ -54,6 +54,10 @@ func tempDirDefault() string { return os.TempDir() }
 
 var (
 	daemonProcessArgv = daemon.ProcessArgv
+	// withheldEnvCause names why the kernel served no environment for a
+	// process (#3584). A package var so tests on Linux, which has no such
+	// redaction, can stage the darwin answer.
+	withheldEnvCause = proctree.WithheldEnvCause
 	// tempHomeLockProbe answers "is a daemon running for this home?" through the
 	// home's daemon.lock — the kernel-guaranteed fact that authorises removing an
 	// abandoned temp home (#1989). A package var so tests can stage each of the
@@ -545,6 +549,9 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 			}
 			continue
 		}
+		if nameStatus == proctree.EnvUnknown {
+			observations.noteWithheldEnv(pid)
+		}
 		if tmuxEnv, st := proctree.LookupEnv(pid, "TMUX"); st == proctree.EnvFound && tmuxServerDead(ctx, tmuxEnv) {
 			if observations.oldEnough(ctx, p) {
 				possibles = append(possibles, p)
@@ -712,6 +719,25 @@ type processLeakObservations struct {
 	unknownAge      int
 	unknownIdentity int
 	blindSessions   []string
+	// envWithheld counts processes whose environment the kernel declined to
+	// serve, so none of the classifications below could read their markers
+	// (#3584). envWithheldCause is the first attributed cause.
+	envWithheld      int
+	envWithheldCause string
+}
+
+// noteWithheldEnv records pid when its unreadable environment has a cause the
+// platform can name. An unattributed unknown (a foreign uid, a process that
+// exited) is ordinary and stays uncounted.
+func (o *processLeakObservations) noteWithheldEnv(pid int) {
+	cause, ok := withheldEnvCause(pid)
+	if !ok {
+		return
+	}
+	if o.envWithheld == 0 {
+		o.envWithheldCause = cause
+	}
+	o.envWithheld++
 }
 
 func (o *processLeakObservations) oldEnough(ctx *scanContext, p proctree.Process) bool {
@@ -745,6 +771,20 @@ func (o processLeakObservations) report(report *Report) {
 		report.Warn(sectionProcesses, "process-leak-inspection",
 			strings.Join(blind, " and ")+"; they are omitted from the escaped, orphaned, and possible-orphan counts",
 			"those candidates are UNKNOWN, not proven leaks; rerun doctor or inspect them manually", false)
+	}
+	// On a SIP-enabled Mac the kernel withholds the environment of every Apple
+	// system binary, /bin/zsh included, so a leaked shell carries markers doctor
+	// cannot read and lands in none of the counts (#3584). Say so once rather
+	// than let the missing findings read as a clean machine. A Warn, like the
+	// other partial-blindness rows here: the process table was read, and the
+	// only remedy (turning SIP off) is not one to suggest.
+	if o.envWithheld > 0 {
+		report.Warn(sectionProcesses, "process-attribution",
+			fmt.Sprintf("the kernel withheld the environment of %s because %s, so af cannot read "+
+				"their session markers; a leaked process of that kind is not counted as escaped, "+
+				"orphaned, or a possible orphan", plural(o.envWithheld, "process", "processes"), o.envWithheldCause),
+			"missing process findings on this host are not proof that nothing leaked; af leaves "+
+				"processes it cannot attribute alone", false)
 	}
 	// A live session whose pane tree could not be read is not a proven-empty
 	// tree: the escaped-process arm's membership check had no answer, so it
