@@ -37,6 +37,15 @@ var (
 	// mid-render (#1982), so a millisecond-scale retry re-enters the very render
 	// that just stranded the first paste. A package var so tests can tighten it.
 	redeliverAfterAbsentDelay = 5 * time.Second
+	// strandedSubmitGrace is how long the submit path waits after Enter before
+	// checking whether the draft is still staged in the composer — the #4200
+	// case, where a composer still rendering the paste absorbs Enter and the
+	// prompt sits unsubmitted. Long enough for a healthy submit to clear the
+	// composer on a busy render; short enough that a create barely notices it.
+	strandedSubmitGrace = 800 * time.Millisecond
+	// strandedSubmitSettle is the shorter wait after the one remedy Enter,
+	// before deciding whether that keystroke submitted the staged draft.
+	strandedSubmitSettle = 350 * time.Millisecond
 )
 
 // minDistinctiveFragment is the shortest payload fragment treated as
@@ -90,7 +99,11 @@ type deliveryObservation struct {
 // disjoint prefix whose appearance proves the pane DID render this payload and
 // can therefore support a terminal negative when completion is still absent.
 // payload is the whole normalized text and baselineText the normalized baseline
-// frame; only the positional newest-render check reads them (#4884). Baselines
+// frame; the positional newest-render check reads them (#4884), and the #4200
+// staged-draft remedy reads baselineText to bind its evidence to this paste.
+// trailingNewlines counts the row breaks the payload ENDS with, which
+// normalization erases but a literal-rendering composer draws as blank rows
+// under the text (#4200). Baselines
 // prefer the capture after the pre-submit clear (and conservatively
 // fall back to the pre-clear frame if that capture fails), so old prompt text
 // in scrollback cannot be mistaken for evidence from this paste. If neither
@@ -104,6 +117,7 @@ type deliveryProbe struct {
 	renderWitnessBaseline int
 	payload               string
 	baselineText          string
+	trailingNewlines      int
 }
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -347,6 +361,18 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 		t.seedDeliveryBaseline(boundary)
 	} else {
 		t.deferDeliveryBaseline()
+	}
+
+	// Enter is fire-and-forget: a composer still rendering the paste can absorb
+	// it as a literal newline, leaving the whole prompt staged but unsubmitted
+	// while the observation above already reads landed (#4200). The remedy looks
+	// once more after a short grace and sends ONE more Enter — never a re-paste —
+	// only when that Enter provably submits the same draft our first Enter was
+	// sent to submit; remedyStrandedSubmit states the property. Observed-absent
+	// is excluded: its partial draft must never be submitted, and the #3293
+	// redelivery owns it.
+	if observation.outcome != deliveryObservedAbsent {
+		observation = t.remedyStrandedSubmit(probe, observation, boundary, boundaryOK)
 	}
 
 	var proof *absenceProof
@@ -707,7 +733,11 @@ func newDeliveryProbe(text string) deliveryProbe {
 		}
 	}
 
-	probe := deliveryProbe{completion: string(n[len(n)-completionLen:]), payload: string(n)}
+	probe := deliveryProbe{
+		completion:       string(n[len(n)-completionLen:]),
+		payload:          string(n),
+		trailingNewlines: trailingNewlines(xansi.Strip(text)),
+	}
 	if availablePrefix >= minDistinctiveFragment {
 		if availablePrefix > witnessRunes {
 			availablePrefix = witnessRunes

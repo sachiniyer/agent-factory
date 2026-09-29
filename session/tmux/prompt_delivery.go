@@ -152,10 +152,11 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 
 // SendKeysCommandObserved sends a prompt exactly like SendKeysCommand and also
 // returns the terminal observation already made by the bounded submit path.
-// It does not add another capture or wait to a delivery that confirmed or ended
-// ambiguous: callers receive the status the submit path observed. The one
-// exception is the observed-ABSENT outcome, which is redelivered once (#3293)
-// before the final observation is reported.
+// Callers receive the status the submit path observed. Two outcomes get a
+// bounded repair inside the transaction: the observed-ABSENT outcome is
+// redelivered once (#3293), and a draft provably still staged in the composer
+// after Enter gets ONE more Enter — never a re-paste (#4200). Neither repair
+// rounds an unconfirmed delivery up to delivered.
 func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus, error) {
 	t.inputMu.Lock()
 	defer t.inputMu.Unlock()
@@ -248,13 +249,16 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 //
 // The bound is computed here, next to the submit path it describes, from the
 // same knobs that bound the path itself. An attempt is counted as its
-// individually bounded tmux commands plus the delivery observation window, and
-// the pre-redelivery absence re-check (#4884) adds one more bounded capture; the
-// command count is deliberately GENEROUS (the longest success path issues 8:
-// load, pre-clear capture, two cursor reads, clear, post-clear capture, paste,
-// Enter+boundary) so a future added capture does not silently outgrow the bound.
+// individually bounded tmux commands plus the delivery observation window and
+// the two #4200 staged-draft waits, and the pre-redelivery absence re-check
+// (#4884) adds one more bounded capture; the command count is deliberately
+// GENEROUS (the longest success path issues 11: load, pre-clear capture, two
+// cursor reads, clear, post-clear capture, paste, Enter+boundary, and on the
+// #4200 remedy path the grace snapshot, remedy Enter+boundary and settle
+// snapshot) so a future added capture does not silently outgrow the bound.
 func SendPromptWorstCaseBound() time.Duration {
-	const boundedCommandsPerAttempt = 10
-	attempt := boundedCommandsPerAttempt*tmuxCommandTimeout + pasteDeliveryMaxWait
+	const boundedCommandsPerAttempt = 14
+	attempt := boundedCommandsPerAttempt*tmuxCommandTimeout + pasteDeliveryMaxWait +
+		strandedSubmitGrace + strandedSubmitSettle
 	return 2*attempt + redeliverAfterAbsentDelay + tmuxCommandTimeout
 }
