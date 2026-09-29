@@ -90,9 +90,19 @@ import (
 //
 // The count itself stays in-memory: a restart resets it to zero, so adoption
 // evidence after a restart instead comes from the durable obligation —
-// owedOnComplete, cleared by a delivery in this same critical section — and
+// owedOnComplete, cleared by a delivery's durable discharge (the notify's
+// persist, which NoteAdoptionDelivery blocks on before returning nil) — and
 // from the durable pane-churn watermark for input that reaches no agent-server
-// entry point (#4162).
+// entry point (#4162). The durable clear is NOT in the in-memory critical
+// section: it is the notify's responsibility and runs after i.mu is released,
+// so NoteAdoptionDelivery must not return nil until that persist has landed,
+// or a unclean exit before the in-memory retry poll re-arms a teardown the
+// adoption already vetoed. Concurrent deliveries serialize through that
+// in-flight discharge: the first caller to clear owedOnComplete installs a
+// discharge future on i.discharge before releasing i.mu, and a second caller
+// arriving while its notify is still running waits on that future instead of
+// proceeding past nil owedOnComplete to a PTY write the durable marker would
+// survive.
 
 // ErrAdoptionFenced refuses a PTY write to a session whose teardown has already
 // claimed it. It is returned to the writer — a browser terminal frame, a TUI
@@ -113,6 +123,31 @@ type adoptionFence struct {
 	closed bool
 }
 
+// adoptionDischarge is the in-flight durable discharge of owedOnComplete that a
+// single NoteAdoptionDelivery caller drives and any concurrent callers wait on
+// and share. The first caller to take the marker clears it in memory, installs
+// the future on Instance.discharge under i.mu, releases i.mu, and runs the
+// notify. A second caller arriving while the first is still parked in the
+// notify has no in-memory marker to take — the first already cleared it —
+// so without the future it would proceed past nil owedOnComplete to its own
+// PTY write; the durable marker that first caller's persist is about to leave
+// set on a failed write would then survive an unclean exit and re-arm a
+// teardown that destroys the second caller's work. Sharing the discharge makes
+// the second caller wait for the first's persist result instead: on success
+// both may write (the marker is durably cleared once for both); on failure
+// both are refused so no PTY write lands on top of a durable marker the
+// failed write left set.
+//
+// Set on Instance.discharge under i.mu by the discharging caller before it
+// releases i.mu, and released (err assigned, done closed, the field cleared)
+// under i.mu by that same caller once the notify returns. The discharged
+// future's done channel is the synchronization barrier: an err write before
+// close is visible to every waiter after the receive.
+type adoptionDischarge struct {
+	done chan struct{}
+	err  error
+}
+
 // NoteAdoptionDelivery records that a delivery is about to be written to this
 // session's PTY, and reports whether it may proceed. Every agent-server entry
 // point that writes to the PTY calls it FIRST — see the file comment for why
@@ -121,10 +156,38 @@ type adoptionFence struct {
 //
 // A delivery also discharges a pending on_complete obligation: prompting a
 // finished task session IS the adoption the marker exists to defer to. The
-// clear happens in the same critical section as the count bump, so the
-// teardown's under-fence read of either sees this delivery; the notify then
-// runs AFTER the lock is released — it performs storage I/O and must not hold
-// i.mu, let alone re-enter it.
+// in-memory clear happens in the same critical section as the count bump, so
+// the teardown's under-fence read of either sees this delivery; the DURABLE
+// clear is the notify's responsibility and runs AFTER the lock is released — it
+// performs storage I/O and must not hold i.mu, let alone re-enter it.
+//
+// Because the durable clear is the agent-server path's ONLY durable adoption
+// signal (the pane-churn watermark is explicitly disclaimed for input that
+// reaches an agent-server entry point), NoteAdoptionDelivery does NOT return
+// nil until the notify's persist has landed. A best-effort notify whose retry
+// lives only in memory would let a unclean exit before the next poll lose the
+// discharge while leaving the durable marker set, re-arming a teardown that
+// reaps a session the user just adopted. So the notify returns any persist
+// error and this call propagates it: on failure the in-memory marker is
+// restored so the caller's refused delivery does not leave the in-memory state
+// half-discharged, and a re-attempted delivery re-runs the durable clear. The
+// caller — SendPromptWithStatus/InputTab/Input — must NOT write to the PTY
+// when this returns an error; the PTY write on top of an unset durable marker
+// is exactly the work-losing window.
+//
+// Two callers racing into a marked session serialize through that durable
+// discharge via i.discharge: the first to take i.mu clears the marker in
+// memory, installs the discharge, releases i.mu, and runs the notify; a
+// second caller arriving while the notify is in flight finds no in-memory
+// marker to clear (the first already cleared it) and the discharge in
+// progress, so it waits on the discharge's result rather than proceeding to
+// its own PTY write. The durable clear is one and the same for both: on
+// success both may write (the marker is durably gone, once, by the first);
+// on failure both are refused so no PTY write lands on top of a durable
+// marker the failed persist left set — without the shared discharge a second
+// caller that bypassed the in-flight clear would, on the first's persist
+// failure, write its bytes onto a pane the re-armed teardown would reap,
+// losing the second caller's work even though its own delivery succeeded.
 func (i *Instance) NoteAdoptionDelivery() error {
 	i.mu.Lock()
 	if i.adoption.closed {
@@ -132,15 +195,81 @@ func (i *Instance) NoteAdoptionDelivery() error {
 		return ErrAdoptionFenced
 	}
 	i.adoption.deliveries++
-	var notify func(*Instance)
+	// A durable discharge is already in flight from a concurrent delivery:
+	// share its result instead of proceeding to the PTY write. The in-memory
+	// marker is gone (the discharging caller took it) and the durable marker
+	// is what the discharging caller's persist is about to clear or leave
+	// set; this caller's bytes depend on the same durable verdict, so wait
+	// on the future and return its result. The count stays bumped: the
+	// discharging caller's count and this caller's are both delivered before
+	// either returns, so the teardown reads both through the fence.
+	if i.discharge != nil {
+		wait := i.discharge
+		// Stamp this delivery in the same critical section that bumped its
+		// count (the discharging path stamps below): a delivery that parks on
+		// an in-flight discharge still mutates the instance, and the concurrent
+		// clear's persistence must not store the stale UpdatedAt this branch
+		// would otherwise leave behind.
+		i.touchLocked()
+		i.mu.Unlock()
+		<-wait.done
+		return wait.err
+	}
+	var notify func(*Instance) error
+	var marker *PendingOnCompleteData
+	var discharge *adoptionDischarge
 	if i.owedOnComplete != nil {
+		marker = i.owedOnComplete
 		i.owedOnComplete = nil
 		notify = i.owedOnCompleteNotify
+		if notify != nil {
+			discharge = &adoptionDischarge{done: make(chan struct{})}
+			i.discharge = discharge
+		}
 	}
 	i.touchLocked()
 	i.mu.Unlock()
 	if notify != nil {
-		notify(i)
+		if err := notify(i); err != nil {
+			// The durable discharge did not land. Restore the in-memory
+			// marker so a re-attempted delivery re-runs the durable clear
+			// rather than proceeding on top of a durable marker the failed
+			// write left set. The delivery count stays bumped: the user's
+			// intent to adopt stands, and it is the in-memory stand-down
+			// signal a concurrent teardown would read through the fence
+			// even before the discharge retries. The notify did not record
+			// an in-memory settleOwed retry — that retry would race this
+			// restore and write the restored marker back to disk — so the only
+			// re-attempt is the caller's, which re-enters this function.
+			//
+			// Release any concurrent caller parked on this discharge's future
+			// with the same error so its PTY write is also refused: the
+			// durable marker this persist just failed to clear is the same
+			// durable veto that would have reaped its panes after a restart.
+			i.mu.Lock()
+			if i.owedOnComplete == nil {
+				i.owedOnComplete = marker
+			}
+			if i.discharge == discharge {
+				discharge.err = err
+				close(discharge.done)
+				i.discharge = nil
+			}
+			i.touchLocked()
+			i.mu.Unlock()
+			return err
+		}
+		// The durable discharge landed. Release any concurrent caller parked
+		// on the future with nil so its PTY write may proceed: the marker is
+		// durably gone for both, once, by this notify.
+		i.mu.Lock()
+		if i.discharge == discharge {
+			close(discharge.done)
+			i.discharge = nil
+		}
+		i.touchLocked()
+		i.mu.Unlock()
+		return nil
 	}
 	return nil
 }
@@ -266,12 +395,115 @@ func (i *Instance) FileOwedOnCompleteIfNotDischarged(marker *PendingOnCompleteDa
 
 // SetOwedOnCompleteNotify installs the callback invoked (outside i.mu) when a
 // delivery discharges the obligation — the daemon's hook for making an
-// adoption durable before the process can lose it. Not persisted itself: the
-// daemon re-installs it wherever a marked row materializes.
-func (i *Instance) SetOwedOnCompleteNotify(notify func(*Instance)) {
+// adoption durable before the process can lose it. The callback returns any
+// persist error so NoteAdoptionDelivery can propagate it and refuse the PTY
+// write rather than proceed on top of a discharge that did not land. Not
+// persisted itself: the daemon re-installs it wherever a marked row
+// materializes.
+func (i *Instance) SetOwedOnCompleteNotify(notify func(*Instance) error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.owedOnCompleteNotify = notify
+}
+
+// TakeOwedOnCompleteForDischarge atomically clears the in-memory marker and
+// installs an in-flight discharge future under i.mu, so a concurrent
+// NoteAdoptionDelivery arriving while the durable clear is still in flight
+// waits on the future instead of proceeding past a nil marker to a PTY write a
+// failed persist would leave on top of a durable marker the restart re-arms.
+//
+// This is the stand-down path's analogue of the discharge future
+// NoteAdoptionDelivery installs for its own notify: both expose an in-flight
+// durable clear to any concurrent caller so the durable verdict is shared
+// rather than bypassed. The stand-down path calls the durable write itself
+// (persistOwedTaskLifecycle) and closes the future with CompleteAdoptionDischarge
+// once the result is known, whereas a delivery runs its notify and closes the
+// future inside NoteAdoptionDelivery — but the future a concurrent delivery
+// parks on is the same in either path, and so is the verdict it shares.
+//
+// Returns a nil marker (and a nil discharge) when no obligation is owed, so
+// the caller persists nothing and completes nothing. A nil marker with a
+// non-nil discharge future installed by an in-flight delivery is also a
+// no-op return here: the stand-down has nothing to clear that the delivery is
+// not already clearing, and installing a second future would race the first.
+func (i *Instance) TakeOwedOnCompleteForDischarge() (*PendingOnCompleteData, *adoptionDischarge) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.owedOnComplete == nil {
+		return nil, nil
+	}
+	marker := i.owedOnComplete
+	i.owedOnComplete = nil
+	discharge := &adoptionDischarge{done: make(chan struct{})}
+	i.discharge = discharge
+	return marker, discharge
+}
+
+// TakeOwedOnCompleteForDischargeRetry is the poll's flush analogue of
+// TakeOwedOnCompleteForDischarge: it clears the in-memory marker and installs an
+// in-flight discharge future ONLY while the marker is still the one a stand-down
+// discharge failed to clear, so a marker filed since (a new run completing) is a
+// different pointer and is left in place, and a delivery that already cleared it
+// durably retires the retry. The future it installs is the same one a concurrent
+// NoteAdoptionDelivery parks on, so the flush's re-run shares its durable verdict
+// with a delivery instead of racing it to a PTY write on top of the surviving
+// marker.
+//
+// It returns the future and taken=true when the marker was taken; the caller
+// persists the fresh cleared row and completes the future exactly as a delivery
+// does. It returns taken=false with retry=true when the marker is nil because a
+// delivery or stand-down is still mid-discharge (an in-flight caller that may FAIL
+// and restore the marker without recording its own retry); the flush must leave
+// the retry in place for the next poll rather than retire it on a transient nil.
+// It returns taken=false with retry=false when the marker is durably gone (no
+// in-flight discharge) or has been replaced by a different marker, so the
+// obligation this retry represented is moot.
+func (i *Instance) TakeOwedOnCompleteForDischargeRetry(marker *PendingOnCompleteData) (*adoptionDischarge, bool, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.owedOnComplete == nil {
+		// A delivery or stand-down is mid-discharge and may restore the marker; its
+		// own future is still installed. Retire nothing — retry on the next poll.
+		return nil, false, i.discharge != nil
+	}
+	if i.owedOnComplete != marker {
+		// A new marker was filed after the stand-down; leave it in place.
+		return nil, false, false
+	}
+	i.owedOnComplete = nil
+	discharge := &adoptionDischarge{done: make(chan struct{})}
+	i.discharge = discharge
+	return discharge, true, false
+}
+
+// CompleteAdoptionDischarge closes the in-flight discharge future under i.mu
+// with the durable clear's result, releasing any concurrent NoteAdoptionDelivery
+// waiter parked on it. On failure it restores the in-memory marker so a
+// re-attempted delivery (or a later stand-down) re-runs the durable clear
+// instead of proceeding on top of a durable marker the failed write left set;
+// on success the durable marker is gone, so a parked delivery may proceed.
+//
+// No-op when discharge is nil (the caller took no marker) or when the future
+// is no longer the installed one (a concurrent discharger already closed it).
+// Closing the future is what releases a parked waiter, so the guard prevents a
+// double close; a future that is no longer installed was already closed by the
+// caller that uninstalled it, and its waiters have already unblocked.
+func (i *Instance) CompleteAdoptionDischarge(discharge *adoptionDischarge, marker *PendingOnCompleteData, err error) {
+	if discharge == nil {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err != nil {
+		if i.owedOnComplete == nil {
+			i.owedOnComplete = marker
+		}
+		discharge.err = err
+	}
+	if i.discharge == discharge {
+		close(discharge.done)
+		i.discharge = nil
+	}
 }
 
 // LastPaneChurnAt returns the most recent observed pane-output timestamp,
