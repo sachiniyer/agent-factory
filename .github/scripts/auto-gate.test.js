@@ -6900,6 +6900,240 @@ test("a push inside the chain stops the walk and anchors on it", async () => {
   assert.equal(found?.chainLength, 1, "one gate merge walked, then a push");
 });
 
+// #4886. The gate's own clean update merges used to void BOTH the maintainer
+// approval and the play-test attestation whenever master and the PR had both
+// touched one file — #4789's `a7705950` and #4825's `52b78a17` each lost the
+// approval to `app/home_update.go` alone — and the attestation whenever master
+// brought ANY gated change, since it was compared against the head, not the
+// content the PR contributed.
+//
+// The fixture is that shape, repeated: the PR edits line 1 of a gated file and
+// every master tip edits a different line of the SAME file, so each link has a
+// path both sides changed. Each lap's merge base is the previous master tip, as
+// it really is. The mutations each break exactly one clause of the invariant.
+const UPDATE_CHAIN_FORK = "f0f0000000000000000000000000000000000000";
+const UPDATE_CHAIN_CONTENT = "c0de000100000000000000000000000000000000";
+const UPDATE_CHAIN_PUSHED = "9057ed0100000000000000000000000000000000";
+const UPDATE_CHAIN_FILE = "app/home_update.go";
+// Master's edit per lap; every one at least two lines from the PR's line 1, from
+// the authored push's line 19, and from each other, so no two hunks touch.
+const UPDATE_CHAIN_MASTER_LINES = [4, 7, 10, 13, 16];
+const updateChainBase = (lap) => `ba5e${String(lap).padStart(4, "0")}${"0".repeat(32)}`;
+const updateChainLap = (lap, laps) => (lap === laps ? HEAD_SHA : `1a9e${String(lap).padStart(4, "0")}${"0".repeat(32)}`);
+const updateChainAt = (minute) => `2026-07-09T10:${String(minute).padStart(2, "0")}:00Z`;
+
+function updateChainText(masterLaps, { pr = true, pushed = false, hand = false } = {}) {
+  const lines = Array.from({ length: 20 }, (_, index) => `line ${index}\n`);
+  if (pr) lines[1] = "pr edit\n";
+  for (let lap = 1; lap <= masterLaps; lap++) lines[UPDATE_CHAIN_MASTER_LINES[lap - 1]] = `master ${lap}\n`;
+  if (pushed) lines[19] = "authored after the approval\n";
+  // A resolution nobody wrote: the kind of hand edit a conflict fix introduces.
+  if (hand) lines[12] = "resolved by hand\n";
+  return lines.join("");
+}
+
+function updateChainFixture({
+  laps = 3,
+  // The last merge's committed file differs from the clean merge of its parents.
+  handResolved = false,
+  // A commit is pushed after lap 1, and the later laps merge master into IT.
+  pushedAfterFirstLap = false,
+  // The head's second parent is not in master's history.
+  secondParentOffMaster = false,
+  // The head merge was not written by the gate's update-branch.
+  headNotGateMade = false,
+} = {}) {
+  const trees = {};
+  const blobs = {};
+  const record = (sha, text) => {
+    const blob = gitBlobSha(text);
+    blobs[blob] = text;
+    trees[sha] = { [UPDATE_CHAIN_FILE]: blob };
+  };
+  const dates = { [UPDATE_CHAIN_CONTENT]: updateChainAt(0) };
+  const parents = { [UPDATE_CHAIN_CONTENT]: [{ oid: UPDATE_CHAIN_FORK }] };
+  const mergeBases = {};
+  record(UPDATE_CHAIN_FORK, updateChainText(0, { pr: false }));
+  record(UPDATE_CHAIN_CONTENT, updateChainText(0));
+  let previous = UPDATE_CHAIN_CONTENT;
+  for (let lap = 1; lap <= laps; lap++) {
+    const base = updateChainBase(lap);
+    record(base, updateChainText(lap, { pr: false }));
+    mergeBases[base] = lap === 1 ? UPDATE_CHAIN_FORK : updateChainBase(lap - 1);
+    const pushed = pushedAfterFirstLap && lap > 1;
+    if (pushed && lap === 2) {
+      parents[UPDATE_CHAIN_PUSHED] = [{ oid: previous, committedDate: dates[previous] }];
+      dates[UPDATE_CHAIN_PUSHED] = updateChainAt(27);
+      record(UPDATE_CHAIN_PUSHED, updateChainText(1, { pushed: true }));
+      previous = UPDATE_CHAIN_PUSHED;
+    }
+    const merge = updateChainLap(lap, laps);
+    parents[merge] = [
+      { oid: previous, committedDate: dates[previous] },
+      { oid: base, committedDate: updateChainAt(18 + lap * 5) },
+    ];
+    dates[merge] = updateChainAt(20 + lap * 5);
+    record(merge, updateChainText(lap, { pushed, hand: handResolved && lap === laps }));
+    previous = merge;
+  }
+  const gateMadeMerges = Array.from({ length: laps }, (_, index) => updateChainLap(index + 1, laps))
+    .filter((sha) => !(headNotGateMade && sha === HEAD_SHA));
+  return {
+    headCommittedDate: dates[HEAD_SHA],
+    headParents: parents[HEAD_SHA],
+    parentsByOid: parents,
+    commitDatesByOid: dates,
+    baseContainedShas: Array.from({ length: laps }, (_, index) => updateChainBase(index + 1)),
+    mergeBaseByTarget: mergeBases,
+    compareStatusByTarget: secondParentOffMaster ? { [updateChainBase(laps)]: "diverged" } : {},
+    gateMadeMerges,
+    treeEntriesByCommit: trees,
+    blobsBySha: blobs,
+    labels: ["play-tested"],
+    files: [UPDATE_CHAIN_FILE],
+    issueComments: [
+      codexRateLimit(updateChainAt(5)),
+      prComment("sachiniyer", `Play-tested commit: ${UPDATE_CHAIN_CONTENT}\n\nDriver passed.`, updateChainAt(8)),
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", updateChainAt(10)),
+    ],
+  };
+}
+
+// Both halves of the carry, stated once so every negative below first proves its
+// own unmutated fixture passes — a negative that also passes on a gate that
+// carries nothing proves nothing.
+function assertUpdateChainCarries(result, laps) {
+  assert.equal(result.shouldMerge, true, `a clean chain must carry: ${result.reasons.join("; ")}`);
+  const notes = result.notes.join("\n");
+  assert.match(notes, new RegExp(`content head ${UPDATE_CHAIN_CONTENT}, current head ${HEAD_SHA}`));
+  assert.match(notes, /merging on maintainer approval/, "the approval carried");
+  assert.match(
+    notes,
+    new RegExp(`play-tested commit ${UPDATE_CHAIN_CONTENT} covers head ${HEAD_SHA} through ${laps} content-preserving update merge`),
+    "the attestation carried",
+  );
+}
+
+// The two halves are read separately because they are not independent in one
+// decision: a stale attestation is itself a blocker, and the degraded pass only
+// consults the approval once nothing else blocks. So the approval is read with
+// the TUI gate out of the way (the PR's own files list nothing gated), and the
+// attestation with it in place. The approval probe also gets a usage-limit
+// reply written after the head, so the degraded pass is live whatever the chain
+// proves and the approval is the one thing under test.
+async function assertUpdateChainInvalidates(options, why) {
+  const control = updateChainFixture();
+  const controlResult = await evaluateGate({
+    ...control,
+    files: ["docs/notes.md"],
+    issueComments: [...control.issueComments, codexRateLimit(updateChainAt(59))],
+  });
+  assert.equal(controlResult.shouldMerge, true, `the approval probe must pass unmutated: ${controlResult.reasons.join("; ")}`);
+  const probe = updateChainFixture(options);
+  const withoutTuiGate = await evaluateGate({
+    ...probe,
+    files: ["docs/notes.md"],
+    issueComments: [...probe.issueComments, codexRateLimit(updateChainAt(59))],
+  });
+  assert.equal(withoutTuiGate.shouldMerge, false, `${why}: the approval must not carry`);
+  assert.match(withoutTuiGate.reasons.join("\n"), /awaiting maintainer review/, `${why}: the approval must not carry`);
+  const result = await evaluateGate(updateChainFixture(options));
+  assert.equal(result.shouldMerge, false, why);
+  assert.match(
+    result.reasons.join("\n"),
+    new RegExp(`play-tested attestation for ${UPDATE_CHAIN_CONTENT} is stale`),
+    `${why}: the attestation must not carry`,
+  );
+  return result;
+}
+
+for (const laps of [1, 3, 5]) {
+  test(`#4886: a chain of ${laps} clean update merge(s) through a both-changed gated file carries the approval and the attestation`, async () => {
+    assertUpdateChainCarries(await evaluateGate(updateChainFixture({ laps })), laps);
+  });
+}
+
+test("#4886: a hand-resolved update merge invalidates both", async () => {
+  assertUpdateChainCarries(await evaluateGate(updateChainFixture()), 3);
+  const result = await assertUpdateChainInvalidates(
+    { handResolved: true }, "a committed line neither side wrote is unreviewed content");
+  assert.doesNotMatch(result.notes.join("\n"), /content head/);
+});
+
+test("#4886: a new authored commit inside the chain invalidates both", async () => {
+  assertUpdateChainCarries(await evaluateGate(updateChainFixture()), 3);
+  const result = await assertUpdateChainInvalidates(
+    { pushedAfterFirstLap: true }, "a push after the approval is new code");
+  // The walk stops at the push and anchors there, exactly as an ordinary push does.
+  assert.match(result.notes.join("\n"), new RegExp(`content head ${UPDATE_CHAIN_PUSHED}`));
+});
+
+test("#4886: a second parent outside master's history invalidates both", async () => {
+  assertUpdateChainCarries(await evaluateGate(updateChainFixture()), 3);
+  const result = await assertUpdateChainInvalidates(
+    { secondParentOffMaster: true }, "merging a non-master branch brings in unreviewed content");
+  assert.doesNotMatch(result.notes.join("\n"), /content head/);
+});
+
+// The line-level proof is admitted only on the gate's own update merge. A person's
+// clean merge through a both-changed file keeps the path-level answer it had
+// before #4886, which refuses.
+test("#4886: a both-changed file is proven only on the gate's own update merge", async () => {
+  assertUpdateChainCarries(await evaluateGate(updateChainFixture()), 3);
+  await assertUpdateChainInvalidates(
+    { headNotGateMade: true }, "a merge the gate did not write keeps the path-level proof");
+});
+
+// Master's gated change arriving through parent 2 is master's, but only when the
+// attestation's own content reaches the head through proven links. An attestation
+// for a commit the chain never passed through is compared as before.
+test("#4886: an attestation off the chain still compares the gated trees", async () => {
+  const fixture = updateChainFixture();
+  const stranger = "5724a9e700000000000000000000000000000000";
+  fixture.treeEntriesByCommit[stranger] = { [UPDATE_CHAIN_FILE]: gitBlobSha("something else\n") };
+  fixture.issueComments[1] = prComment("sachiniyer", `Play-tested commit: ${stranger}`, updateChainAt(8));
+  const result = await evaluateGate(fixture);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.reasons.join("\n"), new RegExp(`play-tested attestation for ${stranger} is stale`));
+  // …and not because the chain went unrecognized: it still carried the approval.
+  assert.match(result.notes.join("\n"), new RegExp(`content head ${UPDATE_CHAIN_CONTENT}`));
+});
+
+test("#4886: the line merge accepts disjoint hunks and refuses everything else", () => {
+  // Required lazily: on a gate without the proof this is the test that names it.
+  const { isCleanTextMerge, mergeLines, splitLines } = require("./text-merge.js");
+  const lines = (...values) => values.map((value) => `${value}\n`);
+  const base = lines(1, 2, 3, 4, 5, 6);
+  assert.deepEqual(mergeLines(base, lines(1, "a", 3, 4, 5, 6), lines(1, 2, 3, 4, "b", 6)), lines(1, "a", 3, 4, "b", 6));
+  // Adjacent hunks conflict, as in git.
+  assert.equal(mergeLines(base, lines(1, "a", 3, 4, 5, 6), lines(1, 2, "b", 4, 5, 6)), null);
+  // Two insertions at one point conflict.
+  assert.equal(mergeLines(base, lines(1, 2, "a", 3, 4, 5, 6), lines(1, 2, "b", 3, 4, 5, 6)), null);
+  // The same change on both sides merges to one copy.
+  assert.deepEqual(mergeLines(base, lines(1, "a", 3, 4, 5, 6), lines(1, "a", 3, 4, 5, 6)), lines(1, "a", 3, 4, 5, 6));
+  assert.deepEqual(splitLines("x\ny"), ["x\n", "y"]);
+  assert.deepEqual(splitLines(""), []);
+
+  const bytes = (text) => Buffer.from(text, "latin1");
+  const merge = {
+    base: bytes("1\n2\n3\n4\n5\n"),
+    first: bytes("1\nA\n3\n4\n5\n"),
+    second: bytes("1\n2\n3\n4\nB\n"),
+  };
+  assert.equal(isCleanTextMerge({ ...merge, committed: bytes("1\nA\n3\n4\nB\n") }), true);
+  // One byte off, a dropped side, or a line nobody wrote: all refused.
+  assert.equal(isCleanTextMerge({ ...merge, committed: bytes("1\nA\n3\n4\nB") }), false);
+  assert.equal(isCleanTextMerge({ ...merge, committed: bytes("1\nA\n3\n4\n5\n") }), false);
+  assert.equal(isCleanTextMerge({ ...merge, committed: bytes("1\nA\nX\n4\nB\n") }), false);
+  // Binary on any side is not a text merge.
+  assert.equal(isCleanTextMerge({ ...merge, second: bytes("1\n2\n3\n4\nB\0\n"), committed: bytes("1\nA\n3\n4\nB\0\n") }), false);
+  // Past the edit-distance bound the proof gives up rather than grow.
+  const long = Array.from({ length: 50 }, (_, index) => `${index}\n`).join("");
+  const rewritten = Array.from({ length: 50 }, (_, index) => `r${index}\n`).join("");
+  assert.equal(isCleanTextMerge({ base: bytes(long), first: bytes(rewritten), second: bytes(long), committed: bytes(rewritten) }, 10), false);
+  assert.equal(isCleanTextMerge({ base: bytes(long), first: bytes(rewritten), second: bytes(long), committed: bytes(rewritten) }), true);
+});
+
 test("a merge with more than two parents is not an update-branch", async () => {
   const { updateBranchContentHead } = __test;
   // Containment always answers YES here, deliberately: otherwise the compare stub
@@ -7188,15 +7422,23 @@ test("#4204: a rebase changing only ungated and test files preserves the play-te
   assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${OTHER_SHA} covers head ${HEAD_SHA}`));
 });
 
-for (const changed of [false, true]) {
-  test(`#4204: a master merge ${changed ? "with changed gated content invalidates" : "preserves"} the play-test`, async () => {
-    // The head is a gate-made merge of OTHER_SHA (the tested content head) with
-    // a master tip. Carrying evidence across it requires the merge's own tree to
-    // equal the three-way derive over both parents and the merge base, so the
-    // fixture models all four trees: master alone changed
-    // docs/master.md, or — in the changed case — the gated file itself.
+// Three merges of the tested content head OTHER_SHA with a master tip. Master
+// changing a gated file through parent 2 is master's change, already gated on
+// master, and carries (#4886 — before it, this case invalidated). A merge whose
+// committed gated content is neither side's is a hand resolution and does not.
+for (const { name, masterGated, committedGated, carries } of [
+  { name: "that changes only ungated master paths preserves", masterGated: "1", committedGated: "1", carries: true },
+  { name: "that brings master's own gated change preserves", masterGated: "2", committedGated: "2", carries: true },
+  { name: "whose committed gated content neither side wrote invalidates", masterGated: "2", committedGated: "3", carries: false },
+]) {
+  test(`#4204: a master merge ${name} the play-test`, async () => {
+    // The head is a gate-made merge of OTHER_SHA with a master tip. Carrying
+    // evidence across it requires the merge's own tree to equal the three-way
+    // derive over both parents and the merge base, so the fixture models all
+    // four trees.
     const masterTip = "b".repeat(40);
     const mergeBase = "ba5eba5e00000000000000000000000000000000";
+    const gated = (version) => ({ "session/tmux/envmarker.go": version.repeat(40), "docs/master.md": "2".repeat(40) });
     const result = await evaluateGate(playTestFixture({
       headCommittedDate: "2026-07-09T02:00:00Z",
       headParents: [{ oid: OTHER_SHA, committedDate: "2026-07-09T01:00:00Z" },
@@ -7205,18 +7447,18 @@ for (const changed of [false, true]) {
       treesByOid: {
         [mergeBase]: tuiTree(PLAY_TEST_TREE),
         [OTHER_SHA]: tuiTree(PLAY_TEST_TREE),
-        [masterTip]: tuiTree(changed
-          ? { "session/tmux/envmarker.go": "2".repeat(40) }
-          : { ...PLAY_TEST_TREE, "docs/master.md": "2".repeat(40) }),
-        [HEAD_SHA]: tuiTree(changed
-          ? { "session/tmux/envmarker.go": "2".repeat(40) }
-          : { ...PLAY_TEST_TREE, "docs/master.md": "2".repeat(40) }),
+        [masterTip]: tuiTree(gated(masterGated)),
+        [HEAD_SHA]: tuiTree(gated(committedGated)),
       },
     }));
-    assert.equal(result.shouldMerge, !changed, result.summary);
-    assert.match(result.notes.join("\n"), /content head/);
-    if (changed) assert.match(result.reasons.join("\n"), /gated paths changed/);
-    else assert.match(result.notes.join("\n"), /gated paths unchanged/);
+    assert.equal(result.shouldMerge, carries, result.summary);
+    if (carries) {
+      assert.match(result.notes.join("\n"), /content head/);
+      assert.match(result.notes.join("\n"), new RegExp(`play-tested commit ${OTHER_SHA} covers head ${HEAD_SHA}`));
+    } else {
+      assert.doesNotMatch(result.notes.join("\n"), /content head/);
+      assert.match(result.reasons.join("\n"), /gated paths changed/);
+    }
   });
 }
 
@@ -9526,6 +9768,228 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
 
   assert.equal(targets.length, 10, "runner work is bounded even when more stale PRs exist");
   assert.equal(new Set(targets.map((target) => target.prNumber)).size, targets.length);
+});
+
+// #4782. Mergeability UNKNOWN, a required check still settling, and an aggregate
+// left at "WAITING: refreshing" all clear with time and send no event when they
+// do, so a decision taken on them sat BLOCKED until a manual workflow_dispatch.
+// The reconciliation pass re-evaluates exactly those, once each has aged, and
+// never a decision with any reason that waiting cannot clear.
+const TRANSIENT_BLOCK_MARKER = "<!-- auto-gate-transient-block -->";
+const AGGREGATE_REFRESHING_TITLE = "WAITING: refreshing every PR/head decision at this commit";
+const TRANSIENT_NOW = Date.parse("2026-09-25T21:30:00Z");
+const minutesBeforeTransientNow = (minutes) =>
+  new Date(TRANSIENT_NOW - minutes * 60 * 1000).toISOString();
+
+function transientDecision({ prNumber, headSha, evaluatedAt, reason, marked = true, conclusion }) {
+  const decision = reconciliationDecision({
+    prNumber,
+    headSha,
+    evaluatedAt,
+    reason: reason || "mergeability is still UNKNOWN",
+    observedChecks: [],
+  });
+  if (conclusion) {
+    decision.conclusion = conclusion;
+  }
+  if (marked) {
+    decision.output.text += `\n${TRANSIENT_BLOCK_MARKER}`;
+  }
+  return decision;
+}
+
+function aggregateCheck({ headSha, title, completedAt, id = 70000 }) {
+  return {
+    id,
+    name: "Auto Gate decision",
+    external_id: `auto-gate:aggregate:head:${headSha}`,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: "completed",
+    conclusion: "failure",
+    completed_at: completedAt,
+    output: { title, summary: "" },
+  };
+}
+
+async function reconcileTransient(pulls, checksByHead) {
+  return autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({ pulls, checksByHead }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    reconciliationNowMs: TRANSIENT_NOW,
+  });
+}
+
+async function evaluateAndReport(options) {
+  const github = fakeGateGithub(options);
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  await autoGate.reportDecision({ github, context: fakeContext(), core: fakeCore(), result });
+  const written = github.createdChecks.at(-1);
+  return { result, written, marked: String(written.output.text).split("\n").includes(TRANSIENT_BLOCK_MARKER) };
+}
+
+test("#4782: a decision blocked only by transient state is marked, and a permanent block is not", async () => {
+  const settlingBuild = [
+    checkRun({ name: "Lint", conclusion: "success" }),
+    checkRun({ name: "Build", status: "in_progress", conclusion: null }),
+  ];
+  const transient = [
+    ["mergeability UNKNOWN", { mergeable: "UNKNOWN" }],
+    ["a required check still running", { checkRuns: settlingBuild }],
+    ["a PR Validation check not reported yet", {
+      checkRuns: [checkRun({ name: "Lint", conclusion: "success" })],
+    }],
+    ["mergeability UNKNOWN and a running check", { mergeable: "UNKNOWN", checkRuns: settlingBuild }],
+  ];
+  for (const [label, options] of transient) {
+    const { result, marked } = await evaluateAndReport(options);
+    assert.equal(result.shouldMerge, false, label);
+    assert.ok(marked, `${label} must be marked for retry; reasons: ${result.reasons.join("; ")}`);
+  }
+
+  const permanent = [
+    ["a hold beside mergeability UNKNOWN", {
+      mergeable: "UNKNOWN",
+      labels: ["hold"],
+      labelEvents: [labeledEvent("sachiniyer", "hold", HOLD_APPLIED_AT)],
+    }],
+    ["a missing Codex verdict beside mergeability UNKNOWN", { mergeable: "UNKNOWN", issueComments: [] }],
+    ["a conflicting branch", { mergeable: "CONFLICTING" }],
+    ["a failed required check beside a running one", {
+      checkRuns: [
+        checkRun({ name: "Lint", conclusion: "failure" }),
+        checkRun({ name: "Build", status: "in_progress", conclusion: null }),
+      ],
+    }],
+  ];
+  for (const [label, options] of permanent) {
+    const { result, marked } = await evaluateAndReport(options);
+    assert.equal(result.shouldMerge, false, label);
+    assert.equal(marked, false, `${label} must never be retried; reasons: ${result.reasons.join("; ")}`);
+  }
+});
+
+test("#4782: the written transient decision is what the reconciliation pass selects", async () => {
+  const { written } = await evaluateAndReport({ mergeable: "UNKNOWN" });
+  const stamp = String(written.output.summary).split("\n", 1)[0].slice("evaluated: ".length).split(" ")[0];
+  const decision = {
+    id: 1465,
+    name: written.name,
+    external_id: written.external_id,
+    app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+    status: written.status,
+    conclusion: written.conclusion,
+    completed_at: stamp,
+    output: written.output,
+  };
+  const at = (nowMs) => autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: { [HEAD_SHA]: [decision] },
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    reconciliationNowMs: nowMs,
+  });
+  const evaluatedAt = Date.parse(stamp);
+  assert.deepEqual(await at(evaluatedAt + 60 * 1000), [], "a fresh transient decision is left alone");
+  assert.deepEqual(
+    (await at(evaluatedAt + 11 * 60 * 1000)).map((target) => target.prNumber),
+    [1465],
+    "an aged transient decision is re-evaluated without any other event",
+  );
+});
+
+test("#4782: reconciliation selects aged transient-only blocks and stale refreshing aggregates, nothing else", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  const add = (number, checks) => {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = checks;
+  };
+  // Selected: transient-only, evaluated 30 minutes ago.
+  add(1, [transientDecision({ prNumber: 1, headSha: sha(1), evaluatedAt: minutesBeforeTransientNow(30) })]);
+  // Not yet: transient-only, evaluated two minutes ago. This is the spacing.
+  add(2, [transientDecision({ prNumber: 2, headSha: sha(2), evaluatedAt: minutesBeforeTransientNow(2) })]);
+  // Never: permanent blocks, however old.
+  add(3, [transientDecision({
+    prNumber: 3, headSha: sha(3), evaluatedAt: minutesBeforeTransientNow(300), marked: false,
+    reason: "the maintainer `hold` label is on this pull request",
+  })]);
+  add(4, [transientDecision({
+    prNumber: 4, headSha: sha(4), evaluatedAt: minutesBeforeTransientNow(300), marked: false,
+    reason: "required check Lint (app 15368) did not succeed (check run completed/failure)",
+  })]);
+  // Never: a passing decision has nothing to retry.
+  add(5, [transientDecision({
+    prNumber: 5, headSha: sha(5), evaluatedAt: minutesBeforeTransientNow(300), conclusion: "success",
+  })]);
+  // Selected: the aggregate was left at WAITING: refreshing 40 minutes ago.
+  add(6, [
+    transientDecision({
+      prNumber: 6, headSha: sha(6), evaluatedAt: minutesBeforeTransientNow(40), conclusion: "success", marked: false,
+    }),
+    aggregateCheck({ headSha: sha(6), title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(40) }),
+  ]);
+  // Not yet: a refreshing aggregate a live transaction may still own.
+  add(7, [aggregateCheck({
+    headSha: sha(7), title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(5),
+  })]);
+  // Never: an aggregate that finished, naming a real blocker.
+  add(8, [aggregateCheck({
+    headSha: sha(8),
+    title: "WAITING: PR #8 at this commit is waiting: Codex has not reviewed this head",
+    completedAt: minutesBeforeTransientNow(300),
+  })]);
+
+  const targets = await reconcileTransient(pulls, checksByHead);
+  assert.deepEqual(targets, [
+    { prNumber: 6, headSha: sha(6), decisionKey: `pr-6-head-${sha(6)}` },
+    { prNumber: 1, headSha: sha(1), decisionKey: `pr-1-head-${sha(1)}` },
+  ], "oldest first; the aggregate re-apply runs through the same per-PR target");
+});
+
+test("#4782: transient retries are bounded per pass and never displace a PR Validation wake", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 12; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [transientDecision({
+      prNumber: number,
+      headSha: sha(number),
+      // Higher numbers are older, so the oldest-first order is observable.
+      evaluatedAt: minutesBeforeTransientNow(20 + number),
+    })];
+  }
+  const onlyTransient = await reconcileTransient(pulls, checksByHead);
+  assert.deepEqual(
+    onlyTransient.map((target) => target.prNumber),
+    [12, 11, 10, 9, 8],
+    "at most five transient retries per pass, oldest first",
+  );
+
+  for (let number = 101; number <= 108; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [
+      reconciliationDecision({ prNumber: number, headSha: sha(number), evaluatedAt: "2026-07-09T20:00:00Z" }),
+      reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+    ];
+  }
+  const mixed = await reconcileTransient(pulls, checksByHead);
+  assert.equal(mixed.length, 10, "the pass-wide cap of ten still holds");
+  assert.deepEqual(
+    mixed.map((target) => target.prNumber),
+    [101, 102, 103, 104, 105, 106, 107, 108, 12, 11],
+    "PR Validation wakes go first; transient retries take only the slots left",
+  );
 });
 
 // The schedule is a backstop, not a clock: GitHub delivered the */5 trigger
@@ -14716,6 +15180,12 @@ function fakeGateGithub({
   // The live comparison recognizes each as contained in today's base branch.
   baseContainedShas = [],
   mergeBaseSha = "ba5eba5e00000000000000000000000000000000",
+  // The merge base per base-side sha, for a chain whose links each have their
+  // own (#4886). Unlisted targets fall back to mergeBaseSha.
+  mergeBaseByTarget = {},
+  // Commits whose REST read carries the gate's own update-merge identity:
+  // github-actions[bot] as author, web-flow as committer, a verified signature.
+  gateMadeMerges = [],
   treeEntriesByCommit = {},
   truncatedTreeCommits = [],
   // Workflow runs the repo reports for a head, and the head the branch moves to
@@ -15141,9 +15611,13 @@ function fakeGateGithub({
         getCommit: async ({ ref }) => ({
           data: {
             sha: ref,
+            ...(gateMadeMerges.includes(ref)
+              ? { author: { login: "github-actions[bot]" }, committer: { login: "web-flow" } }
+              : {}),
             commit: {
               committer: { date: (commitDatesByOid || {})[ref] },
               tree: { sha: ref },
+              ...(gateMadeMerges.includes(ref) ? { verification: { verified: true, reason: "valid" } } : {}),
             },
             // Default: an ordinary one-parent commit, so the first-parent walk
             // stops at the first link unless a fixture describes a chain.
@@ -15181,7 +15655,7 @@ function fakeGateGithub({
                 behind_by: 0,
                 ahead_by: 0,
                 status: secondParentInBase ? "behind" : "diverged",
-                merge_base_commit: { sha: mergeBaseSha },
+                merge_base_commit: { sha: mergeBaseByTarget[target] ?? mergeBaseSha },
               },
             };
           }

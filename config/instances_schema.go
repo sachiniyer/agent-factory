@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 var errInstancesSchemaContent = errors.New("invalid instances.json schema content")
@@ -73,6 +75,16 @@ func MigrateRepoInstancesForDaemonLoad(repoID string) (SchemaMigrationResult, er
 // (RepoInstancesMigrateOnLoadPaths) so the two can never enumerate a different
 // set. A missing instances directory is not an error: a daemon with no per-repo
 // state has nothing to migrate.
+//
+// A subdirectory whose name is not a valid repoID is skipped here, the same way
+// a non-directory entry already is. repoInstancesPath validates the id before
+// touching the filesystem, so feeding an unvalidated name to either consumer
+// fails at that pre-condition — a failure that is neither corrupted content nor
+// a write failure and so aborts the whole sweep under both callers. Skipping at
+// the walk keeps that class from blocking daemon startup while preserving the
+// hard-refuse posture for real repos with read/write/newer-schema problems. This
+// matches LoadAllRepoInstancesReportingMissing, which already logs and
+// continues on the identical case (state.go).
 func repoInstanceIDsForDaemonLoad() ([]string, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
@@ -88,6 +100,10 @@ func repoInstanceIDsForDaemonLoad() ([]string, error) {
 	ids := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		if err := ValidateRepoID(entry.Name()); err != nil {
+			log.WarningLog.Printf("skipping instances subdirectory %q: not a valid repo id: %v", entry.Name(), err)
 			continue
 		}
 		ids = append(ids, entry.Name())

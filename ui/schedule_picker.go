@@ -515,7 +515,8 @@ const indentSub = "  "
 // three times in the block — the Cron input right above already shows it
 // (#2596). Custom gets the one fact that input line cannot carry instead: when
 // the expression next fires, in the same "Jan 02 15:04" shape the automations
-// rail's next-run column uses. A half-typed or invalid expression has no next
+// rail's next-run column uses — or, past task.FarOutThreshold, the lists'
+// dated far-out note, since "Jan 02" hides a year-out run (#4855). A half-typed or invalid expression has no next
 // run, so the line is dropped rather than padded back out with a repeat —
 // which also retires the empty-raw case that used to render a bare "Custom:".
 func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
@@ -530,11 +531,19 @@ func (p *schedulePicker) renderPreviewLine(preview, dim lipgloss.Style) string {
 		// the ZERO time.Time, which formats as a thoroughly plausible
 		// "Jan 01 00:00". Promising a fire time the task will never reach is
 		// worse than the echo this line replaced, so name the absence.
-		next := sched.Next(p.now())
+		now := p.now()
+		next := sched.Next(now)
 		if next.IsZero() {
 			return indentSub + preview.Render("No upcoming run")
 		}
-		return indentSub + preview.Render("Next run "+next.Format("Jan 02 15:04"))
+		// "Jan 02" has no year, so a dated cron typed just after its date read
+		// as this year's run when it is next year's (#4855). Past the far-out
+		// threshold, word it the way the task lists do.
+		when := next.Format("Jan 02 15:04")
+		if note := task.FarOutNoteAt(next, now); note != "" {
+			when = note
+		}
+		return indentSub + preview.Render("Next run "+when)
 	}
 	return indentSub + preview.Render(p.Describe()) + dim.Render("  ·  "+p.Cron())
 }

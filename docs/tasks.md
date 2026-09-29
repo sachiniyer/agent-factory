@@ -158,6 +158,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `unschedulable_reason` | **Derived at read time, never stored.** Which shape it is — `no-trigger`, `invalid-expression`, or `no-occurrence` — straight from the classifier below, so a surface that cannot call it words the verdict the same way instead of re-deriving one from `cron_expr`. Absent unless `unschedulable` is set |
 | `unassessable` | **Derived at read time, never stored.** No lateness verdict could be reached: there is no instant to measure from, or none the schedule can be evaluated against. Unknown, not healthy |
 | `next_run_at` | **Derived at read time, never stored.** When the daemon's *live* scheduler entry will next fire this task — read off what is armed, not recomputed from `cron_expr`. Absent when the task is not armed, and that absence is itself the signal |
+| `next_run_far` | **Derived at read time, never stored.** `true` when the task is enabled and `next_run_at` is more than 60 days away; absent otherwise |
 | `arming` | **Derived at read time, never stored.** `armed`, `not-armed`, or absent when no running daemon answered (nothing observed it — which is not the same as "not armed") |
 
 A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft. An enabled cron task must carry a non-empty prompt — there is no event line to fall back to. Watch tasks are exempt (empty prompt defaults to the emitted line). Disabled drafts are tolerated regardless of prompt.
@@ -390,6 +391,8 @@ The verdict is deliberately a claim about the **scheduler**, not about the calen
 Watch tasks are never overdue: they fire when their command emits a line, which may legitimately be never. Neither is a disabled task — whether disabling it was *intended* is what the audit trail answers.
 
 **`next_run_at` comes from the live scheduler entry.** Present when the daemon has the task armed, absent when it does not. An enabled task with `arming: "not-armed"` is **enabled but not armed**: it will not fire at all until that is fixed (check the daemon log for an arming refusal, then `af daemon restart`). When no daemon answers, `arming` is absent — nothing observed it — and no surface reports that as "not armed".
+
+**A next run more than 60 days out is flagged.** Cron has no year field, so a dated expression such as `0 7 21 9 *` re-arms for the same date next year after it fires; the TUI and web task lists show such a run as `next 2027-09-21 (in 11 months)`, `af tasks show` appends `· in 11 months` to its next-run row, and `af tasks list`/`get` set `next_run_far: true` — disable the task if the re-arm was not intended.
 
 **Every mutation leaves a line.** `audit` records who created, updated, enabled, or disabled the task, when, and which fields moved, bounded to the last 20 entries. The store writes it inside the same locked operation that commits the change, diffed against the record actually replaced, so it cannot describe a change that did not happen.
 
