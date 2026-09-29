@@ -446,7 +446,6 @@ type home struct {
 	// rows are built from the daemon's registry (plus a leading "ambient identity"
 	// row), so the overlay's index cannot be mapped back through any local list.
 	accountPickerChoices []accountChoice
-
 	// attached is set while the user is inside an attached tmux session.
 	// While true, periodic background work that hits the shared tmux server
 	// (capture-pane via runMetadataTick, refreshPanesCmd) is
