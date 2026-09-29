@@ -38,8 +38,9 @@ export interface EventStreamCallbacks {
   onResync(): void;
   /** Fired on every connection-state change, for the header indicator. */
   onStatus(status: EventStreamStatus): void;
-  /** Fired ONCE when a streak of reconnect attempts has closed before `onopen`
-   *  ever fired — the only visible signature that the daemon rejected the WS
+  /** Fired when a streak of reconnect attempts has closed before `onopen`
+   *  ever fired, and again every AUTH_FAILURE_THRESHOLD further failures while
+   *  the streak lasts (so an inconclusive probe is retried) — the only visible signature that the daemon rejected the WS
    *  upgrade (the realistic cause is HTTP 401 after the operator rotated the
    *  access token; the browser's WS API exposes no HTTP status to JS, surfacing
    *  a rejected handshake as `onclose(1006)` with no `onopen`). The caller
@@ -60,7 +61,7 @@ const BACKOFF_MAX_MS = 10_000;
 // so EventStream cannot tell 401 from a transient drop at the WS layer. The
 // reliable signal for "the credential was revoked" is therefore "the upgrade
 // keeps failing to even open": a small threshold of consecutive closes-without-
-// onopen escalates once through `onAuthFailure`. The threshold is a streak
+// onopen escalates through `onAuthFailure`. The threshold is a streak
 // (not a count of total failures) because the first successful `onopen` resets
 // it — so a single network blip that recovers, or a one-off WS handshake race,
 // does not trip the escalation, while an idle client whose token has been
@@ -94,12 +95,18 @@ export class EventStream {
   // every successful open so only an unbroken streak of close-before-opens
   // trips the escalation, not a single transient drop that recovered.
   private consecutiveCloseBeforeOpen = 0;
-  // Allows firing `onAuthFailure` once per close-before-open streak rather than
-  // on every failed reconnect: the caller's probe is a single authenticated
-  // resync, and a 401 on it -> disconnect() stops the stream, while a transport
-  // failure leaves the loop alone. Reset on every successful open so a later
-  // genuine revocation re-escalates.
-  private escalatedAuthFailure = false;
+  // The streak length at which `onAuthFailure` next fires. It fires at the
+  // threshold, then again every AUTH_FAILURE_THRESHOLD further close-before-
+  // opens — not on every failed reconnect (that would spam the caller's probe),
+  // and not only once per streak: the probe is an authenticated resync whose
+  // inconclusive outcomes (a status-0 transport failure, a 5xx, a request
+  // coalesced into or superseded by another resync) all retain the token and
+  // report nothing back, so a one-shot escalation left a revoked credential
+  // looping forever once REST recovered. Re-arming by count needs no probe
+  // outcome from the caller, so no inconclusive path can leave it disarmed; once
+  // backoff saturates at BACKOFF_MAX_MS it is one probe per ~30s. Reset on every
+  // successful open so a later streak starts from the threshold again.
+  private nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
 
   constructor(
     private readonly token: string,
@@ -160,7 +167,7 @@ export class EventStream {
       // close-before-open streak so a single transient drop cannot trip the
       // threshold, and a later genuine revocation gets its own escalation.
       this.consecutiveCloseBeforeOpen = 0;
-      this.escalatedAuthFailure = false;
+      this.nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
       this.cb.onStatus("open");
       // Re-Snapshot on EVERY open. The FIRST open closes the login-window race:
       // the seed Snapshot was taken before this socket existed, so a mutation in
@@ -204,7 +211,7 @@ export class EventStream {
    *  normal close of an open socket leaves the streak alone. Always
    *  schedules the backoff reconnect (the existing behavior) so a transient
    *  drop still heals through the same path, and past the streak threshold
-   *  escalates once via `onAuthFailure`. */
+   *  escalates via `onAuthFailure`. */
   private handleClose(opened: boolean): void {
     if (!opened) {
       this.consecutiveCloseBeforeOpen += 1;
@@ -230,20 +237,20 @@ export class EventStream {
     // rejected outright (the realistic cause is HTTP 401 on a revoked
     // credential after the operator rotated the token — the only
     // close-before-open shape the daemon's auth gate produces, since an
-    // authorized upgrade reaches onopen; #1674). Escalate ONCE per streak so
-    // the caller's authenticated REST probe (its resync) gets a single shot:
-    // a 401 on it trips shouldForgetToken → disconnect() and stop()s this
-    // stream, while a transport failure leaves the loop reconnecting. The
-    // timeout we just armed keeps trying in the meantime, so a probe that
+    // authorized upgrade reaches onopen; #1674). Escalate at the threshold and
+    // then every AUTH_FAILURE_THRESHOLD further failures (see
+    // nextAuthEscalationAt) so the caller's authenticated REST probe (its
+    // resync) is retried while the upgrade keeps failing: a 401 on it trips
+    // shouldForgetToken → disconnect() and stop()s this stream, while an
+    // inconclusive probe leaves the loop reconnecting until the next re-arm.
+    // The timeout we just armed keeps trying in the meantime, so a probe that
     // returns 200 (a false positive — the WS handshake was failing for some
     // other reason that has since cleared) is observed by the next onopen,
-    // which resets the streak and the escalation guard. Fire after arming so
+    // which resets the streak and the escalation point. Fire after arming so
     // the stream owns its reconnect before the caller's probe chain runs.
-    if (
-      !this.escalatedAuthFailure &&
-      this.consecutiveCloseBeforeOpen >= AUTH_FAILURE_THRESHOLD
-    ) {
-      this.escalatedAuthFailure = true;
+    if (this.consecutiveCloseBeforeOpen >= this.nextAuthEscalationAt) {
+      this.nextAuthEscalationAt =
+        this.consecutiveCloseBeforeOpen + AUTH_FAILURE_THRESHOLD;
       this.cb.onAuthFailure();
     }
   }

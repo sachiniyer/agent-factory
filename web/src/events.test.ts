@@ -195,7 +195,7 @@ test("escalates to onAuthFailure after the WS upgrade closes before open past th
   stream.stop();
 });
 
-test("onAuthFailure fires at most once per close-before-open streak, not on every failed reconnect", () => {
+test("onAuthFailure re-arms every threshold failures, not on every failed reconnect", () => {
   let authFailures = 0;
   const stream = new EventStream("tok", {
     onEvent: () => {},
@@ -214,16 +214,58 @@ test("onAuthFailure fires at most once per close-before-open streak, not on ever
   failReconnectBeforeOpen();
   assert.equal(authFailures, 1, "escalated exactly once at the threshold");
 
-  // Keep failing: further close-before-opens must NOT re-fire onAuthFailure —
-  // the streak has already escalated, and one probe is the caller's contract
-  // (a 401 on it calls disconnect -> stop(); a transport failure leaves the
-  // reconnect loop alone). Continuous re-escalation would spam requestResync.
+  // The failures right after an escalation must not re-fire it: the caller's
+  // probe is in flight, and firing on every reconnect would spam requestResync.
+  failReconnectBeforeOpen();
+  failReconnectBeforeOpen();
+  assert.equal(authFailures, 1, "the next two close-before-opens must not re-escalate");
+
+  // ...but the escalation must re-arm. The caller's probe can be inconclusive
+  // (a status-0 transport failure, a 5xx, a resync superseded by a newer one):
+  // every such outcome retains the token and reports nothing back. With a
+  // revoked credential the WS never opens again, so a one-shot escalation left
+  // the stream looping forever even after REST recovered (Codex P2 on #4549).
+  failReconnectBeforeOpen();
+  assert.equal(authFailures, 2, "threshold more close-before-opens re-escalate");
   failReconnectBeforeOpen();
   failReconnectBeforeOpen();
   failReconnectBeforeOpen();
-  assert.equal(authFailures, 1, "subsequent close-before-opens must not re-escalate");
+  assert.equal(authFailures, 3, "and keep re-escalating while the streak lasts");
 
   stream.stop();
+});
+
+test("a revoked token whose first probe was inconclusive still reaches a second probe", () => {
+  // Models the Codex P2 scenario end to end at the EventStream seam: the first
+  // escalation's probe fails on transport (the caller retains the token and
+  // does not stop the stream), REST then recovers, and the next escalation's
+  // probe gets the 401 that stops the stream. Without re-arming, the second
+  // probe never happens and the reconnect loop runs forever.
+  let probes = 0;
+  let stream: EventStream | null = null;
+  stream = new EventStream("tok", {
+    onEvent: () => {},
+    onResync: () => {},
+    onStatus: () => {},
+    onAuthFailure: () => {
+      probes += 1;
+      if (probes >= 2) {
+        // REST is back: the probe sees 401 -> disconnect() -> stream.stop().
+        stream!.stop();
+      }
+      // First probe: status 0 — inconclusive, token retained, stream untouched.
+    },
+  });
+  stream.start();
+  MockWebSocket.instances[0]!.fireOpen();
+  MockWebSocket.instances[0]!.fireClose();
+  for (let i = 0; i < 12; i++) {
+    failReconnectBeforeOpen();
+  }
+  assert.equal(probes, 2, "the second escalation probed and the 401 stopped the stream");
+  const attempts = MockWebSocket.instances.length;
+  flushTimers();
+  assert.equal(MockWebSocket.instances.length, attempts, "no reconnect after the 401 stopped the stream");
 });
 
 test("a successful open resets the close-before-open streak so a blip-then-recover does not escalate", () => {

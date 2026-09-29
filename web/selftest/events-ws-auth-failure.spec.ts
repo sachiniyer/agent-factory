@@ -4,7 +4,8 @@
 // API exposes no HTTP status to JS — so the old EventStream scheduled a reconnect
 // with the same revoked credential forever and never told index.ts. The fix
 // (events.ts) counts consecutive close-before-opens and past a small threshold
-// fires onAuthFailure ONCE; index.ts routes that to requestResync(), whose
+// fires onAuthFailure (re-armed every threshold failures while the streak
+// lasts); index.ts routes that to requestResync(), whose
 // fetchSessionSnapshot 401 trips the existing shouldForgetToken -> disconnect(),
 // returning the SPA to the paste-token login.
 //
