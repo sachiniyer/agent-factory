@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/hooklog"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -338,18 +340,57 @@ func TestArchiveSessionMoveFailureAlsoSurfacesHookFailure(t *testing.T) {
 	assert.Equal(t, session.Lost, inst.GetStatus(), "the session must be left recoverable in place")
 }
 
+// A hook that floods its output must not flood the surfaced error or the daemon
+// log. Since #4853 the report is one line naming the full-output file, then at
+// most hooklog.ExcerptLines quoted lines of hooklog.ExcerptLineBytes each —
+// the 64 KiB tail it used to carry is only in that file now. The payload is
+// one 256 KiB line with no newline, so the reason the hook printed last sits at
+// the END of an overlong line; the excerpt has to keep that end.
 func TestArchiveSessionHookFailureBoundsCapturedOutputToATail(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
+	manager, logs, repoID, repoPath := newStatusTestManagerCapturingLogs(t)
 	_, _ = registerArchivable(t, manager, repoID, repoPath, "worker")
 	writeOnArchiveCommand(t,
 		`head -c 262144 /dev/zero | tr '\0' x; printf 'tail-marker'; exit 29`)
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tail-marker",
-		"the bounded capture must retain the diagnostically useful end of output")
-	assert.Less(t, len(err.Error()), 70*1024,
-		"a noisy hook must not make daemon memory and the surfaced error grow without bound")
+	surfaced := err.Error()
+
+	hookLogs, globErr := filepath.Glob(filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "logs", "hooks", "on-archive-*.log"))
+	require.NoError(t, globErr)
+	require.Len(t, hookLogs, 1)
+	assert.Contains(t, surfaced, "(full output: "+hookLogs[0]+")",
+		"the report must name the file that holds what the excerpt leaves out")
+	full, readErr := os.ReadFile(hookLogs[0])
+	require.NoError(t, readErr)
+	assert.Len(t, full, 262144+len("tail-marker"), "the full output is kept on disk, whole")
+
+	quoted := 0
+	for _, line := range strings.Split(surfaced, "\n") {
+		if !strings.HasPrefix(line, hooklog.ExcerptPrefix) {
+			continue
+		}
+		quoted++
+		assert.LessOrEqual(t, len(strings.TrimPrefix(line, hooklog.ExcerptPrefix)), hooklog.ExcerptLineBytes,
+			"each quoted line is bounded, however long the hook's line was")
+	}
+	assert.Equal(t, 1, quoted, "one unbroken line of output quotes as exactly one line:\n%s", surfaced)
+	assert.Contains(t, surfaced, hooklog.ExcerptPrefix+"…",
+		"an overlong line says it was cut")
+	assert.Contains(t, surfaced, "tail-marker",
+		"the bounded excerpt must retain the diagnostically useful end of output")
+	// 4 KiB leaves room for the header's paths and wrapping clauses; the old
+	// contract allowed 70 KiB and a regression to it is 64 KiB.
+	assert.Less(t, len(surfaced), 4*1024,
+		"a noisy hook must not make the surfaced error grow with its output")
+	assert.NotContains(t, surfaced, strings.Repeat("x", hooklog.ExcerptLineBytes+1))
+
+	for level, capture := range map[string]*logCapture{"warning": logs.warnings, "info": logs.info, "error": logs.errors} {
+		text := capture.String()
+		assert.NotContains(t, text, strings.Repeat("x", hooklog.ExcerptLineBytes+1),
+			"the %s log must not carry the hook's output beyond the excerpt", level)
+		assert.Less(t, len(text), 16*1024, "the %s log must stay bounded", level)
+	}
 }
 
 func TestArchiveSessionRejectsCheckedInHookWithoutExecutingRepoCode(t *testing.T) {

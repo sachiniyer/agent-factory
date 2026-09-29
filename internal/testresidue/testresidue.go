@@ -41,10 +41,12 @@ const (
 	// harness that writes it and doctor that reads it share one definition.
 	SandboxUserHomeMarker = ".af-testguard-sandbox-home"
 
-	// OwnerStampFile is the file testguard writes inside every one of these
-	// directories, of either kind, naming the test binary that created it, so
-	// a later test binary can reap the directory once that owner is provably
-	// dead (#4468).
+	// OwnerStampFile is the file testguard writes inside the harness
+	// directories it stamps — SandboxHome and TmuxSocketDir — naming the test
+	// binary that created it, so a later test binary can reap the directory once
+	// that owner is provably dead (#4468). A SandboxUserHome is never stamped:
+	// userhome.sandboxUserHome writes no owner stamp into it, so af doctor's
+	// content rule (not a stamp) decides whether it is removable.
 	OwnerStampFile = "owner"
 	// OwnerStampTempFile is the stamp before its rename into place. A binary
 	// killed between the write and the rename leaves it behind.

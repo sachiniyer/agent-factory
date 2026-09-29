@@ -361,7 +361,9 @@ func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
 				}
 				log.InfoLog.Printf("post-worktree hook %q completed successfully", commandForLog)
 			} else {
-				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v\n%s", commandForLog, outputPath, waitErr, outputTail)
+				// One entry, not the hook's whole output: the full output is in the
+				// file this names, and a dump of it reads as log entries (#4853).
+				log.ErrorLog.Printf("post-worktree hook %q failed (full output: %s): %v%s", commandForLog, outputPath, waitErr, hooklog.Excerpt(outputTail))
 			}
 			index++
 		}
