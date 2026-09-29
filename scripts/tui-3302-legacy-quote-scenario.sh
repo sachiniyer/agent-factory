@@ -4,7 +4,7 @@
 #
 # Mirrors scripts/tui-3302-scenario.sh in spirit, but the fake agent here
 # quotes the legacy phrase INSIDE ITS OWN TRANSCRIPT (not as a dialog),
-# with the composer painted below. The fix (claudeLegacyTrustPickerIsLast)
+# with the composer painted below. The fix (claudeLegacyTrustDialogOf)
 # must refuse this pane: no Enter is injected between the agent's quote
 # line and its composer.
 #
