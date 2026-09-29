@@ -78,11 +78,15 @@ func (m *home) handleTaskCreate() tea.Cmd {
 		// its stored form ("" for keep, and "" whenever the draft names a target
 		// session), so a task created here is byte-identical to one created
 		// before the field was reachable unless the user chose otherwise.
-		OnComplete:  draft.OnComplete,
-		ProjectPath: absPath,
-		Program:     program,
-		Enabled:     true,
-		CreatedAt:   time.Now(),
+		OnComplete: draft.OnComplete,
+		// The concurrency cap the form collected (#4180), in the same stored
+		// form: 0 for unlimited, and 0 whenever the draft's shape cannot carry
+		// one.
+		MaxConcurrentRuns: draft.MaxConcurrentRuns,
+		ProjectPath:       absPath,
+		Program:           program,
+		Enabled:           true,
+		CreatedAt:         time.Now(),
 	}
 	// Route the create through the daemon (#1029 PR 6): it is the sole writer of
 	// tasks.json among clients (#960) and re-arms its own scheduler/watchers in

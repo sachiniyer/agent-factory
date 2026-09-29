@@ -1431,16 +1431,16 @@ func TestTaskPaneEditFormClampsToHeightWithFocusInView(t *testing.T) {
 // TestTaskPaneEditFormUnclampedWhenItFits: at normal sizes the form renders
 // unchanged — no window, no more-markers.
 //
-// 25, measured, not guessed: the On-done row (#2595) added a line to the form,
-// which moved the unclamped floor for this pane from 23 to 25. The two-row jump
-// is the prompt textarea, sized at height/4, crossing its own step at the same
-// time. A pane 25 tall is the task pane's share of a ~42-row terminal, and every
-// height below it still renders — clamped and scrolled, which is what #1098
-// built the window for.
+// 26, measured, not guessed: the On-done row (#2595) moved the unclamped floor
+// for this pane from 23 to 25, and the Max-runs row (#4180) moved it once more.
+// (The 23→25 jump was two rows because the prompt textarea, sized at height/4,
+// crossed its own step at the same time.) A pane 26 tall is the task pane's
+// share of a ~42-row terminal, and every height below it still renders —
+// clamped and scrolled, which is what #1098 built the window for.
 func TestTaskPaneEditFormUnclampedWhenItFits(t *testing.T) {
 	repo := newGitRepo(t)
 	tp := NewTaskPane()
-	tp.SetSize(80, 25)
+	tp.SetSize(80, 26)
 	tp.EnterCreateMode(repo)
 
 	out := tp.String()
