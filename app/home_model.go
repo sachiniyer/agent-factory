@@ -778,7 +778,8 @@ func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPa
 // fragments stay ordered worst-first, so what survives is which pane went away,
 // and since #2618 the clipped tail is readable in full with `E details`.
 func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
-	if p == nil || paneCount <= 1 {
+	// Suppress the auto-hide notice during a config-agent spawn (handleConfigAgent).
+	if p == nil || paneCount <= 1 || m.configAgentSpawning {
 		return
 	}
 	subject := "a pane is hidden"
