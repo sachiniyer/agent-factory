@@ -419,49 +419,15 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 		return false
 	}
 
-	// Capture the previously selected instance BEFORE SetSelectedInstance
-	// mutates it, and the RAW cursor, because an explicit h/← collapse
-	// (treeCollapsed) must survive a Down that stays on THIS instance's row
-	// but must NOT survive a move that left the row for a header or an
-	// archived row. pushSelection skips header rows, so after a second h/←
-	// folds the Instances header the store's sticky selection and
-	// treeCollapsed both still name this instance while the cursor is on the
-	// header; keying the override off the store alone would pin every
-	// subsequent Down on the header. c4757da9 routed Down/Up through
-	// selectTabStop and dropped this guard, turning a single Down off the
-	// collapsed row into an unconditional re-expand.
-	prev := s.proj.GetSelectedInstance()
-	cur := s.rawSelection()
-	onInstRow := cur.Kind == SectionInstances && !cur.IsHeader && !cur.IsTab &&
-		cur.ItemIndex == stop.itemIndex
-	// When the target tab belongs to the instance the cursor already rests on
-	// AND that instance is explicitly collapsed (h/←), the rebuilt list omits
-	// its tab rows, so the loop below could not land and would return false —
-	// but only after SetActiveTab reset the active tab to tab 0, silently
-	// retargeting the preview pane while the fold visually persists, and the
-	// false return makes moveVerticalNavStop fall through to expand the
-	// Archived section. Treat the move as a consumed no-op before any store
-	// mutation: the fold, active tab and cursor are unchanged. liveTabStops()
-	// emits these stops regardless of treeCollapsed, so this guard is reached
-	// on a normal cross-row Down, not a stale one. The onInstRow gate is
-	// load-bearing: without it, a Down from the Instances header (store still
-	// sticky on this collapsed instance) is consumed here and neither the
-	// section nor the instance ever re-expands. Navigation from a header or an
-	// archived row falls through to select its target tab normally.
-	if prev != nil && prev.Title == inst.Title && s.treeCollapsed == inst.Title && onInstRow {
-		return true
-	}
 	s.proj.SetSelectedInstance(inst)
 	s.proj.SetActiveTab(stop.tabIndex)
-	// Clear the override on any move that is NOT a same-row, same-instance
-	// move: a cross-instance move (so every newly selected instance starts
-	// auto-expanded, mirroring pushSelection), and — the case the store-only
-	// test missed — a move whose cursor left the instance row for a header or
-	// an archived row, where the sticky store selection still names this
-	// instance but the target tab must be revealed and selected normally.
-	if prev == nil || prev.Title != inst.Title || !onInstRow {
-		s.treeCollapsed = ""
-	}
+	// The folded-instance-Down case is handled in tryMoveVerticalNavStop, which
+	// moves the cursor to the next instance row instead of targeting this
+	// instance's hidden tabs, so selectTabStop is reached for the same instance
+	// only on a normal dive into its (expanded) tabs. From a header or archived
+	// cursor the target tab must be revealed and selected normally. In both
+	// cases clearing the explicit-collapse override is the right thing.
+	s.treeCollapsed = ""
 	for i, sec := range s.sections {
 		if sec.Kind == SectionInstances {
 			s.sections[i].Expanded = true
@@ -530,6 +496,21 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 		target = cur + dir
 	} else if sel.Kind == SectionInstances && !sel.IsTab {
 		if dir > 0 {
+			// An explicitly folded (h/←) instance row hides this instance's
+			// own tab rows, so a Down that targets them must not re-expand the
+			// same instance (#4770) and must not trap the cursor on the folded
+			// row. Move the cursor to the next instance row instead; the
+			// afterCursorMove push selects that instance (auto-expanding it)
+			// and clears the override, leaving the folded instance collapsed.
+			// When this is the last instance there is no next row to move to,
+			// so consume the move as a no-op that keeps the fold, the cursor
+			// and the active tab unchanged.
+			instances := s.proj.GetInstances()
+			if s.treeCollapsed != "" && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
+				s.treeCollapsed == instances[sel.ItemIndex].Title {
+				s.moveCursorToNextInstanceRow()
+				return true
+			}
 			target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
 		} else {
 			target = lastTabStopBeforeInstance(stops, sel.ItemIndex)
@@ -723,6 +704,22 @@ func (s *Sidebar) CollapseSection() {
 func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
 	for j, item := range s.visibleItems {
 		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab && item.ItemIndex == instIdx {
+			s.selectedIdx = j
+			return
+		}
+	}
+}
+
+// moveCursorToNextInstanceRow advances the cursor to the next live instance
+// row below the current cursor, if one is visible in the Instances section.
+// It is a no-op when the cursor already rests on the last instance row (there
+// is nothing below it to move to within the section). Used by Down off an
+// explicitly folded instance to move past it instead of diving into its hidden
+// tabs.
+func (s *Sidebar) moveCursorToNextInstanceRow() {
+	for j := s.selectedIdx + 1; j < len(s.visibleItems); j++ {
+		item := s.visibleItems[j]
+		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab {
 			s.selectedIdx = j
 			return
 		}

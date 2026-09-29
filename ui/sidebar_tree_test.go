@@ -187,14 +187,16 @@ func TestSidebarTreeExplicitCollapseExpand(t *testing.T) {
 	assert.Equal(t, 2, tabRowCount(s), "re-selecting auto-expands; explicit collapse does not persist")
 }
 
-// TestSidebarTreeCollapseSurvivesDownFromInstanceRow pins the
-// c4757da9 regression: a single Down off an explicitly-collapsed (h/←)
-// instance row must NOT clear treeCollapsed and re-expand the SAME instance
-// into its own tab 0. The field's doc states it is "Cleared when the selection
-// moves to a different instance"; a Down that targets the same instance's
-// tabs is not a cross-instance move, so the fold must persist and the cursor
-// must stay on the instance row (not dive into hidden tabs). Pre-fix the
-// unconditional s.treeCollapsed = "" in selectTabStop reverted the collapse.
+// TestSidebarTreeCollapseSurvivesDownFromInstanceRow pins the #4770 regression
+// under the corrected navigation: a single Down off an explicitly-collapsed
+// (h/←) instance row must NOT re-expand the SAME instance into its own tab 0.
+// Down now moves the cursor off the folded row to the next instance instead of
+// trapping it; the field's doc states treeCollapsed is "Cleared when the
+// selection moves to a different instance", and once the cursor moves on the
+// folded instance stays collapsed via collapse-by-default. The pre-fix
+// unconditional s.treeCollapsed = "" in selectTabStop reverted the collapse;
+// the no-op guard that replaced it then trapped the cursor so j/Down could
+// never move past a folded instance.
 func TestSidebarTreeCollapseSurvivesDownFromInstanceRow(t *testing.T) {
 	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
 	s.SetSelectedInstance(0)
@@ -207,35 +209,38 @@ func TestSidebarTreeCollapseSurvivesDownFromInstanceRow(t *testing.T) {
 	sel := s.GetSelection()
 	require.False(t, sel.IsTab, "collapse leaves the cursor on the instance row")
 
-	// A single Down press must not undo the fold. The pre-fix code
-	// unconditionally cleared treeCollapsed in selectTabStop and dove into
-	// tab 0 of the SAME instance.
+	// A single Down must move the cursor off the folded row to the next
+	// instance, not dive into instance 0's folded tabs and not stay trapped.
 	s.Down()
-	assert.Equal(t, 0, tabRowCount(s), "folded tabs stay hidden after Down")
-	assert.False(t, s.GetSelection().IsTab, "cursor does not dive into folded tabs")
-	assert.Equal(t, "t-00", s.treeCollapsed, "explicit collapse survives same-instance Down")
-	// The cursor stays on instance 0's row.
 	sel = s.GetSelection()
-	assert.Equal(t, 0, sel.ItemIndex)
-	assert.False(t, sel.IsTab)
+	assert.Equal(t, 1, sel.ItemIndex, "Down moves the cursor to the next instance")
+	assert.False(t, sel.IsTab, "cursor lands on the next instance's row")
+
+	// #4770: the folded instance must NOT re-expand — its tab children stay
+	// hidden once the cursor has moved on.
+	instances := s.proj.GetInstances()
+	require.Equal(t, "t-00", instances[0].Title)
+	assert.False(t, s.instanceExpanded(instances[0]),
+		"the folded instance does not re-expand on Down")
 }
 
-// TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab pins the second half
-// of the regression the inline review flagged: when an explicitly collapsed
-// instance carries a NONZERO active tab, a Down whose target is the same
-// instance's tabs cannot land (the tab rows are folded away), so it must be a
-// consumed no-op BEFORE SetActiveTab — otherwise selectTabStop resets the
-// active tab to 0, silently retargeting the preview pane while the fold
-// visually persists. The sibling test above uses the default active tab (0),
-// which a spurious SetActiveTab(0) cannot distinguish from "unchanged"; this
-// one uses tab 1 so the reset is observable.
+// TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab pins the active-tab
+// preservation half of the fix for the LAST folded instance: when a Down off a
+// folded instance has no next instance to move to, the move is a consumed
+// no-op before any store mutation, so SetActiveTab is not called and the
+// nonzero active tab is not silently reset to 0. (The multi-instance case now
+// moves the cursor to the next instance, covered by
+// TestSidebarTreeCollapseDownLandsOnNextInstance; only the last instance has
+// nowhere to go.) The sibling scenario below uses the default active tab (0),
+// which a spurious SetActiveTab(0) cannot be told apart from "unchanged", so
+// this one drives the active tab to the nonzero terminal tab before folding.
 func TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab(t *testing.T) {
-	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
+	s := newTreeSidebar(t, 1) // a single folded instance: Down has nowhere to go
 	s.SetSelectedInstance(0)
 	require.Equal(t, 2, tabRowCount(s), "instance 0 auto-expanded")
 
-	// Drive the active tab to the (nonzero) terminal tab, then fold instance 0
-	// in place from its row.
+	// Drive the active tab to the (nonzero) terminal tab, then fold the
+	// instance in place from its row.
 	s.proj.SetActiveTab(1)
 	require.Equal(t, 1, s.proj.ActiveTab(), "active tab is the terminal tab before collapse")
 	s.CollapseSection()
@@ -243,16 +248,13 @@ func TestSidebarTreeCollapseDownSameInstanceKeepsActiveTab(t *testing.T) {
 	require.Equal(t, 0, tabRowCount(s))
 	require.False(t, s.GetSelection().IsTab, "collapse leaves the cursor on the instance row")
 
-	// A same-instance Down is a consumed no-op: the fold and cursor survive…
+	// Down at the last folded instance is a consumed no-op: the fold, cursor
+	// and active tab all survive.
 	s.Down()
-	assert.Equal(t, 0, tabRowCount(s), "folded tabs stay hidden after Down")
 	assert.False(t, s.GetSelection().IsTab, "cursor does not dive into folded tabs")
-	assert.Equal(t, "t-00", s.treeCollapsed, "explicit collapse survives same-instance Down")
-	sel := s.GetSelection()
-	assert.Equal(t, 0, sel.ItemIndex)
-	assert.False(t, sel.IsTab)
-	// …and the store's active tab is NOT reset to 0.
-	assert.Equal(t, 1, s.proj.ActiveTab(), "active tab preserved when same-instance Down is a no-op")
+	assert.Equal(t, 0, s.GetSelection().ItemIndex, "cursor stays on the folded instance row")
+	assert.Equal(t, "t-00", s.treeCollapsed, "explicit collapse survives a Down with no next instance")
+	assert.Equal(t, 1, s.proj.ActiveTab(), "active tab preserved when Down is a no-op")
 }
 
 // TestSidebarTreeCollapseClearsOnCrossInstanceSelect pins that the fix did
@@ -274,16 +276,17 @@ func TestSidebarTreeCollapseClearsOnCrossInstanceSelect(t *testing.T) {
 }
 
 // TestSidebarTreeCollapseDownFromHeaderSelectsTab pins the second inline Codex
-// finding's regression (review 5274299199): the same-instance-collapsed no-op
-// must fire ONLY when the cursor rests on the instance row. A second h/← from
-// the collapsed-instance row jumps to the Instances header and folds the
-// section, but pushSelection skips header rows, so the store's sticky
-// selection and treeCollapsed both still name the just-collapsed instance
-// while the cursor is on the header. Keying the no-op off the store pinned
-// every subsequent Down on the header — the first stop's tab belonged to the
-// still-sticky instance, the guard consumed the move, and neither the section
-// nor the instance re-expanded. Navigation from a header must instead clear
-// the override and select the target tab normally.
+// finding's regression (review 5274299199): a Down off the Instances header
+// must clear the sticky collapse override and select the target tab
+// normally. A second h/← from the collapsed-instance row jumps to the
+// Instances header and folds the section, but pushSelection skips header
+// rows, so the store's sticky selection and treeCollapsed both still name the
+// just-collapsed instance while the cursor is on the header. Down from the
+// header reaches selectTabStop for that still-sticky instance, which clears
+// the override and re-expands it so the target tab can be revealed and
+// selected. Navigation from a header must not be consumed by the folded-row
+// behavior, which is why the folded-instance handling lives in
+// tryMoveVerticalNavStop and keys off the cursor resting on the instance row.
 func TestSidebarTreeCollapseDownFromHeaderSelectsTab(t *testing.T) {
 	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
 	s.SetSelectedInstance(0)
@@ -310,6 +313,41 @@ func TestSidebarTreeCollapseDownFromHeaderSelectsTab(t *testing.T) {
 	assert.Equal(t, 0, sel.TabIndex)
 	assert.Equal(t, "", s.treeCollapsed, "the same-instance override is cleared")
 	assert.Equal(t, 2, tabRowCount(s), "instance 0 re-expanded so the tab row is visible")
+}
+
+// TestSidebarTreeCollapseDownLandsOnNextInstance pins the navigation fix the
+// batch play-test (see #4745) required: a Down off an explicitly folded (h/←)
+// instance lands on the NEXT instance — the display binding follows the
+// cursor, so that next instance is selected and auto-expands while the folded
+// one stays collapsed — and a following Down keeps moving forward instead of
+// trapping on the folded row.
+func TestSidebarTreeCollapseDownLandsOnNextInstance(t *testing.T) {
+	s := newTreeSidebar(t, 3) // instances t-00, t-01, t-02
+	s.SetSelectedInstance(0)
+	s.CollapseSection()
+	require.Equal(t, "t-00", s.treeCollapsed)
+	require.False(t, s.GetSelection().IsTab, "cursor on the folded instance row")
+
+	// Down lands on the next instance row and selects it; the folded one
+	// stays collapsed and the override clears once the selection moves on.
+	s.Down()
+	require.Equal(t, "t-01", s.GetSelectedInstance().Title,
+		"Down from a folded instance selects the next instance")
+	sel := s.GetSelection()
+	assert.Equal(t, 1, sel.ItemIndex, "cursor lands on the next instance row")
+	assert.False(t, sel.IsTab, "cursor rests on the instance row, not a tab")
+	assert.False(t, s.instanceExpanded(s.proj.GetInstances()[0]),
+		"the folded instance stays collapsed")
+	assert.Equal(t, "", s.treeCollapsed, "the override clears once the selection moves on")
+	assert.Equal(t, 2, tabRowCount(s), "the next instance auto-expands")
+
+	// A second Down proceeds normally into the now-selected instance's tabs —
+	// the cursor is not trapped on the row above.
+	s.Down()
+	sel = s.GetSelection()
+	assert.True(t, sel.IsTab, "the next Down dives into the selected instance's tabs")
+	assert.Equal(t, 1, sel.ItemIndex, "still on the next instance")
+	assert.Equal(t, 0, sel.TabIndex, "lands on its first tab")
 }
 
 // TestSidebarTreeTabCursorDrivesActiveTab pins the selection tab dimension:
