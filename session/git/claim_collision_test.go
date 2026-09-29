@@ -31,7 +31,7 @@ func TestClaimCollision(t *testing.T) {
 			name:  "recorded branch compares case-insensitively",
 			title: "-x", naming: local,
 			claim:      BranchClaim{Title: "#x", Branch: "Proj-X", Local: true},
-			wantBranch: "Proj-X", want: true,
+			wantBranch: "proj-x", want: true,
 		},
 		{
 			name:  "no recorded branch is derived under the create's prefix",
@@ -44,6 +44,11 @@ func TestClaimCollision(t *testing.T) {
 			title: "Foo", naming: local,
 			claim: BranchClaim{Title: "foo", Branch: "global/foo", Local: true},
 			want:  true,
+		},
+		{
+			name:  "an archived session renamed off a title does not hold the branch it left behind",
+			title: "foo", naming: TitleNaming{Prefix: "global/", GlobalPrefix: "global/", Local: true},
+			claim: BranchClaim{Title: "foo (archived)", Branch: "global/foo", Local: true},
 		},
 		{
 			name:  "an off-box create is judged under the global prefix",

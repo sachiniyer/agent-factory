@@ -220,10 +220,16 @@ type TitleNaming struct {
 // with claim, and the branch name the two share when that is the reason (empty
 // for a title-only collision).
 //
-// Between two host-local sessions the question is about real branches: the
-// claim's recorded branch, not one re-derived under today's prefix, because a
-// session keeps the branch it was created with when branch_prefix changes
-// later. A claim with no recorded branch yet is derived under n.Prefix.
+// Between two host-local sessions the rule is TitlesCollide under n.Prefix, with
+// one correction: a claim whose recorded branch is not the one its title derives
+// under n.Prefix does not hold that derived branch, so it cannot collide on it.
+// That is a session created before branch_prefix changed (it keeps the branch it
+// was created with, #4539), an archived session renamed off a title whose
+// branch was left for the new session to adopt (#2127), or a lane checked out on
+// a branch its title never derived. Whether such a recorded branch is really in
+// the way is a question for git, which the held-branch guards ask; this rule only
+// stops inventing claims no session holds. A claim with no recorded branch yet
+// is derived.
 //
 // When either side is off-box (Docker, SSH, hook, sandbox), the branch is made
 // inside the sandbox from that machine's config, so the host cannot know it.
@@ -231,24 +237,18 @@ type TitleNaming struct {
 // TitlesCollide under the global prefix. A host project's override therefore
 // never changes whether an off-box session can be created.
 func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, bool) {
+	prefix := n.Prefix
 	if !n.Local || !claim.Local {
-		if !TitlesCollide(title, claim.Title, n.GlobalPrefix) {
-			return "", false
-		}
-		return sharedBranch(title, claim.Title, n.GlobalPrefix), true
+		prefix = n.GlobalPrefix
+	} else if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
+		// EqualFold, not ==: on a case-insensitive filesystem two loose refs that
+		// differ only in case are one file.
+		return "", strings.EqualFold(title, claim.Title)
 	}
-	if claim.Branch == "" {
-		if !TitlesCollide(title, claim.Title, n.Prefix) {
-			return "", false
-		}
-		return sharedBranch(title, claim.Title, n.Prefix), true
+	if !TitlesCollide(title, claim.Title, prefix) {
+		return "", false
 	}
-	// EqualFold, not ==: on a case-insensitive filesystem two loose refs that
-	// differ only in case are one file.
-	if branch := BranchForTitle(n.Prefix, title); strings.EqualFold(branch, claim.Branch) {
-		return claim.Branch, true
-	}
-	return "", strings.EqualFold(title, claim.Title)
+	return sharedBranch(title, claim.Title, prefix), true
 }
 
 // sharedBranch is the branch two colliding titles both derive under prefix, or
