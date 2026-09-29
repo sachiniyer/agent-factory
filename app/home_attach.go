@@ -105,21 +105,19 @@ var attachOverlayCallbackFn = (*home).attachOverlayCallback
 // attachStreamFn is the indirection attachInstanceTab dials the daemon's WS PTY
 // stream through — the SOLE full-screen attach byte source for every session,
 // local or remote (#1837). Production points it at apiclient; tests swap it to
-// observe the routing without standing up a daemon. The (idOrTitle, repoID)
-// pair follows the daemon's stream-address contract: an empty repoID resolves
-// the path segment as a stable id first, so callers passing a session id must
-// leave the scope empty (see streamAddress).
-var attachStreamFn = func(ctx context.Context, idOrTitle, repoID, tabID string, tabIdx int) (chan struct{}, error) {
+// observe the routing without standing up a daemon. The session is addressed
+// as streamAddress builds it.
+var attachStreamFn = func(ctx context.Context, s apiclient.StreamSession, tabID string, tabIdx int) (chan struct{}, error) {
 	c, err := apiclient.NewTargeted()
 	if err != nil {
 		return nil, err
 	}
-	return c.AttachStream(ctx, idOrTitle, repoID, tabID, tabIdx)
+	return c.AttachStream(ctx, s, tabID, tabIdx)
 }
 
 // SetAttachStreamFnForTest swaps the WS PTY stream dial and returns a restore
 // func, so a test can pin which attach source attachInstanceTab routes to.
-func SetAttachStreamFnForTest(fn func(context.Context, string, string, string, int) (chan struct{}, error)) func() {
+func SetAttachStreamFnForTest(fn func(context.Context, apiclient.StreamSession, string, int) (chan struct{}, error)) func() {
 	prev := attachStreamFn
 	attachStreamFn = fn
 	return func() { attachStreamFn = prev }
