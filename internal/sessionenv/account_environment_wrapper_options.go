@@ -170,6 +170,9 @@ func xargsWordCarriesMarker(word *syntax.Word, marker string) bool {
 	if !ok {
 		return true
 	}
-	namePart, _, _ := strings.Cut(lit, "=")
-	return strings.Contains(namePart, marker)
+	namePart, value, _ := strings.Cut(lit, "=")
+	// --unset's value is a name env removes, not data (#4978): `env
+	// --unset={}` fed CODEX_HOME drops the account root.
+	return strings.Contains(namePart, marker) ||
+		(namePart == "--unset" && strings.Contains(value, marker))
 }

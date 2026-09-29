@@ -821,7 +821,7 @@ options:
 	if xargsEnvOperandsFed(words, state, names, memo) {
 		return run.done(nil, true)
 	}
-	return run.done(words, false)
+	return run.done(xargsChild(words, substituting, marker, names, memo))
 }
 
 // isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or

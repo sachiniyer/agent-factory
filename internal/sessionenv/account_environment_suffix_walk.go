@@ -8,9 +8,11 @@ import (
 
 // operandTailMemo holds every per-suffix answer one account-command walk
 // computes. Every words slice inside one validation is a suffix of the call's
-// Args — the parser allocates each Word once and no walk builds a new slice —
-// so the first element's pointer names a distinct remaining suffix, and each
-// question below depends only on that suffix (plus the constant denied names).
+// Args — the parser allocates each Word once, and the one walk that builds a
+// new slice (xargsItemCompletesLink) copies every word so its suffixes get
+// pointers of their own — so the first element's pointer names a distinct
+// remaining suffix, and each question below depends only on that suffix (plus
+// the constant denied names).
 //
 // Each map answers one question at most once per position, which is what
 // keeps the walk linear in the command's word count (#4966). Without them the
@@ -39,6 +41,9 @@ type operandTailMemo struct {
 	xargsEnvScans map[xargsEnvKey]bool
 	// xargsMarkers: where the first marker-carrying word from here sits.
 	xargsMarkers map[xargsMarkerKey]int
+	// xargsInput: can xargs input reach env through the chain from here, per
+	// input mode (#4978).
+	xargsInput map[xargsInputKey]bool
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -52,6 +57,7 @@ func newOperandTailMemo() operandTailMemo {
 		wrapperOptions:    map[wrapperOptionKey]unwrapResult{},
 		xargsEnvScans:     map[xargsEnvKey]bool{},
 		xargsMarkers:      map[xargsMarkerKey]int{},
+		xargsInput:        map[xargsInputKey]bool{},
 	}
 }
 
