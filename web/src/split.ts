@@ -145,7 +145,7 @@ function webFallbackMs(): number {
  *  that posts back to its parent. Mirrors daemon/preview_origin.go
  *  previewProbeLabel/previewProbeMessage. */
 const PREVIEW_PROBE_HOST = "afprobe.localhost";
-const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+export const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
 
 /** How long to wait for the probe frame to report. Overridable for tests. */
 function previewProbeMs(): number {
@@ -179,17 +179,38 @@ const previewReachable = new Map<string, Promise<boolean>>();
  *  the exact frame this created — so nothing else on the page can forge a yes.
  *
  *  Fails CLOSED: any timeout, error, or unexpected sender leaves the pane on the
- *  same-origin mirror, which is the behavior every release before this one had. */
-function previewOriginReachable(origin: string): Promise<boolean> {
+ *  same-origin mirror, which is the behavior every release before this one had.
+ *
+ *  `fresh` is the user-initiated ↻ / Retry path (threaded from `load(true)` the same
+ *  way it nulls `previewSrcOnce`): it bypasses the cache and re-probes this port. See
+ *  the cache note below for why a cached `true` cannot be trusted across that gesture. */
+export function previewOriginReachable(origin: string, fresh = false): Promise<boolean> {
   let port: string;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== undefined) {
-    return cached;
+  // A user-initiated ↻ bypasses the cache. A success is pinned for the SPA's lifetime
+  // (see below) — the right thing between two ordinary loads of the same pane, but
+  // `fresh` is the explicit "give me the CURRENT page" gesture. A port that was
+  // reachable when first probed may have stopped being BROWSER-reachable since: the
+  // daemon's preview listener stays bound and keeps vending the same origin, but the
+  // browser's own path to the port can break — the preview-port ssh forward drops
+  // while the main forward stays up. A cached `true` would then navigate the frame to
+  // a dead origin with no fallback; re-probing on demand restores the "fails CLOSED"
+  // path the cache exists to preserve.
+  //
+  // Only the port THIS origin names is dropped — a port that moved is a different key
+  // and was never cached against the new one — so the dedup across panes that share a
+  // port (one probe answers for the whole page) is kept for every non-fresh load.
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== undefined) {
+      return cached;
+    }
   }
   // Only a SUCCESS is cached; a failure is evicted below so the next ↻ re-probes.
   // A cached false is sticky in the worst way: the everyday causes are transient —
@@ -217,7 +238,7 @@ function previewOriginReachable(origin: string): Promise<boolean> {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -1347,7 +1368,7 @@ export class SplitView {
                 // and Safari does not resolve *.localhost at all. Both look identical
                 // from the daemon, and getting either wrong would abandon a working
                 // mirror for a frame that loads nothing.
-                return (await previewOriginReachable(origin)) ? previewOriginSrc(origin, target) : "";
+                return (await previewOriginReachable(origin, fresh)) ? previewOriginSrc(origin, target) : "";
               })
             : Promise.resolve("");
       }
@@ -1395,6 +1416,9 @@ export class SplitView {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       // A user-initiated reload of a PROXIED target is cache-busted (#1900): without
