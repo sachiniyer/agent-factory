@@ -233,13 +233,16 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 	// not tell the user to restart for a hot-reloadable key. Best-effort: the write
 	// already succeeded on disk; report a live apply failure separately so the
 	// operator knows the running daemon has not adopted the saved config.
-	var outcome config.ApplyOutcome
+	// A nil manager is the in-daemon "no daemon was reached" answer; it is stated
+	// explicitly because an unset DaemonApply reports unknown, not no-daemon
+	// (#4482).
+	outcome := config.ApplyOutcome{DaemonApply: config.DaemonApplyNotReached}
 	if s.manager != nil {
 		if applied, aerr := s.manager.ApplyConfig(); aerr == nil {
 			resp.Applied = applied.Applied
 			resp.Pending = applied.Pending
 			resp.Warnings = applied.Warnings
-			outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applied.FailedListenerKeys}
+			outcome = config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied, FailedListenerKeys: applied.FailedListenerKeys}
 			// A successful apply claims "applied" only if the daemon loaded THIS
 			// save's file: a competing write can land between the writer's
 			// file-lock release and the apply's load (#4247). Both digests are
@@ -248,7 +251,7 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 			confirmSavedConfigDigest(&outcome, &resp.Warnings, wroteDigest, applied.Digest)
 		} else {
 			resp.Warnings = append(resp.Warnings, "saved config, but live apply failed: "+aerr.Error())
-			outcome.DaemonApplyFailed = true
+			outcome.DaemonApply = config.DaemonApplyFailed
 		}
 	}
 	resp.Warnings = completeConfigSaveWarnings(outcome, result.Warnings, resp.Warnings)
@@ -691,9 +694,9 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 // registry in-process, so one process owns the store and — for a web or remote
 // client — the path is resolved on the daemon's filesystem, not the caller's.
 //
-// config.RegisterProject does the work (expand ~, resolve the git root,
-// validate, persist, idempotent) under its own file lock, so this handler adds
-// only the admission gate and the projects-changed publish. It does NOT take a
+// config.RegisterProject does the work (resolve the git root, validate,
+// persist, idempotent) under its own file lock, so this handler adds only the
+// admission gate, the absolute-path boundary, and the projects-changed publish. It does NOT take a
 // manager lock: the registry is independent of the session roster, and
 // RegisterProject's own lock already serializes concurrent registrations.
 //
@@ -706,7 +709,51 @@ func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *Regist
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	project, err := config.RegisterProject(req.Path)
+	// Enforce RegisterProjectRequest's contract here, before the registry is
+	// touched (#4821): config.RegisterProject would resolve a relative path
+	// against THIS process's cwd. The normalized value is the one registered, so
+	// what was checked is exactly what is stored.
+	path, err := config.ResolveDaemonHostPath(req.Path)
+	if err != nil {
+		return fmt.Errorf("project %w", err)
+	}
+	project, err := config.RegisterProject(path)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
+	return nil
+}
+
+// RebindProject moves a registered project's stable identity to a replacement
+// checkout (`af projects rebind`) — the repair when the checkout a registration
+// names was moved or recloned elsewhere. The daemon is the single writer (#960),
+// the same reason RegisterProject routes here: the CLI, TUI, and web all call
+// this rather than writing the registry in-process, and for a web or remote
+// client the path is resolved on the daemon's filesystem, not the caller's.
+//
+// config.RebindProject does the work under its own file lock — resolving the
+// replacement path's binding, refusing a root another project owns, and carrying
+// or minting the checkout marker — so this handler adds only the admission gate
+// and the projects-changed publish a client showing a projects view re-fetches
+// on (the rebound row's root changes; without the event a web switcher would
+// keep naming the dead path until the next manual refresh).
+func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProjectResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	// Enforce RebindProjectRequest's contract here, before the registry moves:
+	// config.RebindProject would resolve a relative path against THIS process's
+	// cwd — an unrelated checkout for an ad-hoc daemon, / under systemd — and
+	// silently repoint the stable id there. The same boundary RegisterProject
+	// applies (#4821); the checked value is the one passed on.
+	path, err := config.ResolveDaemonHostPath(req.Path)
+	if err != nil {
+		return fmt.Errorf("rebind %w", err)
+	}
+	project, err := config.RebindProject(req.ID, path)
 	if err != nil {
 		return err
 	}

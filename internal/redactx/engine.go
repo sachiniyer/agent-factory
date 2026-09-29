@@ -41,13 +41,6 @@ func (e *Engine) MatchText(s string, prov Provenance) []redactspan.Span {
 	return e.matchView(Identity(s), prov, 0)
 }
 
-// MatchView runs the stage on a view a consumer produced itself — e.g. a
-// scalar extracted by a document parser. Its source map composes into the
-// caller's coordinates exactly as a transform-produced view would.
-func (e *Engine) MatchView(v View, prov Provenance) []redactspan.Span {
-	return e.matchView(v, prov, 0)
-}
-
 // Scrub applies MatchText's union over s. It is also the entry point for a
 // decoded scalar a consumer extracted itself — the value to re-encode into
 // the owning grammar.

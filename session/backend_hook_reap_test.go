@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +63,19 @@ func (h hookState) deleteRunCount(t *testing.T) int {
 	return strings.Count(string(data), "\n")
 }
 
+// requireLaunchProvisioned is the precondition of every test whose launch_cmd
+// must provision and then fail ON ITS OWN. A launch killed by its bound takes the
+// same "launch_cmd failed" path as one that exited, so without this a bound that
+// fires mid-provision either fails a later assertion that reads as a reap bug or,
+// where the sandbox is reaped anyway, passes having tested nothing (#4642). The
+// log sits outside the sandbox, so the reap cannot erase it.
+func (h hookState) requireLaunchProvisioned(t *testing.T) {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(h.dir, "launch-provisioned.log"))
+	require.NoError(t, err,
+		"launch_cmd was killed by hookLaunchTimeout before it finished provisioning: the clock, not the reap logic — this test's launch bound is too tight")
+}
+
 // writeHookScript writes an executable bash script and returns its path. Paths
 // are interpolated single-quoted, so the script never depends on cwd or $HOME.
 func writeHookScript(t *testing.T, path, body string) string {
@@ -80,8 +94,9 @@ done
 }
 
 // newHookState builds the script pair. launchBody runs after the sandbox dir is
-// created, so a test only has to say how launch_cmd FAILS; deleteBody defaults
-// to a working, idempotent reap in the shape docs/remote-hooks.md recommends.
+// created and launch-provisioned.log records that it was, so a test only has to
+// say how launch_cmd FAILS; deleteBody defaults to a working, idempotent reap in
+// the shape docs/remote-hooks.md recommends.
 func newHookState(t *testing.T, launchBody, deleteBody string) hookState {
 	t.Helper()
 	dir := t.TempDir()
@@ -98,8 +113,9 @@ func newHookState(t *testing.T, launchBody, deleteBody string) hookState {
 	writeHookScript(t, h.launch, fmt.Sprintf(`
 mkdir -p '%s'/sandboxes/"$name"
 echo "a VM that bills by the hour" > '%s'/sandboxes/"$name"/resource.txt
+echo "$name" >> '%s'/launch-provisioned.log
 %s
-`, dir, dir, launchBody))
+`, dir, dir, dir, launchBody))
 	// No mkdir before the log line: dir is t.TempDir(), which already exists, and
 	// on the wedged-reap paths that mkdir was a whole fork+exec standing between
 	// the spawn and the only evidence the script ever writes (#2821).
@@ -119,6 +135,13 @@ func shrinkHookTimeouts(t *testing.T, launch, del time.Duration) {
 	t.Cleanup(func() { hookLaunchTimeout, hookDeleteTimeout = ol, od })
 }
 
+// completingLaunchBound is hookLaunchTimeout for a test whose launch_cmd must
+// provision and then fail ON ITS OWN. The bound only stops a hang, and these
+// scripts exit by themselves, so a generous one costs no wall-clock — while a
+// tight one is a race against fork+exec and the fixture's mkdir that a loaded
+// runner loses (#4642). Tests that need the bound to FIRE keep short values.
+const completingLaunchBound = 30 * time.Second
+
 func newHookProvisioner(h hookState, title string) *hookProvisioner {
 	return &hookProvisioner{
 		hooks: config.RemoteHooks{LaunchCmd: h.launch, DeleteCmd: h.delete},
@@ -135,6 +158,10 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 		name string
 		// launchBody runs after the sandbox has been "provisioned".
 		launchBody string
+		// boundFires marks the case that needs hookLaunchTimeout to FIRE; every
+		// other case must reach its own exit, so it gets completingLaunchBound
+		// rather than a bound it would have to race (#4642).
+		boundFires bool
 	}{
 		{
 			// (a) provisions, then hangs until the launch timeout kills it. The
@@ -142,6 +169,7 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 			// output pipe — the shape that made the timeout unbounded.
 			name:       "provisions then hangs until timeout",
 			launchBody: "sleep 3\n",
+			boundFires: true,
 		},
 		{
 			// (b) provisions, then exits non-zero.
@@ -158,12 +186,22 @@ func TestHookProvisionReapsPartiallyProvisionedLaunch(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
+			launchBound := completingLaunchBound
+			if tc.boundFires {
+				launchBound = 300 * time.Millisecond
+			}
+			shrinkHookTimeouts(t, launchBound, 5*time.Second)
 			h := newHookState(t, tc.launchBody, "")
 			p := newHookProvisioner(h, "bills by the hour")
 
 			_, err := p.provisionOrReap()
 			require.Error(t, err, "provisioning must fail")
+			if tc.boundFires {
+				require.ErrorIs(t, err, context.DeadlineExceeded,
+					"this case is the launch bound firing mid-launch; a launch_cmd that reached its own exit tests nothing here")
+			} else {
+				h.requireLaunchProvisioned(t)
+			}
 
 			assert.True(t, h.deleteRan(t), "delete_cmd must run: launch_cmd started, so it may have provisioned")
 			assert.NoDirExists(t, h.sandbox(p.slug),
@@ -223,7 +261,7 @@ func TestHookProvisionDoesNotReapWhenLaunchNeverStarted(t *testing.T) {
 // so the failure has to reach the person creating the session, name the orphan,
 // and say how to reap it by hand.
 func TestHookProvisionReportsOrphanWhenDeleteFails(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 5*time.Second)
+	shrinkHookTimeouts(t, completingLaunchBound, 5*time.Second)
 	h := newHookState(t,
 		"echo 'provisioned, then died' >&2\nexit 4\n",
 		"echo 'the VM is still in CREATING state' >&2\nexit 9\n")
@@ -231,6 +269,7 @@ func TestHookProvisionReportsOrphanWhenDeleteFails(t *testing.T) {
 
 	_, err := p.provisionOrReap()
 	require.Error(t, err)
+	h.requireLaunchProvisioned(t)
 	msg := err.Error()
 
 	// The original failure survives...
@@ -477,12 +516,14 @@ func TestHookReapAnsweredErrorIsKnownStateAndLatches(t *testing.T) {
 // (errors.Join, not flattened into %s text) — the hook/docker/ssh unknown-state
 // parity this fix is about, matching ssh's reapProvisionFailure.
 func TestHookProvisionFailureWithReapTimeoutPreservesUnknownSentinel(t *testing.T) {
-	shrinkHookTimeouts(t, 300*time.Millisecond, 300*time.Millisecond)
+	// Only the delete bound is under test: launch_cmd must exit 4 on its own.
+	shrinkHookTimeouts(t, completingLaunchBound, 300*time.Millisecond)
 	h := newHookState(t, "echo 'provisioned then died' >&2\nexit 4\n", "sleep 5\n")
 	p := newHookProvisioner(h, "create then wedged reap")
 
 	_, err := p.provisionOrReap()
 	require.Error(t, err)
+	h.requireLaunchProvisioned(t)
 	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
 		"the provision error must keep the reap's unknown-state sentinel classifiable (#2529 review P3-a)")
 	// The original launch failure and the human-actionable orphan warning survive too.

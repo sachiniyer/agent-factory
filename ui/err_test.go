@@ -282,3 +282,31 @@ func TestSanitizeErrorControls(t *testing.T) {
 		}
 	}
 }
+
+// TestErrBoxDetailsHintOverride: a modal text field swaps in the key that
+// opens the details from there (#4123); clearing the override restores the
+// error_details binding's hint.
+func TestErrBoxDetailsHintOverride(t *testing.T) {
+	e := NewErrBox()
+	e.SetSize(40, 1)
+	e.SetNotice(errors.New("a session titled \"todo-core\" conflicts with existing session \"todo-core\""))
+
+	e.SetDetailsHint("ctrl+e details")
+	if got := e.String(); !strings.Contains(got, "ctrl+e details") {
+		t.Errorf("the override hint must replace E details, got %q", got)
+	}
+
+	e.SetDetailsHint("")
+	if got := e.String(); !strings.Contains(got, "E details") || strings.Contains(got, "ctrl+e") {
+		t.Errorf("clearing the override must restore E details, got %q", got)
+	}
+
+	e.HideDetailsHint(true)
+	if got := e.String(); strings.Contains(got, "details") {
+		t.Errorf("a hidden hint must advertise no details key, got %q", got)
+	}
+	e.HideDetailsHint(false)
+	if got := e.String(); !strings.Contains(got, "E details") {
+		t.Errorf("unhiding must restore the hint, got %q", got)
+	}
+}

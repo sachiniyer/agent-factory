@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { createLatestRequestGate } from "./refetch.js";
-import { THEME_CHOICES, normalizeThemeChoice, connectionAttemptMayCommit, hasConnectedToken } from "./theme.js";
+import { THEME_CHOICES, normalizeThemeChoice, connectionAttemptMayCommit } from "./theme.js";
 
 test("appearance has exactly Light, Dark and System; old Auto and invalid storage migrate to System", () => {
   assert.deepEqual(THEME_CHOICES, ["light", "dark", "system"]);
@@ -21,8 +21,6 @@ test("connection fences admit tokenless clients and reject invalidated attempts"
   const gate = createLatestRequestGate();
   const attempt = gate.begin();
 
-  assert.equal(hasConnectedToken(""), true, "the empty token is an authorized tokenless connection");
-  assert.equal(hasConnectedToken(null), false);
   assert.equal(connectionAttemptMayCommit(attempt, "", ""), true);
   gate.invalidate();
   assert.equal(connectionAttemptMayCommit(attempt, "", ""), false);

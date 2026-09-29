@@ -611,7 +611,7 @@ func serveControlStub(t *testing.T, stub any) {
 // the tokenless-network exposure drop: a TUI edit of network.listen_addr to a
 // non-loopback address while require_token is false, with NO daemon running.
 //
-// On the no-daemon fallback, daemon.SetGlobalConfigValue's RequestApplyConfig
+// On the no-daemon fallback, daemon.SetGlobalConfigValue's apply poke
 // cannot dial the control socket, so resp.Warnings stays nil while
 // resp.Result.Warnings carries the exposureWarning the write produced. Before
 // the fix, localConfigSet passed only resp.Warnings to paneNotice and the

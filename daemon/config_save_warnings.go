@@ -16,7 +16,7 @@ import (
 // listener exposure in different words; merging those would show one hazard
 // twice on every successful save.
 func completeConfigSaveWarnings(outcome config.ApplyOutcome, writeWarnings, applyWarnings []string) []string {
-	if !outcome.DaemonApplyFailed && !outcome.DaemonApplyUnconfirmed {
+	if outcome.DaemonApply != config.DaemonApplyFailed && outcome.DaemonApply != config.DaemonApplyUnconfirmed {
 		return applyWarnings
 	}
 	warnings := append([]string(nil), writeWarnings...)

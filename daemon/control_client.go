@@ -21,12 +21,6 @@ import (
 
 var ensureDaemonMu sync.Mutex
 
-// ErrAccountHandoffUnsupported is returned before a handoff mutation is sent
-// when the responding daemon does not affirm the account-aware protocol. The
-// daemon, not the client, owns admission against live account-pin state; an
-// older daemon cannot safely make that decision and must not receive the call.
-var ErrAccountHandoffUnsupported = errors.New("daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon — upgrade it); the handoff was not sent")
-
 // daemonStartingErrText is the wire-visible text of the warm-up error. net/rpc
 // flattens server-side errors into plain strings, so clients cannot errors.Is
 // against a sentinel value; IsDaemonStartingErr matches this text instead.
@@ -604,41 +598,6 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	return resp.ArchivedPath, err
 }
 
-// ResumeFromLimit asks the daemon to retry a session parked at a usage-limit
-// wall. The TUI and web reach the identical controlServer handler over HTTP;
-// this wrapper gives the CLI its existing gob-control-socket transport without
-// duplicating the recovery action.
-func ResumeFromLimit(req ResumeFromLimitRequest) error {
-	var resp ResumeFromLimitResponse
-	if err := callDaemon("ResumeFromLimit", req, &resp); err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("resume was not performed: %s", resp.Reason)
-	}
-	return nil
-}
-
-// HandoffSession asks the daemon to continue a session under a different agent,
-// in place (#2013): swap the agent program, keep the worktree and branch, and
-// deliver a mission brief to the incoming agent.
-func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
-	var resp HandoffSessionResponse
-	err := callDaemon(AccountAwareHandoffMethod, req, &resp)
-	if isRPCMethodMissing(err) {
-		return HandoffSessionResponse{}, ErrAccountHandoffUnsupported
-	}
-	if err != nil && !isMutationCommitted(err) {
-		return HandoffSessionResponse{}, err
-	}
-	requestedAccount := strings.TrimSpace(req.Account)
-	if requestedAccount != "" && resp.ToAccount != requestedAccount {
-		mismatch := &rpcMutationCommittedError{err: fmt.Errorf("daemon did not honor the requested account %q (likely an older daemon — upgrade it); the runtime was already restarted, but the resulting credential identity is unknown because the source account label may have carried across agent namespaces", requestedAccount)}
-		return resp, errors.Join(err, mismatch)
-	}
-	return resp, err
-}
-
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
 func RestoreSession(req RestoreSessionRequest) (string, error) {
 	var resp RestoreSessionResponse
@@ -677,6 +636,18 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// RebindProject asks the daemon to move a registered project's stable identity
+// to the checkout at req.Path (`af projects rebind`) — the same single-writer
+// registry path RegisterProject takes, so a running client is told through
+// projects.changed rather than discovering the move on a later read.
+func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	var resp RebindProjectResponse
+	if err := callDaemon("RebindProject", req, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
 // SendPromptWithStatus asks the daemon to send a prompt and returns the
 // delivery observation made by the runtime's existing bounded submit path.
 func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, error) {
@@ -692,19 +663,14 @@ func SendPromptWithStatus(req SendPromptRequest) (session.PromptDeliveryStatus, 
 	return resp.Status, nil
 }
 
-// DeliverPrompt asks the daemon to deliver a prompt to a target session,
-// auto-creating it when missing. It returns the recorded status ("started",
-// "sent", or a task-only park). Unlike a bare CreateSession-then-SendPrompt, the
-// whole create-or-send decision runs under the daemon's per-target lock, so
+// DeliverPromptWithStatus asks the daemon to deliver a prompt to a target
+// session, auto-creating it when missing, and returns both the task lifecycle
+// status ("started", "sent", or a task-only park) and the delivery
+// observation. Unlike a bare CreateSession-then-SendPrompt, the whole
+// create-or-send decision runs under the daemon's per-target lock, so
 // concurrent deliveries to the same shared target never drop a prompt (#865).
-func DeliverPrompt(req DeliverPromptRequest) (string, error) {
-	status, _, err := DeliverPromptWithStatus(req)
-	return status, err
-}
-
-// DeliverPromptWithStatus returns both the task lifecycle status and the
-// delivery observation. Older daemons omit DeliveryStatus, which is honest
-// could-not-confirm rather than an inferred success.
+// Older daemons omit DeliveryStatus, which is honest could-not-confirm rather
+// than an inferred success.
 func DeliverPromptWithStatus(req DeliverPromptRequest) (string, session.PromptDeliveryStatus, error) {
 	result, err := deliverPromptForTaskRPC(req)
 	return result.status, result.deliveryStatus, err

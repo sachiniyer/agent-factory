@@ -13,6 +13,7 @@ const doc = { activeElement: null as Control | null };
 class Menu {
   ownerDocument = doc;
   hidden = false;
+  rendered = true;
   constructor(public children: Control[]) {}
   contains(node: unknown) { return this.children.includes(node as Control); }
   replaceChildren(...children: Control[]) {
@@ -20,6 +21,7 @@ class Menu {
     this.children = children;
   }
   querySelectorAll() { return this.children; }
+  getClientRects() { return this.rendered ? [{}] : []; }
 }
 function replace(menu: Menu, rows: Control[], fallback: Control) {
   replaceProjectMenuChildren(menu as unknown as HTMLElement, rows as unknown as HTMLElement[], fallback as unknown as HTMLElement);
@@ -58,8 +60,20 @@ test("a refresh returns focus to the switcher after the project menu closes", ()
   const menu = new Menu([old]);
   old.focus();
   menu.hidden = true;
+  menu.rendered = false;
   const replacement = new Control("project:/work/todo-cli");
   const fallback = new Control("trigger");
   replace(menu, [replacement], fallback);
   assert.equal(doc.activeElement, fallback);
+});
+
+test("a refresh keeps focus in the phone panel's inlined menu despite its hidden attribute", () => {
+  const old = new Control("project:/work/todo-cli");
+  const menu = new Menu([old]);
+  old.focus();
+  // The More panel shows the menu through CSS; the switcher never opened it (#4817).
+  menu.hidden = true;
+  const replacement = new Control("project:/work/todo-cli");
+  replace(menu, [replacement], new Control("trigger"));
+  assert.equal(doc.activeElement, replacement);
 });

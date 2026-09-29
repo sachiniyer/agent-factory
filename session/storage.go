@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -140,6 +139,12 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
+	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
+	// a handoff mission was still owed (#4429), so the next idle observation after
+	// the mission is resolved ends the run. Persisted for the same reason as
+	// TaskRunActive: the held edge is already spent and nothing re-derives it.
+	// omitempty + additive: an older record decodes to false, which holds nothing.
+	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle
@@ -212,6 +217,13 @@ type InstanceData struct {
 	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
 	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
 	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
+	// AccountAgent is the agent namespace Account was selected in (#4430). It is
+	// durable because program_overrides can later resolve Program's enum to a
+	// different agent's command: re-deriving the namespace from that new command
+	// would look the same label up in another agent's registry. Empty on records
+	// older than the field — their selections could only have used the Program
+	// enum's namespace, which is the reader-side fallback.
+	AccountAgent string `json:"account_agent,omitempty"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving
@@ -519,90 +531,6 @@ func (d InstanceData) ForStorage() InstanceData {
 	return d
 }
 
-func cloneBoolPointer(value *bool) *bool {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
-}
-
-func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
-	fence := &git.ArchiveRollbackFence{
-		OriginalStartupStateUnknown: data.StartupStateUnknown,
-		OriginalExternalWorktree:    data.Worktree.ExternalWorktree,
-		OriginalBranchCreatedByUs:   cloneBoolPointer(data.Worktree.BranchCreatedByUs),
-		RelocationRecoveryProjected: true,
-	}
-	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
-		fence.OriginalRelocationRecovery = &git.ArchiveRollbackRelocationRecovery{
-			State:                              recovery.State,
-			CleanupLifecycle:                   recovery.CleanupLifecycle,
-			AlternatePath:                      recovery.AlternatePath,
-			IdentityKnown:                      recovery.IdentityKnown,
-			Device:                             recovery.Device,
-			Inode:                              recovery.Inode,
-			FileType:                           recovery.FileType,
-			CleanupGeneration:                  recovery.CleanupGeneration,
-			CleanupOriginalExternalWorktree:    cloneBoolPointer(recovery.CleanupOriginalExternalWorktree),
-			CleanupOriginalBranchCreatedByUs:   cloneBoolPointer(recovery.CleanupOriginalBranchCreatedByUs),
-			CleanupOriginalStartupStateUnknown: cloneBoolPointer(recovery.CleanupOriginalStartupStateUnknown),
-			OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
-			OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
-			OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
-		}
-	}
-	return fence
-}
-
-func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRecovery) *GitWorktreeRelocationRecoveryData {
-	if recovery == nil {
-		return nil
-	}
-	return &GitWorktreeRelocationRecoveryData{
-		State:                              recovery.State,
-		CleanupLifecycle:                   recovery.CleanupLifecycle,
-		AlternatePath:                      recovery.AlternatePath,
-		IdentityKnown:                      recovery.IdentityKnown,
-		Device:                             recovery.Device,
-		Inode:                              recovery.Inode,
-		FileType:                           recovery.FileType,
-		CleanupGeneration:                  recovery.CleanupGeneration,
-		CleanupOriginalExternalWorktree:    cloneBoolPointer(recovery.CleanupOriginalExternalWorktree),
-		CleanupOriginalBranchCreatedByUs:   cloneBoolPointer(recovery.CleanupOriginalBranchCreatedByUs),
-		CleanupOriginalStartupStateUnknown: cloneBoolPointer(recovery.CleanupOriginalStartupStateUnknown),
-		OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
-		OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
-		OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
-	}
-}
-
-func archiveReportKillFence(report git.ArchiveReport) *GitWorktreeRelocationRecoveryData {
-	tree := report.RetainedTrees[0]
-	fence := report.RollbackFence
-	originalExternal := fence.OriginalExternalWorktree
-	originalBranch := cloneBoolPointer(fence.OriginalBranchCreatedByUs)
-	originalStartup := fence.OriginalStartupStateUnknown
-	return &GitWorktreeRelocationRecoveryData{
-		// A previous reader refuses explicit kill while any recovery record is
-		// unresolved, but its restore path consumes an identity-qualified
-		// AlternatePath as a worktree candidate. Retained trees can be snapshots
-		// from an older archive cycle, so never publish their pathname here. A
-		// claim-stale record with no alternate and the retained source's identity
-		// cannot match the cross-filesystem published archive and therefore makes
-		// both kill and restore fail closed. Current readers remove this synthetic
-		// record through RollbackFence before reconstructing the worktree.
-		State:                       git.RelocationRecoveryClaimStale,
-		IdentityKnown:               true,
-		Device:                      tree.Device,
-		Inode:                       tree.Inode,
-		FileType:                    tree.FileType,
-		OriginalExternalWorktree:    &originalExternal,
-		OriginalBranchCreatedByUs:   originalBranch,
-		OriginalStartupStateUnknown: &originalStartup,
-	}
-}
-
 // TabData is the serializable form of a session.Tab. The full list is persisted
 // (and restored by exact TmuxName) so every tab — agent and shell alike —
 // reconnects to its tmux session across an af/daemon restart (#930). The field
@@ -652,6 +580,31 @@ type TabData struct {
 	// indistinguishable from a session that was never handed off — and those two
 	// deserve the same treatment, so nothing has to be backfilled.
 	Handoffs []AgentHandoff `json:"handoffs,omitempty"`
+	// Exit records how a process tab's command ended (#4479): the pane was seen
+	// dead, not merely missing, or af stopped it and says why. nil for tabs af
+	// never saw finish — the load path maps that to "still in flight", never to
+	// "re-run me".
+	Exit *TabExitData `json:"exit,omitempty"`
+	// AccountScope is the account af launched this tab's pane under (#4506
+	// review). A sibling whose recorded scope is not the session's account is
+	// stopped once at load, because its pane may run on another identity. Empty
+	// for a pane launched on the ambient identity, and for rows written before
+	// this field existed.
+	AccountScope string `json:"account_scope,omitempty"`
+}
+
+// TabExitData is the wire form of Tab.Exit: only the fields a reader needs to
+// render or reason about a finished command.
+type TabExitData struct {
+	Status      int  `json:"status,omitempty"`
+	StatusKnown bool `json:"status_known,omitempty"`
+	// At is omitted, not zero-valued, when tmux reported no death time:
+	// omitempty never omits a struct, and "0001-01-01T00:00:00Z" would present
+	// an invented completion time to every reader (#4506 review).
+	At time.Time `json:"at,omitzero"`
+	// StoppedBy is set when af stopped the command rather than it exiting:
+	// "account-scope" or "account-swap" (#4506 review).
+	StoppedBy string `json:"stopped_by,omitempty"`
 }
 
 // TabCleanupData is one durable cleanup handle for a closed tab whose tmux
@@ -807,61 +760,6 @@ func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
 		<-archiveSettled
 	}
 	return s.SaveInstances(instances)
-}
-
-// LoadInstances loads the list of instances from disk.
-func (s *Storage) LoadInstances() ([]*Instance, error) {
-	var allJSON map[string]json.RawMessage
-	if s.repoID != "" {
-		// TUI mode: load just this repo. Surface read errors so startup can
-		// report "couldn't read your sessions" instead of silently showing
-		// an empty list that looks like a fresh install (#766).
-		raw, err := s.state.GetInstances(s.repoID)
-		if err != nil {
-			return nil, err
-		}
-		allJSON = map[string]json.RawMessage{s.repoID: raw}
-	} else {
-		// Daemon mode: load all repos. Surface a directory-level read error so
-		// the daemon reports "couldn't read your sessions" instead of silently
-		// presenting an empty list that looks like a fresh install while live
-		// sessions sit unreadable on disk (#868).
-		all, err := s.state.GetAllInstances()
-		if err != nil {
-			return nil, err
-		}
-		allJSON = all
-	}
-
-	var instances []*Instance
-	for repoID, jsonData := range allJSON {
-		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
-			continue
-		}
-		var instancesData []InstanceData
-		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
-		}
-		// Collapse duplicate records written before the dedup-on-save fix
-		// (#808) so a dup-containing file yields one sidebar row per session
-		// immediately, not just after the next save rewrites the file.
-		instancesData = dedupeInstanceData(instancesData)
-		for _, data := range instancesData {
-			data = data.ForStorage()
-			instance, err := FromInstanceData(data)
-			if err != nil {
-				// Instance's tmux session or worktree may have been
-				// destroyed externally. Log and skip rather than
-				// failing the entire load.
-				log.WarningLog.Printf("skipping instance %q: %v", data.Title, err)
-				continue
-			}
-			instance.PinStorageRepoID(repoID)
-			instances = append(instances, instance)
-		}
-	}
-
-	return instances, nil
 }
 
 // InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for

@@ -208,3 +208,25 @@ func TestListAccountsReportsTheProjectDefaults(t *testing.T) {
 		defaultAccountsFor(&config.Config{}, repoPath, []string{"codex"}))
 	assert.NoDirExists(t, filepath.Join(home, "accounts", "codex", "gone"))
 }
+
+// The resolved_agents half of the handoff picker's answer (#4430 review): a
+// picker must classify a target by the command it launches, so the daemon
+// reports DetectAgentFromCommand over the repo's program_overrides through the
+// same session-layer chain the frozen swap plan resolves with. Repo-scoped
+// overrides apply to the requesting repo; a target with none resolves to itself.
+func TestListAccountsReportsResolvedAgents(t *testing.T) {
+	_, repoPath, project := defaultAccountFixture(t, "", "")
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "program_overrides.codex", "aider")
+	require.NoError(t, err)
+
+	resp, err := m.ListAccounts(ListAccountsRequest{RepoPath: repoPath})
+	require.NoError(t, err)
+	require.Equal(t, "aider", resp.ResolvedAgents["codex"],
+		"the picker must see the command codex resolves to, not the enum it requested")
+	for _, agent := range []string{"claude", "gemini", "amp", "opencode", "devin"} {
+		require.Equal(t, agent, resp.ResolvedAgents[agent],
+			"a target with no override resolves to its own enum")
+	}
+}

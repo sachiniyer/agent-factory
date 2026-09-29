@@ -24,26 +24,31 @@ import (
 // daemon→disk read path (listSessions, getSessionByTitle, whoamiSession,
 // getSessionByTitleInScope) routes through so the "remote reads never fall back
 // to disk" contract cannot be silently reintroduced at a new read site (#1679,
-// #1681). On daemon success it returns (data, false, nil). On error it returns:
-//   - remote target: (nil, false, err) — surface the real error; a remote daemon
+// #1681). On daemon success it returns (data, skipped, false, nil), where
+// `skipped` carries repos the daemon dropped at startup due to a corrupted
+// instances.json (#603) — the wire-side incompleteness channel the caller uses
+// to refuse or caveat rather than silently serving a partial list as complete
+// (#730's principle extended to the wire surface #1029 PR 2 introduced). On
+// error it returns:
+//   - remote target: (nil, nil, false, err) — surface the real error; a remote daemon
 //     has no local disk to fall back to, and a bad token must not be masked by a
 //     same-machine disk read (docs/remote-tcp-auth.md, #1592 Phase 3 PR4).
-//   - local target:  (nil, true, err)  — the caller runs its own disk scan.
+//   - local target:  (nil, nil, true, err)  — the caller runs its own disk scan.
 //
 // Callers switch on err == nil for the success path and, on error, consult the
 // fallBackToDisk flag before touching disk. This keeps each caller's exact local
 // disk-fallback behavior (diskListSessions / diskWhoami / findInstanceByTitle,
 // including their distinct not-found and corrupt-repo errors) while centralizing
 // the one decision that must never regress: whether disk may be read at all.
-func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, fallBackToDisk bool, err error) {
-	data, err = snapshotViaDaemon(req)
+func snapshotRead(req daemon.SnapshotRequest) (data []session.InstanceData, skipped []daemon.SkippedRepo, fallBackToDisk bool, err error) {
+	data, skipped, err = snapshotViaDaemon(req)
 	if err == nil {
-		return data, false, nil
+		return data, skipped, false, nil
 	}
 	if apiclient.IsRemoteTarget() {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return nil, true, err
+	return nil, nil, true, err
 }
 
 // Shared flags
@@ -344,21 +349,49 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, []config.Rep
 	return session.DedupeSorted(paths), unreadable, nil
 }
 
+// corruptedRepoRepairHint is the one-line remedy appended to every corruption
+// refusal/caveat. af stores per-repo state only in instances.json and keeps no
+// backup of it, so the operator has to repair the file themselves (#4742).
+const corruptedRepoRepairHint = "Stop the af daemon, copy the corrupt file(s) aside, fix the JSON or restore it from a backup, then start the daemon; af keeps no backup of these files."
+
+// corruptedRepoPaths renders the full path of each corrupted repo's
+// instances.json, resolved through the same home resolver the store uses
+// (config.RepoInstancesPath honors AGENT_FACTORY_HOME rather than a hard-coded
+// ~/.agent-factory). A bare repo id is the fallback only when the id is too
+// malformed to resolve to a path, which the corrupted repos the daemon reports
+// never are — they passed ValidateRepoID when first registered (#4742).
+func corruptedRepoPaths(corrupted []string) string {
+	sort.Strings(corrupted)
+	paths := make([]string, 0, len(corrupted))
+	for _, rid := range corrupted {
+		if p, err := config.RepoInstancesPath(rid); err == nil && p != "" {
+			paths = append(paths, p)
+		} else {
+			paths = append(paths, rid)
+		}
+	}
+	return strings.Join(paths, ", ")
+}
+
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
 // whose instances.json failed to parse. Callers use it to surface corruption
-// loudly instead of silently returning empty/partial results (#730).
+// loudly instead of silently returning empty/partial results (#730). Each repo
+// is named by its full instances.json path and the message carries the repair
+// step, so a miss caveats with something the operator can act on (#4742).
 func corruptedReposSuffix(corrupted []string) string {
-	sort.Strings(corrupted)
-	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Sprintf("%d repo(s) have a corrupted instances.json and may be hiding it: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // corruptedReposError builds a structured error for aggregate queries (e.g.
 // `sessions list`) that name the repos whose instances.json failed to parse.
 // Returning this instead of a silently-truncated result lets users tell "no
 // sessions exist" apart from "sessions exist but the file is corrupted" (#730).
+// Each repo is named by its full instances.json path and the message carries the
+// repair step, so a refusal is actionable rather than a dead end (#4742).
 func corruptedReposError(corrupted []string) error {
-	sort.Strings(corrupted)
-	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s", len(corrupted), strings.Join(corrupted, ", "))
+	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s\n%s",
+		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon
@@ -489,16 +522,37 @@ func repoHasInstanceTitle(repoID, title string) (bool, error) {
 	return false, nil
 }
 
-// repoHasLiveInstanceTitle is like repoHasInstanceTitle but skips archived
-// rows. Used by the sessions-create pre-check: the daemon intentionally
-// reclaims an archived-only title by renaming the archived record to
-// "<title> (archived)" and proceeding (renameArchivedForReuseLocked), so
-// counting an archived row as "already exists" would abort a create the daemon
-// would allow, with the wrong error. RecordedLiveness resolves both the
-// explicit Liveness field and the legacy Status fallback so a row persisted
-// before the Liveness field existed is still detected as archived and skipped.
+// repoHasLiveInstanceTitle is like repoHasInstanceTitle but skips rows the
+// daemon treats as non-reservations. Used by the sessions-create pre-check so
+// a title the daemon would ALLOW reaches it instead of aborting client-side with
+// the wrong error. RecordedLiveness resolves both the explicit Liveness field
+// and the legacy Status fallback so a row persisted before the Liveness field
+// existed is still detected and skipped.
+//
+// The skip-set mirrors the daemon's authoritative title scan,
+// findTitleConflictLocked (plus its parallel scans in archive_names.go and
+// manager_create_titles.go), exactly:
+//
+//   - Archived rows (RecordedLiveness == LiveArchived): the daemon reclaims the
+//     title by renaming the archived record to "<title> (archived)" and
+//     proceeding (renameArchivedForReuseLocked), so counting an archived row as
+//     "already exists" would abort a create the daemon would allow.
+//   - Status == Loading "ghost" rows: a legacy TUI binary (#551) could persist
+//     a Loading-status row to disk on quit. The daemon treats such ghosts as
+//     overwritable — appendInstanceData overwrites a same-titled Loading ghost
+//     and findTitleConflictLocked skips them when deciding a title is free,
+//     specifically so they do not "block title reuse forever" — so counting one
+//     as a collision would block a create the daemon would allow. RecordedLiveness
+//     resolves a Loading row to LivenessUnset, not LiveArchived, so the archived
+//     skip above does NOT cover it; this carve-out is separate on purpose.
+//
+// Deleting is deliberately NOT skipped: a persisted Deleting row is a real
+// titleConflictDisk collision to the daemon, so letting it through here would
+// hand the daemon a create it would then refuse — aborting client-side is the
+// correct, fail-fast behavior for a genuine live collision.
+//
 // The authoritative race-safe check still happens inside the daemon under the
-// per-repo file lock, so letting archived rows through is safe.
+// per-repo file lock, so letting these rows through is safe.
 //
 // NOTE: do NOT use this for the send-prompt existence pre-check
 // (instanceTitleExistsInScope). Send-prompt to an archived session should fall
@@ -511,7 +565,9 @@ func repoHasLiveInstanceTitle(repoID, title string) (bool, error) {
 		return false, err
 	}
 	for i := range instances {
-		if instances[i].Title == title && session.RecordedLiveness(instances[i]) != session.LiveArchived {
+		skip := session.RecordedLiveness(instances[i]) == session.LiveArchived ||
+			instances[i].Status == session.Loading
+		if instances[i].Title == title && !skip {
 			return true, nil
 		}
 	}
@@ -664,7 +720,13 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 // wraps the payload in the shared success Envelope.
 func jsonOut(v any) error {
 	if envelopeOutput {
-		return apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v))
+		// close quietly so a dirty --json success leaves stderr empty, matching jsonError (#3169);
+		// only close after the envelope is written so a write failure retains the dirty-log diagnostic
+		if err := apiproto.WriteEnvelope(os.Stdout, apiproto.Success(v)); err != nil {
+			return err
+		}
+		log.CloseQuiet()
+		return nil
 	}
 	data, err := apiproto.MarshalIndented(v)
 	if err != nil {
