@@ -496,22 +496,24 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 		target = cur + dir
 	} else if sel.Kind == SectionInstances && !sel.IsTab {
 		if dir > 0 {
-			// An explicitly folded (h/←) instance row hides this instance's
-			// own tab rows, so a Down that targets them must not re-expand the
-			// same instance (#4770) and must not trap the cursor on the folded
-			// row. Move the cursor to the next instance row instead; the
-			// afterCursorMove push selects that instance (auto-expanding it)
-			// and clears the override, leaving the folded instance collapsed.
-			// When this is the last instance there is no next row to move to,
-			// so consume the move as a no-op that keeps the fold, the cursor
-			// and the active tab unchanged.
 			instances := s.proj.GetInstances()
 			if s.treeCollapsed != "" && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
 				s.treeCollapsed == instances[sel.ItemIndex].Title {
-				s.moveCursorToNextInstanceRow()
-				return true
+				if s.moveCursorToNextInstanceRow() {
+					return true
+				}
+				// Last live instance, folded: a Down must not target this
+				// instance's hidden tabs (that would re-expand the fold, #4770).
+				// Fall through to the next stop strictly past this instance —
+				// the Archived rows moveVerticalNavStop's #1518 reveal fallback
+				// exposes below it — so the tail lands on the first archived
+				// session instead of trapping on the folded row. Until that
+				// fallback runs there is no such stop, so target stays -1 and the
+				// fallback reveals it.
+				target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex+1)
+			} else {
+				target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
 			}
-			target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
 		} else {
 			target = lastTabStopBeforeInstance(stops, sel.ItemIndex)
 		}
@@ -711,19 +713,20 @@ func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
 }
 
 // moveCursorToNextInstanceRow advances the cursor to the next live instance
-// row below the current cursor, if one is visible in the Instances section.
-// It is a no-op when the cursor already rests on the last instance row (there
-// is nothing below it to move to within the section). Used by Down off an
-// explicitly folded instance to move past it instead of diving into its hidden
-// tabs.
-func (s *Sidebar) moveCursorToNextInstanceRow() {
+// row below the current cursor, if one is visible in the Instances section,
+// and reports whether the cursor moved. It returns false when the cursor
+// already rests on the last instance row (there is nothing below it to move
+// to within the section). Used by Down off an explicitly folded instance to
+// move past it instead of diving into its hidden tabs.
+func (s *Sidebar) moveCursorToNextInstanceRow() bool {
 	for j := s.selectedIdx + 1; j < len(s.visibleItems); j++ {
 		item := s.visibleItems[j]
 		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab {
 			s.selectedIdx = j
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // GetSelectedInstance returns the instance under the cursor — including when

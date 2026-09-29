@@ -398,3 +398,46 @@ func TestTreeNav_FoldedLastInstanceDownPreservesFold(t *testing.T) {
 	require.Equal(t, 1, h.store.ActiveTab(),
 		"the nonzero active tab is preserved when Down is a no-op")
 }
+
+// TestTreeNav_FoldedLastInstanceDownReachesArchived pins the #1518 tail the
+// pre-merge review (thread on #4776) flagged: when the LAST live instance is
+// explicitly folded (h/←) and an archived session exists, Down must still
+// reveal the Archived section and land the cursor on the first archived row —
+// the same path a Down off the last live tab takes — instead of trapping the
+// cursor on the folded row. moveCursorToNextInstanceRow has no next instance
+// to move to, so it must report the no-move and let moveVerticalNavStop's
+// reveal-Archived fallback expand the folder and retry.
+func TestTreeNav_FoldedLastInstanceDownReachesArchived(t *testing.T) {
+	h := newTestHome(t)
+	addTreeInstance(t, h, "alpha")
+	addTreeInstance(t, h, "bravo") // the last LIVE instance
+	archived := archiveActionInstance(t, "put-away", session.Ready)
+	archived.SetArchived()
+	h.store.AddInstance(archived)
+	resizeHome(h, 120, 40)
+
+	// bravo is the last live instance, so a Down off it has no next instance
+	// row to move to.
+	selectTreeInstance(h, 1)
+	require.NotContains(t, h.sidebar.View(), "put-away", "Archived starts collapsed")
+
+	// Fold the last live instance in place; the cursor stays on its row.
+	dispatchKey(h, runeKey('h'))
+	require.False(t, h.sidebar.GetSelection().IsTab, "cursor on the folded instance row")
+	require.False(t, sidebarRendersExpanded(h, "bravo"), "bravo folded")
+
+	// Down must not trap on the folded last row: it reveals the Archived
+	// section and lands the cursor on the first archived row, the same path
+	// a Down off the last live tab takes, instead of reporting success over
+	// a no-op move and leaving the #1518 reveal-Archived fallback idle.
+	dispatchKey(h, runeKey('j'))
+	sel := h.sidebar.GetSelection()
+	require.Equal(t, ui.SectionArchived, sel.Kind,
+		"Down off the last folded live instance must reach the Archived section")
+	require.False(t, sel.IsHeader)
+	require.Same(t, archived, h.sidebar.GetSelectedInstance(),
+		"the cursor rests on the archived session row")
+	assert.Contains(t, h.sidebar.View(), "put-away", "Archived was revealed")
+	assert.False(t, sidebarRendersExpanded(h, "bravo"),
+		"the folded live instance stays collapsed")
+}
