@@ -821,6 +821,10 @@ options:
 	if xargsEnvOperandsFed(words, state, names, memo) {
 		return run.done(nil, true)
 	}
+	if substituting {
+		argv, unsafe := xargsSubstitutedArgv(words, markerKnown, marker)
+		return run.done(argv, unsafe)
+	}
 	return run.done(words, false)
 }
 
