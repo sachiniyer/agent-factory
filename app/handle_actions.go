@@ -21,7 +21,9 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyHelp:
 		return m.showHelpScreen(helpTypeGeneral{}, nil)
 	case keys.KeyErrorDetails:
-		return m.showErrorDetails()
+		// Reaching here means openNoticeDetails declined the key: the bar
+		// advertises no details key in this state, so none may open them.
+		return m, nil
 
 	// Tree navigation. Each moves the sidebar cursor and re-homes the focus
 	// ring on the tree (focusTreeForNav) so the ring-reading attach verb `o`

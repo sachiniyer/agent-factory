@@ -334,6 +334,7 @@ type home struct {
 	// Each new error/success notice increments it; a stale hideErrMsg from an
 	// older timer must not clear a newer notice.
 	transientNoticeID uint64
+	namingNotice      namingFormNotice // a notice the open naming form raised (#4123)
 	// alarmBanner is the top-of-screen delivery-failure alarm (#1238): a
 	// persistent red bar raised while the daemon snapshot reports a watch task
 	// whose events are failing to reach their target session. Fed each poll by
@@ -777,7 +778,8 @@ func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPa
 // fragments stay ordered worst-first, so what survives is which pane went away,
 // and since #2618 the clipped tail is readable in full with `E details`.
 func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
-	if p == nil || paneCount <= 1 {
+	// Suppress the auto-hide notice during a config-agent spawn (handleConfigAgent).
+	if p == nil || paneCount <= 1 || m.configAgentSpawning {
 		return
 	}
 	subject := "a pane is hidden"
