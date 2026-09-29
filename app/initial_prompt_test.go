@@ -21,36 +21,19 @@ import (
 // `af sessions create --prompt` and the web modal both had it.
 //
 // These tests drive the REAL key path (handleKeyPress, not the sub-handlers)
-// so they cover the state dispatch and the menu-highlight hop a key must
-// survive during naming — a key that opens the field in handleStateNew but is
+// so they cover the state dispatch and the menu highlight a key passes through
+// during naming — a key that opens the field in handleStateNew but is
 // swallowed on the way there is exactly the bug shape this flow invites. The
 // highlight RENDER for the new hint is pinned separately, in
 // TestNamingKeysHighlightMenu (handle_input_test.go).
 
 // pressFormKey feeds msg through handleKeyPress the way the Bubble Tea event loop
-// does, including the re-emit hop: during naming, handleMenuHighlighting
-// intercepts the form's action keys, fires the highlight, and re-emits the key
-// as a message. Replaying that hop here is what makes the tests cover the
-// highlight path rather than route around it. Returns every non-key message the
-// press produced.
+// does — the menu highlight and the key's action in one call — and returns
+// every message the press produced.
 func pressFormKey(t *testing.T, h *home, msg tea.KeyMsg) []tea.Msg {
 	t.Helper()
 	_, cmd := h.handleKeyPress(msg)
-	if cmd == nil {
-		return nil
-	}
-	var out []tea.Msg
-	for _, produced := range drainCmd(t, cmd, time.Second) {
-		km, ok := produced.(tea.KeyMsg)
-		if !ok {
-			out = append(out, produced)
-			continue
-		}
-		if _, replayCmd := h.handleKeyPress(km); replayCmd != nil {
-			out = append(out, drainCmd(t, replayCmd, time.Second)...)
-		}
-	}
-	return out
+	return drainCmd(t, cmd, time.Second)
 }
 
 func typeRunes(t *testing.T, h *home, s string) {

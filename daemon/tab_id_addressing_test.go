@@ -46,7 +46,7 @@ func TestPreview_RefusesStaleTabID(t *testing.T) {
 	}
 
 	// Close a (ordinal 1); b shifts down into ordinal 1.
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "a"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "a"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 	if idx, ok := inst.TabIndexByID(b.ID); !ok || idx != 1 {
@@ -134,7 +134,7 @@ func TestBindTab_RefusesStaleID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddProcessTab b: %v", err)
 	}
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "a"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repo.ID, TabName: "a"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 

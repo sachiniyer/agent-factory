@@ -857,27 +857,6 @@ func copiedDirectoryHasChildren(directory *copiedDirectory) bool {
 	return false
 }
 
-// copyFile is the path-based test entrypoint for the regular-file copier. The
-// production tree walker calls copyRegularFileAt with already-open parents.
-func copyFile(src, dst string) error {
-	sourceParent, _, err := openDirectoryPath(filepath.Dir(src), "source parent")
-	if err != nil {
-		return err
-	}
-	defer sourceParent.Close()
-	destinationParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dst), "destination parent")
-	if err != nil {
-		return err
-	}
-	defer destinationParent.Close()
-	return copyRegularFileAt(sourceParent, destinationParent, filepath.Base(src), src, dst)
-}
-
-func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
-	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil, &xattrDestination{}, nil)
-	return err
-}
-
 func copyRegularFileAtWithIdentity(
 	source, destination *os.File,
 	name, sourcePath, destinationPath string,
