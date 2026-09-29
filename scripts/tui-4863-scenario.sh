@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Real-TUI + CLI drive for #4040's shift+<rune> dead-binding fix.
+# Real-TUI + CLI drive for #4863's shift+<rune> dead-binding fix.
 #
-#   scripts/testbox.sh scenario scripts/tui-4040-scenario.sh
+#   scripts/testbox.sh scenario scripts/tui-4863-scenario.sh
 #
 # The bug: `normalizeKeySpec` accepted `quit = ["shift+a"]` (and the
 # ctrl/alt+shift variants) and installed the binding under the spelling
@@ -9,16 +9,24 @@
 # was dead on arrival; config validation — the one place to catch it — missed
 # it because the emit-ability guard was gated on named keys.
 #
+# The fix rejects shift+<rune> at the WRITE path (`af config set keys`, via
+# keys.ValidateOverrides), but a config that ALREADY contains one must not
+# break the upgrade: ValidateOverrides runs in every LoadConfig, including the
+# daemon's, so a hard error would turn a silently inert binding into a refusal
+# to start. So the LOAD path applies the "warn now, reject later" policy
+# (#4599): warn naming the key and saying it will never fire, then skip it.
+#
 # This scenario proves the fix end-to-end through the REAL af binary:
 #   Part A (deterministic, the validation contract that gates boot):
-#     `af config validate` rejects shift+a / ctrl+shift+a / alt+shift+a /
-#     alt+ctrl+shift+a with a non-zero exit and a message naming the dead key,
-#     while it ACCEPTS the reachable rune combos the fix must preserve
+#     `af config validate` ACCEPTS a config whose quit is a dead shift+<rune>
+#     override, printing a "will never fire" warning that names the dead key
+#     alongside "config OK", and it still ACCEPTS the reachable rune combos
 #     (Q, alt+a, ctrl+a).
-#   Part B (the boot the validation gates): booting af with `quit = ["shift+a"]`
-#     does NOT reach the TUI first frame — the launch is refused at config
-#     load, exactly the failure mode the fix turns from a silent dead binding
-#     into a loud boot error.
+#   Part B (the boot the policy gates): booting af with `quit = ["shift+a"]`
+#     REACHES the TUI first frame — the load warned and skipped the dead
+#     binding instead of refusing to start — and the dead binding is skipped,
+#     not installed: Shift+A (emitted as "A") does NOT quit, while the default
+#     `q` (restored when the dead override was dropped) still does.
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -26,7 +34,8 @@ source /src/scripts/tui-driver.sh
 
 # cheap_config <keys-toml> — write a sandbox config.toml whose instances are
 # bash, then append a [keys] block. The container's validate path is identical
-# to a user's: LoadConfigReadOnly runs normalizeOverrides -> normalizeKeySpec.
+# to a user's: LoadConfigReadOnly runs discardDeadShiftRuneOverrides ->
+# keys.ValidateOverrides.
 cheap_config() {
     printf 'default_program = "claude"\n\n[program_overrides]\nclaude = "bash"\n\n%s\n' "$1"
 }
@@ -37,19 +46,30 @@ run_validate() {
     if out="$(AGENT_FACTORY_HOME="$home" "$bin" config validate 2>&1)"; then rc=0; else rc=$?; fi
 }
 
-expect_reject() {
+# expect_warn_accept <spec> <label> — `af config validate` ACCEPTS a config
+# whose quit is a dead shift+<rune> override (warn-and-skip), and the output
+# names the dead key in a "will never fire" warning alongside the "config OK"
+# line. The load path warns and skips; only the write path (`af config set
+# keys`) rejects a NEW dead binding.
+expect_warn_accept() {
     local spec="$1" label="$2"
     cheap_config "[keys]\nquit = [\"$spec\"]" > "$cfg"
     # cheap_config uses a literal \n; convert to real newlines.
     printf '%b' "$(cat "$cfg")" > "$cfg"
     run_validate
-    if [ "$rc" -eq 0 ]; then
-        _af_fail "#4040: $label: $spec was ACCEPTED; expected a validation error"; return 1
+    if [ "$rc" -ne 0 ]; then
+        _af_fail "#4863: $label: $spec was REJECTED; the load path should warn-and-skip an existing dead binding. out=$out"; return 1
     fi
-    if ! printf '%s' "$out" | grep -qF "\"$spec\" is not a valid key"; then
-        _af_fail "#4040: $label: $spec rejected, but the error did not name the dead key. out=$out"; return 1
+    if ! printf '%s' "$out" | grep -q 'config OK'; then
+        _af_fail "#4863: $label: $spec accepted but no 'config OK' line. out=$out"; return 1
     fi
-    _af_log "assert OK: $label: $spec rejected at config validation naming the dead key (rc=$rc)"
+    if ! printf '%s' "$out" | grep -qF "\"$spec\""; then
+        _af_fail "#4863: $label: $spec accepted but the warning did not name the dead key. out=$out"; return 1
+    fi
+    if ! printf '%s' "$out" | grep -q 'will never fire'; then
+        _af_fail "#4863: $label: $spec accepted but the warning did not say it will never fire. out=$out"; return 1
+    fi
+    _af_log "assert OK: $label: $spec accepted at config validation with a dead-key warning (rc=$rc)"
 }
 
 expect_accept() {
@@ -58,10 +78,10 @@ expect_accept() {
     printf '%b' "$(cat "$cfg")" > "$cfg"
     run_validate
     if [ "$rc" -ne 0 ]; then
-        _af_fail "#4040: $label: $action=$spec was REJECTED; the shift fix must not reject reachable combos. out=$out"; return 1
+        _af_fail "#4863: $label: $action=$spec was REJECTED; the shift fix must not reject reachable combos. out=$out"; return 1
     fi
     if ! printf '%s' "$out" | grep -q 'config OK'; then
-        _af_fail "#4040: $label: $spec accepted but no 'config OK' line. out=$out"; return 1
+        _af_fail "#4863: $label: $spec accepted but no 'config OK' line. out=$out"; return 1
     fi
     _af_log "assert OK: $label: $action=$spec accepted (reachable combo preserved)"
 }
@@ -72,15 +92,16 @@ drive_validate_contract() {
     home="$(mktemp -d)"
     cfg="$home/config.toml"
 
-    # Part A.1 — every shift+-inclining rune combo is dead and must be rejected,
-    # with an error that names the offending key string.
-    expect_reject "shift+a"            "letter (shift+)"
-    expect_reject "ctrl+shift+a"       "letter (ctrl+shift+)"
-    expect_reject "alt+shift+a"        "letter (alt+shift+)"
-    expect_reject "alt+ctrl+shift+a"   "letter (alt+ctrl+shift+)"
-    expect_reject "shift+0"            "digit (shift+)"
-    expect_reject "shift+/"            "symbol (shift+)"
-    expect_reject "shift+å"            "multi-byte rune (shift+)"
+    # Part A.1 — every shift+-inclining rune combo is dead, but an EXISTING one
+    # must load (warn-and-skip): validate exits 0 with "config OK" AND a
+    # warning that names the dead key and says it will never fire.
+    expect_warn_accept "shift+a"            "letter (shift+)"
+    expect_warn_accept "ctrl+shift+a"       "letter (ctrl+shift+)"
+    expect_warn_accept "alt+shift+a"        "letter (alt+shift+)"
+    expect_warn_accept "alt+ctrl+shift+a"   "letter (alt+ctrl+shift+)"
+    expect_warn_accept "shift+0"            "digit (shift+)"
+    expect_warn_accept "shift+/"            "symbol (shift+)"
+    expect_warn_accept "shift+å"            "multi-byte rune (shift+)"
 
     # Part A.2 — the reachable combos Bubble Tea CAN emit still validate. The
     # fix narrowed only the dead path; over-rejection here would be a regression.
@@ -90,20 +111,23 @@ drive_validate_contract() {
     expect_accept "up"   "alt+ctrl+a"   "alt+ctrl+letter"
 
     rm -rf "$home"
-    echo "PASS: #4040 config validate shifts+rune rejected, reachable combos preserved"
+    echo "PASS: #4863 config validate warns+skips dead shift+<rune>, reachable combos preserved"
 }
 
-# drive_boot_refused_with_dead_keys — the boot the validation gate protects.
-# With `quit = ["shift+a"]` in config.toml, launching af must NOT reach the TUI
-# first frame ("Agent Factory"): the config load refuses and the process exits.
-# Before the fix this WOULD have booted and silently installed an unreachable
-# quit binding; now it refuses loudly.
-drive_boot_refused_with_dead_keys() {
+# drive_boot_warns_and_skips_dead_keys — the boot the warn-and-skip policy
+# gates. With `quit = ["shift+a"]` in config.toml, af must now REACH the TUI
+# first frame: the load warned and skipped the dead override (instead of
+# refusing to start, the old reject policy's failure mode over an inert
+# binding). And the dead binding is skipped, not installed: pressing Shift+A
+# — which Bubble Tea emits as the rune "A", never "shift+a" — must NOT quit,
+# while the default `q` (restored when the dead override was dropped) still
+# does.
+drive_boot_warns_and_skips_dead_keys() {
     export AF_DRIVER_COLS=100 AF_DRIVER_ROWS=30
     export AF_DRIVER_REPO="$HOME/sandbox/mock-repo"
 
     af_reset_sandbox
-    # Seed a config so the only thing wrong is the dead key binding.
+    # Seed a config so the only thing notable is the dead key binding.
     af_set_config "$(cat <<'TOML'
 default_program = "claude"
 
@@ -119,49 +143,39 @@ TOML
     bin="$(_af_resolve_bin)"
 
     # Launch af directly in the driver session (NOT via af_boot — af_boot waits
-    # for the first frame, which must NOT arrive here).
+    # for the first frame, which IS the assertion here, so launch directly and
+    # wait on it).
     tmux kill-session -t "$AF_DRIVER_SESSION" 2>/dev/null || true
     tmux new-session -d -s "$AF_DRIVER_SESSION" -x "$AF_DRIVER_COLS" -y "$AF_DRIVER_ROWS"
     tmux set-option -t "$AF_DRIVER_SESSION" window-size manual >/dev/null 2>&1 || true
     af_send_literal "cd $AF_DRIVER_REPO && $bin"
     af_send Enter
 
-    # Poll a short deadline: the first frame ("Agent Factory") must NOT arrive,
-    # while the config error naming the dead key DOES appear on the pane.
-    local deadline screen saw_first_frame saw_error
-    deadline=$(( $(_af_now) + 25 ))
-    saw_first_frame=no; saw_error=no
-    while [ "$(_af_now)" -lt "$deadline" ]; do
-        screen="$(af_capture)"
-        if printf '%s\n' "$screen" | grep -qE 'Agent Factory'; then
-            saw_first_frame=yes
-            break
-        fi
-        if printf '%s\n' "$screen" | grep -qE 'shift\+a.*is not a valid key|is not a valid key'; then
-            saw_error=yes
-        fi
-        # af exited back to a shell prompt — config load refused.
-        if printf '%s\n' "$screen" | grep -qE '\$ $'; then
-            [ "$saw_error" = yes ] && break || true
-        fi
-        sleep "$AF_DRIVER_POLL"
-    done
+    # The boot the warn-and-skip policy gates: af REACHES the TUI first frame
+    # despite the dead shift+a override — the load warned and skipped it
+    # instead of refusing to start.
+    af_wait_for 'Agent Factory' "$AF_DRIVER_TIMEOUT" \
+        'af boots with a dead shift+a override (warn-and-skip, not refused)' || return 1
+    af_ensure_nav
 
-    if [ "$saw_first_frame" = yes ]; then
-        _af_fail "#4040: af booted the TUI despite a dead shift+a binding — the fix did not gate boot"
-        printf '%s\n' "$screen" >&2
-        return 1
-    fi
-    if [ "$saw_error" = no ]; then
-        _af_fail "#4040: af did not boot but no dead-key error was visible on the pane"
-        printf '%s\n' "$screen" >&2
-        return 1
-    fi
-    _af_log "assert OK: af refuses to boot with quit=[shift+a], surfacing the dead-key error instead"
+    # THE first assertion: the dead binding is skipped, not installed. Pressing
+    # Shift+A — which Bubble Tea emits as the rune "A", never "shift+a" — must
+    # NOT quit. tmux send-keys "A" sends the literal uppercase rune, the exact
+    # bytes a real Shift+A produces. The TUI stays on the first frame.
+    af_send A
+    af_wait_for 'Agent Factory' 5 \
+        'Shift+A does not quit (dead shift+a override was skipped, not installed)' || return 1
+
+    # THE second assertion: the default `q` is restored — the dead override was
+    # dropped, reverting quit to its default — so `q` still quits and af exits
+    # back to the shell.
+    af_send q
+    af_wait_gone 'Agent Factory' "$AF_DRIVER_TIMEOUT" \
+        'q still quits after the dead shift+a override was dropped (default restored)' || return 1
 
     # Cleanup the tmux session so the box is reusable.
     tmux kill-session -t "$AF_DRIVER_SESSION" 2>/dev/null || true
-    echo "PASS: #4040 af boot refused with a dead shift+<rune> binding"
+    echo "PASS: #4863 af boots with a dead shift+a override (warned and skipped); Shift+A does not quit, q still does"
 }
 
 # drive_reachable_alt_rune_dispatches — the no-regression leg, mirroring the
@@ -228,7 +242,7 @@ TOML
     while [ "$(_af_now)" -lt "$deadline" ]; do
         screen="$(af_capture)"
         if printf '%s\n' "$screen" | grep -qE 'submit name'; then
-            _af_fail "#4040: n still opened the new prompt after the alt+a override replaced the default"
+            _af_fail "#4863: n still opened the new prompt after the alt+a override replaced the default"
             return 1
         fi
         sleep "$AF_DRIVER_POLL"
@@ -236,10 +250,10 @@ TOML
     _af_log "assert OK: default n is released by the reachable alt+a override"
 
     tmux kill-session -t "$AF_DRIVER_SESSION" 2>/dev/null || true
-    echo 'PASS: #4040 reachable alt+a override boots, dispatches the new action, and releases the default n'
+    echo 'PASS: #4863 reachable alt+a override boots, dispatches the new action, and releases the default n'
 }
 
 drive_validate_contract
-drive_boot_refused_with_dead_keys
+drive_boot_warns_and_skips_dead_keys
 drive_reachable_alt_rune_dispatches
-echo 'PASS: #4040 shift+<rune> dead bindings rejected at validation and boot; reachable combos preserved'
+echo 'PASS: #4863 shift+<rune> dead bindings warn-and-skip on load; write path rejects; reachable combos preserved'

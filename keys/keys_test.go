@@ -517,12 +517,6 @@ func TestNamedKeySpecsMatchBubbleTea(t *testing.T) {
 	}
 }
 
-// TestNamedKeySpecsMatchBubbleTea audits named keys only: its wire map is built
-// from KeyType names and contains no rune content, so a bare rune like "a" (emitted
-// via KeyRunes) is absent from it. The rune×modifier space — the exact place
-// where shift collapses a letter into its uppercase rune — is audited against
-// real Bubble Tea emission by TestRuneSpecsMatchBubbleTea below.
-
 // TestRuneSpecsMatchBubbleTea is the rune counterpart to TestNamedKeySpecsMatchBubbleTea.
 // It cross-checks every rune×modifier combination against the KeyMsg Bubble Tea's
 // input parser actually emits. The #4040 emit-ability guard in normalizeKeySpec was

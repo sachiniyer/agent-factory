@@ -821,6 +821,67 @@ func normalizeKeySpec(s string) (string, bool) {
 	}
 }
 
+// IsDeadShiftRuneSpec reports whether s is a shift+-bearing plain-rune key spec
+// that normalizeKeySpec rejects because Bubble Tea can never emit it: the Key
+// struct has no Shift field, so for rune input (KeyRunes) it writes the rune
+// verbatim — Shift+A is emitted as "A", never "shift+a" — and only the
+// dedicated KeyShift*/KeyCtrlShift* named KeyTypes spell "shift+". The load
+// path warns and skips these (#4599, "warn now, reject later") so a config
+// that already contains one upgrades without refusing to start over a binding
+// that was already inert; the write path (`af config set keys`, via
+// ValidateOverrides) still rejects a NEW one. The predicate mirrors
+// normalizeKeySpec's guard order so it returns true only for the exact case
+// the shift guard catches, not for the unrelated rejections around it (an
+// unsupported named-key combo like shift+space, a malformed spec like "qq", or
+// a reachable spec like "ctrl+a" or "shift+up").
+func IsDeadShiftRuneSpec(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n") {
+		return false
+	}
+	rest := s
+	var ctrl, alt, shift bool
+	for {
+		switch {
+		case strings.HasPrefix(rest, "ctrl+"):
+			if ctrl {
+				return false
+			}
+			ctrl = true
+			rest = rest[len("ctrl+"):]
+		case strings.HasPrefix(rest, "alt+"):
+			if alt {
+				return false
+			}
+			alt = true
+			rest = rest[len("alt+"):]
+		case strings.HasPrefix(rest, "shift+"):
+			if shift {
+				return false
+			}
+			shift = true
+			rest = rest[len("shift+"):]
+		default:
+			if namedKeys[rest] && !namedKeyModifiersSupported(rest, ctrl, shift) {
+				return false
+			}
+			if rest == "space" {
+				if ctrl {
+					rest = "@"
+				} else {
+					rest = " "
+				}
+			}
+			if !namedKeys[rest] && utf8.RuneCountInString(rest) != 1 {
+				return false
+			}
+			return shift && !namedKeys[rest]
+		}
+		if rest == "" {
+			return false
+		}
+	}
+}
+
 // Mirrors the modified KeyTypes in Bubble Tea v1's key.go. The table test
 // checks every namedKeys entry and modifier combination against Key.String.
 func namedKeyModifiersSupported(name string, ctrl, shift bool) bool {
