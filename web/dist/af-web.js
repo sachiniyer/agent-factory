@@ -18194,6 +18194,7 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -18249,8 +18250,10 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) openModal(m);
-          else surfaceMutationError(e);
+          if (!modal && token === tok) {
+            openModal(m, true, invoker);
+            m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
+          } else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
