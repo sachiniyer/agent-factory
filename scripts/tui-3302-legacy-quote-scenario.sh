@@ -8,12 +8,11 @@
 # must refuse this pane: no Enter is injected between the agent's quote
 # line and its composer.
 #
-# The fake agent never paints a real picker — it paints a quoted mention
-# followed by its composer. After af's daemon poll, the agent must observe
-# its own arbitrary "echo:" line that it was set up to print AFTER the
-# quote — meaning no Enter was injected into the composer (an injected
-# Enter would deliver a blank line / commit nothing, which the fake agent
-# logs as 'received::end').
+# The fake agent first paints the boxed legacy dialog, pausing half-drawn
+# (af must send nothing until the whole picker is up, then one Enter), and
+# then paints a quoted mention followed by a framed composer whose draft
+# reads "Yes No". An Enter injected into that composer is logged as
+# 'received::end'; a key sent into the half-drawn picker as 'early-input'.
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -28,26 +27,45 @@ FAKE_BIN_DIR="$HOME/sandbox/bin"
 mkdir -p "$FAKE_BIN_DIR"
 rm -f "$TRUST_LOG"
 
-# Phase 1 paints the real legacy dialog once (af dismisses it with bare Enter).
-# Phase 2 quotes the legacy phrase as ordinary output and then renders a
-# "❯" composer that echoes every line it receives. A blank "received:" line
-# in the log means af injected an Enter into the composer phase — the bug.
+# Phase 1 paints the legacy dialog in its boxed layout (labelled options,
+# "Enter to confirm" footer last) one piece at a time, and PAUSES with only
+# "❯ 1. Yes, proceed" painted — the half-drawn stacked frame (#4743 Codex P1).
+# Before painting "2. No, exit" it checks whether input already arrived: a key
+# sent into the half-drawn picker is logged as 'early-input'. It then reads the
+# dismissal; a bare Enter logs 'dialog-answer::end'.
+#
+# Phase 2 quotes the legacy question in prose AND as a whole row of ordinary
+# output, then paints a framed composer whose draft reads "Yes No" (#4743 Codex
+# P2), and echoes every line it receives. A blank "received:" line in the log
+# means af injected an Enter into the composer phase — the bug.
 # Uses <<EOF (unquoted) so $TRUST_LOG is expanded by the OUTER shell into
-# the script body, while \$answer / \$line / \$line are passed through to
+# the script body, while \$answer / \$line / \$RULE are passed through to
 # the inner script verbatim. Same pattern as scripts/tui-3302-scenario.sh.
 cat > "$FAKE_BIN_DIR/claude" <<EOF
 #!/usr/bin/env bash
-# Phase 1: paint the real legacy dialog; block for the dismissal Enter.
-printf 'Do you trust the files in this folder?\n'
-printf '\xe2\x9d\xaf Yes  No\n'
+RULE='──────────────────────────────────────────────'
+# Phase 1: paint the boxed legacy dialog, pausing half-drawn.
+printf '╭%s╮\n' "\$RULE"
+printf '│ Do you trust the files in this folder?       │\n'
+printf '│                                              │\n'
+printf '│ Claude Code may read files in this folder.   │\n'
+printf '│                                              │\n'
+printf '│ \xe2\x9d\xaf 1. Yes, proceed                            │\n'
+sleep 6
+if read -r -t 0; then printf 'early-input\n' >> '$TRUST_LOG'; fi
+printf '│   2. No, exit                                │\n'
+printf '╰%s╯\n' "\$RULE"
+printf '   Enter to confirm · Esc to exit\n'
 IFS= read -r answer
 printf 'dialog-answer:%s:end\n' "\$answer" >> '$TRUST_LOG'
+clear
 # Phase 2: the agent is now in its composer, and its visible output QUOTES
-# the legacy phrase as ordinary output before the composer cursor. This is
-# the bug's repro shape: a quoted mention above a working composer.
+# the legacy question above a framed composer whose draft reads "Yes No".
 printf 'I remember when Claude asked: "Do you trust the files in this folder?"\n'
-printf 'That prompt is gone now.\n'
-printf '\xe2\x9d\xaf composer ready\n'
+printf 'Do you trust the files in this folder?\n'
+printf '╭%s╮\n' "\$RULE"
+printf '│ \xe2\x9d\xaf Yes No                                     │\n'
+printf '╰%s╯\n' "\$RULE"
 # The composer echoes every line it receives so the test can see injected keys.
 while IFS= read -r line; do
     printf 'received:%s:end\n' "\$line" >> '$TRUST_LOG'
@@ -80,8 +98,9 @@ af_wait_for_file_content() {
     done
 }
 
-# Wait for the dismissal Enter to land.
-af_wait_for_file_content '^dialog-answer::end$' "$AF_DRIVER_TIMEOUT" \
+# Wait for the dismissal Enter to land. The dialog sits half-drawn for 6s
+# first, so allow for that on top of the usual timeout.
+af_wait_for_file_content '^dialog-answer::end$' "$(( AF_DRIVER_TIMEOUT + 10 ))" \
     'dlgq legacy dialog answered with a bare Enter'
 
 # Now the agent is in its composer phase. Its visible pane quotes the
@@ -93,6 +112,11 @@ af_wait_for_file_content '^dialog-answer::end$' "$AF_DRIVER_TIMEOUT" \
 # composer echoes the empty line: a `^received::end$` line appears in
 # the log. If the fix works, NO such line appears during this idle window.
 sleep "${AF_DRIVER_TIMEOUT:-10}"
+
+if grep -qx 'early-input' "$TRUST_LOG" 2>/dev/null; then
+    _af_fail "#4743: af sent a key into the half-drawn legacy picker (only '1. Yes, proceed' painted) — log: [$(cat "$TRUST_LOG")]"
+    exit 1
+fi
 
 if grep -qE '^received::end$' "$TRUST_LOG" 2>/dev/null; then
     _af_fail "#3302-legacy-quote: af injected Enter into the composer that quotes the legacy phrase — log: [$(cat "$TRUST_LOG")]"
