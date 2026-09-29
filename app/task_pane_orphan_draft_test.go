@@ -219,6 +219,30 @@ func discardFailUpdater(t *testing.T, alpha task.Task) {
 	}))
 }
 
+// settleFailUpdater makes alpha's update land on disk while its reply is lost
+// (an uncertain outcome → the draft is held unconfirmed), so the save's reload
+// carries the edit and the pane settles it, queuing the settled-draft notice;
+// bravo's update fails generically (→ the draft is retained and the recovery
+// screen raised). A single saveContentPaneState run thus parks the #4824
+// settled-draft notice behind the recovery screen — the sibling of the #4798
+// discard notice discardFailUpdater sets up.
+func settleFailUpdater(t *testing.T, alpha task.Task) {
+	t.Helper()
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		switch id {
+		case alpha.ID:
+			// The mutation landed; only the reply was lost (#4824). The save's
+			// reload re-reads Enabled=false, so the held unconfirmed edit settles
+			// and names itself for TakeSettledDraftNotice.
+			_, err := task.UpdateTask(id, update, expect)
+			require.NoError(t, err)
+			return replyLost()
+		default:
+			return errors.New("The daemon refused this save.")
+		}
+	}))
+}
+
 // A single save that both discards one task's draft (its task was deleted, so the
 // notice is queued) and generically fails a sibling edit (raising the recovery
 // screen) leaves the notice sitting in the pane. The snapshot poll is the
@@ -285,4 +309,53 @@ func TestDiscardedDraftNoticeSurfacesAfterRecoveryResolved(t *testing.T) {
 	// The next quit goes through.
 	_, _ = h.handleQuit()
 	assert.True(t, h.quitting, "the next quit exits")
+}
+
+// The #4824 settled-draft notice is the #4798 discard notice's sibling: it reads
+// the same notice bar, and its Take clears the durable settledDrafts copy just as
+// lossily, so a snapshot poll that fires while the recovery screen shadows the
+// bar would swallow it just as silently. Unlike the discard notice, the poll is
+// the notice's only delivery path — handleQuit has no TakeSettledDraftNotice of
+// its own — so an unguarded poll during recovery would lose it for good.
+func TestPollHoldsSettledDraftNoticeUntilBarIsVisibleAgain(t *testing.T) {
+	h, sp, alpha, _ := homeWithTwoHeldDrafts(t)
+	settleFailUpdater(t, alpha)
+
+	// Save: alpha's edit landed but its reply was lost (held unconfirmed; the
+	// reload carries it so the pane settles alpha and queues the settled-draft
+	// notice), and bravo fails generically (raising the recovery screen that
+	// shadows the notice bar).
+	require.Error(t, h.saveContentPaneState())
+	require.NotNil(t, h.recovery, "bravo's generic failure raises the recovery screen")
+	assert.Equal(t, "Cannot save task", h.recovery.condition)
+	require.True(t, sp.IsDirty(), "bravo's draft stays retryable")
+
+	// A snapshot poll fires while the recovery screen shadows the notice bar.
+	// The poll must not Take the settled-draft notice: that would clear the
+	// only durable copy and paint it onto a bar the recovery screen covers,
+	// where it expires unseen — and (unlike the discard) nothing re-raises it.
+	h.Update(snapshotFetchedMsg{repoID: h.repoID})
+	require.NotNil(t, h.recovery, "the recovery screen is still up")
+	// The guard held the notice: the poll neither Took it nor surfaced it onto
+	// a bar the recovery screen covers. An unguarded poll would have Taken it
+	// and raised it here, clearing the durable copy behind a hidden bar.
+	shadowedText, _ := h.errBox.RetainedNotice()
+	assert.Empty(t, shadowedText,
+		"the notice must not surface onto a bar the recovery screen covers")
+
+	// The user dismisses recovery (any key), so the bar the notice paints on is
+	// visible again.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeySpace})
+	require.Nil(t, h.recovery, "the recovery screen is dismissed")
+
+	// The next snapshot poll, with the bar visible, takes the settled-draft
+	// notice and paints it onto the bar — the frame the held notice waited for.
+	// If the recovery-shadowing poll above had taken it, there would be nothing
+	// left to surface here.
+	h.Update(snapshotFetchedMsg{repoID: h.repoID})
+	text, failure := h.errBox.RetainedNotice()
+	assert.Contains(t, text, `Saved edits to "alpha"`,
+		"the settled-draft notice surfaces once the bar is visible again")
+	assert.False(t, failure, "a settled draft is a notice, not a failure")
+	assert.Empty(t, sp.TakeSettledDraftNotice(), "the notice was raised once")
 }
