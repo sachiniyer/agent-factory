@@ -8,7 +8,6 @@ package task
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -330,7 +329,7 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 		}
 
 		if !found {
-			return fmt.Errorf("task with id %q not found", id)
+			return &NotFoundError{ID: id}
 		}
 
 		generation, err := writeTasks(tasks)

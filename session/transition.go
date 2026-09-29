@@ -624,6 +624,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		switch spec.run {
 		case runEnds:
 			i.taskRunActive = false
+			i.taskRunIdleEdgeHeld = false
 			i.touchLocked()
 			// The completion transition IS the capture point for the adoption
 			// baseline (#3865): taken here, inside the same i.mu section that ends
@@ -636,10 +637,43 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// calls an in-flight archive "pending", which would miss an agent going
 			// idle mid-teardown. Not the resulting state alone — a session is born
 			// LiveReady before its agent ever runs, so that would end the run at birth.
-			if to.liveness == LiveReady && from.liveness != LiveReady {
-				i.taskRunActive = false
-				i.touchLocked()
-				i.captureAdoptionBaselineLocked()
+			//
+			// An idle pane is not a finished run while a handoff mission is still
+			// owed (#4429). The incoming agent may be idle precisely BECAUSE its
+			// takeover brief never landed, and this edge is what hands a task
+			// session to its on_complete policy — so ending the run here is what
+			// would archive or kill a session whose mission is still waiting for
+			// the operator. The replacement fence used to hide the row from the
+			// poll and carry this; the fence now settles on the incoming runtime's
+			// liveness, so the obligation itself has to say so.
+			//
+			// A held edge is recorded rather than dropped. Resolving the mission
+			// without a resend (Mark delivered) leaves the pane exactly as idle as
+			// it was, so no fresh edge into Ready ever arrives; the held marker
+			// lets the first idle observation after the obligation clears end the
+			// run in its place. A resend makes the agent work, and that run then
+			// ends on its own idle edge.
+			//
+			// ANY idle observation while the mission is owed holds, not only a
+			// transition into Ready. A row that reloads already Ready — every row
+			// a pre-#4429 daemon fenced, on the upgrade that settles it — sees
+			// only Ready → Ready, and would otherwise hold nothing and keep its
+			// run open forever after the confirm. The edge rule exists so a
+			// session born Ready does not end its run at birth; a row owing a
+			// takeover mission is past birth by construction.
+			if to.liveness == LiveReady {
+				switch {
+				case i.owesMissionDeliveryLocked():
+					if !i.taskRunIdleEdgeHeld {
+						i.taskRunIdleEdgeHeld = true
+						i.touchLocked()
+					}
+				case from.liveness != LiveReady || i.taskRunIdleEdgeHeld:
+					i.taskRunActive = false
+					i.taskRunIdleEdgeHeld = false
+					i.touchLocked()
+					i.captureAdoptionBaselineLocked()
+				}
 			}
 		}
 	}

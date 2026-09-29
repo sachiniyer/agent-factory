@@ -35,8 +35,8 @@ func TestResumeLimitedSessions_CrossAgentSameLabelDoesNotUseOutgoingReset(t *tes
 	inst.Account = "work"
 	inst.SetLimitReached(nowFunc().Add(time.Hour))
 	require.NoError(t, inst.BeginManualAccountSwap())
-	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex))
-	_, err = inst.SelectAccountForHandoff("work", "work", tmux.ProgramCodex,
+	require.NoError(t, inst.ValidateManualAccountSwap("work", tmux.ProgramCodex, true))
+	_, err = inst.SelectAccountForHandoff("work", "work", tmux.ProgramCodex, tmux.ProgramCodex, true,
 		session.HandoffReasonManual, "tip", "continue")
 	require.NoError(t, err)
 	inst.EndLimitResume()
@@ -161,6 +161,7 @@ func TestHandoffSession_PinnedAccountRequiresTargetAccount(t *testing.T) {
 			Title: inst.Title, RepoID: repo, To: tmux.ProgramGemini,
 		})
 		require.ErrorContains(t, err, "target account")
+		require.ErrorContains(t, err, "--account")
 		swaps, prompts := backend.snapshot()
 		require.Zero(t, swaps)
 		require.Empty(t, prompts)
@@ -180,5 +181,79 @@ func TestHandoffSession_PinnedAccountRequiresTargetAccount(t *testing.T) {
 		swaps, prompts := backend.snapshot()
 		require.Equal(t, 1, swaps)
 		require.Len(t, prompts, 1)
+	})
+}
+
+// A scoped session may change agents — the account question is answered by the
+// TARGET's capability, never by reusing the outgoing name (#4428). A target
+// with no account namespace drops the scope in the record transaction and the
+// response reports the drop on from_account; a target with one refuses without
+// --account whether the scope was pinned or af-selected.
+func TestHandoffSession_ScopeDecisionByTargetCapability(t *testing.T) {
+	t.Run("auto-scoped refuses a scopable target without --account", func(t *testing.T) {
+		m, repo, path := newStatusTestManager(t)
+		backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+		inst := registerHandoffSubject(t, m, repo, path, "auto-scoped", backend)
+		require.True(t, inst.ReconcileAccountHandoffSnapshot("work", "claude", true, nil))
+
+		_, err := m.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repo, To: tmux.ProgramGemini,
+		})
+		require.ErrorContains(t, err, "--account")
+		swaps, prompts := backend.snapshot()
+		require.Zero(t, swaps)
+		require.Empty(t, prompts)
+		require.Equal(t, tmux.ProgramClaude, inst.AgentProgram())
+		if account, auto := inst.AccountSelection(); account != "work" || !auto {
+			t.Fatalf("AccountSelection = (%q, %v) after the refusal, want the scope untouched",
+				account, auto)
+		}
+	})
+
+	t.Run("pinned drops the scope for a target with no account support", func(t *testing.T) {
+		m, repo, path := newStatusTestManager(t)
+		backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+		inst := registerHandoffSubject(t, m, repo, path, "descoped-pinned", backend)
+		inst.Account = "work"
+
+		resp, err := m.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repo, To: tmux.ProgramAider,
+		})
+		require.NoError(t, err)
+		require.Equal(t, tmux.ProgramAider, resp.To)
+		require.Equal(t, "work", resp.FromAccount,
+			"the dropped scope is reported so the client can say what happened to it")
+		require.Empty(t, resp.ToAccount)
+		if account, auto := inst.AccountSelection(); account != "" || auto {
+			t.Fatalf("AccountSelection = (%q, %v) after the swap, want the scope dropped — "+
+				"aider has no account namespace for the name to resolve in", account, auto)
+		}
+		handoffs := inst.Tabs[0].Handoffs
+		require.Len(t, handoffs, 1)
+		require.Equal(t, "work", handoffs[0].FromAccount)
+		require.Empty(t, handoffs[0].ToAccount)
+		swaps, prompts := backend.snapshot()
+		require.Equal(t, 1, swaps)
+		require.Len(t, prompts, 1)
+	})
+
+	t.Run("auto-scoped drops the scope for a target with no account support", func(t *testing.T) {
+		m, repo, path := newStatusTestManager(t)
+		backend := &handoffBackend{FakeBackend: session.NewFakeBackend()}
+		inst := registerHandoffSubject(t, m, repo, path, "descoped-auto", backend)
+		require.True(t, inst.ReconcileAccountHandoffSnapshot("work", "claude", true, nil))
+
+		resp, err := m.HandoffSession(HandoffSessionRequest{
+			Title: inst.Title, RepoID: repo, To: tmux.ProgramAider,
+		})
+		require.NoError(t, err)
+		require.Equal(t, "work", resp.FromAccount)
+		require.Empty(t, resp.ToAccount)
+		if account, auto := inst.AccountSelection(); account != "" || auto {
+			t.Fatalf("AccountSelection = (%q, %v) after the swap, want the af-selected scope "+
+				"dropped the same way a pinned one is", account, auto)
+		}
+		swaps, _ := backend.snapshot()
+		require.Equal(t, 1, swaps)
 	})
 }

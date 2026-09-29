@@ -322,7 +322,7 @@ func TestResolveProjectSelectorUnregisteredPath(t *testing.T) {
 	_, err := ResolveProjectSelector(unregistered)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not a registered project")
-	require.Contains(t, err.Error(), "af projects register", "the error must name the real registration command")
+	require.Contains(t, err.Error(), "af projects add", "the error must name the real registration command")
 }
 
 func TestResolveProjectSelectorNonGitPath(t *testing.T) {

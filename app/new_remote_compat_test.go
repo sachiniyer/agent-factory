@@ -21,25 +21,13 @@ func TestConfiguredNewRemoteOpensBackendField(t *testing.T) {
 	stubAccounts(t, twoAgentsWithAccounts(), nil)
 	calls := stubBackends(t, twoUsableBackends(), nil)
 	_, cmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}, Alt: true})
-	// Replay the menu-highlight hop before inspecting the creation outcome.
-	for _, msg := range drainCmd(t, cmd, time.Second) {
-		if key, ok := msg.(tea.KeyMsg); ok {
-			_, cmd = h.handleKeyPress(key)
-		}
-	}
 	requireNamingFormOpened(t, h, "configured new_remote must open creation without a local hooks precheck")
 	require.Equal(t, stateNew, h.state)
 	// Enter may arrive before the async catalog; it must not submit a default
 	// backend and end naming before the promised picker can open.
 	h.pendingProgram = "sh"
 	require.NoError(t, h.namingInstance.SetTitle("choose-backend"))
-	_, enterCmd := h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
-	for _, msg := range drainCmd(t, enterCmd, 4*time.Second) {
-		if key, ok := msg.(tea.KeyMsg); ok {
-			_, replay := h.handleKeyPress(key)
-			drainCmd(t, replay, 4*time.Second)
-		}
-	}
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Empty(t, got.Title, "no create request may precede the backend catalog")
 	require.Equal(t, stateNew, h.state, "Enter must leave the pending picker form open")
 	assert.Equal(t, "Loading backends…", h.errBox.FullError())

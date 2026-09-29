@@ -34,6 +34,7 @@ type limitResumeBackend struct {
 	respawnCalls  int
 	sentPrompts   []string
 	onRespawn     func(*session.Instance)
+	onPrompt      func(*session.Instance, string)
 	sendPromptErr error
 }
 
@@ -73,13 +74,18 @@ func (b *limitResumeBackend) Respawn(i *session.Instance) error {
 	return nil
 }
 
-func (b *limitResumeBackend) SendPromptCommand(_ *session.Instance, prompt string) error {
+func (b *limitResumeBackend) SendPromptCommand(i *session.Instance, prompt string) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.sendPromptErr != nil {
+		b.mu.Unlock()
 		return b.sendPromptErr
 	}
 	b.sentPrompts = append(b.sentPrompts, prompt)
+	onPrompt := b.onPrompt
+	b.mu.Unlock()
+	if onPrompt != nil {
+		onPrompt(i, prompt)
+	}
 	return nil
 }
 
