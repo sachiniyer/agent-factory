@@ -238,6 +238,9 @@ func (m *home) View() string {
 		viewParts = append(viewParts, banner)
 	}
 	m.menu.SetStatusText(m.dragStatusText())
+	hint, hideHint := m.noticeDetailsHint()
+	m.errBox.SetDetailsHint(hint)
+	m.errBox.HideDetailsHint(hideHint)
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := layout.JoinVertical(viewParts...)
 
@@ -266,7 +269,8 @@ func (m *home) View() string {
 		}
 		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
 	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent ||
-		m.state == stateSelectBackend || m.state == stateSelectAccount {
+		m.state == stateSelectBackend || m.state == stateSelectAccount ||
+		m.state == stateSelectHandoffResolve {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}

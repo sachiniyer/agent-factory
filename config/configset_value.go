@@ -715,8 +715,13 @@ func removeTOMLTopLevelValue(content, key string) (string, error) {
 				end := leadingTableCommentStart(data, start, currentBlock.start)
 				ranges = append(ranges, byteRange{start: currentBlock.start, end: end})
 			}
+			isTarget := len(parts) > 0 && parts[0] == key
+			blockStart := start
+			if isTarget && currentBlock != nil {
+				blockStart = leadingTableCommentStart(data, start, currentBlock.start)
+			}
 			currentTable = parts
-			currentBlock = &tableBlock{start: start, target: len(parts) > 0 && parts[0] == key}
+			currentBlock = &tableBlock{start: blockStart, target: isTarget}
 		case unstable.KeyValue:
 			if len(currentTable) == 0 && len(parts) > 0 && parts[0] == key {
 				raw := expr.Raw
