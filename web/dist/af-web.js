@@ -13669,7 +13669,7 @@ var SplitView = class {
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
     const shown = findLeaf(this.tree, pane.leafId)?.tab;
-    if (zone === "center" && shown === tab) {
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
       return false;
     }
     const onItsOwnPane = zone !== "center" && shown === tab;

@@ -2,9 +2,10 @@
 // still LANDS — the gesture is consumed — but a drop that resolves and mutates
 // nothing must report false so AppShell leaves user-opened disclosures alone.
 // The no-ops are three: a stale payload, the sole tab on its own pane's edge,
-// and (#4434 review) a tab dropped on the center of the pane already showing
-// it — replaceTab hands back the same tree, so committing it would report a
-// change that never happened.
+// and (#4434 review) a tab dropped on the center of the FOCUSED pane already
+// showing it — replaceTab hands back the same tree, so committing it would
+// report a change that never happened. The same drop on an UNFOCUSED pane is
+// not a no-op (#4500 review): it moves focus there, as it did before #4434.
 //
 // SplitView is constructed directly and its private state staged, exactly as
 // split_selfsplit.test.ts does: the real path needs a DOM, an xterm and a live
@@ -15,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 
-import { type DragPayload, type LayoutNode, leaves, resetIds, singleLeaf } from "./layout.js";
+import { type DragPayload, type LayoutNode, leaves, resetIds, singleLeaf, splitLeaf } from "./layout.js";
 import type { SplitCallbacks, SplitView as SplitViewType } from "./split.js";
 
 register("./browser_stub_loader.mjs", import.meta.url);
@@ -60,6 +61,7 @@ test("drop: a tab on the center of the pane already showing it is a no-op (#4434
   const v = stage(["a", "b"]);
   const leaf = singleLeaf(0);
   v.tree = leaf;
+  v.focusedId = leaf.id;
 
   const changed = v.applyTabDrop(centerPane(leaf.id), { id: "a", index: 0, tabs: ["a", "b"] }, 0, 0);
   assert.equal(changed, false,
@@ -86,4 +88,30 @@ test("drop: a payload that resolves to nothing is still rejected, not a no-op co
   const changed = v.applyTabDrop(centerPane(leaf.id), { id: "closed", index: 0, tabs: ["a", "b"] }, 0, 0);
   assert.equal(changed, false);
   assert.equal(leaves(v.tree!)[0].tab, 0);
+});
+
+test("drop: a tab on the center of an UNFOCUSED pane already showing it moves focus there (#4500 review)", () => {
+  const v = stage(["a", "b"]);
+  const left = singleLeaf(0);
+  v.tree = splitLeaf(left, left.id, "right", 1);
+  const [a, b] = leaves(v.tree);
+  v.focusedId = a.id;
+
+  const changed = v.applyTabDrop(centerPane(b.id), { id: "b", index: 1, tabs: ["a", "b"] }, 0, 0);
+  assert.equal(v.focusedId, b.id,
+    "dropping a tab on its own pane is how a user focuses that pane — the no-op return must not swallow it");
+  assert.equal(changed, true, "focus moved, so the drop is a real transition");
+  assert.deepEqual(leaves(v.tree!).map((l) => l.tab), [0, 1], "the panes still show the same tabs");
+});
+
+test("drop: a tab on the center of the FOCUSED pane already showing it stays a no-op", () => {
+  const v = stage(["a", "b"]);
+  const left = singleLeaf(0);
+  v.tree = splitLeaf(left, left.id, "right", 1);
+  const [, b] = leaves(v.tree);
+  v.focusedId = b.id;
+
+  const changed = v.applyTabDrop(centerPane(b.id), { id: "b", index: 1, tabs: ["a", "b"] }, 0, 0);
+  assert.equal(changed, false, "neither the layout nor the focus moved");
+  assert.equal(v.focusedId, b.id);
 });

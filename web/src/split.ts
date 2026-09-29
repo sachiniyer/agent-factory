@@ -1597,11 +1597,12 @@ export class SplitView {
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
     const shown = findLeaf(this.tree, pane.leafId)?.tab;
-    // A center drop on the pane already showing the tab is a third no-op:
-    // replaceTab would hand back this same tree, so committing it would report
-    // a change that never happened — and dismiss a disclosure the drop left
-    // untouched (#4434 review).
-    if (zone === "center" && shown === tab) {
+    // A center drop on the FOCUSED pane already showing the tab is a third no-op:
+    // replaceTab would hand back this same tree and focus would not move, so
+    // committing it would report a change that never happened — and dismiss a
+    // disclosure the drop left untouched (#4434 review). On an unfocused pane the
+    // tree still holds, but the drop moves focus there, so it falls through.
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
       return false;
     }
     // Dragging the pane's OWN tab onto its edge still splits — but the new half must
