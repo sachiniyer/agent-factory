@@ -102,6 +102,15 @@ type Instance struct {
 	// so a session has exactly one run. Work a user starts in that session
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
+	// taskRunIdleEdgeHeld records that the agent's idle edge arrived while a
+	// handoff mission was still owed, so the run was kept open rather than ended
+	// (#4429). The edge is spent once it is held — the pane stays Ready, and every
+	// later idle poll is Ready → Ready — so without this the run would never end
+	// after the operator resolves the mission without making the agent work again
+	// (Mark delivered). With it, the first idle observation after the obligation
+	// clears ends the run, as the held edge would have. Meaningful only while
+	// taskRunActive; persisted with it, because the edge is not re-derivable.
+	taskRunIdleEdgeHeld bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -196,6 +205,14 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
+	// accountAgent is the agent namespace Account was selected in. It must be
+	// durable rather than re-derived at refresh time: a program_overrides edit
+	// after the pin can resolve the recorded Program to a different agent's
+	// command, and re-deriving from that new command would silently reinterpret
+	// the same label in another agent's registry (#4430 review). Empty only when
+	// Account is ambient or the record predates the field — those selections
+	// could only have used the Program enum's namespace.
+	accountAgent string
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.

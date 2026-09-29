@@ -106,3 +106,45 @@ func TestResolveUserPathNeverCorruptsTilde(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveDaemonHostPath pins the #4821 RPC-boundary helper: surrounding
+// whitespace is trimmed and "~" expanded, the result must be absolute, and the
+// returned value is the normalized one — never the raw input — so a caller that
+// stores it stores exactly what was checked.
+func TestResolveDaemonHostPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+
+	accepted := []struct {
+		in   string
+		want string
+	}{
+		{"/abs/repo", "/abs/repo"},
+		{" /abs/repo", "/abs/repo"},
+		{"\t/abs/repo \n", "/abs/repo"},
+		{"~/repo", filepath.Join(home, "repo")},
+		{" ~/repo", filepath.Join(home, "repo")},
+	}
+	for _, c := range accepted {
+		got, err := ResolveDaemonHostPath(c.in)
+		if err != nil {
+			t.Errorf("ResolveDaemonHostPath(%q) error = %v, want %q", c.in, err, c.want)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ResolveDaemonHostPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	for _, in := range []string{"", " ", ".", "repo", "./x", "../x", " repo", "~user/repo"} {
+		got, err := ResolveDaemonHostPath(in)
+		if err == nil {
+			t.Errorf("ResolveDaemonHostPath(%q) = %q, want an error: a relative path must not resolve against the daemon's cwd", in, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "must be absolute") {
+			t.Errorf("ResolveDaemonHostPath(%q) error = %q, want an actionable 'must be absolute' message", in, err)
+		}
+	}
+}

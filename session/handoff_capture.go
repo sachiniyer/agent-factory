@@ -24,8 +24,23 @@ func (p AgentSwapPlan) CaptureAfterStop() error {
 // Program already names the target. Update the rollback token too, so a later
 // launch failure can still remove precisely this transaction's ledger entry.
 func (i *Instance) CaptureHandoffBrief(swap *HandoffSwap, override string) (MissionBrief, error) {
-	brief := i.BuildMissionBrief(swap.To, override, swap.Reason)
+	// The brief's To is the effective agent — the one the resolved command
+	// launches — so Render's same-agent check is judged on the same value
+	// admission was. An unclassifiable command has no effective answer; the
+	// enum is still the honest display label there. But sameness is a
+	// two-sided decision admission made, not a value Render can re-derive from
+	// From == To: a program_overrides redirect can make the resolved running
+	// identity (From) equal the target enum (To) for a handoff admission
+	// classified as cross-agent. The CrossAgent flag carries admission's
+	// verdict so Render's same-agent branch honors it instead of collapsing
+	// on that coincidence (#4430 review).
+	to := swap.effectiveTo
+	if to == "" {
+		to = swap.To
+	}
+	brief := i.BuildMissionBrief(to, override, swap.Reason)
 	brief.From = swap.From.Agent
+	brief.CrossAgent = swap.crossAgent
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpReplacing || len(i.Tabs) == 0 || len(i.Tabs[0].Handoffs) == 0 {
