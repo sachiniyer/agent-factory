@@ -112,7 +112,8 @@ For one target, the JSON acknowledgement includes status: delivered,
 not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
 accepted the paste and Enter while a readable pane did not render exact content
 proof; could-not-confirm means the pane observer itself was unavailable. Neither
-status claims delivery, and the command adds no second confirmation wait.
+status claims delivery. A prompt still staged in the composer shortly after
+Enter gets one more Enter, never a second paste.
 
 With --all, broadcast a single prompt to every live session in scope:
 
