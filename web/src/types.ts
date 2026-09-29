@@ -349,6 +349,10 @@ export interface TaskData {
    *  armed rather than recomputed from the expression. Absent when the task is
    *  not armed, and that absence is itself the signal. */
   next_run_at?: string;
+  /** The task is enabled and `next_run_at` is more than 60 days out — usually a
+   *  dated cron re-armed for next year (#4843). Decided by the daemon's
+   *  task.NextRunFarOut; read it rather than re-derive the threshold here. */
+  next_run_far?: boolean;
   /** The live arming observation: "armed", "not-armed", or ABSENT when no daemon
    *  has reported on it (none running, or one still starting). Absent must never
    *  be read as "not armed". */

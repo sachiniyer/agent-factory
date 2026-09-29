@@ -296,8 +296,8 @@ header preference and follows OS appearance for System. The CLI edits the TUI
 preference; it has no persistent visual renderer and does not set the browser
 preference. Agent-owned ANSI output remains unchanged.
 
-Legacy global config migrates once on a normal config read, without a separate
-`af config migrate` command:
+Legacy global config migrates once on a normal config read — no separate
+`af config migrate` invocation is needed for this retirement:
 
 | Legacy value | Saved replacement |
 | --- | --- |
@@ -661,6 +661,16 @@ identity_file = "~/.ssh/id_ed25519"
 An unknown `backend` value (or `--backend`) is reported when the session's
 runtime is resolved at create time, naming the valid options.
 
+An unknown key inside `[docker]` or `[ssh]` — `runargs` for `run_args`, say — is
+ignored, so the setting it was meant to carry has no effect. af warns about it:
+on stderr when you run an `af` command (except under `--json`, whose stderr is
+reserved for the envelope), as a WARNING in the log (including the daemon's), and
+as a WARN finding in `af doctor`. The warning names the file and the key and,
+when a known key is close, suggests it (`did you mean "run_args"?`). Key case does
+not matter: `Image` and `image` are the same key. A later release will refuse to
+load a file with an unknown `[docker]`/`[ssh]` key, so fix these when you see
+them ([#4845](https://github.com/sachiniyer/agent-factory/issues/4845)).
+
 ### In-repo file name: `config.toml` or `config.json`
 
 Because the in-repo file is **checked into your repository**, both names are accepted indefinitely: `<repo-root>/.agent-factory/config.toml` **or** `<repo-root>/.agent-factory/config.json`. This is deliberate — a repo shared with collaborators still on an older `af` (which only understands `config.json`) must keep working, so `af` never renames a checked-in file out from under them.
@@ -740,7 +750,7 @@ All data (sessions, tasks) is scoped to the current git repository — the TUI s
 | `~/.agent-factory/instances/<repoID>/instances.json` | Persisted sessions, per repo. |
 | `~/.agent-factory/tasks.json` | Tasks (see [tasks.md](tasks.md)). |
 | `~/.agent-factory/logs/task-<id>.log` | Per-task watch-script logs. Rotated with the same `log_max_size_mb`/`log_max_backups` policy as the application log (`task-<id>.log.1`, `.2`). |
-| `~/.agent-factory/logs/hooks/{post-worktree,on-archive}-<run>.log` | Complete stdout/stderr retained for a failed or daemon-interrupted operator hook command, in a private per-run file the hook can keep writing across a daemon restart. Failure messages include the exact path and a tail capped at 64 KiB; normally completed logs are removed. Opening a hook log prunes kept `*-v1-*.log` files to the newest 20 per kind and removes those last modified more than 14 days ago, excluding active logs protected by an inherited descriptor lock, the file being opened, and files modified less than 5 seconds ago. Closing a completed log refreshes its modification time before releasing the lock, starting retention and the five-second grace period at completion. If timestamp refresh fails, a private `<log>.done` completion sidecar supplies that clock instead; retention uses the later of the log and sidecar modification times, and cleanup removes both files. No sidecar is created when timestamp refresh succeeds. Unversioned logs from older versions or filesystems where locking fails are preserved for manual cleanup after their hooks stop; locking failures disable pruning for that run without preventing the hook from running. Individual run output is not size-capped; `af doctor` warns when total file size under `logs/hooks` exceeds 100 MiB. |
+| `~/.agent-factory/logs/hooks/{post-worktree,on-archive}-<run>.log` | Complete stdout/stderr retained for a failed or daemon-interrupted operator hook command, in a private per-run file the hook can keep writing across a daemon restart. Failure messages include the exact path and a bounded excerpt of the last output lines; normally completed logs are removed. Opening a hook log prunes kept `*-v1-*.log` files to the newest 20 per kind and removes those last modified more than 14 days ago, excluding active logs protected by an inherited descriptor lock, the file being opened, and files modified less than 5 seconds ago. Closing a completed log refreshes its modification time before releasing the lock, starting retention and the five-second grace period at completion. If timestamp refresh fails, a private `<log>.done` completion sidecar supplies that clock instead; retention uses the later of the log and sidecar modification times, and cleanup removes both files. No sidecar is created when timestamp refresh succeeds. Unversioned logs from older versions or filesystems where locking fails are preserved for manual cleanup after their hooks stop; locking failures disable pruning for that run without preventing the hook from running. Individual run output is not size-capped; `af doctor` warns when total file size under `logs/hooks` exceeds 100 MiB. |
 | `~/.agent-factory/tmux-server.log` | Linux tmux server stdout/stderr and wrapper exit evidence. The daemon starts the shared server in a dedicated user scope and rotates this file with the same policy as the application log. |
 | `~/.config/agent-factory/agent-factory.log` | Application log (`os.UserConfigDir` on other platforms). Rotated once it exceeds `log_max_size_mb` (default 50 MB); the most recent `log_max_backups` rotations (default 2) are kept as `agent-factory.log.1`, `.2`. |
 

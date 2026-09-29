@@ -28,6 +28,7 @@ import {
   probeWebTab,
   reapConfigAssistant,
   registerProject,
+  rebindProject,
   removeTask,
   renameTab,
   reorderTab,
@@ -1023,6 +1024,60 @@ test("registerProject surfaces a non-git path error for inline display", async (
   // prefix — the exact P1 regression #2543 fixed (describeError -> errorText).
   assert.equal(errorText(err), "resolve git common directory: not a git repository");
   assert.doesNotMatch(errorText(err), /Login failed/);
+});
+
+// --- rebindProject: the web rebind affordance (project.rebind parity) ----------
+//
+// Same wire contract as registerProject: the path names a directory on the
+// daemon host, sent VERBATIM for the daemon to resolve; the stable id is what
+// moves. The daemon's rejection (unknown id, path owned by another project)
+// surfaces inline.
+
+test("rebindProject posts id + verbatim path to RebindProject", async () => {
+  const cap = stubFetch();
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "~/repos/moved", "tok");
+  assert.ok(cap.url.endsWith("/v1/RebindProject"), `posted to ${cap.url}`);
+  assert.equal(cap.body.id, "prj_0123456789abcdef0123456789abcdef");
+  assert.equal(cap.body.path, "~/repos/moved", "the path is forwarded unchanged for the daemon to resolve");
+  assert.equal(cap.auth, "Bearer tok");
+});
+
+test("rebindProject returns the rebound project", async () => {
+  stubFetchResponse({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: {
+        ok: true,
+        project: {
+          id: "prj_0123456789abcdef0123456789abcdef",
+          checkout_id: "chk_00000000000000000000000000000000",
+          root: "/new/checkout",
+          relative_root: ".",
+          path_exists: true,
+        },
+      },
+      error: null,
+    }),
+  });
+  const project = await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new/checkout", "tok");
+  assert.equal(project.id, "prj_0123456789abcdef0123456789abcdef", "the stable id survives the move");
+  assert.equal(project.root, "/new/checkout");
+});
+
+test("rebindProject surfaces a daemon rejection for inline display", async () => {
+  stubFetchResponse({
+    ok: false,
+    status: 500,
+    statusText: "Internal Server Error",
+    json: async () => ({ data: null, error: { message: "path is already bound to another project" } }),
+  });
+  const err = await rebindProject("prj_0123456789abcdef0123456789abcdef", "/tmp/taken", "tok").then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof ApiError);
+  assert.equal(errorText(err), "path is already bound to another project");
 });
 
 // --- listProjects: the registry read half of the #2456 union -------------------

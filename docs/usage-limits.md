@@ -460,8 +460,11 @@ outgoing and incoming accounts and branch tip.
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
 submission may already have landed. Inspect the replacement pane, then choose
-the explicit override when it is needed: press **`c`** in the TUI (shown as
-**Retry**), click **Retry handoff** in the web pane header, or run
+the explicit override when it is needed: if the agent is already acting on the
+mission, mark it delivered (no resend) — **Mark delivered** in the TUI's
+**`c`** picker, **Mark delivered** in the web pane header, or
+`af sessions retry-limit <title> --delivered`; otherwise resend it — **Try
+send** in the **`c`** picker, **Retry handoff** in the web pane header, or run
 `af sessions retry-limit <title>`. The retry verdict is attached to that pending
 handoff mission; sending another prompt does not make the daemon resend it.
 If that explicit retry delivers the mission but cannot persist its final
