@@ -621,6 +621,36 @@ async function typeableShellTab(p: Page): Promise<Locator> {
   return host;
 }
 
+/**
+ * The terminal row a command's OUTPUT begins on: a row whose text STARTS with
+ * `text`, the newest such row.
+ *
+ * Not "a row containing it", and not `toContainText` on the host, because the shell
+ * echoes the command line before it runs it — and the command line carries the same
+ * text, after the prompt. A wait on the text alone passes on that echo, the output
+ * has not arrived, and the row it picks is the command line, so a gesture aimed at
+ * its left edge lands on the prompt (#4585: the long press copied `#`). Output
+ * printed at column 0 is the one row whose text begins with it; the echo begins with
+ * the prompt. Waiting for THIS row to be visible is waiting for the output itself.
+ *
+ * Pair it with {@link LATE_OUTPUT}, which makes the race this guards against happen
+ * on every run instead of on an unlucky one.
+ */
+function outputRowStartingWith(host: Locator, text: string): Locator {
+  const anchored = new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`);
+  return host.locator(".xterm-rows > div", { hasText: anchored }).last();
+}
+
+/**
+ * Appended to a command whose output a test then locates and presses on: the output
+ * arrives a second AFTER the shell has echoed the command line, instead of usually
+ * in the same frame. This is not a wait — the test never sleeps on it — it is the
+ * late-output condition #4585 flaked on, staged deliberately, so a wait that is
+ * satisfied by the echo fails every run rather than one run in a hundred. The output
+ * itself is byte-for-byte what printf wrote.
+ */
+const LATE_OUTPUT = " | { sleep 1; cat; }";
+
 interface ElementBox {
   x: number;
   y: number;
@@ -2310,12 +2340,11 @@ test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_
     await createTerminalTab(p);
 
     const host = await typeableShellTab(p);
-    await p.keyboard.type("printf 'af-2787-copy-me\\n'");
+    await p.keyboard.type(`printf 'af-2787-copy-me\\n'${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("af-2787-copy-me", { timeout: 15_000 });
 
-    const outputRow = host.locator(".xterm-rows > div", { hasText: "af-2787-copy-me" }).last();
-    await expect(outputRow).toBeVisible();
+    const outputRow = outputRowStartingWith(host, "af-2787-copy-me");
+    await expect(outputRow).toBeVisible({ timeout: 15_000 });
     const rowBox = await outputRow.boundingBox();
     expect(rowBox, "the visible output row must have selectable geometry").toBeTruthy();
     const { x, y, width, height } = rowBox as { x: number; y: number; width: number; height: number };
@@ -2738,14 +2767,13 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // word-vs-line assertions below actually discriminate.
     const TOKEN = "/srv/af-2849.log";
     const TRAILER = "ready";
-    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}`);
+    await p.keyboard.type(`printf '%s %s\\n' ${TOKEN} ${TRAILER}${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText(`${TOKEN} ${TRAILER}`, { timeout: 20_000 });
 
-    // The LAST row showing it is the printf output; the row above is the echoed
-    // command line, which would copy the same token from the wrong place.
-    const tokenRow = host.locator(".xterm-rows > div", { hasText: TOKEN }).last();
-    await expect(tokenRow).toBeVisible();
+    // The printf output's row, NOT the echoed command line above it, which holds the
+    // same text after the prompt and exists before the command has even run.
+    const tokenRow = outputRowStartingWith(host, `${TOKEN} ${TRAILER}`);
+    await expect(tokenRow).toBeVisible({ timeout: 20_000 });
     const rowBox = await tokenRow.boundingBox();
     expect(rowBox, "the token's row must have geometry to press on").toBeTruthy();
     const { x, y, width, height } = rowBox as ElementBox;
@@ -2809,11 +2837,20 @@ test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTUR
     // buffer row, and a scan that stopped at the row edge would copy a fragment and
     // look like it had worked.
     const LONG = `/srv/af-2849/${"wrapped-".repeat(6)}end`;
-    await p.keyboard.type(`printf '%s\\n' ${LONG}`);
+    await p.keyboard.type(`printf '%s\\n' ${LONG}${LATE_OUTPUT}`);
     await p.keyboard.press("Enter");
-    await expect(host).toContainText("wrapped-end", { timeout: 20_000 });
-    const wrappedRow = host.locator(".xterm-rows > div", { hasText: "/srv/af-2849/wrapped-" }).last();
-    await expect(wrappedRow).toBeVisible();
+    const wrappedRow = outputRowStartingWith(host, "/srv/af-2849/wrapped-");
+    await expect(wrappedRow).toBeVisible({ timeout: 20_000 });
+    // …and ALL of it, both rows. The first row can paint before the PTY delivers the
+    // rest, and a press then reads a token that really does end at the screen edge —
+    // correctly, since nothing more exists yet. The echo already holds LONG once, so the
+    // output is the second occurrence.
+    await expect
+      .poll(async () => ((await host.textContent()) ?? "").split(LONG).length - 1, {
+        message: "the wrapped token's output must have arrived whole before it is pressed",
+        timeout: 20_000,
+      })
+      .toBeGreaterThanOrEqual(2);
     const wrappedBox = (await wrappedRow.boundingBox()) as ElementBox;
     await p.evaluate(() => navigator.clipboard.writeText("af-2849-clipboard-untouched").catch(() => {}));
     await touchLongPress(cdp, wrappedBox.x + 2, wrappedBox.y + wrappedBox.height / 2);

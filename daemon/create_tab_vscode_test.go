@@ -127,14 +127,14 @@ func TestCloseTab_StopsEditorOnlyWithTheLastVSCodeTab(t *testing.T) {
 		worktree: "/nowhere", instanceID: inst.ID, exited: make(chan struct{}),
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "one"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "one"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab(one): %v", err)
 	}
 	if _, ok := manager.vscode.servers[key]; !ok {
 		t.Fatal("closing one of two vscode tabs stopped the editor the other tab still needs")
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "two"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "two"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab(two): %v", err)
 	}
 	if _, ok := manager.vscode.servers[key]; ok {
@@ -159,7 +159,7 @@ func TestCloseTab_LastVSCodeTabPropagatesUnconfirmedEditorStop(t *testing.T) {
 		killGroup: func(int, syscall.Signal) error { return nil },
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}); err == nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}, "internal daemon caller"); err == nil {
 		t.Fatal("CloseTab reported success after the last VS Code tab editor could not confirm exit")
 	}
 	if !instanceHasVSCodeTab(inst) {
@@ -202,7 +202,7 @@ func TestCloseTab_FinalVSCodeStopFailureRestoresTab(t *testing.T) {
 		return syscall.Kill(-pgid, sig)
 	}
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabID: created.ID})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabID: created.ID}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("CloseTab reported success after its final editor sweep remained unknown")
 	}
@@ -228,7 +228,7 @@ func TestCloseTab_ShellTabLeavesEditorAlone(t *testing.T) {
 		worktree: "/nowhere", instanceID: manager.instances[key].ID, exited: make(chan struct{}),
 	}
 
-	if _, err := manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "shell"}); err != nil {
+	if _, err := manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "shell"}, "internal daemon caller"); err != nil {
 		t.Fatalf("CloseTab(shell): %v", err)
 	}
 	if _, ok := manager.vscode.servers[key]; !ok {
@@ -263,7 +263,7 @@ func TestCloseTab_StopsEditorEvenWhenPersistFails(t *testing.T) {
 		t.Fatalf("corrupting the instances file: %v", err)
 	}
 
-	_, err = manager.CloseTab(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"})
+	_, err = manager.closeTabRequestedBy(CloseTabRequest{Title: title, RepoID: repoID, TabName: "vscode"}, "internal daemon caller")
 	if err == nil {
 		t.Fatal("CloseTab succeeded despite a persist failure; the test's premise is wrong")
 	}

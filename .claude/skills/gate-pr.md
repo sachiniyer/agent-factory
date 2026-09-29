@@ -418,10 +418,10 @@ it comes from an **allowed author** and carries a whole-word `RESOLVED` or
 `ACCEPTED` — note `UNRESOLVED` contains `RESOLVED` as a substring, so match on
 word boundaries.
 
-**The `$allowed` list in both jq snippets below must match `ALLOWED_AUTHORS` in
+**Every `$allowed` list in this skill must match `ALLOWED_AUTHORS` in
 `.github/scripts/auto-gate.js` exactly.** There is no mechanical derivation —
-the two copies are maintained by hand. Whenever `ALLOWED_AUTHORS` changes in the
-script, update both occurrences here in lockstep; a copy that disagrees with the
+they are kept in sync by hand. Whenever `ALLOWED_AUTHORS` changes in the
+script, update every occurrence here in lockstep; a copy that disagrees with the
 real predicate produces confident wrong answers and is worse than no copy.
 
 **A thread's location is not part of the test (#3689).** GitHub nulls `line`
@@ -600,7 +600,7 @@ worktree registered and blocks the next run's `git worktree add`.
   See `scripts/tui-2599-scenario.sh` for the shape.
 - **A PR-specific scenario does not replace the shared acceptance gate.** Your scenario proves your change works; `make tui-driver-selftest` proves you did not break someone else's. Run both. Require the self-test to report **all** steps green — match the `N/N` in its final `SELF-TEST PASSED` line rather than a hard-coded number, because the suite grows.
 
-  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **no PR gate runs them.** `go test -race ./...` covers the Go suite, but no workflow in `.github/workflows/` runs `scripts/testbox.sh selftest` as a PR gate — the `TUI driver selftest` workflow fires on Auto Gate's post-merge dispatch after every merge and on native pushes touching TUI paths — never on a PR head — so skipping the local run means the regression shows up post-merge on `master` rather than on your PR head. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither.
+  These two are the **only** container runs that survive the no-routine-containers rule above, and only for a TUI-touching PR. They are not exempt because TUI work is special — they are exempt because **no PR gate runs them.** `go test -race ./...` covers the Go suite, but no workflow in `.github/workflows/` runs `scripts/testbox.sh selftest` as a PR gate — the `TUI driver selftest` workflow fires on Auto Gate's post-merge dispatch after every merge and on native pushes touching TUI paths — never on a PR head — so skipping the local run means the regression shows up post-merge on `master` rather than on your PR head. That is also why `auto-gate.js` demands the `play-tested` label on TUI paths. If your PR touches no TUI path, run neither. The same goes for a PR whose only TUI-path changes reword comments in `.go` files: the gate proves those comment-only and waives the label itself (`.github/auto-gate.md`, "Comment-only changes"). The decision summary names each file it waived, so check that note before skipping the run.
 - **tmux work: isolated socket only.** `-L <unique-name>`, removed afterward. Never the default server, never `tmux kill-server`, never `af reset`. An agent once destroyed every live session on this box that way (#2175).
 - **A fake must model production's real error shape**, not the shape your assertion needs. #2711 shipped a test that injected `context.DeadlineExceeded` directly while production returned `signal: killed` — green, and proving a property the code did not have.
 
@@ -832,7 +832,10 @@ Two things the gate insists on, and both matter:
   update-branch` produces — but a cheap pre-filter only, since a hand-written
   conflict resolution has the same parents. The full gate also reads the merge
   base and both parent trees and requires the merge commit's tree to equal the
-  path-level three-way result, or carry is refused. When the proof passes, the
+  path-level three-way result, or carry is refused. A path both sides
+  changed has no path-level result. On the gate's own update merge the gate
+  proves it line by line instead (`.github/auto-gate.md`); on any other
+  merge such a path refuses. When the proof passes, the
   anchors — the approval and every Codex artifact — bind to the merge's FIRST
   parent, the content head, because nothing about the reviewed change moved.
   Without that the gate's own update-branch voided the approval it had just

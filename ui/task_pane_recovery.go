@@ -8,8 +8,9 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
-// RestoreCreateMode keeps every field after a rejected create. SetTasks closes
-// the form only once the daemon has committed the mutation.
+// RestoreCreateMode reopens the create form with every field kept after a
+// rejected create. Submitting closed it; nothing closes it again until the
+// daemon has committed the mutation.
 func (s *TaskPane) RestoreCreateMode() {
 	s.creating = true
 	s.pendingCreate = false

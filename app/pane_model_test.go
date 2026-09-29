@@ -47,7 +47,7 @@ func paneTestHome(t *testing.T) *home {
 }
 
 // pressKey drives handleDefaultKeyPress with a raw key string, the full
-// dispatch path (menu highlighting re-emit excluded — tests call the handler
+// dispatch path (menu highlighting excluded — tests call the handler
 // directly like the other model-level suites).
 func pressKey(t *testing.T, h *home, key string) {
 	t.Helper()
