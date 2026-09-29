@@ -20,11 +20,18 @@ consult the relevant notes below when preparing the announcement.
   or per project, applies to the next session created, and `af config set`
   and the config panes now say so. Before, the daemon read the global value
   once at startup.
+- **Existing sessions keep their branches.** After a prefix change, a new
+  title is checked against the branch each existing session actually holds,
+  not one re-derived under the new prefix, and reusing an archived session's
+  title moves its branch aside only when the new session would need that same
+  branch.
 - **The naming form checks titles against the same prefix.** The TUI's
   duplicate-title check reads the active project's prefix when `af` starts or
   switches projects. The daemon still re-checks every create.
-- Docker and ssh sessions are unchanged: their branch is created inside the
-  sandbox, which uses its own config.
+- Off-box sessions (`docker`, `ssh`, `hook`, and `sandbox` backends) are
+  unchanged: their branch is created inside the sandbox, which uses its own
+  config, so a project override neither names their branch nor decides whether
+  they can be created.
 
 ## Sessions stuck in `loading` after a handoff recover on upgrade (upcoming release)
 

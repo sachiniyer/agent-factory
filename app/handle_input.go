@@ -105,16 +105,17 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := session.ReservedTitleRefusalFor(title, instance.Path); err != nil {
 			return m, m.handleNotice(err)
 		}
+		naming := m.titleNaming(instance.Path)
 		for _, other := range m.store.GetInstances() {
 			if other == instance {
 				continue
 			}
-			// Mirror the daemon's authoritative collision rule (git.TitlesCollide:
-			// case-insensitive equality OR same sanitized branch) so the naming
-			// flow rejects what the daemon would reject after submit, instead of
-			// only catching exact duplicates and deferring case/branch variants
-			// to a post-Start error (#936).
-			if git.TitlesCollide(other.Title, title, m.namingBranchPrefix()) {
+			// Mirror the daemon's authoritative collision rule (git.ClaimCollision:
+			// case-insensitive equality OR the same branch) so the naming flow
+			// rejects what the daemon would reject after submit, instead of only
+			// catching exact duplicates and deferring case/branch variants to a
+			// post-Start error (#936).
+			if _, collides := git.ClaimCollision(title, naming, other.BranchClaim()); collides {
 				return m, m.handleNotice(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
 			}
 		}
@@ -496,7 +497,7 @@ func switchProjectKeyPhrase() string {
 // created during naming) is still caught at submit and, authoritatively, by the
 // daemon.
 func (m *home) suggestSessionName(naming *session.Instance) string {
-	prefix := m.namingBranchPrefix()
+	titleNaming := m.titleNaming(naming.Path)
 	return namegen.Suggest(func(name string) bool {
 		// The same admission question the submit gate asks, for the same reason:
 		// a suggestion the create would refuse is not a suggestion. namegen emits
@@ -510,7 +511,7 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 			if other == naming {
 				continue
 			}
-			if git.TitlesCollide(other.Title, name, prefix) {
+			if _, collides := git.ClaimCollision(name, titleNaming, other.BranchClaim()); collides {
 				return true
 			}
 		}
@@ -518,9 +519,29 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 	})
 }
 
-// namingBranchPrefix is the branch_prefix the naming pre-check and the name
-// suggestion derive branches with: the active project's resolved value (#4539),
-// or the global one when no project resolved. It is read when af starts and on a
+// titleNaming is how the create this naming form submits derives its branch,
+// resolved the way the daemon resolves it (branchNamingForCreate): a host-local
+// create takes namingBranchPrefix, and an off-box one (Docker, SSH, hook,
+// sandbox) keeps the global prefix, because the host project's override does not
+// reach the sandbox that makes its branch. A backend that does not resolve is
+// treated as local, the daemon's own default for it.
+func (m *home) titleNaming(path string) git.TitleNaming {
+	global := ""
+	if m.appConfig != nil {
+		global = m.appConfig.BranchPrefix
+	}
+	kind, err := session.BackendKindFor(session.InstanceOptions{
+		Backend: session.BackendKind(m.pendingBackend),
+	}, path)
+	if err == nil && kind != session.BackendLocal {
+		return git.TitleNaming{Prefix: global, GlobalPrefix: global}
+	}
+	return git.TitleNaming{Prefix: m.namingBranchPrefix(), GlobalPrefix: global, Local: true}
+}
+
+// namingBranchPrefix is the branch_prefix a host-local create's naming pre-check
+// and name suggestion derive branches with: the active project's resolved value
+// (#4539), or the global one when no project resolved. It is read when af starts and on a
 // project switch, like the default program. A change saved while the TUI is open
 // reaches the daemon's next create right away but this pre-check only after a
 // relaunch or switch. The daemon re-checks every create anyway.

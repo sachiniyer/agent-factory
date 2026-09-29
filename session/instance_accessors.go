@@ -314,6 +314,19 @@ func (i *Instance) GetBranch() string {
 	return i.Branch
 }
 
+// BranchClaim is what this session holds in its repo's title namespace, for
+// title admission (git.ClaimCollision): its title, its recorded branch, and
+// whether that branch lives in a host-local worktree (#4539).
+func (i *Instance) BranchClaim() git.BranchClaim {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return git.BranchClaim{
+		Title:  i.Title,
+		Branch: i.Branch,
+		Local:  i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree,
+	}
+}
+
 // ArchiveWarning returns the bounded live notice for an incomplete archive.
 // It is projection-only: the complete durable ownership report stays on the
 // GitWorktree and storage projections scrub this string before writing disk.

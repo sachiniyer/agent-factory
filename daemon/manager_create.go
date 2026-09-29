@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -706,7 +707,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	// The ONE branch_prefix read for this create (#4539), resolved outside the
 	// manager lock like the backend above. Every title rule below and the worktree
 	// CreateSession builds use this value.
-	naming := m.branchNamingForCreate(cfg, repo)
+	naming := m.branchNamingForCreate(cfg, repo, nameNamespace)
 
 	// Keep the create's final branch/path observation reserved until its live row
 	// is published. Without this lock, two --here creates can both observe no
@@ -874,6 +875,10 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	// returns the release() only on success); m.mu has been held unbroken since
 	// admitTaskRunLocked, so the count is exactly what admission saw.
 	m.reservedTitles[key] = struct{}{}
+	if m.reservedTitleClaims == nil {
+		m.reservedTitleClaims = make(map[string]git.BranchClaim)
+	}
+	m.reservedTitleClaims[key] = reservedClaim(naming, title, req.InPlace)
 	reservationCommitted = true
 	if nameNamespace == runtimeNamespaceLocalTmux && !req.InPlace {
 		if m.reservedArchiveTitles == nil {
@@ -894,6 +899,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	release := func() {
 		m.mu.Lock()
 		delete(m.reservedTitles, key)
+		delete(m.reservedTitleClaims, key)
 		delete(m.reservedArchiveTitles, key)
 		if tmuxReservationKey != "" {
 			delete(m.reservedTmuxNames, tmuxReservationKey)

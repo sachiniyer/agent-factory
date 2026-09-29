@@ -362,6 +362,11 @@ func (d InstanceData) UsesLocalTmux() bool {
 	return d.BackendType == "" || d.BackendType == "local"
 }
 
+// BranchClaim is Instance.BranchClaim for a durable row.
+func (d InstanceData) BranchClaim() git.BranchClaim {
+	return git.BranchClaim{Title: d.Title, Branch: d.Branch, Local: d.UsesLocalTmux()}
+}
+
 // RestoreArchiveRollbackFence removes the previous-release safety projection
 // from a persisted row. FromInstanceData uses it before reconstructing an
 // Instance; storage-only cleanup paths use it before manually reconstructing a

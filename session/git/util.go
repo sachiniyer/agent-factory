@@ -197,6 +197,69 @@ func TitlesCollide(a, b, branchPrefix string) bool {
 	return BranchForTitle(branchPrefix, a) == BranchForTitle(branchPrefix, b)
 }
 
+// BranchClaim is what an existing session holds in a repo's title namespace:
+// its title, the branch it recorded (empty while it has none yet), and whether
+// that branch lives in a host-local worktree.
+type BranchClaim struct {
+	Title  string
+	Branch string
+	Local  bool
+}
+
+// TitleNaming is how ONE create derives its branch: Prefix is the prefix its
+// own branch gets (a project's override for a host-local create, #4539),
+// GlobalPrefix the global branch_prefix, and Local whether the create builds a
+// host-local worktree.
+type TitleNaming struct {
+	Prefix       string
+	GlobalPrefix string
+	Local        bool
+}
+
+// ClaimCollision reports whether a create titled title under n cannot coexist
+// with claim, and the branch name the two share when that is the reason (empty
+// for a title-only collision).
+//
+// Between two host-local sessions the question is about real branches: the
+// claim's recorded branch, not one re-derived under today's prefix, because a
+// session keeps the branch it was created with when branch_prefix changes
+// later. A claim with no recorded branch yet is derived under n.Prefix.
+//
+// When either side is off-box (Docker, SSH, hook, sandbox), the branch is made
+// inside the sandbox from that machine's config, so the host cannot know it.
+// That pair keeps the rule it had before per-project prefixes existed:
+// TitlesCollide under the global prefix. A host project's override therefore
+// never changes whether an off-box session can be created.
+func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, bool) {
+	if !n.Local || !claim.Local {
+		if !TitlesCollide(title, claim.Title, n.GlobalPrefix) {
+			return "", false
+		}
+		return sharedBranch(title, claim.Title, n.GlobalPrefix), true
+	}
+	if claim.Branch == "" {
+		if !TitlesCollide(title, claim.Title, n.Prefix) {
+			return "", false
+		}
+		return sharedBranch(title, claim.Title, n.Prefix), true
+	}
+	// EqualFold, not ==: on a case-insensitive filesystem two loose refs that
+	// differ only in case are one file.
+	if branch := BranchForTitle(n.Prefix, title); strings.EqualFold(branch, claim.Branch) {
+		return claim.Branch, true
+	}
+	return "", strings.EqualFold(title, claim.Title)
+}
+
+// sharedBranch is the branch two colliding titles both derive under prefix, or
+// empty when they collide only as titles.
+func sharedBranch(a, b, prefix string) string {
+	if branch := BranchForTitle(prefix, a); branch == BranchForTitle(prefix, b) {
+		return branch
+	}
+	return ""
+}
+
 // randomHex returns a hex string of n random bytes (2n hex characters).
 func randomHex(n int) string {
 	b := make([]byte, n)

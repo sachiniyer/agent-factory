@@ -50,13 +50,65 @@ func TestNamingPreCheckUsesTheActiveProjectsBranchPrefix(t *testing.T) {
 	assert.False(t, refused, "a project with no override must use the global prefix, not the previous project's")
 }
 
-// submitNamingBeside presses Enter on a naming form titled naming while a session
-// titled existing is in the rail, and reports whether the pre-check kept the form
-// open, along with the notice it showed.
-func submitNamingBeside(t *testing.T, h *home, repoRoot, existing, naming string) (bool, string) {
+// TestNamingPreCheckJudgesAnExistingSessionByItsRecordedBranch: a session made
+// before the project's override keeps the branch it was created with, so the
+// pre-check must compare against that branch, as the daemon does, rather than
+// re-derive it under the override. "x" holds the global branch; "-x" derives
+// proj-x, which nothing holds.
+func TestNamingPreCheckJudgesAnExistingSessionByItsRecordedBranch(t *testing.T) {
+	h, overridden := namingHomeWithProjectPrefix(t)
+	recorded := git.BranchForTitle(h.appConfig.BranchPrefix, "x")
+
+	_, notice := submitNamingBesideClaim(t, h, overridden, "x", recorded, "-x")
+	assert.NotContains(t, notice, "conflicts with existing session",
+		"x holds %q and -x derives proj-x, so the pre-check must not refuse", recorded)
+}
+
+// TestNamingPreCheckKeepsOffBoxCreatesOnTheGlobalPrefix: a Docker, SSH, hook, or
+// sandbox create makes its branch inside the sandbox, which the host project's
+// override does not reach, so the pre-check judges it under the global prefix,
+// as the daemon does.
+func TestNamingPreCheckKeepsOffBoxCreatesOnTheGlobalPrefix(t *testing.T) {
+	h, overridden := namingHomeWithProjectPrefix(t)
+	h.pendingBackend = string(session.BackendDocker)
+
+	_, notice := submitNamingBesideClaim(t, h, overridden, "x", "", "-x")
+	assert.NotContains(t, notice, "conflicts with existing session",
+		"under the global prefix x and -x derive different branches; only the host override made them collide")
+}
+
+// namingHomeWithProjectPrefix is a home switched into a project whose personal
+// config sets branch_prefix "proj-".
+func namingHomeWithProjectPrefix(t *testing.T) (*home, string) {
+	t.Helper()
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	h.errBox.SetSize(120, 1)
+	t.Cleanup(SetSessionStarterForTest(func(*session.Instance, sessionStartRequest) (*session.Instance, error) {
+		return nil, errors.New("test: the naming pre-check must not start a session")
+	}))
+	require.False(t, git.TitlesCollide("x", "-x", h.appConfig.BranchPrefix),
+		"precondition: the global prefix keeps these two titles on different branches")
+	overridden := initTestGitRepo(t)
+	project, err := config.RegisterProject(overridden)
+	require.NoError(t, err)
+	_, err = config.SetProjectConfigValue(project.ID, "branch_prefix", "proj-")
+	require.NoError(t, err)
+	h.switchProject(&config.RepoContext{Root: overridden, ID: config.RepoIDFromRoot(overridden)})
+	require.True(t, git.TitlesCollide("x", "-x", h.namingBranchPrefix()),
+		"precondition: under the project's prefix the two titles derive one branch")
+	return h, overridden
+}
+
+// submitNamingBesideClaim is submitNamingBeside with the existing session's
+// recorded branch set, as a started session's is.
+func submitNamingBesideClaim(t *testing.T, h *home, repoRoot, existing, branch, naming string) (bool, string) {
 	t.Helper()
 	prior, err := session.NewInstance(session.InstanceOptions{Title: existing, Path: repoRoot, Program: "claude"})
 	require.NoError(t, err)
+	prior.Branch = branch
 	h.store.AddInstance(prior)
 	pending, err := session.NewInstance(session.InstanceOptions{Title: naming, Path: repoRoot, Program: "claude"})
 	require.NoError(t, err)
@@ -65,4 +117,12 @@ func submitNamingBeside(t *testing.T, h *home, repoRoot, existing, naming string
 
 	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
 	return h.state == stateNew, h.errBox.String()
+}
+
+// submitNamingBeside presses Enter on a naming form titled naming while a session
+// titled existing is in the rail, and reports whether the pre-check kept the form
+// open, along with the notice it showed.
+func submitNamingBeside(t *testing.T, h *home, repoRoot, existing, naming string) (bool, string) {
+	t.Helper()
+	return submitNamingBesideClaim(t, h, repoRoot, existing, "", naming)
 }

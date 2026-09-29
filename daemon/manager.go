@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -143,6 +144,10 @@ type Manager struct {
 	// mutation lookups do not, so a half-built runtime cannot be acted on.
 	pendingCreates map[string]session.InstanceData
 	reservedTitles map[string]struct{}
+	// reservedTitleClaims holds, per reservedTitles key, the branch that in-flight
+	// create derived when it was admitted (#4539). A later create is judged against
+	// that branch rather than a re-derivation under the prefix current by then.
+	reservedTitleClaims map[string]git.BranchClaim
 	// projectDeletes is a short-lived admission fence keyed by repo ID. A delete
 	// installs it under m.mu in the same decision that proves no create is already
 	// reserved or pending; reserveCreate checks it under that lock before any title
