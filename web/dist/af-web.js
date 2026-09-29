@@ -10772,23 +10772,9 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
-  // Number of consecutive attempts whose close fired before `onopen` ever did
-  // — a 401-rejected upgrade closes with code 1006 and no onopen, which is the
-  // only visible shape of a revoked credential at the WS layer. Reset to 0 on
-  // every successful open so only an unbroken streak of close-before-opens
-  // trips the escalation, not a single transient drop that recovered.
+  // Streak of attempts closed before onopen, and the streak length at which
+  // onAuthFailure next fires (see AUTH_FAILURE_THRESHOLD).
   consecutiveCloseBeforeOpen = 0;
-  // The streak length at which `onAuthFailure` next fires. It fires at the
-  // threshold, then again every AUTH_FAILURE_THRESHOLD further close-before-
-  // opens — not on every failed reconnect (that would spam the caller's probe),
-  // and not only once per streak: the probe is an authenticated resync whose
-  // inconclusive outcomes (a status-0 transport failure, a 5xx, a request
-  // coalesced into or superseded by another resync) all retain the token and
-  // report nothing back, so a one-shot escalation left a revoked credential
-  // looping forever once REST recovered. Re-arming by count needs no probe
-  // outcome from the caller, so no inconclusive path can leave it disarmed; once
-  // backoff saturates at BACKOFF_MAX_MS it is one probe per ~30s. Reset on every
-  // successful open so a later streak starts from the threshold again.
   nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
@@ -10854,13 +10840,8 @@ var EventStream = class {
       }
     };
   }
-  /** Single funnel for every socket end (clean close, onerror-close, or a
-   *  constructor throw). A close counts toward the close-before-open streak
-   *  only when `onopen` never fired for THIS attempt (`opened` is false); a
-   *  normal close of an open socket leaves the streak alone. Always
-   *  schedules the backoff reconnect (the existing behavior) so a transient
-   *  drop still heals through the same path, and past the streak threshold
-   *  escalates via `onAuthFailure`. */
+  /** Single funnel for every socket end; only a close-before-open extends
+   *  the streak. */
   handleClose(opened) {
     if (!opened) {
       this.consecutiveCloseBeforeOpen += 1;
@@ -19309,24 +19290,10 @@ function startStream(tok) {
       requestResync();
     },
     onStatus: (s) => store.set({ live: s }),
-    // A streak of close-before-opens on the WS upgrade means the daemon is
-    // rejecting our credential (the realistic cause is the operator rotating
-    // the token after a transport drop) — structurally the same auth-rejection
-    // the REST resync .catch below already escalates. The browser's WS API
-    // exposes no HTTP status to JS, so EventStream surfaces the failure via
-    // this callback after a small threshold. Don't probe /v1/auth-info: its
-    // handler answers whether the PEER must present a token, not whether THIS
-    // token is valid, so a healthy client and a stale-token client get an
-    // identical response. Issue an authenticated requestResync instead — its
-    // fetchSessionSnapshot 401 trips shouldForgetToken → disconnect(), the
-    // same path the REST resync uses, returning the SPA to login rather than
-    // looping the WS reconnect on the now-revoked credential forever (#1674
-    // regression). `if (token === null)`: "" is the authorized-tokenless
-    // credential (#1696), so the guard MUST be `=== null` rather than `!tok`;
-    // it also no-ops for an escalation that arrives during a teardown already
-    // begun by a previous probe — stopStream/disconnect null `token` and
-    // stream.stop() drops our handlers so EventStream can't keep firing, but a
-    // close in flight before that settles reaches here.
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
     onAuthFailure: () => {
       if (token === null) {
         return;
