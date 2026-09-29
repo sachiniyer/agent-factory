@@ -877,6 +877,7 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -956,7 +957,11 @@ function newSession(): void {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal && token === tok) openModal(m);
+            if (!modal && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector<HTMLElement>(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")
+                ?.focus({ preventScroll: true });
+            }
             else surfaceMutationError(e);
           });
       },
@@ -2632,6 +2637,16 @@ function startStream(tok: string): void {
       requestResync();
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    },
   });
   stream.start();
 }

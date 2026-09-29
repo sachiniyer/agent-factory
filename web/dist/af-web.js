@@ -10760,6 +10760,7 @@ function openConfigAssistant(opts) {
 // src/events.ts
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
+var AUTH_FAILURE_THRESHOLD = 3;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -10773,6 +10774,10 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
+  // Streak of attempts closed before onopen, and the streak length at which
+  // onAuthFailure next fires (see AUTH_FAILURE_THRESHOLD).
+  consecutiveCloseBeforeOpen = 0;
+  nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
     this.stopped = false;
@@ -10801,13 +10806,17 @@ var EventStream = class {
     try {
       ws = new WebSocket(url);
     } catch {
-      this.scheduleReconnect();
+      this.handleClose(false);
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.retry = 0;
       this.everOpened = true;
+      this.consecutiveCloseBeforeOpen = 0;
+      this.nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
       this.cb.onStatus("open");
       this.cb.onResync();
     };
@@ -10825,13 +10834,21 @@ var EventStream = class {
         this.cb.onEvent(ev);
       }
     };
-    ws.onclose = () => this.scheduleReconnect();
+    ws.onclose = () => this.handleClose(opened);
     ws.onerror = () => {
       try {
         ws.close();
       } catch {
       }
     };
+  }
+  /** Single funnel for every socket end; only a close-before-open extends
+   *  the streak. */
+  handleClose(opened) {
+    if (!opened) {
+      this.consecutiveCloseBeforeOpen += 1;
+    }
+    this.scheduleReconnect();
   }
   scheduleReconnect() {
     if (this.stopped || this.reconnectTimer !== null) {
@@ -10847,6 +10864,10 @@ var EventStream = class {
         this.open();
       }
     }, delay2);
+    if (this.consecutiveCloseBeforeOpen >= this.nextAuthEscalationAt) {
+      this.nextAuthEscalationAt = this.consecutiveCloseBeforeOpen + AUTH_FAILURE_THRESHOLD;
+      this.cb.onAuthFailure();
+    }
   }
 };
 
@@ -18194,6 +18215,7 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -18249,8 +18271,10 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) openModal(m);
-          else surfaceMutationError(e);
+          if (!modal && token === tok) {
+            openModal(m, true, invoker);
+            m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
+          } else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
@@ -19277,7 +19301,17 @@ function startStream(tok) {
     onResync: () => {
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s })
+    onStatus: (s) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    }
   });
   stream.start();
 }
