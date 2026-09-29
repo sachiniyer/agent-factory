@@ -423,3 +423,70 @@ func TestUserPasteIntoStrandedChipWithholdsRemedy(t *testing.T) {
 	require.Equal(t, 1, enters, "a composer holding the user's paste must never receive our Enter")
 	require.Equal(t, PromptSentUnverified, status)
 }
+
+// wrapRender draws a literal paste the way an 80-column pane does: the text
+// hard-wraps at the pane width, so the tail's last visual row can be any
+// length — including shorter than minDistinctiveFragment.
+func wrapRender(width int) func(string) []string {
+	return func(payload string) []string {
+		r := []rune(payload)
+		first := width - 2 // the "› " glyph shares the first row
+		var rows []string
+		for len(r) > 0 {
+			n := first
+			if len(rows) > 0 {
+				n = width
+			}
+			if n > len(r) {
+				n = len(r)
+			}
+			rows = append(rows, string(r[:n]))
+			r = r[n:]
+		}
+		return rows
+	}
+}
+
+// TestWrappedTailWithShortLastRowGetsRemedy is the #4530 play-test failure
+// (s2): a 2.9 KB literal draft in an 80-column pane wrapped so its last visual
+// row held only "R_4530". Row-by-row matching found no tail there, the remedy
+// stood down, and the stranded prompt was reported delivered. The tail has to
+// be read across the wrapped rows that end at the anchor.
+func TestWrappedTailWithShortLastRowGetsRemedy(t *testing.T) {
+	prompt := "PLAYTEST-4530 " + strings.Repeat("Keep the change focused and run the package tests. ", 15) + "FINAL_TAIL_MARKER_4530"
+	rows := wrapRender(80)(prompt)
+	require.Less(t, len([]rune(rows[len(rows)-1])), minDistinctiveFragment,
+		"fixture must reproduce the short last row that defeated the row match")
+	m := &stagedDraftPane{swallowedEnters: 1, render: wrapRender(80)}
+	status, pastes, enters := sendStaged(t, m, prompt)
+	require.Equal(t, 2, enters, "a stranded wrapped draft gets its remedy Enter")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, PromptDelivered, status)
+}
+
+// TestHiddenCursorWrappedTailWithShortLastRowGetsRemedy: the same wrap on
+// Claude's hidden-cursor geometry.
+func TestHiddenCursorWrappedTailWithShortLastRowGetsRemedy(t *testing.T) {
+	prompt := "PLAYTEST-4530 " + strings.Repeat("Keep the change focused and run the package tests. ", 15) + "FINAL_TAIL_MARKER_4530"
+	m := &stagedDraftPane{swallowedEnters: 1, glyph: claudeComposerGlyph, boxed: true, hiddenCursor: true, render: wrapRender(80)}
+	status, _, enters := sendStaged(t, m, prompt)
+	require.Equal(t, 2, enters)
+	require.Equal(t, PromptDelivered, status)
+}
+
+// TestDispatchedWrappedDraftGetsNoRemedyEnter: reading the tail across wrapped
+// rows must not reach a submitted draft's wrapped echo. The fresh composer row
+// under it ends the joined text with the glyph, not with the payload's tail.
+func TestDispatchedWrappedDraftGetsNoRemedyEnter(t *testing.T) {
+	prompt := "PLAYTEST-4530 " + strings.Repeat("Keep the change focused and run the package tests. ", 15) + "FINAL_TAIL_MARKER_4530"
+	for name, m := range map[string]*stagedDraftPane{
+		"visible cursor": {render: wrapRender(80)},
+		"hidden cursor":  {glyph: claudeComposerGlyph, boxed: true, hiddenCursor: true, render: wrapRender(80)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, _, enters := sendStaged(t, m, prompt)
+			require.Equal(t, 1, enters, "a submitted wrapped draft must never get a second Enter")
+			require.Equal(t, PromptDelivered, status)
+		})
+	}
+}

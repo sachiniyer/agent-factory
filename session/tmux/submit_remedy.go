@@ -104,6 +104,9 @@ func (t *TmuxSession) capturePaneAndCursorState() (string, paneCursorState, bool
 // transcript?" — the question the frame comparison cannot, since a pane whose
 // application renders nothing on submit would also stand still.
 //
+// In both geometries the tail is read across wrapped rows: a literal draft
+// wider than the pane can leave any length of text on its last visual row.
+//
 // With a visible cursor, the cursor row is the anchor. The payload's own
 // trailing newlines, and each Enter the composer absorbed as a newline
 // (absorbedEnters), leave the cursor on blank continuation rows BELOW the text,
@@ -127,6 +130,7 @@ func stagedInComposer(pane string, cursor paneCursorState, probe deliveryProbe, 
 		if last < 0 {
 			return false
 		}
+		var block strings.Builder
 		for j := last; j < len(rows); j++ {
 			norm := normalizeDelivery(rows[j])
 			if norm == "" {
@@ -135,7 +139,9 @@ func stagedInComposer(pane string, cursor paneCursorState, probe deliveryProbe, 
 				}
 				return false
 			}
-			if composerRowHolds(norm, probe, bound) {
+			block.WriteString(norm)
+			if composerRowHolds(norm, probe, bound) ||
+				(bound.tail && strings.HasSuffix(block.String(), probe.completion)) {
 				return true
 			}
 		}
@@ -149,7 +155,29 @@ func stagedInComposer(pane string, cursor paneCursorState, probe deliveryProbe, 
 	for steps := probe.trailingNewlines + absorbedEnters; steps > 0 && row > 0 && blankComposerRow(rows[row]); steps-- {
 		row--
 	}
-	return composerRowHolds(normalizeDelivery(rows[row]), probe, bound)
+	if composerRowHolds(normalizeDelivery(rows[row]), probe, bound) {
+		return true
+	}
+	return bound.tail && strings.HasSuffix(wrappedTextEndingAt(rows, row, len(probe.completion)), probe.completion)
+}
+
+// wrappedTextEndingAt joins the normalized text of the contiguous non-empty
+// rows ending at row, reading upward until it holds at least want bytes. A
+// literal draft wider than the pane wraps, and its last visual row can be any
+// length — the #4530 play-test stranded a draft whose last row was "R_4530",
+// too short to be matched on its own — so the tail must be read across the
+// wrap. The walk stops at an empty row (a blank line or a border), so it never
+// joins text across the composer's edge.
+func wrappedTextEndingAt(rows []string, row, want int) string {
+	joined := ""
+	for k := row; k >= 0 && len(joined) < want; k-- {
+		norm := normalizeDelivery(rows[k])
+		if norm == "" {
+			break
+		}
+		joined = norm + joined
+	}
+	return joined
 }
 
 // composerRowHolds matches bound evidence on ONE normalized composer row: the
