@@ -9,10 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// typeRunes feeds each rune of s to the pane as its own KeyRunes message, so
+// typeIntoPane feeds each rune of s to the pane as its own KeyRunes message, so
 // the single-glyph verb matching in handleEditMode (msg.String() == "r" etc.)
 // is exercised exactly the way a keystroke-at-a-time user drives the form.
-func typeRunes(tp *TaskPane, s string) {
+func typeIntoPane(tp *TaskPane, s string) {
 	for _, c := range s {
 		tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
 	}
@@ -127,7 +127,7 @@ func TestTaskPaneEditModeVerbGlyphsTypeIntoTextFields(t *testing.T) {
 			tabN(tp, tc.tabs)
 			tc.clear(tp)
 
-			typeRunes(tp, "rxD")
+			typeIntoPane(tp, "rxD")
 
 			assert.Equal(t, "rxD", tc.value(tp), "r/x/D must be typed into the %s field", tc.name)
 			assert.False(t, tp.HasPendingTrigger(), "r must not run from the %s field", tc.name)
@@ -155,7 +155,7 @@ func TestTaskPaneEditModeCronTriggerValueDoesNotFireVerbs(t *testing.T) {
 	tabN(tp, 2) // Name -> Trigger -> TriggerValue (cron schedule picker)
 	require.Equal(t, taskFocusTriggerValue, tp.focusIndex)
 
-	typeRunes(tp, "rxD")
+	typeIntoPane(tp, "rxD")
 
 	assert.False(t, tp.HasPendingTrigger(), "r must not run from the cron trigger value")
 	assert.True(t, tp.IsEditing(), "D must not exit edit mode from the cron trigger value")
@@ -190,7 +190,7 @@ func TestTaskPaneEditModeVerbsReachableAtSelectorStops(t *testing.T) {
 			tabN(tp, sc.tabs)
 
 			// r runs the selected task and leaves the form open.
-			typeRunes(tp, "r")
+			typeIntoPane(tp, "r")
 			require.True(t, tp.HasPendingTrigger(), "r at %s must run the task", sc.name)
 			pending := tp.ConsumePendingTrigger()
 			require.NotNil(t, pending)
@@ -198,7 +198,7 @@ func TestTaskPaneEditModeVerbsReachableAtSelectorStops(t *testing.T) {
 			assert.True(t, tp.IsEditing(), "run-now leaves the edit form in place")
 
 			// x toggles the selected task and marks it dirty.
-			typeRunes(tp, "x")
+			typeIntoPane(tp, "x")
 			require.True(t, tp.IsEditing(), "toggle must not exit edit mode")
 			require.True(t, tp.IsDirty(), "toggle from %s marks the task dirty", sc.name)
 			assert.False(t, tp.GetTasks()[0].Enabled)
@@ -206,7 +206,7 @@ func TestTaskPaneEditModeVerbsReachableAtSelectorStops(t *testing.T) {
 
 			// D does not delete in-pane: the app layer confirms it. The pane
 			// must stay in edit mode with the task intact.
-			typeRunes(tp, "D")
+			typeIntoPane(tp, "D")
 			assert.True(t, tp.IsEditing(), "D at %s is app-confirmed, not an in-pane delete", sc.name)
 			assert.Len(t, tp.GetTasks(), 1, "D must not remove the task from the pane")
 			assert.Empty(t, tp.ConsumeDeleted(), "D must not queue a deletion at the pane level")
@@ -228,7 +228,7 @@ func TestTaskPaneEditModeKeepsListActionsReachable(t *testing.T) {
 	require.True(t, tp.IsEditing())
 
 	// Focus opens on the Name text field: r/x/D must insert, not act.
-	typeRunes(tp, "rxD")
+	typeIntoPane(tp, "rxD")
 	require.False(t, tp.HasPendingTrigger(), "r at the Name field must type, not run")
 	require.False(t, tp.IsDirty(), "x at the Name field must type, not toggle")
 	require.True(t, tp.IsEditing(), "D at the Name field must type, not delete")
@@ -241,21 +241,21 @@ func TestTaskPaneEditModeKeepsListActionsReachable(t *testing.T) {
 	require.False(t, tp.textFocusStop(), "Trigger is a selector stop")
 	tp.editName.SetValue("nightly") // keep the buffer tidy for the run assertion
 
-	typeRunes(tp, "r")
+	typeIntoPane(tp, "r")
 	require.True(t, tp.HasPendingTrigger(), "r must remain reachable from a selector stop")
 	pending := tp.ConsumePendingTrigger()
 	require.NotNil(t, pending)
 	assert.Equal(t, "abc", pending.ID)
 	assert.True(t, tp.IsEditing(), "run-now leaves the edit form in place until the app consumes it")
 
-	typeRunes(tp, "x")
+	typeIntoPane(tp, "x")
 	require.True(t, tp.IsEditing(), "toggle should not kick the user out of edit")
 	require.True(t, tp.IsDirty(), "toggle from a selector stop marks the task dirty")
 	assert.False(t, tp.GetTasks()[0].Enabled)
 	assert.Len(t, tp.ConsumeDirty(), 1)
 
 	// D is confirmed by the app layer, not deleted here.
-	typeRunes(tp, "D")
+	typeIntoPane(tp, "D")
 	assert.True(t, tp.IsEditing(), "D at a selector stop is confirmed by the app, not deleted in-pane")
 	assert.Len(t, tp.GetTasks(), 1)
 	assert.Empty(t, tp.ConsumeDeleted())
@@ -269,7 +269,7 @@ func TestTaskPaneCreateModeTypesVerbGlyphs(t *testing.T) {
 	tp.EnterCreateMode("/tmp/repo")
 	require.True(t, tp.IsCreating())
 
-	typeRunes(tp, "rXD")
+	typeIntoPane(tp, "rXD")
 
 	assert.Equal(t, "rXD", tp.editName.Value(), "verb glyphs must type in create mode")
 	assert.False(t, tp.HasPendingTrigger(), "create mode must not run on r")
