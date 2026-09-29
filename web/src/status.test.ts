@@ -18,7 +18,9 @@ import {
   isCreating,
   isLimitReached,
   isPendingAgentHandoffDeliveryUnconfirmed,
+  isPendingAgentHandoffDeliveryConfirmable,
   isPendingManualHandoffDeliveryUnconfirmed,
+  isPendingManualSwapDeliveryConfirmable,
   isWorking,
   type OperatorKind,
   operatorKind,
@@ -373,6 +375,117 @@ test("pending agent handoff retry is hidden by a retained kill tombstone", () =>
       pending_handoff_delivery_status: "could-not-confirm",
     })),
     false,
+  );
+});
+
+// #4429: a startup-unknown row is the wedge this issue reported — previously
+// inert, now the explicit retry's own readiness wait re-proves the binding.
+// Dead liveness still refuses: restore owns a runtime that no longer exists.
+test("pending agent handoff retry admits startup-unknown rows but not dead ones", () => {
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Replacing,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    true,
+    "the wedge's own shape must offer its exit",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Lost,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    false,
+    "a lost runtime has no pane to resend into",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Running,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "not-delivered",
+    })),
+    false,
+    "positive non-delivery stays owned by automatic recovery",
+  );
+});
+
+test("confirmable pending deliveries mirror the session predicates", () => {
+  const mission = {
+    pending_handoff_mission: "continue the inherited work",
+  };
+  // Ambiguous and delivered verdicts confirm; delivered covers the crash window
+  // between a confirmed send and its clearing settle.
+  for (const status of ["sent-unverified", "could-not-confirm", "delivered"] as const) {
+    assert.equal(
+      isPendingAgentHandoffDeliveryConfirmable(sess({
+        ...mission,
+        liveness: Liveness.Running,
+        pending_handoff_delivery_status: status,
+      })),
+      true,
+      `${status} is confirmable`,
+    );
+  }
+  assert.equal(
+    isPendingAgentHandoffDeliveryConfirmable(sess({
+      ...mission,
+      liveness: Liveness.Running,
+      pending_handoff_delivery_status: "not-delivered",
+    })),
+    false,
+    "automatic recovery owns a mission proven absent",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryConfirmable(sess({
+      ...mission,
+      liveness: Liveness.Running,
+      in_flight_op: InFlightOp.Archiving,
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    false,
+    "an unrelated in-flight op owns the row",
+  );
+  // The account-swap half: an orphaned OpRespawning fence does not block it.
+  assert.equal(
+    isPendingManualSwapDeliveryConfirmable(sess({
+      liveness: Liveness.Ready,
+      in_flight_op: InFlightOp.Respawning,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "sent-unverified",
+      },
+    })),
+    true,
+  );
+  assert.equal(
+    isPendingManualSwapDeliveryConfirmable(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: {
+        manual: true,
+        replacement_panes_started: true,
+        mission_delivery_status: "not-delivered",
+      },
+    })),
+    false,
+    "not-delivered belongs to the resend path",
+  );
+  assert.equal(
+    isPendingManualSwapDeliveryConfirmable(sess({
+      liveness: Liveness.Ready,
+      pending_account_swap: {
+        manual: false,
+        replacement_panes_started: true,
+        mission_delivery_status: "sent-unverified",
+      },
+    })),
+    false,
+    "an automatic swap is not the operator's to attest",
   );
 });
 

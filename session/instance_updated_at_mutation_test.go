@@ -77,11 +77,9 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"account panes", func(t *testing.T, i *Instance) { i.pendingAccountSwap = &AccountSwapData{} }, func(t *testing.T, i *Instance) { require.NoError(t, i.markAccountSwapReplacementPanesStarted()) }},
 		{"add tab", nil, func(t *testing.T, i *Instance) { i.AddTabForTest("extra", TabKindShell) }},
 		{"add web tab fixture", nil, func(t *testing.T, i *Instance) { i.AddWebTabForTest("extra", "https://example.com") }},
-		{"rename tab", nil, func(t *testing.T, i *Instance) { _, err := i.RenameTab(1, "renamed"); require.NoError(t, err) }},
 		{"rename tab by id", nil, func(t *testing.T, i *Instance) { _, err := i.RenameTabByID("web1", "renamed"); require.NoError(t, err) }},
 		{"reorder tab", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.ReorderTab(1, 2)) }},
 		{"reorder tab by id", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.ReorderTabByID("web1", 2)) }},
-		{"close tab", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.CloseTab(1)) }},
 		{"close tab by id", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.CloseTabByID("web1")) }},
 		{"drop tab", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.DropClosedTab(1)) }},
 		{"cleanup roster", nil, func(t *testing.T, i *Instance) {
