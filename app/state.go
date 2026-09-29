@@ -64,6 +64,12 @@ const (
 	// to stateNew when it closes; this returns to stateDefault. Both drive the same
 	// promptOverlay field — one overlay, two owners, distinguished by who is asking.
 	stateJumpTab
+	// stateSelectHandoffResolve is the state when the user is choosing how to
+	// settle an ambiguous handoff delivery (#4429): resend the pending mission or
+	// mark it delivered without a resend. It reuses the selection overlay; like
+	// stateSelectHandoffAgent it differs only in what submit does — and here the
+	// two answers are NOT interchangeable, which is why the choice exists at all.
+	stateSelectHandoffResolve
 	// stateRenameTab is the `R` rename-tab prompt (#1904's verb reaching the TUI).
 	// Its own state for the same reason stateJumpTab is: it returns to
 	// stateDefault, drives the shared promptOverlay, and owns its Enter/Esc

@@ -6658,6 +6658,24 @@ async function resumeFromLimit(id, title, token2) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
+async function confirmHandoffDelivery(id, title, token2) {
+  let result;
+  try {
+    result = await af("ConfirmHandoffDelivery", { id, title, repo_id: "" }, token2);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, CONFIRM_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "delivery was not confirmed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+}
 var ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
 var ACCOUNT_AWARE_HANDOFF_UNSUPPORTED = "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon \u2014 upgrade it); the handoff was not sent";
 async function handoffSession(id, title, to, token2, account = "") {
@@ -7317,6 +7335,9 @@ function terminalChrome(opts) {
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
+  const deliver = action("Mark delivered", "", opts.markDelivered);
+  deliver.title = "Retire the pending handoff mission without resending \u2014 the pane already shows it landed";
+  deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
@@ -7329,9 +7350,9 @@ function terminalChrome(opts) {
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
+  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -9097,6 +9118,8 @@ var MidLineHold = class {
       const payload = data.startsWith(PASTE_START) ? "" : data;
       const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
       this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    } else {
+      this.queuedEndsLine = false;
     }
     return this.beginOrRenew(nowMs);
   }
@@ -10745,6 +10768,7 @@ function openConfigAssistant(opts) {
 // src/events.ts
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
+var AUTH_FAILURE_THRESHOLD = 3;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -10758,6 +10782,10 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
+  // Streak of attempts closed before onopen, and the streak length at which
+  // onAuthFailure next fires (see AUTH_FAILURE_THRESHOLD).
+  consecutiveCloseBeforeOpen = 0;
+  nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
     this.stopped = false;
@@ -10786,13 +10814,17 @@ var EventStream = class {
     try {
       ws = new WebSocket(url);
     } catch {
-      this.scheduleReconnect();
+      this.handleClose(false);
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.retry = 0;
       this.everOpened = true;
+      this.consecutiveCloseBeforeOpen = 0;
+      this.nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
       this.cb.onStatus("open");
       this.cb.onResync();
     };
@@ -10810,13 +10842,21 @@ var EventStream = class {
         this.cb.onEvent(ev);
       }
     };
-    ws.onclose = () => this.scheduleReconnect();
+    ws.onclose = () => this.handleClose(opened);
     ws.onerror = () => {
       try {
         ws.close();
       } catch {
       }
     };
+  }
+  /** Single funnel for every socket end; only a close-before-open extends
+   *  the streak. */
+  handleClose(opened) {
+    if (!opened) {
+      this.consecutiveCloseBeforeOpen += 1;
+    }
+    this.scheduleReconnect();
   }
   scheduleReconnect() {
     if (this.stopped || this.reconnectTimer !== null) {
@@ -10832,6 +10872,10 @@ var EventStream = class {
         this.open();
       }
     }, delay2);
+    if (this.consecutiveCloseBeforeOpen >= this.nextAuthEscalationAt) {
+      this.nextAuthEscalationAt = this.consecutiveCloseBeforeOpen + AUTH_FAILURE_THRESHOLD;
+      this.cb.onAuthFailure();
+    }
   }
 };
 
@@ -11716,6 +11760,23 @@ function removeTaskModal(name, onConfirm, onCancel) {
   asForm(handle.el.firstElementChild, onConfirm);
   return handle;
 }
+function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel
+  });
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. If the pane does not show it, cancel and use Retry instead \u2014 that submits the mission a second time."
+    )
+  );
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
+}
 
 // src/types.ts
 var Liveness = {
@@ -12036,11 +12097,33 @@ function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
 function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -12829,16 +12912,20 @@ function previewProbeMs() {
   return typeof override === "number" ? override : 2500;
 }
 var previewReachable = /* @__PURE__ */ new Map();
-function previewOriginReachable(origin) {
+function previewOriginReachable(origin, fresh = false) {
   let port;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== void 0) {
-    return cached;
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== void 0) {
+      return cached;
+    }
   }
   const probe = new Promise((resolve) => {
     const frame = document.createElement("iframe");
@@ -12855,7 +12942,7 @@ function previewOriginReachable(origin) {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -13553,7 +13640,7 @@ var SplitView = class {
           if (origin === "") {
             return "";
           }
-          return await previewOriginReachable(origin) ? previewOriginSrc(origin, target) : "";
+          return await previewOriginReachable(origin, fresh) ? previewOriginSrc(origin, target) : "";
         }) : Promise.resolve("");
       }
       return previewSrcOnce;
@@ -13583,6 +13670,9 @@ var SplitView = class {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;
@@ -15504,6 +15594,16 @@ function patchRetryButton(button, action) {
     button.title = action.title;
   }
 }
+function markDeliveredActionForSession(s) {
+  if (isPendingAgentHandoffDeliveryConfirmable(s) || isPendingManualSwapDeliveryConfirmable(s)) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed \u2014 retire it without resending"
+    };
+  }
+  return null;
+}
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
 }
@@ -16004,6 +16104,11 @@ var AppShell = class {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
   retryKind = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  deliverBtn = null;
+  deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -16884,6 +16989,8 @@ var AppShell = class {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -16916,6 +17023,7 @@ var AppShell = class {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
+      markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.()
     });
     this.terminalChrome = chrome;
@@ -16924,6 +17032,9 @@ var AppShell = class {
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -17377,6 +17488,11 @@ var AppShell = class {
     if (this.retryBtn && retryKind !== this.retryKind) {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
+    }
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
     }
     const nowHandoff = canHandoff(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
@@ -18107,6 +18223,7 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -18162,8 +18279,10 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) openModal(m);
-          else surfaceMutationError(e);
+          if (!modal && token === tok) {
+            openModal(m, true, invoker);
+            m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
+          } else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
@@ -19005,6 +19124,37 @@ function doRetryLimit() {
     surfaceTabError(e);
   });
 }
+function doMarkDelivered() {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok).then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      closeModal
+    )
+  );
+}
 function doHandoff() {
   const sel = selectedSessionData();
   if (!sel || !sel.id || !canHandoff(sel)) {
@@ -19109,6 +19259,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
@@ -19185,7 +19336,17 @@ function startStream(tok) {
     onResync: () => {
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s })
+    onStatus: (s) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    }
   });
   stream.start();
 }

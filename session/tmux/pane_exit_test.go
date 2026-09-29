@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 )
 
 // #4506 review: tmux leaves pane_dead_status EMPTY for a command killed by a
@@ -83,6 +87,94 @@ func TestProbePaneExitWaitsForTheStatusOfAnUncollectedRoot(t *testing.T) {
 	require.Equal(t, 7, status)
 	require.True(t, at.Equal(time.Unix(1726000000, 0)), "at = %v", at)
 	require.Equal(t, 3, reads)
+}
+
+// #4682: tmux 3.4 built with utempter can lose the root's SIGCHLD, and then it
+// collects the root only on its next SIGCHLD. The fixture's server behaves that
+// way: it reports the status only once something runs a job through it. The
+// probe must make that happen rather than wait out paneStatusWait.
+func TestProbePaneExitNudgesTheServerToCollectAStrandedRoot(t *testing.T) {
+	uncollected := uncollectedProcess(t)
+	nudges := 0
+	stranded := heldPaneExec(uncollected, "", "", "", nil)
+	collected := heldPaneExec(uncollected, "7", "", "1726000000", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-stranded", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "run-shell") {
+				nudges++
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if nudges == 0 {
+				return stranded.OutputFunc(c)
+			}
+			return collected.OutputFunc(c)
+		},
+	})
+	dead, status, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.True(t, statusKnown, "the probe never got the server to collect the root")
+	require.Equal(t, 7, status)
+	require.Equal(t, 1, nudges, "one nudge collects the root; more are noise")
+}
+
+// A server that never collects the root, however often it is nudged, gets a
+// fixed number of nudges, and the probe still answers within paneStatusWait.
+func TestProbePaneExitCapsItsNudges(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	uncollected := uncollectedProcess(t)
+	nudges := 0
+	stranded := heldPaneExec(uncollected, "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-never-collected", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(c.String(), "run-shell") {
+				nudges++
+			}
+			return nil
+		},
+		OutputFunc: stranded.OutputFunc,
+	})
+	dead, _, statusKnown, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.False(t, statusKnown)
+	require.Equal(t, maxReapNudges, nudges)
+}
+
+// #4906 review: the nudge's log line names the version of the SERVER that lost
+// the SIGCHLD, read in the probe's own display-message. It never runs the tmux
+// client: `tmux -V` reports the installed binary, which after an upgrade is not
+// the running server, and it would start a fresh command timeout after the
+// probe's wait had already run out.
+func TestProbePaneExitLogsTheServersVersionWithoutRunningTheClient(t *testing.T) {
+	shrinkPaneStatusWait(t)
+	dir := t.TempDir()
+	ranClient := filepath.Join(dir, "ran")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"), []byte(
+		"#!/bin/sh\ntouch "+ranClient+"\necho 'tmux 3.6'\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var info logtest.Buffer
+	previous := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&info)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(previous) })
+
+	stranded := heldPaneExec(uncollectedProcess(t), "", "", "", nil)
+	ts := NewTmuxSessionWithDeps("pane-exit-version", "true", nil, cmd_test.MockCmdExec{
+		RunFunc: stranded.RunFunc,
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			last := len(c.Args) - 1
+			c.Args[last] = strings.ReplaceAll(c.Args[last], "#{version}", "3.4")
+			return stranded.OutputFunc(c)
+		},
+	})
+	dead, _, _, _, known := ts.ProbePaneExit()
+	require.True(t, known)
+	require.True(t, dead)
+	require.NoFileExists(t, ranClient, "the probe ran the tmux client for its log line")
+	require.Contains(t, info.String(), "tmux 3.4", "the log line must name the server's version")
+	require.NotContains(t, info.String(), "3.6")
 }
 
 // Once a read has established that the root exited, a re-read that cannot

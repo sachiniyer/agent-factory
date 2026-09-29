@@ -56,6 +56,7 @@ import {
   reorderTab,
   restoreSession,
   resumeFromLimit,
+  confirmHandoffDelivery,
   shouldForgetToken,
   storeToken,
   triggerTask,
@@ -72,6 +73,7 @@ import {
   confirmDeleteProjectModal,
   confirmModal,
   handoffModal,
+  markDeliveredModal,
   type ModalHandle,
   newSessionModal,
   rebindProjectModal,
@@ -876,6 +878,7 @@ function doOpenConfigAssistant(): void {
  *  removes it. A failure surfaces through the shared operation toast because the
  *  form is deliberately no longer held open by the RPC. */
 function newSession(): void {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -955,7 +958,11 @@ function newSession(): void {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal && token === tok) openModal(m);
+            if (!modal && token === tok) {
+              openModal(m, true, invoker);
+              m.el.querySelector<HTMLElement>(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")
+                ?.focus({ preventScroll: true });
+            }
             else surfaceMutationError(e);
           });
       },
@@ -2375,6 +2382,57 @@ function doRetryLimit(): void {
 }
 
 /**
+ * Retires the selected session's pending handoff mission WITHOUT resending it
+ * (#4429) — the web's "Mark delivered", the no-resend half of the TUI's `c`
+ * resolve picker.
+ *
+ * Unlike Retry this DOES confirm: the attestation is the operator's — "the pane
+ * already shows the incoming agent acting on its mission" — and it retires a
+ * durable obligation on that word, so the click must be deliberate. The daemon
+ * probes the runtime, settles the leftover fence, and persists; the resulting
+ * session.updated event drops the row's pending-delivery state. No optimistic
+ * clear, same as doRetryLimit: the web is the daemon's projection.
+ *
+ * Uses the FULL projection (selectedSessionData, not the id/title-only
+ * selectedSession): the re-check on the freshest snapshot keeps a stale button
+ * from attesting against a row whose verdict already settled.
+ */
+function doMarkDelivered(): void {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok)
+          .then(closeModal)
+          .catch((e) => {
+            if (isMutationCommittedError(e)) {
+              if (modal === m) closeModal();
+              requestResync();
+              surfaceMutationError(e, "confirmed");
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          });
+      },
+      closeModal,
+    ),
+  );
+}
+
+/**
  * Hands the selected session off to a different agent (#2013) — the web's analogue
  * of the TUI's `F`. Opens the agent picker (excluding the running agent); on confirm
  * it swaps the agent in place via HandoffSession, keeping the worktree and branch,
@@ -2507,6 +2565,7 @@ const actions = {
   archive: (session: ActionableSession) => openConfirm("archive", session),
   restore: (session: ActionableSession) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
@@ -2620,6 +2679,16 @@ function startStream(tok: string): void {
       requestResync();
     },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    },
   });
   stream.start();
 }

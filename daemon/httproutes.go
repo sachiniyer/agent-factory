@@ -230,6 +230,18 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
 	},
+	// The "it already landed" half of the ambiguous-delivery exit (#4429): the
+	// operator inspected the pane and attests the mission arrived, so the
+	// daemon retires the obligation WITHOUT resending. A separate verb rather
+	// than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead
+	// of silently resending.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/ConfirmHandoffDelivery",
+		Description: "Retire a pending handoff mission on the operator's attestation that it already landed — settles the replacement fence and startup-unknown flag without resending.",
+		requestType: reflect.TypeOf(ConfirmHandoffDeliveryRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ConfirmHandoffDelivery) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/HandoffSession",
