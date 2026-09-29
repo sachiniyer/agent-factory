@@ -24,17 +24,55 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 
 // pendingAccountSwapRetryTargetLocked reports whether agent and account name
 // the committed swap's own target: the account the identity checkpoint already
-// moved this session to and — when the request names an agent — the agent the
-// record already runs. Callers hold i.mu.
+// moved this session to and — when the request names an agent — a target the
+// committed transaction already is. That is the requested enum in i.Program OR
+// the resolved agent the pane now runs: a program_overrides redirect makes the
+// two differ (`--to aider` recording Program=aider while launching codex), and
+// a retry may spell the committed identity either way (#4430 review round 3).
+// Callers hold i.mu.
 func (i *Instance) pendingAccountSwapRetryTargetLocked(agent, account string) bool {
 	pending := i.pendingAccountSwap
 	if pending == nil || pending.To != i.Account || strings.TrimSpace(account) != pending.To {
 		return false
 	}
 	if agent = strings.TrimSpace(agent); agent != "" {
-		return agent == i.currentAgentNameLocked()
+		if agent == i.Program || agent == i.currentAgentNameLocked() {
+			return true
+		}
+		// The committed transaction's own target spelling: a same-agent alias
+		// (`--to aider` where aider resolves to the running codex) keeps
+		// i.Program on the established label while the ledger records To=aider,
+		// so the retry matches neither identity above without this (#4430
+		// review round 6). The trailing ledger entry IS this transaction's —
+		// a pending manual swap exists only because its commit appended it.
+		if pending.Manual && len(i.Tabs) > 0 {
+			h := i.Tabs[0].Handoffs
+			return len(h) > 0 && h[len(h)-1].To == agent
+		}
+		return false
 	}
 	return true
+}
+
+// PendingAccountSwapTarget reports the agent enum the committed manual swap was
+// requested under — the trailing ledger entry's To — or "" when no committed
+// manual transaction is pending. A same-agent alias (`--to aider` whose
+// override resolves to the running codex) keeps Program on the established
+// label while the transaction's true target lives only here, so retry and
+// replay detection must consult it as well as the two identity spellings
+// (#4430 review round 6).
+func (i *Instance) PendingAccountSwapTarget() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.To != i.Account || len(i.Tabs) == 0 {
+		return ""
+	}
+	h := i.Tabs[0].Handoffs
+	if len(h) == 0 {
+		return ""
+	}
+	return h[len(h)-1].To
 }
 
 // BeginManualAccountSwap raises the existing account-replacement fence after
@@ -55,24 +93,49 @@ func (i *Instance) BeginManualAccountSwap() error {
 
 // SelectAccountForHandoff commits the same identity transaction as automatic
 // rotation, retaining an explicit pin and its durable delivery obligation.
-func (i *Instance) SelectAccountForHandoff(from, name, agent, reason, head, mission string) (HandoffSwap, error) {
+// target and effectiveAgent travel separately for the same reason they do in
+// recordHandoffSwapLocked: an override can redirect the launch — the ledger's
+// To and the recorded Program name the enum the operator asked for, while the
+// scope judgment is made on the agent the command resolves to (#4430 review).
+// crossAgent is the decision ValidateManualAccountSwap froze the launch plan
+// under; passing the same value keeps the record describing that launch.
+func (i *Instance) SelectAccountForHandoff(from, name, target, effectiveAgent string, crossAgent bool, reason, head, mission string) (HandoffSwap, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
 		return HandoffSwap{}, fmt.Errorf("account handoff requires the replacement fence")
 	}
-	entry, err := i.recordHandoffSwapLocked(agent, reason, head, false)
+	entry, err := i.recordHandoffSwapLocked(target, effectiveAgent, crossAgent, reason, head, false)
 	if err != nil {
 		return HandoffSwap{}, err
 	}
 	entry.FromAccount, entry.ToAccount = from, name
 	i.Tabs[0].Handoffs[len(i.Tabs[0].Handoffs)-1] = entry.AgentHandoff
-	if _, err := i.selectAccountLocked(from, name, false); err != nil {
+	if _, err := i.selectAccountLocked(from, name, effectiveAgent, false); err != nil {
 		return HandoffSwap{}, err
 	}
 	i.pendingAccountSwap.Manual = true
 	i.pendingAccountSwap.Mission = mission
+	// The namespace the account was just selected in travels with the durable
+	// transaction: post-commit recovery must answer it even after a restart
+	// under changed program_overrides, when neither the pane's (rewritten)
+	// program metadata nor a fresh resolution can still prove it (#4430 review).
+	i.pendingAccountSwap.AccountAgent = effectiveAgent
 	return entry, nil
+}
+
+// PendingAccountSwapAgent reports the account namespace the committed manual
+// swap's replacement account was selected in, or "" when the pending record
+// predates the field or is not a committed manual swap. Recovery prefers it
+// over any re-derivation: it is the one answer a config flip plus daemon
+// restart cannot move (#4430 review).
+func (i *Instance) PendingAccountSwapAgent() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
+		return ""
+	}
+	return i.pendingAccountSwap.AccountAgent
 }
 
 func (i *Instance) PendingManualAccountSwap() (bool, string) {
@@ -178,15 +241,85 @@ func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
-// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity and
-// pending delivery transaction onto an existing client projection.
-func (i *Instance) ReconcileAccountHandoffSnapshot(account string, auto bool, pending *AccountSwapData) bool {
+// CanConfirmPendingManualAccountSwapDelivery reports whether an operator can
+// retire a pending manual account swap's mission on the attestation that it
+// already landed — the same "it is already running" exit the agent-handoff
+// path gained in #4429. Unlike the retry predicate this DOES admit
+// startup-unknown and orphaned-fence rows: the daemon probes the pane before
+// honoring the attestation, which is the runtime proof those rows were missing.
+func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
+	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
+	return !i.userKilled && !dead && (i.startupStateUnknown || knownLive) &&
+		(i.inFlightOp == OpNone || i.inFlightOp == OpRespawning) &&
+		i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwap.ReplacementPanesStarted &&
+		confirmableHandoffDelivery(i.pendingAccountSwap.MissionDeliveryStatus)
+}
+
+// ConfirmPendingManualAccountSwapDelivery retires the pending manual account
+// swap on the operator's attestation that its mission already landed (#4429).
+// It is the account-swap half of ConfirmPendingHandoffDelivery: the daemon has
+// already probed the pane alive, so this method re-checks the durable facts and
+// then clears the transaction and its admitted launch plan, lifts any orphaned
+// replacement fence, and resolves a startup-unknown flag the probe just
+// disproved — all in one critical section so no later reader can rebuild the
+// wedge.
+func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.Account == account && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
+		return fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("manual account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
+	}
+	if !confirmableHandoffDelivery(pending.MissionDeliveryStatus) {
+		return fmt.Errorf("manual account swap from %q to %q has no ambiguous delivery to confirm (status %q); retry-limit owns the resend", from, to, pending.MissionDeliveryStatus)
+	}
+	if i.userKilled {
+		return fmt.Errorf("session %q has a pending kill", i.Title)
+	}
+	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
+		return fmt.Errorf("session %q has no live runtime to confirm against (liveness %v); restore owns this row", i.Title, i.liveness)
+	}
+	if i.inFlightOp != OpNone && i.inFlightOp != OpRespawning {
+		return fmt.Errorf("session %q is busy (%v)", i.Title, i.inFlightOp)
+	}
+	lv, op, resetAt := i.lifecycleStateLocked()
+	i.resolveStartupStateLocked()
+	if i.inFlightOp == OpRespawning {
+		// The daemon holds the op lock while calling, so a respawn fence still
+		// up here is orphaned bookkeeping — a crashed/abandoned resume — not a
+		// live operation. ClearOp preserves liveness and releases the row.
+		if err := i.transitionLocked(ClearOp()); err != nil {
+			return err
+		}
+	}
+	// Retire the launch plan with the transaction, as ClearPendingAccountSwap
+	// does: tabSpawnBlockedLocked refuses on either, so leaving the plan behind
+	// would keep new tabs refused until the daemon restarted.
+	i.pendingAccountSwap = nil
+	i.accountSwapLaunch = nil
+	i.touchLocked()
+	i.noteStateChangeLocked(lv, op, resetAt)
+	return nil
+}
+
+// ReconcileAccountHandoffSnapshot mirrors the daemon-owned account identity —
+// name, the namespace it was selected in, auto flag — and pending delivery
+// transaction onto an existing client projection.
+func (i *Instance) ReconcileAccountHandoffSnapshot(account, accountAgent string, auto bool, pending *AccountSwapData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.Account == account && i.accountAgent == accountAgent && i.accountAutoSelected == auto && accountSwapDataEqual(i.pendingAccountSwap, pending) {
 		return false
 	}
 	i.Account = account
+	i.accountAgent = accountAgent
 	i.accountAutoSelected = auto
 	i.pendingAccountSwap = cloneAccountSwapData(pending)
 	i.touchLocked()

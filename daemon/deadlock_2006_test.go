@@ -76,7 +76,7 @@ func TestDeliverPromptResumeFromLimit_NoInvertedLockDeadlock(t *testing.T) {
 	// Goroutine A: resumeFromLimit — grabs its first lock and parks in the seam.
 	go func() {
 		defer wg.Done()
-		resumeErr = manager.resumeFromLimit(ResumeFromLimitRequest{Title: "shared", RepoID: repoID})
+		_, resumeErr = manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: "shared", RepoID: repoID})
 	}()
 
 	// Do not start the delivery until the resume goroutine is provably holding its

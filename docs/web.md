@@ -155,10 +155,11 @@ for tab and view navigation.
 The pane header's **Retry limit** appears for a session waiting on a usage limit
 and requests another attempt. If an agent or account handoff could not confirm
 mission delivery, inspect the pane first; the same place shows **Retry handoff**
-as the explicit override while automatic redelivery stays suppressed. If that retry
-delivers the mission while its final disk settlement remains pending, the web
-keeps a confirmed-mutation warning on screen because the mission has already
-landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
+as the explicit override while automatic redelivery stays suppressed, and
+**Mark delivered** to retire it without resending when the pane shows the mission
+already landed. If that retry delivers the mission while its final disk
+settlement remains pending, the web keeps a confirmed-mutation warning on screen
+because the mission has already landed and must not be retried. Open the pane header’s **Actions** menu (shown as **…**
 on a phone) for **Handoff**, which appears when the session supports swapping
 agents in place. Choose **New agent** in its modal and confirm **Hand off** to stop
 the current agent and continue with the replacement. A limit-blocked local
@@ -550,7 +551,9 @@ What to know before turning it on:
   hostname into a network-reachable capability, and one that leaks through a log, a
   screenshot, or browser history stops being usable only from this machine. Editor
   tabs are withheld entirely while the listener is network-bound, and the daemon
-  warns at start. Keep it on loopback unless you have a reason not to.
+  warns at start, `af config set` warns on every exposed save, and the TUI
+  and web config panes warn on a transition into exposure. Keep it on loopback
+  unless you have a reason not to.
 - **It is off by default.** No second port opens unless you set the key, and a bind
   conflict is logged and skipped, never fatal.
 

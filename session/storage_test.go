@@ -2,7 +2,6 @@ package session
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +95,41 @@ func readDisk(t *testing.T, ms *mockInstanceStorage, repoPath string) []Instance
 	var out []InstanceData
 	require.NoError(t, json.Unmarshal(raw, &out))
 	return out
+}
+
+// loadInstancesForTest mirrors the daemon's load path for tests that verify
+// save→load round-trips through Storage: it reads the raw records the mock
+// holds, normalizes each through ForStorage, and rebuilds live Instances via
+// FromInstanceData + PinStorageRepoID — the same steps the production
+// config.LoadAllRepoInstancesReportingMissing + FromInstanceData path performs.
+func loadInstancesForTest(t *testing.T, storage *Storage) []*Instance {
+	t.Helper()
+	var allJSON map[string]json.RawMessage
+	if storage.repoID != "" {
+		raw, err := storage.state.GetInstances(storage.repoID)
+		require.NoError(t, err)
+		allJSON = map[string]json.RawMessage{storage.repoID: raw}
+	} else {
+		all, err := storage.state.GetAllInstances()
+		require.NoError(t, err)
+		allJSON = all
+	}
+	var instances []*Instance
+	for repoID, jsonData := range allJSON {
+		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
+			continue
+		}
+		var instancesData []InstanceData
+		require.NoError(t, json.Unmarshal(jsonData, &instancesData))
+		for _, data := range dedupeInstanceData(instancesData) {
+			data = data.ForStorage()
+			instance, err := FromInstanceData(data)
+			require.NoError(t, err)
+			instance.PinStorageRepoID(repoID)
+			instances = append(instances, instance)
+		}
+	}
+	return instances
 }
 
 // makeInstance creates a minimal Instance for testing.
@@ -485,8 +519,7 @@ func TestDaemonSaveRetainsLoadedLegacyStorageKey(t *testing.T) {
 	ms.data[legacyID] = raw
 	storage, err := NewStorage(ms, "")
 	require.NoError(t, err)
-	loaded, err := storage.LoadInstances()
-	require.NoError(t, err)
+	loaded := loadInstancesForTest(t, storage)
 	require.Len(t, loaded, 1)
 
 	require.NoError(t, storage.SaveInstances(loaded))
@@ -544,22 +577,6 @@ func TestDaemonSaveFallsBackToPathForRemoteBackend(t *testing.T) {
 	result := readDisk(t, ms, repoPath)
 	require.Len(t, result, 1)
 	assert.Equal(t, "remote-1", result[0].Title)
-}
-
-// TestLoadInstancesDaemonSurfacesUnreadableDir verifies that daemon-mode
-// LoadInstances (repoID == "") surfaces an unreadable instances directory as
-// an error rather than presenting an empty session list that looks like a
-// fresh install while live sessions sit unreadable on disk (#868).
-func TestLoadInstancesDaemonSurfacesUnreadableDir(t *testing.T) {
-	ms := newMockStorage()
-	ms.readAllErr = errors.New("permission denied")
-
-	storage, err := NewStorage(ms, "")
-	require.NoError(t, err)
-
-	instances, err := storage.LoadInstances()
-	require.Error(t, err, "the daemon must not hide an unreadable instances directory")
-	assert.Nil(t, instances)
 }
 
 // --- Issue #808: instances.json held byte-identical duplicate records -----

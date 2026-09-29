@@ -107,6 +107,109 @@ func TestLiveDropOverlayPreservesTerminalWatcherStatus(t *testing.T) {
 	}
 }
 
+// TestLifecycleStopFlushPreservesTerminalStatus drives the real run() lifecycle:
+// a watch script emits a burst exceeding the per-minute cap (the trailing lines
+// are drops) and then exits 0 ("stopped"). The first drop checkpoint persists
+// the dropped status once; later drops within the same window leave an
+// unpersisted delta that stop()'s flushDroppedEvents flushes using
+// lastDroppedAt (the last drop time, which post-dates the only delivery).
+// Without the terminal-status guard in RecordWatchRateDrops, that stale flush
+// overwrites the newer "stopped" outcome on disk. This regression test drives
+// the production recordDrops (persistWatcherDrops) and setStatus
+// (persistWatcherStatus) against the real task store.
+func TestLifecycleStopFlushPreservesTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357020", `printf 'e1\ne2\ne3\ne4\ne5\n'; exit 0`, dir)
+	require.NoError(t, task.AddTask(tsk))
+
+	s := newWatcherSupervisorWithEventsPerMinute(2)
+	s.loadTasks = task.LoadTasks
+	s.deliver = func(taskID, line string, _ watchDeliveryOptions) error {
+		now := time.Now()
+		_, err := task.UpdateTaskStatus(taskID, &now, "sent")
+		return err
+	}
+	logDir := t.TempDir()
+	s.logPath = func(taskID string) (string, error) {
+		return filepath.Join(logDir, "task-"+taskID+".log"), nil
+	}
+	queueDir := t.TempDir()
+	s.queueDir = func() (string, error) { return queueDir, nil }
+	s.baseBackoff = 40 * time.Millisecond
+	s.maxBackoff = time.Second
+	s.stopGrace = 250 * time.Millisecond
+	s.shell = "sh"
+	t.Cleanup(s.Stop)
+
+	require.NoError(t, s.Reload(), "arm the watch task")
+
+	waitUntil(t, 10*time.Second, "stopped status on disk", func() bool {
+		stored, err := task.GetTask(tsk.ID)
+		return err == nil && stored.LastRunStatus == "stopped"
+	})
+	stored, _ := task.GetTask(tsk.ID)
+	require.Equal(t, "stopped", stored.LastRunStatus)
+	require.True(t, stored.DroppedEvents > 0, "drops must have occurred")
+
+	s.Stop()
+
+	stored, _ = task.GetTask(tsk.ID)
+	require.Equal(t, "stopped", stored.LastRunStatus,
+		"a stale drop flush must not overwrite the newer terminal watcher status")
+	require.True(t, stored.DroppedEvents > 0, "cumulative drop count must survive the flush")
+}
+
+// TestLifecycleErroredFlushPreservesTerminalStatus is the crash-loop variant:
+// the script emits a burst (drops) and exits 1 repeatedly until the breaker
+// persists an "errored:" terminal status. The flush of the unpersisted drop
+// delta must not clobber that errored outcome.
+func TestLifecycleErroredFlushPreservesTerminalStatus(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	dir := t.TempDir()
+	tsk := watchTask("d4357021", `printf 'e1\ne2\ne3\ne4\ne5\n'; exit 1`, dir)
+	require.NoError(t, task.AddTask(tsk))
+
+	s := newWatcherSupervisorWithEventsPerMinute(2)
+	s.loadTasks = task.LoadTasks
+	s.deliver = func(taskID, line string, _ watchDeliveryOptions) error {
+		now := time.Now()
+		_, err := task.UpdateTaskStatus(taskID, &now, "sent")
+		return err
+	}
+	logDir := t.TempDir()
+	s.logPath = func(taskID string) (string, error) {
+		return filepath.Join(logDir, "task-"+taskID+".log"), nil
+	}
+	queueDir := t.TempDir()
+	s.queueDir = func() (string, error) { return queueDir, nil }
+	s.baseBackoff = 40 * time.Millisecond
+	s.maxBackoff = time.Second
+	s.stopGrace = 250 * time.Millisecond
+	s.crashMaxExits = 3
+	s.crashWindow = 10 * time.Minute
+	s.shell = "sh"
+	t.Cleanup(s.Stop)
+
+	require.NoError(t, s.Reload(), "arm the watch task")
+
+	waitUntil(t, 20*time.Second, "errored status on disk", func() bool {
+		stored, err := task.GetTask(tsk.ID)
+		return err == nil && strings.HasPrefix(stored.LastRunStatus, "errored:")
+	})
+	stored, _ := task.GetTask(tsk.ID)
+	require.True(t, strings.HasPrefix(stored.LastRunStatus, "errored:"),
+		"breaker must have persisted an errored status, got %q", stored.LastRunStatus)
+	require.True(t, stored.DroppedEvents > 0, "drops must have occurred")
+
+	s.Stop()
+
+	stored, _ = task.GetTask(tsk.ID)
+	require.True(t, strings.HasPrefix(stored.LastRunStatus, "errored:"),
+		"a stale drop flush must not overwrite the newer terminal watcher status, got %q", stored.LastRunStatus)
+	require.True(t, stored.DroppedEvents > 0, "cumulative drop count must survive the flush")
+}
+
 func TestLiveDropOverlayPreservesRecordedParkedHeadOverTerminalStatus(t *testing.T) {
 	queue := newEventQueue(t.TempDir(), "d4357005")
 	_, err := queue.enqueueWithParkedStatus("held occurrence", true, true)

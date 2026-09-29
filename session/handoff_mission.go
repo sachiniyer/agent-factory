@@ -24,12 +24,23 @@ type MissionBrief struct {
 	// From and To are the outgoing and incoming agent names.
 	From string
 	To   string
+	// CrossAgent is admission's verdict on whether the swap changed the agent,
+	// threaded from the launch plan so Render's same-agent branch does not
+	// re-derive it from From == To. A program_overrides redirect can make the
+	// RESOLVED running identity (From) equal the target enum (To) for a handoff
+	// admission classified as cross-agent, so the string compare alone can
+	// route a cross-agent brief onto the same-agent branch (#4430 review).
+	CrossAgent bool
 	// Reason is why the handoff happened, rendered into the brief so the new
 	// agent knows its predecessor stopped for an external reason and did not
 	// simply fail.
 	Reason string
 	// Work is the branch state at handoff time.
 	Work git.WorkSummary
+	// Conversation is what a same-agent account handoff carried (#4367). A
+	// cross-agent brief ignores it: providers cannot read each other's
+	// transcripts, so that conversation is never available.
+	Conversation HandoffConversation
 }
 
 // BuildMissionBrief assembles the brief for handing this instance to `to`.
@@ -77,8 +88,12 @@ func (i *Instance) BuildMissionBrief(to, override, reason string) MissionBrief {
 // a goal is worse than one that admits it has none: the agent would pursue the
 // invention.
 func (m MissionBrief) Render() string {
-	sameAgent := m.From != "" && m.From == m.To
-	if sameAgent && m.Work.Empty() {
+	sameAgent := m.From != "" && m.From == m.To && !m.CrossAgent
+	carryFailure := strings.TrimSpace(m.Conversation.CarryFailure)
+	if sameAgent && m.Conversation.Carried {
+		return m.renderCarried()
+	}
+	if sameAgent && m.Work.Empty() && carryFailure == "" {
 		return m.Goal
 	}
 	var b strings.Builder
@@ -88,10 +103,18 @@ func (m MissionBrief) Render() string {
 		from = "another agent"
 	}
 	b.WriteString("You are continuing work that is already in progress in this worktree.\n\n")
-	if sameAgent {
+	switch {
+	case sameAgent && carryFailure != "":
+		// A silently truncated history is worse than a stated one (#4367): say
+		// that continuity was attempted, and why it did not happen.
+		fmt.Fprintf(&b, "This is a fresh conversation after an account handoff. "+
+			"af tried to carry the previous conversation over to the new account, but %s, "+
+			"so it is not available to you — only the working tree and its git history are.\n",
+			carryFailure)
+	case sameAgent:
 		b.WriteString("This is a fresh conversation after an account handoff. " +
 			"The previous conversation is not available to you — only the working tree and its git history are.\n")
-	} else {
+	default:
 		fmt.Fprintf(&b, "It was being done by %s, which %s. "+
 			"Its conversation is not available to you — only the working tree and its git history are.\n",
 			from, stoppedClause(m.Reason))
@@ -146,6 +169,19 @@ func (m MissionBrief) Render() string {
 	b.WriteString("\nContinue from that state. Do not start over, and do not revert work you did not write.\n")
 
 	return b.String()
+}
+
+// renderCarried is the notice for a same-agent account handoff whose
+// conversation was carried. The agent already holds the history and the work,
+// so the brief says only that, plus the goal: a --brief override is the one
+// thing the carried transcript cannot contain.
+func (m MissionBrief) renderCarried() string {
+	notice := "This conversation continues after an account handoff: everything above is still yours to use, " +
+		"and only the account changed. Continue from where you left off."
+	if m.Goal == "" {
+		return notice
+	}
+	return notice + "\n\nThe goal:\n\n" + m.Goal
 }
 
 // stoppedClause turns a handoff reason into the verb clause the brief reads

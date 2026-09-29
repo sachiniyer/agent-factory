@@ -24,9 +24,37 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if err != nil {
 			return true
 		}
+		// Inverted arithmetic guard: refuse any command whose arithmetic context
+		// has an operand that is not provably a numeric constant. Rather than
+		// enumerating the ways a variable's stored value can become hazardous
+		// (command substitution, hazardous literal, runtime-input builtin,
+		// dynamically composed strings, …), the guard inverts the burden: an
+		// arithmetic context is refused UNLESS its operand provably consists of
+		// only integer literals, arithmetic operators, and parentheses. Any
+		// variable reference inside arithmetic — $((x)), (( x )), let x,
+		// arr[x], etc. — is unprovable regardless of how x was assigned.
+		//
+		// This single check subsumes the three coarse rules that preceded it:
+		//   - CmdSubst+arith: a CmdSubst inside arithmetic is never a constant.
+		//   - Literal-assignment+arith: a variable holding a hazardous literal
+		//     appears in arithmetic as a variable reference — not a constant.
+		//   - Runtime-input+arith: same as the literal case above.
+		//   - Dynamic-composition bypass (n=CODEX_HOME; x="${n}=1"; : $((x))):
+		//     x is a variable reference in arithmetic — not a constant.
+		//
+		// Safe-side false positives: commands that combine arithmetic with any
+		// non-constant expression are refused, including provably safe ones like
+		// n=5; : $((n+1)). That cost is documented and priced as acceptable:
+		// arithmetic over non-constant operands is uncommon in agent invocation
+		// strings, and the precision gain from tracking whether the variable was
+		// actually hazardous is outweighed by the unbounded enumeration gap it
+		// creates.
+		if fileHasArithmeticContextWithVariableOperand(file) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(file, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, nil) {
 				mutates = true
 				return false
 			}
@@ -39,15 +67,54 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	return false
 }
 
-func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}, tainted map[string]struct{}) bool {
 	switch node := node.(type) {
 	case *syntax.CallExpr:
-		return callMutatesAccountEnvironment(node, names)
+		return callMutatesAccountEnvironment(node, names, tainted)
 	case *syntax.Assign:
+		// An indexed assignment (`arr[i]=val`) evaluates the subscript as
+		// arithmetic; a command substitution in the index is re-evaluated as
+		// fresh arithmetic by bash and can assign a denied name via its output
+		// even when `arr` itself is not denied.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
+		if node.Index != nil && arithmeticExprReferencesTaintedVar(node.Index, tainted) {
+			return true
+		}
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.WordIter:
 		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
 	case *syntax.ParamExp:
+		// An indexed subscript (`${arr[i]}`) is evaluated as arithmetic by
+		// bash, so a command substitution inside the index — e.g.
+		// `${arr[$(printf CODEX_HOME=1)]}` — is re-evaluated as fresh
+		// arithmetic and can assign a denied name even when `arr` itself is
+		// not denied. Fail closed when the index contains a substitution.
+		if node.Index != nil && arithmeticExprHasCommandSubstitution(node.Index) {
+			return true
+		}
+		if node.Index != nil && arithmeticExprReferencesTaintedVar(node.Index, tainted) {
+			return true
+		}
+		// Slice expressions (`${x:offset:length}`) also evaluate their
+		// operands as arithmetic; a command substitution in either position
+		// is re-evaluated as fresh arithmetic by bash and can assign a denied
+		// name (e.g. `${x:$(printf CODEX_HOME=1)}`). Fail closed on either.
+		if node.Slice != nil {
+			if node.Slice.Offset != nil && arithmeticExprHasCommandSubstitution(node.Slice.Offset) {
+				return true
+			}
+			if node.Slice.Offset != nil && arithmeticExprReferencesTaintedVar(node.Slice.Offset, tainted) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprHasCommandSubstitution(node.Slice.Length) {
+				return true
+			}
+			if node.Slice.Length != nil && arithmeticExprReferencesTaintedVar(node.Slice.Length, tainted) {
+				return true
+			}
+		}
 		return node.Param != nil && node.Exp != nil &&
 			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) &&
 			accountEnvironmentNameDenied(node.Param.Value, names)
@@ -55,6 +122,79 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 		return arithmeticAssignmentMutatesAccountEnvironment(node, names)
 	case *syntax.UnaryArithm:
 		return arithmeticIncrementMutatesAccountEnvironment(node, names)
+	case *syntax.ArithmCmd:
+		// `(( expr ))`. A command substitution inside the arithmetic is
+		// re-evaluated as fresh arithmetic by bash and can assign a denied name
+		// via its output; the literal assignment form is still caught by the
+		// BinaryArithm/UnaryArithm arms below once this returns false.
+		// A variable reference to a tainted var (one assigned from a command
+		// substitution earlier in the same command) is equally unprovable: bash
+		// re-evaluates the variable's value as arithmetic, so the prior
+		// substitution's stdout becomes a deferred arithmetic mutation.
+		if arithmeticExprHasCommandSubstitution(node.X) {
+			return true
+		}
+		return arithmeticExprReferencesTaintedVar(node.X, tainted)
+	case *syntax.ArithmExp:
+		// `$(( expr ))`. Same re-evaluation hazard as `(( ))`; appears inside a
+		// word (e.g. `echo $(( ... ))` or `x=$(( ... ))`), and the literal
+		// assignment form is still caught by the arithm arms below.
+		if arithmeticExprHasCommandSubstitution(node.X) {
+			return true
+		}
+		return arithmeticExprReferencesTaintedVar(node.X, tainted)
+	case *syntax.LetClause:
+		// A bash `let` clause parsed as a builtin (the POSIX parse keeps `let` as
+		// a CallExpr and is handled by letMutatesAccountEnvironment). The
+		// command-substitution hazard is the same; returning false lets the walk
+		// descend so a literal assignment (BinaryArithm/UnaryArithm) is still
+		// caught.
+		for _, expr := range node.Exprs {
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
+	case *syntax.BinaryTest:
+		// Numeric comparison operators in `[[ ]]` (-eq, -ne, -lt, -gt, -le,
+		// -ge) cause bash to evaluate both operands as arithmetic. A command
+		// substitution in either operand is re-evaluated as fresh arithmetic by
+		// bash and can assign a denied name via its output, e.g.
+		// `[[ 0 -eq $(printf CODEX_HOME=1) ]]`. A tainted variable in either
+		// operand is the deferred form of the same bypass. Fail closed on either.
+		switch node.Op {
+		case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+			if wordHasCommandSubstitution(node.X) || wordHasCommandSubstitution(node.Y) {
+				return true
+			}
+			if wordReferencesTaintedVar(node.X, tainted) || wordReferencesTaintedVar(node.Y, tainted) {
+				return true
+			}
+		}
+		return false
+	case *syntax.CStyleLoop:
+		// C-style `for (( init; cond; post ))`. All three clauses are
+		// evaluated as arithmetic by bash; the same command-substitution and
+		// tainted-variable hazards apply. Fail closed on either. Returning
+		// true here prevents the walk from descending into Init/Cond/Post a
+		// second time; the BinaryArithm/UnaryArithm arms below still catch
+		// literal assignments when the loop is safe (no substitution, no
+		// tainted variable).
+		for _, expr := range []syntax.ArithmExpr{node.Init, node.Cond, node.Post} {
+			if expr == nil {
+				continue
+			}
+			if arithmeticExprHasCommandSubstitution(expr) {
+				return true
+			}
+			if arithmeticExprReferencesTaintedVar(expr, tainted) {
+				return true
+			}
+		}
+		return false
 	case *syntax.UnaryTest:
 		return unaryTestMutatesAccountEnvironment(node)
 	default:
@@ -116,7 +256,7 @@ func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
 	return literalShellWord(word)
 }
 
-func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}, tainted map[string]struct{}) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -130,10 +270,10 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
-	return unwrappedAccountCommandMutates(words, names, memo)
+	return unwrappedAccountCommandMutates(words, names, tainted, memo)
 }
 
-func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
+func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}, tainted map[string]struct{}, memo operandTailMemo) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -157,7 +297,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	case isBareName(words[0], "printf"):
 		return printfMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "let"):
-		return letMutatesAccountEnvironment(words[1:], names)
+		return letMutatesAccountEnvironment(words[1:], names, tainted)
 	case isBareName(words[0], "mapfile"), isBareName(words[0], "readarray"):
 		return arrayReadMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "wait"):
@@ -248,7 +388,7 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}, memo 
 			}
 		case isAccountCommandName(words[0], "setsid"):
 			var unsafe bool
-			words, unsafe = unwrapSetsid(words[1:])
+			words, unsafe = unwrapSetsid(words[1:], names, memo)
 			if unsafe {
 				return nil, true
 			}
@@ -502,7 +642,9 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 		if len(commandWords) == 0 {
 			return false
 		}
-		return unwrappedAccountCommandMutates(commandWords, names, memo)
+		// envCallMutatesAccountEnvironment has no access to tainted; the taint
+		// check is applied at the arithmetic-node level by nodeMutatesAccountEnvironment.
+		return unwrappedAccountCommandMutates(commandWords, names, nil, memo)
 	}
 	return false
 }
@@ -592,131 +734,6 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 		}
 	}
 	return false
-}
-
-// setMutatesAccountEnvironment reports whether a `set` call switches the shell
-// into keyword mode, where an assignment-shaped word written AFTER a command
-// name is placed in that command's environment instead of staying an argument.
-//
-// This walk reads every later call under DEFAULT parsing rules, so the mode is
-// not a mutation of its own — it silently invalidates every verdict that
-// follows it. Under `set -k`, `codex CODEX_HOME=/other` is not the two-word
-// call this walk sees: bash removes the assignment from codex's arguments and
-// launches it with the replacement root. Refusing the switch is what keeps the
-// rest of the walk meaningful; tracking the mode across calls instead would
-// have to model the shell's own state machine.
-//
-// Deliberately narrow: a process tab runs an arbitrary user command, and an
-// ordinary `set -e` prologue must keep working. Only keyword mode is refused.
-//
-// Option arity modelled by this scanner:
-//
-//	-o / +o   conditional arity — consumes the next word as a mode name ONLY
-//	          when that word does not start with `-` or `+`. Real mode names
-//	          (pipefail, noclobber, keyword, …) never start with either; when
-//	          the next word does start with one it is another option that the
-//	          scan must keep examining. This applies to both the standalone
-//	          `-o` word and to `o` embedded in a minus-prefixed cluster.
-//	          These are the only conditional-arity options; all others have
-//	          fixed arity (zero).
-//
-// Keyword-mode tracking: bash processes options left to right; a later `-k`
-// overrides an earlier `+k` and vice versa. The scanner tracks the running
-// state rather than returning on the first `-k`, so a sequence like
-// `set -k +k` is correctly seen as leaving keyword mode off.
-func setMutatesAccountEnvironment(words []*syntax.Word) bool {
-	keywordMode := false
-	for idx := 0; idx < len(words); idx++ {
-		value, literal := literalShellWord(words[idx])
-		if !literal {
-			// An operand this parser cannot evaluate could expand to -k.
-			return true
-		}
-		// `--` and the first non-option operand both end option parsing: every
-		// word after one is a positional parameter, so `set -- -k` assigns the
-		// string "-k" to $1 and enables nothing. A lone `-` is also a bash
-		// option terminator ("assign any remaining arguments to the positional
-		// parameters"); `set +e - -k` assigns "-k" to $1 and does NOT enable
-		// keyword mode. A `+` prefix is a turn-OFF flag in bash, not a
-		// non-option operand, so it does NOT end the scan: `set +e -k` still
-		// enables keyword mode and must be caught by the loop below.
-		if value == "--" || value == "-" || (!strings.HasPrefix(value, "-") && !strings.HasPrefix(value, "+")) {
-			return keywordMode
-		}
-		// A long-form switch names its mode in the next word.
-		//
-		// `-o` has conditional arity: it consumes the following word as a mode
-		// name ONLY when that word does not start with `-` or `+`. A real mode
-		// name (pipefail, noclobber, keyword, …) never starts with either; a
-		// word that does start with one is another option that the scan must
-		// continue examining. When the next word is another option, `-o` behaves
-		// as bare `-o` (prints current settings) and the shell processes the
-		// following option normally — so `set +e -o -k` does enable keyword mode
-		// via the `-k` that the `-o` branch must NOT swallow.
-		if value == "-o" || value == "+o" {
-			if idx+1 >= len(words) {
-				// A bare `set -o` prints the current settings.
-				continue
-			}
-			mode, ok := literalShellWord(words[idx+1])
-			if !ok {
-				return true
-			}
-			// Only treat the next word as the mode name when it cannot itself
-			// be an option token. Mode names (pipefail, noclobber, …) never
-			// start with `-` or `+`; a word that does start with one is an
-			// option that must be examined on the next iteration.
-			if strings.HasPrefix(mode, "-") || strings.HasPrefix(mode, "+") {
-				continue
-			}
-			if mode == "keyword" {
-				keywordMode = value == "-o"
-			}
-			idx++
-			continue
-		}
-		// Short options cluster, so a guard matching only a lone "-k" walks
-		// straight past "-ek" (the #3402 lesson). Track the running state
-		// rather than returning immediately, so a later `+k` can cancel an
-		// earlier `-k` (bash processes options left to right and the last
-		// setting wins: `set -k +k` leaves keyword mode off).
-		//
-		// When a minus-prefixed cluster contains `o`, it has the same
-		// conditional arity as the standalone `-o`: if the following word does
-		// not start with `-` or `+`, that word is the mode name (and is consumed
-		// by advancing idx). A plus-prefixed cluster containing `o` (`+eo`)
-		// behaves as `+o` and turns the named mode OFF.
-		prefix := value[0]
-		tail := value[1:]
-		if strings.ContainsRune(tail, 'o') {
-			if idx+1 >= len(words) {
-				// No following word: bare cluster with `o`, prints settings.
-			} else {
-				mode, ok := literalShellWord(words[idx+1])
-				if !ok {
-					return true
-				}
-				if !strings.HasPrefix(mode, "-") && !strings.HasPrefix(mode, "+") {
-					// The following word is a mode name; consume it.
-					if mode == "keyword" {
-						keywordMode = prefix == '-'
-					}
-					idx++
-					// Fall through to the `k` check: the cluster may contain `k`
-					// in addition to `o` (e.g. `-ko pipefail`), and bash applies
-					// all cluster characters — those before `o` and those after `o`
-					// when the consumed name is valid. Skipping the check here
-					// would miss a `k` in the same cluster.
-				}
-				// The following word is another option (or we just consumed the
-				// mode name); fall through to the `k` check below.
-			}
-		}
-		if strings.ContainsRune(tail, 'k') {
-			keywordMode = prefix == '-'
-		}
-	}
-	return keywordMode
 }
 
 // hashMutatesAccountEnvironment reports whether a `hash` call remaps a command

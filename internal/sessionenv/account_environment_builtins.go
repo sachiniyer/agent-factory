@@ -56,7 +56,7 @@ func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]st
 	if len(tail) == 0 {
 		return false
 	}
-	return unwrappedAccountCommandMutates(tail, names, memo)
+	return unwrappedAccountCommandMutates(tail, names, nil, memo)
 }
 
 // shadowedTailOperandLimit bounds a childless tail. The real binaries take a
@@ -200,7 +200,7 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 	return nil, false
 }
 
-func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
@@ -210,7 +210,10 @@ func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 		case "--":
 			return words[1:], false
 		case "-h", "--help", "-V", "--version":
-			return nil, false
+			if shadowedOperandTailMutates(words[1:], names, memo) {
+				return nil, true
+			}
+			return words[1:], false
 		case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 			words = words[1:]
 		default:
@@ -239,7 +242,10 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case option == "--":
 			return words[1:], false
 		case option == "--help" || option == "--version":
-			return nil, false
+			if shadowedOperandTailMutates(words[1:], names, memo) {
+				return nil, true
+			}
+			return words[1:], false
 		case option == "-i" || option == "--input" ||
 			option == "-o" || option == "--output" ||
 			option == "-e" || option == "--error":
@@ -685,7 +691,10 @@ options:
 			name, value, attached := strings.Cut(option[2:], "=")
 			switch name {
 			case "help", "version":
-				return nil, false
+				if shadowedOperandTailMutates(words[1:], names, memo) {
+					return nil, true
+				}
+				return words[1:], false
 			case "null", "interactive", "no-run-if-empty", "open-tty", "verbose", "exit", "show-limits":
 				if attached {
 					return nil, true
@@ -904,7 +913,7 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 	return false
 }
 
-func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}, tainted map[string]struct{}) bool {
 	for _, word := range words {
 		expression, literal := literalShellWord(word)
 		if !literal || accountSubscriptInArithmetic(expression, names) {
@@ -914,9 +923,27 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		if err != nil {
 			return true
 		}
+		// A command substitution (`$(...)` or backticks) inside a literal `let`
+		// argument is unprovable: bash re-evaluates the substitution's stdout as
+		// FRESH arithmetic before using it, so `arr[$(echo CODEX_HOME=1)]` runs
+		// `echo CODEX_HOME=1`, splices `CODEX_HOME=1` back into the expression,
+		// and evaluates it as an arithmetic assignment to a denied name. The
+		// walk below judges the inner `echo` as inert data and never models that
+		// re-evaluation; accountSubscriptInArithmetic only finds a literal
+		// `name[`. Fail closed on any substitution the parser can see.
+		if arithmeticExprHasCommandSubstitution(parsed) {
+			return true
+		}
+		// A variable that was assigned from a command substitution earlier in the
+		// same command is equally unprovable when referenced in arithmetic: bash
+		// re-evaluates the variable's value as fresh arithmetic, so its prior
+		// substitution output becomes a deferred arithmetic mutation.
+		if arithmeticExprReferencesTaintedVar(parsed, tainted) {
+			return true
+		}
 		mutates := false
 		syntax.Walk(parsed, func(node syntax.Node) bool {
-			if nodeMutatesAccountEnvironment(node, names) {
+			if nodeMutatesAccountEnvironment(node, names, tainted) {
 				mutates = true
 				return false
 			}
@@ -925,67 +952,6 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		if mutates {
 			return true
 		}
-	}
-	return false
-}
-
-func accountSubscriptInArithmetic(expression string, names map[string]struct{}) bool {
-	for name := range names {
-		for offset := 0; offset < len(expression); {
-			index := strings.Index(expression[offset:], name+"[")
-			if index < 0 {
-				break
-			}
-			index += offset
-			if index == 0 || !isShellNameByte(expression[index-1]) {
-				return true
-			}
-			offset = index + len(name)
-		}
-	}
-	return false
-}
-
-func isShellNameByte(value byte) bool {
-	return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
-}
-
-func arrayReadMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	options := true
-	for len(words) > 0 {
-		value, literal := literalShellWord(words[0])
-		if !literal {
-			return true
-		}
-		words = words[1:]
-		if options {
-			switch value {
-			case "--":
-				options = false
-				continue
-			case "-t":
-				continue
-			case "-d":
-				if len(words) == 0 {
-					return true
-				}
-				if _, literal := literalShellWord(words[0]); !literal {
-					return true
-				}
-				words = words[1:]
-				continue
-			}
-			if strings.HasPrefix(value, "-") {
-				// The remaining options accept arithmetic expressions or callbacks.
-				// Either can assign an identity indirectly, so unsupported option
-				// forms fail closed.
-				return true
-			}
-		}
-		if len(words) != 0 {
-			return true
-		}
-		return accountEnvironmentOperandDenied(value, names)
 	}
 	return false
 }

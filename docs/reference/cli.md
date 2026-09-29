@@ -1264,12 +1264,13 @@ accumulate silently on a machine running agent-factory:
     os.Remove rather than a recursive delete, so a directory that has gained
     anything since the scan fails instead of being swept up with it
   - directories af's own test harness left under the temp dir when a test run
-    ended before its cleanup (af-test-home-*, af-tmux-pkg-*, af-tmux-*). --fix
-    removes one only when it holds nothing but that run's log or tmux sockets
-    nobody answers on, has not changed for a week, and no live process has a
-    file open in it, names it, or works inside it — entry by entry with
-    os.Remove, never a recursive delete. Anything else in one is reported, and a
-    tmux server still answering in one is named rather than stopped
+    ended before its cleanup (af-test-home-*, af-test-user-home-*,
+    af-tmux-pkg-*, af-tmux-*, ...). --fix removes one only when it holds
+    nothing but that run's leftover harness content, has not changed for a
+    week, and no live process has a file open in it, names it, or works
+    inside it — entry by entry with os.Remove, never a recursive delete.
+    Anything else in one is reported, and a tmux server still answering in
+    one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -1518,6 +1519,11 @@ Rebind a stable project id to a new checkout path.
 
 The project id is preserved. Rebinding refuses to take a path already owned by
 another registered project.
+
+The path may be relative (including '.'), absolute, or start with ~. A relative
+path or '~' is resolved against YOUR shell's working directory before the
+request is sent — the daemon, which owns the registry write, then resolves the
+checkout it lands on.
 
 ```
 af projects rebind <project-id> <path>
@@ -1838,20 +1844,41 @@ agent and stored prompt, or combine both flags to change agent and account.
 A manual handoff moves an explicit account pin; automatic rotation still
 respects it. Targets with current usage-limit evidence are refused.
 
+An account belongs to one agent, so a scoped session that changes agents
+must name the incoming agent's account with --account — unless the target
+has no account support at all, which drops the scope instead and reports
+it on from_account. What decides capability is the command the target
+resolves to, not the enum: program_overrides can make aider launch codex
+(a codex account is then required) or codex launch something unscopable
+(the scope is dropped). A resolved command af cannot classify as an agent
+at all — a wrapper like "npx codex" may launch an account-capable agent
+underneath — refuses rather than drop the pin on an unproven answer. The
+drop is one-way: handing back to an account-capable agent later does not
+restore it, so name the account again with --account. Dropping the scope
+restarts only the agent pane, so a session with shell, process, or VS Code
+sibling tabs is refused until those tabs are closed — they would keep
+running under the dropped account's environment.
+
 The session keeps its identity, its git worktree, and its branch — only the
-agent process changes. The incoming agent starts a fresh conversation and is
+agent process changes. A different agent starts a fresh conversation and is
 given a mission brief: the session's goal, and what is already on the branch.
+
+A same-agent account handoff (--account alone, or --to naming the current
+agent) keeps the conversation for claude and codex: af copies the transcript
+into the new account's home and resumes it. If that copy cannot be made, the
+new account starts a fresh conversation, and its brief says why.
 
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
 docs/usage-limits.md for the waiting path).
 
-Agent conversations are not portable between providers: the incoming agent
-cannot read what its predecessor was thinking, only the working tree and the git
-history. The brief points it at both. Because of that, a handoff is recorded —
-the swap and the branch tip at the moment it happened — so a reviewer reading
-the resulting diff can tell which agent wrote which part.
+Agent conversations are not portable between providers: after a cross-agent
+handoff the incoming agent cannot read what its predecessor was thinking, only
+the working tree and the git history. The brief points it at both. Because of
+that, a handoff is recorded — the swap and the branch tip at the moment it
+happened — so a reviewer reading the resulting diff can tell which agent wrote
+which part.
 
 Local-worktree sessions only: swapping the agent inside a remote/docker/ssh
 sandbox is a different lifecycle and is not supported yet.
@@ -2058,16 +2085,28 @@ clears the limit state after delivery succeeds.
 
 Before retrying an unconfirmed handoff, inspect its pane: the first submission
 may already have landed, and this command is the operator's explicit decision to
-send the pending mission again. The command fails when neither recovery
-obligation exists. Use 'af sessions list' to find sessions carrying the [limit]
-badge; the TUI and web expose Retry handoff for an unconfirmed handoff.
+send the pending mission again. When the pane shows the incoming agent ALREADY
+acting on its mission, use --delivered instead: it retires the pending
+obligation and clears the leftover operation/startup flags WITHOUT sending the
+mission a second time.
+
+The command fails when neither recovery obligation exists. Use 'af sessions
+list' to find sessions carrying the [limit] badge; the TUI and web expose
+Retry handoff and Mark delivered for an unconfirmed handoff.
 
 Example:
   af sessions retry-limit fix-auth
+  af sessions retry-limit fix-auth --delivered
 
 ```
-af sessions retry-limit <title>
+af sessions retry-limit <title> [flags]
 ```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--delivered` |  | Mark the pending handoff mission as delivered and retire it WITHOUT resending — use after inspecting the pane and confirming the incoming agent already received it |
 
 **Global flags**
 
@@ -2142,7 +2181,19 @@ canonical kind and name, while "Terminal" is only the label those UIs display.
 
 Process tab (default): runs --command in the session's git worktree (e.g. a data
 explorer TUI or a test watcher). If --name is omitted, a name is derived from the
-command's basename.
+command's basename. The command runs once, at creation, and af never runs it
+again. If it exits non-zero immediately (a mistyped command, for example),
+tab-create fails with the exit status and the command's last output, and no tab
+is added. Across a daemon/af restart, af reattaches to the pane: a running
+command keeps running, and a finished one keeps its output and records its exit
+status in the tab's "exit" field. A process tab whose tmux session is gone
+entirely restores inert.
+
+In an account-scoped session, af stops a running process tab it did not start
+under the session's account, once, at restart; an account swap stops every
+running process tab. Neither runs the command again, and the tab's exit.stopped_by
+says why ("account-scope" or "account-swap"). A finished process tab with nothing
+left running is kept as it is.
 
 Web tab (--kind web): a URL/iframe tab with NO process — an agent injects a live
 browser view into the user's screen. Point it at a local dev server with --port
@@ -2152,7 +2203,9 @@ preview works even when the web UI is viewed remotely (Tailscale/SSH); an extern
 URL is iframed directly (best-effort — many sites block embedding). The web tab
 renders as an iframe in the web UI and as a placeholder in the TUI.
 
-The tab persists and reconnects across a daemon/af restart like every other tab.
+The tab persists and reconnects across a daemon/af restart like every other
+tab — for a process tab "reconnect" means reattach-only, never re-running the
+command (see above).
 
 --name sets a process, web, or VS Code tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is

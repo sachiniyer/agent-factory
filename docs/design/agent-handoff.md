@@ -255,6 +255,42 @@ agent onto someone's branch with no instructions. In the prompted path the user
 can supply the brief inline (`--brief`), which is strictly better information
 than anything af could synthesize.
 
+### 3.4 Addendum (#4367): the same-agent account boundary copies the transcript
+
+D2's "never transcript" rule is about **providers**: claude cannot read a codex
+rollout. A same-agent **account** handoff crosses a different boundary. The
+format stays the same, and only the provider home changes: each account
+relocates `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, so the new account starts with
+none of the old account's history. There, af deliberately copies the
+provider's own conversation file:
+
+| Provider | What is copied, relative to both homes | Replacement launch |
+|---|---|---|
+| claude | `projects/<project>/<id>.jsonl`, plus the `<id>/` per-session directory when possible | `claude --resume <id>` |
+| codex | `sessions/YYYY/MM/DD/rollout-…-<id>.jsonl` | `codex resume <id>` |
+
+Both were measured to resume under the other account's real credentials, and
+both keep the same id and append to the same file. Both CLIs fail loudly when
+the id is missing, so a failed copy never turns into a silent fresh session.
+The copy runs after the outgoing runtime stops, because transcripts are
+appended while the agent runs, and before the identity checkpoint. It only
+adds to the new account's home, never changes the previous account's, and
+never touches a credential file. Symlinks are never followed below either
+home. Both formats are append-only, so the copy always keeps the longer
+version when one is a prefix of the other, and refuses when neither is.
+
+If the copy cannot be made, the replacement starts fresh, and the brief says
+that af tried to carry the conversation and why it could not. The same fallback
+applies when the recorded id is no longer the newest conversation in the
+worktree (after `/clear` or `/new`), and when a replacement already launched on
+the carried id had to be launched again. The copy stays in the new account's
+home, where the provider replays it under that account. A cross-agent
+handoff never copies anything, and gemini, which records no conversation id,
+keeps the fresh start with a brief. The pending swap record stores the carried
+id separately from a freshly injected one (`carried_conversation_id` beside
+`conversation_id`). A daemon restart therefore plans a resume plus an
+idempotent re-copy, rather than injecting the carried id as a new session.
+
 ---
 
 ## 4. D3 — Session identity  ⚠️ LOAD-BEARING
@@ -366,6 +402,87 @@ make the error tidier would strand the record.
 The worktree is never cleaned up on failure, unlike the first-launch path this
 otherwise mirrors: on a create, a failed start means the workspace holds nothing
 worth keeping; here it holds everything the outgoing agent did.
+
+### 4.6 Mission delivery is a verdict, not a bool (#4429)
+
+The §4.5 failure paragraph says a failed delivery leaves the swap standing — but
+"failed" was doing too much work. Prompt submission has **three** honest
+outcomes, and `daemon/handoff_delivery.go` records the attempt's verdict
+durably as `pending_handoff_delivery_status`. Before the composer is touched,
+and only once readiness has proved the incoming runtime, it writes
+`could-not-confirm` as an attempt marker, so a crash mid-submit can never
+reload permission to send again. A crash inside the readiness wait reloads
+the verdict that admitted the attempt instead:
+
+| Verdict | Meaning | Who resolves it |
+|---|---|---|
+| `PromptDelivered` | submission confirmed | settles itself |
+| `PromptNotDelivered` | positive, mission-scoped evidence the prompt never landed (e.g. composer still held it) | **automatic** retry — the only verdict the recovery loop may resend |
+| `PromptSentUnverified` / `PromptCouldNotConfirm` | the paste may have landed; submit could not be confirmed | **the operator**, explicitly |
+
+`sent-unverified` is not an error to retry or a failure to tear down — it is an
+ambiguity, and the two branches of the ambiguity need opposite responses:
+resend if the mission is sitting in the composer, stand down if it is already
+executing. Collapsing it into failure double-delivers; collapsing it into
+success strands a mission that never landed. So the exact rendered mission
+stays pinned in `pending_handoff_mission` until a positive verdict or an
+operator decision retires it. The same treatment covers the manual
+account-swap mission, which has the identical wedge shape.
+
+**The replacement fence settles on liveness, not on the send.** `OpReplacing`
+exists to stop a half-completed swap being treated as complete. Once the
+incoming runtime is proven live and answering, the swap *is* complete — the
+unresolved question is whether its first prompt landed, which is a property of
+the mission record, not of the swap. So an ambiguous verdict commits the fence
+while the mission stays pending, and a crash-restart no longer reconstructs it:
+`session/instance_data.go` rebuilds `OpReplacing` only for
+`PromptNotDelivered` (automatic retry owns the row) and `PromptDelivered` (the
+recovery loop retires the mission without a resend). That recovery settle
+keeps a Lost or Dead row's liveness: it drops the fence without claiming a
+runtime that restore still owns. `startup_state_unknown` clears the same way: through an operation
+that actually confirmed the runtime, not through the passage of time. This is
+what un-wedges the #4429 state: the row stops being inert the moment the
+runtime answers, with the pending mission still advertised and resolvable.
+
+**The exit is a verb, and it has two halves.** After inspecting the pane:
+
+- **Resend** — `af sessions retry-limit <title>`, the TUI `c` key, the web
+  Retry action. Retries the pending mission in place, with the send path's
+  readiness wait as the gate. A positive observation after submit can upgrade
+  the ambiguous verdict to delivered. On a `startup_state_unknown` row the
+  daemon probes the pane first: the flag lowered the row's `started` bit, and
+  the local backend neither captures nor sends without it. A pane that answers
+  gets its binding back before readiness runs; one that does not answer
+  refuses the retry and leaves the row untouched.
+- **Mark delivered** — `af sessions retry-limit <title> --delivered`, the
+  picker's second choice under `c`, the web **Mark delivered** action. The
+  operator attests the mission already landed; the daemon probes that a
+  runtime answers at the binding (a dead or lost row is refused — restore owns
+  those), then clears the mission and settles the leftover state **without
+  sending anything**.
+
+**What the settled fence stopped carrying.** `OpReplacing` was doing two jobs
+beyond the swap itself, and settling it on liveness dropped both, so they are
+now carried by the obligation they are actually about (#4528):
+
+- An idle incoming pane is not a finished task run while its mission is owed.
+  That edge is what hands a task session to its `on_complete` policy, so the
+  run marker now stays set until the mission is resolved — otherwise an
+  unresolved handoff could be archived or killed by policy. The held edge is
+  recorded durably (`task_run_idle_edge_held`), because Mark delivered leaves
+  the pane exactly as idle as it was and no fresh edge would ever arrive: the
+  first idle poll after the mission is retired ends the run in its place. A
+  resend drops the held edge instead — the resent turn ends the run on its own
+  idle edge.
+- A second handoff may not start while the first one's mission is unresolved.
+  `SetPendingHandoffMission` would overwrite the mission and its verdict, and
+  nothing else records that obligation, so `ValidateRuntimeAction` refuses the
+  handoff and names the verbs that resolve it.
+
+The attest-without-resend half is a separate RPC (`ConfirmHandoffDelivery`)
+rather than a flag on `ResumeFromLimit` on purpose: a daemon that predates the
+verb must refuse loudly, where a flag it ignored would silently resend the very
+prompt that may already be executing.
 
 ## 5. Agent matrix
 

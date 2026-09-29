@@ -3,6 +3,7 @@ package commands
 import (
 	"os"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/doctor"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/spf13/cobra"
@@ -15,6 +16,12 @@ var doctorVerboseFlag bool
 // doctorJSONFlag switches `af doctor` from the human report to the shared
 // {data,error} envelope, matching `af config`/`af token`'s --json.
 var doctorJSONFlag bool
+
+// doctorRun is the seam over doctor.Run so a test can drive doctorCmd.RunE
+// with a canned report instead of the real tmux/daemon/process sweep doctor.Run
+// performs (which is not hermetic from the commands package). Mirrors the
+// runLaunchApp seam in root.go.
+var doctorRun = doctor.Run
 
 // doctorCmd is `af doctor` (#1044, #1104): detect orphaned session
 // processes, runaway CPU children, leaked af_ tmux sessions, stale temp
@@ -56,12 +63,13 @@ accumulate silently on a machine running agent-factory:
     os.Remove rather than a recursive delete, so a directory that has gained
     anything since the scan fails instead of being swept up with it
   - directories af's own test harness left under the temp dir when a test run
-    ended before its cleanup (af-test-home-*, af-tmux-pkg-*, af-tmux-*). --fix
-    removes one only when it holds nothing but that run's log or tmux sockets
-    nobody answers on, has not changed for a week, and no live process has a
-    file open in it, names it, or works inside it — entry by entry with
-    os.Remove, never a recursive delete. Anything else in one is reported, and a
-    tmux server still answering in one is named rather than stopped
+    ended before its cleanup (af-test-home-*, af-test-user-home-*,
+    af-tmux-pkg-*, af-tmux-*, ...). --fix removes one only when it holds
+    nothing but that run's leftover harness content, has not changed for a
+    week, and no live process has a file open in it, names it, or works
+    inside it — entry by entry with os.Remove, never a recursive delete.
+    Anything else in one is reported, and a tmux server still answering in
+    one is named rather than stopped
   - daemon health: control socket, autostart unit, pid file, binary freshness
   - client/daemon version skew, and the ways a stale daemon survives an
     upgrade: a second daemon on this home, an autostart unit launching a
@@ -126,14 +134,17 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		// Doctor reports config warnings as findings; echoing them on stderr
+		// too would say everything twice (#4599).
+		config.SetInteractiveWarningWriter(nil)
 
-		report, err := doctor.Run(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
+		report, err := doctorRun(doctor.Options{Fix: doctorFixFlag, Setup: doctorSetupFlag, Version: version})
 		if err != nil {
 			return jsonWrapError(cmd, doctorJSONFlag, err)
 		}
 		if doctorJSONFlag {
 			if err := doctor.RenderJSON(cmd.OutOrStdout(), report, doctorFixFlag, doctorVerboseFlag); err != nil {
-				return err
+				return jsonWrapError(cmd, doctorJSONFlag, err)
 			}
 		} else {
 			doctor.Render(os.Stdout, report, doctorFixFlag, doctorVerboseFlag)
@@ -143,6 +154,21 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 			// printing a redundant error line.
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
+			// os.Exit does not run the deferred log.Close() above
+			// (https://pkg.go.dev/os#Exit), so the plain-mode "wrote logs
+			// to <path>" hint that log.Close prints when the run recorded a
+			// WARNING/ERROR (dirty=true, log/log.go:564) would be lost on
+			// this path — an operator who gets exit 1 and empty stderr has
+			// no in-band pointer to the log file the report did not
+			// surface. Close mode-aware before exiting: log.Close() surfaces
+			// the hint for a human reader; in --json stderr must stay
+			// machine-parseable, so log.CloseQuiet suppresses it (mirroring
+			// jsonWrapError). stdout and the exit code are unchanged.
+			if doctorJSONFlag {
+				log.CloseQuiet()
+			} else {
+				log.Close()
+			}
 			os.Exit(code)
 		}
 		return nil

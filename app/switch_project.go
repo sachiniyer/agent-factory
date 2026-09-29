@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
@@ -28,6 +29,16 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	projects, registryDegraded := m.buildProjectList()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
+	if isRemoteTarget() {
+		// The picker's registry rows come from the LOCAL config.ListProjects
+		// and its path input resolves on THIS filesystem, but a rebind would
+		// land on the REMOTE daemon's registry — where the prj_ id likely
+		// does not exist, or worse, names a different record. Observation and
+		// mutation must come from the same daemon (#3626's rule); until the
+		// switcher reads the remote registry too, rebind stays local-only and
+		// the remote repair is `af projects rebind` on the daemon host.
+		m.projectPickerOverlay.SetRebindDenied("local registry — `af projects rebind` on daemon host")
+	}
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject
@@ -196,6 +207,13 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 	// so a registered project on a stalled or missing checkout keeps its own
 	// row instead of vanishing or borrowing an ancestor's.
 	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	// registryRecordByRow maps each registry record to the row id the union
+	// below assigns it — the resolved repo id when Git proves the recorded
+	// root, else the reconciled recorded identity (the same split the union
+	// makes). It is what lets a row carry the record's prj_… id — what `b`
+	// rebinds — and its path_exists flag, so the picker can offer rebind only
+	// where there is a registration to move and flag a checkout that is gone.
+	registryRecordByRow := make(map[string]config.Project, len(registeredProjects))
 	// recordedIdentities remembers which identity each registry row lent to a
 	// path, so the root_agents union below can ask rather than re-hash.
 	recordedIdentities := make(map[string]string, len(registeredProjects))
@@ -236,6 +254,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		// path registration resolved (#2110's rule — macOS `/var` ->
 		// `/private/var` makes the two unequal every time).
 		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
+		registryRecordByRow[resolved.id] = project
 		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
@@ -303,6 +322,13 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		}
 		return projects[i].Root < projects[j].Root
 	})
+	for i := range projects {
+		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
+			projects[i].RegistryID = rec.ID
+			projects[i].RegistryRoot = rec.Root
+			projects[i].MissingPath = !rec.PathExists
+		}
+	}
 	return projects, registryDegraded, probeBudgets
 }
 
@@ -369,6 +395,13 @@ func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
 // consumes its outcomes: an add request (validate + register + switch), a chosen
 // existing project (switch), or a cancel (close).
 func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A pending rebind makes the picker's form consume every key so nothing can
+	// race a second mutation — which would include the always-on Ctrl+C hard
+	// exit, leaving a TUI whose daemon call has stalled impossible to quit.
+	// Quitting is safe mid-flight: the daemon owns the write, not this process.
+	if msg.String() == "ctrl+c" && m.projectPickerOverlay.RebindPending() {
+		return m.handleQuit()
+	}
 	if msg.String() == "D" {
 		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
 			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
@@ -386,6 +419,12 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// registered and switched to.
 	if path, ok := m.projectPickerOverlay.TakeAddRequest(); ok {
 		return m.handleAddProject(path)
+	}
+
+	// Rebind submit: the overlay stays open while the daemon answers so a
+	// rejection is corrected inline, mirroring the add flow's error handling.
+	if req, ok := m.projectPickerOverlay.TakeRebindRequest(); ok {
+		return m.handleRebindProject(req)
 	}
 
 	if !shouldClose {
@@ -459,6 +498,16 @@ func (m *home) addProjectCmd(root string) tea.Cmd {
 // as a warning rather than an error box, matching the pre-#2456 best-effort write.
 func (m *home) handleProjectAdded(msg projectAddedMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
+		// A registration that may have landed is re-read rather than assumed
+		// either way (#4824): the Projects section shows it if the daemon
+		// recorded it, and the message says the outcome is unknown instead of
+		// staying silent the way a definite failure does.
+		if mutationMayHaveLanded(msg.err) {
+			log.WarningLog.Printf("project %s registration outcome unknown: %v", msg.root, msg.err)
+			m.refreshSidebarProjects()
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("adding project %s", msg.root), "the projects list", msg.err))
+		}
 		log.WarningLog.Printf("failed to register project %s in the registry: %v", msg.root, msg.err)
 		return m, nil
 	}
@@ -586,9 +635,33 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 // separate attached TUI reflects it on its next launch, matching how every other
 // daemon-side config and registry write is picked up) and refreshes the Projects
 // section so the now-empty project leaves the list immediately.
+//
+// When the deleted project was the active one, it ALSO tears the running TUI out
+// of that scope and drops it into registry mode. The daemon has just archived
+// every live session of m.repoID and removed the registry entry; without a
+// re-scope the TUI stays pinned to the deleted identity — open panes keep
+// rendering against a stale m.repoID whose tmux the archive step already tore
+// down, and refreshSidebarProjects re-derives the deleted project as an
+// Active row with SessionCount 0 via the unconditional active-root pre-seed in
+// buildProjectListFromCounted. Mirroring switchProject's teardown (close panes,
+// reset the projection, clear m.repoID/m.repoRoot, reset the sidebar project
+// name, drop the per-project hooks/program/tasks) lets the TUI fall cleanly
+// into the NoRegisteredProjectWorkspace / empty-rail state a fresh launch
+// outside a repo would see; switchProject is the only other writer to those
+// fields, so a re-scope here is the symmetric recovery for an in-session
+// action that removed the active identity from under the TUI.
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
+		// The delete may have archived the project's sessions and dropped its
+		// registration with only the reply lost (#4824). The TUI is not
+		// re-scoped on a guess; the Projects section is re-read, and the user
+		// checks it before deleting again.
+		if mutationOutcomeUnknown(msg.err) {
+			m.refreshSidebarProjects()
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("deleting project '%s'", msg.name), "the projects list", msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("failed to delete project '%s': %w", msg.name, msg.err))
 	}
 	if m.appConfig != nil {
@@ -598,7 +671,100 @@ func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) 
 			}
 		}
 	}
+	// Re-scope when the deleted project was the active one. Evaluated before
+	// any scope mutation and captured in rescoped because the teardown below
+	// clears m.repoID, so a second read of `msg.repoID == m.repoID` after it
+	// would silently invert.
+	rescoped := msg.repoID == m.repoID
+	if rescoped {
+		// Persist the OUTGOING project's pane/selection state under its
+		// still-current repoID before any scope field changes, exactly as
+		// switchProject does. writeTUIViewState is a no-op once m.repoID is
+		// empty, so the order is load-bearing.
+		m.flushTUIViewStateBestEffort()
+		// Close every open pane (releasing its live termpane attachment) so no
+		// pane from the deleted project keeps rendering against the stale
+		// scope. The daemon's archive step already tore down the tmux sessions
+		// backing those panes, so the pane windows were dead attachments
+		// regardless — closing their windows matches switchProject and stops
+		// the tab-pane watcher from lingering in its "Session lost" fallback.
+		for _, p := range append([]*store.OpenPane(nil), m.store.OpenPanes()...) {
+			m.closePaneWindow(p)
+		}
+		m.store.ResetInstances()
+		// ResetInstances drops every row but leaves their *session.Instance
+		// pointers behind as keys in m.adoptedSnapshotOps. In an active-project
+		// switch the next snapshot (scoped to the new repoID) calls pruneTo, but
+		// here the re-scope clears m.repoID into registry mode, where
+		// handleSnapshot deliberately skips reconcileSnapshot — the only path
+		// that calls pruneTo (#3005). Prune explicitly so entries for the
+		// deleted project's rows do not pin them in memory indefinitely while
+		// the TUI stays in registry mode.
+		m.adoptedSnapshotOps.pruneTo(m.store.GetInstances())
+		m.initialPaneOpened = false
+		m.hasLastTUIViewState = false
+		m.repoID = ""
+		m.repoRoot = ""
+		m.sidebar.SetProjectName("")
+		// The in-repo config, hooks, and program are scoped to the deleted
+		// project; clear them so nothing from it leaks into the registry-mode
+		// TUI (#1686/#2138). The global default_program is what a project that
+		// expresses no preference — and registry mode — resolve to, exactly
+		// as newHome and switchProject's failure branch set it.
+		m.store.SetHookCount(0)
+		m.hooksPane.SetCommands(nil)
+		if m.appConfig != nil {
+			m.program = m.appConfig.DefaultProgram
+		}
+		// Tasks are per-project and LoadTasksForCurrentRepo needs a cwd repo,
+		// so with no active project the automations strip is empty — not
+		// errored — until a project is selected, matching the empty session
+		// rail. Reset (not Set) so a held edit against the deleted project's
+		// list does not follow the user into registry mode.
+		m.store.SetTasks(nil)
+		sp := m.automations.TaskPane()
+		sp.ResetTasks(nil)
+		// ResetTasks clears the backing list but leaves a held create/edit
+		// form's `creating` and `hasFocus` set; the form captured its editPath
+		// at EnterCreateMode time (from m.repoRoot), so a draft submitted
+		// AFTER the rescope clears m.repoID would persist a task pinned to
+		// the deleted project's path and its scheduler entry could recreate
+		// sessions for it. SetFocus(false) cancels the form (clears creating/
+		// editing/pendingCreate/pendingTrigger), matching the intent the
+		// comment above already claims. The hooks overlay's save target is
+		// m.repoRoot — already empty here — so a held hook add/edit would
+		// either error or land in the wrong place; close it the same way.
+		sp.SetFocus(false)
+		m.hooksPane.SetFocus(false)
+		// State overlays scoped to the deleted project (stateTasks/stateHooks)
+		// keep their overlay rendered against the cleared identity once
+		// m.repoID is empty. Close them so neither the task create form nor
+		// the hooks editor stays pinned to a project the user just removed.
+		if m.state == stateTasks || m.state == stateHooks {
+			m.state = stateDefault
+		}
+	}
 	m.refreshSidebarProjects()
+	if rescoped {
+		// Re-home focus on the tree (the rail is now empty — a focused pane
+		// region just vanished with the closed panes) and re-solve the grid so
+		// the cleared project rows and closed pane regions stop reserving
+		// space. Runs after refreshSidebarProjects so the grid sizes against
+		// the new, scope-cleared project list, matching switchProject's order.
+		m.focusTreeForNav()
+		m.relayout()
+		// The Sessions tree is empty after the rescope, so focus on its rail
+		// leaves `j`/`k` and Enter inert. When other projects remain, land
+		// focus on the Projects section instead — the only directly
+		// actionable region in registry mode — matching newHome's
+		// registry-mode initialization. Ring.Focus refuse to leave the
+		// Projects region hidden (the grid hides it for <=1 row), so this is
+		// a no-op when the section is not visible.
+		if m.projects.HasProjects() {
+			m.ring.Focus(layout.RegionProjects)
+			m.syncFocus()
+		}
+	}
 	success := m.showTransientMessage(deleteProjectResultMessage(msg.name, msg.archived, msg.killed))
 	if committedWarning {
 		return m, tea.Batch(success, m.handleError(msg.err))
@@ -708,10 +874,12 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	if tasks, err := task.LoadTasksForKnownRepo(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
-		m.automations.TaskPane().SetTasks(nil)
+		m.automations.TaskPane().ResetTasks(nil)
 	} else {
 		m.store.SetTasks(tasks)
-		m.automations.TaskPane().SetTasks(tasks)
+		// Reset, not reconcile: an edit held against the outgoing project's
+		// list must not follow the user into this one.
+		m.automations.TaskPane().ResetTasks(tasks)
 	}
 
 	m.restoreTUIViewStateOnLaunch()

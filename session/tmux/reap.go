@@ -95,7 +95,7 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	out, err := outputTmuxBoundedWith(ctx, cmdExec,
-		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", "#{pane_pid}")
+		"list-panes", "-s", "-t", exactTarget(sanitizedName), "-F", paneRowFormat)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, sanitizedName, tmuxCommandTimeout)
@@ -138,10 +138,26 @@ func CaptureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		}
 	}
 	for _, field := range strings.Fields(string(out)) {
-		panePID, err := strconv.Atoi(field)
+		row, err := parsePaneRow(field)
+		panePID := row.pid
 		if err != nil || panePID <= 1 {
 			captureErrs = append(captureErrs, fmt.Errorf("invalid pane pid %q in list-panes output", field))
 			continue
+		}
+		if row.dead {
+			// A held dead pane (#4506 review): its pid may already be reaped, or
+			// reused by another process. See deadPaneProcesses.
+			survivors, asLive, err := deadPaneProcesses(snap, sanitizedName, row)
+			if err != nil {
+				captureErrs = append(captureErrs, err)
+				continue
+			}
+			for _, p := range survivors {
+				add(p)
+			}
+			if !asLive {
+				continue
+			}
 		}
 		root, ok := snap[panePID]
 		if !ok {

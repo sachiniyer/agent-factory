@@ -4,7 +4,10 @@ export function replaceProjectMenuChildren(menu: HTMLElement, children: HTMLElem
   const key = active && menu.contains(active) ? active.dataset.projectFocus : undefined;
   menu.replaceChildren(...children);
   if (key === undefined) return;
-  if (menu.hidden) {
+  // Ask whether the menu renders, not whether it is `hidden`: the phone More panel
+  // inlines it with `display: flex !important` while the attribute stays set, so a
+  // live refresh there must keep the keyboard user on the row (#4817).
+  if (menu.getClientRects().length === 0) {
     fallback.focus({ preventScroll: true });
     return;
   }

@@ -50,7 +50,9 @@ func TestAccountSwapBlindTeardownIdentifiesOnlyAgent(t *testing.T) {
 			inst.gitWorktree = gw
 			inst.Tabs = []*Tab{
 				newAgentTab(tmux.NewTmuxSessionFromSanitizedNameWithDeps(names[0], "claude", nil, executor)),
-				{ID: "shell", Name: "shell", Kind: TabKindProcess, Command: "cat", tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(names[1], "cat", nil, executor)},
+				// A shell, not a process tab: a process tab whose session is gone is
+				// inert, and the swap passes it (#4506 review).
+				{ID: "shell", Name: "shell", Kind: TabKindShell, tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(names[1], "/bin/sh", nil, executor)},
 			}
 			err = inst.StopForAccountSwap()
 			require.ErrorContains(t, err, "detached child")
