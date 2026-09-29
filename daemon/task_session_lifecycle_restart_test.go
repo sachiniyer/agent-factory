@@ -280,7 +280,7 @@ func TestTaskSessionLifecycle_PreMarkerDeliveryRaceSurvivesAbortOnRestart(t *tes
 	// survives the restart (the drain's churn guard reads durable churn
 	// against the durable marker.FiledAt, and the test must surface the bug on
 	// both signals exactly as production does).
-	manager.persistOwedTaskLifecycle(repo.ID, inst)
+	_ = manager.persistOwedTaskLifecycle(repo.ID, inst)
 
 	// Park the deferred intent exactly as deferTaskSessionLifecycleWhilePaused
 	// does on the paused poll path, then release m.mu — the race window opens
