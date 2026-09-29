@@ -36,20 +36,33 @@ type StreamConn struct {
 // StartSeq + bytesReceived and reconnects with ?since=<that> to replay a drop.
 func (s *StreamConn) StartSeq() uint64 { return s.startSeq }
 
-// DialStream opens a WS subscription to a tab of the session (idOrTitle,
-// optional repoID) starting at output cursor `since` (0 = the live tail). When
-// repoID is empty the daemon resolves the path segment as a stable session id
-// first; a non-empty repoID selects the title namespace instead (see
-// authoritativeStreamTarget). The tab is
+// StreamSession names the session a WS stream dials. ID, when non-empty, is
+// authoritative: the dial is sent as by=id with no repo scope, so the daemon
+// resolves the stable id and REFUSES a miss rather than falling back to a title
+// — a deleted session's id cannot reach a different session whose title spells
+// the same bytes (#4760 review). With no ID the legacy shape applies: Title in
+// the path, scoped by RepoID when set.
+type StreamSession struct {
+	ID     string
+	Title  string
+	RepoID string
+}
+
+// DialStream opens a WS subscription to a tab of the session s starting at
+// output cursor `since` (0 = the live tail). The tab is
 // addressed by its stable id (#1738) when tabID is non-empty — so a reorder/close
 // can't misroute the stream — and by the ordinal `tab` otherwise (legacy
 // positional path). The read/write framing is agentproto's; this only establishes
 // the connection and reports the server's starting cursor. The caller owns Conn
 // and must Close it.
-func (c *Client) DialStream(ctx context.Context, idOrTitle, repoID, tabID string, tab int, since uint64) (*StreamConn, error) {
+func (c *Client) DialStream(ctx context.Context, s StreamSession, tabID string, tab int, since uint64) (*StreamConn, error) {
 	q := url.Values{}
-	if repoID != "" {
-		q.Set("repo_id", repoID)
+	segment := s.Title
+	if s.ID != "" {
+		segment = s.ID
+		q.Set(agentproto.StreamAddressQueryParam, agentproto.StreamAddressByID)
+	} else if s.RepoID != "" {
+		q.Set("repo_id", s.RepoID)
 	}
 	if tabID != "" {
 		q.Set("tab_id", tabID)
@@ -73,7 +86,7 @@ func (c *Client) DialStream(ctx context.Context, idOrTitle, repoID, tabID string
 	// wsBase is the placeholder ws://unix for the local socket (the http.Client's
 	// transport dials the socket regardless of host) or the real ws://host:port
 	// for a remote daemon; either way "ws://" selects the WebSocket handshake.
-	u := c.wsBase + "/v1/sessions/" + url.PathEscape(idOrTitle) + "/stream"
+	u := c.wsBase + "/v1/sessions/" + url.PathEscape(segment) + "/stream"
 	if enc := q.Encode(); enc != "" {
 		u += "?" + enc
 	}

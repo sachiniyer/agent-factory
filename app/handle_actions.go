@@ -946,8 +946,7 @@ func (m *home) attachInstanceTab(instance *session.Instance, tabIdx int, agentLa
 		// has one — so a same-title replacement between keypress and dial does
 		// not receive the user's keystrokes.
 		tabID, _ := instance.TabIDAt(tabIdx)
-		idOrTitle, scopeRepoID := streamAddress(instance, repoID)
-		return attachStreamFn(context.Background(), idOrTitle, scopeRepoID, tabID, tabIdx)
+		return attachStreamFn(context.Background(), streamAddress(instance, repoID), tabID, tabIdx)
 	}
 	return m.showHelpScreen(helpAttach(instance, tabIdx), func() tea.Cmd {
 		return m.beginAttachTransition(func() tea.Cmd {

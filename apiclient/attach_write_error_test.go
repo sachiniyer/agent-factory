@@ -128,7 +128,7 @@ func startDriverWithFailingStdout(t *testing.T, out io.Writer) (*websocket.Conn,
 	c, connCh := attachWSServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	sc, err := c.DialStream(ctx, "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(ctx, StreamSession{Title: "alpha"}, "", 0, 0)
 	require.NoError(t, err)
 	server := <-connCh
 

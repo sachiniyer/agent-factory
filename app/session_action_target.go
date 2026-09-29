@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -181,18 +182,16 @@ func (target sessionActionTarget) renameTabRequest(tabID, tabName, newName strin
 	}
 }
 
-// streamAddress returns the WS stream coordinates for inst. The daemon's
-// /v1/sessions/{idOrTitle}/stream route resolves an UNSCOPED path segment by
-// stable id first (authoritativeStreamTarget), so a session with a recorded id
-// is dialed by it — a killed-and-recreated row cannot inherit the pane's input
-// the way a reused title can, and a deferred attach really does reach the
-// captured session (#716's intent, carried onto the wire). Sending a repo_id
-// would select the title namespace instead, so the scope is deliberately empty
-// when the id is sent. A pre-ID record keeps the repo-scoped title contract:
-// an empty id must not occupy the id slot.
-func streamAddress(inst *session.Instance, repoID string) (idOrTitle, scopeRepoID string) {
+// streamAddress returns the WS stream address for inst. A session with a
+// recorded stable id is dialed by it, ID-only (apiclient.StreamSession sends
+// by=id): a killed-and-recreated row cannot inherit the pane's input the way a
+// reused title can, a deferred attach really does reach the captured session
+// (#716's intent, carried onto the wire), and a stale id is refused rather than
+// reinterpreted as some other session's title (#4760 review). A pre-ID record
+// keeps the repo-scoped title contract: an empty id must not occupy the id slot.
+func streamAddress(inst *session.Instance, repoID string) apiclient.StreamSession {
 	if inst.ID != "" {
-		return inst.ID, ""
+		return apiclient.StreamSession{ID: inst.ID}
 	}
-	return inst.Title, repoID
+	return apiclient.StreamSession{Title: inst.Title, RepoID: repoID}
 }

@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -158,18 +159,13 @@ func TestStreamAddress_AddressesSessionByStableIDWhenPresent(t *testing.T) {
 	inst := newKillableInstance(t, "worker")
 	require.NotEmpty(t, inst.ID, "test instance should carry a minted stable ID")
 
-	idOrTitle, scopeRepoID := streamAddress(inst, "repo-123")
-	require.Equal(t, inst.ID, idOrTitle,
-		"a session with a stable ID must stream-address by it, not by title")
-	require.Empty(t, scopeRepoID,
-		"id-addressed streams must leave the repo scope empty so the daemon resolves the id namespace")
+	require.Equal(t, apiclient.StreamSession{ID: inst.ID}, streamAddress(inst, "repo-123"),
+		"a session with a stable ID must stream-address by it alone — no title the daemon could fall back to, no repo scope that would select the title namespace")
 }
 
 func TestStreamAddress_LegacyRecordKeepsRepoScopedTitle(t *testing.T) {
 	legacy := &session.Instance{Title: "legacy-row"} // pre-#1195 record: no ID
 
-	idOrTitle, scopeRepoID := streamAddress(legacy, "repo-123")
-	require.Equal(t, "legacy-row", idOrTitle)
-	require.Equal(t, "repo-123", scopeRepoID,
+	require.Equal(t, apiclient.StreamSession{Title: "legacy-row", RepoID: "repo-123"}, streamAddress(legacy, "repo-123"),
 		"a title-addressed stream keeps its repo scope so same-title rows in other repos are not confused")
 }

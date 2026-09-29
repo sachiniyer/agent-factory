@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -287,7 +288,7 @@ func TestEnterOnPreviewedTabRowCommitsAndEntersInteractive(t *testing.T) {
 	inst := startedLocalInstance(t, "tab-row-live")
 	selectInstance(h, inst)
 	resizeHome(h, 120, 40)
-	fakes, sessions := stubLiveTermFactory(t)
+	fakes, addrs := stubLiveTermFactory(t)
 
 	pane := openTestPane(t, h, inst, 0)
 	require.Equal(t, 0, pane.Tab(), "precondition: the Agent tab is open")
@@ -310,7 +311,9 @@ func TestEnterOnPreviewedTabRowCommitsAndEntersInteractive(t *testing.T) {
 	require.True(t, h.interactive, "the same Enter must enter the committed tab")
 	require.Equal(t, pane, h.focusedOpenPane())
 	require.Len(t, *fakes, 1)
-	require.Equal(t, inst.Title, (*sessions)[0])
+	require.NotEmpty(t, inst.ID, "precondition: the instance carries a stable id")
+	require.Equal(t, apiclient.StreamSession{ID: inst.ID}, (*addrs)[0],
+		"the committed tab streams the session by its stable id, id-only")
 
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
 	assert.Equal(t, []string{"Z"}, (*fakes)[0].keys, "typing after one Enter must route into the tab")
@@ -793,7 +796,7 @@ func TestAttachFocusedBrowserOnlyPaneShowsGuardNotAttach(t *testing.T) {
 			// must never dial the real daemon socket. The 20ms beginAttachTransition
 			// tick is not pumped below, so this should stay uncalled either way.
 			t.Cleanup(SetAttachStreamFnForTest(
-				func(context.Context, string, string, string, int) (chan struct{}, error) {
+				func(context.Context, apiclient.StreamSession, string, int) (chan struct{}, error) {
 					t.Errorf("a browser-only tab must never dial a WS PTY stream")
 					return nil, fmt.Errorf("unexpected dial")
 				}))

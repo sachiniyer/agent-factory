@@ -554,7 +554,7 @@ func (hs *headlessServer) streamInfoHandler(w http.ResponseWriter, r *http.Reque
 	if ep.URL != "" {
 		resp.URL = ep.URL
 	} else {
-		resp.URL = localStreamPath(id, "")
+		resp.URL = localStreamPath(authoritativeStreamTarget(id, ""))
 	}
 	writeHTTPSuccess(w, r, resp)
 }
