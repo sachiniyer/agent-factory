@@ -83,6 +83,11 @@ type ConfigPane struct {
 	// through the config write path — and config_pane_accounts.go holds all of it.
 	accounts accountsSection
 
+	// quota is the Usage section (#2983): the daemon's per-agent usage report,
+	// rendered below Accounts. Same shape as accounts — a separate domain that
+	// never touches the write path, held by config_pane_quota.go.
+	quota quotaSection
+
 	// assistantRequested is set when the user presses the assistant key in normal
 	// mode. The pane cannot spawn the config agent itself — that is a daemon round
 	// trip owned by the app package — so it records the intent and the app reads it
@@ -99,9 +104,13 @@ type configRow struct {
 	heading string
 	entry   *config.ConfigEntry
 	// account is set for a row of the Accounts section (#3385) — an agent
-	// identity, not a config key. Exactly one of heading, entry and account is
-	// meaningful on any row.
+	// identity, not a config key. Exactly one of heading, entry, account and
+	// quota is meaningful on any row.
 	account *AccountRow
+	// quota is set for a row of the Usage section (#2983) — a daemon-rendered
+	// report line. It takes the cursor so the scroll window can reach it, but
+	// nothing on it opens for editing.
+	quota *QuotaRow
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
@@ -110,8 +119,14 @@ type configRow struct {
 // rejection stays visible in this real field. Turning the row read-only would
 // restore the class #3345 explicitly removed, while a local-write fallback
 // would bypass the running daemon's lifecycle admission gate.
+//
+// Quota rows take the cursor even though there is nothing to edit on them
+// (#2983): the selection is the only scroll driver this list has — window()
+// scrolls just far enough to reveal it — so a non-selectable Usage section
+// below the last editable row would render but never scroll into view. Enter
+// on one is a no-op because selectedEntry returns nil for it.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil
+	return r.entry != nil || r.account != nil || r.quota != nil
 }
 
 var (
@@ -126,6 +141,7 @@ var (
 	configOKStyle       = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configNoticeStyle   = lipgloss.NewStyle().Foreground(activeTheme.Ink)
 	configHintStyle     = lipgloss.NewStyle().Foreground(activeTheme.Ink)
+	configLimitStyle    = lipgloss.NewStyle().Foreground(activeTheme.LimitReached)
 )
 
 // NewConfigPane builds the pane wired to the real write path.
@@ -232,8 +248,10 @@ func (c *ConfigPane) rebuildRows() {
 		}
 	}
 	// Accounts last: the config keys are what this overlay is for, and a
-	// credential section above them would push them off the first screen.
+	// credential section above them would push them off the first screen. Usage
+	// (#2983) sits after it — daemon-reported sections go last, newest last.
 	c.appendAccountRows()
+	c.appendQuotaRows()
 	if selectedAccount != nil {
 		found := false
 		for i, row := range c.rows {
@@ -538,6 +556,9 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		case row.account != nil:
 			rendered := c.renderAccountRow(i, *row.account)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.quota != nil:
+			rendered := c.renderQuotaRow(i, *row.quota)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
@@ -552,6 +573,26 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 					lines = append(lines, strings.Split(DialogRecoveryContent("No accounts", "", "Select register · enter to add an account.", false, c.width), "\n")...)
 				} else {
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(accountsHeadingNote, configHintStyle), "\n"), "\n")...)
+				}
+			}
+			if row.heading == quotaHeading {
+				switch {
+				case c.quota.loading:
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("Loading usage…", configHintStyle), "\n"), "\n")...)
+				case c.quota.unavailable != "":
+					lines = append(lines, strings.Split(c.renderQuotaUnavailable(), "\n")...)
+				default:
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaHeadingNote, configHintStyle), "\n"), "\n")...)
+					if len(c.quota.rows) == 0 {
+						lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("No agent CLIs are configured, so there is nothing to report.", configHintStyle), "\n"), "\n")...)
+					}
+				}
+				// Completeness caveats ride under the heading note: a skipped or
+				// unparseable record may be hiding exactly the parked session the
+				// report exists to find, so the warning goes where the reader
+				// sees it rather than into a log.
+				for _, warning := range c.quota.warnings {
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("warning: "+warning, configErrorStyle), "\n"), "\n")...)
 				}
 			}
 		}

@@ -1553,7 +1553,9 @@ Two different things, kept apart on purpose:
             wall, and the reset time recorded with it. Real signal even where the
             provider exposes nothing.
 
-Read-only: it reads local session records and starts nothing.
+Read-only: it reads session records and starts nothing. With --daemon-url (or
+AF_DAEMON_URL) the report comes from the targeted daemon's host — the daemon
+serves the same records read, so the answer describes that machine, not yours.
 
 ```
 af quota

@@ -404,6 +404,7 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	m.accountGeneration++ // discard account results from an earlier opening
+	m.quotaGeneration++   // discard usage results from an earlier opening
 	entries, location, err := ui.ReadConfigForEditor()
 	if err != nil {
 		return m, m.handleError(err)
@@ -413,6 +414,11 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	// config is: an account registered from the CLI, or logged in from the web,
 	// since this TUI started must show as it is now rather than as af remembers.
 	accountsCmd := m.loadAccountsIntoPane()
+	// The Usage section (#2983) for the same reason: a session parked at a limit
+	// since the TUI started is exactly the signal the report exists to show. On
+	// a remote target its read is fired by the accounts read's completion, so
+	// the returned cmd stays the accounts one.
+	m.loadQuotaIntoPane()
 	m.showAccountRegisterPending()
 	m.configPane.SetFocus(true)
 	m.layoutPaneOverlays()

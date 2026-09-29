@@ -564,6 +564,31 @@ export interface RegisterAccountResponse {
   notices?: string[];
 }
 
+/** One agent's line of the QuotaReport (daemon/control_types_quota.go): the
+ *  four columns `af quota` prints, rendered server-side so every surface shows
+ *  the daemon's own words (#2983). The strings are the content — no client
+ *  re-derives them from codes. */
+export interface QuotaAgentRow {
+  program: string;
+  quota: string;
+  observed: string;
+  sessions: number;
+  limited_sessions: number;
+  /** RFC3339; absent when the parked limit carried no reset time. */
+  reset_at?: string;
+  /** The row's sentence — reset times included — rendered at serve time. */
+  detail: string;
+}
+
+/** QuotaReportResponse (daemon/control_types_quota.go). */
+export interface QuotaReportResponse {
+  agents: QuotaAgentRow[];
+  /** Completeness caveats (record files that could not be read or parsed).
+   *  Shown when present — an incomplete report that hides them reads as
+   *  authoritative. */
+  warnings?: string[];
+}
+
 /** AccountLoginResponse (daemon/control_types_accounts.go). */
 export interface AccountLoginResponse {
   agent: string;

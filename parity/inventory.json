@@ -569,20 +569,20 @@
       "id": "quota.usage-report",
       "title": "Report usage-limit status per agent CLI",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane_quota.go (Usage section of the config overlay); app/quota_load.go, app/quota_target.go (daemon QuotaReport fetch)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/quota.ts renderQuotaSection (Usage section of the config view); web/src/api.ts quotaReport"
       },
       "cli": {
         "status": "yes",
-        "pointer": "commands/quotacmd.go:29"
+        "pointer": "commands/quotacmd.go; remote targets now run the same read via POST /v1/QuotaReport instead of refusing"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#2983",
-      "notes": "#2983 Part 1 ships the CLI only; the issue also asks for a TUI/web panel, so tui and web are a real GAP rather than n/a and are recorded as such. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall, so a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid."
+      "notes": "Closed by serving the report from the daemon (POST /v1/QuotaReport, daemon/quota_report.go): all three surfaces render the SAME records->quota.Build read — internal/quotaobs Collect is the one projection, and the rows ship pre-rendered (quota.RenderedAgent) so no client re-derives the vocabulary. The panel sits in the config view/pane next to Accounts, per #3385's precedent for daemon-reported non-config sections. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall; a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid. Not sandboxAllowed — it reports fleet-wide session health with no per-session owner to narrow to. Multiple accounts per agent (#2983 Part 2) is a separate capability, session.accounts."
     },
     {
       "id": "session.account-login",
@@ -1629,6 +1629,7 @@
       "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/QuotaReport": "quota.usage-report",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RebindProject": "project.rebind",
@@ -1724,6 +1725,7 @@
       "ListProjects": "project.list",
       "ListTasks": "task.list",
       "PauseStatusPoll": "-",
+      "QuotaReport": "quota.usage-report",
       "RegisterProject": "project.add",
       "RebindProject": "project.rebind",
       "RemoveTask": "task.remove",

@@ -747,6 +747,17 @@ func ListAccounts(req ListAccountsRequest) (ListAccountsResponse, error) {
 	return resp, nil
 }
 
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the same records→quota.Build read `af quota` makes locally, served so a
+// remote or UI client cannot paint a different answer.
+func QuotaReport(req QuotaReportRequest) (QuotaReportResponse, error) {
+	var resp QuotaReportResponse
+	if err := callDaemon("QuotaReport", req, &resp); err != nil {
+		return QuotaReportResponse{}, err
+	}
+	return resp, nil
+}
+
 // RegisterAccount creates an account's credential directory through the daemon,
 // without logging in.
 func RegisterAccount(req RegisterAccountRequest) (RegisterAccountResponse, error) {

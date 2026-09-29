@@ -188,18 +188,64 @@ func Build(programs []string, sessions []SessionState) Report {
 	return report
 }
 
+// RenderedAgent is one agent's line of the report in display form — the four
+// columns Render prints, plus the counts a UI needs to emphasize a limit
+// without parsing a sentence. It is the row the daemon's QuotaReport RPC
+// serves (#2983), so every surface shows the daemon's own words rather than
+// re-deriving the vocabulary from the enums.
+type RenderedAgent struct {
+	Program         string `json:"program"`
+	Quota           string `json:"quota"`
+	Observed        string `json:"observed"`
+	Sessions        int    `json:"sessions"`
+	LimitedSessions int    `json:"limited_sessions"`
+	// ResetAt is the earliest recorded reset, RFC3339; empty when the parked
+	// limit carried no reset time — the same distinction Detail words.
+	ResetAt string `json:"reset_at,omitempty"`
+	// Detail is the row's sentence — reset times included — rendered at serve
+	// time so no client formats it differently.
+	Detail string `json:"detail"`
+}
+
+// Rendered flattens the report into display rows, computing each Detail at now.
+func (r Report) Rendered(now time.Time) []RenderedAgent {
+	rows := make([]RenderedAgent, 0, len(r.Agents))
+	for _, agent := range r.Agents {
+		row := RenderedAgent{
+			Program:         agent.Program,
+			Quota:           agent.Entitlement.String(),
+			Observed:        agent.Observation.String(),
+			Sessions:        agent.Sessions,
+			LimitedSessions: agent.LimitedSessions,
+			Detail:          Detail(agent, now),
+		}
+		if agent.ResetAt != nil {
+			row.ResetAt = agent.ResetAt.UTC().Format(time.RFC3339)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
 // Render writes the human-readable table.
 //
 // Every cell is filled. There is no branch that can emit an empty column, which
 // is the rendering half of the rule the types enforce: a blank in a quota table
 // is read as zero remaining, and af does not know that about any provider.
 func Render(w io.Writer, report Report, now time.Time) error {
-	if len(report.Agents) == 0 {
+	return RenderRows(w, report.Rendered(now))
+}
+
+// RenderRows writes the same table Render does over rows whose words were
+// rendered server-side — the daemon-served form a remote `af quota` prints —
+// so both paths emit one table and one footnote.
+func RenderRows(w io.Writer, rows []RenderedAgent) error {
+	if len(rows) == 0 {
 		_, err := fmt.Fprintln(w, "No agent CLIs are configured, so there is nothing to report.")
 		return err
 	}
 	width := len("AGENT")
-	for _, agent := range report.Agents {
+	for _, agent := range rows {
 		if len(agent.Program) > width {
 			width = len(agent.Program)
 		}
@@ -207,9 +253,9 @@ func Render(w io.Writer, report Report, now time.Time) error {
 	if _, err := fmt.Fprintf(w, "%-*s  %-13s  %-13s  %s\n", width, "AGENT", "QUOTA", "OBSERVED", "DETAIL"); err != nil {
 		return err
 	}
-	for _, agent := range report.Agents {
+	for _, agent := range rows {
 		if _, err := fmt.Fprintf(w, "%-*s  %-13s  %-13s  %s\n",
-			width, agent.Program, agent.Entitlement, agent.Observation, detail(agent, now),
+			width, agent.Program, agent.Quota, agent.Observed, agent.Detail,
 		); err != nil {
 			return err
 		}
@@ -221,10 +267,10 @@ func Render(w io.Writer, report Report, now time.Time) error {
 	return err
 }
 
-// detail is the per-row sentence. It states what was observed and, when a
+// Detail is the per-row sentence. It states what was observed and, when a
 // session is parked, when it resets — saying so explicitly when that is unknown
 // rather than leaving the column blank.
-func detail(agent AgentQuota, now time.Time) string {
+func Detail(agent AgentQuota, now time.Time) string {
 	switch agent.Observation {
 	case ObservationLimitReached:
 		base := fmt.Sprintf("%d of %d session(s) parked at a usage limit", agent.LimitedSessions, agent.Sessions)

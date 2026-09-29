@@ -364,6 +364,19 @@ func (c *Client) ListAccounts(agent, repoPath string) (daemon.ListAccountsRespon
 // a Go consumer. Unlike login, registration needs no terminal on the daemon
 // host: #3950 deliberately restores it for the config pane's remote target.
 
+// QuotaReport reads the daemon host's per-agent usage/quota report (#2983) —
+// the web's usage section and a remote `af quota` both render it. HTTP twin of
+// daemon.QuotaReport: the daemon reads ITS host's session records, so the
+// answer describes the daemon a remote client is actually pointed at — the
+// local-records read `af quota` used to refuse for exactly that reason.
+func (c *Client) QuotaReport() (daemon.QuotaReportResponse, error) {
+	var resp daemon.QuotaReportResponse
+	if err := c.call("QuotaReport", daemon.QuotaReportRequest{}, &resp); err != nil {
+		return daemon.QuotaReportResponse{}, err
+	}
+	return resp, nil
+}
+
 // RegisterAccount creates an account's credential directory on the daemon host
 // without logging in, for the config pane's Accounts section.
 func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {

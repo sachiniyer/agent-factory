@@ -3339,6 +3339,83 @@ button:disabled,
   padding: var(--af-space-1) var(--af-space-2);
 }
 
+/* The Usage section (#2983): the daemon's QuotaReport under the Accounts
+ * section. Same "not config" treatment as Accounts — its own heading, state
+ * cells rather than controls — and the observed cell takes the rail's limit
+ * color when a session is parked. */
+.af-quota {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+  padding: var(--af-space-2) var(--af-space-3) var(--af-space-4);
+  border-top: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+
+.af-quota-head {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+}
+
+.af-quota-title {
+  font-size: var(--af-type-body);
+  font-weight: 600;
+  color: var(--af-ink);
+}
+
+.af-quota-note,
+.af-quota-empty {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+}
+
+.af-quota-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+}
+
+.af-quota-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: var(--af-space-3);
+}
+
+.af-quota-agent {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-body);
+  color: var(--af-ink);
+}
+
+.af-quota-cell {
+  font-size: var(--af-type-caption);
+  color: var(--af-ink);
+}
+
+/* The same color the rail gives a session parked at a usage limit, so the
+ * state reads identically in both places. */
+.af-quota-limited {
+  color: var(--af-limit-reached);
+}
+
+.af-quota-detail {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+}
+
+.af-quota-error,
+.af-quota-warning {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-dead);
+  line-height: 1.5;
+}
+
 /* The login overlay's explanation of what af is running, above the pane. */
 .af-assistant-note {
   margin: 0 0 var(--af-space-2);
@@ -3397,11 +3474,11 @@ summary:focus-visible { outline: calc(var(--af-space-1) / 2) solid var(--af-acce
 .af-row-actions .af-rail-action { width: 100%; justify-content: flex-start; padding: var(--af-space-2); }
 .af-row-actions .af-term-more { min-width: calc(var(--af-space-4) + var(--af-space-3) + var(--af-space-1)); }
 .af-view-count { padding: 0; border: 0; border-radius: 0; background: transparent; }
-.af-tasks-head, .af-config-head, .af-config-tier, .af-accounts-head { border: 0; }
-.af-config-body, .af-accounts { padding: var(--af-space-3); }
-.af-accounts { margin-top: var(--af-space-4); border: 0; }
-.af-config-title, .af-accounts-title, .af-tasks-title { font-size: var(--af-type-heading); }
-.af-config-desc, .af-config-key, .af-config-value, .af-accounts-note, .af-accounts-name { color: var(--af-ink); font-size: var(--af-type-body); }
+.af-tasks-head, .af-config-head, .af-config-tier, .af-accounts-head, .af-quota-head { border: 0; }
+.af-config-body, .af-accounts, .af-quota { padding: var(--af-space-3); }
+.af-accounts, .af-quota { margin-top: var(--af-space-4); border: 0; }
+.af-config-title, .af-accounts-title, .af-tasks-title, .af-quota-title { font-size: var(--af-type-heading); }
+.af-config-desc, .af-config-key, .af-config-value, .af-accounts-note, .af-accounts-name, .af-quota-note, .af-quota-agent { color: var(--af-ink); font-size: var(--af-type-body); }
 .af-config-path, .af-accounts-dir { color: var(--af-ink-muted); font-size: var(--af-type-caption); white-space: normal; overflow-wrap: anywhere; }
 .af-empty-title { font-size: var(--af-type-display); }
 .af-empty-hint { color: var(--af-ink); margin-bottom: var(--af-space-4); }
