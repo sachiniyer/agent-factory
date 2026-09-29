@@ -513,25 +513,37 @@ func LoadAllRepoInstancesReportingSkips() (map[string]json.RawMessage, []string,
 	return result, ids, nil
 }
 
-// LoadAllRepoInstancesReportingSkipDetails is the primitive the two forms above
-// narrow: the records it could load, plus a RepoInstancesSkip per repo it could
+// LoadAllRepoInstancesReportingSkipDetails is what the two forms above narrow
+// (it narrows LoadAllRepoInstancesReportingMissing in turn): the records it could load, plus a RepoInstancesSkip per repo it could
 // not, carrying the file path and the underlying I/O error.
 //
 // Skips arrive in repoID order (os.ReadDir sorts), so a message built from them
 // is stable across runs.
 func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []RepoInstancesSkip, error) {
+	result, skipped, _, err := LoadAllRepoInstancesReportingMissing()
+	return result, skipped, err
+}
+
+// LoadAllRepoInstancesReportingMissing is LoadAllRepoInstancesReportingSkipDetails
+// plus the repos whose directory exists but whose instances.json does not. Those
+// load as an empty "[]" like every other form reports them, and missing is the
+// only way to tell that apart from a file that was read and held no sessions.
+// The daemon needs the difference: only a real read may clear a repo it skipped
+// at startup, and a deleted file is an omission, not a repair (#4783).
+func LoadAllRepoInstancesReportingMissing() (map[string]json.RawMessage, []RepoInstancesSkip, map[string]bool, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	result := make(map[string]json.RawMessage)
 	var skipped []RepoInstancesSkip
+	missing := make(map[string]bool)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return result, nil, nil
+			return result, nil, missing, nil
 		}
-		return nil, nil, fmt.Errorf("failed to read instances directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to read instances directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -539,7 +551,7 @@ func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []R
 			continue
 		}
 		repoID := entry.Name()
-		data, err := loadRepoInstancesForAll(repoID)
+		data, fileMissing, err := loadRepoInstancesForAll(repoID)
 		if err != nil {
 			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
 			// Best-effort: repoInstancesPath only fails on a repoID that is not
@@ -548,9 +560,12 @@ func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []R
 			skipped = append(skipped, RepoInstancesSkip{RepoID: repoID, Path: path, Err: err})
 			continue
 		}
+		if fileMissing {
+			missing[repoID] = true
+		}
 		result[repoID] = data
 	}
-	return result, skipped, nil
+	return result, skipped, missing, nil
 }
 
 // DeleteAllRepoInstances deletes all per-repo instance files.

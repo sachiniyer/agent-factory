@@ -1,5 +1,6 @@
 const { createHash, randomUUID } = require("node:crypto");
 const { goSourcesEquivalent, patchTouchesOnlyCommentLines } = require("./go-inert.js");
+const { isCleanTextMerge } = require("./text-merge.js");
 
 // GitHub renders one GitHub App actor under several logins depending on the
 // surface being read: the detail app has been observed as `app/detail-app` on a
@@ -45,6 +46,17 @@ const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 // comment-only (#4477). The proof costs two reads per file on every
 // evaluation, so past this the files simply stay gated.
 const COMMENT_ONLY_PROOF_FILE_LIMIT = 20;
+// Who writes the gate's own update merges (#4886): `PUT update-branch` called with
+// the workflow token commits as this author, with GitHub (`web-flow`) as the
+// committer and a signature GitHub verified. Only such a merge may have a path
+// that BOTH sides changed proven line by line; any other merge keeps the
+// path-level proof, where a both-changed path refuses carry.
+const GATE_UPDATE_MERGE_AUTHOR = "github-actions[bot]";
+const GATE_UPDATE_MERGE_COMMITTER = "web-flow";
+// Bounds on that line-level proof. It reads four blobs per path, so past the
+// path limit, or for a blob past the byte limit, the link is simply unproven.
+const TEXT_MERGE_PROOF_PATH_LIMIT = 20;
+const TEXT_MERGE_PROOF_BLOB_BYTES = 4 * 1024 * 1024;
 // The label a maintainer applies to stop this gate on one pull request (#4576).
 //
 // Before #4576 a maintainer's only stop lever was converting the PR to a draft,
@@ -463,6 +475,15 @@ const RETRY_DELAYS_MS = [250, 1000];
 // Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
 // read back as "nobody merged" — refusing the concession this exists to grant.
 const MERGE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
+// The same lesson for a check-run create that may already have LANDED. Its
+// marker reconcile reused RETRY_DELAYS_MS, so a create GitHub answered 503 for
+// had 1.25s to become listable — during the same degradation that produced the
+// 503 — before the transaction gave up on a run that existed (#4763).
+//
+// This buys back transactions, not safety: a window of any length cannot tell a
+// slow listing from a create that never landed, so what happens when it is
+// exhausted is decided by blockUnconfirmedInvalidation, not by this number.
+const CHECK_CREATE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
 const AGGREGATE_PROPAGATION_DELAYS_MS = [250, 500, 1000];
 const RULE_VIOLATION_RETRY_DELAY_MS = 1000;
 const MAX_RATE_LIMIT_DELAY_MS = 10000;
@@ -540,7 +561,12 @@ async function createCheckRun({
       if (!isRetryableGitHubError(error)) {
         throw error;
       }
-      return retryTransient(
+      // A 5xx RESPONSE is reconciled exactly like a transport failure, not
+      // replayed like the rate-limit refusal above. GitHub documents no 5xx as
+      // "rejected before any work", and a gateway can answer 503 for a create
+      // the backend went on to commit, so the response proves nothing about
+      // whether a run exists (#4763).
+      return reconcileAmbiguousCreate(
         `${label} after ambiguous create failure (${error.message || String(error)})`,
         async () => {
           const checkRuns = await github.paginate(github.rest.checks.listForRef, {
@@ -565,13 +591,37 @@ async function createCheckRun({
           }
           return { data: created };
         },
-        { failureName: "AutoGateCheckWriteError", readFailure: false },
       );
     }
   }
 }
 
-async function retryTransient(label, operation, { failureName, readFailure, subject = null }) {
+// The read-back of a create whose outcome the POST did not report. Exhausting it
+// is its own outcome — the write was issued exactly once and whether it landed is
+// what could not be read — so the failure says so, and a caller that can
+// establish what the head publishes some other way may act on that instead of
+// dying (#4763). Only the exhaustion is marked: a read-back GitHub refused
+// outright is rethrown untouched by retryTransient, and stays an ordinary error.
+async function reconcileAmbiguousCreate(label, findCreated) {
+  try {
+    return await retryTransient(label, findCreated, {
+      failureName: "AutoGateCheckWriteError",
+      readFailure: false,
+      delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+    });
+  } catch (error) {
+    if (isExhaustedCheckWrite(error)) {
+      error.autoGateCreateUnconfirmed = true;
+    }
+    throw error;
+  }
+}
+
+async function retryTransient(
+  label,
+  operation,
+  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS },
+) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await operation();
@@ -586,10 +636,10 @@ async function retryTransient(label, operation, { failureName, readFailure, subj
       if (!selfContradictory && !isRetryableGitHubError(error)) {
         throw error;
       }
-      if (attempt >= RETRY_DELAYS_MS.length) {
+      if (attempt >= delays.length) {
         throw retryFailure(label, attempt + 1, error, failureName, readFailure);
       }
-      await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
+      await delay(retryDelayMilliseconds(error, delays[attempt]));
     }
   }
 }
@@ -751,6 +801,46 @@ function isDefinitiveRateLimitResponse(error) {
   return Boolean(error?.response) && isRateLimitError(error);
 }
 
+// The rate-limit answer for a WRAPPED error. retryFailure preserves the
+// transport error on `cause` but strips its headers and GraphQL name, so
+// isRateLimitError alone can miss the failure it wraps; the retry-exhausted
+// message ("could not invalidate aggregate …: API rate limit exceeded for
+// installation") is itself the record. Walking the chain covers both (#4461).
+function isRateLimitFailure(error) {
+  for (let current = error; current; current = current.cause) {
+    if (isRateLimitError(current)) {
+      return true;
+    }
+    if (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(current?.message || "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A sentence naming the throttle window when the failure carries it, so an
+// UNKNOWN verdict can say when evaluation is worth retrying (#4461).
+function rateLimitResetSentence(error) {
+  for (let current = error; current; current = current.cause) {
+    if (!isRateLimitFailure(current)) {
+      continue;
+    }
+    const headers = githubErrorHeaders(current);
+    const resetSeconds = Number(headers["x-ratelimit-reset"]);
+    if (Number.isFinite(resetSeconds) && resetSeconds > 0) {
+      return ` GitHub reports the rate limit resets at ${new Date(resetSeconds * 1000).toISOString()}.`;
+    }
+    const retryAfter = Number(headers["retry-after"]);
+    if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+      return ` GitHub asks for a retry in ${retryAfter}s.`;
+    }
+  }
+  if (isRateLimitFailure(error)) {
+    return " Retry once the GitHub API rate-limit window resets.";
+  }
+  return "";
+}
+
 function retryDelayMilliseconds(error, fallback) {
   if (!isRateLimitError(error)) {
     return fallback;
@@ -777,6 +867,22 @@ function githubErrorHeaders(error) {
 
 function isReadFailure(error) {
   return error?.autoGateReadFailure === true;
+}
+
+// A check write that GAVE UP on a retryable failure, as opposed to one GitHub
+// refused outright. The name is the record: retryFailure is the only thing that
+// assigns it, and the retry helpers build one only from an error
+// isRetryableGitHubError accepted — a 403, a 422, a validation failure are all
+// rethrown untouched and never carry it.
+function isExhaustedCheckWrite(error) {
+  return error?.name === "AutoGateCheckWriteError";
+}
+
+// An ambiguous check-run create whose marker never became visible: the POST was
+// issued once, GitHub did not say whether it landed, and the read-back gave up.
+// See reconcileAmbiguousCreate (#4763).
+function isUnconfirmedCheckCreate(error) {
+  return error?.autoGateCreateUnconfirmed === true;
 }
 
 function delay(milliseconds) {
@@ -845,6 +951,9 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
   const reasons = [];
   const notes = [];
+  // Reasons only time clears (#4782): reportDecision marks a decision blocked by
+  // nothing else, and the reconciliation pass re-evaluates it once it has aged.
+  const transientReasons = [];
   // A merge-queue batch head carries no reviewable content of its own — the
   // approval and verdict it stands in for live on each constituent PR's own
   // head — so the author gate is replaced by the constituent evaluation below
@@ -887,7 +996,13 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   if (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY") {
     reasons.push(`mergeability is blocked (${pr.mergeable}/${pr.mergeStateStatus})`);
   } else if (pr.mergeable !== "MERGEABLE") {
-    reasons.push(`mergeability is still ${pr.mergeable}`);
+    const reason = `mergeability is still ${pr.mergeable}`;
+    reasons.push(reason);
+    // GitHub computes mergeability asynchronously and sends no event when it
+    // settles (#4782), so only UNKNOWN or an absent value is a transient block.
+    if (pr.mergeable == null || pr.mergeable === "UNKNOWN") {
+      transientReasons.push(reason);
+    }
   }
 
   // The maintainer hold, HERE — among the structural refusals, above every read
@@ -961,6 +1076,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
+    transientReasons.push(...(requiredChecks.transientReasons || []));
   }
   notes.push(...requiredChecks.notes);
 
@@ -1004,6 +1120,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       workflowsChanged,
       requiredCheckObservations: requiredChecks.observations,
       reasons,
+      transientReasons,
       notes,
     });
   }
@@ -1068,7 +1185,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   } else if (touchesTui) {
     let playTest;
     try {
-      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, subject });
+      playTest = await evaluatePlayTest({ github, context, pr, comments: codex.comments, contentHead, subject });
     } catch (error) {
       // An attestation that cannot be verified fails closed as a BLOCKED
       // reason for EVERY author class — never an unhandled error. Re-throwing
@@ -1249,6 +1366,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     workflowsChanged,
     requiredCheckObservations: requiredChecks.observations,
     reasons,
+    transientReasons,
     notes,
   });
 }
@@ -1720,6 +1838,14 @@ async function evaluateMergeQueueBatch({ github, context, pr, constituents, subj
 // constant existed.
 const DECISION_STAMP_PREFIX = "evaluated: ";
 const REQUIRED_CHECK_SNAPSHOT_PREFIX = "<!-- auto-gate-required-check-snapshot:";
+// Written on a failing decision whose every reason is transient (#4782): GitHub
+// mergeability still UNKNOWN, a required check still settling, or a Build/Lint
+// run that has not reported yet. None of those sends an event when it clears, so
+// the reconciliation pass re-evaluates a marked decision once it has aged. The
+// marker is absent whenever any other reason is present — a hold, a failed
+// check, a finding, a missing verdict or approval — and an unmarked decision is
+// never selected, so an untagged new reason fails toward "wait for an event".
+const TRANSIENT_BLOCK_MARKER = "<!-- auto-gate-transient-block -->";
 
 // A decision summary with the evaluation stamp removed, for readers that want the
 // REASON. The stamp is metadata about the write, not part of the decision.
@@ -1735,6 +1861,35 @@ function decisionSummaryBody(summary) {
 function requiredCheckSnapshotText(observations) {
   const payload = JSON.stringify({ version: 2, checks: observations || [] });
   return `${REQUIRED_CHECK_SNAPSHOT_PREFIX}${payload} -->`;
+}
+
+// Whether this result fails ONLY on reasons its producers tagged transient. The
+// manual path is excluded outright: its conclusion comes from
+// manualMergeBlockers, which are all maintainer-answerable, never transient.
+function isTransientOnlyBlock(result) {
+  const reasons = result?.reasons || [];
+  if (result?.shouldMerge || result?.manualMergeRequired || reasons.length === 0) {
+    return false;
+  }
+  const transient = new Set(result.transientReasons || []);
+  return reasons.every((reason) => transient.has(reason));
+}
+
+function decisionIsTransientOnlyBlock(decision) {
+  return String(decision?.output?.text || "")
+    .split("\n")
+    .includes(TRANSIENT_BLOCK_MARKER);
+}
+
+// The time a decision was last evaluated, from the stamp reportDecision writes
+// into its summary. null when the stamp is absent or unreadable.
+function decisionEvaluatedAt(decision) {
+  const summary = String(decision?.output?.summary || decision?.summary || "");
+  if (!summary.startsWith(DECISION_STAMP_PREFIX)) {
+    return null;
+  }
+  const line = summary.slice(DECISION_STAMP_PREFIX.length).split("\n")[0];
+  return parseTimestamp(line.split(" ")[0]);
 }
 
 function decisionRequiredCheckSnapshot(decision) {
@@ -1939,7 +2094,10 @@ async function reportDecision({ github, context, core, result, manual = false })
       // not when this later write happened. The scheduled reconciler compares
       // this identity/state tuple with the current check run and never needs to
       // order clocks owned by different observations (#4242).
-      text: requiredCheckSnapshotText(result.requiredCheckObservations),
+      text: [
+        requiredCheckSnapshotText(result.requiredCheckObservations),
+        ...(isTransientOnlyBlock(result) ? [TRANSIENT_BLOCK_MARKER] : []),
+      ].join("\n"),
     },
   };
   try {
@@ -1996,17 +2154,46 @@ function resolveAggregateHeads({ context, targets = [] }) {
   return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))];
 }
 
+// The conclusion every non-passing fixed-aggregate write carries: the WAITING
+// invalidation marker and the UNKNOWN could-not-evaluate verdict alike.
+//
+// It is `failure` because the aggregate is a REQUIRED check, and GitHub documents
+// "Successful check statuses are `success`, `skipped`, and `neutral`"
+// (troubleshooting-required-status-checks). A neutral UNKNOWN therefore does not
+// block the ruleset, a manual `gh pr merge`, or any merger that defers to it —
+// it would turn "Auto Gate could not look" into a merge nobody evaluated (#4461).
+// What distinguishes UNKNOWN from a defect verdict is its title and summary.
+const AGGREGATE_NOT_PASSING = "failure";
+const REQUIRED_CHECK_SATISFYING_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
+
+// Whether a fixed-aggregate check run, as a write returned it, leaves its commit
+// unmergeable: anything but a completed run whose conclusion GitHub counts as
+// satisfying a required check. Null — no write landed — is not non-passing: it
+// proves nothing about what the newest generation says.
+function isNonPassingAggregate(check) {
+  if (!check) {
+    return false;
+  }
+  if (check.status !== "completed") {
+    return true;
+  }
+  return !REQUIRED_CHECK_SATISFYING_CONCLUSIONS.has(String(check.conclusion || "").toLowerCase());
+}
+
 async function invalidateAggregateDecision({ github, context, core, headSha }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for Auto Gate aggregate invalidation: ${headSha}`);
   }
   const decision = {
-    // Create a new failure before any API-dependent reads. If target resolution,
-    // association lookup, or evaluation fails, the newest fixed check is already
-    // non-green and the prior PASS cannot remain authoritative.
+    // Make the newest fixed check non-green before any API-dependent reads. If
+    // target resolution, association lookup, or evaluation fails, the prior
+    // PASS cannot remain authoritative. The conclusion is AGGREGATE_NOT_PASSING,
+    // never neutral: GitHub counts a neutral required check as satisfied, so a
+    // neutral marker would leave the commit mergeable (#4461). The title is
+    // what says "waiting", not a verdict about the code.
     status: "completed",
-    conclusion: "failure",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
       title: AGGREGATE_WAITING_TITLE,
       summary:
@@ -2044,20 +2231,36 @@ async function blockAggregateEvaluation({
   headSha,
   checkRunId,
   reason,
+  cause,
 }) {
   const sha = normalizeHeadSha(headSha);
   if (!sha) {
     throw new Error(`Invalid head SHA for blocked Auto Gate aggregate: ${headSha}`);
   }
   const detail = String(reason || "required GitHub read failed").replace(/^BLOCKED:\s*/i, "");
+  // The reset detail rides the error where one exists; where only the reason
+  // string survives (a cross-job env, an evaluate() summary) the message itself
+  // is the record that the throttle was the cause.
+  const resetClause =
+    rateLimitResetSentence(cause) ||
+    (/(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(detail)
+      ? " Retry once the GitHub API rate-limit window resets."
+      : "");
   const summary =
-    `${detail}. Auto Gate did not infer an empty PR set or any PR state from the failed read; ` +
-    "this commit remains blocked until a complete evaluation succeeds.";
+    `${detail}. Auto Gate did not evaluate this commit and published no verdict about it: ` +
+    "it did not infer an empty PR set or any PR state from the failed read, and no " +
+    "previously reached decision for an exact (PR, head) pair was consumed. This commit " +
+    `remains blocked until a complete evaluation succeeds.${resetClause}`;
   const decision = {
+    // A could-not-evaluate state is not a defect verdict, and the UNKNOWN title
+    // and summary are what say so (#4461). The conclusion cannot: GitHub counts
+    // neutral and skipped required checks as satisfied, so the only completed
+    // conclusions that keep an unevaluated commit unmergeable in every consumer
+    // are the failing ones. See AGGREGATE_NOT_PASSING.
     status: "completed",
-    conclusion: "failure",
+    conclusion: AGGREGATE_NOT_PASSING,
     output: {
-      title: "BLOCKED: Auto Gate could not complete a required GitHub read",
+      title: "UNKNOWN: Auto Gate could not evaluate this commit",
       summary,
     },
   };
@@ -2070,7 +2273,7 @@ async function blockAggregateEvaluation({
     decision,
     checkRunId,
   });
-  core.notice(`BLOCKED: ${detail}`);
+  core.notice(`UNKNOWN: ${detail}`);
   return {
     ok: false,
     headSha: sha,
@@ -2084,13 +2287,125 @@ async function blockAggregateEvaluation({
   };
 }
 
+// The lane's own invalidation could not be confirmed (#4763): GitHub answered the
+// create with a 5xx, or dropped the connection, and the marker never appeared.
+// That is a GitHub fault rather than a verdict, and it used to escape as an
+// unhandled error that reddened master — the class #3396, #3808 and #4461 each
+// closed one instance of.
+//
+// What decides the outcome is not the fault but what the head PUBLISHES, because
+// an invalidation exists to make exactly one thing true: the newest generation of
+// the fixed aggregate does not satisfy the ruleset. So that is read back, the way
+// the ruleset sees it.
+//
+// - The newest generation is non-passing. This is the ordinary case: the
+//   pre-lane job published a WAITING marker for this same event before the lane
+//   began. The commit is unmergeable whether or not this create landed — one
+//   that did land is itself a WAITING generation — so the transaction ends as
+//   #4461's could-not-evaluate: UNKNOWN, concluded AGGREGATE_NOT_PASSING, never
+//   neutral.
+// - The newest generation satisfies the ruleset, none is visible, or the read
+//   failed too. Nothing proves the head unmergeable: a stale PASS may be what the
+//   ruleset reads, and this transaction could not replace it. The original error
+//   is rethrown and the run stays red, which is #4461's rule for a transaction
+//   that left nothing non-passing behind.
+//
+// Either way the transaction stops here. It owns no generation, so it has nothing
+// to fence a publish with, and evaluating or merging without one is exactly what
+// the generation check exists to prevent.
+//
+// UNKNOWN goes on by UPDATE, onto the generation the read found. A second POST
+// would be the replay createCheckRun refuses to make; an update is idempotent,
+// and it only restates a conclusion that is already non-passing. This lane holds
+// the head's serialized slot, so nothing else is publishing on that generation —
+// and if that ever stopped being true, the write still moves the head toward
+// blocked, never toward green.
+async function blockUnconfirmedInvalidation({ github, context, core, headSha, error, reason }) {
+  if (!isUnconfirmedCheckCreate(error)) {
+    throw error;
+  }
+  const sha = normalizeHeadSha(headSha);
+  let published;
+  try {
+    published = await publishedAggregateCheck({ github, context, headSha: sha });
+  } catch (readError) {
+    core.warning(
+      `Auto Gate could not confirm its invalidation of ${sha}, and could not read what that ` +
+        `commit publishes either (${formatError(readError)}). Nothing proves it unmergeable, so ` +
+        "the invalidation failure stands.",
+    );
+    throw error;
+  }
+  if (!isNonPassingAggregate(published)) {
+    core.warning(
+      `Auto Gate could not confirm its invalidation of ${sha}, and the newest published ` +
+        `aggregate generation there is ${
+          published
+            ? `check ${published.id}, concluded ${published.conclusion || published.status}`
+            : "absent"
+        }. That does not prove the commit unmergeable, so the invalidation failure stands.`,
+    );
+    throw error;
+  }
+  core.warning(
+    `Auto Gate could not confirm its invalidation of ${sha}: ${formatError(error)}. The newest ` +
+      `published aggregate generation (check ${published.id}: ` +
+      `${published.output?.title || "untitled"}) is already non-passing, so the commit stays ` +
+      "unmergeable; a later subscribed event re-runs the evaluation.",
+  );
+  const detail = reason || formatError(error);
+  let blocked;
+  try {
+    blocked = await blockAggregateEvaluation({
+      github,
+      context,
+      core,
+      headSha: sha,
+      checkRunId: published.id,
+      reason: detail,
+      cause: error,
+    });
+  } catch (writeError) {
+    // Only a write that gave up on a transient is tolerated: the read above is
+    // the proof the head is blocked, and the UNKNOWN title is the courtesy of
+    // saying why. A write GitHub REFUSED is a permission or payload defect, and
+    // those stay loud wherever they surface.
+    if (!isExhaustedCheckWrite(writeError)) {
+      throw writeError;
+    }
+    core.warning(
+      `Auto Gate could not retitle check ${published.id} UNKNOWN on ${sha} ` +
+        `(${formatError(writeError)}); it stays non-passing as published.`,
+    );
+    blocked = {
+      ok: false,
+      headSha: sha,
+      pullNumbers: [],
+      blockers: [detail],
+      checkRuns: [],
+      summary: detail,
+      writeState: "unconfirmed",
+      priorAggregate: true,
+      state: "evaluation-error",
+    };
+  }
+  // Never the id that was written to: this transaction does not own that
+  // generation, and a checkRunId is what every later write treats as ownership.
+  return { ...blocked, checkRunId: null };
+}
+
 async function beginAggregateDecision({ github, context, core, headSha }) {
-  const invalidated = await invalidateAggregateDecision({
-    github,
-    context,
-    core,
-    headSha,
-  });
+  let invalidated;
+  try {
+    invalidated = await invalidateAggregateDecision({
+      github,
+      context,
+      core,
+      headSha,
+    });
+  } catch (error) {
+    return blockUnconfirmedInvalidation({ github, context, core, headSha, error });
+  }
   if (invalidated.writeState === "read-only") {
     return invalidated;
   }
@@ -2109,6 +2424,7 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
       headSha: sha,
       checkRunId: invalidated.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   return {
@@ -2168,6 +2484,14 @@ async function establishPublishPreconditions(label, preconditions) {
 // all still pass while the published check is red, because it is invalidated
 // outside the head's serialized lane.
 async function publishedAggregateConclusion({ github, context, headSha }) {
+  const newest = await publishedAggregateCheck({ github, context, headSha });
+  return newest ? newest.conclusion || "" : null;
+}
+
+// That newest published generation itself, or null. isNonPassingAggregate needs
+// the status as well as the conclusion: a generation still in progress blocks the
+// ruleset with no conclusion at all.
+async function publishedAggregateCheck({ github, context, headSha }) {
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
   const checkRuns = await retryRead(`could not read the published aggregate at ${headSha}`, () =>
@@ -2188,7 +2512,7 @@ async function publishedAggregateConclusion({ github, context, headSha }) {
         run.app?.id === GITHUB_ACTIONS_APP_ID,
     ),
   );
-  return newest ? newest.conclusion || "" : null;
+  return newest || null;
 }
 
 // Observe the exact check we just wrote, rather than trusting the PATCH response.
@@ -2261,6 +2585,7 @@ async function reportAggregateDecision({
       headSha,
       checkRunId,
       reason: formatError(error),
+      cause: error,
     });
   }
   if (checkRunId) {
@@ -2369,12 +2694,27 @@ async function processAggregateHead({
   // exhausted its retries, publish its failure without performing a second
   // evaluation that could silently turn the same run green or merge the PR.
   if (readFailureReason) {
-    const invalidated = await invalidateAggregateDecision({
-      github,
-      context,
-      core,
-      headSha,
-    });
+    let invalidated;
+    try {
+      invalidated = await invalidateAggregateDecision({
+        github,
+        context,
+        core,
+        headSha,
+      });
+    } catch (error) {
+      // The resolver's failure is still the reason this head is unevaluated; the
+      // unconfirmed create only changes which generation gets to say so.
+      const aggregate = await blockUnconfirmedInvalidation({
+        github,
+        context,
+        core,
+        headSha,
+        error,
+        reason: readFailureReason,
+      });
+      return { state: "evaluation-error", pending: aggregate, aggregate };
+    }
     if (invalidated.writeState === "read-only") {
       return { state: "read-only", pending: invalidated };
     }
@@ -2510,6 +2850,7 @@ async function processAggregateHead({
         headSha: pending.headSha,
         checkRunId: pending.checkRunId,
         reason: formatError(error),
+        cause: error,
       });
       return { state: "evaluation-error", pending, aggregate };
     }
@@ -2581,6 +2922,7 @@ async function processAggregateHead({
       headSha: pending.headSha,
       checkRunId: pending.checkRunId,
       reason: formatError(error),
+      cause: error,
     });
     return { state: "evaluation-error", pending, aggregate: blocked };
   }
@@ -2713,6 +3055,7 @@ async function processAggregateHead({
           headSha: pending.headSha,
           checkRunId: invalidated.checkRunId,
           reason: formatError(error),
+          cause: error,
         });
         return { state: "evaluation-error", pending, aggregate: blocked, invalidated };
       }
@@ -2938,6 +3281,20 @@ async function createAggregateCheck({ github, context, core, headSha, decision }
     });
     return { writeState: "created", priorAggregate: false, checkRunId: response.data.id };
   } catch (error) {
+    // What gave up is the READ-BACK of a create that was issued once, so an
+    // unconfirmed invalidation is classified with the exhausted reads. It still
+    // throws — the pre-lane step's retry is the fencing re-POST, and it depends
+    // on the throw — but a second exhaustion now defers the head to the
+    // serialized lane, which settles it in blockUnconfirmedInvalidation, instead
+    // of failing the job. That is the "exhausted-transport invalidation" the step
+    // already documents deferring, which only a rate limit could reach (#4461).
+    //
+    // Marked here rather than in createCheckRun on purpose: the per-PR decision
+    // create surfaces inside catches that answer a read failure by publishing
+    // UNKNOWN, so marking every create would change that path too.
+    if (isUnconfirmedCheckCreate(error)) {
+      error.autoGateReadFailure = true;
+    }
     if (!isReadOnlyForkCheckError(error, context)) {
       throw error;
     }
@@ -3149,6 +3506,19 @@ const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
 const REQUIRED_CHECK_RECONCILIATION_DISPATCH = "auto-gate-reconcile";
 const REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
 const PR_VALIDATION_REQUIRED_CHECK_NAMES = ["Build", "Lint"];
+// Transient blocks (#4782). A decision marked TRANSIENT_BLOCK_MARKER, or a fixed
+// aggregate left at AGGREGATE_WAITING_TITLE by a transaction that never finished,
+// clears with time and sends no event when it does. A pass re-evaluates one once
+// it is this old. The age is the spacing: a re-evaluation that still meets the
+// transient state rewrites the stamp, so one PR costs at most one evaluation per
+// window however long the state lasts. The aggregate's bound is longer because a
+// live transaction legitimately holds WAITING while it evaluates.
+const TRANSIENT_BLOCK_RETRY_AFTER_MS = 10 * 60 * 1000;
+const STALE_AGGREGATE_WAITING_AFTER_MS = 15 * 60 * 1000;
+// Transient retries share the pass's REQUIRED_CHECK_REEVALUATION_LIMIT, take only
+// the slots a PR Validation blocker left free, and never more than this many. The
+// oldest go first, so a backlog drains instead of starving.
+const TRANSIENT_BLOCK_REEVALUATION_LIMIT = 5;
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -3819,6 +4189,69 @@ async function readOrNull(operation) {
   }
 }
 
+// Events whose newer suites did NOT hide an older aggregate from the ruleset:
+// #3992 merged with its aggregate in an Auto Gate suite that already had newer
+// pull_request_review and pull_request_review_comment suites (#4802).
+const NON_SUPERSEDING_EVENTS = new Set(["pull_request_review", "pull_request_review_comment"]);
+
+// Why a PASS the rollup shows can still be "expected" to the ruleset (#4802).
+//
+// checks.create takes no suite: GitHub files every Actions-token check run in
+// the EARLIEST github-actions suite on the head, whichever run creates it. When
+// a newer suite of that same workflow arrives from a head event, the ruleset
+// stops counting the older suite's runs, and no rerun or republish moves the
+// aggregate out of it. Returns the explanation, or null when the placement is
+// not provably superseded — including when the aggregate's own check run or the
+// head's workflow runs cannot be read, so a missing fact never changes wording.
+async function describeSupersededPlacement({ github, owner, repo, headSha, ownedAggregateCheck }) {
+  let suiteId = Number(ownedAggregateCheck?.check_suite?.id);
+  if (!Number.isFinite(suiteId) || suiteId <= 0) {
+    const checkRunId = Number(ownedAggregateCheck?.id);
+    if (!Number.isFinite(checkRunId) || checkRunId <= 0) {
+      return null;
+    }
+    const checkRun = await github.rest.checks.get({ owner, repo, check_run_id: checkRunId });
+    suiteId = Number(checkRun?.data?.check_suite?.id);
+    if (!Number.isFinite(suiteId) || suiteId <= 0) {
+      return null;
+    }
+  }
+  // Every page: the listing is newest first and the placement is one of the
+  // head's EARLIEST runs, so a busy head (#4799 had ~40 Auto Gate runs) pushes
+  // it past page one, where a single read would miss it and say nothing.
+  const listed = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+    owner,
+    repo,
+    head_sha: headSha,
+    per_page: 100,
+  });
+  const runs = Array.isArray(listed) ? listed : listed?.workflow_runs || [];
+  const placement = runs.find((run) => Number(run?.check_suite_id) === suiteId);
+  if (!placement) {
+    return null;
+  }
+  const newer = runs
+    .filter(
+      (run) =>
+        run?.workflow_id === placement.workflow_id &&
+        Number(run?.check_suite_id) > suiteId &&
+        !NON_SUPERSEDING_EVENTS.has(run?.event),
+    )
+    .sort((a, b) => Number(a.check_suite_id) - Number(b.check_suite_id));
+  if (newer.length === 0) {
+    return null;
+  }
+  const workflow = placement.name || `workflow ${placement.workflow_id}`;
+  const newerSuites = newer.map((run) => `${run.check_suite_id} (${run.event})`).join(", ");
+  return (
+    `GitHub is not counting the passing ${AUTO_GATE_DECISION_CHECK}: it was placed in check suite ` +
+    `${suiteId} (${workflow} · ${placement.event}), and newer ${workflow} suite ${newerSuites} on ` +
+    `${headSha} supersedes it for the ruleset. The placement is permanent for this head — no rerun ` +
+    "or republish moves it. Push a new head (a commit with an identical tree re-rolls placement) " +
+    "and gate that head (#4802)"
+  );
+}
+
 async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck }) {
   const status = Number(
     error?.status ?? error?.response?.status ?? error?.response?.data?.status,
@@ -3985,9 +4418,15 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   // standing. Unknown ownership is still not "no winner": keep that error loud
   // and do not overwrite a transaction this run could not read (#3551).
   if (refusal.unprovenReason && !error.autoGateOwnershipUnknown) {
+    // Same control flow either way; only the reason changes. A superseded
+    // placement is permanent for this head, and "propagation" was the wrong
+    // name for it through three incidents (#4802).
+    const superseded = await readOrNull(() =>
+      describeSupersededPlacement({ github, owner, repo, headSha: expectedHeadSha, ownedAggregateCheck }),
+    );
     return {
       reason: "unproven-wait",
-      message: `Refusing to merge PR #${prNumber}; ${refusal.unprovenReason}`,
+      message: `Refusing to merge PR #${prNumber}; ${superseded || refusal.unprovenReason}`,
     };
   }
 
@@ -4796,7 +5235,77 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
   return { pulls, checkRunsByHead, statusesByHead, pages };
 }
 
-async function listRequiredCheckReevaluationTargets({ github, context, core }) {
+// Decisions blocked only by transient state, and heads whose fixed aggregate was
+// left at "WAITING: refreshing", each old enough to retry (#4782). Everything it
+// reads is in the reconciliation snapshot already, so it costs no API call.
+function transientBlockReevaluationCandidates({ pulls, checkRunsByHead, now }) {
+  const candidates = [];
+  for (const pull of pulls || []) {
+    const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
+    const baseRefName = pull?.base?.ref || pull?.baseRefName;
+    const state = String(pull?.state || "").toLowerCase();
+    const prNumber = Number(pull?.number);
+    if (
+      !headSha ||
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      state !== "open" ||
+      baseRefName !== "master"
+    ) {
+      continue;
+    }
+    const identity = decisionIdentity(prNumber, headSha);
+    const headChecks = checkRunsByHead.get(headSha) || [];
+    const ownedByActions = (run) => run.app?.id === GITHUB_ACTIONS_APP_ID;
+
+    // An unreadable time counts as old: a redundant evaluation is bounded by the
+    // per-pass limit, and a permanent freeze is the defect this exists to end.
+    const decision = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          ownedByActions(run),
+      ),
+    );
+    if (
+      decision &&
+      decision.status === "completed" &&
+      decision.conclusion !== "success" &&
+      decisionIsTransientOnlyBlock(decision)
+    ) {
+      const evaluatedAt = decisionEvaluatedAt(decision) ?? 0;
+      if (now - evaluatedAt >= TRANSIENT_BLOCK_RETRY_AFTER_MS) {
+        candidates.push({ prNumber, headSha, decisionKey: identity.key, since: evaluatedAt });
+        continue;
+      }
+    }
+
+    const aggregate = newestCheckGeneration(
+      headChecks.filter(
+        (run) =>
+          run.name === AUTO_GATE_DECISION_CHECK &&
+          run.external_id === `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${headSha}` &&
+          ownedByActions(run),
+      ),
+    );
+    if (
+      aggregate &&
+      aggregate.status === "completed" &&
+      String(aggregate.output?.title || aggregate.title || "").startsWith(AGGREGATE_WAITING_TITLE)
+    ) {
+      const writtenAt = parseTimestamp(aggregate.completed_at || aggregate.started_at) ?? 0;
+      if (now - writtenAt >= STALE_AGGREGATE_WAITING_AFTER_MS) {
+        candidates.push({ prNumber, headSha, decisionKey: identity.key, since: writtenAt });
+      }
+    }
+  }
+  return candidates.sort(
+    (left, right) => left.since - right.since || left.prNumber - right.prNumber,
+  );
+}
+
+async function listRequiredCheckReevaluationTargets({ github, context, core, now = Date.now() }) {
   // One GraphQL page carries 100 PRs and each head's current check rollup. This
   // makes every open PR eligible on every sweep without one REST read per head,
   // wall-clock page assignment, or mutable cursor state. A truncated rollup is
@@ -4814,12 +5323,32 @@ async function listRequiredCheckReevaluationTargets({ github, context, core }) {
         `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
     );
   }
+  const selected = new Set(targets.map((target) => target.prNumber));
+  const transient = transientBlockReevaluationCandidates({
+    pulls: snapshot.pulls,
+    checkRunsByHead: snapshot.checkRunsByHead,
+    now,
+  }).filter((candidate) => !selected.has(candidate.prNumber));
+  const transientSlots = Math.max(
+    0,
+    Math.min(TRANSIENT_BLOCK_REEVALUATION_LIMIT, REQUIRED_CHECK_REEVALUATION_LIMIT - targets.length),
+  );
+  const transientTargets = transient
+    .slice(0, transientSlots)
+    .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+  if (transient.length > transientTargets.length) {
+    core.warning(
+      `Required-check reconciliation deferred ${transient.length - transientTargets.length} ` +
+        "transiently blocked PR(s) to a later sweep.",
+    );
+  }
   core.notice(
     `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
-      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s), and ` +
-      `selected ${targets.length}.`,
+      `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s) and ` +
+      `${transient.length} transient block(s), and selected ` +
+      `${targets.length + transientTargets.length}.`,
   );
-  return targets;
+  return [...targets, ...transientTargets];
 }
 
 function isRequiredCheckReconciliationDispatch(context) {
@@ -4831,8 +5360,9 @@ function isRequiredCheckReconciliationDispatch(context) {
 
 // Called by every Auto Gate run that is not itself a pass (#4571). The request
 // is one repository_dispatch; the run it starts is a full scheduled pass, with
-// the same ten-evaluation cap and the same PR Validation blocker filter, and it
-// serializes with scheduled passes in one concurrency group.
+// the same ten-evaluation cap and the same selection (PR Validation blockers and
+// aged transient blocks), and it serializes with scheduled passes in one
+// concurrency group.
 //
 // Two guards keep this from fanning out:
 //
@@ -4923,9 +5453,10 @@ async function resolveTargets({
   headPollAttempts = 6,
   headPollDelayMs = 5000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  reconciliationNowMs = Date.now(),
 }) {
   if (context.eventName === "schedule") {
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs });
   }
   if (isRequiredCheckReconciliationDispatch(context)) {
     const source = context.payload?.client_payload || {};
@@ -4935,7 +5466,7 @@ async function resolveTargets({
     if (/^[1-9][0-9]*$/.test(String(source.source_run_id)) && /^[a-z_]+$/.test(String(source.source_event))) {
       core.info(`Required-check reconciliation requested by ${source.source_event} run ${source.source_run_id}.`);
     }
-    return listRequiredCheckReevaluationTargets({ github, context, core });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs });
   }
   const numbers = [];
   const payload = context.payload;
@@ -5460,6 +5991,18 @@ function sameTreeEntry(left, right) {
 // the only caller turns null into "keep the gate", which is the safe way to be
 // wrong, and an unreadable blob must not take the whole evaluation down (#4484).
 async function readGoSource({ github, context, sha, subject }) {
+  const bytes = await readVerifiedBlob({ github, context, sha, subject });
+  if (!bytes) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+// A blob's raw bytes, or null — trusted only as far as they hash to the blob
+// that was asked for. Null on every failure, for the same reason as above.
+async function readVerifiedBlob({ github, context, sha, subject }) {
   const { owner, repo } = context.repo;
   try {
     const response = await retryRead(`could not read blob ${sha}`, () =>
@@ -5468,8 +6011,7 @@ async function readGoSource({ github, context, sha, subject }) {
     if (data?.encoding !== "base64" || typeof data.content !== "string") return null;
     const bytes = Buffer.from(data.content, "base64");
     const actual = createHash("sha1").update(`blob ${bytes.length}\x00`).update(bytes).digest("hex");
-    if (actual !== sha) return null;
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    return actual === sha ? bytes : null;
   } catch {
     return null;
   }
@@ -5571,7 +6113,14 @@ async function gatedTuiChanges({ github, context, pr, files, subject }) {
 
 // Like a prose review verdict, the attestation names its commit explicitly.
 // The latest recognized attestation wins; a label alone cannot identify tested code.
-async function evaluatePlayTest({ github, context, pr, comments, subject }) {
+//
+// `contentHead` is the update-branch proof's result for this head (#4886). A head
+// the proof walked back from carries nothing of its own past that chain: each
+// link is the previous one plus master, merged without a hand resolution. So an
+// attestation for any link carries to the head, and so does one whose gated
+// paths match the terminal content head. Gated changes that arrived through a
+// link's second parent are master's, already gated on master, not the PR's.
+async function evaluatePlayTest({ github, context, pr, comments, contentHead = null, subject }) {
   const attestations = comments
     .filter((comment) => isAllowedAuthor(comment.user?.login))
     .map((comment) => ({
@@ -5591,50 +6140,75 @@ async function evaluatePlayTest({ github, context, pr, comments, subject }) {
   if (!testedSha) {
     return { ok: false, message: `play-tested label has no SHA-bound attestation; ${remedy}` };
   }
-  if (testedSha !== pr.headRefOid.toLowerCase()) {
-    // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
-    // diverge and compare's file list can truncate. Tree equality covers adds,
-    // deletes, renames, modes and merge conflict resolutions as well as edits.
-    let tested;
-    try {
-      tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
-    } catch (error) {
-      // A well-formed SHA naming no commit is a bad attestation — user input
-      // with its own blocking reason, not a gate-read failure (#4484).
-      const status = Number(error?.status ?? error?.cause?.status);
-      if (status === 404 || status === 422) {
-        return {
-          ok: false,
-          message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
-        };
-      }
-      throw error;
+  if (testedSha === pr.headRefOid.toLowerCase()) {
+    return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+  }
+  const chain = contentHead ? evidenceHeadShasFor(pr.headRefOid, contentHead) : [];
+  const updateMerges = `${contentHead?.chainLength ?? 0} content-preserving update merge(s)`;
+  if (chain.includes(testedSha)) {
+    return {
+      ok: true,
+      message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
+        `through ${updateMerges}; gated changes since arrived from ${pr.baseRefName}`,
+    };
+  }
+  // Compare snapshots, not GitHub's three-dot/merge-base diff. Rebases can
+  // diverge and compare's file list can truncate. Tree equality covers adds,
+  // deletes, renames, modes and merge conflict resolutions as well as edits.
+  let tested;
+  try {
+    tested = await readGatedTuiTree({ github, context, sha: testedSha, role: "play-tested", subject });
+  } catch (error) {
+    // A well-formed SHA naming no commit is a bad attestation — user input
+    // with its own blocking reason, not a gate-read failure (#4484).
+    const status = Number(error?.status ?? error?.cause?.status);
+    if (status === 404 || status === 422) {
+      return {
+        ok: false,
+        message: `play-tested attestation names ${testedSha}, which GitHub cannot resolve as a commit (HTTP ${status}); ${remedy}`,
+      };
     }
-    const current = await readGatedTuiTree({ github, context, sha: pr.headRefOid, role: "play-tested", subject });
+    throw error;
+  }
+  // Whether the tested gated paths still describe `sha`: unchanged, or changed
+  // only in comments (#4477). Any path added, removed, or not provably
+  // comment-only makes the attestation stale for it.
+  const covers = async (sha) => {
+    const current = await readGatedTuiTree({ github, context, sha, role: "play-tested", subject });
     const changed = [...new Set([...tested.keys(), ...current.keys()])]
       .filter((path) => !sameTreeEntry(tested.get(path), current.get(path)))
       .sort();
-    if (changed.length > 0) {
-      // A follow-up that only rewords comments leaves the tested program intact,
-      // so it keeps the evidence (#4477). Any path that is added, removed, or
-      // not provably comment-only still makes the attestation stale.
-      const commentOnly = await everyGoChangeIsInert({
-        github,
-        context,
-        subject,
-        changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
-      });
-      if (!commentOnly) {
-        return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
-      }
+    if (changed.length === 0) return { covered: true, changed };
+    const commentOnly = await everyGoChangeIsInert({
+      github,
+      context,
+      subject,
+      changes: changed.map((path) => ({ path, before: tested.get(path), after: current.get(path) })),
+    });
+    return { covered: commentOnly, changed };
+  };
+  const describe = (changed) => changed.length === 0
+    ? "gated paths unchanged"
+    : `gated paths changed only in comments: ${changed.join(", ")}`;
+  const atHead = await covers(pr.headRefOid);
+  if (atHead.covered) {
+    return {
+      ok: true,
+      message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (${describe(atHead.changed)})`,
+    };
+  }
+  if (contentHead) {
+    const atContent = await covers(contentHead.oid);
+    if (atContent.covered) {
       return {
         ok: true,
-        message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} ` +
-          `(gated paths changed only in comments: ${changed.join(", ")})`,
+        message: `TUI path gate passed: play-tested commit ${testedSha} covers content head ${contentHead.oid} ` +
+          `(${describe(atContent.changed)}), and head ${pr.headRefOid} adds only ${pr.baseRefName} ` +
+          `through ${updateMerges}`,
       };
     }
   }
-  return { ok: true, message: `TUI path gate passed: play-tested commit ${testedSha} covers head ${pr.headRefOid} (gated paths unchanged)` };
+  return { ok: false, message: `play-tested attestation for ${testedSha} is stale: gated paths changed at head ${pr.headRefOid}; ${remedy}` };
 }
 
 // The raw pulls.listFiles entries: the TUI path gate needs each file's status,
@@ -5691,6 +6265,10 @@ async function evaluateRequiredChecks({
   );
   const notes = [];
   const reasons = [...required.errors];
+  // The subset of `reasons` that only the passage of time clears (#4782). Tagged
+  // here, where the state that produced each reason is still in hand, never by
+  // re-reading the prose later.
+  const transientReasons = [];
   const observations = [];
 
   if (syntheticDecisionSpecs.length > 0) {
@@ -5796,18 +6374,29 @@ async function evaluateRequiredChecks({
         validationDispatch?.dispatched && isPRValidationSpec(spec)
           ? ` — PR Validation had no run for this head, so Auto Gate dispatched it on ${validationRef}`
           : "";
-      reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`);
+      const missing = `required check ${formatCheckSpec(spec)} is missing on ${sha}${dispatched}`;
+      reasons.push(missing);
+      // A missing Build or Lint is transient: every base-repository head gets a
+      // PR Validation run, and this evaluation dispatches one when none exists.
+      // Any other missing check may have no run coming, so it is not.
+      if (isPRValidationSpec(spec)) {
+        transientReasons.push(missing);
+      }
       continue;
     }
 
     notes.push(`${formatCheckSpec(spec)}: ${state.description}`);
     if (!state.ok) {
       const stateDescription = state.waiting ? "is still settling" : "did not succeed";
-      reasons.push(`required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`);
+      const reason = `required check ${formatCheckSpec(spec)} ${stateDescription} (${state.description})`;
+      reasons.push(reason);
+      if (state.waiting) {
+        transientReasons.push(reason);
+      }
     }
   }
 
-  return { ok: reasons.length === 0, reasons, notes, observations };
+  return { ok: reasons.length === 0, reasons, transientReasons, notes, observations };
 }
 
 function isSyntheticDecisionContext(contextName) {
@@ -6213,8 +6802,11 @@ function markerApprovalCounts(approverLogin, prAuthor) {
 // authorization to carry review evidence, because a hand-written conflict
 // resolution has the same parents. For every accepted link, derive the only
 // unambiguous path-level three-way result from the parents and their merge base,
-// then require the merge commit's complete tree to equal it. A truncated tree,
-// same-path conflict, malformed entry or committed-tree mismatch returns null.
+// then require the merge commit's complete tree to equal it. A path BOTH sides
+// changed has no path-level result; on the gate's own update merge it is proven
+// line by line instead (#4886, bothChangedMergeEntries), and on any other merge
+// it refuses. A truncated tree, unproven both-changed path, malformed entry or
+// committed-tree mismatch returns null.
 //
 // The containment test is a compare against the base BRANCH rather than a
 // remembered sha, for the same reason #3752 reads the branch: the question is
@@ -6262,6 +6854,10 @@ async function updateBranchContentHead({
           committedDate: commit?.data?.commit?.committer?.date,
           parents: (commit?.data?.parents || []).map((parent) => ({ oid: parent.sha })),
           treeOid: normalizeHeadSha(commit?.data?.commit?.tree?.sha),
+          gateMade:
+            commit?.data?.author?.login === GATE_UPDATE_MERGE_AUTHOR &&
+            commit?.data?.committer?.login === GATE_UPDATE_MERGE_COMMITTER &&
+            commit?.data?.commit?.verification?.verified === true,
         };
       }, subject));
     }
@@ -6363,6 +6959,7 @@ async function updateBranchContentHead({
     }
 
     const expected = new Map();
+    const bothChanged = [];
     const paths = new Set([...baseTree.keys(), ...firstTree.keys(), ...secondTree.keys()]);
     for (const path of paths) {
       const base = baseTree.get(path);
@@ -6376,16 +6973,81 @@ async function updateBranchContentHead({
       } else if (secondValue === base) {
         merged = firstValue;
       } else {
-        // Both sides changed one leaf differently. Reconstructing a textual
-        // merge would require executing or trusting PR content, so this result
-        // is deliberately unknown and review evidence does not carry.
-        return false;
+        // Both sides changed one leaf differently: the path-level result is
+        // unknown, and only the line-level proof below can settle it.
+        bothChanged.push(path);
+        continue;
       }
       if (merged !== undefined) {
         expected.set(path, merged);
       }
     }
+    if (bothChanged.length > 0) {
+      const provenEntries = await bothChangedMergeEntries(mergeOid, bothChanged, {
+        baseTree, firstTree, secondTree, committedTree,
+      });
+      if (!provenEntries) {
+        return false;
+      }
+      for (const [path, entry] of provenEntries) {
+        expected.set(path, entry);
+      }
+    }
     return sameTree(expected, committedTree);
+  };
+
+  // The committed entries of paths BOTH sides changed, each proven to be the
+  // clean line merge of its two sides against the merge base — or null (#4886).
+  //
+  // Before #4886 any such path refused carry, and a hot file is exactly the one
+  // master and a PR both touch: #4789's `a7705950` and #4825's `52b78a17` each
+  // lost a maintainer approval to `app/home_update.go` alone, on merges that
+  // `git merge-tree --write-tree` reproduces exactly. text-merge.js holds the
+  // proof and says what it does and does not establish.
+  //
+  // Admitted only on the gate's own update merge, and only for a regular file on
+  // all four sides: an add/add, a delete on either side, a symlink, a submodule
+  // or a type change stays unproven. The mode takes the same three-way rule as a
+  // leaf. Every read is verified against the object id the tree named, and any
+  // failure, limit or byte difference refuses the whole link.
+  const bothChangedMergeEntries = async (mergeOid, bothChanged, trees) => {
+    const merge = await readCommit(mergeOid);
+    if (!merge?.gateMade || bothChanged.length > TEXT_MERGE_PROOF_PATH_LIMIT) {
+      return null;
+    }
+    const regularBlob = (entry) => {
+      const [mode, type, sha] = String(entry ?? "").split("\0");
+      return type === "blob" && (mode === "100644" || mode === "100755") ? { mode, sha } : null;
+    };
+    const proven = new Map();
+    for (const path of bothChanged) {
+      const [base, first, second, committed] = [
+        trees.baseTree, trees.firstTree, trees.secondTree, trees.committedTree,
+      ].map((tree) => regularBlob(tree.get(path)));
+      if (!base || !first || !second || !committed) {
+        return null;
+      }
+      const mode = first.mode === second.mode ? first.mode
+        : first.mode === base.mode ? second.mode
+          : second.mode === base.mode ? first.mode
+            : null;
+      if (mode !== committed.mode) {
+        return null;
+      }
+      const [baseBytes, firstBytes, secondBytes, committedBytes] = await Promise.all(
+        [base, first, second, committed].map(({ sha }) =>
+          readVerifiedBlob({ github, context, sha, subject })),
+      );
+      const blobs = { base: baseBytes, first: firstBytes, second: secondBytes, committed: committedBytes };
+      if (
+        Object.values(blobs).some((bytes) => !bytes || bytes.length > TEXT_MERGE_PROOF_BLOB_BYTES) ||
+        !isCleanTextMerge(blobs)
+      ) {
+        return null;
+      }
+      proven.set(path, trees.committedTree.get(path));
+    }
+    return proven;
   };
 
   // Whether these parents are the shape `PUT update-branch` produces: exactly
@@ -7579,7 +8241,10 @@ module.exports = {
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,
+  isNonPassingAggregate,
+  isRateLimitFailure,
   isReadFailure,
+  isUnconfirmedCheckCreate,
   merge,
   processAggregateHead,
   reportAggregateDecision,

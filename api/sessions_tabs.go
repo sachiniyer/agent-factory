@@ -99,6 +99,13 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	log.Initialize(false)
 	defer log.Close()
 
+	// Presence and value are separate for pflag: --port 0 and --url "" both
+	// leave their bound globals at the zero value but are still supplied. Keep
+	// the value fallbacks because focused tests and internal callers invoke RunE
+	// directly after assigning the package-level bound variables.
+	urlSupplied := cmd.Flags().Changed("url") || strings.TrimSpace(tabCreateURLFlag) != ""
+	portSupplied := cmd.Flags().Changed("port") || tabCreatePortFlag != 0
+
 	// The kind vocabulary lives in the session package (session.ParseTabKindName),
 	// which the daemon dispatches on too — so this client-side check can never
 	// accept a kind the daemon would reject. It stays a pre-check purely to fail
@@ -109,16 +116,30 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		return jsonError(fmt.Errorf("--kind must be empty or one of %s, got %q",
 			strings.Join(session.TabKindNameList(), ", "), tabCreateKindFlag))
 	case explicitKind && kind == session.TabKindWeb:
-		if strings.TrimSpace(tabCreateURLFlag) == "" && tabCreatePortFlag == 0 {
+		if !urlSupplied && !portSupplied {
 			return jsonError(fmt.Errorf("--kind web requires --url or --port"))
 		}
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
 			return jsonError(fmt.Errorf("--command is not valid for a web tab (--kind web); use --url or --port"))
 		}
+		// Validate every supplied target independently so neither value can be
+		// silently ignored. URL validation runs first for deterministic errors
+		// when both are invalid. When both are valid, both remain on the request
+		// and the daemon's established URL-over-port target precedence applies.
+		if urlSupplied {
+			if _, err := session.NormalizeWebTabURL(tabCreateURLFlag); err != nil {
+				return jsonError(err)
+			}
+		}
+		if portSupplied {
+			if _, err := session.WebTabURLForPort(tabCreatePortFlag); err != nil {
+				return jsonError(err)
+			}
+		}
 	case explicitKind && kind == session.TabKindVSCode:
 		// A vscode tab always opens the session's own worktree, so a target is
 		// meaningless rather than optional.
-		if strings.TrimSpace(tabCreateURLFlag) != "" || tabCreatePortFlag != 0 {
+		if urlSupplied || portSupplied {
 			return jsonError(fmt.Errorf("--url/--port are not valid for a vscode tab (--kind vscode): it always opens the session's worktree"))
 		}
 		if strings.TrimSpace(tabCreateCommandFlag) != "" {
@@ -131,12 +152,20 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		if strings.TrimSpace(tabCreateNameFlag) != "" {
 			return jsonError(fmt.Errorf("--name is not valid for a shell tab (--kind shell): its canonical name is \"shell\" (shown as \"Terminal\" in the UIs)"))
 		}
-		if strings.TrimSpace(tabCreateURLFlag) != "" || tabCreatePortFlag != 0 {
+		if urlSupplied || portSupplied {
 			return jsonError(fmt.Errorf("--url/--port are not valid for a shell tab (--kind shell)"))
 		}
 	default:
 		if strings.TrimSpace(tabCreateCommandFlag) == "" {
 			return jsonError(fmt.Errorf("--command is required for a process tab (or pass --kind shell, --kind web with --url/--port, or --kind vscode)"))
+		}
+		// The process dispatcher (AddProcessTab) takes only a command and name,
+		// so --url/--port have no field to land in — the daemon drops them
+		// silently. Reject them here, as the shell/vscode arms do for their
+		// kinds, so the caller gets a flag-shaped error instead of a success
+		// with part of their input discarded.
+		if urlSupplied || portSupplied {
+			return jsonError(fmt.Errorf("--url/--port are not valid for a process tab (default); use --kind web for a URL/iframe tab"))
 		}
 	}
 

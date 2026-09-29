@@ -1004,6 +1004,12 @@ func installEnsureTestUnitAndManager(t *testing.T, block bool) (string, string) 
 		// The child keeps the output pipe open too. A direct-child-only timeout
 		// therefore hangs unless the production runner owns and kills the group.
 		script += "sleep 300 &\nwait\n"
+		// The hang only has to outlive the unit's bounded start slice; shrinking
+		// the slice keeps the ordering while saving each caller the production
+		// two seconds of wall-clock (#4464).
+		prev := ensureUnitStartTimeout
+		ensureUnitStartTimeout = 300 * time.Millisecond
+		t.Cleanup(func() { ensureUnitStartTimeout = prev })
 	}
 	if err := os.WriteFile(filepath.Join(managerDir, "systemctl"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake systemctl: %v", err)
