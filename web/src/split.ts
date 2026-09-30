@@ -31,6 +31,7 @@ import {
   closeLeaf,
   companionTab,
   type DragPayload,
+  type TabDropResult,
   type Edge,
   findLeaf,
   type LayoutNode,
@@ -145,7 +146,7 @@ function webFallbackMs(): number {
  *  that posts back to its parent. Mirrors daemon/preview_origin.go
  *  previewProbeLabel/previewProbeMessage. */
 const PREVIEW_PROBE_HOST = "afprobe.localhost";
-const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
+export const PREVIEW_PROBE_MESSAGE = "af-preview-origin-ok";
 
 /** How long to wait for the probe frame to report. Overridable for tests. */
 function previewProbeMs(): number {
@@ -179,17 +180,38 @@ const previewReachable = new Map<string, Promise<boolean>>();
  *  the exact frame this created — so nothing else on the page can forge a yes.
  *
  *  Fails CLOSED: any timeout, error, or unexpected sender leaves the pane on the
- *  same-origin mirror, which is the behavior every release before this one had. */
-function previewOriginReachable(origin: string): Promise<boolean> {
+ *  same-origin mirror, which is the behavior every release before this one had.
+ *
+ *  `fresh` is the user-initiated ↻ / Retry path (threaded from `load(true)` the same
+ *  way it nulls `previewSrcOnce`): it bypasses the cache and re-probes this port. See
+ *  the cache note below for why a cached `true` cannot be trusted across that gesture. */
+export function previewOriginReachable(origin: string, fresh = false): Promise<boolean> {
   let port: string;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== undefined) {
-    return cached;
+  // A user-initiated ↻ bypasses the cache. A success is pinned for the SPA's lifetime
+  // (see below) — the right thing between two ordinary loads of the same pane, but
+  // `fresh` is the explicit "give me the CURRENT page" gesture. A port that was
+  // reachable when first probed may have stopped being BROWSER-reachable since: the
+  // daemon's preview listener stays bound and keeps vending the same origin, but the
+  // browser's own path to the port can break — the preview-port ssh forward drops
+  // while the main forward stays up. A cached `true` would then navigate the frame to
+  // a dead origin with no fallback; re-probing on demand restores the "fails CLOSED"
+  // path the cache exists to preserve.
+  //
+  // Only the port THIS origin names is dropped — a port that moved is a different key
+  // and was never cached against the new one — so the dedup across panes that share a
+  // port (one probe answers for the whole page) is kept for every non-fresh load.
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== undefined) {
+      return cached;
+    }
   }
   // Only a SUCCESS is cached; a failure is evicted below so the next ↻ re-probes.
   // A cached false is sticky in the worst way: the everyday causes are transient —
@@ -217,7 +239,7 @@ function previewOriginReachable(origin: string): Promise<boolean> {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -1347,7 +1369,7 @@ export class SplitView {
                 // and Safari does not resolve *.localhost at all. Both look identical
                 // from the daemon, and getting either wrong would abandon a working
                 // mirror for a frame that loads nothing.
-                return (await previewOriginReachable(origin)) ? previewOriginSrc(origin, target) : "";
+                return (await previewOriginReachable(origin, fresh)) ? previewOriginSrc(origin, target) : "";
               })
             : Promise.resolve("");
       }
@@ -1395,6 +1417,9 @@ export class SplitView {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       // A user-initiated reload of a PROXIED target is cache-busted (#1900): without
@@ -1584,26 +1609,35 @@ export class SplitView {
    * rather than two: every rule below (id resolution, the #1901 self-split dedupe, the
    * focus choice) is a rule a second implementation would drift away from.
    */
-  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): void {
+  private applyTabDrop(pane: Pane, drag: DragPayload, clientX: number, clientY: number): boolean {
     if (!this.tree) {
-      return;
+      return false;
     }
     // Resolve the dragged tab to the ordinal it should bind — by its STABLE id when
     // it has one, else the guarded legacy index. See resolveDragTab; null cancels.
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    // A center drop on the FOCUSED pane already showing the tab is a third no-op:
+    // replaceTab would hand back this same tree and focus would not move, so
+    // committing it would report a change that never happened — and dismiss a
+    // disclosure the drop left untouched (#4434 review). On an unfocused pane the
+    // tree still holds, but the drop moves focus there, so it falls through.
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
+      return false;
+    }
     // Dragging the pane's OWN tab onto its edge still splits — but the new half must
     // open a DIFFERENT tab (#1901). Binding the dragged tab on both sides is what the
     // one-tab-one-pane dedupe undoes, collapsing the split back to where it started.
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane
       ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs())
       : tab;
     if (opened === null) {
-      return; // no other tab to fill the new half — leave the layout as it stands
+      return false; // no other tab to fill the new half — leave the layout as it stands
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     // Focus the pane holding the tab that just landed — the NEW half (VS Code focuses
@@ -1616,6 +1650,7 @@ export class SplitView {
     }
     this.commit();
     this.refocus();
+    return true;
   }
 
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
@@ -1653,17 +1688,18 @@ export class SplitView {
     }
   }
 
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
-  dropTabAt(clientX: number, clientY: number, drag: DragPayload): boolean {
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
+  dropTabAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
 
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
