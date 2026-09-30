@@ -1421,3 +1421,68 @@ func TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath(t *testing.T) 
 	assert.Empty(t, stored.RepoID, "a symlink-divergent rebind whose \"..\" is in the dead recorded path is a real rebind, not a same-path reassertion: the binding re-resolves (to empty) rather than retain")
 	assert.NotEqual(t, retained, stored.RepoID, "the stale binding for the removed other/task is not retained across a \"..\"-divergent rebind whose \"..\" is in the recorded path")
 }
+
+// TestAudit_SamePathDeadPatchRetainsRepoIDForCaseVariantSpelling pins the
+// os.SameFile guard sameProjectPathReassertion adds for case-insensitive,
+// case-preserving volumes (the common macOS and Windows layout). The daemon
+// does not normalize project_path, so a remote caller can reassert the SAME
+// dead path with only a change in casing — recorded /Users/me/Repo versus
+// patched /Users/me/repo. Both filepath.EvalSymlinks calls succeed while
+// preserving the differing spelling, so before the identity compare the
+// resolved-string inequality read the reassertion as a rebind and the empty
+// re-resolution erased the retained RepoID, stranding the task from its own
+// project's scoped list. Comparing by filesystem identity (os.SameFile)
+// recognizes the case-variant spellings as one directory and retains. Pairs
+// with TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling, whose
+// equivalent spellings the lexical Clean fallback already covers.
+//
+// The case-variant shape only arises on a case-insensitive volume, so the test
+// short-circuits on a case-sensitive filesystem (the Linux CI layout), where
+// the case-variant spelling is a genuinely distinct, non-existent directory;
+// the macOS CI job exercises the retain assertion.
+func TestAudit_SamePathDeadPatchRetainsRepoIDForCaseVariantSpelling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	repo := filepath.Join(base, "MixedCase")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	require.NoError(t, exec.Command("git", "init", repo).Run())
+
+	created, err := AddTaskChecked(Task{
+		ID: "case0001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	// Kill the repo's .git so the recorded path no longer resolves; the
+	// directory itself still stands, so EvalSymlinks still answers for it and
+	// the case-variant reassertion is decided by the resolved-spelling branch
+	// (the os.SameFile guard), not the dead-path Clean fallback.
+	require.NoError(t, os.RemoveAll(filepath.Join(repo, ".git")))
+	require.Empty(t, repoIDForPath(repo), "precondition: the path no longer resolves to a repo")
+
+	// A case-variant spelling the caller reasserts. On a case-sensitive
+	// filesystem this is a distinct, non-existent directory and the
+	// case-variant reassertion this test pins (a case-insensitive-volume
+	// behavior) does not arise — skip there.
+	patched := filepath.Join(base, "mixedcase")
+	require.NotEqual(t, repo, patched, "precondition: the spellings differ only in case")
+	repoStat, err := os.Stat(repo)
+	require.NoError(t, err)
+	patchedStat, err := os.Stat(patched)
+	if err != nil || !os.SameFile(repoStat, patchedStat) {
+		t.Skip("case-sensitive filesystem: the case-variant reassertion is a case-insensitive-volume behavior")
+	}
+
+	_, err = UpdateTaskChecked("case0001", TaskUpdate{ProjectPath: &patched}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("case0001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "a case-variant reassertion of the same dead directory on a case-insensitive volume must not erase the retained RepoID")
+	for _, e := range stored.Audit {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "no daemon-upgrade entry fires for a case-variant same-path reassertion")
+	}
+}

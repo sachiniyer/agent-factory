@@ -8,6 +8,7 @@ package task
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -292,18 +293,21 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 					// equivalent spellings a remote caller can reassert without the
 					// daemon normalizing project_path (a trailing separator or a "."
 					// leaf). It compares filesystem-resolved paths when both sides
-					// still resolve, so a symlink-divergent spelling that cleans
-					// lexically equal — e.g. base/link/../task, where base/link points
-					// elsewhere, cleans to base/task but resolves to a different
-					// directory — is read as a real rebind rather than a same-path
-					// reassertion. It falls back to lexical Clean only for a path the
-					// filesystem can no longer resolve (the dead-path case this
-					// protection exists for), where EvalSymlinks fails and a genuine
-					// rebind cannot be proven either — and only when neither spelling
-					// has a ".." segment, since ".." can cross a symlink Clean cannot
-					// see against a dead path on either side, so it is treated as a
-					// rebind (the conservative outcome) rather than risk retaining a
-					// stale RepoID.
+					// still resolve — by filesystem identity (os.SameFile), not the
+					// resolved spelling, so a case-variant reassertion on a
+					// case-insensitive volume (/Users/me/Repo vs /Users/me/repo) is
+					// recognized as the same path rather than read as a rebind — so
+					// a symlink-divergent spelling that cleans lexically equal — e.g.
+					// base/link/../task, where base/link points elsewhere, cleans to
+					// base/task but resolves to a different directory — is read as a
+					// real rebind rather than a same-path reassertion. It falls back
+					// to lexical Clean only for a path the filesystem can no longer
+					// resolve (the dead-path case this protection exists for), where
+					// EvalSymlinks fails and a genuine rebind cannot be proven either
+					// — and only when neither spelling has a ".." segment, since ".."
+					// can cross a symlink Clean cannot see against a dead path on
+					// either side, so it is treated as a rebind (the conservative
+					// outcome) rather than risk retaining a stale RepoID.
 					if rebindRepoID != "" || !sameProjectPathReassertion(existing.ProjectPath, *update.ProjectPath) {
 						merged.RepoID = rebindRepoID
 					}
@@ -460,14 +464,20 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 // alone misreads a symlink-divergent spelling as the same path — base/link/../task
 // cleans to base/task while base/link resolves elsewhere, so the two are
 // physically distinct. Evaluate symlinks on both sides when the filesystem can
-// answer, and fall back to lexical Clean only for a form the filesystem cannot
-// resolve (a path that has since been removed, the dead-path case this
-// comparison protects), where EvalSymlinks fails and a genuine rebind cannot be
-// proven either. The fallback is restricted to cases where neither spelling
-// has a ".." segment: ".." can cross a symlink to a directory Clean cannot
-// reach, so against a dead path on either side the cleaned compare would read
-// a real rebind as same-path and retain a stale RepoID; a ".." in either
-// spelling is treated as a rebind instead (the conservative outcome).
+// answer, and compare the two by filesystem identity (os.SameFile) rather than
+// by the resolved spelling: on a case-insensitive, case-preserving volume (the
+// common macOS and Windows layout) EvalSymlinks preserves the input spelling,
+// so /Users/me/Repo and /Users/me/repo both resolve yet spell differently, and
+// a string compare would read the reassertion as a rebind and clear the
+// retained RepoID over a path that never moved. Fall back to lexical Clean only
+// for a form the filesystem cannot resolve (a path that has since been
+// removed, the dead-path case this comparison protects), where EvalSymlinks
+// fails and a genuine rebind cannot be proven either. The fallback is
+// restricted to cases where neither spelling has a ".." segment: ".." can
+// cross a symlink to a directory Clean cannot reach, so against a dead path on
+// either side the cleaned compare would read a real rebind as same-path and
+// retain a stale RepoID; a ".." in either spelling is treated as a rebind
+// instead (the conservative outcome).
 func sameProjectPathReassertion(recorded, patched string) bool {
 	if recorded == patched {
 		return true
@@ -486,6 +496,27 @@ func sameProjectPathReassertion(recorded, patched string) bool {
 	resolvedPatched, errPatched := filepath.EvalSymlinks(patched)
 	resolvedRecorded, errRecorded := filepath.EvalSymlinks(recorded)
 	if errPatched == nil && errRecorded == nil {
+		// Compare by filesystem identity, not resolved spelling. On a
+		// case-insensitive, case-preserving volume (the common macOS and
+		// Windows layout) EvalSymlinks preserves the input spelling, so a
+		// reassertion of the SAME directory with only a change in casing —
+		// recorded /Users/me/Repo versus patched /Users/me/repo — succeeds on
+		// both calls yet compares unequal as a string, reading as a rebind
+		// and clearing the retained RepoID over a path that never moved.
+		// os.SameFile compares the underlying file (device + inode), so the
+		// case-variant spellings of one directory are recognized as a
+		// same-path reassertion. It is a strict superset of the resolved
+		// string compare: the only pairs that share an inode but resolve to
+		// different spellings are the same directory reached another way (a
+		// bind mount of the same inode), which is also not a rebind. A Stat
+		// failure here is a TOCTOU removal between EvalSymlinks and Stat;
+		// fall back to the resolved-string compare rather than guess.
+		statPatched, errP := os.Stat(patched)
+		if errP == nil {
+			if statRecorded, errR := os.Stat(recorded); errR == nil {
+				return os.SameFile(statPatched, statRecorded)
+			}
+		}
 		return resolvedPatched == resolvedRecorded
 	}
 	// Lexical Clean is only a safe fallback for spellings that cannot cross a
