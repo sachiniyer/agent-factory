@@ -210,6 +210,14 @@ function hasPrintable(data: string): boolean {
  *  remaining-prefix draft unprotected — the same window fixed for the other
  *  editing controls.
  *
+ *  Ctrl-L (\x0c, readline clear-screen/redraw) preserves the current input
+ *  buffer; the redrawn prompt re-shows the still-present draft. The keybar emits
+ *  it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  redrawn draft unprotected — the same window fixed for the other editing
+ *  controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -221,7 +229,7 @@ function isEditingControl(data: string): boolean {
     data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
     data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
     data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
-    data.includes("\x0b")
+    data.includes("\x0b") || data.includes("\x0c")
   );
 }
 
