@@ -181,6 +181,64 @@ func TestGetSessionByTitle_RemoteEmptyPathKnownLimitation(t *testing.T) {
 	}
 }
 
+// TestGetSessionByTitle_PendingSnapshotHolderNotOnDiskCollidesWithDisk guards
+// the regression the repoID-only count introduced: an in-flight pendingCreates
+// row is exposed by daemon.SnapshotWithSkipped but is not written to
+// instances.json until creation completes, so it is invisible to the disk
+// widening. When a persisted row with the same title exists in ANOTHER repo, the
+// snapshot serves a lone non-empty-Path match and the disk widening finds one
+// repo — a count of one would silently return the pending row. The snapshot
+// holder must be retained in the project count (via its non-empty Path) so the
+// collision is still flagged.
+func TestGetSessionByTitle_PendingSnapshotHolderNotOnDiskCollidesWithDisk(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// The persisted twin in repo-beta (its worktree/tmux is gone, so refresh
+	// skipped it and it never reached the snapshot, but it is on disk).
+	saveOneRepoInstances(t, "repo-beta", session.InstanceData{Title: "foo", Path: "/repos/beta", BackendType: "docker"})
+	// The snapshot serves a lone pendingCreates row NOT yet on disk (a Path the
+	// disk widening will not find among the persisted rows).
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "foo", Path: "/repos/pending", BackendType: "docker"}}, nil
+	})
+
+	_, _, err := getSessionByTitle("foo")
+	if err == nil {
+		t.Fatalf("a lone pending snapshot match must not resolve while another repo holds the title on disk")
+	}
+	if !errors.Is(err, session.ErrAmbiguousTitle) {
+		t.Fatalf("expected ErrAmbiguousTitle, got: %v", err)
+	}
+	for _, want := range []string{"/repos/pending", "/repos/beta"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must name both holders (%q and %q), got: %v", "/repos/pending", "/repos/beta", err)
+		}
+	}
+}
+
+// TestGetSessionByTitle_SnapshotHolderOnDiskDoesNotOverCount guards the other
+// side of the pending fix: when the snapshot's lone match IS the same project as
+// a disk row (the normal, fully-persisted case), folding the holder in by Path
+// must not double-count it. The holder's Path matches a disk row's Path, so it
+// is not added as a synthetic id and a unique title still resolves.
+func TestGetSessionByTitle_SnapshotHolderOnDiskDoesNotOverCount(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	saveOneRepoInstances(t, "repo-alpha", session.InstanceData{Title: "foo", Path: "/repos/alpha", BackendType: "docker"})
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "foo", Path: "/repos/alpha", BackendType: "docker"}}, nil
+	})
+
+	got, notice, err := getSessionByTitle("foo")
+	if err != nil {
+		t.Fatalf("a unique title whose snapshot match is on disk must resolve, got: %v", err)
+	}
+	if got.Title != "foo" {
+		t.Errorf("resolved wrong session: %q", got.Title)
+	}
+	if notice != "" {
+		t.Errorf("a clean unique resolution must carry no widening notice, got: %q", notice)
+	}
+}
+
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {

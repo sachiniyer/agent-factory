@@ -326,16 +326,23 @@ func repoPathsOf(matches []session.InstanceData) []string {
 //
 // The FIRST return counts distinct PROJECTS by repoID (the storage map key,
 // never empty). The snapshot carries no repoID, so its own ambiguity check keys
-// on Path; but a row whose Path is "" still belongs to a distinct repo, and
-// keying THIS widening on Path too would let DedupeSorted drop the empty value
-// and silently collapse two repos into one (or zero) — the exact asymmetry that
-// left the disk twin (findInstanceByTitle, which keys on repoID) robust while
-// this backstop was not. Counting by repoID closes that gap. The SECOND return
-// keeps the human-readable repo Paths for the AmbiguousTitleError message: a
-// repoID is an opaque hash and would not help the user pass --repo, so the
-// message still names paths. When every holder has Path "" the path set is
-// empty and AmbiguousTitleError falls back to its defensive wording — the same
-// fallback the disk twin lands on.
+// on Path; keying THIS widening on Path too would let DedupeSorted drop an empty
+// value and collapse two repos into one — the asymmetry that left the disk twin
+// (findInstanceByTitle, keys on repoID) robust while this backstop was not.
+//
+// The snapshot holder is folded into this count too: an in-flight pendingCreates
+// row is exposed by daemon.SnapshotWithSkipped but not written to instances.json
+// until creation completes (daemon/manager_create.go), so a lone snapshot match
+// may be a project the disk widening cannot see. Its Path is the only handle;
+// when non-empty and no disk row shares it, the holder is added as a synthetic id
+// so the >1 count still flags the collision. An empty-Path holder is left to the
+// disk repoID count (its Path can't be matched to a disk repo, and counting it
+// would over-refuse a unique empty-Path match).
+//
+// The SECOND return keeps the human-readable repo Paths for the
+// AmbiguousTitleError message: a repoID is an opaque hash, so the message names
+// paths. When every holder has Path "" the path set is empty and
+// AmbiguousTitleError falls back to its defensive wording.
 //
 // The third return names repos whose file could not be READ, so the caller can
 // say the widening was incomplete instead of implying it was exhaustive (#3479).
@@ -366,6 +373,21 @@ func diskRepoPathsForTitle(title string, known []string) (repoIDs, repoPaths []s
 				paths = append(paths, rows[i].Path)
 				break
 			}
+		}
+	}
+	// Retain the snapshot holder (known) in the project count: an in-flight
+	// pendingCreates row is not on disk, so fold its non-empty Path in as a
+	// synthetic id when no disk row shares it. An empty-Path holder is skipped
+	// (can't be matched to a disk repo; would over-refuse a unique match).
+	diskPaths := make(map[string]bool, len(paths)-len(known))
+	for _, p := range paths[len(known):] {
+		if p != "" {
+			diskPaths[p] = true
+		}
+	}
+	for _, p := range known {
+		if p != "" && !diskPaths[p] {
+			ids = append(ids, p)
 		}
 	}
 	return session.DedupeSorted(ids), session.DedupeSorted(paths), unreadable, nil
