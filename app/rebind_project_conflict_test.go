@@ -68,6 +68,21 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, moved.Root, root, "the refused rebind wrote nothing")
 
+	// Esc leaves the re-armed form for the list — which the conflict handler
+	// rebuilt from the fresh registry read. The row must describe the rebound
+	// registration, not the checkout the picker was opened on (#4888 review):
+	// an Esc onto a stale row could select a path the registry dropped.
+	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEsc})
+	row, ok := h.projectPickerOverlay.HighlightedProject()
+	require.True(t, ok, "the rebuilt list still highlights a row")
+	assert.Equal(t, moved.Root, row.Root, "the row's root is where the project is bound now")
+	assert.Equal(t, config.RepoIDFromRoot(moved.Root), row.RepoID, "the row carries the rebound repo identity")
+	assert.False(t, row.MissingPath, "the rebound checkout exists — the stale row claimed it did not")
+
+	// Re-armed on that fresh row, Enter retries — expecting the root the
+	// rebuilt row reports.
+	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(mine)})
 	_, cmd := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
 	require.NotNil(t, cmd, "the re-armed form submits again")
 	h.Update(cmd())

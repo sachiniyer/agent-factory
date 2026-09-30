@@ -274,12 +274,17 @@ func RebindProject(id, path string) (Project, error) {
 // checkout ID.
 //
 // A non-empty expectedRoot makes the rebind a compare-and-set (#4822): it is
-// applied only while the record still names expectedRoot — or already names
-// path, so a replay of a rebind that landed is not mistaken for someone else's
-// — and is otherwise refused with a *ProjectReboundError. The check runs under
-// the registry lock, so two rebinds made against the same observed root cannot
-// both apply. An empty expectedRoot skips the check (last writer wins), which is
-// what a caller that predates the precondition sends.
+// applied only while the record's stored root still spells expectedRoot —
+// compared as clean path TEXT, never resolved through the filesystem, so a
+// stale precondition cannot pass because its old path now aliases the new
+// root (#4888 review). The one bypass is a replay of the rebind that already
+// landed, and only while the resolved binding still sits on the recorded root
+// AND still carries the recorded checkout marker — a checkout replaced at the
+// same root is a different identity, so its replay is refused like any other
+// stale precondition. Anything else returns *ProjectReboundError. The check
+// runs under the registry lock, so two rebinds made against the same observed
+// root cannot both apply. An empty expectedRoot skips the check (last writer
+// wins), which is what a caller that predates the precondition sends.
 func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 	if err := ValidateProjectID(id); err != nil {
 		return Project{}, err
@@ -320,8 +325,21 @@ func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 		}
 
 		record := records[index]
-		if expectedRoot != "" && !sameProjectPath(record.Root, expectedRoot) && !sameProjectPath(record.Root, binding.root) {
-			return &ProjectReboundError{ID: id, Expected: expectedRoot, Current: record.Root}
+		if expectedRoot != "" && !sameProjectPathSpelling(record.Root, expectedRoot) {
+			// The precondition no longer names the recorded root. The only way
+			// through is a replay of the rebind that already landed — the
+			// resolved binding still sits on the recorded root AND still
+			// carries the recorded checkout marker, which the marker is READ
+			// for, not ensured: a refused compare must not mint one. A
+			// replacement checkout at that root is a different identity even
+			// though the path text matches (#4888 review).
+			boundID, bound, rerr := readCheckoutID(binding.checkoutMarkerPath)
+			if rerr != nil {
+				return fmt.Errorf("re-read the checkout marker for %q before accepting a rebind replay: %w", binding.root, rerr)
+			}
+			if !sameProjectPath(record.Root, binding.root) || !bound || boundID != record.CheckoutID {
+				return &ProjectReboundError{ID: id, Expected: expectedRoot, Current: record.Root}
+			}
 		}
 		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
 		if err != nil {
@@ -867,6 +885,19 @@ func sameProjectPath(left, right string) bool {
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
+}
+
+// sameProjectPathSpelling is the first half of sameProjectPath WITHOUT the
+// filesystem fallback — clean path text only. It exists for the rebind
+// compare-and-set's expected-root compare (#4888 review): a precondition names
+// the registry value the caller OBSERVED, and a path that merely resolves to
+// the same inode today — a symlink or bind mount created at the old root after
+// the record moved — must not satisfy it. The collision checks that keep
+// sameProjectPath's os.SameFile fallback ask a different question (does this
+// path occupy the same directory), so only the precondition compare is
+// spelling-only.
+func sameProjectPathSpelling(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 // projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes

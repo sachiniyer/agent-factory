@@ -248,15 +248,27 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 
 // SetRebindConflict answers the in-flight rebind with the daemon's "rebound
 // elsewhere" refusal (#4822): another rebind moved the registration after this
-// picker read it. currentRoot is where the registry, re-read by the caller,
-// binds it now; it becomes the root the next submission expects, so the re-armed
-// form retries against what the user was just told rather than being refused
-// again on the root it was opened with.
-func (p *ProjectPickerOverlay) SetRebindConflict(msg, currentRoot string) {
-	p.rebindTarget.RegistryRoot = currentRoot
+// picker read it. projects is the caller's just-refreshed project list, and the
+// open picker is REBUILT from it rather than patched in place — the conflict
+// moved the registration, so the row's Root, RepoID, name and missing-path
+// state are all stale, and an Esc back to a list still showing them would let
+// Enter select a checkout the registry no longer records (#4888 review).
+// The rebind target is re-read from the rebuilt list too: its fresh
+// RegistryRoot is what the re-armed form's next submission expects, so Enter
+// retries against the root the user was just told rather than being refused
+// again on the root it was opened with. A target whose record vanished keeps
+// its last row — resubmitting against a deleted registration fails
+// definitively, as it should.
+func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project) {
+	p.all = projects
+	// len(p.all) is the trailing add-project row — still a valid cursor spot.
+	if p.selectedIdx > len(p.all) {
+		p.selectedIdx = len(p.all)
+	}
 	for i := range p.all {
 		if p.all[i].RegistryID != "" && p.all[i].RegistryID == p.rebindTarget.RegistryID {
-			p.all[i].RegistryRoot = currentRoot
+			p.rebindTarget = p.all[i]
+			break
 		}
 	}
 	p.SetRebindError(msg)
