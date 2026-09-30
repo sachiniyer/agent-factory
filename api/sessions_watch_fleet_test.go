@@ -1222,6 +1222,79 @@ func TestClassifyWatchStop_DiskFallbackManualParkReportsUsageLimited(t *testing.
 		"a post-respawn crash read off disk, carrying the outgoing identity's limit, is still held as working")
 }
 
+// A cross-AGENT manual swap that KEEPS the account label (e.g. claude/work →
+// codex/work) and crashes after the post-respawn checkpoint must stay `working`
+// in the disk-fallback view, not report `usage-limited`. ForStorage scrubs
+// CurrentAgent (session/storage.go) and the disk-fallback read path does not
+// rebuild it, so the agent mismatch disjunct above cannot fire; and because the
+// incoming identity kept the account label, LimitAccount == Account even though
+// the limit is the OUTGOING agent's, so the LimitAccount != Account disjunct
+// cannot fire either. Without this gate the row falls through to the liveness
+// switch and reports `usage-limited`, ending daemon-unavailable
+// `sessions watch --all --include-current` early while ResumeLimitedSessions
+// still owes the replacement's mission delivery. The committed incoming agent
+// is durable on the pending swap (PendingAccountSwap.AccountAgent, set by
+// SelectAccountForHandoff and not scrubbed by ForStorage), so the gate
+// compares the persisted outgoing limit's agent against it: a mismatch is the
+// cross-agent crash-recovery row and stays `working`.
+func TestClassifyWatchStop_DiskFallbackCrossAgentSwapCrashStaysWorking(t *testing.T) {
+	// The replacement started, but a crash after the post-respawn checkpoint
+	// stripped OpRespawning; the incoming identity kept the account label, so
+	// the outgoing agent's stale limit shares LimitAccount with the incoming
+	// account. CurrentAgent is scrubbed by ForStorage and not rebuilt on the
+	// disk-fallback read path; the persisted PendingAccountSwap.AccountAgent
+	// carries the committed incoming agent.
+	crashedDisk := withLiveness("s", session.LiveLimitReached)
+	crashedDisk.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "work",
+		Mission:                 "continue under the new agent",
+		AccountAgent:            "codex",
+		ReplacementPanesStarted: true,
+	}
+	crashedDisk.InFlightOp = session.OpNone
+	crashedDisk.Account = "work"      // incoming identity kept the label
+	crashedDisk.CurrentAgent = ""     // scrubbed by ForStorage; not rebuilt on disk read
+	crashedDisk.LimitAccount = "work" // OUTGOING identity's stale limit; same label
+	crashedDisk.LimitAgent = "claude" // OUTGOING identity's stale limit's agent
+	reason, detail := classifyWatchStop(crashedDisk)
+	require.Equal(t, watchWorking, reason,
+		"a cross-agent manual swap that keeps the account label, crash-recovered and read off disk, stays working rather than reporting usage-limited on the outgoing agent's stale limit")
+	require.Empty(t, detail,
+		"a working row carries no stop detail")
+
+	// The watcher holds the slot as working on the disk fallback: neither the
+	// --include-current baseline nor an edge into the crash-recovered row emits
+	// a stop.
+	w := newFleetWatcher(true)
+	require.Empty(t, w.observe([]session.InstanceData{crashedDisk}),
+		"a cross-agent crash-recovered manual swap read off disk must not be reported as a stop")
+
+	// Sanity: the same cross-agent shape parked at the INCOMING identity's
+	// limit (ParkManualAccountSwapAtLimit sets limitAccount/limitAgent to the
+	// current account/agent, so LimitAgent == the committed incoming agent)
+	// still reports `usage-limited` — the gate must not swallow the genuine
+	// cross-agent park read off disk.
+	parkedDisk := withLiveness("s", session.LiveLimitReached)
+	parkedDisk.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "work",
+		Mission:                 "continue under the new agent",
+		AccountAgent:            "codex",
+		ReplacementPanesStarted: true,
+		MissionDeliveryStatus:   session.PromptNotDelivered,
+	}
+	parkedDisk.InFlightOp = session.OpNone
+	parkedDisk.Account = "work"      // incoming identity kept the label
+	parkedDisk.CurrentAgent = ""     // scrubbed by ForStorage
+	parkedDisk.LimitAccount = "work" // incoming identity's limit; same label as Account
+	parkedDisk.LimitAgent = "codex"  // incoming identity's limit's agent == AccountAgent
+	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(parkedDisk)),
+		"a cross-agent manual swap genuinely parked at the incoming identity's limit still reports usage-limited when read off disk")
+}
+
 // A crash-recovered MANUAL swap whose replacement HAD started (the post-respawn
 // checkpoint landed) must stay `working`, not report `usage-limited`, when the
 // row still carries the OUTGOING account's stale limit. RespawnForAccountSwapWithLiveBoundary
