@@ -136,6 +136,11 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		// -I then -n2/-L cancels replace mode, so input is appended.
 		{"xargs -I{} -n2 nohup", true},
 		{"xargs -I{} -L1 strace", true},
+		{"xargs -I{} -n ' 2' nohup", true},
+		// BSD xargs (macOS) keeps -I in force alongside -n/-L, so both
+		// readings are judged: the marker is still substituted there.
+		{"xargs -I{} -n2 nohup {} CODEX_HOME=/x codex", true},
+		{"xargs -Icat -n2 strace /bin/cat codex", true},
 		// Controls: a named command takes appended items as its arguments,
 		// and a marker that only fills a data value stays accepted.
 		{"xargs", false},
@@ -171,9 +176,9 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs -I{} strace --env=A={} codex", false},
 		// With nothing after "--" there is still no program.
 		{"xargs -I{} strace -f -{} --", false},
-		// -n1 keeps replace mode; a later -n2 cancels it and `cat` is data.
+		// -n1 keeps replace mode in GNU's count grammar.
 		{"xargs -I{} -n1 echo {}", false},
-		{"xargs -Icat -n2 strace /bin/cat codex", false},
+		{"xargs -I{} -n ' 1' echo {}", false},
 		// Abbreviated and hidden options consume no marker here.
 		{"xargs -I{} strace --fol echo {}", false},
 		// An unparseable link no input reaches keeps the walk's verdict.

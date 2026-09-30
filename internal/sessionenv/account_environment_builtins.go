@@ -691,11 +691,14 @@ func unwrapXargs(words []*syntax.Word, names map[string]struct{}, memo operandTa
 	markerKnown := true
 	marker := "{}"
 	// substituting/markerKnown/marker keep the walk's long-standing reading,
-	// which the env operand scan below relies on. GNU xargs 4.9 differs in two
-	// ways, tracked separately so the xargs input checks follow the real
-	// binary while every existing refusal stands (#4977): -I, -L/-l and -n are
-	// mutually exclusive and the last one wins ("ignoring previous --replace
-	// value"), except -n1; and a bare -i/--replace means the marker {}.
+	// which the env operand scan below relies on. The real binaries differ,
+	// tracked separately so the xargs input checks follow them while every
+	// existing refusal stands (#4977). A bare -i/--replace means the marker {}.
+	// And GNU xargs 4.9 makes -I, -L/-l and -n mutually exclusive with the
+	// last one winning ("ignoring previous --replace value"), except -n1,
+	// while BSD xargs (macOS) keeps -I in force alongside them. So a later
+	// -L/-l/-n sets replaceCancelled, meaning input may be appended, and both
+	// readings are judged.
 	replaceCancelled := false
 	replaceMarker := "{}"
 options:
@@ -730,7 +733,7 @@ options:
 				words = words[1:]
 			case "eof", "max-lines":
 				// Optional-argument long options take a value only via =.
-				if name == "max-lines" && xargsLineCountValid(value) {
+				if name == "max-lines" {
 					replaceCancelled = true
 				}
 				words = words[1:]
@@ -789,7 +792,7 @@ options:
 				case 'e', 'l':
 					// -e/-l take an optional attached argument; whatever
 					// remains in this word is the value.
-					if flags[idx] == 'l' && xargsLineCountValid(flags[idx+1:]) {
+					if flags[idx] == 'l' {
 						replaceCancelled = true
 					}
 					idx = len(flags)
@@ -825,9 +828,7 @@ options:
 							markerKnown = false
 						}
 					case 'L':
-						if xargsLineCountValid(arg) {
-							replaceCancelled = true
-						}
+						replaceCancelled = true
 					case 'n':
 						if xargsCountCancelsReplace(arg) {
 							replaceCancelled = true
@@ -853,17 +854,22 @@ options:
 	if xargsEnvOperandsFed(words, state, names, memo) {
 		return run.done(nil, true)
 	}
-	if !substituting || replaceCancelled {
-		if replaceCancelled {
-			// GNU appends input instead, so env's operand region is judged
-			// the way appended input reaches it too: `xargs -I{} -n2 env`
-			// runs `env ITEM…`.
-			appended := xargsLoopState{markerKnown: true, marker: "{}"}
-			if xargsEnvOperandsFed(words, appended, names, memo) {
-				return run.done(nil, true)
-			}
-		}
+	if !substituting {
 		return run.done(xargsChild(words, false, "", names, memo))
+	}
+	if replaceCancelled {
+		// GNU appends input instead, so env's operand region and the chain
+		// are judged the way appended input reaches them too: `xargs -I{}
+		// -n2 env` runs `env ITEM…` and `xargs -I{} -n2 nohup` hands nohup
+		// its program. BSD still substitutes, so the replace-mode checks
+		// below run as well (Codex on #4979).
+		appended := xargsLoopState{markerKnown: true, marker: "{}"}
+		if xargsEnvOperandsFed(words, appended, names, memo) {
+			return run.done(nil, true)
+		}
+		if _, unsafe := xargsChild(words, false, "", names, memo); unsafe {
+			return run.done(nil, true)
+		}
 	}
 	if replaceMarker != marker {
 		// A later bare -i/--replace switched GNU's marker back to {}.
