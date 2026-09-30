@@ -350,7 +350,7 @@ test("delivery_hold: a queued report after queued Enter does NOT keep the hold",
 // how the user comes back to a stranded draft (deleting a char or word), so they
 // must re-acquire too instead of falling through the startsADraft gate to "none".
 test("delivery_hold: plain editing controls re-acquire the lease after the idle bound", () => {
-  for (const edit of ["\x7f", "\x04", "\x15"]) {
+  for (const edit of ["\x7f", "\x04", "\x15", "\x08"]) {
     const h = new MidLineHold(1_000, 15_000);
     h.noteInput("half a thought", 0);
     assert.equal(h.tick(15_000), "none", "the idle bound released the still-present draft");

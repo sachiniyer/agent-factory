@@ -171,6 +171,11 @@ function hasPrintable(data: string): boolean {
  *  style composer each edits the draft rather than discarding it, so they are
  *  how the user comes back to a draft the idle bound left sitting in the PTY.
  *
+ *  Ctrl+Backspace is included as its BS form (\x08): xterm encodes that chord as
+ *  BS while Backspace alone is DEL (web/src/terminal-keybar.ts:20-21). BS is
+ *  the same kind of in-place edit, so the post-idle resume must recognise it too
+ *  or returning to a stranded draft with Ctrl+Backspace would take no lease.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -178,7 +183,9 @@ function hasPrintable(data: string): boolean {
  *  bounded and re-fires, a missing one lets a delivery splice into (or C-u
  *  clear) the live draft. */
 function isEditingControl(data: string): boolean {
-  return data.includes("\x7f") || data.includes("\x04") || data.includes("\x15");
+  return (
+    data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08")
+  );
 }
 
 /**
