@@ -18,7 +18,7 @@ import (
 // old daemon is gone and nothing is running, which is false. The phase must be
 // carried from daemon.ErrShutdownIncomplete, and every other respawn failure
 // must stay restartPhaseRespawn.
-func TestRestartDaemon_UnfinishedShutdownIsItsOwnPhase(t *testing.T) {
+func TestRespawn_Draining_BoundIsShutdownIncompletePhase(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		waitErr   error
@@ -61,9 +61,9 @@ func TestRestartDaemon_UnfinishedShutdownIsItsOwnPhase(t *testing.T) {
 // The report must say the true thing: the old daemon is still finishing its
 // shutdown — never "No daemon is running", and never the start-a-daemon hint,
 // which would race it for the home lock. Nor may it promise the daemon exits:
-// a wedged one may not, so the report hedges and gives the manual path, naming
-// the PID when RequestShutdown established one.
-func TestReportUpgradeRestart_UnfinishedShutdownSaysItIsStillFinishing(t *testing.T) {
+// a wedged one may not. The wording is fixed verbatim by the #5007 spec, in
+// both the pid-known and pid-unknown forms.
+func TestUpgradeReport_Draining_BoundWording(t *testing.T) {
 	// Never probe the host's real daemon if a regression reaches the health
 	// fallback: answer as if nothing is verifiable.
 	prevHealth := daemonHealthFn
@@ -75,10 +75,18 @@ func TestReportUpgradeRestart_UnfinishedShutdownSaysItIsStillFinishing(t *testin
 	for _, tc := range []struct {
 		name     string
 		oldPID   int
-		wantHint []string
+		wantLine string
 	}{
-		{name: "pid known", oldPID: 4242, wantHint: []string{"ps -p 4242", "kill 4242"}},
-		{name: "pid unknown", oldPID: 0, wantHint: []string{"af --daemon", "kill it"}},
+		{
+			name:     "pid known",
+			oldPID:   4242,
+			wantLine: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: `ps -p 4242` / `kill 4242`; then run af again.",
+		},
+		{
+			name:     "pid unknown",
+			oldPID:   0,
+			wantLine: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: look for a leftover `af --daemon`; then run af again.",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errOut bytes.Buffer
@@ -91,15 +99,10 @@ func TestReportUpgradeRestart_UnfinishedShutdownSaysItIsStillFinishing(t *testin
 
 			reportUpgradeRestart(&out, &errOut, outcome, restartErr, "/usr/local/bin/af")
 
-			assert.Contains(t, out.String(), "Upgraded successfully!")
+			assert.Equal(t, "Upgraded successfully!\n", out.String())
+			assert.Equal(t, tc.wantLine+"\nDetail: "+restartErr.Error()+"\n", errOut.String(),
+				"the bound-expired wording is fixed by the #5007 spec")
 			msg := errOut.String()
-			assert.Contains(t, msg, "still finishing its shutdown")
-			assert.Contains(t, msg, "normally exits on its own")
-			assert.Contains(t, msg, "may be wedged")
-			for _, want := range tc.wantHint {
-				assert.Contains(t, msg, want)
-			}
-			assert.NotContains(t, msg, "It exits on its own", "a wedged daemon may never exit; that is a promise the report cannot keep")
 			assert.NotContains(t, msg, "No daemon is running", "the old daemon is alive; saying otherwise is the defect")
 			assert.NotContains(t, msg, startDaemonHint(), "starting a daemon now would race the draining one")
 		})

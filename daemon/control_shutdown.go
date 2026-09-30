@@ -191,182 +191,163 @@ var ErrShutdownIncomplete = errors.New("daemon shutdown acknowledged but not fin
 var ErrDaemonStillDraining = errors.New("daemon is still finishing its shutdown")
 
 // WaitForShutdownCompletion blocks until the daemon a Shutdown was sent to has
-// actually exited. The Shutdown RPC acknowledges before the daemon tears down
-// (shutdownAckGrace plus the teardown tail), so a caller that respawns
-// immediately after RequestShutdown races the dying daemon: EnsureDaemon's
-// liveness ping — or a unit-restarted daemon's startup ping guard — can see the
-// old socket still answering, skip the spawn, and leave nothing running once
-// the old daemon exits (#854). Callers on the shutdown-then-respawn path must
-// not respawn until this returns.
+// provably exited — the #5007 spec's draining→exited wait, shared by every
+// consumer (see waitForDaemonExit for the proof). The Shutdown RPC acks before
+// teardown, so shutdown-then-respawn callers must not respawn until this
+// returns nil (#854). pid is RequestShutdown's second return, or 0.
 //
-// pid is RequestShutdown's second return, and the contract is that it names the
-// stopped daemon or is 0: RequestShutdown establishes that at request time
-// (self-reported by the daemon, or verified against argv). When it is positive
-// the wait is on that process exiting — a positive signal, not a socket that
-// happens to have stopped answering, which can vanish while teardown still
-// holds the per-home lock. The argv heuristic is deliberately not re-applied
-// mid-wait: a renamed install's basename is not `af`, and dropping its PID
-// would fall back to exactly that socket race.
-//
-// pid == 0 waits on the per-home daemon lock instead, never on the control
-// socket. The socket going quiet is not proof of exit: drainDaemon closes it
-// BEFORE its durable joins, and the daemon holds the home lock until the
-// process is gone, so a replacement started on "socket quiet" loses the lock
-// and exits, leaving nothing once the old daemon finishes. The daemon.pid file
-// is no handle either — drainDaemon unlinks it when teardown begins. The flock
-// is held for the process's whole life and released by the kernel at exit,
-// SIGKILL included, so the lock being takeable is the positive exit signal the
-// replacement itself depends on.
-//
-// shutdownCompleteGrace is where the wait gives up and reports, never where it
-// shoots the daemon. drainDaemon deliberately JOINS root-agent creates and
-// admitted background mutations rather than cancelling them — a create killed
-// mid-provision is a half-created session nothing can reconcile (#3721) — and
-// those joins can run past any bound. By then drainDaemon has already closed
-// the control socket, so from outside "still alive" cannot be told apart from
-// wedged, and a SIGKILL there can corrupt session state. So a PID still alive
-// at the bound is an error, and so is a home lock still held (or unprovable)
-// at the bound when there is no PID. Either way the caller must NOT respawn: a new daemon
-// would lose the per-home lock to the draining one and exit, leaving nothing
-// once the old one finishes. That closes the old 5s-then-respawn-anyway hole
-// (#5007): the bound ends in an error, never in a respawn beside a live daemon
-// or a kill of a draining one.
+// shutdownCompleteGrace is where it gives up with ErrShutdownIncomplete, never
+// where it signals: drainDaemon JOINS root-agent creates and admitted mutations
+// (#3721) with its socket already closed, so a still-alive daemon cannot be
+// told apart from a wedged one and a kill could corrupt session state. Callers
+// must not respawn on that error — the replacement would lose the home lock.
 func WaitForShutdownCompletion(pid int) error {
+	if waitForDaemonExit(pid, time.Now().Add(shutdownCompleteGrace)) {
+		return nil
+	}
+	if pid > 0 && pid != os.Getpid() {
+		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
+	}
+	return fmt.Errorf("%w: could not confirm within %s that the daemon released this home's lock (it may still be draining durable work)", ErrShutdownIncomplete, shutdownCompleteGrace)
+}
+
+// waitForDaemonExit is the one bounded draining→exited wait (#5007): true once
+// the daemon is provably gone, false if not proven by deadline. It never
+// signals. The proof is the established PID dying (never re-checked against
+// argv: a renamed install is not `af`), else the home lock becoming takeable —
+// the kernel releases it only at process exit, SIGKILL included. A quiet socket
+// is never proof (drainDaemon closes it before its durable joins), nor is a
+// missing daemon.pid (unlinked when teardown begins), nor an unprovable lock.
+// The probe repeats after the loop: the last sleep can wake past the deadline.
+func waitForDaemonExit(pid int, deadline time.Time) bool {
 	if pid == os.Getpid() {
 		pid = 0 // never watch ourselves
 	}
-	deadline := time.Now().Add(shutdownCompleteGrace)
-	if pid > 0 {
-		for time.Now().Before(deadline) {
-			if !shutdownWaitPIDAliveFn(pid) {
-				return nil
-			}
-			time.Sleep(shutdownCompletePoll)
+	exited := func() bool {
+		if pid > 0 {
+			return !shutdownWaitPIDAliveFn(pid)
 		}
-		// The last sleep can wake past the deadline; an exit inside it must
-		// read as an exit, not as an unfinished shutdown.
-		if !shutdownWaitPIDAliveFn(pid) {
-			return nil
-		}
-		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
-	}
-	dir, dirErr := config.GetConfigDir()
-	lockReleased := func() bool {
-		if dirErr != nil {
-			return false // unresolvable home: never proof of exit
-		}
-		released := false
-		shutdownWaitHomeLockFn(dir).Match(
-			func() {}, func() { released = true }, func() {}, func(error) {})
-		return released
+		return homeLockState() == daemonExited
 	}
 	for time.Now().Before(deadline) {
-		if lockReleased() {
-			return nil
+		if exited() {
+			return true
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
-	// Same boundary as above: the lock may have been released during the last sleep.
-	if lockReleased() {
-		return nil
-	}
-	if dirErr != nil {
-		return fmt.Errorf("%w: cannot resolve the AF home to confirm the daemon released its lock: %v", ErrShutdownIncomplete, dirErr)
-	}
-	return fmt.Errorf("%w: the daemon still holds this home's lock %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, shutdownCompleteGrace)
+	return exited()
 }
 
-// shutdownWaitPIDAliveFn and shutdownWaitHomeLockFn are
-// WaitForShutdownCompletion's liveness probes. Vars only so tests can script the
-// exact moment a daemon leaves relative to the wait's bound; production never
-// assigns them.
+// shutdownWaitPIDAliveFn and shutdownWaitHomeLockFn are the exit probes. Vars
+// only so tests can script when a daemon leaves; production never assigns them.
 var (
 	shutdownWaitPIDAliveFn = pidLooksAlive
 	shutdownWaitHomeLockFn = homeLockReleased
 )
 
-// homeLockReleased asks the one question a replacement daemon's acquireHomeLock
-// will ask: could this home's daemon lock be taken right now? AnswerNo means it
-// could — the previous holder has exited — and AnswerYes that a live process
-// still holds it. A missing lock file is AnswerNo: a daemon that ever held the
-// lock created the file first, and the replacement creates and takes it. Any
-// other failure to look is Undetermined, which never counts as exit.
+// daemonState is the consumer's view of this home's daemon in the #5007
+// shutdown state machine; pingState and probeDaemonState alone classify it.
+type daemonState int
+
+const (
+	daemonServing  daemonState = iota // answers, not quiescing
+	daemonDraining                    // acked Shutdown, or silent while holding the lock
+	daemonExited                      // the home lock is takeable
+	daemonUnknown                     // no probe established the above
+)
+
+// pingState classifies one Ping reply, with the PID the responder reported. It
+// is the whole classification for waitForDaemonReady, which must not touch the
+// home lock while a child is acquiring it.
+func pingState(resp PingResponse, err error) (daemonState, int) {
+	switch {
+	case err != nil:
+		return daemonUnknown, 0
+	case resp.Phase == DaemonPhaseQuiescing:
+		return daemonDraining, resp.PID
+	default:
+		return daemonServing, resp.PID
+	}
+}
+
+// probeDaemonState is the one state probe (#5007): Ping, then the home lock
+// when nothing answers. A daemon.pid still on disk means no teardown has begun
+// (drainDaemon unlinks it first), so there a failed ping is unknown and the
+// caller's usual recovery applies. Without one, a held lock is a daemon
+// draining past its closed socket — or, for an instant, one between taking its
+// lock and binding its socket, which callers recheck.
+func probeDaemonState(deadline time.Time) (daemonState, int) {
+	state, pid := pingState(pingDaemonResponseUntil(deadline))
+	if state != daemonUnknown {
+		return state, pid
+	}
+	if path, err := daemonPIDFilePath(); err != nil {
+		return daemonUnknown, 0
+	} else if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		return daemonUnknown, 0
+	}
+	return homeLockState(), 0
+}
+
+// homeLockState reads this home's lock through shutdownWaitHomeLockFn; an
+// unresolvable home is unknown.
+func homeLockState() daemonState {
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return daemonUnknown
+	}
+	return shutdownWaitHomeLockFn(dir)
+}
+
+// homeLockReleased asks what a replacement daemon's acquireHomeLock will ask:
+// could this home's lock be taken right now? Takeable is exited, held
+// (EWOULDBLOCK) is draining, and any other failure to look is unknown. A
+// missing lock file is exited: a daemon that ever held the lock created the
+// file first, and the replacement creates and takes it.
 //
-// Deliberately not ProbeHomeLock. That answers doctor's question — may this
-// home be DELETED — so it reads a missing file and an unrecognized filesystem
-// as unknown. Here the question is only whether the replacement would win the
-// same flock it needs, on the same host, through the same mechanism; applying
-// doctor's gates would stall every PID-less wait on a home that never ran a
-// daemon, or that lives on a filesystem outside doctor's allowlist. The probe
-// holds the lock only for the instant between its flock and its unlock.
-func homeLockReleased(dir string) ProbeAnswer {
+// Deliberately not ProbeHomeLock, which answers doctor's may-this-home-be-
+// deleted question and so reads a missing file or an unrecognized filesystem
+// as unknown — that would stall every PID-less wait on a home that never ran a
+// daemon (af reset) or lives on NFS/FUSE. The probe holds the lock only for the
+// instant between its flock and its unlock.
+func homeLockReleased(dir string) daemonState {
 	f, err := os.OpenFile(daemonLockPathIn(dir), os.O_RDWR, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return AnswerNo()
+			return daemonExited
 		}
-		return Undetermined(fmt.Errorf("open daemon lock: %w", err))
+		return daemonUnknown
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return AnswerYes()
+			return daemonDraining
 		}
-		return Undetermined(fmt.Errorf("flock daemon lock: %w", err))
+		return daemonUnknown
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return AnswerNo()
+	return daemonExited
 }
 
-// daemonAlreadyServing is RunDaemon's startup liveness guard. Only a responder
-// that is NOT quiescing counts as already serving: one reporting
-// DaemonPhaseQuiescing acknowledged a Shutdown and is leaving (#5007), so
-// exiting on its answer would leave no daemon once it finishes. For that
-// responder it waits (bounded) for the exit and reports false; the per-home
-// lock the caller takes next arbitrates a drain that outlived the bound — a
-// held lock is a non-zero exit, which the unit's Restart=on-failure retries.
-// Unlike EnsureDaemon this never stops anything, so proceeding is safe here.
+// daemonAlreadyServing is RunDaemon's startup liveness guard. Only a serving
+// daemon counts: a draining one is leaving (#5007), so exiting on its answer
+// would leave no daemon once it finishes. For a draining one it waits (bounded)
+// for the exit and reports false either way; the per-home lock the caller takes
+// next arbitrates a drain that outlived the bound — a held lock is a non-zero
+// exit, which the unit's Restart=on-failure retries. Unlike EnsureDaemon this
+// never stops anything, so proceeding is safe here.
 func daemonAlreadyServing() bool {
-	resp, err := pingDaemonResponse()
-	if err != nil {
-		return false
-	}
-	if resp.Phase != DaemonPhaseQuiescing {
+	state, pid := probeDaemonState(time.Time{})
+	switch state {
+	case daemonServing:
 		return true
-	}
-	log.InfoLog.Printf("daemon pid %d on the control socket is draining after shutdown; waiting for it to exit", resp.PID)
-	if !waitForDrainingDaemonExit(resp.PID, time.Now().Add(shutdownCompleteGrace)) {
-		log.InfoLog.Printf("daemon pid %d is still draining at the bound; proceeding to home-lock arbitration", resp.PID)
+	case daemonDraining:
+		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit", pid)
+		if !waitForDaemonExit(pid, time.Now().Add(shutdownCompleteGrace)) {
+			log.InfoLog.Printf("the daemon for this home is still draining at the bound; proceeding to home-lock arbitration")
+		}
 	}
 	return false
-}
-
-// waitForDrainingDaemonExit is a best-effort wait for a responder that reported
-// DaemonPhaseQuiescing to finish leaving, bounded by deadline. With a PID —
-// PingResponse.PID, always self-reported, so trusted without the argv basename
-// heuristic a renamed install would fail — it waits for that process to exit;
-// without one it waits for the control socket to stop answering. It reports
-// true once the responder is gone and false if it is still there at deadline;
-// it never signals anything. What a false means is the caller's call: RunDaemon
-// proceeds to the per-home lock, which only arbitrates; EnsureDaemon reports
-// ErrDaemonStillDraining rather than proceed into its stop path.
-func waitForDrainingDaemonExit(pid int, deadline time.Time) bool {
-	if pid == os.Getpid() {
-		pid = 0
-	}
-	for {
-		if pid > 0 {
-			if !pidLooksAlive(pid) {
-				return true
-			}
-		} else if pingDaemon() != nil {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		time.Sleep(shutdownCompletePoll)
-	}
 }
 
 // isDaemonAbsentErr reports whether err from a dial/RPC call indicates that

@@ -16,10 +16,10 @@ import (
 // so the control socket and home lock under test are private — the host's real
 // supervised daemon is never pinged, signaled, or spawned.
 
-// TestWaitForShutdownCompletionNoDaemon: with no daemon at all — no socket and
+// TestWaitForShutdownCompletion_Exited_NoDaemonReturnsAtOnce: with no daemon at all — no socket and
 // no lock file, as in a home that never ran one — the PID-less wait must
 // return nil on its first probe rather than burning the grace.
-func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
+func TestWaitForShutdownCompletion_Exited_NoDaemonReturnsAtOnce(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	start := time.Now()
@@ -31,7 +31,7 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 	}
 }
 
-// TestUpgradeRespawnWaitsForDelayedTeardown reproduces the #854 race shape
+// TestRespawn_Draining_WaitsForLockReleaseThenSpawns reproduces the #854 race shape
 // end to end, with #5007's tail: a fake daemon holds the home lock, acks the
 // Shutdown RPC, keeps its control socket open past the ack, then CLOSES the
 // socket and keeps holding the lock a while longer — drainDaemon's durable-join
@@ -40,7 +40,7 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 // with exactly one spawn. Pre-#854 EnsureDaemon pinged the still-alive socket
 // and skipped the spawn; pre-#5007 the wait returned on the quiet socket while
 // the lock was still held, so the replacement would lose it.
-func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
+func TestRespawn_Draining_WaitsForLockReleaseThenSpawns(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	oldLock, err := acquireHomeLock()
@@ -120,11 +120,11 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionTimesOut: a daemon that never releases its home
+// TestWaitForShutdownCompletion_Draining_BoundIsShutdownIncomplete: a daemon that never releases its home
 // lock (a long drain, or a wedged teardown) must produce ErrShutdownIncomplete
 // at the grace deadline — not hang forever or silently report success. No
 // control socket exists at all here: a quiet socket must not read as exit.
-func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
+func TestWaitForShutdownCompletion_Draining_BoundIsShutdownIncomplete(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	lock, err := acquireHomeLock()

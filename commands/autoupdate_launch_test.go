@@ -383,47 +383,63 @@ func drainingRestartSeams(t *testing.T, oldPID int, secondWait, retryErr error) 
 	return waitPIDs, respawnPIDs
 }
 
-// TestAutoUpdateOnLaunchStandsDownWhileOldDaemonDrains: the binary installed,
+// TestAutoUpdateLaunch_Draining_BoundStandsDown: the binary installed,
 // but the previous daemon outlived both shutdown waits and still holds the home
 // lock. Re-execing would land the new TUI on an EnsureDaemon it cannot win, so
 // the launch must stand down with one line saying why and what to do.
-func TestAutoUpdateOnLaunchStandsDownWhileOldDaemonDrains(t *testing.T) {
-	withTestHome(t)
-	captureLogs(t)
-	tempBin := seedNewerRelease(t, "1.0.0", "v1.0.1")
-	waitPIDs, respawnPIDs := drainingRestartSeams(t, 4242,
-		fmt.Errorf("%w: daemon pid 4242 still running", daemon.ErrShutdownIncomplete), nil)
+func TestAutoUpdateLaunch_Draining_BoundStandsDown(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		oldPID     int
+		wantNotice string
+	}{
+		{
+			name:       "pid known",
+			oldPID:     4242,
+			wantNotice: "af updated to v1.0.1 — the previous daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: `ps -p 4242` / `kill 4242`; then run af again.\n",
+		},
+		{
+			name:       "pid unknown",
+			oldPID:     0,
+			wantNotice: "af updated to v1.0.1 — the previous daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: look for a leftover `af --daemon`; then run af again.\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTestHome(t)
+			captureLogs(t)
+			tempBin := seedNewerRelease(t, "1.0.0", "v1.0.1")
+			waitPIDs, respawnPIDs := drainingRestartSeams(t, tc.oldPID,
+				fmt.Errorf("%w: still running", daemon.ErrShutdownIncomplete), nil)
 
-	got := launchWithTTY(t, nil)
+			got := launchWithTTY(t, nil)
 
-	if got.proceed {
-		t.Fatalf("autoUpdateOnLaunch = true, want false while the old daemon still drains")
-	}
-	if got.calls != 0 {
-		t.Fatalf("re-exec calls = %d, want 0 — the new TUI could not reach a daemon yet", got.calls)
-	}
-	if !slices.Equal(*waitPIDs, []int{4242}) {
-		t.Fatalf("second wait PIDs = %v, want [4242]", *waitPIDs)
-	}
-	if !slices.Equal(*respawnPIDs, []int{4242}) {
-		t.Fatalf("respawn calls = %v, want only the withheld first attempt", *respawnPIDs)
-	}
-	notice := strings.Join(got.notices, "")
-	if !strings.Contains(notice, "still finishing its shutdown") || !strings.Contains(notice, "run af again") {
-		t.Fatalf("notice = %q, want the still-finishing shutdown and run-again guidance", notice)
-	}
-	if strings.Contains(notice, "and exits on its own") || !strings.Contains(notice, "may be wedged") {
-		t.Fatalf("notice = %q, must not promise the old daemon exits and must name the wedged case", notice)
-	}
-	if contents, err := os.ReadFile(tempBin); err != nil || string(contents) != "new-binary" {
-		t.Fatalf("binary contents = %q (err %v), want the update installed even though the launch stood down", contents, err)
+			if got.proceed {
+				t.Fatalf("autoUpdateOnLaunch = true, want false while the old daemon still drains")
+			}
+			if got.calls != 0 {
+				t.Fatalf("re-exec calls = %d, want 0 — the new TUI could not reach a daemon yet", got.calls)
+			}
+			if !slices.Equal(*waitPIDs, []int{tc.oldPID}) {
+				t.Fatalf("second wait PIDs = %v, want [%d]", *waitPIDs, tc.oldPID)
+			}
+			if !slices.Equal(*respawnPIDs, []int{tc.oldPID}) {
+				t.Fatalf("respawn calls = %v, want only the withheld first attempt", *respawnPIDs)
+			}
+			// The download's progress line precedes it; the stand-down is the last.
+			if len(got.notices) == 0 || got.notices[len(got.notices)-1] != tc.wantNotice {
+				t.Fatalf("notices = %q, want the last to be the #5007 spec wording verbatim: %q", got.notices, tc.wantNotice)
+			}
+			if contents, err := os.ReadFile(tempBin); err != nil || string(contents) != "new-binary" {
+				t.Fatalf("binary contents = %q (err %v), want the update installed even though the launch stood down", contents, err)
+			}
+		})
 	}
 }
 
-// TestAutoUpdateOnLaunchRetriesRespawnOnceDrainFinishes: the first respawn was
+// TestAutoUpdateLaunch_Exited_RetriesRespawnAndReexecs: the first respawn was
 // withheld, but the old daemon exits during the second wait. The withheld
 // respawn is retried with the old PID and the launch re-execs as normal.
-func TestAutoUpdateOnLaunchRetriesRespawnOnceDrainFinishes(t *testing.T) {
+func TestAutoUpdateLaunch_Exited_RetriesRespawnAndReexecs(t *testing.T) {
 	withTestHome(t)
 	captureLogs(t)
 	tempBin := seedNewerRelease(t, "1.0.0", "v1.0.1")
@@ -445,10 +461,10 @@ func TestAutoUpdateOnLaunchRetriesRespawnOnceDrainFinishes(t *testing.T) {
 	}
 }
 
-// TestAutoUpdateOnLaunchProceedsWhenRespawnRetryFails: once the old daemon has
+// TestAutoUpdateLaunch_Exited_ProceedsWhenRespawnRetryFails: once the old daemon has
 // exited, a failed retry does not stand the launch down — the re-exec'd TUI's
 // own EnsureDaemon starts a daemon now that nothing holds the home lock.
-func TestAutoUpdateOnLaunchProceedsWhenRespawnRetryFails(t *testing.T) {
+func TestAutoUpdateLaunch_Exited_ProceedsWhenRespawnRetryFails(t *testing.T) {
 	withTestHome(t)
 	captureLogs(t)
 	seedNewerRelease(t, "1.0.0", "v1.0.1")

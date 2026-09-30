@@ -99,9 +99,9 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 
-	// stillDraining records that the previous daemon outlived both shutdown
-	// waits (#5007); it is reported after the install is recorded.
-	var stillDraining bool
+	// draining is set when the previous daemon outlived both shutdown waits
+	// (#5007); it is reported after the install is recorded.
+	var draining *shutdownIncompleteError
 	err = withUpdateCheckLock(func(cache *autoupdate.CheckCache, now time.Time) error {
 		currentVersion := strings.TrimPrefix(version, "v")
 		if !cache.Due(channel, currentVersion, now) {
@@ -240,7 +240,7 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 			if errors.Is(restartErr, daemon.ErrShutdownIncomplete) {
 				restartErr = retryRespawnAfterDrain(resolvedPath, outcome.OldPID, latestVersion)
 				if restartErr != nil {
-					stillDraining = true
+					draining = &shutdownIncompleteError{pid: outcome.OldPID}
 				}
 			}
 			switch {
@@ -264,11 +264,22 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 	// bookkeeping write failed, or whose previous daemon is still draining, has
 	// the new binary on disk either way. Swallowing that would strand the user
 	// on the old image for no reason.
-	if stillDraining {
-		err = errors.Join(err, fmt.Errorf("auto-update installed %s but the previous daemon is still finishing its shutdown: %w", installed, daemon.ErrShutdownIncomplete))
+	if draining != nil {
+		err = errors.Join(err, draining)
 	}
 	return installed, err
 }
+
+// shutdownIncompleteError reports an install whose previous daemon is still
+// finishing its shutdown past both waits (#5007). It carries the PID so the
+// launch stand-down names it, and unwraps to daemon.ErrShutdownIncomplete.
+type shutdownIncompleteError struct{ pid int }
+
+func (e *shutdownIncompleteError) Error() string {
+	return fmt.Sprintf("the previous daemon (pid %d, 0 if unknown) is still finishing its shutdown", e.pid)
+}
+
+func (e *shutdownIncompleteError) Unwrap() error { return daemon.ErrShutdownIncomplete }
 
 // retryRespawnAfterDrain finishes a post-install restart whose respawn was
 // withheld because the old daemon was still draining (#5007). It waits once

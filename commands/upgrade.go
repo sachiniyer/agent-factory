@@ -332,15 +332,17 @@ func stopDaemonHint(h daemon.HealthStatus) string {
 	return "Find its pid with `af daemon status` and stop it, then run af — the next run starts a fresh daemon from the new binary."
 }
 
-// shutdownIncompleteHint is the manual path for an old daemon that has not
-// finished its shutdown and may be wedged. `af daemon status` is not the check:
-// mid-teardown the pid file and control socket are already gone, so it can
-// report no daemon while the process still runs and holds the home lock.
+// shutdownIncompleteHint is the #5007 spec's bound-expired wording, shared by
+// the upgrade report and the launch stand-down notice. It never promises the
+// daemon exits (a wedged one may not), and it points at the process table
+// rather than `af daemon status`, which may already report the daemon stopped:
+// mid-teardown its pid file and socket are gone while it still holds the lock.
 func shutdownIncompleteHint(pid int) string {
+	manual := "look for a leftover `af --daemon`"
 	if pid > 0 {
-		return fmt.Sprintf("If it persists it may be wedged: check with `ps -p %d` (`af daemon status` may already report it stopped); if it is stuck, stop it with `kill %d`, then run af again.", pid, pid)
+		manual = fmt.Sprintf("`ps -p %d` / `kill %d`", pid, pid)
 	}
-	return "If it persists it may be wedged: look for a leftover `af --daemon` process with `ps` (`af daemon status` may already report it stopped); if one is stuck, kill it, then run af again."
+	return "still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: " + manual + "; then run af again."
 }
 
 // startDaemonHint names what brings a daemon back when none is running.
@@ -408,14 +410,9 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// Neither "would not stop" nor "nothing is running": the old daemon
 		// acknowledged the shutdown and is still finishing it (#5007). Saying no
 		// daemon is running would be false, and starting one now would race it.
-		// It normally exits on its own — but a wedged one may never, so say
-		// both and give the manual path. `af daemon status` may already call it
-		// stopped (its pid file and socket are gone mid-teardown), so the check
-		// is the process table.
 		fmt.Fprintln(out, "Upgraded successfully!")
-		fmt.Fprintf(errOut, "The old daemon is still finishing its shutdown (it may be completing in-flight session work): %v\n", restartErr)
-		fmt.Fprintln(errOut, "It normally exits on its own, and the next af command then starts the new daemon from the upgraded binary.")
-		fmt.Fprintln(errOut, shutdownIncompleteHint(outcome.OldPID))
+		fmt.Fprintln(errOut, "The old daemon is "+shutdownIncompleteHint(outcome.OldPID))
+		fmt.Fprintf(errOut, "Detail: %v\n", restartErr)
 		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.

@@ -224,14 +224,14 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 	}
 }
 
-// TestRespawnAfterUpgradeDoesNotRespawnBesideUnfinishedShutdown pins the
+// TestRespawn_Draining_BoundWithholdsRespawn pins the
 // reversal of the old warn-and-respawn contract (#5007): a wait that reports
 // the old daemon still running at its bound means it is usually still joining
 // durable work with its control socket already closed. A respawn then would
 // lose the per-home lock to it and exit, leaving nothing once the old daemon
 // finishes — so the respawn must return the error and start nothing, on
 // either branch.
-func TestRespawnAfterUpgradeDoesNotRespawnBesideUnfinishedShutdown(t *testing.T) {
+func TestRespawn_Draining_BoundWithholdsRespawn(t *testing.T) {
 	for _, installed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unit installed=%v", installed), func(t *testing.T) {
 			restartCalls, ensureCalls := stubRespawnCollaborators(t, installed, nil)
@@ -249,11 +249,11 @@ func TestRespawnAfterUpgradeDoesNotRespawnBesideUnfinishedShutdown(t *testing.T)
 	}
 }
 
-// TestRestartDaemonFromPathThreadsStoppedDaemonPID pins #5007's handle: the
+// TestRespawn_Exited_WaitsOnEstablishedPIDThenRespawns pins #5007's handle: the
 // pid RequestShutdown reports for the daemon it stopped must reach both the
 // respawn and, through it, the shutdown wait — so the respawn waits on that
 // process exiting rather than on a control socket that outlives the ack.
-func TestRestartDaemonFromPathThreadsStoppedDaemonPID(t *testing.T) {
+func TestRespawn_Exited_WaitsOnEstablishedPIDThenRespawns(t *testing.T) {
 	stubRespawnCollaborators(t, false, nil)
 	prevShutdown := requestDaemonShutdownFn
 	prevRespawn := respawnDaemonFn

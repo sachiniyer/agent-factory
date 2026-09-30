@@ -137,21 +137,23 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	}
 	defer ensureDaemonMu.Unlock()
 
-	if resp, err := pingDaemonResponseUntil(deadline); err == nil {
-		if resp.Phase != DaemonPhaseQuiescing {
-			return nil
-		}
-		// The responder acknowledged a Shutdown and is leaving (#5007): it does
-		// not serve this home, and returning nil would strand the caller with no
-		// daemon once it exits. Wait for it to go, leaving a sliver of the
-		// admission budget for the spawn, then proceed as if the ping failed.
-		// The drain deadline is where this REPORTS, never where it proceeds: the
-		// launch path below stops a stale daemon (SIGTERM, then SIGKILL), and a
-		// daemon still draining is joining durable work a kill would corrupt.
-		log.InfoLog.Printf("daemon pid %d on the control socket is draining after shutdown; waiting for it to exit before launching", resp.PID)
+	// Only a serving daemon satisfies the ensure (#5007). A draining one is
+	// waited out, keeping a sliver of the budget for the spawn. Its deadline is
+	// where this REPORTS, never where it proceeds: the launch path below stops
+	// (SIGTERM, then SIGKILL) or restarts a daemon still joining durable work.
+	switch state, pid := probeDaemonState(deadline); state {
+	case daemonServing:
+		return nil
+	case daemonDraining:
+		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit before launching", pid)
 		drainDeadline := drainWaitDeadline(deadline)
-		if !waitForDrainingDaemonExit(resp.PID, drainDeadline) {
-			return fmt.Errorf("%w: daemon pid %d was still finishing durable work at %s and must not be killed to make room; retry shortly", ErrDaemonStillDraining, resp.PID, drainDeadline.Format(time.RFC3339))
+		if !waitForDaemonExit(pid, drainDeadline) {
+			// A held lock with no answer can also be a daemon that took its lock
+			// and has not bound its socket yet; if it answers now, it serves.
+			if again, _ := probeDaemonState(deadline); again == daemonServing {
+				return nil
+			}
+			return fmt.Errorf("%w: the daemon for this home (pid %d, 0 if unknown) was still finishing durable work at %s and must not be killed to make room; retry shortly", ErrDaemonStillDraining, pid, drainDeadline.Format(time.RFC3339))
 		}
 	}
 	if admissionDeadlineExpired(deadline) {
@@ -325,12 +327,16 @@ func drainWaitDeadline(deadline time.Time) time.Time {
 func waitForDaemonReady(deadline time.Time) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if resp, err := pingDaemonResponseUntil(deadline); err != nil {
-			lastErr = err
-		} else if resp.Phase == DaemonPhaseQuiescing {
-			lastErr = errDaemonDraining
-		} else {
+		// Ping only: a lock probe here could collide with the starting child's
+		// own acquireHomeLock.
+		resp, err := pingDaemonResponseUntil(deadline)
+		switch state, _ := pingState(resp, err); state {
+		case daemonServing:
 			return nil
+		case daemonDraining:
+			lastErr = errDaemonDraining
+		default:
+			lastErr = err
 		}
 		if !waitUntilAdmissionDeadline(deadline, 50*time.Millisecond) {
 			break

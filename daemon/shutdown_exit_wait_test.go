@@ -59,12 +59,12 @@ func startFakeDaemonNamed(t *testing.T, home, basename, script string) (int, <-c
 	return pid, exited
 }
 
-// TestWaitForShutdownCompletionWaitsForPIDExit: with the stopped daemon's PID
+// TestWaitForShutdownCompletion_DrainingToExited_PIDDies: with the stopped daemon's PID
 // in hand, the wait must return only once that process has exited. There is no
 // control socket at all here, so the pre-#5007 socket-only wait returned on its
 // first ping while the daemon was still alive — the exact window in which a
 // respawn's startup ping mistook the dying daemon for a live one.
-func TestWaitForShutdownCompletionWaitsForPIDExit(t *testing.T) {
+func TestWaitForShutdownCompletion_DrainingToExited_PIDDies(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv classification needs /proc")
 	}
@@ -89,13 +89,13 @@ func TestWaitForShutdownCompletionWaitsForPIDExit(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionNeverSignalsAtBound: a daemon still alive at
+// TestWaitForShutdownCompletion_Draining_BoundNeverSignals: a daemon still alive at
 // shutdownCompleteGrace may be joining durable work in drainDaemon (root-agent
 // creates, admitted mutations — #3721) with its control socket already closed,
 // so from outside it cannot be told apart from a wedged one, and a kill there
 // can corrupt session state. The bound must end in an error with the process
 // untouched — whether it serves this home or another.
-func TestWaitForShutdownCompletionNeverSignalsAtBound(t *testing.T) {
+func TestWaitForShutdownCompletion_Draining_BoundNeverSignals(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
@@ -138,10 +138,10 @@ func TestWaitForShutdownCompletionNeverSignalsAtBound(t *testing.T) {
 	}
 }
 
-// TestShutdownAckReportsPIDAndQuiescing: the Shutdown ack names the process
+// TestShutdown_ServingToDraining_AckCarriesPIDAndQuiesces: the Shutdown ack names the process
 // that received it and flips the lifecycle to quiescing at once, so every Ping
 // answered during the teardown tail reads "leaving", never "ready".
-func TestShutdownAckReportsPIDAndQuiescing(t *testing.T) {
+func TestShutdown_ServingToDraining_AckCarriesPIDAndQuiesces(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	manager := &Manager{lifecycle: readyLifecycle(t)}
@@ -171,9 +171,9 @@ func TestShutdownAckReportsPIDAndQuiescing(t *testing.T) {
 	}
 }
 
-// TestQuiescingIsTerminal: a Shutdown acked mid-warm-up must not be undone by
+// TestLifecycle_Draining_QuiescingIsTerminal: a Shutdown acked mid-warm-up must not be undone by
 // a restore that completes in the ack's grace window.
-func TestQuiescingIsTerminal(t *testing.T) {
+func TestLifecycle_Draining_QuiescingIsTerminal(t *testing.T) {
 	l, err := newDaemonLifecycle("", "", "")
 	if err != nil {
 		t.Fatalf("newDaemonLifecycle: %v", err)
@@ -188,22 +188,34 @@ func TestQuiescingIsTerminal(t *testing.T) {
 	}
 }
 
-// startDrainingControlServer binds a control server whose lifecycle is
-// quiescing — a daemon that acked Shutdown — and closes it after linger,
-// modeling the teardown tail.
-func startDrainingControlServer(t *testing.T, linger time.Duration) {
+// startDrainingControlServer models a daemon that acked Shutdown: it holds the
+// home lock and binds a control server whose lifecycle is quiescing, closes the
+// server after linger, then holds the lock for the same again — drainDaemon's
+// durable-join tail — before releasing it. The in-process server reports this
+// test's own PID, which every wait refuses to watch, so the draining→exited
+// proof here is the lock. The returned flag reports the release.
+func startDrainingControlServer(t *testing.T, linger time.Duration) *atomic.Bool {
 	t.Helper()
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
 	lifecycle := readyLifecycle(t)
 	lifecycle.markQuiescing()
 	closeFn, err := startControlServer(&Manager{lifecycle: lifecycle}, nil, nil, nil)
 	if err != nil {
+		lock.release()
 		t.Fatalf("startControlServer: %v", err)
 	}
+	var released atomic.Bool
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		time.Sleep(linger)
 		_ = closeFn()
+		time.Sleep(linger)
+		released.Store(true)
+		lock.release()
 	}()
 	t.Cleanup(func() {
 		select {
@@ -212,13 +224,14 @@ func startDrainingControlServer(t *testing.T, linger time.Duration) {
 			t.Errorf("draining control server never closed")
 		}
 	})
+	return &released
 }
 
-// TestEnsureDaemonSpawnsWhenResponderIsDraining: a responder reporting
+// TestEnsureDaemon_Draining_SpawnsOnExit: a responder reporting
 // DaemonPhaseQuiescing is leaving, not serving. EnsureDaemon must wait it out
 // and spawn, not return nil against it. Pre-#5007 the ping succeeded and
 // EnsureDaemon returned with zero spawns, leaving no daemon once it exited.
-func TestEnsureDaemonSpawnsWhenResponderIsDraining(t *testing.T) {
+func TestEnsureDaemon_Draining_SpawnsOnExit(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	startDrainingControlServer(t, 300*time.Millisecond)
 
@@ -246,9 +259,9 @@ func TestEnsureDaemonSpawnsWhenResponderIsDraining(t *testing.T) {
 	}
 }
 
-// TestWaitForDaemonReadyIgnoresDrainingResponder: readiness means a daemon that
+// TestWaitForDaemonReady_Draining_NotReady: readiness means a daemon that
 // will stay; a quiescing responder is not one, and the expiry says why.
-func TestWaitForDaemonReadyIgnoresDrainingResponder(t *testing.T) {
+func TestWaitForDaemonReady_Draining_NotReady(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	startDrainingControlServer(t, time.Second)
 
@@ -261,10 +274,10 @@ func TestWaitForDaemonReadyIgnoresDrainingResponder(t *testing.T) {
 	}
 }
 
-// TestDaemonAlreadyServingWaitsOutDrainingResponder covers RunDaemon's startup
+// TestDaemonAlreadyServing_ServingCountsDrainingWaits covers RunDaemon's startup
 // guard: a live responder counts as already serving; a quiescing one does not,
 // and the guard returns only once it has gone.
-func TestDaemonAlreadyServingWaitsOutDrainingResponder(t *testing.T) {
+func TestDaemonAlreadyServing_ServingCountsDrainingWaits(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	closeLive, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, nil)
@@ -276,18 +289,18 @@ func TestDaemonAlreadyServingWaitsOutDrainingResponder(t *testing.T) {
 	}
 	_ = closeLive()
 
-	startDrainingControlServer(t, 300*time.Millisecond)
+	released := startDrainingControlServer(t, 300*time.Millisecond)
 	if daemonAlreadyServing() {
 		t.Fatalf("a quiescing responder must not count as already serving (#5007)")
 	}
-	if pingDaemon() == nil {
-		t.Fatalf("daemonAlreadyServing returned while the draining responder still answered")
+	if !released.Load() {
+		t.Fatalf("daemonAlreadyServing returned while the draining daemon still held the home lock")
 	}
 }
 
-// TestWaitForDrainingDaemonExit: the best-effort wait returns once the process
+// TestWaitForDaemonExit_DrainingToExited_PIDDiesOrBound: the best-effort wait returns once the process
 // exits, and at the bound when it does not — it never hangs.
-func TestWaitForDrainingDaemonExit(t *testing.T) {
+func TestWaitForDaemonExit_DrainingToExited_PIDDiesOrBound(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv classification needs /proc")
 	}
@@ -295,32 +308,32 @@ func TestWaitForDrainingDaemonExit(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pid, _ := startFakeAFDaemon(t, home, "sleep 0.4; exit 0")
-	if !waitForDrainingDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout)) {
-		t.Fatalf("waitForDrainingDaemonExit reported pid %d still there after it exited", pid)
+	if !waitForDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout)) {
+		t.Fatalf("waitForDaemonExit reported pid %d still there after it exited", pid)
 	}
 	if pidLooksAlive(pid) {
-		t.Fatalf("waitForDrainingDaemonExit returned while pid %d was still alive", pid)
+		t.Fatalf("waitForDaemonExit returned while pid %d was still alive", pid)
 	}
 
 	wedged, _ := startFakeAFDaemon(t, home, "sleep 60; :")
 	start := time.Now()
-	if waitForDrainingDaemonExit(wedged, time.Now().Add(200*time.Millisecond)) {
-		t.Fatalf("waitForDrainingDaemonExit reported a still-running pid %d as gone", wedged)
+	if waitForDaemonExit(wedged, time.Now().Add(200*time.Millisecond)) {
+		t.Fatalf("waitForDaemonExit reported a still-running pid %d as gone", wedged)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("waitForDrainingDaemonExit overran its bound: %s", elapsed)
+		t.Fatalf("waitForDaemonExit overran its bound: %s", elapsed)
 	}
 	if !pidLooksAlive(wedged) {
-		t.Fatalf("waitForDrainingDaemonExit must never signal the process it waits on")
+		t.Fatalf("waitForDaemonExit must never signal the process it waits on")
 	}
 }
 
-// TestWaitForShutdownCompletionWaitsOnRenamedDaemonBinary: a PID the daemon
+// TestWaitForShutdownCompletion_DrainingToExited_RenamedBinaryPIDTrusted: a PID the daemon
 // reported for itself names the stopped daemon whatever its binary is called.
 // The wait must not discard it because the basename is not `af`: falling back
 // to socket polling reopens #5007, since the socket can vanish while teardown
 // still holds the per-home lock and the replacement then fails to start.
-func TestWaitForShutdownCompletionWaitsOnRenamedDaemonBinary(t *testing.T) {
+func TestWaitForShutdownCompletion_DrainingToExited_RenamedBinaryPIDTrusted(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
@@ -348,9 +361,9 @@ func TestWaitForShutdownCompletionWaitsOnRenamedDaemonBinary(t *testing.T) {
 	}
 }
 
-// TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary: PingResponse.PID is
+// TestWaitForDaemonExit_DrainingToExited_RenamedBinaryPIDTrusted: PingResponse.PID is
 // always self-reported, so the drain wait trusts it under any basename too.
-func TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary(t *testing.T) {
+func TestWaitForDaemonExit_DrainingToExited_RenamedBinaryPIDTrusted(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
@@ -358,9 +371,9 @@ func TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pid, _ := startFakeDaemonNamed(t, home, "af-renamed", "sleep 0.4; exit 0")
-	waitForDrainingDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout))
+	waitForDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout))
 	if pidLooksAlive(pid) {
-		t.Fatalf("waitForDrainingDaemonExit returned while renamed daemon pid %d was still alive", pid)
+		t.Fatalf("waitForDaemonExit returned while renamed daemon pid %d was still alive", pid)
 	}
 }
 
@@ -433,13 +446,13 @@ func writeTestPIDFile(t *testing.T, pid int) {
 	}
 }
 
-// TestRequestShutdownTakesPingPIDFromPrePIDDaemon: a daemon predating
+// TestRequestShutdown_PIDOrder_PrePIDDaemonUsesPingPID: a daemon predating
 // ShutdownResponse.PID acks with PID 0. When it is a renamed install, the PID
 // file fallback cannot name it (the basename check rejects `af-renamed`), so
 // without the Ping self-report RequestShutdown returned 0 and the respawn fell
 // back to the socket race #5007 closes. The Ping PID — captured before the
 // Shutdown, while the daemon is provably up — must be returned.
-func TestRequestShutdownTakesPingPIDFromPrePIDDaemon(t *testing.T) {
+func TestRequestShutdown_PIDOrder_PrePIDDaemonUsesPingPID(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
@@ -462,10 +475,10 @@ func TestRequestShutdownTakesPingPIDFromPrePIDDaemon(t *testing.T) {
 	}
 }
 
-// TestRequestShutdownFallsBackToVerifiedPIDFileWhenPingFails: the Ping capture
+// TestRequestShutdown_PIDOrder_VerifiedPIDFileWhenPingFails: the Ping capture
 // adds a source, it does not replace one. A failed Ping leaves the verified
 // PID-file fallback exactly as it was.
-func TestRequestShutdownFallsBackToVerifiedPIDFileWhenPingFails(t *testing.T) {
+func TestRequestShutdown_PIDOrder_VerifiedPIDFileWhenPingFails(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
@@ -485,13 +498,13 @@ func TestRequestShutdownFallsBackToVerifiedPIDFileWhenPingFails(t *testing.T) {
 	}
 }
 
-// TestEnsureDaemonRefusesToRaceStillDrainingDaemon: a responder still reporting
+// TestEnsureDaemon_Draining_WaitsThenReportsStillDraining: a responder still reporting
 // DaemonPhaseQuiescing at the drain-wait deadline is finishing durable work
 // (#3721). EnsureDaemon must report ErrDaemonStillDraining and leave it alone —
 // not fall through to its launch path, whose stale-daemon stop SIGTERMs the PID
 // file's daemon and escalates to SIGKILL. The PID file here names the draining
 // fake, so the old fall-through killed it.
-func TestEnsureDaemonRefusesToRaceStillDrainingDaemon(t *testing.T) {
+func TestEnsureDaemon_Draining_WaitsThenReportsStillDraining(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
@@ -519,12 +532,12 @@ func TestEnsureDaemonRefusesToRaceStillDrainingDaemon(t *testing.T) {
 	}
 }
 
-// TestDrainDaemonUnlinksPIDFileBeforeJoins: drainDaemon's joins can outlast any
+// TestDrainDaemon_Draining_UnlinksPIDFileAtTeardownStart: drainDaemon's joins can outlast any
 // bound with the control socket already closed, and for that tail EnsureDaemon's
 // stale-daemon stop reads daemon.pid and SIGTERMs, then SIGKILLs, whatever it
 // names. The file must therefore be gone as soon as teardown begins — before
 // the control plane closes, let alone the joins — not at process exit.
-func TestDrainDaemonUnlinksPIDFileBeforeJoins(t *testing.T) {
+func TestDrainDaemon_Draining_UnlinksPIDFileAtTeardownStart(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	writeTestPIDFile(t, 999999)
 	path, err := daemonPIDFilePath()
@@ -571,11 +584,11 @@ func scriptShutdownWaitBoundary(t *testing.T) time.Time {
 	return time.Now().Add(shutdownCompleteGrace)
 }
 
-// TestWaitForShutdownCompletionRechecksPIDAfterFinalPoll: a daemon that exits
+// TestWaitForShutdownCompletion_DrainingToExited_PIDBoundaryRecheck: a daemon that exits
 // during the loop's last sleep wakes the wait past its deadline. Classifying
 // that as ErrShutdownIncomplete would suppress the respawn and report a live
 // daemon that is already gone; the post-loop recheck must observe the exit.
-func TestWaitForShutdownCompletionRechecksPIDAfterFinalPoll(t *testing.T) {
+func TestWaitForShutdownCompletion_DrainingToExited_PIDBoundaryRecheck(t *testing.T) {
 	leaves := scriptShutdownWaitBoundary(t)
 	probes := 0
 	shutdownWaitPIDAliveFn = func(int) bool {
@@ -591,17 +604,17 @@ func TestWaitForShutdownCompletionRechecksPIDAfterFinalPoll(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionRechecksHomeLockAfterFinalPoll: the PID-less
+// TestWaitForShutdownCompletion_DrainingToExited_LockBoundaryRecheck: the PID-less
 // loop has the same boundary — a home lock released during the last sleep.
-func TestWaitForShutdownCompletionRechecksHomeLockAfterFinalPoll(t *testing.T) {
+func TestWaitForShutdownCompletion_DrainingToExited_LockBoundaryRecheck(t *testing.T) {
 	leaves := scriptShutdownWaitBoundary(t)
 	probes := 0
-	shutdownWaitHomeLockFn = func(string) ProbeAnswer {
+	shutdownWaitHomeLockFn = func(string) daemonState {
 		probes++
 		if time.Now().Before(leaves) {
-			return AnswerYes() // still held
+			return daemonDraining // lock still held
 		}
-		return AnswerNo()
+		return daemonExited
 	}
 
 	if err := WaitForShutdownCompletion(0); err != nil {
@@ -612,14 +625,14 @@ func TestWaitForShutdownCompletionRechecksHomeLockAfterFinalPoll(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionNeverReadsUnprovableLockAsExit: a lock probe that
+// TestWaitForShutdownCompletion_Unknown_UnprovableLockIsNotExit: a lock probe that
 // cannot answer is not proof of exit, however long it goes on — the wait ends
 // in ErrShutdownIncomplete, never in a respawn beside a daemon it could not see
 // leave.
-func TestWaitForShutdownCompletionNeverReadsUnprovableLockAsExit(t *testing.T) {
+func TestWaitForShutdownCompletion_Unknown_UnprovableLockIsNotExit(t *testing.T) {
 	scriptShutdownWaitBoundary(t)
-	shutdownWaitHomeLockFn = func(string) ProbeAnswer {
-		return Undetermined(errors.New("flock: input/output error"))
+	shutdownWaitHomeLockFn = func(string) daemonState {
+		return daemonUnknown // e.g. flock: input/output error
 	}
 
 	if err := WaitForShutdownCompletion(0); !errors.Is(err, ErrShutdownIncomplete) {
@@ -627,13 +640,13 @@ func TestWaitForShutdownCompletionNeverReadsUnprovableLockAsExit(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionWaitsForHomeLockNotSocket (#5007 finding A): with
+// TestWaitForShutdownCompletion_Draining_LockReleaseNotSocketQuiet (#5007 finding A): with
 // no trustworthy PID the wait must not treat a quiet control socket as exit —
 // drainDaemon closes the socket BEFORE its durable joins, while the process
 // still holds the home lock. Here there is no socket at all and a real flock is
 // held, then released: the wait must return only after the release. The old
 // socket-quiet wait returned on its first ping.
-func TestWaitForShutdownCompletionWaitsForHomeLockNotSocket(t *testing.T) {
+func TestWaitForShutdownCompletion_Draining_LockReleaseNotSocketQuiet(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	lock, err := acquireHomeLock()
 	if err != nil {
@@ -654,13 +667,13 @@ func TestWaitForShutdownCompletionWaitsForHomeLockNotSocket(t *testing.T) {
 	}
 }
 
-// TestStopDaemonForRecoveryConfirmsOnlyAfterHomeLockRelease (#5007 finding B):
+// TestRecoveryStop_Draining_ConfirmsOnLockRelease (#5007 finding B):
 // drainDaemon unlinks daemon.pid and closes the socket when teardown begins, so
 // mid-drain the recovery actor's StopDaemon finds nothing to stop and the socket
 // is already quiet. StopConfirmed must still wait for the draining daemon to
 // release its home lock — confirming earlier lets the supervisor start a
 // candidate that loses the singleton lock.
-func TestStopDaemonForRecoveryConfirmsOnlyAfterHomeLockRelease(t *testing.T) {
+func TestRecoveryStop_Draining_ConfirmsOnLockRelease(t *testing.T) {
 	home := stubForwardEnv(t)
 	journal := forwardJournal(home)
 	stopDaemonFn = func() (bool, error) { return false, nil } // no pid file: nothing to stop
@@ -689,9 +702,9 @@ func TestStopDaemonForRecoveryConfirmsOnlyAfterHomeLockRelease(t *testing.T) {
 	}
 }
 
-// TestStopDaemonForRecoveryReportsStillRunningWhileLockHeld: a drain that
+// TestRecoveryStop_Draining_StillRunning: a drain that
 // outlives the bound is StopStillRunning, never a fabricated confirmation.
-func TestStopDaemonForRecoveryReportsStillRunningWhileLockHeld(t *testing.T) {
+func TestRecoveryStop_Draining_StillRunning(t *testing.T) {
 	home := stubForwardEnv(t)
 	journal := forwardJournal(home)
 	stopDaemonFn = func() (bool, error) { return false, nil }
@@ -712,5 +725,63 @@ func TestStopDaemonForRecoveryReportsStillRunningWhileLockHeld(t *testing.T) {
 	}
 	if outcome != upgradetxn.StopStillRunning {
 		t.Fatalf("outcome = %v, want StopStillRunning while the home lock is held", outcome)
+	}
+}
+
+// TestEnsureDaemon_Draining_LockHeldWithoutAnswerReportsStillDraining: past its
+// socket close a draining daemon answers nothing and has unlinked daemon.pid,
+// but still holds the home lock. EnsureDaemon must classify that as draining
+// and report ErrDaemonStillDraining at the bound — not spawn a child that can
+// only lose the lock and exit. The old ping-only check went straight to spawn.
+func TestEnsureDaemon_Draining_LockHeldWithoutAnswerReportsStillDraining(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+
+	launches := 0
+	launch := func() error {
+		launches++
+		return errors.New("test launcher: must not be reached")
+	}
+	err = ensureDaemonWithLauncherUntil(launch, time.Now().Add(1500*time.Millisecond))
+	if !errors.Is(err, ErrDaemonStillDraining) {
+		t.Fatalf("ensure against a lock-holding drainer = %v, want ErrDaemonStillDraining", err)
+	}
+	if launches != 0 {
+		t.Fatalf("launches = %d, want 0 while the home lock is held", launches)
+	}
+}
+
+// TestEnsureDaemon_Exited_Spawns: no answer, no daemon.pid, and a home lock that
+// is takeable — the previous daemon has exited — so EnsureDaemon spawns.
+func TestEnsureDaemon_Exited_Spawns(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock() // leaves daemon.lock on disk, as a past daemon would
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	lock.release()
+
+	spawns := 0
+	var newDaemonClose func() error
+	launch := func() error {
+		spawns++
+		var bindErr error
+		newDaemonClose, bindErr = startControlServer(nil, nil, nil, nil)
+		return bindErr
+	}
+	t.Cleanup(func() {
+		if newDaemonClose != nil {
+			_ = newDaemonClose()
+		}
+	})
+	if err := ensureDaemonWithLauncherUntil(launch, time.Now().Add(5*time.Second)); err != nil {
+		t.Fatalf("ensure with the previous daemon exited: %v", err)
+	}
+	if spawns != 1 {
+		t.Fatalf("spawns = %d, want 1", spawns)
 	}
 }
