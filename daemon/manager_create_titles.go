@@ -685,7 +685,8 @@ func (m *Manager) findArchivedOnlyCollisionLocked(naming branchNaming, repoID, r
 		if rid != repoID {
 			continue
 		}
-		if _, ok := naming.collision(title, m.reservationClaimLocked(naming, key, existing)); ok {
+		claim := m.reservationClaimLocked(naming, key, existing)
+		if branch, ok := naming.collision(title, claim); ok && !m.recordedCollisionHeldByLiveLane(naming, repoPath, title, claim, branch, diskData) {
 			// A concurrent create is reserving a colliding name; let the
 			// availability check reject with errConcurrentCreate.
 			return nil, "", nil
@@ -705,7 +706,7 @@ func (m *Manager) findArchivedOnlyCollisionLocked(naming branchNaming, repoID, r
 			continue
 		}
 		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
-		if namespace, _ := m.titleCollisionNamespace(naming, repoPath, title, inst.BranchClaim(), bothUseLocalTmux); namespace == titleNamespaceNone {
+		if namespace, _ := m.titleCollisionNamespace(naming, repoPath, title, inst.BranchClaim(), bothUseLocalTmux, diskData); namespace == titleNamespaceNone {
 			continue
 		}
 		if inst.GetLiveness() != session.LiveArchived {
@@ -778,7 +779,7 @@ func (m *Manager) findArchivedOnlyCollisionLocked(naming branchNaming, repoID, r
 	matchedPersistedCopy := false
 	for _, data := range diskData {
 		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && data.UsesLocalTmux()
-		if namespace, _ := m.titleCollisionNamespace(naming, repoPath, title, data.BranchClaim(), bothUseLocalTmux); namespace == titleNamespaceNone || data.Status == session.Loading {
+		if namespace, _ := m.titleCollisionNamespace(naming, repoPath, title, data.BranchClaim(), bothUseLocalTmux, diskData); namespace == titleNamespaceNone || data.Status == session.Loading {
 			continue
 		}
 		if !matchedPersistedCopy && data.Title == archived.Title && data.ID == archived.ID {

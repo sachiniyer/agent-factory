@@ -156,14 +156,42 @@ func (m *Manager) branchNamingForCreate(cfg *config.Config, repo *config.RepoCon
 // so either one may collide while the other does not. The tmux half is enabled
 // only when both records use the host-local runtime. The returned branch is the
 // one they share, for the refusal message.
-func (m *Manager) titleCollisionNamespace(naming branchNaming, repoPath, title string, claim git.BranchClaim, bothUseLocalTmux bool) (titleNamespace, string) {
-	if branch, ok := naming.collision(title, claim); ok {
+func (m *Manager) titleCollisionNamespace(naming branchNaming, repoPath, title string, claim git.BranchClaim, bothUseLocalTmux bool, diskData []session.InstanceData) (titleNamespace, string) {
+	if branch, ok := naming.collision(title, claim); ok &&
+		!m.recordedCollisionHeldByLiveLane(naming, repoPath, title, claim, branch, diskData) {
 		return titleNamespaceBranch, branch
 	}
 	if bothUseLocalTmux && tmux.SanitizedNameForRepo(claim.Title, repoPath) == tmux.SanitizedNameForRepo(title, repoPath) {
 		return titleNamespaceTmux, ""
 	}
 	return titleNamespaceNone, ""
+}
+
+// recordedCollisionHeldByLiveLane reports whether a collision exists ONLY
+// because title derives the branch a claim recorded — and a live lane's
+// worktree currently has that branch checked out. Such a collision defers to
+// refuseLiveHeldBranchLocked, which names the lane and offers the handoff
+// command; reporting it here as a record conflict would mask the actionable
+// refusal (#4562 review). The TitlesCollide gate keeps every pair master
+// already flagged on the record-conflict path it had before claims recorded
+// branches: only the purely-new defense defers.
+func (m *Manager) recordedCollisionHeldByLiveLane(naming branchNaming, repoPath, title string, claim git.BranchClaim, branch string, diskData []session.InstanceData) bool {
+	if claim.Branch == "" || branch == "" {
+		return false
+	}
+	prefix := naming.prefix
+	if !naming.local || !claim.Local {
+		prefix = naming.global
+	}
+	if git.TitlesCollide(title, claim.Title, prefix) {
+		return false
+	}
+	for _, holder := range m.worktreeHeldBranchesLocked(repoPath, false)[branch] {
+		if m.liveLaneHoldingWorktreeLocked(holder, diskData) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // findTitleConflictLocked returns the existing title that conflicts with the
@@ -177,7 +205,8 @@ func (m *Manager) findTitleConflictLocked(naming branchNaming, repoID, repoPath,
 		if rid != repoID {
 			continue
 		}
-		if branch, ok := naming.collision(title, m.reservationClaimLocked(naming, key, existing)); ok {
+		claim := m.reservationClaimLocked(naming, key, existing)
+		if branch, ok := naming.collision(title, claim); ok && !m.recordedCollisionHeldByLiveLane(naming, repoPath, title, claim, branch, diskData) {
 			return existing, titleConflictReserved, titleNamespaceBranch, branch
 		}
 	}
@@ -193,13 +222,13 @@ func (m *Manager) findTitleConflictLocked(naming branchNaming, repoID, repoPath,
 			continue
 		}
 		bothUseLocalTmux := localTmux && inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
-		if namespace, branch := m.titleCollisionNamespace(naming, repoPath, title, inst.BranchClaim(), bothUseLocalTmux); namespace != titleNamespaceNone {
+		if namespace, branch := m.titleCollisionNamespace(naming, repoPath, title, inst.BranchClaim(), bothUseLocalTmux, diskData); namespace != titleNamespaceNone {
 			return inst.Title, titleConflictLive, namespace, branch
 		}
 	}
 	for _, data := range diskData {
 		bothUseLocalTmux := localTmux && data.UsesLocalTmux()
-		namespace, branch := m.titleCollisionNamespace(naming, repoPath, title, data.BranchClaim(), bothUseLocalTmux)
+		namespace, branch := m.titleCollisionNamespace(naming, repoPath, title, data.BranchClaim(), bothUseLocalTmux, diskData)
 		if namespace == titleNamespaceNone {
 			continue
 		}

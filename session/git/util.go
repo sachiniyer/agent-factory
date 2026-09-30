@@ -225,39 +225,35 @@ type TitleNaming struct {
 // with claim, and the branch name the two share when that is the reason (empty
 // for a title-only collision).
 //
-// Between two host-local sessions the rule is TitlesCollide under n.Prefix, with
-// one correction: a claim whose recorded branch is not the one its title derives
-// under n.Prefix does not hold that derived branch, so it cannot collide on it.
-// That is a session created before branch_prefix changed (it keeps the branch it
-// was created with, #4539), an archived session renamed off a title whose
-// branch was left for the new session to adopt (#2127), or a lane checked out on
-// a branch its title never derived. Whether such a recorded branch is really in
-// the way is a question for git, which the held-branch guards ask; this rule only
-// stops inventing claims no session holds. A claim with no recorded branch yet
-// is derived. The mirror image also holds: while a claim still defends its
-// recorded branch (Relinquished unset), a title that derives THAT branch
-// collides with it — taking the ref would confiscate it from the record that
-// still points at it. An archived claim sets Relinquished because its reuse
-// rename either moved the branch aside or left it for the re-user to adopt.
+// The default rule is TitlesCollide under the pair's prefix — n.Prefix between
+// two host-local sessions, n.GlobalPrefix when either side is off-box (Docker,
+// SSH, hook, sandbox: the branch is made inside the sandbox from that machine's
+// config, so the host cannot know it, and a host project's override therefore
+// never changes whether an off-box session can be created).
 //
-// When either side is off-box (Docker, SSH, hook, sandbox), the branch is made
-// inside the sandbox from that machine's config, so the host cannot know it.
-// That pair keeps the rule it had before per-project prefixes existed:
-// TitlesCollide under the global prefix. A host project's override therefore
-// never changes whether an off-box session can be created.
+// A claim with a RECORDED branch is the correction: it defends that branch, not
+// a re-derivation of its title under the live prefix — a session created before
+// branch_prefix changed (it keeps the branch it was created with, #4539), an
+// off-box reservation pinned under the global value live at ITS admission
+// (#4562 review), an archived session renamed off a title whose branch was left
+// for the new session to adopt (#2127), or a lane checked out on a branch its
+// title never derived. While the claim still defends the recorded branch
+// (Relinquished unset), a title that derives THAT branch collides with it —
+// taking the ref would confiscate it from the record that still points at it,
+// and local setup's leftover-branch delete could destroy it outright. The
+// surviving name-level check is literal title equality; sanitized-title
+// equality under a prefix the claim was never admitted against is a
+// re-derivation, not something the claim holds. An archived claim sets
+// Relinquished because its reuse rename either moved the branch aside or left
+// it for the re-user to adopt. A claim with no recorded branch yet is derived.
+// EqualFold, not ==: on a case-insensitive filesystem two loose refs that
+// differ only in case are one file.
 func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, bool) {
 	prefix := n.Prefix
 	if !n.Local || !claim.Local {
 		prefix = n.GlobalPrefix
-	} else if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
-		// The claim holds its RECORDED branch, not the one its title derives
-		// under prefix — but a create whose title derives that recorded branch
-		// still collides with it while the claim defends it: taking the branch
-		// would confiscate the ref another record points at (a lost session's
-		// restore target, an in-place lane's checkout), and local setup's
-		// leftover-branch delete could destroy it outright (#4562 review).
-		// EqualFold, not ==: on a case-insensitive filesystem two loose refs
-		// that differ only in case are one file.
+	}
+	if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
 		if !claim.Relinquished && strings.EqualFold(claim.Branch, BranchForTitle(prefix, title)) {
 			return BranchForTitle(prefix, title), true
 		}

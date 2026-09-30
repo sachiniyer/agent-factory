@@ -391,7 +391,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// for it as off-box, judged under the global prefix as the daemon judges a
 	// genuinely off-box create (#4562 review). A row that carries a backend is
 	// classified by it, including "local" for a pending host-local create.
-	if inFlightOp == OpCreating && data.BackendType == "" {
+	// data.InFlightOp, not the derived inFlightOp: a legacy disk row says
+	// Status Loading with the op scrubbed, and it must keep master's drop
+	// behavior rather than materialize as an inert claim (#551 ghost rows).
+	if data.InFlightOp == OpCreating && data.BackendType == "" {
 		instance.pendingLocalityUnknown = true
 	}
 	// The pending on_complete obligation rides the restart so the daemon can
@@ -452,7 +455,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// the in-flight create is still building it. Its empty WorktreePath
 		// would fail the rebuild below and drop the row off the snapshot
 		// entirely, so it is skipped along with the tab restore (#4562 review).
-		if inFlightOp == OpCreating {
+		// The gate is the explicit field, not the derived op: a disk-scrubbed
+		// legacy Loading row derives OpCreating but has no create in flight —
+		// it must keep falling through to the worktree rebuild that drops it.
+		if data.InFlightOp == OpCreating {
 			break
 		}
 
@@ -603,7 +609,9 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// event replaces the row with the real session. Returning here keeps it
 	// inert rather than letting the sandbox-restart rule below rewrite it Lost
 	// or Start() attach a tmux binding that does not exist yet (#4562 review).
-	if inFlightOp == OpCreating {
+	// Explicit-field gate again: a disk-scrubbed Loading row must reach the
+	// paths below that fail and drop it, or the ghost claims its title forever.
+	if data.InFlightOp == OpCreating {
 		return instance, nil
 	}
 

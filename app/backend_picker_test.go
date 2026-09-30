@@ -431,7 +431,13 @@ func TestBackendPickRegeneratesTheNameSuggestion(t *testing.T) {
 	}
 	t.Cleanup(func() { suggestName = prev })
 
-	startNaming(t, h, "")
+	inst := startNaming(t, h, "")
+	// startNaming leaves the naming state but not the entry side effects
+	// startNewInstance runs — the first suggestion is generated as the form
+	// opens (handle_input.go), judged under the then-pending backend's
+	// collision namespace.
+	h.namingPlaceholder = h.suggestSessionName(inst)
+	h.sidebar.SetNamingPlaceholder(inst, h.namingPlaceholder)
 	require.Equal(t, "suggestion-1", h.namingPlaceholder,
 		"opening the form generates the first suggestion")
 
