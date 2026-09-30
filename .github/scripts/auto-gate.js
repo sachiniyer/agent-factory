@@ -497,18 +497,24 @@ const MAX_RATE_LIMIT_DELAY_MS = 10000;
 // mutations are also non-idempotent; never route them through these helpers.
 // The merge path retries only a definite ruleset refusal, after proving no
 // winner and re-running its preflight (#3902).
-async function retryRead(label, operation, subject = null) {
+// A parked-run approve does go through the helper, but its operation settles
+// the parked list to convergence before believing any failure — a
+// committed-but-unanswered approve reads as already done and is never replayed
+// (#5004).
+async function retryRead(label, operation, subject = null, { sleep } = {}) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
     readFailure: true,
     subject,
+    sleep,
   });
 }
 
-async function retryCheckUpdate(label, operation) {
+async function retryCheckUpdate(label, operation, { sleep } = {}) {
   return retryTransient(label, operation, {
     failureName: "AutoGateCheckWriteError",
     readFailure: false,
+    sleep,
   });
 }
 
@@ -620,7 +626,7 @@ async function reconcileAmbiguousCreate(label, findCreated) {
 async function retryTransient(
   label,
   operation,
-  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS },
+  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS, sleep = delay },
 ) {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -639,7 +645,7 @@ async function retryTransient(
       if (attempt >= delays.length) {
         throw retryFailure(label, attempt + 1, error, failureName, readFailure);
       }
-      await delay(retryDelayMilliseconds(error, delays[attempt]));
+      await sleep(retryDelayMilliseconds(error, delays[attempt]));
     }
   }
 }
@@ -728,6 +734,22 @@ function retryFailure(label, attempts, error, failureName, readFailure) {
   failure.name = failureName;
   failure.autoGateReadFailure = readFailure;
   failure.status = error.status;
+  failure.cause = error;
+  return failure;
+}
+
+// A precondition that failed inside a retried write is the READ's outcome, not
+// the write's: marked so the write's retry classifier lets it out immediately
+// (isRetryableGitHubError answers false on autoGateGuardFailure), rather than
+// multiplying the read's own retries under the write's schedule or relabeling
+// it a write error. Its own classification — the read-failure marker a caller
+// publishes UNKNOWN on, the association-change flag — is preserved (#4461).
+function writeRetryGuardFailure(error) {
+  const failure = new Error(error?.message || String(error));
+  failure.name = "AutoGateGuardError";
+  failure.autoGateGuardFailure = true;
+  failure.autoGateReadFailure = isReadFailure(error);
+  failure.autoGateAssociationChanged = error?.autoGateAssociationChanged === true;
   failure.cause = error;
   return failure;
 }
@@ -889,7 +911,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+async function evaluate({ github, context, core, prNumber, setOutputs = true, sleep }) {
   // The resolved PR's node id is what reportDecision's NOT_FOUND
   // classification reads, so evaluatePullRequest publishes it here the moment
   // it is known — a mid-evaluation failure then still writes its scoped
@@ -897,7 +919,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   // (#4484, Codex on #4486).
   const resolved = {};
   try {
-    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved });
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved, sleep });
   } catch (error) {
     // A PR that no longer exists is a conclusion, not an evaluation failure: it
     // cannot be evaluated and there is nothing to report on it. isOpen false
@@ -928,7 +950,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   }
 }
 
-async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved }) {
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved, sleep }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
@@ -1073,6 +1095,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     core,
     subject,
     validationRef,
+    sleep,
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
@@ -3217,15 +3240,7 @@ async function upsertAggregateCheck({
       try {
         await beforePublish({ attempt });
       } catch (error) {
-        // Re-thrown as a guard failure so the write's retry classifier lets it
-        // out immediately, with the read-failure marker preserved for the caller.
-        const guardFailure = new Error(error?.message || String(error));
-        guardFailure.name = "AutoGateGuardError";
-        guardFailure.autoGateGuardFailure = true;
-        guardFailure.autoGateReadFailure = isReadFailure(error);
-        guardFailure.autoGateAssociationChanged = error?.autoGateAssociationChanged === true;
-        guardFailure.cause = error;
-        throw guardFailure;
+        throw writeRetryGuardFailure(error);
       }
       attempt += 1;
     };
@@ -3471,6 +3486,10 @@ async function commitsBehindBase({ github, context, baseRefName, headSha }) {
 // "Approve and run". Shared, because two callers need the same answer: the one
 // that approves them after an update-branch, and the one that has to describe an
 // absent required check honestly.
+function parkedRunsIn(workflowRuns) {
+  return (workflowRuns || []).filter((run) => run?.conclusion === "action_required");
+}
+
 async function listParkedRuns({ github, context, headSha, subject = null }) {
   const { owner, repo } = context.repo;
   const listed = await retryRead(
@@ -3485,7 +3504,7 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
       }),
     subject,
   );
-  return (listed?.data?.workflow_runs || []).filter((run) => run?.conclusion === "action_required");
+  return parkedRunsIn(listed?.data?.workflow_runs);
 }
 
 // The workflow the gate dispatches when nothing validated a head it created.
@@ -3595,7 +3614,10 @@ async function ensureValidationRun({
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
       // again here, on what the wait actually found.
       if (!await canRecover()) return { cancelled: true };
-      const { parked, approved } = await approveParkedRuns({ github, context, headSha, core });
+      const { parked, approved, cancelled } = await approveParkedRuns({
+        github, context, headSha, core, canRecover, sleep,
+      });
+      if (cancelled) return { cancelled: true };
       return { dispatched: false, found: true, approved: parked.length === approved.length };
     }
     if (attempt < attempts - 1) {
@@ -3746,24 +3768,177 @@ async function dispatchMissingValidationRun({
   return { dispatched: true };
 }
 
-async function approveParkedRuns({ github, context, headSha, core }) {
-  const { owner, repo } = context.repo;
+async function approveParkedRuns({
+  github, context, headSha, core,
+  canRecover = async () => true,
+  sleep = delay,
+}) {
   const parked = await listParkedRuns({ github, context, headSha });
   const approved = [];
   for (const run of parked) {
     try {
-      await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
+      const outcome = await approveParkedRun({ github, context, headSha, run, canRecover, sleep });
+      if (outcome?.cancelled) {
+        return { parked, approved, cancelled: true };
+      }
       approved.push(run);
     } catch (error) {
-      // Not fatal on its own: the decision reports what is still waiting, and a
-      // run the gate could not approve becomes an explicit unmet item rather than
-      // the misleading "required check is missing".
+      // A guard that could not answer is not an approval refusal: a failed
+      // precondition read — eligibility or the settle read-back itself — is an
+      // unknown about the write's safety, and "unapproved" would misreport it
+      // as a run GitHub kept parked. It propagates with the read-failure
+      // classification writeRetryGuardFailure preserved; real approve failures
+      // keep the warning shape — an explicit unmet item, not a hidden cancel.
+      if (error?.autoGateGuardFailure) {
+        throw error;
+      }
       core.warning(
         `Could not approve workflow run ${run.id} (${run.name}) on ${headSha}: ${formatError(error)}`,
       );
     }
   }
   return { parked, approved };
+}
+
+// One parked run's approval, under the same write policy every other gate write
+// already goes through: transient failures retried by retryTransient, a
+// definitive refusal rethrown untouched (#5004). The bare call was the one
+// write in successor-head recovery without it — a lone 500 ("Unexpected end of
+// JSON input", run 36667620661) failed the whole recovery and reddened a master
+// run for a miss the next dispatch approved without incident.
+//
+// What makes retrying this POST safe is the read-back, not the response. A
+// failed approve says nothing about whether it committed, and a failed read-back
+// that ran ONCE would answer from a listing that can still lag the commit — the
+// same ambiguity reconcileAmbiguousCreate settles (#4763), so the parked list
+// is polled to convergence before the error is believed. A run that leaves
+// action_required IS the goal state, whether the "failed" call landed or a
+// concurrent approver beat this lane to it; only a run still parked through the
+// whole settle window earns a replay, or — on a definitive refusal — the report
+// the caller writes. Two exceptions stand outside that ambiguity: an explicit
+// rate-limit answer rejected the request outright (nothing committed, so it
+// goes straight back to the write retry, which honors Retry-After — routing it
+// through the read-back would let a rate-limited LISTING bury a refusal the
+// retry could have waited out), and a recovery precondition, which is
+// re-established before every attempt like every other retried write's guard —
+// the settle window can spend seconds, and a PR that closed or moved meanwhile
+// must not get a stale head's run approved.
+async function approveParkedRun({ github, context, headSha, run, canRecover, sleep }) {
+  const { owner, repo } = context.repo;
+  return retryCheckUpdate(
+    `could not approve workflow run ${run.id} (${run.name}) on ${headSha}`,
+    async () => {
+      let recoverable;
+      try {
+        recoverable = await canRecover();
+      } catch (error) {
+        throw writeRetryGuardFailure(error);
+      }
+      if (!recoverable) {
+        return { cancelled: true };
+      }
+      try {
+        await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
+      } catch (error) {
+        if (isDefinitiveRateLimitResponse(error)) {
+          throw error;
+        }
+        if (await runLeftParkedList({ github, context, headSha, runId: run.id, sleep })) {
+          return {};
+        }
+        throw error;
+      }
+      return {};
+    },
+    { sleep },
+  );
+}
+
+// The approve guard for lanes that are not successor-head recovery — the
+// post-update merge pass and the evaluate pass: the PR the parked runs belong
+// to must still be open and still point at that head when the POST fires. The
+// settle window can spend seconds, and a hand merge, a close, or a push
+// meanwhile leaves a replay approving a stale head's run (#5004, Codex on
+// #5005). Deliberately REST while the lanes' other reads are GraphQL — the
+// same cross-path reasoning as resolvedPullRequest.exists — with only a
+// definite 404 answering "gone". The read rides the same read-retry policy as
+// every other GitHub read in the gate: a transient failure must not abort the
+// approval, and an exhausted one escapes as a READ-marked guard failure
+// rather than waving the write through unguarded.
+function liveHeadGuard({ github, context, prNumber, headSha, sleep }) {
+  const { owner, repo } = context.repo;
+  return async () => {
+    let live;
+    try {
+      live = await retryRead(
+        `could not re-read PR #${prNumber} before approving its parked runs`,
+        () => github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+        null,
+        { sleep },
+      );
+    } catch (error) {
+      if (Number(error?.status ?? error?.response?.status) === 404) return false;
+      throw error;
+    }
+    return !pullRequestEnded(live?.data) && normalizeHeadSha(live?.data?.head?.sha) === headSha;
+  };
+}
+
+// The read-back of an approve whose POST did not report its outcome: whether
+// the run still reads as parked, asked over the same settle window the
+// ambiguous-create reconcile uses — a listing can answer "parked" for a run
+// the commit already un-parked, and believing one stale answer replays the POST
+// into a refusal for a write that already landed (#5004, #4763's shape).
+//
+// Read the run directly, never the repository-wide listing: that index lags in
+// BOTH directions — still showing a just-approved run parked, and omitting a
+// just-created parked run entirely — so "absent from the list" proves nothing
+// (Codex on #5005). The run's own GET carries its conclusion, which flips off
+// action_required only when approval actually committed. Nothing inside the
+// poll is retried twice: a transient failure or a vanished run (404 is a
+// stale read, not a verdict — a run listed parked seconds ago cannot be gone)
+// occupies the same settle slot a "still parked" answer would. Resolves true
+// once the run is out of action_required; false when it stayed parked through
+// the whole window, so the caller may retry or report the original failure. A
+// window that ends on unreadable answers escapes as a guard failure marked a
+// READ failure — that is what exhausted — never as "still parked".
+async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
+  const { owner, repo } = context.repo;
+  try {
+    return await retryTransient(
+      `could not confirm whether run ${runId} left the parked list on ${headSha}`,
+      async () => {
+        let run;
+        try {
+          run = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId });
+        } catch (error) {
+          if (Number(error?.status ?? error?.response?.status) !== 404) {
+            throw error;
+          }
+        }
+        if (run && run.data?.conclusion !== "action_required") {
+          return true;
+        }
+        const stillParked = new Error(`run ${runId} still reads as parked on ${headSha}`);
+        stillParked.status = 503;
+        stillParked.autoGateRunStillParked = true;
+        throw stillParked;
+      },
+      {
+        failureName: "AutoGateReadError",
+        readFailure: true,
+        delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+        sleep,
+      },
+    );
+  } catch (error) {
+    // The settle window ended on the sentinel itself — every read reported the
+    // run parked — rather than on an answer GitHub could not serve.
+    if (error.cause?.autoGateRunStillParked === true) {
+      return false;
+    }
+    throw writeRetryGuardFailure(error);
+  }
 }
 
 // A PR the gate does not own can end while a transaction on it is in flight
@@ -3806,13 +3981,13 @@ async function updateBranchToBase({ github, context, prNumber, headSha }) {
 
 async function merge({
   github, context, core, prNumber, expectedHeadSha, aggregateCheckRunId,
-  ruleViolationRetries = 1,
+  ruleViolationRetries = 1, sleep = delay,
 }) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
   }
 
-  const gate = await evaluate({ github, context, core, prNumber, setOutputs: false });
+  const gate = await evaluate({ github, context, core, prNumber, setOutputs: false, sleep });
   if (evaluationFailed(gate)) {
     throw evaluationFailure(
       `Auto Gate merge evaluation failed for PR #${prNumber}: ${gate.summary}`,
@@ -3916,7 +4091,10 @@ async function merge({
         const newHead = normalizeHeadSha(updated?.data?.head?.sha);
         if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
           observedUpdatedHead = newHead;
-          const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
+          const stillOurs = liveHeadGuard({ github, context, prNumber, headSha: newHead, sleep });
+          const { approved } = await approveParkedRuns({
+            github, context, headSha: newHead, core, canRecover: stillOurs, sleep,
+          });
           if (approved.length > 0) {
             core.notice(
               `Approved ${approved.length} workflow run(s) parked on ${newHead} after update-branch: ` +
@@ -3929,6 +4107,8 @@ async function merge({
             core,
             headSha: newHead,
             headRefName: updated?.data?.head?.ref || gate.headRefName,
+            canRecover: stillOurs,
+            sleep,
           });
         }
       }
@@ -6250,7 +6430,7 @@ function isPRValidationSpec(spec) {
 }
 
 async function evaluateRequiredChecks({
-  github, context, branch, sha, core, subject = null, validationRef = null,
+  github, context, branch, sha, core, subject = null, validationRef = null, sleep,
 }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core, subject });
   const syntheticDecisionSpecs = required.specs.filter(
@@ -6318,11 +6498,17 @@ async function evaluateRequiredChecks({
   // for a later evaluation to narrate is how #3811 sat for 33 minutes with the
   // decision correctly saying "waiting for approval" and nobody approving.
   //
-  // Approving is idempotent enough for this: a run that has already started
-  // rejects the call, which is warned and ignored, and the reasons below still
-  // describe whatever is genuinely still parked.
+  // Approving is idempotent enough for this: a run that has already started no
+  // longer reads as parked, which the approve's read-back counts as done
+  // (#5004), and the reasons below still describe whatever is genuinely still
+  // parked.
   if (parkedRuns.length > 0) {
-    await approveParkedRuns({ github, context, headSha: sha, core });
+    await approveParkedRuns({
+      github, context, headSha: sha, core, sleep,
+      canRecover: subject?.number
+        ? liveHeadGuard({ github, context, prNumber: subject.number, headSha: sha, sleep })
+        : undefined,
+    });
   }
 
   const states = specs.map((spec) => latestRequiredState(spec, checkRuns, statuses));
