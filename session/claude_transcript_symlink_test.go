@@ -110,19 +110,22 @@ func TestInspectClaudeProjectConversationsSymlinkedLaunchDirSubstitutesNewestUnd
 		"the fallback must substitute the newest transcript found under the resolved-path project name")
 }
 
-// TestInspectClaudeProjectConversationsSymlinkedLaunchDirPicksNewestAcrossBothCandidates
-// verifies the fallback newest-transcript selection spans both candidate
-// project directories: an older transcript under the link-path project name
-// must not outrank a newer one under the resolved-path project name.
-func TestInspectClaudeProjectConversationsSymlinkedLaunchDirPicksNewestAcrossBothCandidates(t *testing.T) {
+// TestInspectClaudeProjectConversationsSymlinkedLaunchDirPrefersResolvedProjectForFallback
+// verifies the fallback prefers the effective resolved project: a newer
+// transcript under the link-path project name (e.g. a stale transcript left
+// when the raw path was a real directory before being replaced by a symlink)
+// must not outrank a valid replacement under the resolved-path project name,
+// since Claude launched through the symlink files under and resumes from the
+// resolved-path project and cannot resume the link-project transcript.
+func TestInspectClaudeProjectConversationsSymlinkedLaunchDirPrefersResolvedProjectForFallback(t *testing.T) {
 	configDir := t.TempDir()
 	linkDir, resolvedDir := symlinkLaunchDirs(t)
 	repoDir := t.TempDir()
-	const older = "5299e00d-4444-4222-8333-f7045e07a242"
-	const newer = "5299e00d-5555-4222-8333-f7045e07a242"
+	const staleNewer = "5299e00d-4444-4222-8333-f7045e07a242"
+	const resolvedOlder = "5299e00d-5555-4222-8333-f7045e07a242"
 	oldTime := time.Now().Add(-time.Hour)
-	writeClaudeTranscript(t, configDir, linkDir, older, oldTime)
-	writeClaudeTranscript(t, configDir, resolvedDir, newer, oldTime.Add(time.Minute))
+	writeClaudeTranscript(t, configDir, linkDir, staleNewer, oldTime.Add(time.Minute))
+	writeClaudeTranscript(t, configDir, resolvedDir, resolvedOlder, oldTime)
 
 	state, err := InspectClaudeProjectConversations(
 		"env -C "+linkDir+" CLAUDE_CONFIG_DIR="+configDir+" claude", repoDir,
@@ -130,8 +133,30 @@ func TestInspectClaudeProjectConversationsSymlinkedLaunchDirPicksNewestAcrossBot
 	)
 	require.NoError(t, err)
 	require.False(t, state.RecordedExists)
-	require.Equal(t, newer, state.Resume.ID,
-		"the fallback must choose the newest transcript across both the link-path and resolved-path project directories")
+	require.Equal(t, resolvedOlder, state.Resume.ID,
+		"the fallback must choose a transcript from the resolved-path project even when a newer transcript exists under the link-path project")
+}
+
+// TestInspectClaudeProjectConversationsSymlinkedLaunchDirFallsBackToLinkProjectWhenResolvedIsEmpty
+// confirms the link-path project is still used as a fallback when the
+// resolved-path project has no transcripts, so a symlinked launch whose
+// resolved project is empty still substitutes a transcript from the link
+// project rather than starting fresh.
+func TestInspectClaudeProjectConversationsSymlinkedLaunchDirFallsBackToLinkProjectWhenResolvedIsEmpty(t *testing.T) {
+	configDir := t.TempDir()
+	linkDir, _ := symlinkLaunchDirs(t)
+	repoDir := t.TempDir()
+	const only = "5299e00d-6666-4222-8333-f7045e07a242"
+	writeClaudeTranscript(t, configDir, linkDir, only, time.Now())
+
+	state, err := InspectClaudeProjectConversations(
+		"env -C "+linkDir+" CLAUDE_CONFIG_DIR="+configDir+" claude", repoDir,
+		AgentConversationData{Agent: tmux.ProgramClaude, ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+	)
+	require.NoError(t, err)
+	require.False(t, state.RecordedExists)
+	require.Equal(t, only, state.Resume.ID,
+		"with no transcript under the resolved-path project, the fallback must use the link-path project's newest transcript")
 }
 
 // TestInspectClaudeProjectConversationsSymlinkedLaunchDirHasNoResumeWhenNoTranscriptAnywhere
