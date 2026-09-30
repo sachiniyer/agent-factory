@@ -116,6 +116,26 @@ func TestControlServer_RebindProject_OmittedExpectedRootStillApplies(t *testing.
 	assert.Equal(t, filepath.Clean(targets[1]), registryRoot(t, id))
 }
 
+// TestControlServer_RebindProject_WhitespaceExpectedRootFailsClosed pins the
+// verbatim-precondition rule: a nonempty expected_root that is only whitespace —
+// or a padded spelling of the real root — is still a compare-and-set
+// precondition, just one the recorded root cannot satisfy. It must be refused,
+// never relaxed toward the empty "no precondition" form, or a malformed request
+// would silently drop the guard it asked for (#4888 review).
+func TestControlServer_RebindProject_WhitespaceExpectedRootFailsClosed(t *testing.T) {
+	cs, id, start, targets := rebindConflictFixture(t)
+
+	for _, expected := range []string{"   ", "\t \n", " " + start + " "} {
+		var resp RebindProjectResponse
+		err := cs.RebindProject(RebindProjectRequest{ID: id, Path: targets[0], ExpectedRoot: expected}, &resp)
+		var rebound *projectReboundError
+		require.True(t, errors.As(err, &rebound),
+			"expected_root %q must stay a precondition and be refused, got %v", expected, err)
+		assert.Equal(t, filepath.Clean(start), registryRoot(t, id),
+			"a refused rebind writes nothing (expected_root %q)", expected)
+	}
+}
+
 // TestHTTPRebindProject_ConflictIs409WithCode pins the public wire shape of the
 // refusal: 409, error code project_rebound, marked as a daemon rejection — and
 // that a body with no expected_root at all (an old client) still applies.

@@ -341,8 +341,11 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		// Surface the daemon's message verbatim — byte-identical to what the
 		// net/rpc client would carry, since both transports wrap the same
 		// controlServer error — except where the message is provably a version
-		// skew, which is unactionable in its raw form.
-		return interpretEnvelopeError(env.Error.Message, env.Error.Code)
+		// skew, which is unactionable in its raw form. The definitive outcome
+		// codes first verify the answer is the daemon's own: status and the
+		// daemon_rejected marker both go in, so an intermediary's substituted or
+		// replayed envelope cannot classify a mutation it may have forwarded.
+		return interpretEnvelopeError(httpReq.URL.Path, httpResp.StatusCode, env.Error)
 	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {

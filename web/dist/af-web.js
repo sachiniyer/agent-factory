@@ -18602,11 +18602,15 @@ function openRebindProject(projectId, label) {
         };
         const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
         const reArmAfterRebound = (e) => {
-          refreshRegisteredProjects();
           void listProjects(tok).then((projects) => {
             if (!current()) return;
-            const now = token === tok ? projects.find((p) => p.id === projectId)?.root : void 0;
-            if (now !== void 0) expectedRoot = now;
+            const own = token === tok;
+            const now = own ? projects.find((p) => p.id === projectId)?.root : void 0;
+            if (own) {
+              commitRegisteredProjects(projects);
+              if (now !== void 0) expectedRoot = now;
+              refreshRegisteredProjects();
+            }
             if (modal !== m) {
               surfaceTabError(e);
               return;
@@ -18615,6 +18619,7 @@ function openRebindProject(projectId, label) {
             m.setError(now !== void 0 ? `Rebound elsewhere, to ${now} \xB7 submit again to move it from there` : errorText(e));
           }).catch(() => {
             if (!current()) return;
+            refreshRegisteredProjects();
             if (modal !== m) {
               surfaceTabError(e);
               return;

@@ -1352,15 +1352,26 @@ function openRebindProject(projectId: string, label: string): void {
         // Another rebind moved the project after this modal read it: nothing was
         // written. Re-read the registry, then re-arm the form against the root it
         // reports now, so the user decides again knowing where the project is.
+        // The read that re-arms the form is ALSO the registry refresh — it is
+        // committed through commitRegisteredProjects, the same reconciliation a
+        // fenced refetch lands in — because a snapshot used only to re-arm and
+        // never stored leaves the switcher (and the next attempt's expected
+        // root) on the pre-rebind registry whenever the refresh loses.
         const reArmAfterRebound = (e: unknown): void => {
-          refreshRegisteredProjects();
           void listProjects(tok)
             .then((projects) => {
               if (!current()) return;
               // A read under a credential this page no longer holds says nothing
               // it may act on; the form still re-arms, on the daemon's message.
-              const now = token === tok ? projects.find((p) => p.id === projectId)?.root : undefined;
-              if (now !== undefined) expectedRoot = now;
+              const own = token === tok;
+              const now = own ? projects.find((p) => p.id === projectId)?.root : undefined;
+              if (own) {
+                commitRegisteredProjects(projects);
+                if (now !== undefined) expectedRoot = now;
+                // Settle anything that raced this read — the same trailing
+                // fenced refetch followConfirmedRebind uses.
+                refreshRegisteredProjects();
+              }
               if (modal !== m) {
                 surfaceTabError(e);
                 return;
@@ -1370,6 +1381,9 @@ function openRebindProject(projectId: string, label: string): void {
             })
             .catch(() => {
               if (!current()) return;
+              // The direct read failed: the fenced refetch still re-reads the
+              // registry so the switcher cannot keep showing the refused root.
+              refreshRegisteredProjects();
               if (modal !== m) {
                 surfaceTabError(e);
                 return;

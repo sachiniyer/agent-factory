@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -54,21 +55,47 @@ func (e *VersionSkewError) Error() string {
 		e.Field, e.Detail)
 }
 
-// interpretEnvelopeError converts a daemon envelope message into an error,
+// interpretEnvelopeError converts a daemon envelope error into a Go error,
 // upgrading a provable version skew into an actionable VersionSkewError and
 // passing everything else through verbatim so existing callers that match on
 // daemon message text are unaffected.
-func interpretEnvelopeError(msg, code string) error {
-	if code == apiproto.ErrorCodeMutationCommitted {
-		return &mutationCommittedError{detail: msg}
+//
+// The two machine-readable outcome codes classify definitively only on a
+// verified daemon answer — the web client's provenance rule (web/src/api.ts
+// isDaemonRejection / isMutationCommittedError): a 502 or 504 is always an
+// intermediary's answer no matter what the body carries, and a refusal code
+// must also bear the daemon_rejected marker. Without those checks a proxy that
+// forwarded the mutation could substitute or replay a project_rebound envelope
+// and this client would report "nothing was written" for a request the daemon
+// may have applied. An unverified outcome code is therefore an
+// UnconfirmedHTTPResponseError — outcome unknown — never a definitive refusal
+// or commit. On the local unix socket the checks are free: the daemon always
+// sets the marker and never emits a gateway status, so a real daemon's answer
+// always verifies.
+func interpretEnvelopeError(route string, status int, envErr *apiproto.EnvelopeError) error {
+	gatewayStatus := status == http.StatusBadGateway || status == http.StatusGatewayTimeout
+	switch envErr.Code {
+	case apiproto.ErrorCodeMutationCommitted:
+		// A committed envelope omits daemon_rejected (daemon/httpserver.go), so
+		// the gateway-status check is the whole provenance rule.
+		if !gatewayStatus {
+			return &mutationCommittedError{detail: envErr.Message}
+		}
+	case apiproto.ErrorCodeProjectRebound:
+		if envErr.DaemonRejected && !gatewayStatus {
+			return &ProjectReboundError{Detail: envErr.Message}
+		}
+	default:
+		if m := unknownFieldPattern.FindStringSubmatch(envErr.Message); m != nil {
+			return &VersionSkewError{Field: m[1], Detail: envErr.Message}
+		}
+		return fmt.Errorf("%s", envErr.Message)
 	}
-	if code == apiproto.ErrorCodeProjectRebound {
-		return &ProjectReboundError{Detail: msg}
+	detail := envErr.Message
+	if detail == "" {
+		detail = fmt.Sprintf("envelope carried code %q without daemon provenance", envErr.Code)
 	}
-	if m := unknownFieldPattern.FindStringSubmatch(msg); m != nil {
-		return &VersionSkewError{Field: m[1], Detail: msg}
-	}
-	return fmt.Errorf("%s", msg)
+	return &UnconfirmedHTTPResponseError{Route: route, Status: status, Detail: detail}
 }
 
 // mutationCommittedError tells mutation callers that the daemon durably wrote
