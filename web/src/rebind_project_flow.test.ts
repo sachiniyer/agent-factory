@@ -102,7 +102,7 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null;
     var connectionGeneration = 0, rebindInFlightGeneration = 0; // var: tests bump the connection
-    const REBIND_ANSWER_MS = 30000;
+    const REBIND_ANSWER_MS = 30000, REBIND_REFRESH_MS = 10000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
     ${topLevelFunction(source, "rebindOutcomeUnknown")}
@@ -456,6 +456,51 @@ test("a rebound-elsewhere refusal still re-arms when the refresh fails", async (
   await settle();
 
   assert.deepEqual(events.slice(-2), ["busy:1:false", `error:1:${REBOUND}`]);
+});
+
+// The re-arm's registry read is bounded (#4888 review): fetch has no timeout,
+// so a read that never settles must not leave the open modal busy forever. On
+// the bound the refusal the daemon already returned is reported, the fenced
+// refetch still re-reads the registry, and a late answer is dropped.
+test("a rebound-elsewhere refusal whose refresh never settles re-arms on the bound", async () => {
+  const { app, events, submits, pending, reads, fire, timers } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+  assert.ok(events.includes("read"), "the registry re-read was attempted");
+  assert.equal(timers.size, 1, "the re-arm wait is armed");
+
+  // The read never answers: the bound still re-arms the form on the refusal.
+  fire();
+  await settle();
+  assert.deepEqual(events.slice(-2), ["busy:1:false", `error:1:${REBOUND}`]);
+  assert.ok(events.includes("refetch"), "the fenced refetch still re-reads the registry");
+  assert.equal(timers.size, 0, "the bound does not fire twice");
+
+  const before = events.length;
+  reads[0].resolve([{ id: "prj_A", root: "/theirs" }]);
+  await settle();
+  assert.deepEqual(events.slice(before), [], "a late answer after the bound is dropped");
+});
+
+// The same bound must still deliver the refusal a dismissed modal was promised —
+// as the tab error, since the inline slot is gone.
+test("a dismissed modal's rebound refusal surfaces on the refresh bound", async () => {
+  const { app, events, submits, pending, fire } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  app.closeModal();
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+
+  fire();
+  await settle();
+  assert.ok(events.includes(`toast:${REBOUND}`),
+    "a dismissed modal's refusal is still reported when its refresh never settles");
+  assert.ok(events.includes("refetch"), "the registry is still re-read");
 });
 
 // A control: a dismissed modal's refusal was already a toast before #4822, and

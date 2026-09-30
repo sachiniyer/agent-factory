@@ -268,6 +268,12 @@ func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project)
 	for i := range p.all {
 		if p.all[i].RegistryID != "" && p.all[i].RegistryID == p.rebindTarget.RegistryID {
 			p.rebindTarget = p.all[i]
+			// The rebuild can reorder rows — the record's name, root, or
+			// missing-path flag feed the sort — so land the cursor on the
+			// rebound row rather than leaving it on whatever now occupies the
+			// old numeric position: an Esc returning to the list must
+			// highlight THIS registration (#4888 review).
+			p.selectedIdx = i
 			break
 		}
 	}

@@ -87,23 +87,35 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 			if apiclient.IsProjectRebound(msg.err) {
 				// A conflict moved a registration: the sidebar's Projects
 				// section and the row this picker returns to are both stale in
-				// every field, not just the recorded root. Refresh both from
-				// ONE snapshot — a second synchronous daemon RPC here would
-				// double the on-loop stall (#4888 review).
+				// every field, not just the recorded root. Rebuild ONCE — the
+				// daemon snapshot plus the single registry read inside it —
+				// and apply that same list to both, so a further registry move
+				// cannot leave the rows and the retry's named root carrying
+				// different answers, and nothing blocks the loop on a second
+				// fetch (#4888 review).
 				data, fetchErr := allReposSnapshotFetcher()
-				m.refreshSidebarProjectsFromSnapshot(data, fetchErr)
+				fresh, degraded := m.buildProjectListFrom(data)
+				m.applySidebarProjects(fresh, degraded, fetchErr)
 				if owned {
-					if root, ok := registeredProjectRoot(msg.projectID); ok {
-						// Rebuild the open picker from the fresh list so an
-						// Esc back to it cannot select a checkout the registry
-						// no longer records; the same rebuild re-targets the
-						// rebind form at the root the registry reports now.
-						fresh, degraded := m.buildProjectListFrom(data)
-						m.projectPickerOverlay.SetDegraded(degraded)
-						m.projectPickerOverlay.SetRebindConflict(
-							fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root), fresh)
-						return m, nil
+					m.projectPickerOverlay.SetDegraded(degraded)
+					// The re-armed form names the root the rebuilt ROW carries
+					// — the read the picker installs — so the message and the
+					// retry's expected root always describe the same record.
+					// A record gone from the snapshot falls back to the
+					// daemon's refusal text.
+					text := msg.err.Error()
+					for _, row := range fresh {
+						if row.RegistryID == msg.projectID {
+							root := row.RegistryRoot
+							if root == "" {
+								root = row.Root
+							}
+							text = fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root)
+							break
+						}
 					}
+					m.projectPickerOverlay.SetRebindConflict(text, fresh)
+					return m, nil
 				}
 			}
 			if owned {

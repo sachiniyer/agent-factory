@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -92,4 +94,41 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	root, ok = registeredProjectRoot(id)
 	require.True(t, ok)
 	assert.Equal(t, mine, root, "the retry, made against the current root, lands")
+}
+
+// TestRebindConflictWithAVanishedRecordStillRebuildsTheList pins the second
+// #4888-review round on the conflict handler: the re-arm and the rebuilt list
+// must come from the SAME registry read. When the record is deleted between
+// the daemon's refusal and the TUI's re-read, the previous code skipped the
+// rebuild entirely — the follow-up root read had nothing to name — leaving a
+// row for a registration the registry dropped selectable. The rebuild must run
+// regardless; the vanished record's row must be gone, and the form re-arms on
+// the daemon's own refusal text.
+func TestRebindConflictWithAVanishedRecordStillRebuildsTheList(t *testing.T) {
+	h, id := activeRebindHome(t)
+	displayed := h.projectPickerOverlay
+
+	old := rebindProjectThroughDaemon
+	rebindProjectThroughDaemon = func(projectID, _, path string) (config.Project, error) {
+		// The daemon already computed its refusal; before this reply reaches
+		// the TUI another client deletes the record outright.
+		dir, err := config.ProjectRegistryDir()
+		require.NoError(t, err)
+		require.NoError(t, os.RemoveAll(filepath.Join(dir, projectID)))
+		return config.Project{}, &apiclient.ProjectReboundError{Detail: "rebind project: project " + projectID + " was rebound elsewhere — refresh and retry"}
+	}
+	t.Cleanup(func() { rebindProjectThroughDaemon = old })
+
+	h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+
+	require.Same(t, displayed, h.projectPickerOverlay, "a conflict is a refusal: the picker stays open")
+	assert.False(t, displayed.RebindPending(), "a definitive refusal re-arms the form")
+	assert.Contains(t, displayed.Render(), "rebound elsewhere", "the daemon's refusal text re-arms the form")
+
+	// Esc back to the list: the rebuild ran even with the record gone, so no
+	// row for the dropped registration can be highlighted or selected.
+	h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEsc})
+	if row, ok := displayed.HighlightedProject(); ok && row.RegistryID == id {
+		t.Fatalf("a deleted record's stale row must not survive the conflict rebuild, got %+v", row)
+	}
 }

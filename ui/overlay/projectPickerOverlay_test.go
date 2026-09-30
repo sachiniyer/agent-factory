@@ -296,6 +296,42 @@ func TestProjectPickerRebindConflictRebuildsRows(t *testing.T) {
 	}
 }
 
+// TestProjectPickerRebindConflictKeepsCursorOnReboundRow pins the other half
+// of the #4888-review picker rebuild: a conflict rebuild can REORDER rows —
+// the record's name feeds the sort — so leaving selectedIdx at its old numeric
+// position highlights whichever row now sits there. Esc must return to a list
+// whose cursor rests on the registration the rebind targeted.
+func TestProjectPickerRebindConflictKeepsCursorOnReboundRow(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha"},
+		{Name: "omega", Root: "/repos/omega"},
+		{Name: "zed", Root: "/repos/zed"},
+	}, "")
+	// The cursor is on alpha (idx 0); its rebind is refused. The rebuild names
+	// the rebound registration "zeta" — sorting it LAST — so a stale index 0
+	// would highlight omega instead.
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	p.SetRebindConflict("Rebound elsewhere, to /new/zeta · Enter retries from there", []Project{
+		{Name: "omega", Root: "/repos/omega"},
+		{Name: "zed", Root: "/repos/zed"},
+		{Name: "zeta", Root: "/new/zeta", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/zeta"},
+	})
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+
+	row, ok := p.HighlightedProject()
+	if !ok {
+		t.Fatalf("the rebuilt list should still have a highlighted row")
+	}
+	if row.RegistryID != "prj_aaa" || row.Name != "zeta" || row.Root != "/new/zeta" {
+		t.Fatalf("the cursor must follow the rebound row to its rebuilt position, got %+v", row)
+	}
+}
+
 // TestProjectPickerRebindConflictClampsCursor: if the refreshed list is
 // shorter than the cursor position — the record was deleted outright, so it
 // has no row at all — the rebuild must not leave selectedIdx pointing past

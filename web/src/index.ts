@@ -1238,6 +1238,15 @@ let rebindInFlightGeneration = 0;
  *  registry rather than claiming success or failure. */
 const REBIND_ANSWER_MS = 30_000;
 
+/** How long the registry re-read that re-arms a conflicted rebind may run.
+ *  fetch carries no timeout, so without a bound a never-settling read would
+ *  leave an open modal busy forever — and a dismissed modal's definitive
+ *  refusal would never surface (#4888 review). On the bound the read's late
+ *  answer is dropped and the UI converges to the same end state a failed read
+ *  reaches: the fenced refetch still re-reads the registry, and the original
+ *  refusal is reported. */
+const REBIND_REFRESH_MS = 10_000;
+
 /** The one notice for a rebind whose outcome is not known — unanswered within
  *  REBIND_ANSWER_MS, or failed in transport. The selection is left alone; the
  *  refreshed project list is where the user sees what actually happened. */
@@ -1358,8 +1367,35 @@ function openRebindProject(projectId: string, label: string): void {
         // never stored leaves the switcher (and the next attempt's expected
         // root) on the pre-rebind registry whenever the refresh loses.
         const reArmAfterRebound = (e: unknown): void => {
+          // The end state a bound or failed read converges to: the fenced
+          // refetch still re-reads the registry so the switcher cannot keep
+          // showing the refused root, and the original refusal is reported —
+          // inline when the modal is still up, else as the tab error it was
+          // promised.
+          const missed = (): void => {
+            if (!current()) return;
+            refreshRegisteredProjects();
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          };
+          // fetch carries no timeout, so the read is bounded: after
+          // REBIND_REFRESH_MS its late answer is dropped and missed() runs
+          // instead of leaving the modal busy forever (#4888 review).
+          let readSettled = false;
+          const bound = window.setTimeout(() => {
+            if (readSettled) return;
+            readSettled = true;
+            missed();
+          }, REBIND_REFRESH_MS);
           void listProjects(tok)
             .then((projects) => {
+              if (readSettled) return;
+              readSettled = true;
+              window.clearTimeout(bound);
               if (!current()) return;
               // A read under a credential this page no longer holds says nothing
               // it may act on; the form still re-arms, on the daemon's message.
@@ -1380,16 +1416,11 @@ function openRebindProject(projectId: string, label: string): void {
               m.setError(now !== undefined ? `Rebound elsewhere, to ${now} · submit again to move it from there` : errorText(e));
             })
             .catch(() => {
-              if (!current()) return;
-              // The direct read failed: the fenced refetch still re-reads the
-              // registry so the switcher cannot keep showing the refused root.
-              refreshRegisteredProjects();
-              if (modal !== m) {
-                surfaceTabError(e);
-                return;
-              }
-              m.setBusy(false);
-              m.setError(errorText(e));
+              if (readSettled) return;
+              readSettled = true;
+              window.clearTimeout(bound);
+              // The direct read failed — same end state as the bound.
+              missed();
             });
         };
         const unknownOutcome = (): void => {
