@@ -194,6 +194,26 @@ var backendProvisionsOffBox = map[BackendKind]bool{
 // ParseBackendKind rejects those before they reach a runtime.
 func (k BackendKind) ProvisionsOffBox() bool { return backendProvisionsOffBox[k] }
 
+// persistedBackendType maps a BackendKind to the backend_type discriminator its
+// provisioned backend reports through Type() — the hook backend's Type is
+// "remote", every other kind's is its own name. Declared beside
+// runtimeRegistry for the same reason backendProvisionsOffBox is: a caller that
+// holds only the resolved KIND — the daemon's pending-create projection, which
+// exists precisely because the backend may not exist yet — must not invent the
+// string itself (#4562 review).
+var persistedBackendType = map[BackendKind]string{
+	BackendLocal:   "local",
+	BackendDocker:  "docker",
+	BackendSSH:     "ssh",
+	BackendSandbox: "sandbox",
+	BackendHook:    "remote",
+}
+
+// PersistedBackendType is the backend_type value a session of this kind records
+// once provisioned — i.e. what its backend's Type() returns. Empty for an
+// unregistered kind, which ParseBackendKind rejects before it can be used.
+func (k BackendKind) PersistedBackendType() string { return persistedBackendType[k] }
+
 // AccountWriteBackRationale is the single operator-facing reason ssh, sandbox
 // and hook cannot safely honour a writable credential account. It states only
 // the guarantee af lacks, without asserting where a hook runs or which

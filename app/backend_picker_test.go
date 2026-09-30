@@ -409,6 +409,40 @@ func TestBackendCatalogFailureKeepsTheFormOpen(t *testing.T) {
 		"the cause must precede the detail: the notice clips its tail")
 }
 
+// TestBackendPickRegeneratesTheNameSuggestion: the naming placeholder is the
+// autocreate name Enter adopts, generated under the collision namespace of the
+// backend pending when the form opened. Picking a different backend changes
+// which namespace admission will judge the name under — a per-project
+// branch_prefix applies to local creates only (#4539), so a name free under it
+// can be taken under the global prefix an off-box create is judged by (#4562
+// review). The suggestion must be regenerated with the pick, or Enter on the
+// untouched shadow text can offer a name the submit gate then refuses.
+func TestBackendPickRegeneratesTheNameSuggestion(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(120, 1)
+	recordStartRequest(t)
+	stubBackends(t, twoUsableBackends(), nil)
+
+	generated := 0
+	prev := suggestName
+	suggestName = func(taken func(string) bool) string {
+		generated++
+		return fmt.Sprintf("suggestion-%d", generated)
+	}
+	t.Cleanup(func() { suggestName = prev })
+
+	startNaming(t, h, "")
+	require.Equal(t, "suggestion-1", h.namingPlaceholder,
+		"opening the form generates the first suggestion")
+
+	openBackendField(t, h)
+	pickBackend(t, h, "docker")
+
+	require.Equal(t, 2, generated,
+		"a backend change must regenerate the suggestion under the new backend's namespace")
+	assert.Equal(t, "suggestion-2", h.namingPlaceholder)
+}
+
 // TestBackendDoesNotLeakIntoNextCreate is the leak guard. pendingBackend is
 // home-scoped state that outlives one create, so a submitted or cancelled create
 // must not hand its backend to the next session the user makes — which would

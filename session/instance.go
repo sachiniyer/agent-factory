@@ -67,6 +67,14 @@ type Instance struct {
 	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
+	// pendingLocalityUnknown marks a row that was materialized from a
+	// pending-create projection carrying no backend discriminator — a daemon
+	// publishes that row before the backend exists, and older daemons publish
+	// none at all. It materializes with the inert local backend, but nothing
+	// about it is known-local: its title claim must answer as off-box, so
+	// admission judges it under the global prefix the way the daemon judges a
+	// genuinely off-box create (#4562 review). Set once by FromInstanceData.
+	pendingLocalityUnknown bool
 	// lostRestoreFailure is the durable terminal outcome of automatic recovery.
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.

@@ -204,6 +204,11 @@ type BranchClaim struct {
 	Title  string
 	Branch string
 	Local  bool
+	// Relinquished marks a claim that no longer defends its recorded branch.
+	// An archived row's branch is either moved aside with the reuse rename or
+	// deliberately left for the title's re-user to adopt (#2127) — in both
+	// outcomes the row does not keep the branch away from a later create.
+	Relinquished bool
 }
 
 // TitleNaming is how ONE create derives its branch: Prefix is the prefix its
@@ -229,7 +234,11 @@ type TitleNaming struct {
 // a branch its title never derived. Whether such a recorded branch is really in
 // the way is a question for git, which the held-branch guards ask; this rule only
 // stops inventing claims no session holds. A claim with no recorded branch yet
-// is derived.
+// is derived. The mirror image also holds: while a claim still defends its
+// recorded branch (Relinquished unset), a title that derives THAT branch
+// collides with it — taking the ref would confiscate it from the record that
+// still points at it. An archived claim sets Relinquished because its reuse
+// rename either moved the branch aside or left it for the re-user to adopt.
 //
 // When either side is off-box (Docker, SSH, hook, sandbox), the branch is made
 // inside the sandbox from that machine's config, so the host cannot know it.
@@ -241,8 +250,17 @@ func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, boo
 	if !n.Local || !claim.Local {
 		prefix = n.GlobalPrefix
 	} else if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
-		// EqualFold, not ==: on a case-insensitive filesystem two loose refs that
-		// differ only in case are one file.
+		// The claim holds its RECORDED branch, not the one its title derives
+		// under prefix — but a create whose title derives that recorded branch
+		// still collides with it while the claim defends it: taking the branch
+		// would confiscate the ref another record points at (a lost session's
+		// restore target, an in-place lane's checkout), and local setup's
+		// leftover-branch delete could destroy it outright (#4562 review).
+		// EqualFold, not ==: on a case-insensitive filesystem two loose refs
+		// that differ only in case are one file.
+		if !claim.Relinquished && strings.EqualFold(claim.Branch, BranchForTitle(prefix, title)) {
+			return BranchForTitle(prefix, title), true
+		}
 		return "", strings.EqualFold(title, claim.Title)
 	}
 	if !TitlesCollide(title, claim.Title, prefix) {

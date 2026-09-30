@@ -98,12 +98,19 @@ func (m *Manager) reservationClaimLocked(naming branchNaming, key, title string)
 	return git.BranchClaim{Title: title, Local: naming.local}
 }
 
-// reservedClaim is the claim an admitted create records for its reservation. An
-// in-place create adopts whatever branch the target worktree already has, so it
-// records none and is judged by derivation, as it was before claims existed.
+// reservedClaim is the claim an admitted create records for its reservation: the
+// branch the create derived at admission, so a later create is judged against
+// that and not against a re-derivation under whatever prefix is live then. An
+// off-box reservation pins it too — for one, naming.prefix IS the global prefix —
+// because this commit makes a saved branch_prefix change take effect without a
+// restart, and re-deriving an in-flight off-box reservation under a newer global
+// value can refuse a pair admission already cleared or clear one it refused
+// (#4562 review). An in-place create adopts whatever branch the target worktree
+// already has, so it records none and is judged by derivation, as it was before
+// claims existed.
 func reservedClaim(naming branchNaming, title string, inPlace bool) git.BranchClaim {
 	claim := git.BranchClaim{Title: title, Local: naming.local}
-	if naming.local && !inPlace {
+	if !inPlace {
 		claim.Branch = naming.branchFor(title)
 	}
 	return claim

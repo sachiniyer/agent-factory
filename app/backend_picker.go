@@ -277,6 +277,16 @@ func (m *home) handleStateSelectBackend(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	m.pendingBackend = choice.value
 	m.menu.SetNamingBackend(m.pendingBackend != repoDefaultBackend)
+	// The suggestion was generated under the PREVIOUS backend's collision
+	// namespace — the same name can pass under a project-override prefix and
+	// fail under the global one an off-box backend is judged by, or the
+	// reverse (#4539, #4562 review). Regenerate it against the backend the
+	// user just picked so pressing Enter on the shadow text cannot propose a
+	// name the submit gate now refuses.
+	if m.namingInstance != nil {
+		m.namingPlaceholder = m.suggestSessionName(m.namingInstance)
+		m.sidebar.SetNamingPlaceholder(m.namingInstance, m.namingPlaceholder)
+	}
 	return m, nil
 }
 

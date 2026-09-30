@@ -52,6 +52,23 @@ type createReservation struct {
 	// naming is the branch_prefix admission checked the title against. The
 	// create passes this same value to NewInstance and never reads it again.
 	naming branchNaming
+	// kind is the runtime the create resolved before admission — local, docker,
+	// ssh, sandbox, or hook. The pending-create projection reports it so a
+	// client can classify the row while the backend does not exist yet, and
+	// the create hands it to NewInstance so the backend and the naming
+	// snapshot come from ONE resolution (#4562 review): when the request left
+	// the backend to the repo's `backend` key, re-resolving at NewInstance
+	// could read a config saved in between and provision a different runtime
+	// than the one admission named branches for.
+	kind session.BackendKind
+	// kindResolved reports whether that resolution succeeded. When it did not
+	// (an unusable backend value), NewInstance must still see the raw request
+	// so its canonical error reports the bad value.
+	kindResolved bool
+	// claim is the claim this create's title reservation recorded, so
+	// projections of it — the pending-create row — carry the same branch the
+	// reservation was judged on rather than a re-derivation.
+	claim git.BranchClaim
 }
 
 // reserveCreate keeps the established unit-test seam free of a long-lived
@@ -353,6 +370,16 @@ func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 // archived session still holds the branch it was created with, the new create
 // derives a different one, and nothing needs to move (#4539).
 func (m *Manager) reclaimArchivedBranchLocked(naming branchNaming, repoPath string, archived *session.Instance, title, newTitle string) string {
+	// Reclaim exists to free the branch an incoming host-local create's
+	// `git worktree add` would take. An off-box create (Docker, SSH, hook,
+	// sandbox) provisions its workspace inside the sandbox and adds no host
+	// worktree, so an archived branch that merely equals its derived
+	// <global>/<title> name is not in its way and must not be moved (#4562
+	// review). The title rename itself still runs — that frees the NAME, which
+	// a create on any backend reuses.
+	if !naming.local {
+		return ""
+	}
 	current, ok := archived.ArchivedBranchForReclaim()
 	if !ok {
 		return ""

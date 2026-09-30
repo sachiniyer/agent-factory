@@ -364,7 +364,7 @@ func (d InstanceData) UsesLocalTmux() bool {
 
 // BranchClaim is Instance.BranchClaim for a durable row.
 func (d InstanceData) BranchClaim() git.BranchClaim {
-	return git.BranchClaim{Title: d.Title, Branch: d.Branch, Local: d.UsesLocalTmux()}
+	return git.BranchClaim{Title: d.Title, Branch: d.Branch, Local: d.UsesLocalTmux(), Relinquished: IsArchivedData(d)}
 }
 
 // RestoreArchiveRollbackFence removes the previous-release safety projection

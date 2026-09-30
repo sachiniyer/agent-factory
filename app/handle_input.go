@@ -496,9 +496,14 @@ func switchProjectKeyPhrase() string {
 // an empty submit passes those same checks. A residual collision (a session
 // created during naming) is still caught at submit and, authoritatively, by the
 // daemon.
+// suggestName is the namegen seam: tests stub it to observe that a suggestion
+// was REGENERATED, which a random wordlist cannot prove. Production never
+// reassigns it.
+var suggestName = namegen.Suggest
+
 func (m *home) suggestSessionName(naming *session.Instance) string {
 	titleNaming := m.titleNaming(naming.Path)
-	return namegen.Suggest(func(name string) bool {
+	return suggestName(func(name string) bool {
 		// The same admission question the submit gate asks, for the same reason:
 		// a suggestion the create would refuse is not a suggestion. namegen emits
 		// no whitespace, so the two predicates cannot differ on anything it can

@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,4 +142,132 @@ func TestOffBoxCreateIgnoresTheHostProjectsBranchPrefix(t *testing.T) {
 	require.NoError(t, err)
 	local.release()
 	assert.Equal(t, "proj-", local.naming.prefix, "control: a local create in the same project does take it")
+}
+
+// TestOffBoxCreateDoesNotReclaimAnArchivedLocalBranch: an archived local "foo"
+// holds global/foo and a Docker create titled "foo" derives that same string —
+// but it provisions inside the container and never runs `git worktree add` on
+// the host, so the archived branch is not in its way. The title reuse still
+// happens; the branch must stay put (#4562 review).
+func TestOffBoxCreateDoesNotReclaimAnArchivedLocalBranch(t *testing.T) {
+	m, first, _, _ := projectBranchPrefixFixture(t)
+	repoID := repoIDFor(t, first)
+	archived, _ := seedArchivedSession(t, m, repoID, first, "foo", "foo")
+	require.Equal(t, "global/foo", archived.GetBranch())
+
+	res, err := m.reserveCreateWithWorktreeAdmission(CreateSessionRequest{
+		RepoPath: first, Title: "foo", Program: "claude", Backend: string(session.BackendDocker),
+	}, m.Config(), false)
+	require.NoError(t, err)
+	defer res.release()
+	require.NotNil(t, res.renamedArchived,
+		"the archived session still gives up its title for an off-box reuse")
+	assert.Equal(t, "global/foo", res.renamedArchived.Branch,
+		"an off-box create never needs a host branch, so the archived one must not be moved")
+	assert.Equal(t, "global/foo", archived.GetBranch())
+}
+
+// TestOffBoxReservationKeepsThePrefixItReservedUnder: an in-flight off-box
+// create is judged by the branch it derived when admitted, not re-derived under
+// the global branch_prefix a later create's snapshot carries. "#x" reserved
+// global/x; the global value then changes to "new-", under which BOTH "#x" and
+// "-x" derive "new-x". Judging the reservation under the new prefix would
+// refuse a pair admission already cleared (#4562 review).
+func TestOffBoxReservationKeepsThePrefixItReservedUnder(t *testing.T) {
+	m, first, _, _ := projectBranchPrefixFixture(t)
+
+	firstRes, err := m.reserveCreateWithWorktreeAdmission(CreateSessionRequest{
+		RepoPath: first, Title: "#x", Program: "claude", Backend: string(session.BackendDocker),
+	}, m.Config(), false)
+	require.NoError(t, err)
+	defer firstRes.release()
+
+	// The op-entry snapshot a create takes after a branch_prefix save carries
+	// the new value; pass it the way CreateSession would.
+	changed := *m.Config()
+	changed.BranchPrefix = "new-"
+	second, err := m.reserveCreateWithWorktreeAdmission(CreateSessionRequest{
+		RepoPath: first, Title: "-x", Program: "claude", Backend: string(session.BackendDocker),
+	}, &changed, false)
+	require.NoError(t, err,
+		"#x reserved global/x and -x derives new-x under the live prefix; re-deriving the reservation under it would collide the pair")
+	second.release()
+}
+
+// TestPendingCreateRowCarriesItsBackendAndBranch: the daemon publishes the
+// pending-create projection before the backend exists. The row must carry the
+// resolved runtime and the branch the reservation pinned, or a client
+// materializes it as a host-local claim with no branch and judges it under a
+// project override the daemon never applied (#4562 review).
+func TestPendingCreateRowCarriesItsBackendAndBranch(t *testing.T) {
+	m, first, _, _ := projectBranchPrefixFixture(t)
+	repoID := repoIDFor(t, first)
+
+	// Hold provisioning so the pending row stays visible while asserted.
+	gate := make(chan struct{})
+	defer close(gate)
+	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+		<-gate
+		backend := session.NewFakeBackend()
+		backend.CompleteStart()
+		return readyFakeBackend{backend}, nil
+	})
+	defer restore()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.CreateSession(context.Background(), CreateSessionRequest{
+			RepoPath: first, Title: "dock", Program: "claude", Backend: string(session.BackendDocker),
+		})
+		done <- err
+	}()
+
+	var pending session.InstanceData
+	require.Eventually(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		row, ok := m.pendingCreates[daemonInstanceKey(repoID, "dock")]
+		pending = row
+		return ok
+	}, 5*time.Second, 5*time.Millisecond, "the pending-create row must be published while provisioning runs")
+
+	assert.Equal(t, "docker", pending.BackendType,
+		"without the resolved backend a client materializes the pending row as host-local")
+	assert.Equal(t, "global/dock", pending.Branch,
+		"the row must carry the branch the reservation pinned, not an empty one to re-derive")
+	assert.False(t, pending.BranchClaim().Local)
+}
+
+// TestCreateSessionProvisionsTheBackendAdmissionResolved: a create that leaves
+// the backend to the repo's `backend` key resolves it ONCE, at admission, and
+// must provision THAT answer. Re-resolving inside NewInstance reads the repo
+// config a second time, so a save landing between the two would pair one
+// runtime's naming snapshot with another's provisioning — a local worktree
+// named under the global prefix, or the reverse (#4562 review). Stubbing the
+// admission resolver to docker proves the pin: the instance factory receives
+// the resolved kind even though the request's backend field is empty and the
+// repo declares none.
+func TestCreateSessionProvisionsTheBackendAdmissionResolved(t *testing.T) {
+	m, first, _, _ := projectBranchPrefixFixture(t)
+
+	prev := backendKindForCreate
+	backendKindForCreate = func(session.InstanceOptions, string) (session.BackendKind, error) {
+		return session.BackendDocker, nil
+	}
+	t.Cleanup(func() { backendKindForCreate = prev })
+
+	var gotBackend session.BackendKind
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		gotBackend = opts.Backend
+		backend := session.NewFakeBackend()
+		backend.CompleteStart()
+		return readyFakeBackend{backend}, nil
+	})
+	defer restore()
+
+	_, _ = m.CreateSession(context.Background(), CreateSessionRequest{
+		RepoPath: first, Title: "dock", Program: "claude",
+	})
+	assert.Equal(t, session.BackendDocker, gotBackend,
+		"NewInstance must receive the backend admission resolved, not re-resolve the request's empty value against live config")
 }

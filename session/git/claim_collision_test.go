@@ -48,7 +48,23 @@ func TestClaimCollision(t *testing.T) {
 		{
 			name:  "an archived session renamed off a title does not hold the branch it left behind",
 			title: "foo", naming: TitleNaming{Prefix: "global/", GlobalPrefix: "global/", Local: true},
-			claim: BranchClaim{Title: "foo (archived)", Branch: "global/foo", Local: true},
+			claim: BranchClaim{Title: "foo (archived)", Branch: "global/foo", Local: true, Relinquished: true},
+		},
+		{
+			name:  "a title that derives a defended recorded branch collides",
+			title: "-x", naming: local,
+			// The claim's title derives "proj-zzz", but the row still records
+			// "proj-x" — a lane checked out on a branch its title never
+			// derived. A create titled "-x" would adopt that ref out from
+			// under the record (#4562 review).
+			claim:      BranchClaim{Title: "zzz", Branch: "proj-x", Local: true},
+			wantBranch: "proj-x", want: true,
+		},
+		{
+			name:  "the recorded-branch check compares case-insensitively",
+			title: "-X", naming: local,
+			claim:      BranchClaim{Title: "zzz", Branch: "Proj-X", Local: true},
+			wantBranch: "proj-x", want: true,
 		},
 		{
 			name:  "an off-box create is judged under the global prefix",

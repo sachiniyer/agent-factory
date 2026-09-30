@@ -77,6 +77,36 @@ func TestNamingPreCheckKeepsOffBoxCreatesOnTheGlobalPrefix(t *testing.T) {
 		"under the global prefix x and -x derive different branches; only the host override made them collide")
 }
 
+// TestNamingPreCheckJudgesAnUnclassifiedPendingRowAsOffBox: a pending-create
+// row reaches a client before its backend exists, and from an older daemon it
+// can arrive carrying no backend discriminator at all. Materialized without
+// one it reads as a host-local claim, which would let the project's override
+// refuse a title the daemon admits under the global off-box rule — here, a
+// pending Docker "x" beside a local candidate "-x" (#4562 review).
+func TestNamingPreCheckJudgesAnUnclassifiedPendingRowAsOffBox(t *testing.T) {
+	h, overridden := namingHomeWithProjectPrefix(t)
+
+	pending, err := session.FromInstanceData(session.InstanceData{
+		Title:      "x",
+		Path:       overridden,
+		Status:     session.Loading,
+		Liveness:   session.LiveReady,
+		InFlightOp: session.OpCreating,
+		Worktree:   session.GitWorktreeData{RepoPath: overridden, WorktreePath: overridden, BranchName: "global/x"},
+	})
+	require.NoError(t, err)
+	h.store.AddInstance(pending)
+
+	naming, err := session.NewInstance(session.InstanceOptions{Title: "-x", Path: overridden, Program: "claude"})
+	require.NoError(t, err)
+	h.namingInstance = naming
+	h.state = stateNew
+
+	_, _ = h.handleStateNew(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.NotContains(t, h.errBox.String(), "conflicts with existing session",
+		"an unclassified pending row is judged under the global prefix, under which x and -x derive different branches")
+}
+
 // namingHomeWithProjectPrefix is a home switched into a project whose personal
 // config sets branch_prefix "proj-".
 func namingHomeWithProjectPrefix(t *testing.T) (*home, string) {

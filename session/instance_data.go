@@ -384,6 +384,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		rootRecreateContext: data.RootRecreateContext,
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
+	// A pending-create row can carry no backend discriminator: the daemon
+	// publishes its projection before the runtime exists, and older daemons
+	// publish none at all. It materializes below with the default local
+	// backend, but nothing about it is known-local — so BranchClaim must answer
+	// for it as off-box, judged under the global prefix as the daemon judges a
+	// genuinely off-box create (#4562 review). A row that carries a backend is
+	// classified by it, including "local" for a pending host-local create.
+	if inFlightOp == OpCreating && data.BackendType == "" {
+		instance.pendingLocalityUnknown = true
+	}
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot
 	// owe its own teardown — mirroring the serialize gate — so a marker that
@@ -437,6 +447,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		}
 	default:
 		instance.backend = &LocalBackend{}
+
+		// A pending-create row (OpCreating) carries no worktree to restore —
+		// the in-flight create is still building it. Its empty WorktreePath
+		// would fail the rebuild below and drop the row off the snapshot
+		// entirely, so it is skipped along with the tab restore (#4562 review).
+		if inFlightOp == OpCreating {
+			break
+		}
 
 		// DESTRUCTION REQUIRES POSITIVE EVIDENCE (#1953). A missing
 		// branch_created_by_us (written before the field landed 2026-04-17)
@@ -577,6 +595,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// tmux-less for the same reason (its TmuxName entries reference sessions
 	// that no longer exist, and restoreLocalTabs only binds names, never spawns).
 	if liveness == LiveArchived {
+		return instance, nil
+	}
+
+	// A pending-create row projects a create still in flight: it has no live
+	// runtime to start and no worktree state to own — the create's completion
+	// event replaces the row with the real session. Returning here keeps it
+	// inert rather than letting the sandbox-restart rule below rewrite it Lost
+	// or Start() attach a tmux binding that does not exist yet (#4562 review).
+	if inFlightOp == OpCreating {
 		return instance, nil
 	}
 
