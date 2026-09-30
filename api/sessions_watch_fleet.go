@@ -170,7 +170,24 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// runtime outranks the swap above. Scoped to PendingAccountSwap because a
 	// non-swap row parked at a limit carries OpNone (the park clears the fence),
 	// so the InFlightOp axis already lets it fall through to the liveness switch.
-	if d.PendingAccountSwap != nil && d.Liveness == session.LiveLimitReached {
+	//
+	// Restricted to a MANUAL pending swap: ParkManualAccountSwapAtLimit is the
+	// only settle path that attributes the wall to the INCOMING identity while
+	// keeping the respawn fence, and it requires PendingAccountSwap.Manual. An
+	// AUTOMATIC swap resume also reaches the watch path with all three fields
+	// set — resumeFromLimitLockedOutcome raises OpRespawning, then
+	// SelectAccountAutomatically installs PendingAccountSwap while the ORIGINAL
+	// account's LiveLimitReached is still present, before
+	// RespawnForAccountSwapWithLiveBoundary clears it — but that row is
+	// mid-replacement, not parked: the limit it carries is the outgoing
+	// identity's stale value, the replacement has not settled, and reporting
+	// `usage-limited` here would make fleet watch return early instead of
+	// waiting for the delivery. The InFlightOp axis below holds that actively
+	// executing replacement as `working`, which is the verdict a driver needs,
+	// so an automatic swap is left to fall through to it. Once the fence
+	// releases (OpNone) an automatic swap parked at the incoming identity's
+	// limit reaches the liveness switch the same way a non-swap row does.
+	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached {
 		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
 	}
 	// ANY operation in flight means the session is in motion, including one this

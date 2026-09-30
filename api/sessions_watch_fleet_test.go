@@ -777,6 +777,57 @@ func TestClassifyWatchStop_StartupUnknownOutranksPendingAccountSwap(t *testing.T
 		"a mid-swap session that went startup-unknown is reported as unknown, not held as working")
 }
 
+// An actively executing AUTOMATIC account-swap resume must stay `working`, not
+// report `usage-limited`. resumeFromLimitLockedOutcome raises OpRespawning,
+// then SelectAccountAutomatically installs PendingAccountSwap while the
+// ORIGINAL account's LiveLimitReached is still present, before
+// RespawnForAccountSwapWithLiveBoundary clears it. A daemon snapshot in that
+// window carries all three fields, but the replacement has not settled: the
+// limit is the outgoing identity's stale value, and the gate above is scoped
+// to a MANUAL parked swap (ParkManualAccountSwapAtLimit requires Manual), so
+// the automatic row falls through to the InFlightOp axis and is held as in
+// motion — the verdict a driver needs while the replacement delivers, instead
+// of fleet watch returning early with a usage-limited edge.
+func TestClassifyWatchStop_ActiveAutomaticAccountSwapResumeStaysWorking(t *testing.T) {
+	// SelectAccountAutomatically builds PendingAccountSwap without setting
+	// Manual: an automatic swap, not an operator-initiated one.
+	pending := &session.AccountSwapData{
+		From:                  "ambient",
+		To:                    "work",
+		Mission:               "continue under the new account",
+		MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	// The active-resume snapshot: OpRespawning raised, PendingAccountSwap
+	// installed, original LiveLimitReached still present.
+	active := withLiveness("s", session.LiveLimitReached)
+	active.PendingAccountSwap = pending
+	active.InFlightOp = session.OpRespawning
+	reason, detail := classifyWatchStop(active)
+	require.Equal(t, watchWorking, reason,
+		"an actively executing automatic account-swap resume is in motion, not parked at a limit")
+	require.Empty(t, detail,
+		"a working row carries no stop detail")
+
+	// The watcher holds the slot as working: neither the --include-current
+	// baseline nor an edge into the mid-replacement row emits.
+	midSwap := fleetRunning("s")
+	midSwap.Liveness = session.LiveLimitReached
+	midSwap.PendingAccountSwap = pending
+	midSwap.InFlightOp = session.OpRespawning
+	w := newFleetWatcher(true)
+	require.Empty(t, w.observe([]session.InstanceData{midSwap}),
+		"a session mid-automatic-swap resume must not be reported as a stop")
+
+	// Sanity: the same row with the fence released (the post-settle view, or a
+	// disk-scrubbed read) falls through to the liveness switch and reports the
+	// limit the way a non-swap row does — the gate does not swallow it forever.
+	released := withLiveness("s", session.LiveLimitReached)
+	released.PendingAccountSwap = pending
+	released.InFlightOp = session.OpNone
+	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(released)),
+		"an automatic swap with the fence released reports usage-limited via the liveness switch")
+}
+
 // A pending swap does not license an unrecognized liveness value to read as
 // `working`. A newer daemon may persist a Liveness this build has no constant for
 // alongside PendingAccountSwap; the gate above holds only the recognized in-motion
