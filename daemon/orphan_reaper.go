@@ -58,12 +58,22 @@ func sweepStartupOrphanContainers(manager *Manager) {
 // not deferred or the skip set has not yet drained; if any repo is still
 // skipped the sweep stays deferred and re-evaluates on the next poll.
 //
-// The sweep runs outside m.mu just as the startup path does: it calls
-// dockerReapProtectedSlugs, which acquires m.mu itself for the short
-// title-collection. Once the skip set drains, every previously-skipped repo's
-// sessions are in m.instances, so their container slugs are in the protected set
-// — the sweep is safe (complete view) and a re-corruption mid-life keeps the
-// re-hydrated rows in m.instances, so the slugs stay protected regardless.
+// Unlike the startup sweep, the deferred sweep runs AFTER the manager readiness
+// barrier has opened (finishInstanceRestore at daemon.go:322), so a
+// CreateSession can be admitted concurrently. A create sets pendingCreates under
+// m.mu and only then provisions its container (manager_create.go), so without a
+// guard a create admitted after the protected-slug snapshot but before
+// SweepOrphanContainers lists containers would publish a container whose slug
+// is absent from the stale protected set — the destructive pass would force-reap
+// a live session (#2632). The startup path is safe only because the not-yet-open
+// readiness barrier excludes creates entirely; this poll-time path holds m.mu
+// across the slug snapshot AND the sweep, which is the dedicated create/sweep
+// exclusion the reviewer asked for: a create that has not yet set pendingCreates
+// blocks on m.mu until the sweep releases it, and one that already set it is in
+// the protected set. The slug collection is inlined because
+// dockerReapProtectedSlugs acquires m.mu itself; holding m.mu across the sweep
+// also keeps the snapshot and the docker list in lockstep, so no container can
+// appear between them.
 func runDeferredOrphanSweepIfReady(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
@@ -75,7 +85,24 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 		return
 	}
 	manager.deferredOrphanSweepArmed = false
-	manager.mu.Unlock()
+	// Collect the protected slugs inline under the already-held m.mu (instead of
+	// calling dockerReapProtectedSlugs, which acquires m.mu itself) so the lock
+	// spans the snapshot and the sweep as one critical section.
+	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
+	for _, inst := range manager.instances {
+		titles = append(titles, inst.Title)
+	}
+	for key, pending := range manager.pendingCreates {
+		if _, settled := manager.instances[key]; settled {
+			continue
+		}
+		titles = append(titles, pending.Title)
+	}
+	slugs := make(map[string]bool, len(titles))
+	for _, t := range titles {
+		slugs[session.Slugify(t)] = true
+	}
 	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses, so the protected set is complete.")
-	sweepOrphanContainers(homeID, manager.dockerReapProtectedSlugs())
+	sweepOrphanContainers(homeID, slugs)
+	manager.mu.Unlock()
 }
