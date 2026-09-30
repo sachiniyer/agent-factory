@@ -240,24 +240,34 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 }
 
 // exitState is the post-ack exit proof without a confirmed PID (#5007 spec
-// amendment). A lock-era daemon always leaves daemon.lock behind (nothing
-// unlinks it), so with the file present the lock decides: takeable is exited,
-// held is draining, unprovable is unknown. An absent file marks a daemon that
-// predates the lock (#501-era Shutdown, pre-#1773 lock), or none at all; its
-// only remaining exit proxy is the control socket — quiet is exited, answering
-// is draining, any other probe failure unknown. That still races such a
-// daemon's post-close tail, the accepted residual for that vintage. A home that
-// never ran a daemon has neither, so it reads exited at once.
+// amendment and addendum). A lock-era daemon always leaves daemon.lock behind
+// (nothing unlinks it), so with the file present the lock decides: takeable is
+// exited, unprovable is unknown. A held lock is ambiguous — a drainer past its
+// socket close, or a new daemon between taking the lock and binding — so Ping
+// settles it: an answer that is not quiescing is a new lock holder serving
+// (quiescing is terminal, so it cannot be the acker), which means the old one
+// released the lock: exited. Quiescing or no answer stays draining.
+//
+// An absent file marks a daemon that predates the lock (#501-era Shutdown,
+// pre-#1773 lock), or none at all; its only exit proxy is the control socket:
+// quiet is exited, quiescing is draining, a serving answer is exited (it cannot
+// be the acker, and the spawn path dedupes on serving), any other probe failure
+// unknown. That still races a pre-lock daemon's post-close tail, the accepted
+// residual for that vintage. A home that never ran a daemon reads exited.
 func exitState() daemonState {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnknown
 	}
-	if state, present := shutdownWaitHomeLockFn(dir); present {
-		return state
+	lock, present := shutdownWaitHomeLockFn(dir)
+	if present && lock != daemonDraining {
+		return lock
 	}
-	switch err := pingDaemon(); {
-	case err == nil:
+	resp, err := pingDaemonResponse()
+	switch state, _ := pingState(resp, err); {
+	case state == daemonServing:
+		return daemonExited
+	case present, state == daemonDraining:
 		return daemonDraining
 	case isDaemonAbsentErr(err):
 		return daemonExited
@@ -363,8 +373,8 @@ func homeLockReleased(dir string) (state daemonState, present bool) {
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a serving
 // daemon counts: a draining one is leaving (#5007), so exiting on its answer
 // would leave no daemon once it finishes. For a draining one it waits (bounded)
-// for the exit and reports false either way; the per-home lock the caller takes
-// next arbitrates a drain that outlived the bound — a held lock is a non-zero
+// for the exit, then reports false unless a new daemon now serves; the per-home
+// lock the caller takes next arbitrates a drain that outlived the bound — a held lock is a non-zero
 // exit, which the unit's Restart=on-failure retries. Unlike EnsureDaemon this
 // never stops anything, so proceeding is safe here.
 func daemonAlreadyServing() bool {
@@ -376,6 +386,11 @@ func daemonAlreadyServing() bool {
 		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit", pid)
 		if !waitForDaemonExit(pid, false, time.Now().Add(shutdownCompleteGrace)) {
 			log.InfoLog.Printf("the daemon for this home is still draining at the bound; proceeding to home-lock arbitration")
+		}
+		// The wait also ends when a new daemon answers serving (#5007): then it
+		// is already serving, exactly as if the first probe had seen it.
+		if again, _ := probeDaemonState(time.Time{}); again == daemonServing {
+			return true
 		}
 	}
 	return false

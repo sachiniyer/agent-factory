@@ -845,17 +845,14 @@ func TestWaitForShutdownCompletion_Draining_UnconfirmedPIDWaitsOnLock(t *testing
 // TestWaitForShutdownCompletion_Draining_PreLockAnsweringSocketKeepsWaiting
 // (#5007 amendment §2): a daemon predating the home lock acks Shutdown and
 // never creates daemon.lock. A missing lock file is not exit — with the socket
-// still answering, it is draining, and the bound reports ErrShutdownIncomplete.
+// still answering quiescing, it is draining, and the bound reports
+// ErrShutdownIncomplete.
 func TestWaitForShutdownCompletion_Draining_PreLockAnsweringSocketKeepsWaiting(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	prevGrace := shutdownCompleteGrace
 	shutdownCompleteGrace = 300 * time.Millisecond
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
-	closeFn, err := startControlServer(nil, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("startControlServer: %v", err)
-	}
-	t.Cleanup(func() { _ = closeFn() })
+	startQuiescingControlServer(t)
 
 	if err := WaitForShutdownCompletion(ShutdownPID{}); !errors.Is(err, ErrShutdownIncomplete) {
 		t.Fatalf("pre-lock daemon still answering = %v, want ErrShutdownIncomplete", err)
@@ -867,10 +864,7 @@ func TestWaitForShutdownCompletion_Draining_PreLockAnsweringSocketKeepsWaiting(t
 // so the wait returns once it stops answering, and not before.
 func TestWaitForShutdownCompletion_DrainingToExited_PreLockSocketQuiet(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	closeFn, err := startControlServer(nil, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("startControlServer: %v", err)
-	}
+	closeFn := startQuiescingControlServer(t)
 	var closed atomic.Bool
 	go func() {
 		time.Sleep(300 * time.Millisecond)
@@ -883,5 +877,114 @@ func TestWaitForShutdownCompletion_DrainingToExited_PreLockSocketQuiet(t *testin
 	}
 	if !closed.Load() {
 		t.Fatalf("the wait returned while the pre-lock daemon's socket still answered")
+	}
+}
+
+// startQuiescingControlServer binds a control server that answers as a daemon
+// that has acked Shutdown — DaemonPhaseQuiescing — WITHOUT taking the home
+// lock: the pre-lock vintage. The returned close is idempotent.
+func startQuiescingControlServer(t *testing.T) func() error {
+	t.Helper()
+	lifecycle := readyLifecycle(t)
+	lifecycle.markQuiescing()
+	closeFn, err := startControlServer(&Manager{lifecycle: lifecycle}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeFn() })
+	return closeFn
+}
+
+// TestWaitForShutdownCompletion_Exited_PreLockServingAnswerIsNotTheAcker (#5007
+// addendum): with no lock file, a responder that answers NOT quiescing cannot be
+// the daemon that acked (quiescing is terminal), so the wait reads exited at
+// once instead of waiting out the bound on someone else's socket.
+func TestWaitForShutdownCompletion_Exited_PreLockServingAnswerIsNotTheAcker(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	closeFn, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeFn() })
+
+	start := time.Now()
+	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
+		t.Fatalf("serving responder with no lock file = %v, want nil", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("wait took %s; a serving answer is exit and must end it at once", elapsed)
+	}
+}
+
+// TestEnsureDaemon_Draining_StarterAnswersServingMidWait (#5007 addendum): a
+// new daemon holds the home lock from before it binds its socket or writes
+// daemon.pid, so in that window EnsureDaemon sees a held lock and no answer —
+// indistinguishable from a drainer — and waits. Once the starter binds and
+// answers serving, that answer proves the lock moved to a new holder: the wait
+// must end early and EnsureDaemon return nil without spawning. A lock-only wait
+// stalled until the drain deadline.
+func TestEnsureDaemon_Draining_StarterAnswersServingMidWait(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock() // the starter's lock, held for its whole life
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+	bound := make(chan func() error, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		closeFn, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, nil)
+		if err != nil {
+			t.Errorf("starter bind: %v", err)
+			bound <- func() error { return nil }
+			return
+		}
+		bound <- closeFn
+	}()
+	t.Cleanup(func() { _ = (<-bound)() })
+
+	launches := 0
+	launch := func() error {
+		launches++
+		return errors.New("test launcher: must not be reached")
+	}
+	start := time.Now()
+	if err := ensureDaemonWithLauncherUntil(launch, time.Now().Add(10*time.Second)); err != nil {
+		t.Fatalf("ensure against a starter that comes up serving: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("ensure took %s; a serving answer must end the drain wait, not the ~9.5s deadline", elapsed)
+	}
+	if launches != 0 {
+		t.Fatalf("launches = %d, want 0: the starter serves this home", launches)
+	}
+}
+
+// TestDaemonAlreadyServing_Draining_StarterAnswersServingCounts: RunDaemon's
+// guard sees the same lock-then-bind window. When the wait ends because a new
+// daemon answers serving, that daemon already serves this home — the guard must
+// say so (a clean exit) rather than proceed to the lock it cannot take.
+func TestDaemonAlreadyServing_Draining_StarterAnswersServingCounts(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+	bound := make(chan func() error, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		closeFn, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, nil)
+		if err != nil {
+			t.Errorf("starter bind: %v", err)
+			bound <- func() error { return nil }
+			return
+		}
+		bound <- closeFn
+	}()
+	t.Cleanup(func() { _ = (<-bound)() })
+
+	if !daemonAlreadyServing() {
+		t.Fatalf("daemonAlreadyServing = false, want true once the starter answers serving")
 	}
 }
