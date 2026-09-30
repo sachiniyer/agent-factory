@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -131,10 +132,12 @@ func readPIDFromFile() (int, bool) {
 // for any zombie before escalating to SIGKILL — visible as a 5s pause in
 // `af upgrade` when the dying daemon's parent isn't waiting.
 //
-// On platforms without /proc (macOS), the cmdline read below returns "" and we
-// can't distinguish zombie from "kernel doesn't expose the cmdline"; we
-// fall back to the signal-0 result. The cost there is the 5s grace, which
-// is correct but slow.
+// macOS has no /proc, so there it asks ps for the process state and treats a
+// zombie ("Z") as dead. Without that, an exited-but-unreaped daemon keeps
+// passing signal 0, and WaitForShutdownCompletion would burn its full grace
+// and withhold the respawn over a daemon that is already gone (#5007). If ps
+// fails (the pid vanished between checks, or ps is missing) it falls back to
+// the signal-0 result: a ps failure must not fabricate a death.
 func pidLooksAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -148,6 +151,12 @@ func pidLooksAlive(pid int) bool {
 		// zombie or kernel thread; for our purposes either is "dead".
 		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 		if err == nil && len(strings.TrimRight(string(data), "\x00")) == 0 {
+			return false
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		if err == nil && strings.Contains(string(out), "Z") {
 			return false
 		}
 	}

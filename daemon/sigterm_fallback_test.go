@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -528,5 +529,34 @@ func TestRequestShutdown_PreShutdownDaemon(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatalf("RequestShutdown returned nil error; expected one carrying the recovery hint")
+	}
+}
+
+// TestPidLooksAliveTreatsZombieAsDead: an exited child that has not been reaped
+// still passes kill(pid, 0), so pidLooksAlive must spot the zombie itself —
+// via /proc on Linux and ps on macOS — or a shutdown wait on an already-dead
+// daemon burns its whole grace (#5007).
+func TestPidLooksAliveTreatsZombieAsDead(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("no zombie detection on %s", runtime.GOOS)
+	}
+	cmd := exec.Command("sleep", "0.1")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	pid := cmd.Process.Pid
+
+	// Deliberately not Wait-ing: once sleep exits it stays a zombie until the
+	// cleanup reaps it.
+	time.Sleep(300 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Skipf("pid %d was reaped already, so no zombie to observe: %v", pid, err)
+	}
+	if pidLooksAlive(pid) {
+		t.Fatalf("pidLooksAlive(%d) = true for an exited, unreaped child", pid)
 	}
 }
