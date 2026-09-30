@@ -298,17 +298,7 @@ function hasPrintable(data: string): boolean {
  *  bounded and re-fires, a missing one lets a delivery splice into (or C-u
  *  clear) the live draft. */
 function isEditingControl(data: string): boolean {
-  return (
-    data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
-    data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
-    data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
-    data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19") ||
-    data.includes("\x14") || data.includes("\x12") || data.includes("\x1f") ||
-    data.includes("\x16") || data.includes("\x0f") || data.includes("\x18") ||
-    data.includes("\x11") || data.includes("\x13") || data.includes("\x1d") || data.includes("\x00") ||
-    data.includes("\x07") ||
-    data.includes("\x1a") || data.includes("\x1c") || data.includes("\x1e")
-  );
+  return /[\x7f\x04\x15\b\x17\x01\x05\t\x02\x06\x10\x0e\v\f\x19\x14\x12\x1f\x16\x0f\x18\x11\x13\x1d\0\x07\x1a\x1c\x1e]/.test(data);
 }
 
 /**

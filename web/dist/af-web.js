@@ -9003,7 +9003,7 @@ function hasPrintable(data) {
   return false;
 }
 function isEditingControl(data) {
-  return data.includes("\x7F") || data.includes("") || data.includes("") || data.includes("\b") || data.includes("") || data.includes("") || data.includes("") || data.includes("	") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("\v") || data.includes("\f") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("") || data.includes("\0") || data.includes("\x07") || data.includes("") || data.includes("") || data.includes("");
+  return /[\x7f\x04\x15\b\x17\x01\x05\t\x02\x06\x10\x0e\v\f\x19\x14\x12\x1f\x16\x0f\x18\x11\x13\x1d\0\x07\x1a\x1c\x1e]/.test(data);
 }
 var MidLineHold = class {
   /**
