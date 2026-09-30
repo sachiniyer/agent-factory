@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -144,21 +146,55 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 	return model, tea.Batch(notice, followCmd)
 }
 
+// rebindConflictRefreshTimeout bounds the off-loop snapshot fetch a conflict
+// re-arm waits on. The daemon already answered with its definitive refusal, so
+// a snapshot that accepts the connection and never answers must not leave the
+// form pending forever — while it pends, the rebind-mode form consumes Esc and
+// every other key. At the deadline the reply lands with the fetch marked
+// failed, and the form re-arms on the refusal it already holds (#4888 review).
+// Same bound the web modal applies to the identical re-read (REBIND_REFRESH_MS).
+var rebindConflictRefreshTimeout = 10 * time.Second
+
 // rebindConflictSnapshotCmd fetches the cross-repo session snapshot a "rebound
 // elsewhere" rebuild needs — off the event loop, mirroring fetchSnapshotCmd's
 // all-repos poll (#4888 review). The fetcher var is captured on the loop
 // rather than read inside the goroutine, the same reason fetchSnapshotCmd
-// captures its seams: a reassignment mid-flight must not race the read.
+// captures its seams: a reassignment mid-flight must not race the read. The
+// fetch itself is bounded by rebindConflictRefreshTimeout — a stalled reply is
+// reported as a failed fetch, which the preserve-merge treats as "session rows
+// unknown, registry truth still applies".
 func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	fetch := allReposSnapshotFetcher
 	return func() tea.Msg {
-		data, fetchErr := fetch()
-		return rebindConflictSnapshotMsg{
-			token:     msg.token,
-			projectID: msg.projectID,
-			refusal:   msg.err,
-			data:      data,
-			fetchErr:  fetchErr,
+		type snapshotResult struct {
+			data []session.InstanceData
+			err  error
+		}
+		// Buffered, so a fetch that outlives the deadline can still send its
+		// answer and exit rather than park a goroutine on a dead channel.
+		answered := make(chan snapshotResult, 1)
+		go func() {
+			data, err := fetch()
+			answered <- snapshotResult{data, err}
+		}()
+		select {
+		case r := <-answered:
+			return rebindConflictSnapshotMsg{
+				token:     msg.token,
+				projectID: msg.projectID,
+				refusal:   msg.err,
+				data:      r.data,
+				fetchErr:  r.err,
+			}
+		case <-time.After(rebindConflictRefreshTimeout):
+			return rebindConflictSnapshotMsg{
+				token:     msg.token,
+				projectID: msg.projectID,
+				refusal:   msg.err,
+				fetchErr: fmt.Errorf(
+					"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",
+					rebindConflictRefreshTimeout),
+			}
 		}
 	}
 }

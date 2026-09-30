@@ -291,6 +291,12 @@ func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects 
 	merged := make([]Project, 0, len(p.all)+len(projects))
 	seenRepoIDs := make(map[string]bool, len(p.all)+len(projects))
 	seenRoots := make(map[string]bool, len(p.all)+len(projects))
+	// RepoIDs claimed by preserved session rows. A registry row landing on one
+	// of these is the rebound-onto-a-live-repo case: it must NOT emit a second
+	// row for the same repository — the coalesce below grafts its registration
+	// fields onto the session row, which is the one holding the live counts
+	// (#4888 review).
+	sessionRepoIDs := make(map[string]bool, len(p.all))
 	for _, row := range p.all {
 		if row.RegistryID == "" {
 			// A session-derived row: the snapshot read that produced it never
@@ -298,6 +304,7 @@ func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects 
 			merged = append(merged, row)
 			seenRepoIDs[row.RepoID] = true
 			seenRoots[row.Root] = true
+			sessionRepoIDs[row.RepoID] = true
 			continue
 		}
 		if fresh, ok := freshByRegistryID[row.RegistryID]; ok {
@@ -324,8 +331,14 @@ func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects 
 	// Registry-side rows with no counterpart in the old list — a registration
 	// newer than the picker, or the root_agents/active rows the snapshot used
 	// to supply — still land; an existing row claiming the same identity or
-	// root already wins.
+	// root already wins. One exception: a registration whose repo a preserved
+	// session row already claims still appends, so the coalesce can graft its
+	// registration fields onto that row instead of losing them on the dedupe.
 	for _, row := range projects {
+		if row.RegistryID != "" && row.RepoID != "" && sessionRepoIDs[row.RepoID] {
+			merged = append(merged, row)
+			continue
+		}
 		if seenRepoIDs[row.RepoID] || seenRoots[row.Root] {
 			continue
 		}
@@ -333,9 +346,49 @@ func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects 
 		seenRepoIDs[row.RepoID] = true
 		seenRoots[row.Root] = true
 	}
-	p.all = merged
+	p.all = coalesceReboundRows(merged)
 	p.reseatAfterConflictRebuild()
 	p.SetRebindError(msg)
+}
+
+// coalesceReboundRows resolves the rebound-onto-a-live-repo collision
+// SetRebindConflictPreserving can produce: a registration that moved onto a
+// repository the picker already listed from live sessions would otherwise
+// appear twice — once as the fresh registry row (carrying counts tallied
+// against the OLD root, before the snapshot failed) and once as the preserved
+// session row holding the real counts. The session row owns the repo's slot
+// and gains the registration fields — the durable id, the recorded root and
+// checkout, the record's path state — and the duplicate registry row is
+// dropped.
+func coalesceReboundRows(rows []Project) []Project {
+	sessionRowByRepoID := make(map[string]int, len(rows))
+	for i, row := range rows {
+		if row.RegistryID == "" && row.RepoID != "" {
+			if _, dup := sessionRowByRepoID[row.RepoID]; !dup {
+				sessionRowByRepoID[row.RepoID] = i
+			}
+		}
+	}
+	// Graft in place before the output slice is built: the registry row can
+	// sort before OR after the session row it merges into, so the copy into
+	// out must happen only after every graft has landed.
+	dropped := make([]bool, len(rows))
+	for i, row := range rows {
+		if at, ok := sessionRowByRepoID[row.RepoID]; ok && at != i && row.RegistryID != "" && row.RepoID != "" {
+			rows[at].RegistryID = row.RegistryID
+			rows[at].RegistryRoot = row.RegistryRoot
+			rows[at].RegistryCheckoutID = row.RegistryCheckoutID
+			rows[at].MissingPath = row.MissingPath
+			dropped[i] = true
+		}
+	}
+	out := make([]Project, 0, len(rows))
+	for i, row := range rows {
+		if !dropped[i] {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // reseatAfterConflictRebuild restores the cursor and rebind target after the

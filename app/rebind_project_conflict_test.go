@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -245,4 +246,53 @@ func TestRebindConflictWithAFailedSnapshotKeepsSessionRows(t *testing.T) {
 	assert.Equal(t, 1, row.InPlaceCount)
 	assert.Contains(t, displayed.Render(), "sessonly",
 		"a session-derived row must survive the failed snapshot refresh")
+}
+
+// TestRebindConflictRefreshTimeoutReArmsTheForm pins the #4888 round-6 review
+// finding: the conflict refresh's cross-repo fetch can accept the connection
+// and never answer, and a fetch with no deadline leaves rebindPending — and
+// every key the inert form consumes, Esc included — stuck for the life of the
+// stall. The fetch is bounded; at the deadline the reply lands as a failed
+// fetch and the form re-arms on the daemon's refusal.
+func TestRebindConflictRefreshTimeoutReArmsTheForm(t *testing.T) {
+	h, id := activeRebindHome(t)
+	displayed := h.projectPickerOverlay
+	moved := initTestGitRepo(t)
+	_, err := config.RebindProject(id, moved) // another client, meanwhile
+	require.NoError(t, err)
+	stubRebindCAS(t)
+
+	old := rebindConflictRefreshTimeout
+	rebindConflictRefreshTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { rebindConflictRefreshTimeout = old })
+
+	release := make(chan struct{})
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		<-release // never answered: the fetch hangs for the life of the test
+		return nil, nil
+	}))
+	t.Cleanup(func() { close(release) })
+
+	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	require.NotNil(t, cmd, "the conflict refresh is dispatched off the event loop")
+	assert.True(t, displayed.RebindPending(), "the form stays inert while the refresh is in flight")
+
+	// Run the refresh beside a test-level deadline: without the bound the cmd
+	// never returns, and that must read as an assertion failure — a hung test
+	// would reproduce the finding but prove nothing about where it ends.
+	replied := make(chan tea.Msg, 1)
+	go func() { replied <- cmd() }()
+	select {
+	case snapshotMsg := <-replied:
+		h.Update(snapshotMsg) // the ~50ms bound elapsed; the reply lands as a failed fetch
+	case <-time.After(5 * time.Second):
+		t.Fatal("the conflict refresh must be bounded — the fetch never answered")
+	}
+
+	assert.False(t, displayed.RebindPending(),
+		"a refresh that never answers must still re-arm the form at the deadline")
+	displayed.SetMaxSize(400, 60)
+	displayed.SetWidth(200)
+	assert.Contains(t, displayed.Render(), "Rebound elsewhere",
+		"the re-armed form names the daemon's refusal")
 }
