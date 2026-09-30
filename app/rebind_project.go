@@ -3,13 +3,16 @@ package app
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -37,7 +40,10 @@ func (m *home) handleRebindProject(req overlay.RebindRequest) (tea.Model, tea.Cm
 // apart from a reply to any other picker.
 func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 	return func() tea.Msg {
-		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Path)
+		// The registration's recorded (root, checkout) pair as the picker read
+		// it: the rebind applies only if no other rebind — and no reclone at
+		// the same path — has moved either half since (#4822 spec).
+		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Project.RegistryRoot, req.Project.RegistryCheckoutID, req.Path)
 		root := project.Root
 		if root == "" {
 			root = req.Path
@@ -72,13 +78,32 @@ func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 //     the user sees what happened.
 //   - A definitive refusal: fed back inline to the picker that owns it, which
 //     re-arms. An unowned one changed nothing; over a different picker it is
-//     logged rather than shown, else it goes to the error box.
+//     logged rather than shown, else it goes to the error box. The "rebound
+//     elsewhere" refusal (#4822) first re-reads the registry, so the re-armed
+//     form names — and next expects — the root the project is bound to now.
 func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	pickerOpen := m.projectPickerOverlay != nil && m.state == stateSwitchProject
 	owned := pickerOpen && m.projectPickerOverlay.OwnsRebindReply(msg.token)
 	committed := msg.err != nil && apiproto.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committed {
 		if !rebindOutcomeUnknown(msg.err) {
+			// A conflict moved a registration: the sidebar's Projects section
+			// and the row this picker returns to are both stale in every
+			// field, not just the recorded root. They rebuild ONCE — from the
+			// daemon snapshot plus the single registry read inside it — so a
+			// further registry move cannot leave the rows and the retry's
+			// named root carrying different answers (#4888 review). The
+			// snapshot fetch runs OFF the loop: local API calls carry no
+			// response deadline, and inside Update a stalled one freezes input
+			// and paint for the life of the stall. The form stays inert until
+			// the reply re-arms it.
+			var conflictRefresh tea.Cmd
+			if apiclient.IsProjectRebound(msg.err) {
+				conflictRefresh = m.rebindConflictSnapshotCmd(msg)
+				if owned {
+					return m, conflictRefresh
+				}
+			}
 			if owned {
 				m.projectPickerOverlay.SetRebindError(msg.err.Error())
 				return m, nil
@@ -88,9 +113,9 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 				// different picker it reads as THAT picker's result — the same
 				// reason a stale success raises no toast there. Log it instead.
 				log.WarningLog.Printf("stale rebind of project %q refused while another picker is open: %v", msg.name, msg.err)
-				return m, nil
+				return m, conflictRefresh
 			}
-			return m, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err))
+			return m, tea.Batch(conflictRefresh, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err)))
 		}
 		if owned {
 			m.closeProjectPicker()
@@ -119,6 +144,101 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 	}
 	model, followCmd := m.followActiveRebind(msg)
 	return model, tea.Batch(notice, followCmd)
+}
+
+// rebindConflictRefreshTimeout bounds the off-loop snapshot fetch a conflict
+// re-arm waits on. The daemon already answered with its definitive refusal, so
+// a snapshot that accepts the connection and never answers must not leave the
+// form pending forever — while it pends, the rebind-mode form consumes Esc and
+// every other key. At the deadline the reply lands with the fetch marked
+// failed, and the form re-arms on the refusal it already holds (#4888 review).
+// Same bound the web modal applies to the identical re-read (REBIND_REFRESH_MS).
+var rebindConflictRefreshTimeout = 10 * time.Second
+
+// rebindConflictSnapshotCmd fetches the cross-repo session snapshot a "rebound
+// elsewhere" rebuild needs — off the event loop, mirroring fetchSnapshotCmd's
+// all-repos poll (#4888 review). The fetcher var is captured on the loop
+// rather than read inside the goroutine, the same reason fetchSnapshotCmd
+// captures its seams: a reassignment mid-flight must not race the read. The
+// fetch itself is bounded by rebindConflictRefreshTimeout — a stalled reply is
+// reported as a failed fetch, which the preserve-merge treats as "session rows
+// unknown, registry truth still applies".
+func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
+	fetch := allReposSnapshotFetcher
+	return func() tea.Msg {
+		type snapshotResult struct {
+			data []session.InstanceData
+			err  error
+		}
+		// Buffered, so a fetch that outlives the deadline can still send its
+		// answer and exit rather than park a goroutine on a dead channel.
+		answered := make(chan snapshotResult, 1)
+		go func() {
+			data, err := fetch()
+			answered <- snapshotResult{data, err}
+		}()
+		select {
+		case r := <-answered:
+			return rebindConflictSnapshotMsg{
+				token:     msg.token,
+				projectID: msg.projectID,
+				refusal:   msg.err,
+				data:      r.data,
+				fetchErr:  r.err,
+			}
+		case <-time.After(rebindConflictRefreshTimeout):
+			return rebindConflictSnapshotMsg{
+				token:     msg.token,
+				projectID: msg.projectID,
+				refusal:   msg.err,
+				fetchErr: fmt.Errorf(
+					"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",
+					rebindConflictRefreshTimeout),
+			}
+		}
+	}
+}
+
+// handleRebindConflictSnapshot applies the conflict-time snapshot once it
+// lands: the sidebar's Projects section always refreshes from it (a conflict
+// moved a registration whether or not a picker is still waiting), and the
+// picker rebuilds from the SAME list — but only while it still owns the reply.
+// A picker closed or swapped in between keeps nothing of this reply; the form
+// it re-arms would name a root nobody is waiting on.
+func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.Model, tea.Cmd) {
+	fresh, degraded := m.buildProjectListFrom(msg.data)
+	m.applySidebarProjects(fresh, degraded, msg.fetchErr)
+	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
+		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
+		return m, nil
+	}
+	m.projectPickerOverlay.SetDegraded(degraded)
+	// The re-armed form names the root the rebuilt ROW carries — the read the
+	// picker installs — so the message and the retry's expected root always
+	// describe the same record. A record gone from the snapshot falls back to
+	// the daemon's refusal text.
+	text := msg.refusal.Error()
+	for _, row := range fresh {
+		if row.RegistryID == msg.projectID {
+			root := row.RegistryRoot
+			if root == "" {
+				root = row.Root
+			}
+			text = fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root)
+			break
+		}
+	}
+	if msg.fetchErr != nil {
+		// The session half of the snapshot never arrived: fresh carries only
+		// the registry-side union, so rebuilding wholesale would drop every
+		// session-derived row and zero the counts the daemon still runs. Keep
+		// the picker's session-derived rows and re-attach their counts; only
+		// registry truth replaces registry truth (#4888 review).
+		m.projectPickerOverlay.SetRebindConflictPreserving(text, fresh, degraded)
+		return m, nil
+	}
+	m.projectPickerOverlay.SetRebindConflict(text, fresh)
+	return m, nil
 }
 
 // rebindOutcomeUnknown reports whether a failed rebind's outcome is not known:

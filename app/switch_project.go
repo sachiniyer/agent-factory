@@ -326,6 +326,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
 			projects[i].RegistryID = rec.ID
 			projects[i].RegistryRoot = rec.Root
+			projects[i].RegistryCheckoutID = rec.CheckoutID
 			projects[i].MissingPath = !rec.PathExists
 		}
 	}
@@ -365,11 +366,20 @@ func (m *home) refreshSidebarProjects() {
 // second on-loop daemon RPC. A fetch error leaves the last-known rows intact
 // (like handleSnapshot/refreshTasks). Returns whether the visible rows changed.
 func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, fetchErr error) bool {
+	projects, registryDegraded := m.buildProjectListFrom(data)
+	return m.applySidebarProjects(projects, registryDegraded, fetchErr)
+}
+
+// applySidebarProjects pushes an already-built project list into the Projects
+// section, for callers that built the list for another consumer too — the
+// section and that consumer must describe the SAME registry read (#4888
+// review). A fetch error leaves the last-known rows intact (like
+// handleSnapshot/refreshTasks). Returns whether the visible rows changed.
+func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
 	if fetchErr != nil {
 		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
 		return false
 	}
-	projects, registryDegraded := m.buildProjectListFrom(data)
 	changed := m.projects.SetProjects(m.projectRows(projects))
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true

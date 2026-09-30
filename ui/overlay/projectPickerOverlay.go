@@ -41,6 +41,12 @@ type Project struct {
 	// highest-priority path (a live session, the active workspace). Whether a
 	// rebind MOVED the record is judged against this, never the display root.
 	RegistryRoot string
+	// RegistryCheckoutID is the checkout marker the registration recorded —
+	// the second half of the guarded rebind's observed pair (#4822 spec). A
+	// reclone at the same path mints a new marker, so root spelling alone
+	// cannot see the checkout the picker displayed being replaced. Empty on a
+	// pre-marker record, which a guarded rebind always refuses.
+	RegistryCheckoutID string
 	// MissingPath marks a registry-backed row whose recorded root the registry
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.
@@ -244,6 +250,167 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 	// user can correct the path and resubmit.
 	p.rebindPending = false
 	p.rebindErr = msg
+}
+
+// SetRebindConflict answers the in-flight rebind with the daemon's "rebound
+// elsewhere" refusal (#4822): another rebind moved the registration after this
+// picker read it. projects is the caller's just-refreshed project list, and the
+// open picker is REBUILT from it rather than patched in place — the conflict
+// moved the registration, so the row's Root, RepoID, name and missing-path
+// state are all stale, and an Esc back to a list still showing them would let
+// Enter select a checkout the registry no longer records (#4888 review).
+// The rebind target is re-read from the rebuilt list too: its fresh
+// RegistryRoot is what the re-armed form's next submission expects, so Enter
+// retries against the root the user was just told rather than being refused
+// again on the root it was opened with. A target whose record vanished keeps
+// its last row — resubmitting against a deleted registration fails
+// definitively, as it should.
+func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project) {
+	p.all = projects
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
+}
+
+// SetRebindConflictPreserving is SetRebindConflict for a conflict refresh whose
+// session snapshot never answered (#4888 review): projects then carries only
+// the registry-side union, so installing it wholesale would drop every
+// session-derived row and zero the counts on registry rows — the daemon still
+// runs those sessions; this client merely could not recount them. The picker's
+// session-derived rows stay, each surviving registry row keeps the counts it
+// last displayed, and only registry truth replaces registry truth: a record
+// absent from a HEALTHY registry read still drops its stale row — the rebuild
+// exists to remove exactly those — while a failed registry read (degraded)
+// proves nothing about absence and keeps it.
+func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects []Project, registryDegraded bool) {
+	freshByRegistryID := make(map[string]Project, len(projects))
+	for _, row := range projects {
+		if row.RegistryID != "" {
+			freshByRegistryID[row.RegistryID] = row
+		}
+	}
+	merged := make([]Project, 0, len(p.all)+len(projects))
+	seenRepoIDs := make(map[string]bool, len(p.all)+len(projects))
+	seenRoots := make(map[string]bool, len(p.all)+len(projects))
+	// RepoIDs claimed by preserved session rows. A registry row landing on one
+	// of these is the rebound-onto-a-live-repo case: it must NOT emit a second
+	// row for the same repository — the coalesce below grafts its registration
+	// fields onto the session row, which is the one holding the live counts
+	// (#4888 review).
+	sessionRepoIDs := make(map[string]bool, len(p.all))
+	for _, row := range p.all {
+		if row.RegistryID == "" {
+			// A session-derived row: the snapshot read that produced it never
+			// answered, so nothing fresher exists to replace it with.
+			merged = append(merged, row)
+			seenRepoIDs[row.RepoID] = true
+			seenRoots[row.Root] = true
+			sessionRepoIDs[row.RepoID] = true
+			continue
+		}
+		if fresh, ok := freshByRegistryID[row.RegistryID]; ok {
+			// The fresh registry row carries the record's new root, name and
+			// path state; the counts were last tallied by the snapshot that
+			// failed, so they carry over from the row it replaces.
+			fresh.SessionCount = row.SessionCount
+			fresh.InPlaceCount = row.InPlaceCount
+			merged = append(merged, fresh)
+			seenRepoIDs[fresh.RepoID] = true
+			seenRoots[fresh.Root] = true
+			continue
+		}
+		if registryDegraded {
+			// The registry read failed too — an absent record proves nothing
+			// under a read that read nothing. Keep the row rather than empty
+			// the list behind a warning it cannot confirm.
+			merged = append(merged, row)
+			seenRepoIDs[row.RepoID] = true
+			seenRoots[row.Root] = true
+		}
+		// Otherwise the healthy read proves the record is gone: drop the row.
+	}
+	// Registry-side rows with no counterpart in the old list — a registration
+	// newer than the picker, or the root_agents/active rows the snapshot used
+	// to supply — still land; an existing row claiming the same identity or
+	// root already wins. One exception: a registration whose repo a preserved
+	// session row already claims still appends, so the coalesce can graft its
+	// registration fields onto that row instead of losing them on the dedupe.
+	for _, row := range projects {
+		if row.RegistryID != "" && row.RepoID != "" && sessionRepoIDs[row.RepoID] {
+			merged = append(merged, row)
+			continue
+		}
+		if seenRepoIDs[row.RepoID] || seenRoots[row.Root] {
+			continue
+		}
+		merged = append(merged, row)
+		seenRepoIDs[row.RepoID] = true
+		seenRoots[row.Root] = true
+	}
+	p.all = coalesceReboundRows(merged)
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
+}
+
+// coalesceReboundRows resolves the rebound-onto-a-live-repo collision
+// SetRebindConflictPreserving can produce: a registration that moved onto a
+// repository the picker already listed from live sessions would otherwise
+// appear twice — once as the fresh registry row (carrying counts tallied
+// against the OLD root, before the snapshot failed) and once as the preserved
+// session row holding the real counts. The session row owns the repo's slot
+// and gains the registration fields — the durable id, the recorded root and
+// checkout, the record's path state — and the duplicate registry row is
+// dropped.
+func coalesceReboundRows(rows []Project) []Project {
+	sessionRowByRepoID := make(map[string]int, len(rows))
+	for i, row := range rows {
+		if row.RegistryID == "" && row.RepoID != "" {
+			if _, dup := sessionRowByRepoID[row.RepoID]; !dup {
+				sessionRowByRepoID[row.RepoID] = i
+			}
+		}
+	}
+	// Graft in place before the output slice is built: the registry row can
+	// sort before OR after the session row it merges into, so the copy into
+	// out must happen only after every graft has landed.
+	dropped := make([]bool, len(rows))
+	for i, row := range rows {
+		if at, ok := sessionRowByRepoID[row.RepoID]; ok && at != i && row.RegistryID != "" && row.RepoID != "" {
+			rows[at].RegistryID = row.RegistryID
+			rows[at].RegistryRoot = row.RegistryRoot
+			rows[at].RegistryCheckoutID = row.RegistryCheckoutID
+			rows[at].MissingPath = row.MissingPath
+			dropped[i] = true
+		}
+	}
+	out := make([]Project, 0, len(rows))
+	for i, row := range rows {
+		if !dropped[i] {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// reseatAfterConflictRebuild restores the cursor and rebind target after the
+// row set changed under a conflict: clamp the index into the navigable rows,
+// then land on the rebound row wherever the rebuild sorted it.
+func (p *ProjectPickerOverlay) reseatAfterConflictRebuild() {
+	// len(p.all) is the trailing add-project row — still a valid cursor spot.
+	if p.selectedIdx > len(p.all) {
+		p.selectedIdx = len(p.all)
+	}
+	for i := range p.all {
+		if p.all[i].RegistryID != "" && p.all[i].RegistryID == p.rebindTarget.RegistryID {
+			p.rebindTarget = p.all[i]
+			// The rebuild can reorder rows — the record's name, root, or
+			// missing-path flag feed the sort — so land the cursor on the
+			// rebound row rather than leaving it on whatever now occupies the
+			// old numeric position: an Esc returning to the list must
+			// highlight THIS registration (#4888 review).
+			p.selectedIdx = i
+			break
+		}
+	}
 }
 
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal

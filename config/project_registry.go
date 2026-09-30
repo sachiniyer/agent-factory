@@ -244,13 +244,57 @@ func sameProjectIdentity(leftCheckoutID, leftRelativeRoot, rightCheckoutID, righ
 	return leftCheckoutID != "" && leftCheckoutID == rightCheckoutID && leftRelativeRoot == rightRelativeRoot
 }
 
-// RebindProject moves an existing stable project identity to path. It refuses
-// to steal a root already owned by another project. When path belongs to a
-// checkout already present in the registry, its marker is reused unless that
-// would duplicate another project binding. A whole-checkout move carries its
-// marker and therefore its checkout ID; a genuine new clone receives a new
-// checkout ID.
+// ProjectReboundError is RebindProjectIfRoot's refusal when the project's
+// recorded identity is no longer the one the caller observed: another rebind —
+// or a reclone at the same path — landed between the caller reading the record
+// and its request reaching the registry (#4822). It is definitive — nothing
+// was written — and names the root and checkout id the registry holds now, so
+// the caller can show them and let the user decide again.
+type ProjectReboundError struct {
+	ID                string
+	Expected          string
+	ExpectedCheckout  string
+	Current           string
+	CurrentCheckoutID string
+}
+
+func (e *ProjectReboundError) Error() string {
+	return fmt.Sprintf("project %s was rebound elsewhere: it is now bound to %s (checkout %s), not %s (checkout %s) — refresh and retry", e.ID, e.Current, e.CurrentCheckoutID, e.Expected, e.ExpectedCheckout)
+}
+
+// RebindProject moves an existing stable project identity to path with no
+// precondition on where it points now: last writer wins. See
+// RebindProjectIfRoot for the compare-and-set form interactive callers use.
 func RebindProject(id, path string) (Project, error) {
+	return RebindProjectIfRoot(id, "", "", path)
+}
+
+// RebindProjectIfRoot moves an existing stable project identity to path. It
+// refuses to steal a root already owned by another project. When path belongs
+// to a checkout already present in the registry, its marker is reused unless
+// that would duplicate another project binding. A whole-checkout move carries
+// its marker and therefore its checkout ID; a genuine new clone receives a new
+// checkout ID.
+//
+// A guarded rebind — either expected field non-empty — is a compare-and-set on
+// the PAIR the caller observed (#4822 spec, issue comment): the record's stored
+// root must still spell expectedRoot (clean-path TEXT, never resolved through
+// the filesystem, so a stale precondition cannot pass because its old path now
+// aliases the new root), AND the record's stored CheckoutID must equal
+// expectedCheckoutID. The checkout half is what sees a reclone at the same
+// path: the marker is re-minted, so the root spelling can keep matching while
+// the checkout the caller observed is gone (#4888 review). A record with no
+// checkout id — pre-marker vintage — can never satisfy a guarded compare.
+//
+// The one bypass is a replay of the rebind that already landed, and only while
+// the resolved binding still sits on the recorded root AND still carries the
+// recorded checkout marker — a checkout replaced at the same root is a
+// different identity, so its replay is refused like any other stale
+// precondition. Anything else returns *ProjectReboundError. The check runs
+// under the registry lock, so two rebinds made against the same observed pair
+// cannot both apply. Both fields empty skips the check (last writer wins),
+// which is what a caller that predates the precondition sends.
+func RebindProjectIfRoot(id, expectedRoot, expectedCheckoutID, path string) (Project, error) {
 	if err := ValidateProjectID(id); err != nil {
 		return Project{}, err
 	}
@@ -290,9 +334,59 @@ func RebindProject(id, path string) (Project, error) {
 		}
 
 		record := records[index]
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
-		if err != nil {
-			return err
+		var checkoutID string
+		// Guarded iff either expected field was sent — a guarded client always
+		// sends the pair (#4822 spec). The precondition holds only when BOTH
+		// halves match what the caller observed: the stored root still spells
+		// expectedRoot as clean-path text, and the stored CheckoutID still
+		// equals expectedCheckoutID. A pre-marker record (CheckoutID "") can
+		// never satisfy it — the refusal path re-reads and re-arms, so the row
+		// self-heals once the registry has resolved its marker.
+		guarded := expectedRoot != "" || expectedCheckoutID != ""
+		preconditionHolds := !guarded ||
+			(sameProjectPathSpelling(record.Root, expectedRoot) &&
+				expectedCheckoutID != "" && record.CheckoutID == expectedCheckoutID)
+		if guarded && !preconditionHolds {
+			// The precondition no longer names the recorded pair. The only way
+			// through is a replay of the rebind that already landed — the
+			// resolved binding still sits on the recorded root AND still
+			// carries the recorded checkout marker, which the marker is READ
+			// for, not ensured: a refused compare must not mint one. A
+			// replacement checkout at that root is a different identity even
+			// though the path text matches (#4888 review).
+			boundID, bound, rerr := readCheckoutID(binding.checkoutMarkerPath)
+			if rerr != nil {
+				return fmt.Errorf("re-read the checkout marker for %q before accepting a rebind replay: %w", binding.root, rerr)
+			}
+			// The root compare is SPELLING, not filesystem identity — the same
+			// rule the expected-root check applies (#4888 review): a request
+			// that merely ALIASES the recorded root (a bind mount, a second
+			// spelling of the same directory) is not the landed rebind, and
+			// accepting it would rewrite the record's root to the alias.
+			if !sameProjectPathSpelling(record.Root, binding.root) || !bound || boundID != record.CheckoutID {
+				return &ProjectReboundError{
+					ID: id, Expected: expectedRoot, ExpectedCheckout: expectedCheckoutID,
+					Current: record.Root, CurrentCheckoutID: record.CheckoutID,
+				}
+			}
+			// The accepted replay keeps the marker it VERIFIED: re-reading
+			// through ensureCheckoutID would answer with whatever checkout sits
+			// at the path now — minting one for a reclone — and the commit-time
+			// verification would compare that replacement to itself, adopting
+			// an identity the precondition never vouched for (#4888 review).
+			// Carrying boundID through means a swap after this read fails the
+			// marker recheck below instead of passing on the replacement.
+			checkoutID = boundID
+			if projectRegistryCommitRaceHookForTest != nil {
+				projectRegistryCommitRaceHookForTest()
+			}
+		}
+		if checkoutID == "" {
+			var err error
+			checkoutID, err = ensureCheckoutID(binding.checkoutMarkerPath)
+			if err != nil {
+				return err
+			}
 		}
 		for i, candidate := range records {
 			if i == index {
@@ -834,6 +928,25 @@ func sameProjectPath(left, right string) bool {
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
+}
+
+// sameProjectPathSpelling is the first half of sameProjectPath WITHOUT the
+// filesystem fallback — clean path text only. It exists for the rebind
+// compare-and-set's precondition compares (#4888 review): the expected root
+// names the registry value the caller OBSERVED, and the replay bypass asks the
+// same question of the request's bound root — a path that merely resolves to
+// the same inode today (a symlink or bind mount created at the old root after
+// the record moved) must satisfy neither. The collision checks that keep
+// sameProjectPath's os.SameFile fallback ask a different question (does this
+// path occupy the same directory), so only the precondition compares are
+// spelling-only.
+//
+// A var, not a func, for the same reason the race hooks below are: producing a
+// real same-inode/different-spelling pair needs a bind mount, which an
+// unprivileged test cannot create — the seam lets a test observe which
+// compare the replay actually consults.
+var sameProjectPathSpelling = func(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 // projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes

@@ -123,6 +123,11 @@ retrying the completed mutation. The daemon omits `daemon_rejected` from these
 committed-outcome envelopes. CLI `--json` ordinary errors retain their existing
 shape without the HTTP provenance marker.
 
+`error.code: "project_rebound"` (status `409`, with `daemon_rejected: true`) is
+`POST /v1/RebindProject`'s refusal of a compare-and-set rebind — see
+[Rebinding a project](#rebinding-a-project). Nothing was written, so it is a
+definitive refusal, not an uncertain outcome.
+
 ## Status codes
 
 | Status | Meaning |
@@ -131,6 +136,7 @@ shape without the HTTP provenance marker.
 | `400 Bad Request` | The request body was not valid JSON, or it carried a field this daemon does not recognize (see [Unknown fields](#unknown-fields)). |
 | `404 Not Found` | Unknown route (e.g. `POST /v1/Nope`). |
 | `405 Method Not Allowed` | Wrong verb — RPC routes are POST-only; `/v1/health` is GET-only. |
+| `409 Conflict` | `POST /v1/RebindProject` only: the request's `expected_root` no longer matches the project's recorded root, because another rebind landed first. `error.code` is `project_rebound`. See [Rebinding a project](#rebinding-a-project). |
 | `413 Request Entity Too Large` | The body exceeded the 16 MiB cap. The request is **rejected, never truncated-then-processed** — the daemon is never reached. |
 | `500 Internal Server Error` | The handler ran but returned an error (validation failure, not-found session, a disabled task refused by `TriggerTask`, etc.). `error.message` carries the detail. |
 
@@ -206,6 +212,48 @@ fields accepts an empty body (`-d '{}'` or no `-d` at all).
 `GET /v1/health` is the one non-POST route: a liveness probe (alias for the
 internal `Ping` RPC) that answers even while the daemon is restoring sessions,
 with response `data` of `{ "ok": true }`.
+
+### Rebinding a project
+
+`POST /v1/RebindProject` moves a registered project's stable `id` to the
+checkout at `path`. It accepts an optional observed pair — `expected_root`,
+the root the caller last saw the project bound to, and `expected_checkout_id`,
+the checkout marker behind it (the `root` and `checkout_id` from
+`POST /v1/ListProjects`):
+
+```bash
+curl --unix-socket ~/.agent-factory/daemon-http.sock \
+    -X POST http://af/v1/RebindProject -d '{"id":"prj_…","path":"/home/me/src/repo","expected_root":"/home/me/old/repo","expected_checkout_id":"chk_…"}'
+```
+
+With either expected field set, the rebind is a compare-and-set on the pair.
+The daemon applies it only if the registry still records that root *and* that
+checkout id when the registry lock is taken — the checkout half is what sees a
+reclone or repair at the same path, which keeps the root spelling but mints a
+new marker — so of two rebinds made from the same observed pair, exactly one
+applies. The other gets `409` with `error.code: "project_rebound"`, and its
+message names the root and checkout the project is bound to now. Re-read the
+registry, show the user the current pair, and retry with it if they still want
+the move. A request whose `path` is already the recorded root and whose
+checkout still matches also succeeds, so a retried request that already landed
+is not refused.
+
+`expected_root` and `expected_checkout_id` are optional. A request that omits
+both is applied whatever the project is bound to, so the last writer wins —
+what clients written before the fields existed send, never refused for the
+omission. The TUI and web client send the pair they displayed. `af projects
+rebind` does not; it rebinds unconditionally, as before.
+
+A daemon that predates the fields treats them like any unknown fields (see
+[Unknown fields](#unknown-fields)). It rejects a hand-authored request with
+`400`. For a request with `X-AF-Client-Version`, such as the TUI's, it ignores
+them and applies the rebind without the check — which is why a client sending
+a guarded pair first reads `GET /v1/health`: a daemon that implements the
+precondition advertises `"guarded_rebind": true` in its `PingResponse`. When
+the bit is absent, or the capability answer cannot be obtained at all, the
+client refuses the send before the request goes out — the remedy is to upgrade
+the daemon or rebind from its host — rather than silently downgrade to last
+writer wins.
 
 **Not in the catalog.** The generated table is `af api`'s discovery surface — the
 client-facing session and task RPCs — so the daemon serves several routes it does

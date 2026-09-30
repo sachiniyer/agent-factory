@@ -311,8 +311,13 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 		var resp Resp
 		if err := call(withHTTPRPCRequester(r), req, &resp); err != nil {
 			status := http.StatusInternalServerError
+			var statused interface{ HTTPStatus() int }
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
+			} else if errors.As(err, &statused) {
+				// A refusal that names its own status (projectReboundError's
+				// 409) keeps it; everything else stays a 500 as before.
+				status = statused.HTTPStatus()
 			}
 			writeHTTPError(w, r, status, err)
 			return

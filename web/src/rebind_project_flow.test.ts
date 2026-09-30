@@ -28,9 +28,10 @@ interface State {
 
 /** An error the stubbed api classifies: "refused" is a definitive daemon refusal,
  *  "uncertain" a lost reply / unverified intermediary error, "committed" a rebind
- *  that landed before a follow-up step failed. */
+ *  that landed before a follow-up step failed, and "rebound" the definitive
+ *  refusal of a rebind whose expected root another rebind moved (#4822). */
 class StubError extends Error {
-  constructor(message: string, readonly kind: "refused" | "uncertain" | "committed") { super(message); }
+  constructor(message: string, readonly kind: "refused" | "uncertain" | "committed" | "rebound") { super(message); }
 }
 
 const UNKNOWN = (label: string) => `outcome:uncertain:Rebind of ${label} · outcome unknown · check the project list`;
@@ -41,6 +42,8 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   let persisted: string | null = initial.selectedProject;
   const events: string[] = [];
   const submits: Array<(path: string) => void> = [];
+  // The expected root each rebind request carried, in order.
+  const expected: Array<string | null> = [];
   const pending: Array<Deferred<Project>> = [];
   // Each followConfirmedRebind registry read, answered by the test.
   const reads: Array<Deferred<Project[]>> = [];
@@ -67,8 +70,9 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
         setError: (msg: string) => events.push(`error:${n}:${msg}`),
       };
     },
-    rebindProject: (id: string, path: string) => {
+    rebindProject: (id: string, path: string, _token: string, expectedRoot: string | null) => {
       events.push(`rpc:${id}:${path}`);
+      expected.push(expectedRoot);
       return new Promise<Project>((resolve, reject) => pending.push({ resolve, reject }));
     },
     listProjects: () => {
@@ -90,14 +94,15 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
     surfaceMutationError: (e: Error, kind = "failed") => events.push(`outcome:${kind}:${e.message}`),
     refreshRegisteredProjects: () => events.push("refetch"),
     isMutationCommittedError: (e: StubError) => e.kind === "committed",
-    isMutationOutcomeUncertain: (e: StubError) => e.kind !== "refused",
+    isMutationOutcomeUncertain: (e: StubError) => e.kind !== "refused" && e.kind !== "rebound",
+    isProjectReboundError: (e: StubError) => e.kind === "rebound",
     errorText: (e: Error) => e.message,
     listDirectory: () => Promise.resolve({}),
   };
   const code = ts.transpileModule(`
     let token = "token", modal = null, rebindInFlight = null;
     var connectionGeneration = 0, rebindInFlightGeneration = 0; // var: tests bump the connection
-    const REBIND_ANSWER_MS = 30000;
+    const REBIND_ANSWER_MS = 30000, REBIND_REFRESH_MS = 10000;
     function openModal(next) { modal = next; }
     function closeModal() { if (modal) modal.close(); modal = null; }
     ${topLevelFunction(source, "rebindOutcomeUnknown")}
@@ -114,7 +119,7 @@ function harness(initial: { registeredProjects: Project[]; selectedProject: stri
   // Simulates a reconnect (connect() bumps the generation too, without going
   // through disconnect()), so the fence is tested on its own.
   const reconnect = () => { (context as unknown as { connectionGeneration: number }).connectionGeneration++; };
-  return { app, state, events, submits, pending, reads, fire, timers, reconnect };
+  return { app, state, events, submits, pending, reads, fire, timers, reconnect, expected };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -357,4 +362,160 @@ test("a late success after the bounded wait does not auto-follow", async () => {
 
   assert.ok(!events.includes("read"), "a late reply never starts a follow");
   assert.notEqual(state.selectedProject, "/new", "the user was told to check the project list; nothing moves them");
+});
+
+// --- rebound elsewhere (#4822): a definitive refusal, re-armed after a refresh --
+
+const REBOUND = "rebind project: project prj_A was rebound elsewhere: it is now bound to /theirs, not /old — refresh and retry";
+
+test("a rebind carries the root the switcher showed as its expected root", async () => {
+  const { app, submits, expected } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/new");
+
+  assert.deepEqual(expected, ["/old"], "the daemon can only refuse a stale rebind if it is told what the client saw");
+});
+
+test("a rebound-elsewhere refusal re-reads the registry, then re-arms against the current root", async () => {
+  const { app, state, events, submits, pending, reads, expected } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+
+  assert.ok(events.includes("read"), "the registry is re-read");
+  assert.ok(!events.includes("close:1"), "a refusal keeps the form open");
+  assert.ok(!events.includes("busy:1:false"), "the form re-arms only after the re-read answers");
+  assert.ok(!events.some(e => e.startsWith("outcome:")), "a refusal is not reported as an unknown outcome");
+
+  reads[0].resolve([{ id: "prj_A", root: "/theirs" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+  assert.deepEqual(events.slice(-2), [
+    "busy:1:false",
+    "error:1:Rebound elsewhere, to /theirs · submit again to move it from there",
+  ]);
+  // The committed read reconciles the selection like any refresh — "/old" is
+  // gone from the registry — but a refusal never FOLLOWS to the rebound root.
+  assert.notEqual(state.selectedProject, "/theirs");
+  assert.ok(events.includes("refetch"), "a fenced refetch settles anything that raced the read");
+
+  submits[0]("/mine");
+  assert.deepEqual(expected, ["/old", "/theirs"], "the retry expects the root the refresh found");
+});
+
+// The registry read that re-arms the form is also committed to the store
+// (#4888 review): a snapshot consulted only for `expectedRoot` but never stored
+// leaves the switcher — and a cancelled-and-reopened modal's next attempt — on
+// the pre-rebind root, so the same stale precondition is refused again.
+test("a rebound-elsewhere refusal commits the registry read it re-arms from", async () => {
+  const { app, state, submits, pending, reads, expected } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+  reads[0].resolve([{ id: "prj_A", root: "/theirs" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+
+  assert.deepEqual(state.registeredProjects.map(p => p.root), ["/theirs", "/other"],
+    "the read the re-arm used must land in the store, not just in the closure");
+
+  // Reopen the modal — the precondition now comes from the committed store,
+  // so a cancel-and-reopen does not resend the root that was just refused.
+  app.closeModal();
+  app.openRebindProject("prj_A", "alpha");
+  submits[1]("/mine");
+  assert.deepEqual(expected, ["/old", "/theirs"], "a reopened modal expects the committed root");
+});
+
+test("a rebound-elsewhere refusal commits the registry read even after the modal was dismissed", async () => {
+  const { app, state, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  app.closeModal();
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+  reads[0].resolve([{ id: "prj_A", root: "/theirs" }, { id: "prj_B", root: "/other" }]);
+  await settle();
+
+  assert.deepEqual(state.registeredProjects.map(p => p.root), ["/theirs", "/other"],
+    "a dismissed modal's refusal still refreshes the store the picker reads");
+});
+
+test("a rebound-elsewhere refusal still re-arms when the refresh fails", async () => {
+  const { app, events, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+  reads[0].reject(new Error("network down"));
+  await settle();
+
+  assert.deepEqual(events.slice(-2), ["busy:1:false", `error:1:${REBOUND}`]);
+});
+
+// The re-arm's registry read is bounded (#4888 review): fetch has no timeout,
+// so a read that never settles must not leave the open modal busy forever. On
+// the bound the refusal the daemon already returned is reported, the fenced
+// refetch still re-reads the registry, and a late answer is dropped.
+test("a rebound-elsewhere refusal whose refresh never settles re-arms on the bound", async () => {
+  const { app, events, submits, pending, reads, fire, timers } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+  assert.ok(events.includes("read"), "the registry re-read was attempted");
+  assert.equal(timers.size, 1, "the re-arm wait is armed");
+
+  // The read never answers: the bound still re-arms the form on the refusal.
+  fire();
+  await settle();
+  assert.deepEqual(events.slice(-2), ["busy:1:false", `error:1:${REBOUND}`]);
+  assert.ok(events.includes("refetch"), "the fenced refetch still re-reads the registry");
+  assert.equal(timers.size, 0, "the bound does not fire twice");
+
+  const before = events.length;
+  reads[0].resolve([{ id: "prj_A", root: "/theirs" }]);
+  await settle();
+  assert.deepEqual(events.slice(before), [], "a late answer after the bound is dropped");
+});
+
+// The same bound must still deliver the refusal a dismissed modal was promised —
+// as the tab error, since the inline slot is gone.
+test("a dismissed modal's rebound refusal surfaces on the refresh bound", async () => {
+  const { app, events, submits, pending, fire } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  app.closeModal();
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+
+  fire();
+  await settle();
+  assert.ok(events.includes(`toast:${REBOUND}`),
+    "a dismissed modal's refusal is still reported when its refresh never settles");
+  assert.ok(events.includes("refetch"), "the registry is still re-read");
+});
+
+// A control: a dismissed modal's refusal was already a toast before #4822, and
+// the refresh step must not change where it lands.
+test("a rebound-elsewhere refusal after the modal was dismissed surfaces as a toast", async () => {
+  const { app, events, submits, pending, reads } = harness(twoProjects());
+
+  app.openRebindProject("prj_A", "alpha");
+  submits[0]("/mine");
+  app.closeModal();
+  pending[0].reject(new StubError(REBOUND, "rebound"));
+  await settle();
+  reads[0]?.resolve([{ id: "prj_A", root: "/theirs" }]);
+  await settle();
+
+  assert.ok(events.includes(`toast:${REBOUND}`));
+  assert.ok(!events.some(e => e.startsWith("error:")), "a dismissed modal's error must not be set inline");
 });
