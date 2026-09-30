@@ -79,10 +79,17 @@ when timestamps share a second.
 Existing labeled PRs need a comment identifying their actual tested commit.
 Do not substitute the current head unless that is the code you exercised.
 
-An attestation for the current head passes directly. For an older commit, the
-gate compares complete Git tree snapshots of the tested commit and current
-head, restricted to the same gated paths and excluding `_test.go` files.
-Evidence survives a master merge or rebase when those files are unchanged.
+An attestation for the current head passes directly. So does one for any
+commit on the head's proven update-merge chain (the content head and every
+update merge the proof walked; see the approval section below): each link is its
+first parent plus master, merged with no hand resolution, so gated changes that
+arrived through a link's second parent are master's, already gated on master,
+not the PR's (#4886). For any other commit, the gate compares complete Git tree
+snapshots of the tested commit and current head, restricted to the same gated
+paths and excluding `_test.go` files, and, when the head is such a chain, also
+the tested commit and the content head: the attestation carries if either
+matches. Evidence survives a master merge or rebase when those files are
+unchanged.
 Content, path, or file-mode changes require another play-test and a new comment,
 except a comment-only change to a `.go` file (below);
 merge shape alone cannot exempt a conflict resolution. A gated file edited and
@@ -207,7 +214,25 @@ The carry check is the complete-tree proof itself: it reads the merge base and
 both parent trees, derives the only path-level three-way result from each
 path's leaf entry (mode, type and object id — the only place blob identity
 enters the decision), and requires the merge commit's tree to match it exactly —
-a truncated, malformed, same-path-conflicting or mismatched tree refuses carry.
+a truncated, malformed or mismatched tree refuses carry.
+
+A path BOTH sides changed has no path-level result (#4886). On the gate's own
+update merge (author `github-actions[bot]`, committer `web-flow`, a signature
+GitHub verified) the gate proves it line by line instead: it reads the four blobs
+(merge base, both parents, the committed file), checks each against the object
+id its tree named, and requires the committed file to be exactly the merge base
+with every hunk of each side applied, the two sides' hunks neither overlapping
+nor adjacent (`.github/scripts/text-merge.js`). That is what `git merge-tree
+--write-tree p1 p2` equality stands for: nothing in the merged file is a line
+neither side wrote. A binary file, an add/add, a delete on either side, a
+symlink or submodule, a mode conflict, more than 20 such paths, a blob over
+4 MiB, a failed read or any byte difference refuses carry. A merge the gate did
+not write keeps the path-level rule, where such a path refuses. Before #4886
+this refusal was the whole reason a maintainer approval failed to carry across
+some update merges and not others: #4789's `a7705950` and #4825's `52b78a17`
+each had one file (`app/home_update.go`) that master and the PR had both
+touched, on merges `merge-tree` reproduces exactly.
+
 When the proof passes, the approval and every Codex artifact bind
 to the merge's FIRST parent — the content head — because the reviewed change did
 not move. Otherwise the gate's own update-branch would void the approval it had
@@ -234,6 +259,29 @@ require: it was never only PR Validation. A queued or running job is left alone.
 Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
+
+**A PR that ends during its own update-branch is a lost race, not an evaluation
+failure (#4462).** The gate does not own this PR, and the open read its
+evaluation was acting on is minutes old by the time the PUT writes — leaving a
+window where a hand or queue merge plus GitHub's delete-on-merge can land
+before the write completes. A fresh pre-write `pulls.get` narrows it to a round
+trip; a confirming re-read after a rejection or an accepted PUT closes the
+rest. When a read proves the PR merged or closed, the lane refuses as ordinary
+waiting — `Refusing to merge PR #N; the PR was merged while its update-branch
+was pending` for the pre-write read, or the same refusal with `was in flight`
+after a rejection or an accepted PUT — so `processAggregateHead` invalidates
+the fixed aggregate and returns the ordinary `waiting` state: the workflow run
+does not fail, but the fixed aggregate stays red as that invalidation's
+enforcement record (the required `Auto Gate decision` check remains red). An
+accepted PUT whose post-update re-read proves the PR ended approves no parked
+runs and schedules no successor: nothing remains for this run to merge. The
+proof is the read, never the update's error shape alone (a 422 is also a real
+tree conflict, a 404 could be a fork PR still owed an answer); a read that
+fails or shows the PR still open stays the update failure it always was only
+on a rejected PUT — an accepted PUT whose confirming re-read fails or still
+shows the old open head instead sets `recoveryError` or observes no new SHA,
+and dispatches the successor Auto Gate run anyway, returning the ordinary
+waiting above rather than an update failure (#3551).
 
 **Every accepted update-branch schedules another Auto Gate evaluation (#4209).**
 The update endpoint can acknowledge before a PR read exposes its new head. The
@@ -311,7 +359,11 @@ winner keeps the existing concession behavior (#3324). With no winner, it leaves
 the aggregate PASS, waits one second, and retries the merge once, re-running the
 full merge preflight first. If the second attempt gets the same refusal, the
 run reports the wait and leaves PASS green for propagation and the next run.
-If that preflight no longer passes, the aggregate is invalidated as before.
+When the gate can prove the aggregate's check-suite placement was superseded
+by a newer suite of the same workflow on the head, the report instead names a
+permanent placement whose remedy is to push a new head — an identical-tree
+commit re-rolls placement (#4802). If that preflight no longer passes,
+the aggregate is invalidated as before.
 An unreadable ownership check is not proof of no winner: it stays loud and does
 not overwrite an unknown owner. A successful merge still invalidates the old
 shared-head authorization because master has advanced.
@@ -496,6 +548,19 @@ This preserves generation ownership checks immediately before PASS and merge,
 including write retries. Runner availability and API failures still apply;
 concurrency adds no wait here.
 
+One exception: an invalidation GitHub's API could not complete — a rate limit
+(#4461), or a create answered with a 5xx whose marker never became listable
+(#4763) — is retried once and then deferred into the lane, which retries the
+invalidation itself. A check-run create is never replayed on an ambiguous
+failure; it is reconciled by its marker over a seven-second window. If the
+lane's own create is still unconfirmed after that, the lane reads the newest
+published generation of the fixed aggregate. When that generation is already
+non-passing, the transaction stops without evaluating, retitles it `UNKNOWN`
+(concluded `failure`, never `neutral`, which the ruleset counts as satisfied),
+and the run does not fail. When it satisfies the ruleset, is absent, or cannot
+be read, the run fails: a stale PASS may still be what the ruleset enforces, and
+nothing replaced it.
+
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR
 number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or
@@ -587,6 +652,35 @@ plus at most one dispatch per window. Passes skip unrelated branch-sweep
 housekeeping. This avoids both the frozen-decision failure and one gate
 evaluation per completed matrix job (#4242).
 
+**A pass also retries transient blocks (#4782).** Some blocks clear with time
+and send no event when they do, so a decision taken on them used to sit BLOCKED
+until someone ran a manual `workflow_dispatch`. A pass re-evaluates two shapes
+once they have aged, using the same snapshot, so they cost no extra read:
+
+- **A decision blocked only by transient state**, evaluated at least ten minutes
+  ago. There are three transient reasons, tagged where each is produced:
+  mergeability still `UNKNOWN` or absent (GitHub computes it asynchronously), a
+  required check still settling (queued, in progress, a pending status, or
+  CodeQL's interim neutral), and a `Build` or `Lint` check that has not reported
+  yet (every base-repository head gets a PR Validation run, and evaluation
+  dispatches one when none exists). `reportDecision` writes
+  `<!-- auto-gate-transient-block -->` into the decision's output text only when
+  every reason is one of those. Any other reason keeps the marker off,
+  including a hold, a failed check, a conflict, a finding, a missing verdict,
+  a missing approval, an unapproved parked run, or any reason added later
+  without a tag. Manual-merge decisions never carry it. An unmarked decision is
+  never selected.
+- **A fixed aggregate left at `WAITING: refreshing every PR/head decision at
+  this commit`** for at least fifteen minutes. That title belongs to an
+  aggregate transaction in progress, so one this old means the transaction died.
+  Re-evaluating any PR at the head re-applies the aggregate.
+
+The age is the spacing. A retry that still sees the transient state rewrites
+the decision stamp, so one PR costs at most one evaluation per ten minutes,
+however long the state lasts. Transient retries take only the slots that
+PR Validation wakes leave under the pass's ten-evaluation cap, and at most five.
+The oldest go first, so a backlog drains instead of starving.
+
 **A head with no PR Validation run at all gets one dispatched (#4581).**
 Reconciliation wakes a decision when Build or Lint completes, so it cannot help
 a head whose run GitHub never created. #4430's `b63f9752` was an ordinary lane
@@ -642,8 +736,9 @@ the post-merge warning names the gap, the maintainer dispatches that first run,
 and every later merge uses the updated list automatically.
 
 Repository-ruleset changes and mergeability changes caused only by `master`
-advancing have no GitHub event here. Use the same manual PR-number dispatch to
-refresh that observational state. The destructive merge path still reevaluates
+advancing have no GitHub event here. A mergeability still `UNKNOWN` is retried
+by the reconciliation pass (#4782). For anything else, use the same manual
+PR-number dispatch to refresh that observational state. The destructive merge path still reevaluates
 the target PR, every other associated PR, and the association set immediately
 before its write.
 

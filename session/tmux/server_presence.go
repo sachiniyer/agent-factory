@@ -417,8 +417,21 @@ func absentTmuxSocketPath(diagnostic string) string {
 // was not disproved. An empty table answers "unclaimed" outright.
 func tmuxSocketClaimed(socketPath string, pids []int) bool {
 	signaled := false
+	unprobedOwnerPossible := false
 	for _, pid := range pids {
-		if pid <= 0 || !proctree.IsTmuxServer(pid) {
+		if pid <= 0 {
+			continue
+		}
+		if !proctree.IsTmuxServer(pid) {
+			// The pid passed the liveTmuxServerPIDs comm prefilter but
+			// could not be positively identified as a server (proctree.
+			// IsTmuxServer is strict: an unreadable command line, a
+			// darwin foreground `tmux -D`, or a same-uid client all fail).
+			// Skip signalling it — SIGUSR1's default disposition is
+			// TERMINATE — but remember it: it occupies a slot the prefilter
+			// admitted, and a skipped owner is never disproved, so a
+			// socket that stays absent is NOT evidence against it.
+			unprobedOwnerPossible = true
 			continue
 		}
 		if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
@@ -434,7 +447,16 @@ func tmuxSocketClaimed(socketPath string, pids []int) bool {
 			return true
 		}
 		if !time.Now().Before(deadline) {
-			return false
+			// A prefilter-passing pid was skipped as not positively a
+			// server. It could be the live owner of this unlinked socket
+			// (a darwin `tmux -D` foreground server, a sidUnknown daemon,
+			// or a client the comm prefilter admitted). Socket absence
+			// after signalling the *other* servers does not disprove it,
+			// so the safe direction — the one the doc comment and the
+			// module's "a failed read is not an empty result" invariant
+			// both demand — is "claimed" (unknown), refusing the
+			// destructive cleanup that a false "unclaimed" would license.
+			return unprobedOwnerPossible
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

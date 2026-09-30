@@ -102,7 +102,7 @@ export function sessionFirstComposition(moves: [HTMLElement, HTMLElement][]) {
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; closePane?(): void }) {
+export function terminalChrome(opts: { title: string; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; closePane?(): void }) {
   const menu = actionsDisclosure();
   const action = (label: string, className: string, run: () => void) => {
     const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
@@ -120,6 +120,11 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   actions.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
+  // The no-resend half of resolving an ambiguous handoff delivery (#4429):
+  // separate button, separate verb — never a silent branch inside Retry.
+  const deliver = action("Mark delivered", "", opts.markDelivered);
+  deliver.title = "Retire the pending handoff mission without resending — the pane already shows it landed";
+  deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
@@ -132,9 +137,9 @@ export function terminalChrome(opts: { title: string; copyLink(): void; handoff(
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, actions, closePane);
+  menu.panel.append(newTabSlot, copy, handoff, deliver, actions, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions, newTabSlot, menu, dispose: menu.dispose };
 }
 
 /** Split leaves share the same title/close treatment as the main tab row. */

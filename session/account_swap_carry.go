@@ -66,6 +66,36 @@ func carrySupportedAgent(agent string) bool {
 	return agent == tmux.ProgramClaude || agent == tmux.ProgramCodex
 }
 
+// AccountSwapCarryIntended reports whether a same-agent account swap would
+// ATTEMPT to carry its conversation, judging only the preconditions the
+// confirming user can know before the swap runs (#4367, #4504). It is a
+// NECESSARY, not sufficient, signal: the daemon re-checks filesystem state
+// (transcript presence, staleness, account homes, copy success) at admission,
+// after the user confirms — so a true return means "the carry is on", not "it
+// will succeed". A false return means no carry is even attempted, so the
+// replacement starts fresh.
+//
+// current and recorded describe the outgoing runtime (CurrentAgentName,
+// AgentProgram); target is the requested enum; targetResolved is the agent
+// that enum's resolved command launches (the daemon's resolved_agents answer,
+// falling back to the enum when the daemon did not classify one); outgoing is
+// the live tab's recorded conversation. The same-agent judgment goes through
+// HandoffTargetIsCurrent, not an enum compare, for the same reason the picker
+// uses it: program_overrides can make a resolved identity differ from the enum
+// (#4430 review), so a naive target == current misclassifies a redirected
+// self-handoff. An opaque target (targetResolved == "") is never
+// carry-intended: the daemon cannot prove it launches a carry-supporting
+// provider, so the replacement starts fresh.
+func AccountSwapCarryIntended(current, target, targetResolved, recorded string, outgoing AgentConversationData) bool {
+	if !HandoffTargetIsCurrent(current, target, targetResolved, recorded) {
+		return false
+	}
+	if !carrySupportedAgent(targetResolved) {
+		return false
+	}
+	return outgoing.HasID() && outgoing.Agent == targetResolved
+}
+
 type accountSwapCarryRequest struct {
 	// agent is the provider the resolved replacement program runs.
 	agent      string
@@ -431,7 +461,7 @@ func (i *Instance) carryOrReplan(plan *accountSwapLaunchPlan) (string, error) {
 	reason := carryFailureReason(copyErr)
 	log.WarningLog.Printf("account swap for %q could not carry %s conversation %s into account %q, so the replacement starts a fresh conversation: %v",
 		i.Title, plan.carry.agent, plan.carry.id, plan.account, copyErr)
-	if err := i.validateAccountSwapPlan(plan.account, plan.agent, plan.manual, true, reason); err != nil {
+	if err := i.validateAccountSwapPlan(plan.account, plan.agent, plan.crossAgent, plan.manual, true, reason); err != nil {
 		return reason, fmt.Errorf("account swap for %q could not carry its conversation (%s), and a fresh conversation could not be prepared either: %w",
 			i.Title, reason, err)
 	}
@@ -645,7 +675,7 @@ func (i *Instance) AbandonCarriedConversationAfterFailedLaunch(account string) e
 	}
 	log.WarningLog.Printf("account swap for %q launched carried conversation %s under account %q and must launch again; starting a fresh conversation instead",
 		i.Title, id, account)
-	if err := i.validateAccountSwapPlan(account, "", false, true, abandonedCarryReason); err != nil {
+	if err := i.validateAccountSwapPlan(account, "", false, false, true, abandonedCarryReason); err != nil {
 		return fmt.Errorf("account swap for %q could not prepare a fresh conversation after its carried launch failed: %w", i.Title, err)
 	}
 	return i.demotePendingAccountSwapCarry(account, abandonedCarryReason)

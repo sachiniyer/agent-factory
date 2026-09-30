@@ -306,3 +306,25 @@ func TestTasksShow_WordsEveryUnschedulableShape(t *testing.T) {
 		assert.NotContains(t, got, "on schedule", "%q is not healthy", tc.expr)
 	}
 }
+
+// TestTasksShow_FlagsAFarOutNextRun is #4843: a dated cron re-armed for next
+// year has to say how far away that is, not only when.
+func TestTasksShow_FlagsAFarOutNextRun(t *testing.T) {
+	tsk := showFixture()
+	tsk.CronExpr, tsk.Overdue, tsk.MissedOccurrences = "0 7 21 9 *", false, 0
+	next := time.Date(2027, time.September, 21, 7, 0, 0, 0, time.Local)
+	tsk.Arming, tsk.NextRunAt = task.ArmingArmed, &next
+
+	var out bytes.Buffer
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 24, 12, 0, 0, 0, time.Local), "")
+	assert.Contains(t, out.String(), "Next run       2027-09-21 07:00 · in 11 months")
+
+	// Near runs are unchanged, and a disabled task is never flagged.
+	out.Reset()
+	renderTaskShow(&out, tsk, time.Date(2027, time.September, 1, 12, 0, 0, 0, time.Local), "")
+	assert.Contains(t, out.String(), "Next run       2027-09-21 07:00\n")
+	tsk.Enabled = false
+	out.Reset()
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 24, 12, 0, 0, 0, time.Local), "")
+	assert.NotContains(t, out.String(), "in 11 months")
+}

@@ -100,13 +100,38 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 			break
 		}
 		t := strings.Trim(xansi.Strip(line), "│ ")
-		if t == "▸ "+s.items[next] || t == s.items[next] {
+		if t == "" {
+			continue
+		}
+		if rowRendersItem(strings.TrimPrefix(t, "▸ "), s.items[next]) {
 			reg.Register(zones.OverlaySelectRow(next), layout.Rect{
 				X: origin.X, Y: origin.Y + i, W: width, H: 1,
 			})
 			next++
 		}
 	}
+}
+
+// rowRendersItem reports whether a rendered row is this item — including the
+// TRUNCATED form the overlay draws when the item does not fit its box
+// (truncateOverlayLine cuts it and appends "…").
+//
+// Matching the full text alone registered no zone at all for such a row, so a
+// long entry answered the keyboard and silently swallowed the mouse — the
+// #1819 class, reached through the renderer rather than through a missing
+// click route (#4528). Every picker with labels longer than its box was
+// affected; the resolve picker is simply the one whose labels are a sentence.
+//
+// The caller walks rows and items in lockstep, advancing only on a match, so
+// prefix matching cannot bind a row to the wrong item. A blank line is
+// rejected by the caller before it gets here, since every item has it as a
+// prefix.
+func rowRendersItem(row, item string) bool {
+	if row == item {
+		return true
+	}
+	head, truncated := strings.CutSuffix(row, "…")
+	return truncated && head != "" && strings.HasPrefix(item, head)
 }
 
 // RegisterZones registers one full-width clickable zone per visible search

@@ -117,9 +117,17 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
 	}
 	key := daemonInstanceKey(repo.ID, title)
+	// createSweepMu serializes this pendingCreates publication with the deferred
+	// orphan sweep: a sweep holding createSweepMu across its protected-slug
+	// snapshot cannot list a container this create publishes mid-sweep, and a
+	// create that has not yet published blocks on createSweepMu until the sweep
+	// releases. m.mu still guards the pendingCreates map itself; createSweepMu is
+	// taken first so the two never invert (#2632).
+	m.createSweepMu.Lock()
 	m.mu.Lock()
 	m.pendingCreates[key] = pending
 	m.mu.Unlock()
+	m.createSweepMu.Unlock()
 	m.publishEvent(agentproto.EventSessionUpdated, pending)
 
 	// Tracks whether the provisional client row was replaced by any durable
@@ -522,7 +530,7 @@ func warnLegacyBareCloneSessions(repo *config.RepoContext) {
 // repository may live there and legitimately own these tasks.
 //
 // The scan is a pure read of the task file — no ProjectPath resolution and no
-// binding backfill (LoadTasksForRepoID durably rewrites bindings and hands the
+// binding backfill (LoadTasksForRepoIDWithBindingUpdates durably rewrites bindings and hands the
 // caller a publish obligation, neither of which belongs on a create path).
 // Matching is therefore textual: the retained RepoID, or a legacy row whose
 // RepoID was never written and whose ProjectPath still spells the old parent.
