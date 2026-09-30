@@ -84,38 +84,21 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 	committed := msg.err != nil && apiproto.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committed {
 		if !rebindOutcomeUnknown(msg.err) {
+			// A conflict moved a registration: the sidebar's Projects section
+			// and the row this picker returns to are both stale in every
+			// field, not just the recorded root. They rebuild ONCE — from the
+			// daemon snapshot plus the single registry read inside it — so a
+			// further registry move cannot leave the rows and the retry's
+			// named root carrying different answers (#4888 review). The
+			// snapshot fetch runs OFF the loop: local API calls carry no
+			// response deadline, and inside Update a stalled one freezes input
+			// and paint for the life of the stall. The form stays inert until
+			// the reply re-arms it.
+			var conflictRefresh tea.Cmd
 			if apiclient.IsProjectRebound(msg.err) {
-				// A conflict moved a registration: the sidebar's Projects
-				// section and the row this picker returns to are both stale in
-				// every field, not just the recorded root. Rebuild ONCE — the
-				// daemon snapshot plus the single registry read inside it —
-				// and apply that same list to both, so a further registry move
-				// cannot leave the rows and the retry's named root carrying
-				// different answers, and nothing blocks the loop on a second
-				// fetch (#4888 review).
-				data, fetchErr := allReposSnapshotFetcher()
-				fresh, degraded := m.buildProjectListFrom(data)
-				m.applySidebarProjects(fresh, degraded, fetchErr)
+				conflictRefresh = m.rebindConflictSnapshotCmd(msg)
 				if owned {
-					m.projectPickerOverlay.SetDegraded(degraded)
-					// The re-armed form names the root the rebuilt ROW carries
-					// — the read the picker installs — so the message and the
-					// retry's expected root always describe the same record.
-					// A record gone from the snapshot falls back to the
-					// daemon's refusal text.
-					text := msg.err.Error()
-					for _, row := range fresh {
-						if row.RegistryID == msg.projectID {
-							root := row.RegistryRoot
-							if root == "" {
-								root = row.Root
-							}
-							text = fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root)
-							break
-						}
-					}
-					m.projectPickerOverlay.SetRebindConflict(text, fresh)
-					return m, nil
+					return m, conflictRefresh
 				}
 			}
 			if owned {
@@ -127,9 +110,9 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 				// different picker it reads as THAT picker's result — the same
 				// reason a stale success raises no toast there. Log it instead.
 				log.WarningLog.Printf("stale rebind of project %q refused while another picker is open: %v", msg.name, msg.err)
-				return m, nil
+				return m, conflictRefresh
 			}
-			return m, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err))
+			return m, tea.Batch(conflictRefresh, m.handleError(fmt.Errorf("failed to rebind project %q: %w", msg.name, msg.err)))
 		}
 		if owned {
 			m.closeProjectPicker()
@@ -158,6 +141,67 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 	}
 	model, followCmd := m.followActiveRebind(msg)
 	return model, tea.Batch(notice, followCmd)
+}
+
+// rebindConflictSnapshotCmd fetches the cross-repo session snapshot a "rebound
+// elsewhere" rebuild needs — off the event loop, mirroring fetchSnapshotCmd's
+// all-repos poll (#4888 review). The fetcher var is captured on the loop
+// rather than read inside the goroutine, the same reason fetchSnapshotCmd
+// captures its seams: a reassignment mid-flight must not race the read.
+func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
+	fetch := allReposSnapshotFetcher
+	return func() tea.Msg {
+		data, fetchErr := fetch()
+		return rebindConflictSnapshotMsg{
+			token:     msg.token,
+			projectID: msg.projectID,
+			refusal:   msg.err,
+			data:      data,
+			fetchErr:  fetchErr,
+		}
+	}
+}
+
+// handleRebindConflictSnapshot applies the conflict-time snapshot once it
+// lands: the sidebar's Projects section always refreshes from it (a conflict
+// moved a registration whether or not a picker is still waiting), and the
+// picker rebuilds from the SAME list — but only while it still owns the reply.
+// A picker closed or swapped in between keeps nothing of this reply; the form
+// it re-arms would name a root nobody is waiting on.
+func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.Model, tea.Cmd) {
+	fresh, degraded := m.buildProjectListFrom(msg.data)
+	m.applySidebarProjects(fresh, degraded, msg.fetchErr)
+	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
+		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
+		return m, nil
+	}
+	m.projectPickerOverlay.SetDegraded(degraded)
+	// The re-armed form names the root the rebuilt ROW carries — the read the
+	// picker installs — so the message and the retry's expected root always
+	// describe the same record. A record gone from the snapshot falls back to
+	// the daemon's refusal text.
+	text := msg.refusal.Error()
+	for _, row := range fresh {
+		if row.RegistryID == msg.projectID {
+			root := row.RegistryRoot
+			if root == "" {
+				root = row.Root
+			}
+			text = fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root)
+			break
+		}
+	}
+	if msg.fetchErr != nil {
+		// The session half of the snapshot never arrived: fresh carries only
+		// the registry-side union, so rebuilding wholesale would drop every
+		// session-derived row and zero the counts the daemon still runs. Keep
+		// the picker's session-derived rows and re-attach their counts; only
+		// registry truth replaces registry truth (#4888 review).
+		m.projectPickerOverlay.SetRebindConflictPreserving(text, fresh, degraded)
+		return m, nil
+	}
+	m.projectPickerOverlay.SetRebindConflict(text, fresh)
+	return m, nil
 }
 
 // rebindOutcomeUnknown reports whether a failed rebind's outcome is not known:
