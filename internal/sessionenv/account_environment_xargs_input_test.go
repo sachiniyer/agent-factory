@@ -84,6 +84,34 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs -I{} xargs -I{} strace CODEX_HOME=/x codex", true},
 		{"xargs -I{} xargs -I {} strace CODEX_HOME=/x codex", true},
 		{"xargs -I{} xargs -i{} strace codex", true},
+		// Codex on #4980: a marker at a chain head is the program even after
+		// modeled wrappers peel off.
+		{"xargs -I{} nohup {}", true},
+		{"xargs -I{} nice -n 5 {}", true},
+		{"xargs -I{} strace nohup {}", true},
+		// getopt_long abbreviations, measured on strace 6.8 and GNU xargs
+		// 4.9. --fol is --follow-forks (no argument), so {} is strace's
+		// program; --proc/--p is --process-slot-var; --re= is --replace.
+		{"xargs -I{} strace --fol {} codex", true},
+		{"xargs -I{} strace --follow-forks xargs --proc={} codex", true},
+		{"xargs -I{} xargs --proc={} codex", true},
+		{"xargs -I{} xargs --p {} codex", true},
+		{"xargs -I{} xargs --re={} codex", true},
+		{"xargs -I{} strace --en={} codex", true},
+		// An option the tables cannot resolve may or may not take the next
+		// word, so a marker there may be the program.
+		{"xargs -I{} strace --zz {} codex", true},
+		{"xargs -I{} strace --outp {} codex", true},
+		// A link the walk cannot parse behind strace still reaches env when
+		// input completes it: nice's --adj is --adjustment.
+		{"xargs strace nice --adj", true},
+		{"xargs -I{} strace nice --adj={} codex", true},
+		// The same rule refuses a marker in any link the walk cannot parse,
+		// which is master's verdict for that link in command position
+		// (`nice -Ex codex` is unsafe there): the model cannot tell an
+		// option the binary rejects from one it accepts under a prefix.
+		{"xargs -I{} strace -f nice -E{} codex", true},
+		{"xargs strace nice -E x", true},
 		// Controls: a named command takes appended items as its arguments,
 		// and a marker that only fills a data value stays accepted.
 		{"xargs", false},
@@ -108,14 +136,19 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs -I{} strace -E A={} codex", false},
 		{"xargs -I{} strace -E --chdir={} codex", false},
 		{"xargs -I{} strace --env=A={} codex", false},
-		// A link the model cannot parse behind strace keeps the walk's
-		// verdict: the real nice rejects -E before running anything.
-		{"xargs -I{} strace -f nice -E{} codex", false},
-		{"xargs strace nice -E x", false},
+
 		{"xargs -I{} env --chdir={} codex", false},
 		{"xargs -I{} env PORT={} codex", false},
 		{"xargs -I{} xargs -n {} echo", false},
 		{"xargs -I{} xargs -I[] echo [] {}", false},
+		// Abbreviated and hidden value options consume the marker as data.
+		{"xargs -I{} strace --fol echo {}", false},
+		{"xargs -I{} strace --decode-pids {} codex", false},
+		{"xargs -I{} strace --output {} codex", false},
+		{"xargs -I{} strace --string-l {} codex", false},
+		{"xargs -I{} xargs --max-args {} echo", false},
+		// An unparseable link no input reaches keeps the walk's verdict.
+		{"xargs -I{} strace nice -E x", false},
 		// No child to run: strace with only options after the marker, and a
 		// nested xargs that names no command (it runs echo).
 		{"xargs -I{} strace -f -{} --", false},

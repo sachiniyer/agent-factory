@@ -18,18 +18,27 @@ import (
 //   - A chain that ends without naming a command hands appended items the
 //     program slot: `xargs nohup` fed `env CODEX_HOME=/x codex` runs
 //     `nohup env CODEX_HOME=/x codex`, and `xargs env A=1 nohup` does the same
-//     one link further in.
+//     one link further in. A marker at any link's head is that program:
+//     `xargs -I{} nohup {}`.
 //   - strace's -E/--env puts a variable into the traced child's environment,
 //     so input that can reach strace's option region — an appended item when
 //     strace names no command yet, or a marker in or as an option word — can
 //     override the account root: `xargs -I{} strace --env={} codex`.
 //   - A nested xargs's -I and --process-slot-var are its own env-reaching
 //     options, so an outer marker in its option region is refused.
+//   - A link the walk cannot parse is refused when input reaches it. Its
+//     binary may still accept it: getopt_long takes unambiguous prefixes, so
+//     `nice --adj` and `xargs --proc=` are real options the modeled wrappers
+//     reject. Appended items always reach it (they land at its end), and a
+//     marker reaches it when the link's words carry one.
 //
 // An unmodeled program's argv is outside this model: nothing here knows which
 // unmodeled programs exec their arguments, and refusing input after every one
 // of them would refuse `xargs rm`. Input there keeps the treatment the walk
 // gives an unknown "$x" in the same place.
+//
+// Every scan here is memoized per suffix position, so the walk stays linear
+// in the command's word count (#4966).
 
 // xargsInputKey memoizes xargsInputReaches by chain suffix and input mode.
 type xargsInputKey struct {
@@ -38,11 +47,35 @@ type xargsInputKey struct {
 	marker       string
 }
 
+// xargsNestedKey memoizes the nested-xargs option-region scan by position,
+// outer marker, and pending-value state.
+type xargsNestedKey struct {
+	word    *syntax.Word
+	marker  string
+	pending xargsNestedPending
+}
+
+type xargsNestedPending uint8
+
+const (
+	xargsNestedNone xargsNestedPending = iota
+	xargsNestedValue
+	xargsNestedDangerousValue
+)
+
+// xargsNestedResult is the scan's answer from a position: whether the marker
+// reaches an env-reaching option before the region ends, and the length of
+// the suffix left after the region.
+type xargsNestedResult struct {
+	carries bool
+	rest    int
+}
+
 // xargsChild peels the modeled wrappers off the argv xargs execs and refuses
 // it when xargs input can reach env through the chain. The peeled tail is
 // returned so the caller does not peel it again.
 func xargsChild(words []*syntax.Word, substituting bool, marker string, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
-	if substituting && xargsMarkerInNestedXargsOptions(words, marker) {
+	if substituting && memo.xargsMarkerInNestedXargsOptions(words, marker) {
 		return nil, true
 	}
 	tail, unsafe := unwrapAccountCommand(words, names, memo)
@@ -70,6 +103,10 @@ func xargsInputReaches(tail []*syntax.Word, substituting bool, marker string, na
 }
 
 func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker string, names map[string]struct{}, memo operandTailMemo) bool {
+	if substituting && xargsWordCarriesMarker(tail[0], marker) {
+		// The program this link runs is the substituted line.
+		return true
+	}
 	var next []*syntax.Word
 	switch {
 	case isAccountCommandName(tail[0], "env"):
@@ -87,7 +124,7 @@ func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker st
 		}
 		next = scan.command
 	case isAccountCommandName(tail[0], "strace"):
-		command, refuse := straceInputRegion(tail[1:], substituting, marker)
+		command, refuse := memo.straceInputRegion(tail[1:], substituting, marker)
 		if refuse {
 			return true
 		}
@@ -100,31 +137,12 @@ func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker st
 	}
 	peeled, unsafe := unwrapAccountCommand(next, names, memo)
 	if unsafe {
-		// A link the model cannot parse is one the real binary rejects, and
-		// the walk already judges it where it runs a command (behind env).
-		// strace's child was never peeled before this chain walk, so refusing
-		// every unparseable one would refuse strace children xargs input
-		// cannot reach; the verdict stays the walk's — unless appended items
-		// are what completes the link: `xargs strace nice -n` hands the
-		// first item to -n and the next to nice's command slot.
-		return !substituting && xargsItemCompletesLink(next, names, memo)
+		// Behind env the walk refuses this itself; behind strace it never
+		// peels the child, so the refusal has to come from here whenever
+		// input can reach the link.
+		return !substituting || memo.xargsMarkerAnywhere(next, marker)
 	}
 	return xargsInputReaches(peeled, substituting, marker, names, memo)
-}
-
-// xargsItemCompletesLink reports whether an unparseable chain parses once one
-// appended item follows it, i.e. whether it failed only for want of a trailing
-// operand. Every word is copied: operandTailMemo keys a suffix by its first
-// word's pointer, and these suffixes end in a word the originals do not.
-func xargsItemCompletesLink(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
-	extended := make([]*syntax.Word, 0, len(words)+1)
-	for _, word := range words {
-		copied := *word
-		extended = append(extended, &copied)
-	}
-	extended = append(extended, &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "1"}}})
-	_, unsafe := unwrapAccountCommand(extended, names, memo)
-	return !unsafe
 }
 
 // straceEnvNameCarries reports whether the marker sits in the VAR part of an
@@ -135,39 +153,34 @@ func straceEnvNameCarries(value, marker string) bool {
 }
 
 // straceShortValueFlags are the strace 6.8 short options that take an
-// argument (optstring "+a:Ab:cCdDe:E:fFhiI:kno:O:p:P:qrs:S:tTu:U:vVwxX:yYzZ").
+// argument (optstring "+a:Ab:cCdDe:E:fFhiI:kno:O:p:P:qrs:S:tTu:U:vVwxX:yYzZ",
+// read from the binary).
 const straceShortValueFlags = "abeEIoOpPsSuUX"
 
-// straceLongFlagsWithoutValue are the strace 6.8 long options that never take
-// a separate argument word. Any other `--name` without '=' is assumed to take
-// the next word, which only widens the option region: reading a value as a
-// command would end the region early and miss a later -E.
-var straceLongFlagsWithoutValue = map[string]bool{
-	"follow-forks": true, "output-separately": true, "instruction-pointer": true,
-	"stack-trace": true, "syscall-number": true, "output-append-mode": true,
-	"relative-timestamps": true, "absolute-timestamps": true, "syscall-times": true,
-	"no-abbrev": true, "strings-in-hex": true, "decode-fds": true, "decode-pids": true,
-	"summary-only": true, "summary": true, "summary-wall-clock": true, "debug": true,
-	"help": true, "seccomp-bpf": true, "tips": true, "version": true, "daemonize": true,
-	"kill-on-exit": true, "successful-only": true, "failed-only": true,
-}
+// straceValue is what the word after a value-taking strace option is.
+type straceValue uint8
 
-// straceEnvLongName reports whether a long option name selects --env.
-// getopt_long accepts any unambiguous prefix, so `--en=` is `--env=`.
-func straceEnvLongName(name string) bool {
-	return name != "" && strings.HasPrefix("env", name)
-}
+const (
+	straceNoValue straceValue = iota
+	straceDataValue
+	straceEnvValue
+	// straceUnresolvedValue follows a --name the tables cannot resolve: the
+	// next word may be its value or strace's command.
+	straceUnresolvedValue
+)
 
 // straceInputRegion walks strace's option region — strace stops parsing
 // options at its first non-option word, the traced command — and returns that
 // command's index in words, or -1 when the region runs to the end of words.
 // refuse is set when a marker can put a program in strace's command slot, or
-// can reach -E/--env with a word after it to run: as the name of the
+// can reach -E/--env with a command after it to run: as the name of the
 // variable that option sets or removes, or as an option word whose identity
 // the substituted line decides. A marker only in the value of a fixed name is
 // data; a fixed denied name is the unmodeled-wrapper scan's refusal already.
-func straceInputRegion(words []*syntax.Word, substituting bool, marker string) (int, bool) {
-	valuePending, envValuePending := false, false
+// The region belongs to one chain link and xargsInputReaches visits each link
+// once per input mode, so the walk is linear overall.
+func (memo operandTailMemo) straceInputRegion(words []*syntax.Word, substituting bool, marker string) (int, bool) {
+	pending := straceNoValue
 	for idx, word := range words {
 		literal, ok := literalShellWord(word)
 		if !ok {
@@ -175,12 +188,16 @@ func straceInputRegion(words []*syntax.Word, substituting bool, marker string) (
 			return idx, false
 		}
 		carries := substituting && strings.Contains(literal, marker)
-		childFollows := commandCanFollow(words[idx+1:])
-		if valuePending {
-			if carries && envValuePending && childFollows && straceEnvNameCarries(literal, marker) {
-				return 0, true
+		childFollows := memo.commandCanFollow(words[idx+1:])
+		if pending != straceNoValue {
+			if carries && childFollows {
+				switch {
+				case pending == straceEnvValue && straceEnvNameCarries(literal, marker),
+					pending == straceUnresolvedValue:
+					return 0, true
+				}
 			}
-			valuePending, envValuePending = false, false
+			pending = straceNoValue
 			continue
 		}
 		if carries {
@@ -200,9 +217,11 @@ func straceInputRegion(words []*syntax.Word, substituting bool, marker string) (
 				if childFollows && straceEnvNameCarries(value, marker) {
 					return 0, true
 				}
-			case strings.HasPrefix(target, "--") && straceEnvLongName(target[2:]):
+			case strings.HasPrefix(target, "--"):
+				resolved, _, resolvedKnown := resolveLongOption(target[2:], straceLongOptions)
 				_, value, _ := strings.Cut(literal, "=")
-				if childFollows && straceEnvNameCarries(value, marker) {
+				if childFollows && (!resolvedKnown || resolved == "env") &&
+					straceEnvNameCarries(value, marker) {
 					return 0, true
 				}
 			}
@@ -215,8 +234,17 @@ func straceInputRegion(words []*syntax.Word, substituting bool, marker string) (
 			return -1, false
 		case strings.HasPrefix(literal, "--"):
 			name, _, attached := strings.Cut(literal[2:], "=")
-			if !attached && !straceLongFlagsWithoutValue[name] {
-				valuePending, envValuePending = true, straceEnvLongName(name)
+			if attached {
+				continue
+			}
+			resolved, requiresArg, known := resolveLongOption(name, straceLongOptions)
+			switch {
+			case !known:
+				pending = straceUnresolvedValue
+			case requiresArg && resolved == "env":
+				pending = straceEnvValue
+			case requiresArg:
+				pending = straceDataValue
 			}
 		case strings.HasPrefix(literal, "-") && literal != "-":
 			flags := literal[1:]
@@ -225,7 +253,10 @@ func straceInputRegion(words []*syntax.Word, substituting bool, marker string) (
 					continue
 				}
 				if i+1 == len(flags) {
-					valuePending, envValuePending = true, flags[i] == 'E'
+					pending = straceDataValue
+					if flags[i] == 'E' {
+						pending = straceEnvValue
+					}
 				}
 				break
 			}
@@ -236,17 +267,49 @@ func straceInputRegion(words []*syntax.Word, substituting bool, marker string) (
 	return -1, false
 }
 
-// commandCanFollow reports whether any word could be the program a wrapper
-// runs: one that is dynamic or does not spell an option. Values of later
-// options also pass, which only over-approximates.
-func commandCanFollow(words []*syntax.Word) bool {
-	for _, word := range words {
-		literal, ok := literalShellWord(word)
-		if !ok || !strings.HasPrefix(literal, "-") || literal == "-" {
-			return true
+// commandCanFollow reports whether any word of words could be the program a
+// wrapper runs: one that is dynamic or does not spell an option. Values of
+// later options also pass, which only over-approximates. Memoized per
+// position: each answer is its own word's or the next position's.
+func (memo operandTailMemo) commandCanFollow(words []*syntax.Word) bool {
+	answer := false
+	scanned := 0
+	for ; scanned < len(words); scanned++ {
+		if cached, seen := memo.xargsCommandFollows[words[scanned]]; seen {
+			answer = cached
+			break
 		}
 	}
-	return false
+	for i := scanned - 1; i >= 0; i-- {
+		if !answer {
+			literal, ok := literalShellWord(words[i])
+			answer = !ok || !strings.HasPrefix(literal, "-") || literal == "-"
+		}
+		memo.xargsCommandFollows[words[i]] = answer
+	}
+	return answer
+}
+
+// xargsMarkerAnywhere reports whether any word of words is dynamic or
+// contains the marker anywhere — in a name, an option, or a value — memoized
+// per (position, marker).
+func (memo operandTailMemo) xargsMarkerAnywhere(words []*syntax.Word, marker string) bool {
+	answer := false
+	scanned := 0
+	for ; scanned < len(words); scanned++ {
+		if cached, seen := memo.xargsMarkerAnywhereMap[xargsMarkerKey{word: words[scanned], marker: marker}]; seen {
+			answer = cached
+			break
+		}
+	}
+	for i := scanned - 1; i >= 0; i-- {
+		if !answer {
+			literal, ok := literalShellWord(words[i])
+			answer = !ok || strings.Contains(literal, marker)
+		}
+		memo.xargsMarkerAnywhereMap[xargsMarkerKey{word: words[i], marker: marker}] = answer
+	}
+	return answer
 }
 
 // xargsShortValueFlags are GNU xargs's short options that take an argument,
@@ -261,56 +324,80 @@ const xargsShortValueFlags = "adEILnPseli"
 // runs echo, so the danger needs a command after its option region. The scan
 // matches xargs anywhere in the argv, which only over-approximates the
 // command positions.
-func xargsMarkerInNestedXargsOptions(words []*syntax.Word, marker string) bool {
+func (memo operandTailMemo) xargsMarkerInNestedXargsOptions(words []*syntax.Word, marker string) bool {
 	for start, word := range words {
 		if !isAccountCommandName(word, "xargs") {
 			continue
 		}
 		options := words[start+1:]
-		carries, end := xargsNestedRegion(options, marker)
-		if carries && commandCanFollow(options[end:]) {
+		region := memo.xargsNestedRegion(options, marker, xargsNestedNone)
+		if region.carries && memo.commandCanFollow(options[len(options)-region.rest:]) {
 			return true
 		}
 	}
 	return false
 }
 
-// xargsNestedRegion walks the xargs option region at the head of words. It
-// reports whether the marker reaches an env-reaching option there, and the
-// index of the first word past the region (after a terminating "--").
-func xargsNestedRegion(words []*syntax.Word, marker string) (bool, int) {
-	carriesMarker, dangerousPending, valuePending := false, false, false
-	for idx, option := range words {
-		literal, ok := literalShellWord(option)
+// xargsNestedRegion walks the xargs option region at the head of words from
+// the given pending state, memoized per (position, marker, state) so that
+// `-a xargs -a xargs …`, where every xargs word starts a scan over the rest,
+// stays linear.
+func (memo operandTailMemo) xargsNestedRegion(words []*syntax.Word, marker string, pending xargsNestedPending) xargsNestedResult {
+	type step struct {
+		key   xargsNestedKey
+		local bool
+	}
+	var chain []step
+	result := xargsNestedResult{rest: 0}
+	for idx := 0; ; idx++ {
+		if idx == len(words) {
+			result = xargsNestedResult{rest: 0}
+			break
+		}
+		key := xargsNestedKey{word: words[idx], marker: marker, pending: pending}
+		if cached, seen := memo.xargsNested[key]; seen {
+			result = cached
+			break
+		}
+		literal, ok := literalShellWord(words[idx])
 		if !ok {
-			return carriesMarker, idx
+			result = xargsNestedResult{rest: len(words) - idx}
+			break
 		}
 		carries := strings.Contains(literal, marker)
-		if valuePending {
-			if carries && dangerousPending {
-				carriesMarker = true
-			}
-			valuePending, dangerousPending = false, false
+		if pending != xargsNestedNone {
+			chain = append(chain, step{key: key, local: carries && pending == xargsNestedDangerousValue})
+			pending = xargsNestedNone
 			continue
 		}
 		if literal == "--" {
-			return carriesMarker, idx + 1
+			chain = append(chain, step{key: key})
+			result = xargsNestedResult{rest: len(words) - idx - 1}
+			break
 		}
 		if !strings.HasPrefix(literal, "-") || literal == "-" {
-			return carriesMarker, idx
+			result = xargsNestedResult{rest: len(words) - idx}
+			break
 		}
+		local := false
 		if carries {
 			target, known := optionMarkerTarget(literal, marker, xargsShortValueFlags)
-			if !known || xargsNestedOptionDangerous(target) {
-				carriesMarker = true
-			}
+			local = !known || xargsNestedOptionDangerous(target)
 		}
+		chain = append(chain, step{key: key, local: local})
 		if strings.HasPrefix(literal, "--") {
 			name, _, attached := strings.Cut(literal[2:], "=")
-			switch name {
-			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars", "process-slot-var":
-				if !attached {
-					valuePending, dangerousPending = true, name == "process-slot-var"
+			if attached {
+				continue
+			}
+			resolved, requiresArg, known := resolveLongOption(name, xargsLongOptions)
+			switch {
+			case !known:
+				pending = xargsNestedDangerousValue
+			case requiresArg:
+				pending = xargsNestedValue
+				if resolved == "process-slot-var" {
+					pending = xargsNestedDangerousValue
 				}
 			}
 			continue
@@ -321,48 +408,34 @@ func xargsNestedRegion(words []*syntax.Word, marker string) (bool, int) {
 				continue
 			}
 			if i+1 == len(flags) && strings.IndexByte("adEILnPs", flags[i]) >= 0 {
-				valuePending, dangerousPending = true, flags[i] == 'I'
+				pending = xargsNestedValue
+				if flags[i] == 'I' {
+					pending = xargsNestedDangerousValue
+				}
 			}
 			break
 		}
 	}
-	return carriesMarker, len(words)
+	for i := len(chain) - 1; i >= 0; i-- {
+		result.carries = result.carries || chain[i].local
+		memo.xargsNested[chain[i].key] = result
+	}
+	return result
 }
 
+// xargsNestedOptionDangerous reports whether a nested xargs option, as
+// optionMarkerTarget names it, takes the outer line where it reaches env:
+// the replace marker or --process-slot-var's variable. A long name is
+// resolved through getopt_long's prefixes (`--proc=`), and one the table
+// cannot resolve counts as dangerous.
 func xargsNestedOptionDangerous(target string) bool {
 	switch target {
-	case "-I", "-i", "--replace", "--process-slot-var":
+	case "-I", "-i":
 		return true
 	}
-	return false
-}
-
-// optionMarkerTarget names the option a marker-bearing word belongs to when
-// the text before the marker fixes it: "--name" once a '=' precedes the
-// marker, or "-X" for the first value-taking short flag before it. A word
-// that does not start with '-' returns "" (an operand or the command). known
-// is false when the substituted line can still choose the option: the marker
-// opens the word, follows a bare "-" or "--name" with no '=', or sits among
-// short flags before any value-taking one.
-func optionMarkerTarget(literal, marker, shortValueFlags string) (string, bool) {
-	prefix := literal[:strings.Index(literal, marker)]
-	switch {
-	case prefix == "" || prefix == "-":
-		return "", false
-	case strings.HasPrefix(prefix, "--"):
-		name, _, attached := strings.Cut(prefix[2:], "=")
-		if !attached {
-			return "", false
-		}
-		return "--" + name, true
-	case strings.HasPrefix(prefix, "-"):
-		for _, flag := range prefix[1:] {
-			if strings.ContainsRune(shortValueFlags, flag) {
-				return "-" + string(flag), true
-			}
-		}
-		return "", false
-	default:
-		return "", true
+	if !strings.HasPrefix(target, "--") {
+		return false
 	}
+	resolved, _, known := resolveLongOption(target[2:], xargsLongOptions)
+	return !known || resolved == "replace" || resolved == "process-slot-var"
 }

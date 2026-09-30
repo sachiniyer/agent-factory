@@ -78,6 +78,16 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"xargs -I{} echo env -u env … x", func(n int) string { return "xargs -I{} echo env" + strings.Repeat(" -u env", n) + " x" }, false},
 		{"xargs -I{} echo env … env x", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" env", n) + " x" }, false},
 		{"taskset -c 1 taskset -c 1 … x", func(n int) string { return strings.Repeat("taskset -c 1 ", n) + "x" }, false},
+		// #4978: the xargs input walk follows the chain through env and
+		// strace and scans nested xargs option regions; every scan is
+		// memoized per position (Codex on #4980: `-a xargs -a …` rescanned
+		// the rest of the argv per xargs word, 5.96s at 8,000 words).
+		{"xargs -I{} echo xargs -a … /tmp/f codex", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" xargs -a", n) + " /tmp/f codex" }, false},
+		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, false},
+		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, false},
+		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, false},
+		{"xargs -I{} strace -o {} … echo x", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -o {}", n) + " echo x" }, false},
+		{"xargs -I{} strace -f -f … {}", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -f", n) + " -{} echo" }, true},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {
