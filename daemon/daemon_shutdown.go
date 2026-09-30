@@ -37,9 +37,10 @@ func drainDaemon(
 	// readers are stop paths — EnsureDaemon's stale-daemon stop reads it and
 	// SIGTERMs, then SIGKILLs, whatever it names, which would kill a daemon
 	// mid-way through durable work. None of them needs it: RequestShutdown
-	// captured this PID before its Shutdown RPC, the per-home flock stays the
-	// singleton until this process exits, and a wedged drain is a
-	// manual-inspection case either way. Status surfaces reading the file just
+	// captured this PID before its Shutdown RPC, and every PID-less wait for
+	// this exit (WaitForShutdownCompletion(0): upgrade recovery, adopt, reset)
+	// watches the per-home flock, which stays held until this process exits.
+	// A wedged drain is a manual-inspection case either way. Status surfaces reading the file just
 	// report the daemon as stopped a moment early. RunDaemon's deferred remove
 	// stays for the warm-up exits that never reach here.
 	removeDaemonPIDFile()

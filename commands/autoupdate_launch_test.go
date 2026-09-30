@@ -412,6 +412,9 @@ func TestAutoUpdateOnLaunchStandsDownWhileOldDaemonDrains(t *testing.T) {
 	if !strings.Contains(notice, "still finishing its shutdown") || !strings.Contains(notice, "run af again") {
 		t.Fatalf("notice = %q, want the still-finishing shutdown and run-again guidance", notice)
 	}
+	if strings.Contains(notice, "and exits on its own") || !strings.Contains(notice, "may be wedged") {
+		t.Fatalf("notice = %q, must not promise the old daemon exits and must name the wedged case", notice)
+	}
 	if contents, err := os.ReadFile(tempBin); err != nil || string(contents) != "new-binary" {
 		t.Fatalf("binary contents = %q (err %v), want the update installed even though the launch stood down", contents, err)
 	}

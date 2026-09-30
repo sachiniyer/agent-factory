@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -177,8 +178,8 @@ var (
 
 // ErrShutdownIncomplete is wrapped by WaitForShutdownCompletion's error at its
 // bound: the daemon acknowledged Shutdown but has not finished tearing down. It
-// is still alive, it will exit on its own, and nothing should be started beside
-// it. Callers match it with errors.Is to report that state rather than "no
+// is still alive — normally still joining durable work and about to exit on its
+// own, though a wedged one may not — and nothing should be started beside it. Callers match it with errors.Is to report that state rather than "no
 // daemon is running" (#5007).
 var ErrShutdownIncomplete = errors.New("daemon shutdown acknowledged but not finished")
 
@@ -205,7 +206,17 @@ var ErrDaemonStillDraining = errors.New("daemon is still finishing its shutdown"
 // happens to have stopped answering, which can vanish while teardown still
 // holds the per-home lock. The argv heuristic is deliberately not re-applied
 // mid-wait: a renamed install's basename is not `af`, and dropping its PID
-// would fall back to exactly that socket race. pid == 0 polls the socket alone.
+// would fall back to exactly that socket race.
+//
+// pid == 0 waits on the per-home daemon lock instead, never on the control
+// socket. The socket going quiet is not proof of exit: drainDaemon closes it
+// BEFORE its durable joins, and the daemon holds the home lock until the
+// process is gone, so a replacement started on "socket quiet" loses the lock
+// and exits, leaving nothing once the old daemon finishes. The daemon.pid file
+// is no handle either — drainDaemon unlinks it when teardown begins. The flock
+// is held for the process's whole life and released by the kernel at exit,
+// SIGKILL included, so the lock being takeable is the positive exit signal the
+// replacement itself depends on.
 //
 // shutdownCompleteGrace is where the wait gives up and reports, never where it
 // shoots the daemon. drainDaemon deliberately JOINS root-agent creates and
@@ -214,8 +225,8 @@ var ErrDaemonStillDraining = errors.New("daemon is still finishing its shutdown"
 // those joins can run past any bound. By then drainDaemon has already closed
 // the control socket, so from outside "still alive" cannot be told apart from
 // wedged, and a SIGKILL there can corrupt session state. So a PID still alive
-// at the bound is an error, and so is a socket still answering at the bound
-// when there is no PID. Either way the caller must NOT respawn: a new daemon
+// at the bound is an error, and so is a home lock still held (or unprovable)
+// at the bound when there is no PID. Either way the caller must NOT respawn: a new daemon
 // would lose the per-home lock to the draining one and exit, leaving nothing
 // once the old one finishes. That closes the old 5s-then-respawn-anyway hole
 // (#5007): the bound ends in an error, never in a respawn beside a live daemon
@@ -239,26 +250,73 @@ func WaitForShutdownCompletion(pid int) error {
 		}
 		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
 	}
+	dir, dirErr := config.GetConfigDir()
+	lockReleased := func() bool {
+		if dirErr != nil {
+			return false // unresolvable home: never proof of exit
+		}
+		released := false
+		shutdownWaitHomeLockFn(dir).Match(
+			func() {}, func() { released = true }, func() {}, func(error) {})
+		return released
+	}
 	for time.Now().Before(deadline) {
-		if shutdownWaitPingFn() != nil {
+		if lockReleased() {
 			return nil
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
-	// Same boundary as above: the socket may have gone quiet during the last sleep.
-	if shutdownWaitPingFn() != nil {
+	// Same boundary as above: the lock may have been released during the last sleep.
+	if lockReleased() {
 		return nil
 	}
-	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownCompleteGrace)
+	if dirErr != nil {
+		return fmt.Errorf("%w: cannot resolve the AF home to confirm the daemon released its lock: %v", ErrShutdownIncomplete, dirErr)
+	}
+	return fmt.Errorf("%w: the daemon still holds this home's lock %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, shutdownCompleteGrace)
 }
 
-// shutdownWaitPIDAliveFn and shutdownWaitPingFn are WaitForShutdownCompletion's
-// liveness probes. Vars only so tests can script the exact moment a daemon
-// leaves relative to the wait's bound; production never assigns them.
+// shutdownWaitPIDAliveFn and shutdownWaitHomeLockFn are
+// WaitForShutdownCompletion's liveness probes. Vars only so tests can script the
+// exact moment a daemon leaves relative to the wait's bound; production never
+// assigns them.
 var (
 	shutdownWaitPIDAliveFn = pidLooksAlive
-	shutdownWaitPingFn     = pingDaemon
+	shutdownWaitHomeLockFn = homeLockReleased
 )
+
+// homeLockReleased asks the one question a replacement daemon's acquireHomeLock
+// will ask: could this home's daemon lock be taken right now? AnswerNo means it
+// could — the previous holder has exited — and AnswerYes that a live process
+// still holds it. A missing lock file is AnswerNo: a daemon that ever held the
+// lock created the file first, and the replacement creates and takes it. Any
+// other failure to look is Undetermined, which never counts as exit.
+//
+// Deliberately not ProbeHomeLock. That answers doctor's question — may this
+// home be DELETED — so it reads a missing file and an unrecognized filesystem
+// as unknown. Here the question is only whether the replacement would win the
+// same flock it needs, on the same host, through the same mechanism; applying
+// doctor's gates would stall every PID-less wait on a home that never ran a
+// daemon, or that lives on a filesystem outside doctor's allowlist. The probe
+// holds the lock only for the instant between its flock and its unlock.
+func homeLockReleased(dir string) ProbeAnswer {
+	f, err := os.OpenFile(daemonLockPathIn(dir), os.O_RDWR, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return AnswerNo()
+		}
+		return Undetermined(fmt.Errorf("open daemon lock: %w", err))
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return AnswerYes()
+		}
+		return Undetermined(fmt.Errorf("flock daemon lock: %w", err))
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return AnswerNo()
+}
 
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a responder
 // that is NOT quiescing counts as already serving: one reporting

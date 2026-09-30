@@ -59,8 +59,10 @@ func TestRestartDaemon_UnfinishedShutdownIsItsOwnPhase(t *testing.T) {
 }
 
 // The report must say the true thing: the old daemon is still finishing its
-// shutdown and will exit on its own — never "No daemon is running", and never
-// the start-a-daemon hint, which would race it for the home lock.
+// shutdown — never "No daemon is running", and never the start-a-daemon hint,
+// which would race it for the home lock. Nor may it promise the daemon exits:
+// a wedged one may not, so the report hedges and gives the manual path, naming
+// the PID when RequestShutdown established one.
 func TestReportUpgradeRestart_UnfinishedShutdownSaysItIsStillFinishing(t *testing.T) {
 	// Never probe the host's real daemon if a regression reaches the health
 	// fallback: answer as if nothing is verifiable.
@@ -70,20 +72,36 @@ func TestReportUpgradeRestart_UnfinishedShutdownSaysItIsStillFinishing(t *testin
 		return daemon.HealthStatus{PingErr: errors.New("dial: no such file or directory")}
 	}
 
-	var out, errOut bytes.Buffer
-	outcome := restartOutcome{
-		Shutdown:    daemon.ShutdownViaRPC,
-		FailedPhase: restartPhaseShutdownIncomplete,
+	for _, tc := range []struct {
+		name     string
+		oldPID   int
+		wantHint []string
+	}{
+		{name: "pid known", oldPID: 4242, wantHint: []string{"ps -p 4242", "kill 4242"}},
+		{name: "pid unknown", oldPID: 0, wantHint: []string{"af --daemon", "kill it"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			outcome := restartOutcome{
+				Shutdown:    daemon.ShutdownViaRPC,
+				FailedPhase: restartPhaseShutdownIncomplete,
+				OldPID:      tc.oldPID,
+			}
+			restartErr := fmt.Errorf("failed to restart daemon: %w", daemon.ErrShutdownIncomplete)
+
+			reportUpgradeRestart(&out, &errOut, outcome, restartErr, "/usr/local/bin/af")
+
+			assert.Contains(t, out.String(), "Upgraded successfully!")
+			msg := errOut.String()
+			assert.Contains(t, msg, "still finishing its shutdown")
+			assert.Contains(t, msg, "normally exits on its own")
+			assert.Contains(t, msg, "may be wedged")
+			for _, want := range tc.wantHint {
+				assert.Contains(t, msg, want)
+			}
+			assert.NotContains(t, msg, "It exits on its own", "a wedged daemon may never exit; that is a promise the report cannot keep")
+			assert.NotContains(t, msg, "No daemon is running", "the old daemon is alive; saying otherwise is the defect")
+			assert.NotContains(t, msg, startDaemonHint(), "starting a daemon now would race the draining one")
+		})
 	}
-	restartErr := fmt.Errorf("failed to restart daemon: %w", daemon.ErrShutdownIncomplete)
-
-	reportUpgradeRestart(&out, &errOut, outcome, restartErr, "/usr/local/bin/af")
-
-	assert.Contains(t, out.String(), "Upgraded successfully!")
-	msg := errOut.String()
-	assert.Contains(t, msg, "still finishing its shutdown")
-	assert.Contains(t, msg, "exits on its own")
-	assert.Contains(t, msg, "next af command starts the new daemon")
-	assert.NotContains(t, msg, "No daemon is running", "the old daemon is alive; saying otherwise is the defect")
-	assert.NotContains(t, msg, startDaemonHint(), "starting a daemon now would race the draining one")
 }

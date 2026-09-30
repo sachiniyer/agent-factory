@@ -599,9 +599,9 @@ type respawnResult struct {
 //     NOTHING IS RUNNING. Task schedules, watch scripts, and session monitoring
 //     are all stopped until something starts a daemon.
 //   - restartPhaseShutdownIncomplete: the old daemon acknowledged Shutdown but
-//     has not finished tearing down, so it is STILL ALIVE and will exit on its
-//     own; nothing was started beside it, and the next af command starts the
-//     new daemon.
+//     has not finished tearing down, so it is STILL ALIVE. It normally exits
+//     on its own (the next af command then starts the new daemon), but a
+//     wedged one may not; nothing was started beside it either way.
 //
 // "Still on the old code" and "no daemon at all" need opposite remedies, and
 // telling them apart by reading the wrapped error's text is exactly the
@@ -623,9 +623,10 @@ const (
 	restartPhaseShutdownUnknown
 	// restartPhaseShutdownIncomplete: the shutdown was acknowledged but teardown
 	// had not finished at the wait's bound (daemon.ErrShutdownIncomplete) — the
-	// old daemon may still be joining durable work. It is alive and WILL exit on
-	// its own; the respawn was withheld so nothing races it for the home lock,
-	// and the next af command starts the new daemon. Distinct from
+	// old daemon may still be joining durable work. It is alive, normally exits
+	// on its own (the next af command then starts the new daemon) but may be
+	// wedged; the respawn was withheld so nothing races it for the home lock.
+	// Distinct from
 	// restartPhaseShutdown (it never refused to stop) and restartPhaseRespawn
 	// (something is still running), and each of their messages would be false
 	// here (#5007).
@@ -784,7 +785,7 @@ func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, erro
 	// daemon's process to exit first; the SIGTERM fallback already waited for
 	// that, so the wait returns immediately on that path.
 	if err := waitForShutdownCompletionFn(oldPID); err != nil {
-		return respawnResult{}, fmt.Errorf("the old daemon is still finishing its shutdown (%w); it exits on its own, and the next af command starts the new daemon — not respawning beside it", err)
+		return respawnResult{}, fmt.Errorf("the old daemon has not finished its shutdown (%w); not respawning beside it — it normally exits on its own and the next af command starts the new daemon, but it may be wedged", err)
 	}
 	var unitErr error
 	useUnit, unitExec, gateErr := unitRestartTarget()

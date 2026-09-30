@@ -291,11 +291,11 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 
 	// 4b. Wait for the shutdown to COMPLETE, not merely to be requested. The
 	//     daemon persists its whole in-memory session set on the way out
-	//     (RunDaemon's final SaveInstances) and only closes the control socket
-	//     afterwards, on the deferred teardown — so a socket that still answers
-	//     is a daemon that may still flush. Deleting instances.json while that
-	//     is pending is how a "factory reset" hands the user their sessions
-	//     back.
+	//     (RunDaemon's final SaveInstances), and it closes its control socket
+	//     BEFORE that — so a quiet socket proves nothing. The wait watches the
+	//     per-home lock instead, which the kernel releases only when the daemon
+	//     process exits (#5007). Deleting instances.json while a flush is
+	//     pending is how a "factory reset" hands the user their sessions back.
 	if waitErr := waitForShutdownCompletionFn(0); waitErr != nil {
 		err = fmt.Errorf("the daemon did not finish shutting down: %w", waitErr)
 		fmt.Fprintln(out, "\nNothing was removed.")

@@ -116,14 +116,15 @@ func runDaemonAdopt(w io.Writer, force bool) error {
 			log.WarningLog.Printf("adopt --force: could not confirm the running daemon's supervision (%v); displacing it anyway at your request", cannotTell)
 			fmt.Fprintf(w, "warning: could not confirm the running daemon is unsupervised (%v); displacing it anyway (--force)\n", cannotTell)
 		}
-		// A detached, unsupervised daemon is serving. Stop it and wait for its
-		// control socket to go quiet so the unit's fresh daemon acquires the freed
-		// singleton lock instead of exiting against a still-live socket (#854).
+		// A detached, unsupervised daemon is serving. Stop it and wait for it to
+		// release the per-home singleton lock — which happens only when its
+		// process exits — so the unit's fresh daemon acquires the freed lock
+		// instead of exiting against a daemon still tearing down (#854, #5007).
 		if _, err := daemonStopFn(); err != nil {
 			return fmt.Errorf("failed to stop the unsupervised daemon before adopting: %w", err)
 		}
 		if err := waitForShutdownCompletionFn(0); err != nil {
-			return fmt.Errorf("the unsupervised daemon did not release the control socket, so the installed unit cannot take it over: %w", err)
+			return fmt.Errorf("the unsupervised daemon did not release its home lock (it may still be finishing its shutdown), so the installed unit cannot take it over: %w", err)
 		}
 		stoppedDetached = true
 	}

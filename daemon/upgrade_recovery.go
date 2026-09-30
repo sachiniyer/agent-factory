@@ -188,9 +188,10 @@ func recoveryHomeGuard(journal upgradetxn.Journal) error {
 // stopCandidateDaemon stops the candidate daemon so the previous binary and
 // metadata can be restored. The candidate serves this AF home's control socket
 // and pid file, so StopDaemon signals exactly it; WaitForShutdownCompletion then
-// upgrades a signalled stop into positive proof the socket is gone before the
-// caller restores anything (#854). Idempotent: with nothing running, StopDaemon
-// reports no daemon and the socket is already quiet — StopConfirmed.
+// upgrades a signalled stop into positive proof the daemon released its home
+// lock — i.e. the process is gone — before the caller restores anything (#854,
+// #5007). Idempotent: with nothing running, StopDaemon reports no daemon and
+// the lock is already free — StopConfirmed.
 func stopCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) (upgradetxn.StopOutcome, error) {
 	_ = ctx
 	return stopDaemonForRecovery(journal, "candidate")
@@ -198,7 +199,13 @@ func stopCandidateDaemon(ctx context.Context, journal upgradetxn.Journal) (upgra
 
 // stopDaemonForRecovery stops THIS home's serving daemon (the candidate on
 // rollback, or the previous daemon on forward activation) and only reports
-// StopConfirmed on positive proof the socket is gone. Both directions carry the
+// StopConfirmed on positive proof the daemon has exited: its per-home lock is
+// free. That proof does not rest on the pid file or the socket, which is what
+// makes it sound mid-teardown — drainDaemon unlinks the pid file and closes the
+// socket BEFORE its durable joins, so a StopDaemon that finds no pid file and a
+// socket that is already quiet say nothing about a daemon still draining and
+// still holding the lock. Confirming on either would let the supervisor start a
+// candidate that loses the singleton lock (#5007). Both directions carry the
 // same destructive authority: a fabricated StopConfirmed lets the supervisor
 // swap a binary or restore metadata under a live daemon, so it fails closed on a
 // home mismatch (StopUnknown) and never upgrades an unobserved stop to confirmed.
@@ -213,11 +220,12 @@ func stopDaemonForRecovery(journal upgradetxn.Journal, role string) (upgradetxn.
 	if _, err := stopDaemonFn(); err != nil {
 		return upgradetxn.StopUnknown, fmt.Errorf("stop upgrade %s daemon: %w", role, err)
 	}
-	// StopDaemon already waited on the process exit, so no PID: this wait is
-	// only confirmation that the control socket went quiet.
+	// No PID: StopDaemon may have found no pid file (drainDaemon unlinks it when
+	// teardown begins), so this wait is the proof — the home lock released,
+	// which only happens once the daemon process is gone.
 	if err := waitForShutdownFn(0); err != nil {
-		// The socket is still answering at the deadline. Report it as still
-		// running rather than confirming a stop we could not observe.
+		// The lock is still held (or unprovable) at the deadline. Report it as
+		// still running rather than confirming a stop we could not observe.
 		return upgradetxn.StopStillRunning, nil
 	}
 	return upgradetxn.StopConfirmed, nil

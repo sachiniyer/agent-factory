@@ -136,10 +136,11 @@ func adoptAfterUpgradeCommit(expectedTransactionID, canonicalExecPath string) er
 		if _, err := stopDaemonFn(); err != nil {
 			return fmt.Errorf("stop the committed candidate before handing it off: %w", err)
 		}
-		// StopDaemon already waited on the process exit, so no PID: this wait is
-		// only confirmation that the control socket went quiet.
+		// No PID: StopDaemon may have found no pid file (drainDaemon unlinks it
+		// when teardown begins), so this wait is the proof — the home lock
+		// released, which only happens once the candidate process is gone.
 		if err := waitForShutdownFn(0); err != nil {
-			return fmt.Errorf("the committed candidate did not release the control socket: %w", err)
+			return fmt.Errorf("the committed candidate did not release the home lock: %w", err)
 		}
 	case candidateAbsent:
 		// The committed candidate is genuinely gone (it committed, then exited).

@@ -9,11 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
 // Tests for #5007: the post-upgrade respawn must not start a new daemon while
@@ -557,11 +559,12 @@ func TestDrainDaemonUnlinksPIDFileBeforeJoins(t *testing.T) {
 // the loop's last sleep can see it gone.
 func scriptShutdownWaitBoundary(t *testing.T) time.Time {
 	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	prevGrace, prevPoll := shutdownCompleteGrace, shutdownCompletePoll
-	prevAlive, prevPing := shutdownWaitPIDAliveFn, shutdownWaitPingFn
+	prevAlive, prevLock := shutdownWaitPIDAliveFn, shutdownWaitHomeLockFn
 	t.Cleanup(func() {
 		shutdownCompleteGrace, shutdownCompletePoll = prevGrace, prevPoll
-		shutdownWaitPIDAliveFn, shutdownWaitPingFn = prevAlive, prevPing
+		shutdownWaitPIDAliveFn, shutdownWaitHomeLockFn = prevAlive, prevLock
 	})
 	shutdownCompleteGrace = 120 * time.Millisecond
 	shutdownCompletePoll = 40 * time.Millisecond
@@ -588,23 +591,126 @@ func TestWaitForShutdownCompletionRechecksPIDAfterFinalPoll(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionRechecksSocketAfterFinalPoll: the PID-less loop
-// has the same boundary — a socket that goes quiet during the last sleep.
-func TestWaitForShutdownCompletionRechecksSocketAfterFinalPoll(t *testing.T) {
+// TestWaitForShutdownCompletionRechecksHomeLockAfterFinalPoll: the PID-less
+// loop has the same boundary — a home lock released during the last sleep.
+func TestWaitForShutdownCompletionRechecksHomeLockAfterFinalPoll(t *testing.T) {
 	leaves := scriptShutdownWaitBoundary(t)
-	pings := 0
-	shutdownWaitPingFn = func() error {
-		pings++
+	probes := 0
+	shutdownWaitHomeLockFn = func(string) ProbeAnswer {
+		probes++
 		if time.Now().Before(leaves) {
-			return nil // still answering
+			return AnswerYes() // still held
 		}
-		return errors.New("connection refused")
+		return AnswerNo()
 	}
 
 	if err := WaitForShutdownCompletion(0); err != nil {
-		t.Fatalf("WaitForShutdownCompletion = %v, want nil: the socket went quiet during the final poll", err)
+		t.Fatalf("WaitForShutdownCompletion = %v, want nil: the lock was released during the final poll", err)
 	}
-	if pings < 2 {
-		t.Fatalf("pings = %d; the script never exercised the in-bounds loop", pings)
+	if probes < 2 {
+		t.Fatalf("lock probes = %d; the script never exercised the in-bounds loop", probes)
+	}
+}
+
+// TestWaitForShutdownCompletionNeverReadsUnprovableLockAsExit: a lock probe that
+// cannot answer is not proof of exit, however long it goes on — the wait ends
+// in ErrShutdownIncomplete, never in a respawn beside a daemon it could not see
+// leave.
+func TestWaitForShutdownCompletionNeverReadsUnprovableLockAsExit(t *testing.T) {
+	scriptShutdownWaitBoundary(t)
+	shutdownWaitHomeLockFn = func(string) ProbeAnswer {
+		return Undetermined(errors.New("flock: input/output error"))
+	}
+
+	if err := WaitForShutdownCompletion(0); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("WaitForShutdownCompletion = %v, want ErrShutdownIncomplete while the lock is unprovable", err)
+	}
+}
+
+// TestWaitForShutdownCompletionWaitsForHomeLockNotSocket (#5007 finding A): with
+// no trustworthy PID the wait must not treat a quiet control socket as exit —
+// drainDaemon closes the socket BEFORE its durable joins, while the process
+// still holds the home lock. Here there is no socket at all and a real flock is
+// held, then released: the wait must return only after the release. The old
+// socket-quiet wait returned on its first ping.
+func TestWaitForShutdownCompletionWaitsForHomeLockNotSocket(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	var released atomic.Bool
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		released.Store(true)
+		lock.release()
+	}()
+
+	if err := WaitForShutdownCompletion(0); err != nil {
+		t.Fatalf("WaitForShutdownCompletion(0): %v", err)
+	}
+	if !released.Load() {
+		t.Fatalf("WaitForShutdownCompletion(0) returned while the home lock was still held")
+	}
+}
+
+// TestStopDaemonForRecoveryConfirmsOnlyAfterHomeLockRelease (#5007 finding B):
+// drainDaemon unlinks daemon.pid and closes the socket when teardown begins, so
+// mid-drain the recovery actor's StopDaemon finds nothing to stop and the socket
+// is already quiet. StopConfirmed must still wait for the draining daemon to
+// release its home lock — confirming earlier lets the supervisor start a
+// candidate that loses the singleton lock.
+func TestStopDaemonForRecoveryConfirmsOnlyAfterHomeLockRelease(t *testing.T) {
+	home := stubForwardEnv(t)
+	journal := forwardJournal(home)
+	stopDaemonFn = func() (bool, error) { return false, nil } // no pid file: nothing to stop
+	waitForShutdownFn = WaitForShutdownCompletion
+
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	var released atomic.Bool
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		released.Store(true)
+		lock.release()
+	}()
+
+	outcome, err := stopDaemonForRecovery(journal, "previous")
+	if err != nil {
+		t.Fatalf("stopDaemonForRecovery: %v", err)
+	}
+	if outcome != upgradetxn.StopConfirmed {
+		t.Fatalf("outcome = %v, want StopConfirmed once the lock is released", outcome)
+	}
+	if !released.Load() {
+		t.Fatalf("StopConfirmed while the draining daemon still held the home lock")
+	}
+}
+
+// TestStopDaemonForRecoveryReportsStillRunningWhileLockHeld: a drain that
+// outlives the bound is StopStillRunning, never a fabricated confirmation.
+func TestStopDaemonForRecoveryReportsStillRunningWhileLockHeld(t *testing.T) {
+	home := stubForwardEnv(t)
+	journal := forwardJournal(home)
+	stopDaemonFn = func() (bool, error) { return false, nil }
+	waitForShutdownFn = WaitForShutdownCompletion
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 200 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+
+	outcome, err := stopDaemonForRecovery(journal, "previous")
+	if err != nil {
+		t.Fatalf("stopDaemonForRecovery: %v", err)
+	}
+	if outcome != upgradetxn.StopStillRunning {
+		t.Fatalf("outcome = %v, want StopStillRunning while the home lock is held", outcome)
 	}
 }

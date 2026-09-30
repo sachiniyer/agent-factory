@@ -115,7 +115,7 @@ func autoUpdateOnLaunch(cfg *config.Config) bool {
 		return true
 	}
 	if errors.Is(err, daemon.ErrShutdownIncomplete) {
-		autoUpdateNotice("af updated to v%s — the previous daemon is still finishing its shutdown and exits on its own; run af again shortly.\n", installed)
+		autoUpdateNotice("af updated to v%s — the previous daemon is still finishing its shutdown; it usually exits on its own, so run af again shortly. If it persists it may be wedged: check `ps` for a leftover `af --daemon` and relaunch once it is gone.\n", installed)
 		return false
 	}
 	reexecIntoNewBinary(installed)

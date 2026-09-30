@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,12 +13,12 @@ import (
 // Shutdown RPC acks before the daemon tears down, so a respawn that runs
 // immediately can ping the still-alive dying daemon, skip the spawn, and
 // leave nothing running. Every test points AGENT_FACTORY_HOME at a temp dir
-// so the control socket under test is private — the host's real supervised
-// daemon is never pinged, signaled, or spawned.
+// so the control socket and home lock under test are private — the host's real
+// supervised daemon is never pinged, signaled, or spawned.
 
-// TestWaitForShutdownCompletionNoDaemon: with no socket at all (the SIGTERM
-// fallback path, or a daemon that already finished tearing down), the wait
-// must return nil on its first ping rather than burning the grace.
+// TestWaitForShutdownCompletionNoDaemon: with no daemon at all — no socket and
+// no lock file, as in a home that never ran one — the PID-less wait must
+// return nil on its first probe rather than burning the grace.
 func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
@@ -30,28 +32,38 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 }
 
 // TestUpgradeRespawnWaitsForDelayedTeardown reproduces the #854 race shape
-// end to end: a fake daemon acks the Shutdown RPC but holds its control
-// socket open well past the ack (shutdownAckGrace plus a stretched teardown
-// tail). The shutdown-then-respawn sequence — RequestShutdown, wait, then
-// EnsureDaemon — must end with exactly one spawn. Pre-fix, EnsureDaemon ran
-// without the wait, pinged the still-alive socket, and returned without
-// spawning anything.
+// end to end, with #5007's tail: a fake daemon holds the home lock, acks the
+// Shutdown RPC, keeps its control socket open past the ack, then CLOSES the
+// socket and keeps holding the lock a while longer — drainDaemon's durable-join
+// tail. The shutdown-then-respawn sequence — RequestShutdown, wait, then
+// EnsureDaemon — must not proceed until the lock is released, and must end
+// with exactly one spawn. Pre-#854 EnsureDaemon pinged the still-alive socket
+// and skipped the spawn; pre-#5007 the wait returned on the quiet socket while
+// the lock was still held, so the replacement would lose it.
 func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
+	oldLock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock for the old daemon: %v", err)
+	}
+	var lockReleased atomic.Bool
 	shutdownCh := make(chan struct{})
 	closeFn, err := startControlServer(nil, nil, nil, shutdownCh)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
 	// The dying daemon's teardown tail: after the Shutdown handler closes
-	// shutdownCh (post shutdownAckGrace), keep answering on the socket a
-	// while longer before closing the listener.
+	// shutdownCh (post shutdownAckGrace), keep answering on the socket a while,
+	// close the listener, then hold the home lock through the durable joins.
 	teardownDone := make(chan struct{})
 	go func() {
 		<-shutdownCh
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		_ = closeFn()
+		time.Sleep(300 * time.Millisecond)
+		lockReleased.Store(true)
+		oldLock.release()
 		close(teardownDone)
 	}()
 	t.Cleanup(func() {
@@ -89,9 +101,12 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 	}
 
 	// The in-process fake reports this test's own PID, which the wait refuses
-	// to watch, so this exercises the socket-drain path end to end.
+	// to watch, so this exercises the PID-less home-lock path end to end.
 	if err := WaitForShutdownCompletion(pid); err != nil {
 		t.Fatalf("WaitForShutdownCompletion: %v", err)
+	}
+	if !lockReleased.Load() {
+		t.Fatalf("WaitForShutdownCompletion returned while the old daemon still held the home lock (#5007): a quiet socket is not an exit")
 	}
 	if pingDaemon() == nil {
 		t.Fatalf("old daemon still answering after WaitForShutdownCompletion returned")
@@ -105,23 +120,24 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionTimesOut: a daemon that never stops answering
-// (wedged teardown) must produce an error at the grace deadline so the caller
-// can warn — not hang forever or silently report success.
+// TestWaitForShutdownCompletionTimesOut: a daemon that never releases its home
+// lock (a long drain, or a wedged teardown) must produce ErrShutdownIncomplete
+// at the grace deadline — not hang forever or silently report success. No
+// control socket exists at all here: a quiet socket must not read as exit.
 func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
-	closeFn, err := startControlServer(nil, nil, nil, nil)
+	lock, err := acquireHomeLock()
 	if err != nil {
-		t.Fatalf("startControlServer: %v", err)
+		t.Fatalf("acquireHomeLock: %v", err)
 	}
-	t.Cleanup(func() { _ = closeFn() })
+	t.Cleanup(lock.release)
 
 	prevGrace := shutdownCompleteGrace
 	shutdownCompleteGrace = 250 * time.Millisecond
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 
-	if err := WaitForShutdownCompletion(0); err == nil {
-		t.Fatalf("expected a timeout error while the daemon socket keeps answering")
+	if err := WaitForShutdownCompletion(0); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("WaitForShutdownCompletion(0) = %v, want ErrShutdownIncomplete while the home lock is held", err)
 	}
 }
