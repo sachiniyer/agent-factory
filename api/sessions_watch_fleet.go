@@ -322,10 +322,27 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// on the complement. Restricted to OpNone because a manual swap with
 	// OpRespawning is the active-resume shape the InFlightOp axis below already
 	// holds as `working`.
+	//
+	// The LimitAgent/CurrentAgent mismatch is gated on CurrentAgent != "" because
+	// CurrentAgent is a PROJECTION-ONLY field scrubbed by ForStorage before disk
+	// persistence (session/storage.go) and not rebuilt by the disk-fallback
+	// read path (diskListSessions → ForClientRead). A genuine
+	// ParkManualAccountSwapAtLimit park read off disk therefore carries a
+	// nonempty LimitAgent (persisted) but an empty CurrentAgent, and matching the
+	// mismatch unconditionally would hold that genuine park as `working` and
+	// suppress the `usage-limited` edge whenever the daemon is unreachable. The
+	// disk-fallback genuine park still carries LimitAccount == Account (both
+	// persisted, both the incoming identity), so it does not match the
+	// LimitAccount != Account disjunct and falls through to the liveness switch
+	// below, which reports `usage-limited`. A post-respawn crash in the
+	// disk-fallback view keeps LimitAccount != Account (outgoing vs incoming,
+	// both persisted), so the LimitAccount disjunct still holds it as `working`
+	// without needing the agent comparison.
 	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual &&
 		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone &&
 		(!d.PendingAccountSwap.ReplacementPanesStarted ||
-			d.LimitAccount != d.Account || d.LimitAgent != d.CurrentAgent) {
+			d.LimitAccount != d.Account ||
+			(d.CurrentAgent != "" && d.LimitAgent != d.CurrentAgent)) {
 		return watchWorking, ""
 	}
 	// ANY operation in flight means the session is in motion, including one this

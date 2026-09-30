@@ -1150,7 +1150,76 @@ func TestClassifyWatchStop_ManualSwapPostRespawnStaleLimitStaysWorking(t *testin
 	parked.LimitAccount = "personal"
 	parked.LimitAgent = "codex"
 	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(parked)),
-		"a manual swap parked at the incoming identity's limit reports usage-limited")
+		"a manual swap parked at the incoming identity's limit still reports usage-limited")
+}
+
+// A genuine manual park read off DISK (the daemon-unavailable fallback) must
+// still report `usage-limited`, not be held as `working` by the crash-recovery
+// gate. ForStorage scrubs the projection-only CurrentAgent to "" and the
+// in-flight op to OpNone before persistence (session/storage.go), while
+// retaining the persisted LimitAgent/LimitAccount/Account.
+// diskListSessions → ForClientRead does not rebuild CurrentAgent, so a
+// disk-fallback row of a ParkManualAccountSwapAtLimit park carries a nonempty
+// LimitAgent (the incoming agent, persisted) and LimitAccount == Account (both
+// the incoming identity) but CurrentAgent == "". The crash-recovery gate must
+// not let the LimitAgent != CurrentAgent mismatch fire on that empty
+// CurrentAgent — it would hold the genuine park as `working` and make
+// `sessions watch --include-current` time out instead of reporting the
+// incoming account's quota wall whenever the daemon is unreachable.
+func TestClassifyWatchStop_DiskFallbackManualParkReportsUsageLimited(t *testing.T) {
+	// The on-disk shape of a genuine ParkManualAccountSwapAtLimit park: the
+	// respawn marked ReplacementPanesStarted, the park attributed the wall to
+	// the incoming identity (LimitAccount == Account, LimitAgent = incoming
+	// agent), and ForStorage scrubbed CurrentAgent to "" and InFlightOp to
+	// OpNone.
+	diskParked := withLiveness("s", session.LiveLimitReached)
+	diskParked.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "personal",
+		Mission:                 "continue under the new account",
+		ReplacementPanesStarted: true,
+		MissionDeliveryStatus:   session.PromptNotDelivered,
+	}
+	diskParked.InFlightOp = session.OpNone
+	diskParked.Account = "personal"
+	diskParked.CurrentAgent = "" // scrubbed by ForStorage; not rebuilt on disk read
+	diskParked.LimitAccount = "personal"
+	diskParked.LimitAgent = "codex" // persisted; nonempty while CurrentAgent is empty
+	reason, detail := classifyWatchStop(diskParked)
+	require.Equal(t, watchStopUsageLimited, reason,
+		"a genuine manual park read off disk reports usage-limited, not working — the crash-recovery gate must not fire on the scrubbed CurrentAgent")
+	require.Contains(t, detail, "usage limit",
+		"the stop carries the liveness axis's usage-limit reason")
+
+	// The watcher reports the working -> usage-limited edge on the disk
+	// fallback, not silence.
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("s")}),
+		"the working baseline establishes no transition")
+	events := w.observe([]session.InstanceData{diskParked})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopUsageLimited}, reasons(events),
+		"a session that parks at the incoming identity's limit reports usage-limited even when read off disk")
+
+	// Sanity: the disk-fallback view of a post-respawn CRASH (the outgoing
+	// identity's limit, both persisted) is still held as `working`. The
+	// LimitAccount != Account disjunct survives the disk fallback because both
+	// are persisted, so the crash does not need the agent comparison.
+	crashedDisk := withLiveness("s", session.LiveLimitReached)
+	crashedDisk.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "personal",
+		Mission:                 "continue under the new account",
+		ReplacementPanesStarted: true,
+	}
+	crashedDisk.InFlightOp = session.OpNone
+	crashedDisk.Account = "personal"
+	crashedDisk.CurrentAgent = ""     // scrubbed by ForStorage
+	crashedDisk.LimitAccount = "work" // OUTGOING identity, persisted
+	crashedDisk.LimitAgent = "aider"  // OUTGOING identity, persisted
+	require.Equal(t, watchWorking, mustReason(classifyWatchStop(crashedDisk)),
+		"a post-respawn crash read off disk, carrying the outgoing identity's limit, is still held as working")
 }
 
 // A crash-recovered MANUAL swap whose replacement HAD started (the post-respawn
