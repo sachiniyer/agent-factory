@@ -123,6 +123,9 @@ func TestRebindConflictWithAVanishedRecordStillRebuildsTheList(t *testing.T) {
 
 	require.Same(t, displayed, h.projectPickerOverlay, "a conflict is a refusal: the picker stays open")
 	assert.False(t, displayed.RebindPending(), "a definitive refusal re-arms the form")
+	// The daemon's full refusal is longer than the overlay's rendered line
+	// width — widen it so the text the form re-armed on is visible.
+	displayed.SetWidth(200)
 	assert.Contains(t, displayed.Render(), "rebound elsewhere", "the daemon's refusal text re-arms the form")
 
 	// Esc back to the list: the rebuild ran even with the record gone, so no
