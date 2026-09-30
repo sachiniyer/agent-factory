@@ -322,8 +322,17 @@ func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 		return changed
 	}
 	if !reflect.DeepEqual(m.store.GetTasks(), tasks) {
+		countChanged := m.store.NumTasks() != len(tasks)
 		m.store.SetTasks(tasks)
 		changed = true
+		if countChanged {
+			// The task count feeds the rail's automations-section height
+			// (#1126), read only in relayout — reflow on this poll, as the
+			// TUI's own write paths do, so a CLI-added first task appears and
+			// a removed last one goes (#4965). A same-count edit leaves every
+			// grid input alone, so the 750ms poll doesn't churn the layout.
+			m.relayout()
+		}
 	}
 	// A held draft keeps the pane's list different from disk, so the pane, not
 	// this comparison, says whether the reconcile changed anything visible.
