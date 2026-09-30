@@ -83,23 +83,6 @@ func (memo operandTailMemo) xargsLiteralMarkerFollows(words []*syntax.Word, mark
 	return answer
 }
 
-// xargsMarkerLimit bounds the distinct replace markers one walk follows.
-// Every per-marker question (which words carry it, where the first one sits)
-// is a scan of the remaining argv, memoized per (position, marker), so a
-// command nesting n xargs with n different markers costs n scans: Codex on
-// #4980 measured `xargs -IM000000Z xargs -IM000001Z … echo` at 18s for 2,000
-// layers, and master's own env-operand scan has the same shape. Real commands
-// nest one or two; past the limit the walk fails closed, as
-// shadowedTailOperandLimit does for childless tails.
-const xargsMarkerLimit = 8
-
-// xargsMarkerLimitExceeded records marker as followed and reports whether the
-// walk has now followed more distinct markers than xargsMarkerLimit.
-func (memo operandTailMemo) xargsMarkerLimitExceeded(marker string) bool {
-	memo.xargsMarkersFollowed[marker] = struct{}{}
-	return len(memo.xargsMarkersFollowed) > xargsMarkerLimit
-}
-
 // xargsItemParam names the synthetic "$xargs_item" parameter. The parser never
 // produces this pointer, so it identifies a substituted marker and nothing else.
 var xargsItemParam = &syntax.Lit{Value: "xargs_item"}
@@ -150,3 +133,52 @@ func hasXargsItemWord(words []*syntax.Word) bool {
 // is parsed. It is neither an option nor an assignment, so env's parse ends at
 // it at the latest.
 const xargsItemEnvPlaceholder = "af-xargs-item"
+
+// xargsReplaceChild judges the argv of an xargs whose options set a replace
+// marker, and returns what the walk continues with. state.marker is the
+// walk's long-standing reading; state.replaceMarker and
+// state.replaceCancelled are the real binaries' (unwrapXargs explains the
+// difference), and every reading is judged.
+func xargsReplaceChild(words []*syntax.Word, state xargsLoopState, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	if state.replaceCancelled {
+		// GNU appends input instead, so env's operand region and the chain
+		// are judged the way appended input reaches them too: `xargs -I{}
+		// -n2 env` runs `env ITEM…` and `xargs -I{} -n2 nohup` hands nohup
+		// its program. BSD still substitutes, so the replace-mode checks
+		// below run as well (Codex on #4979).
+		appended := xargsLoopState{markerKnown: true, marker: "{}"}
+		if xargsEnvOperandsFed(words, appended, names, memo) {
+			return nil, true
+		}
+		if _, unsafe := xargsChild(words, false, "", names, memo); unsafe {
+			return nil, true
+		}
+	}
+	if state.replaceMarker != state.marker {
+		// A later bare -i/--replace switched GNU's marker back to {}.
+		gnu := xargsLoopState{substituting: true, markerKnown: state.markerKnown, marker: state.replaceMarker}
+		if xargsEnvOperandsFed(words, gnu, names, memo) {
+			return nil, true
+		}
+	}
+	if !state.markerKnown || memo.xargsMarkerLimitExceeded(state.replaceMarker) {
+		return nil, true
+	}
+	// Two analyses of the same substitution, each refusal-only, so both must
+	// pass. xargsChild follows the chain with the marker as literal text
+	// (#4978); xargsSubstitutedArgv spells each substituted initial argument
+	// as an unknown word for the rest of the walk (#4977).
+	tail, unsafe := xargsChild(words, true, state.replaceMarker, names, memo)
+	if unsafe {
+		return nil, true
+	}
+	argv, unsafe := memo.xargsSubstitutedArgv(words, state.markerKnown, state.replaceMarker)
+	if unsafe {
+		return nil, true
+	}
+	if len(argv) == len(words) && (len(argv) == 0 || argv[0] == words[0]) {
+		// Nothing was substituted: argv is words, which xargsChild peeled.
+		return tail, false
+	}
+	return argv, false
+}

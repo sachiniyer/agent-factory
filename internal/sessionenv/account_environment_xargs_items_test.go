@@ -107,7 +107,8 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{} env codex {}", false},
 		{"xargs -I{} env PORT={} codex", false},
 		{"xargs -I{} echo PORT={}", false},
-		{"xargs -I{} strace {}", false},
+		// strace is modeled (#4978), so {} here is its program.
+		{"xargs -I{} strace {}", true},
 		{"xargs -I{}", false},
 		{"xargs -I{} xargs -I[] echo []", false},
 		// xargs's own COMMAND word is never substituted, so the marker there

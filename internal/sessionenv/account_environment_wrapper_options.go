@@ -181,13 +181,16 @@ func xargsWordCarriesMarker(word *syntax.Word, marker string) bool {
 // word's name-or-option text: its part before the first '='. A marker only in
 // an assignment's value feeds data. A marker that itself contains '=' is
 // replaced wherever it occurs — GNU xargs 4.9 turns `A=b` into `AXXb` under
-// `-I=` — so there any occurrence counts (#4977).
+// `-I=` — so there any occurrence counts (#4977). --unset's value is a name
+// env removes, not data (#4978): `env --unset={}` fed CODEX_HOME drops the
+// account root.
 func xargsMarkerInName(literal, marker string) bool {
 	if strings.Contains(marker, "=") {
 		return strings.Contains(literal, marker)
 	}
-	namePart, _, _ := strings.Cut(literal, "=")
-	return strings.Contains(namePart, marker)
+	namePart, value, _ := strings.Cut(literal, "=")
+	return strings.Contains(namePart, marker) ||
+		(namePart == "--unset" && strings.Contains(value, marker))
 }
 
 // xargsCountCancelsReplace reports whether an -n/--max-args value may cancel

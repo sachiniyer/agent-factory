@@ -855,30 +855,11 @@ options:
 		return run.done(nil, true)
 	}
 	if !substituting {
-		return run.done(words, false)
+		return run.done(xargsChild(words, false, "", names, memo))
 	}
-	if replaceCancelled {
-		// GNU appends input instead, so env's operand region is judged the
-		// way appended input reaches it too: `xargs -I{} -n2 env` runs
-		// `env ITEM…`. BSD still substitutes, so the replace-mode checks
-		// below run as well (Codex on #4979).
-		appended := xargsLoopState{markerKnown: true, marker: "{}"}
-		if xargsEnvOperandsFed(words, appended, names, memo) {
-			return run.done(nil, true)
-		}
-	}
-	if replaceMarker != marker {
-		// A later bare -i/--replace switched GNU's marker back to {}.
-		gnu := xargsLoopState{substituting: true, markerKnown: markerKnown, marker: replaceMarker}
-		if xargsEnvOperandsFed(words, gnu, names, memo) {
-			return run.done(nil, true)
-		}
-	}
-	if memo.xargsMarkerLimitExceeded(replaceMarker) {
-		return run.done(nil, true)
-	}
-	argv, unsafe := memo.xargsSubstitutedArgv(words, markerKnown, replaceMarker)
-	return run.done(argv, unsafe)
+	replace := xargsLoopState{substituting: true, markerKnown: markerKnown, marker: marker,
+		replaceCancelled: replaceCancelled, replaceMarker: replaceMarker}
+	return run.done(xargsReplaceChild(words, replace, names, memo))
 }
 
 // isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or
