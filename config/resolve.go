@@ -109,6 +109,48 @@ func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
 	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
 }
 
+// ResolveConfigForRepoContext is ResolveConfigForRepo bounded by ctx: the git
+// subprocesses inside a RepoContext already carry their own deadlines, but the
+// resolution itself is ordinary file I/O — global/legacy/checked-in/personal
+// TOML — that an unavailable mount can stall indefinitely. A caller that must
+// answer (the TUI's off-loop refresh) bounds the read here rather than leaking
+// a goroutine on every retry (#4889 review). Same pattern as
+// resolveConfigForRepoInspectionWithGlobalAndPersonalContext; the observation
+// record is kept because this is the runtime, not inspection, resolve.
+func ResolveConfigForRepoContext(ctx context.Context, repo *RepoContext) (*ResolvedConfig, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required for bounded repo resolution")
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve repository config: %w", err)
+	}
+	type result struct {
+		resolved *ResolvedConfig
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resolved, err := resolveConfigForRepo(repo, recordInRepoLoadObservation)
+		done <- result{resolved: resolved, err: err}
+	}()
+	select {
+	case outcome := <-done:
+		return outcome.resolved, outcome.err
+	case <-ctx.Done():
+		// A completed read is an answer even if its caller's deadline became
+		// ready at the same instant. Prefer it before failing the resolve.
+		select {
+		case outcome := <-done:
+			return outcome.resolved, outcome.err
+		default:
+			return nil, fmt.Errorf("resolve repository config: %w", ctx.Err())
+		}
+	}
+}
+
 // ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable
 // in-repo load observation.
 func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) {

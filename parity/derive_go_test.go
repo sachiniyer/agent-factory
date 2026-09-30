@@ -70,6 +70,7 @@ var auditedRequests = map[string]reflect.Type{
 	"HandoffSessionRequest":         reflect.TypeOf(daemon.HandoffSessionRequest{}),
 	"KillSessionRequest":            reflect.TypeOf(daemon.KillSessionRequest{}),
 	"ListBackendsRequest":           reflect.TypeOf(daemon.ListBackendsRequest{}),
+	"ListProgramsRequest":           reflect.TypeOf(daemon.ListProgramsRequest{}),
 	"ListTasksRequest":              reflect.TypeOf(daemon.ListTasksRequest{}),
 	"PauseStatusPollRequest":        reflect.TypeOf(daemon.PauseStatusPollRequest{}),
 	"PingRequest":                   reflect.TypeOf(daemon.PingRequest{}),
