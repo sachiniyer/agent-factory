@@ -393,6 +393,14 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintln(errOut, "No daemon was found and its process could not be verified either, so this upgrade may or may not have reached one.")
 		fmt.Fprintln(errOut, "Check with `af daemon status` before assuming either way.")
 		return
+	case restartPhaseShutdownIncomplete:
+		// Neither "would not stop" nor "nothing is running": the old daemon
+		// acknowledged the shutdown and is still finishing it (#5007). Saying no
+		// daemon is running would be false, and starting one now would race it.
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintf(errOut, "The old daemon is still finishing its shutdown (it may be completing in-flight session work): %v\n", restartErr)
+		fmt.Fprintln(errOut, "It exits on its own, and the next af command starts the new daemon from the upgraded binary.")
+		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.
 		fmt.Fprintln(out, "Upgraded successfully!")

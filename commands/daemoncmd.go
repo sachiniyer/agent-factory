@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -597,6 +598,10 @@ type respawnResult struct {
 //   - restartPhaseRespawn: the old daemon stopped but no new one came up, so
 //     NOTHING IS RUNNING. Task schedules, watch scripts, and session monitoring
 //     are all stopped until something starts a daemon.
+//   - restartPhaseShutdownIncomplete: the old daemon acknowledged Shutdown but
+//     has not finished tearing down, so it is STILL ALIVE and will exit on its
+//     own; nothing was started beside it, and the next af command starts the
+//     new daemon.
 //
 // "Still on the old code" and "no daemon at all" need opposite remedies, and
 // telling them apart by reading the wrapped error's text is exactly the
@@ -616,6 +621,15 @@ const (
 	// may not exist — or, read the other way, lets them wait for one that is
 	// already gone. Both remedies are wrong when the answer is "we could not tell".
 	restartPhaseShutdownUnknown
+	// restartPhaseShutdownIncomplete: the shutdown was acknowledged but teardown
+	// had not finished at the wait's bound (daemon.ErrShutdownIncomplete) — the
+	// old daemon may still be joining durable work. It is alive and WILL exit on
+	// its own; the respawn was withheld so nothing races it for the home lock,
+	// and the next af command starts the new daemon. Distinct from
+	// restartPhaseShutdown (it never refused to stop) and restartPhaseRespawn
+	// (something is still running), and each of their messages would be false
+	// here (#5007).
+	restartPhaseShutdownIncomplete
 )
 
 // restartOutcome is the whole story of a shutdown-then-respawn: how the old
@@ -663,6 +677,9 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	outcome.Respawn = respawn
 	if err != nil {
 		outcome.FailedPhase = restartPhaseRespawn
+		if errors.Is(err, daemon.ErrShutdownIncomplete) {
+			outcome.FailedPhase = restartPhaseShutdownIncomplete
+		}
 		return outcome, fmt.Errorf("failed to restart daemon: %w", err)
 	}
 	outcome.Respawned = true

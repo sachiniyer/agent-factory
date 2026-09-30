@@ -175,6 +175,20 @@ var (
 	shutdownCompletePoll  = shutdownAckGrace
 )
 
+// ErrShutdownIncomplete is wrapped by WaitForShutdownCompletion's error at its
+// bound: the daemon acknowledged Shutdown but has not finished tearing down. It
+// is still alive, it will exit on its own, and nothing should be started beside
+// it. Callers match it with errors.Is to report that state rather than "no
+// daemon is running" (#5007).
+var ErrShutdownIncomplete = errors.New("daemon shutdown acknowledged but not finished")
+
+// ErrDaemonStillDraining is wrapped by EnsureDaemon's error when the daemon on
+// the control socket reported DaemonPhaseQuiescing and was still there at the
+// drain-wait deadline. It is finishing durable work (drainDaemon joins
+// root-agent creates and admitted mutations, #3721), so it must not be stopped
+// or killed to make room; the caller should retry shortly, once it has exited.
+var ErrDaemonStillDraining = errors.New("daemon is still finishing its shutdown")
+
 // WaitForShutdownCompletion blocks until the daemon a Shutdown was sent to has
 // actually exited. The Shutdown RPC acknowledges before the daemon tears down
 // (shutdownAckGrace plus the teardown tail), so a caller that respawns
@@ -218,7 +232,7 @@ func WaitForShutdownCompletion(pid int) error {
 			}
 			time.Sleep(shutdownCompletePoll)
 		}
-		return fmt.Errorf("daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", pid, shutdownCompleteGrace)
+		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
 	}
 	for time.Now().Before(deadline) {
 		if pingDaemon() != nil {
@@ -226,7 +240,7 @@ func WaitForShutdownCompletion(pid int) error {
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
-	return fmt.Errorf("daemon control socket still answering %s after shutdown was acknowledged", shutdownCompleteGrace)
+	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownCompleteGrace)
 }
 
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a responder
@@ -236,6 +250,7 @@ func WaitForShutdownCompletion(pid int) error {
 // responder it waits (bounded) for the exit and reports false; the per-home
 // lock the caller takes next arbitrates a drain that outlived the bound — a
 // held lock is a non-zero exit, which the unit's Restart=on-failure retries.
+// Unlike EnsureDaemon this never stops anything, so proceeding is safe here.
 func daemonAlreadyServing() bool {
 	resp, err := pingDaemonResponse()
 	if err != nil {
@@ -245,7 +260,9 @@ func daemonAlreadyServing() bool {
 		return true
 	}
 	log.InfoLog.Printf("daemon pid %d on the control socket is draining after shutdown; waiting for it to exit", resp.PID)
-	waitForDrainingDaemonExit(resp.PID, time.Now().Add(shutdownCompleteGrace))
+	if !waitForDrainingDaemonExit(resp.PID, time.Now().Add(shutdownCompleteGrace)) {
+		log.InfoLog.Printf("daemon pid %d is still draining at the bound; proceeding to home-lock arbitration", resp.PID)
+	}
 	return false
 }
 
@@ -253,20 +270,25 @@ func daemonAlreadyServing() bool {
 // DaemonPhaseQuiescing to finish leaving, bounded by deadline. With a PID —
 // PingResponse.PID, always self-reported, so trusted without the argv basename
 // heuristic a renamed install would fail — it waits for that process to exit;
-// without one it waits for the control socket to stop answering. It never errors: callers
-// fall through afterwards, and the per-home lock and socket liveness arbitrate
-// a drain that outlived the bound.
-func waitForDrainingDaemonExit(pid int, deadline time.Time) {
+// without one it waits for the control socket to stop answering. It reports
+// true once the responder is gone and false if it is still there at deadline;
+// it never signals anything. What a false means is the caller's call: RunDaemon
+// proceeds to the per-home lock, which only arbitrates; EnsureDaemon reports
+// ErrDaemonStillDraining rather than proceed into its stop path.
+func waitForDrainingDaemonExit(pid int, deadline time.Time) bool {
 	if pid == os.Getpid() {
 		pid = 0
 	}
-	for time.Now().Before(deadline) {
+	for {
 		if pid > 0 {
 			if !pidLooksAlive(pid) {
-				return
+				return true
 			}
 		} else if pingDaemon() != nil {
-			return
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
 		}
 		time.Sleep(shutdownCompletePoll)
 	}

@@ -145,8 +145,14 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 		// not serve this home, and returning nil would strand the caller with no
 		// daemon once it exits. Wait for it to go, leaving a sliver of the
 		// admission budget for the spawn, then proceed as if the ping failed.
+		// The drain deadline is where this REPORTS, never where it proceeds: the
+		// launch path below stops a stale daemon (SIGTERM, then SIGKILL), and a
+		// daemon still draining is joining durable work a kill would corrupt.
 		log.InfoLog.Printf("daemon pid %d on the control socket is draining after shutdown; waiting for it to exit before launching", resp.PID)
-		waitForDrainingDaemonExit(resp.PID, drainWaitDeadline(deadline))
+		drainDeadline := drainWaitDeadline(deadline)
+		if !waitForDrainingDaemonExit(resp.PID, drainDeadline) {
+			return fmt.Errorf("%w: daemon pid %d was still finishing durable work at %s and must not be killed to make room; retry shortly", ErrDaemonStillDraining, resp.PID, drainDeadline.Format(time.RFC3339))
+		}
 	}
 	if admissionDeadlineExpired(deadline) {
 		return daemonAdmissionDeadlineError()
@@ -305,7 +311,8 @@ var errDaemonDraining = errors.New("daemon is shutting down")
 // from waiting on a draining daemon, so the launch that follows still runs.
 const drainWaitSpawnReserve = 500 * time.Millisecond
 
-// drainWaitDeadline bounds EnsureDaemon's wait for a draining responder: the
+// drainWaitDeadline bounds EnsureDaemon's wait for a draining responder — where
+// it reports ErrDaemonStillDraining, never where it proceeds to a launch: the
 // admission deadline less drainWaitSpawnReserve, or shutdownCompleteGrace when
 // the caller set no deadline.
 func drainWaitDeadline(deadline time.Time) time.Time {

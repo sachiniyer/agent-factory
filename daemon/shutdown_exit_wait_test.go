@@ -117,8 +117,9 @@ func TestWaitForShutdownCompletionNeverSignalsAtBound(t *testing.T) {
 			}
 			pid, exited := startFakeAFDaemon(t, daemonHome, "sleep 60; :")
 
-			if err := WaitForShutdownCompletion(pid); err == nil {
-				t.Fatalf("WaitForShutdownCompletion(%d) returned nil while the daemon is still running", pid)
+			err := WaitForShutdownCompletion(pid)
+			if !errors.Is(err, ErrShutdownIncomplete) {
+				t.Fatalf("WaitForShutdownCompletion(%d) = %v, want an error wrapping ErrShutdownIncomplete while the daemon is still running", pid, err)
 			}
 			if !pidLooksAlive(pid) {
 				t.Fatalf("daemon pid %d is gone after the wait; the bound must never signal it", pid)
@@ -291,14 +292,18 @@ func TestWaitForDrainingDaemonExit(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pid, _ := startFakeAFDaemon(t, home, "sleep 0.4; exit 0")
-	waitForDrainingDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout))
+	if !waitForDrainingDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout)) {
+		t.Fatalf("waitForDrainingDaemonExit reported pid %d still there after it exited", pid)
+	}
 	if pidLooksAlive(pid) {
 		t.Fatalf("waitForDrainingDaemonExit returned while pid %d was still alive", pid)
 	}
 
 	wedged, _ := startFakeAFDaemon(t, home, "sleep 60; :")
 	start := time.Now()
-	waitForDrainingDaemonExit(wedged, time.Now().Add(200*time.Millisecond))
+	if waitForDrainingDaemonExit(wedged, time.Now().Add(200*time.Millisecond)) {
+		t.Fatalf("waitForDrainingDaemonExit reported a still-running pid %d as gone", wedged)
+	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("waitForDrainingDaemonExit overran its bound: %s", elapsed)
 	}
@@ -362,6 +367,7 @@ func TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary(t *testing.T) {
 // models a Ping that errors, so RequestShutdown's fallbacks are exercised.
 type preShutdownPIDControl struct {
 	pingPID   int
+	pingPhase DaemonPhase
 	pingFails bool
 }
 
@@ -371,6 +377,7 @@ func (c *preShutdownPIDControl) Ping(_ PingRequest, resp *PingResponse) error {
 	}
 	resp.OK = true
 	resp.PID = c.pingPID
+	resp.Phase = c.pingPhase
 	return nil
 }
 
@@ -472,5 +479,39 @@ func TestRequestShutdownFallsBackToVerifiedPIDFileWhenPingFails(t *testing.T) {
 	}
 	if result != ShutdownViaRPC || pid != fakePID {
 		t.Fatalf("RequestShutdown = (%v, %d), want (ShutdownViaRPC, %d) from the verified PID file", result, pid, fakePID)
+	}
+}
+
+// TestEnsureDaemonRefusesToRaceStillDrainingDaemon: a responder still reporting
+// DaemonPhaseQuiescing at the drain-wait deadline is finishing durable work
+// (#3721). EnsureDaemon must report ErrDaemonStillDraining and leave it alone —
+// not fall through to its launch path, whose stale-daemon stop SIGTERMs the PID
+// file's daemon and escalates to SIGKILL. The PID file here names the draining
+// fake, so the old fall-through killed it.
+func TestEnsureDaemonRefusesToRaceStillDrainingDaemon(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv rewrite needs /proc to observe")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	fakePID, _ := startFakeAFDaemon(t, home, "sleep 60; :")
+	writeTestPIDFile(t, fakePID)
+	startFakeControlService(t, &preShutdownPIDControl{pingPID: fakePID, pingPhase: DaemonPhaseQuiescing})
+
+	launches := 0
+	launch := func() error {
+		launches++
+		return errors.New("test launcher: must not be reached")
+	}
+	err := ensureDaemonWithLauncherUntil(launch, time.Now().Add(1500*time.Millisecond))
+	if !errors.Is(err, ErrDaemonStillDraining) {
+		t.Fatalf("ensure against a still-draining daemon = %v, want ErrDaemonStillDraining", err)
+	}
+	if launches != 0 {
+		t.Fatalf("launches = %d, want 0 while the old daemon is still draining", launches)
+	}
+	if !pidLooksAlive(fakePID) {
+		t.Fatalf("the draining daemon (pid %d) was stopped; it must be left to finish", fakePID)
 	}
 }
