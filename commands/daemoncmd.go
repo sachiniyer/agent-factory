@@ -756,8 +756,14 @@ func canonicalExec(p string) string {
 // where nothing was running and "no enabled tasks" means there is nothing to
 // start.
 //
-// oldPID is the stopped daemon's PID as RequestShutdown reported it (0 when
-// unknown); the wait below watches that process exit.
+// The one exception is a shutdown that has not finished: oldPID (the stopped
+// daemon's PID as RequestShutdown reported it, 0 when unknown) is waited on
+// first, and if the wait reports the old daemon still running at its bound,
+// this returns that error WITHOUT respawning. A daemon past the bound is
+// usually still joining durable work in drainDaemon, with its control socket
+// already closed, so quiescing-aware startup checks cannot see it: a respawn
+// would lose the per-home lock to it and exit, and the old daemon's own exit
+// would then leave nothing running (#5007).
 func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, error) {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
 	// control socket can still answer pings here. Respawning into that window
@@ -765,13 +771,9 @@ func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, erro
 	// guard — mistake the dying daemon for a live one and skip the spawn,
 	// leaving no daemon at all once it exits (#854, #5007). Wait for the old
 	// daemon's process to exit first; the SIGTERM fallback already waited for
-	// that, so the wait returns immediately on that path. A daemon wedged past
-	// the wait's bound is escalated inside it. If the exit still cannot be
-	// confirmed, warn and respawn anyway rather than wedge the upgrade: the old
-	// daemon answers pings as quiescing, so the respawn's own startup checks wait
-	// it out, and the per-home lock arbitrates a drain that outlives them.
+	// that, so the wait returns immediately on that path.
 	if err := waitForShutdownCompletionFn(oldPID); err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: could not confirm the old daemon exited: %v; respawning anyway — the new daemon waits out a still-draining one at startup, so run af again only if schedules stay dark", err)
+		return respawnResult{}, fmt.Errorf("the old daemon is still finishing its shutdown (%w); it exits on its own, and the next af command starts the new daemon — not respawning beside it", err)
 	}
 	var unitErr error
 	useUnit, unitExec, gateErr := unitRestartTarget()

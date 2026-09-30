@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -178,18 +179,15 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 // control socket to die before EITHER respawn branch runs — otherwise the new
 // daemon (ad-hoc EnsureDaemon ping or the unit-restarted daemon's startup ping
 // guard) sees the dying daemon as alive, skips the spawn, and nothing is left
-// running once it exits. Both branches are exercised; a wait timeout must
-// degrade to a respawn attempt, never a skipped one.
+// running once it exits. Both branches are exercised.
 func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		installed bool
-		waitErr   error
 		wantStep  string
 	}{
 		{name: "ad-hoc branch", installed: false, wantStep: "ensure"},
 		{name: "unit branch", installed: true, wantStep: "restart"},
-		{name: "wait timeout still respawns", installed: false, waitErr: errors.New("daemon control socket still answering"), wantStep: "ensure"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubRespawnCollaborators(t, tc.installed, nil)
@@ -198,7 +196,7 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 			waitForShutdownCompletionFn = func(pid int) error {
 				seq = append(seq, "wait")
 				gotPID = pid
-				return tc.waitErr
+				return nil
 			}
 			prevRestart, prevEnsure := restartAutostartUnitFn, ensureDaemonFromPathFn
 			restartAutostartUnitFn = func() error {
@@ -221,6 +219,31 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 			// socket (#5007): the pid handed to the respawn reaches the wait.
 			if gotPID != 4242 {
 				t.Fatalf("shutdown wait got pid %d, want 4242 (the stopped daemon's pid)", gotPID)
+			}
+		})
+	}
+}
+
+// TestRespawnAfterUpgradeDoesNotRespawnBesideUnfinishedShutdown pins the
+// reversal of the old warn-and-respawn contract (#5007): a wait that reports
+// the old daemon still running at its bound means it is usually still joining
+// durable work with its control socket already closed. A respawn then would
+// lose the per-home lock to it and exit, leaving nothing once the old daemon
+// finishes — so the respawn must return the error and start nothing, on
+// either branch.
+func TestRespawnAfterUpgradeDoesNotRespawnBesideUnfinishedShutdown(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unit installed=%v", installed), func(t *testing.T) {
+			restartCalls, ensureCalls := stubRespawnCollaborators(t, installed, nil)
+			waitErr := errors.New("daemon pid 4242 still running 60s after shutdown was acknowledged")
+			waitForShutdownCompletionFn = func(int) error { return waitErr }
+
+			_, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 4242)
+			if !errors.Is(err, waitErr) {
+				t.Fatalf("respawnDaemonAfterUpgrade error = %v, want it to wrap the wait error", err)
+			}
+			if *restartCalls != 0 || *ensureCalls != 0 {
+				t.Fatalf("unit restarts = %d, ad-hoc spawns = %d; want 0 and 0 while the old daemon is still shutting down", *restartCalls, *ensureCalls)
 			}
 		})
 	}

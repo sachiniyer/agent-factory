@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -163,7 +162,8 @@ func ClassifyShutdownTarget(pingErr error) ProbeAnswer {
 // shutdownCompleteGrace bounds WaitForShutdownCompletion; shutdownCompletePoll
 // is the cadence. The mechanism is the exit signal — the stopped daemon's PID
 // going away, or, without a PID, its control socket going quiet. The bound only
-// stops a wedged teardown from hanging the caller forever, so it is generous: a
+// stops a long or wedged teardown from hanging the caller forever (it reports,
+// never signals — see WaitForShutdownCompletion), so it is generous: a
 // busy daemon's teardown (watchers, store flush, dozens of tmux clients) has
 // outlasted a 5s budget in production (#5007). Package vars rather than
 // constants so tests can shorten the timeout path, mirroring
@@ -174,10 +174,6 @@ var (
 	shutdownCompleteGrace = 60 * time.Second
 	shutdownCompletePoll  = shutdownAckGrace
 )
-
-// shutdownKillConfirmGrace bounds how long WaitForShutdownCompletion waits for a
-// SIGKILLed daemon to disappear from the process table.
-const shutdownKillConfirmGrace = 2 * time.Second
 
 // WaitForShutdownCompletion blocks until the daemon a Shutdown was sent to has
 // actually exited. The Shutdown RPC acknowledges before the daemon tears down
@@ -197,18 +193,22 @@ const shutdownKillConfirmGrace = 2 * time.Second
 // mid-wait: a renamed install's basename is not `af`, and dropping its PID
 // would fall back to exactly that socket race. pid == 0 polls the socket alone.
 //
-// At shutdownCompleteGrace a daemon that acknowledged Shutdown but is still
-// alive is wedged: it is SIGKILLed, after re-verifying it is an af daemon of
-// this uid serving this AF home, and the kill is confirmed. That escalation is
-// the only place argv is re-verified — the TOCTOU guard against signaling a
-// recycled PID. So the old
-// 5s-then-respawn-anyway hole (#5007) is closed — a daemon still answering at
-// the bound means escalation or an error, never a blind respawn beside it.
-// Returns an error when the daemon could not be confirmed gone; the caller
-// should warn and proceed, and the respawn's own startup checks arbitrate.
+// shutdownCompleteGrace is where the wait gives up and reports, never where it
+// shoots the daemon. drainDaemon deliberately JOINS root-agent creates and
+// admitted background mutations rather than cancelling them — a create killed
+// mid-provision is a half-created session nothing can reconcile (#3721) — and
+// those joins can run past any bound. By then drainDaemon has already closed
+// the control socket, so from outside "still alive" cannot be told apart from
+// wedged, and a SIGKILL there can corrupt session state. So a PID still alive
+// at the bound is an error, and so is a socket still answering at the bound
+// when there is no PID. Either way the caller must NOT respawn: a new daemon
+// would lose the per-home lock to the draining one and exit, leaving nothing
+// once the old one finishes. That closes the old 5s-then-respawn-anyway hole
+// (#5007): the bound ends in an error, never in a respawn beside a live daemon
+// or a kill of a draining one.
 func WaitForShutdownCompletion(pid int) error {
 	if pid == os.Getpid() {
-		pid = 0 // never watch, let alone signal, ourselves
+		pid = 0 // never watch ourselves
 	}
 	deadline := time.Now().Add(shutdownCompleteGrace)
 	if pid > 0 {
@@ -218,7 +218,7 @@ func WaitForShutdownCompletion(pid int) error {
 			}
 			time.Sleep(shutdownCompletePoll)
 		}
-		return killWedgedShutdownDaemon(pid)
+		return fmt.Errorf("daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", pid, shutdownCompleteGrace)
 	}
 	for time.Now().Before(deadline) {
 		if pingDaemon() != nil {
@@ -227,46 +227,6 @@ func WaitForShutdownCompletion(pid int) error {
 		time.Sleep(shutdownCompletePoll)
 	}
 	return fmt.Errorf("daemon control socket still answering %s after shutdown was acknowledged", shutdownCompleteGrace)
-}
-
-// killWedgedShutdownDaemon escalates a daemon that acknowledged Shutdown but did
-// not exit within shutdownCompleteGrace, the way the SIGTERM fallbacks escalate.
-// A PID is a reusable handle, so it is re-verified as an af daemon of this uid
-// serving this AF home immediately before the signal; anything else is refused.
-func killWedgedShutdownDaemon(pid int) error {
-	if !pidLooksAlive(pid) {
-		return nil
-	}
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return fmt.Errorf("daemon pid %d did not exit %s after shutdown was acknowledged, and the AF home could not be resolved to verify it before escalating: %w", pid, shutdownCompleteGrace, err)
-	}
-	wantHome, err := canonicalDir(dir)
-	if err != nil {
-		return fmt.Errorf("daemon pid %d did not exit %s after shutdown was acknowledged, and the AF home could not be resolved to verify it before escalating: %w", pid, shutdownCompleteGrace, err)
-	}
-	if scope := verifyScopedDaemon(pid, os.Getuid(), wantHome); scope != daemonOurs {
-		if !pidLooksAlive(pid) {
-			return nil
-		}
-		return fmt.Errorf("daemon pid %d did not exit %s after shutdown was acknowledged and could not be verified as this home's daemon; not signaling it", pid, shutdownCompleteGrace)
-	}
-	log.WarningLog.Printf("daemon pid %d acknowledged shutdown but did not exit within %s; escalating to SIGKILL", pid, shutdownCompleteGrace)
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("FindProcess %d: %w", pid, err)
-	}
-	if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
-		return fmt.Errorf("SIGKILL wedged daemon pid %d: %w", pid, err)
-	}
-	confirm := time.Now().Add(shutdownKillConfirmGrace)
-	for time.Now().Before(confirm) {
-		if !pidLooksAlive(pid) {
-			return nil
-		}
-		time.Sleep(sigtermFallbackPoll)
-	}
-	return fmt.Errorf("daemon pid %d survived SIGKILL %s after shutdown was acknowledged", pid, shutdownKillConfirmGrace)
 }
 
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a responder

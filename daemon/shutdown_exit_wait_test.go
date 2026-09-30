@@ -86,59 +86,51 @@ func TestWaitForShutdownCompletionWaitsForPIDExit(t *testing.T) {
 	}
 }
 
-// TestWaitForShutdownCompletionEscalatesWedgedDaemon: a daemon that acked
-// Shutdown but is still alive at the bound is wedged. It must be SIGKILLed
-// (after re-verifying it is this home's af daemon) and the wait must return nil
-// once it is confirmed gone — never a blind respawn beside a live daemon.
-func TestWaitForShutdownCompletionEscalatesWedgedDaemon(t *testing.T) {
+// TestWaitForShutdownCompletionNeverSignalsAtBound: a daemon still alive at
+// shutdownCompleteGrace may be joining durable work in drainDaemon (root-agent
+// creates, admitted mutations — #3721) with its control socket already closed,
+// so from outside it cannot be told apart from a wedged one, and a kill there
+// can corrupt session state. The bound must end in an error with the process
+// untouched — whether it serves this home or another.
+func TestWaitForShutdownCompletionNeverSignalsAtBound(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
-		t.Skip("AF-home verification needs /proc")
+		t.Skip("fake-daemon argv rewrite needs /proc to observe")
 	}
-	home := testguard.SocketTempDir(t)
-	t.Setenv("AGENT_FACTORY_HOME", home)
+	for _, tc := range []struct {
+		name        string
+		foreignHome bool
+	}{
+		{name: "this home's daemon"},
+		{name: "another home's daemon", foreignHome: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := testguard.SocketTempDir(t)
+			t.Setenv("AGENT_FACTORY_HOME", home)
 
-	prevGrace := shutdownCompleteGrace
-	shutdownCompleteGrace = 300 * time.Millisecond
-	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+			prevGrace := shutdownCompleteGrace
+			shutdownCompleteGrace = 300 * time.Millisecond
+			t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 
-	pid, exited := startFakeAFDaemon(t, home, "sleep 60; :")
+			daemonHome := home
+			if tc.foreignHome {
+				daemonHome = t.TempDir()
+			}
+			pid, exited := startFakeAFDaemon(t, daemonHome, "sleep 60; :")
 
-	if err := WaitForShutdownCompletion(pid); err != nil {
-		t.Fatalf("WaitForShutdownCompletion(%d) on a wedged daemon: %v", pid, err)
-	}
-	select {
-	case state := <-exited:
-		ws, ok := state.Sys().(syscall.WaitStatus)
-		if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
-			t.Fatalf("wedged daemon exit state = %v, want death by SIGKILL", state)
-		}
-	case <-time.After(testSpawnReadyTimeout):
-		t.Fatalf("wedged daemon pid %d was never killed", pid)
-	}
-}
-
-// TestWaitForShutdownCompletionRefusesToKillForeignHomeDaemon: the escalation
-// re-verifies the PID before signaling. An af daemon serving a DIFFERENT home
-// (a recycled PID, or a misreported handle) is never ours to kill: the wait
-// must return an error and leave it running.
-func TestWaitForShutdownCompletionRefusesToKillForeignHomeDaemon(t *testing.T) {
-	if _, err := os.Stat("/proc"); err != nil {
-		t.Skip("AF-home verification needs /proc")
-	}
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-
-	prevGrace := shutdownCompleteGrace
-	shutdownCompleteGrace = 300 * time.Millisecond
-	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
-
-	pid, _ := startFakeAFDaemon(t, t.TempDir(), "sleep 60; :")
-
-	err := WaitForShutdownCompletion(pid)
-	if err == nil {
-		t.Fatalf("WaitForShutdownCompletion must refuse to escalate against another home's daemon")
-	}
-	if !pidLooksAlive(pid) {
-		t.Fatalf("a foreign-home daemon (pid %d) was killed; it must be left running", pid)
+			if err := WaitForShutdownCompletion(pid); err == nil {
+				t.Fatalf("WaitForShutdownCompletion(%d) returned nil while the daemon is still running", pid)
+			}
+			if !pidLooksAlive(pid) {
+				t.Fatalf("daemon pid %d is gone after the wait; the bound must never signal it", pid)
+			}
+			// Give a signal the wait might have sent time to land before
+			// concluding none did.
+			select {
+			case state := <-exited:
+				t.Fatalf("daemon pid %d exited (%v) after the wait; the bound must never signal it", pid, state)
+			case <-time.After(500 * time.Millisecond):
+			}
+		})
 	}
 }
 
