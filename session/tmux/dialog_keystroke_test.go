@@ -424,6 +424,75 @@ func TestHandleCodexSafetyBuffering_ModelVerificationTimeoutKeepsRecordForSamePi
 		"the Down af sent survives the same-picker timeout and is named in the death diagnostic")
 }
 
+// TestHandleCodexSafetyBuffering_PickerClosureClearsModelTimeoutMarkerBeforeLaterPicker is
+// the #4740 review follow-up at the inline thread anchored on codex_safety.go line 383:
+// the model-verification timeout sets pickerOpenAfterModelTimeout while the answered
+// picker is still rendered, and the marker is otherwise cleared only by the normal
+// finish (footer readable, picker closed). When the answered picker closes WITHOUT a
+// readable footer, the next poll is an ordinary composer pane that took the
+// !dialogPresent path without clearing the marker; a fresh safety picker appearing
+// inside the 30s attribution window then skipped resetCompletedCodexSafetyKeystroke
+// and appended its navigation onto the prior picker's completed Down Enter, so a death
+// during the new picker's selection verification read the prior Enter as af answering
+// it. The handler clears the marker at proven closure so the later picker starts a
+// fresh record. Without the clear, the second picker's record carries both pickers'
+// keys instead of only its own.
+func TestHandleCodexSafetyBuffering_PickerClosureClearsModelTimeoutMarkerBeforeLaterPicker(t *testing.T) {
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	frames := []trustPromptFrame{
+		{content: normalPane},
+		{content: codexSafetyBufferingDialog},
+		{content: codexSafetyBufferingKeepWaitingSelected},
+	}
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		frames = append(frames, trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected})
+	}
+	frames = append(frames,
+		// The answered picker closes without a readable footer, so the next
+		// poll is an ordinary composer pane with a visible cursor — the
+		// positive-closure boundary that must clear the timeout marker.
+		trustPromptFrame{content: normalPane, cursorVisible: true},
+		// A fresh safety picker appears inside the 30s attribution window.
+		trustPromptFrame{content: codexSafetyBufferingDialog},
+		trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected},
+		trustPromptFrame{content: normalPane},
+	)
+
+	session, _ := runTrustPromptFrames(t, ProgramCodex, frames...)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(), "a normal Codex pane is not a modal")
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the first safety picker must be answered (Down Enter)")
+
+	// Drive the model-verification polls in which the answered picker stays
+	// rendered and no model footer is readable. The poll that hits the budget
+	// times out while the SAME picker is still on screen, setting the marker.
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		require.True(t, session.CheckAndHandleTrustPrompt(),
+			"the answered picker is still rendered on verification poll %d; the handler keeps blocking", i)
+	}
+
+	// The answered picker has now closed. This ordinary-pane poll must clear
+	// the timeout marker; without it a later picker would append onto the
+	// prior completed record instead of starting fresh.
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the closed picker is an ordinary pane again, not a modal")
+
+	// The fresh safety picker is handled as a new instance: its record must
+	// carry only its own Down Enter, not the first picker's completed record.
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the second safety picker must be handled")
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the second picker's model verification observes; it does not inject another key")
+
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af just answered the second safety picker; there must be a recent keystroke")
+	require.Equal(t, codexSafetyDialogName, record.dialog,
+		"the recorded dialog must be the safety-check, not a stale prior dialog")
+	require.Equal(t, codexSafetyWaitLabel, record.choice,
+		"the recorded choice must be the row af navigated to and accepted on the second picker")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys,
+		"the second picker's record must carry only its own keys; the first picker's completed Down Enter must not survive the model-verification timeout once the picker closed")
+}
+
 // TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic is the
 // end-to-end guard against the same regression recurring: it drives the real
 // CheckAndHandleTrustPrompt through the safety picker the way the daemon's

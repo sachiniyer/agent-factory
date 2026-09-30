@@ -165,6 +165,24 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 			}
 			return true
 		}
+		// The model-verification timeout leaves pickerOpenAfterModelTimeout set
+		// while the answered picker is still rendered, and the normal finish
+		// (footer readable, picker closed) is the only thing that cleared it.
+		// When the answered picker closes WITHOUT a readable footer the next
+		// poll is an ordinary composer pane, and it reached this branch without
+		// clearing the marker; a fresh safety picker inside the 30s attribution
+		// window then skipped resetCompletedCodexSafetyKeystroke and appended
+		// onto the prior picker's completed Down Enter, so a death during the
+		// new picker's selection verification read the prior Enter as af
+		// answering it. Clear the marker at proven closure — a visible cursor,
+		// the same positive-closure boundary the pending-selection path trusts
+		// — so the later picker starts a fresh record. Requiring the cursor
+		// (not merely the picker chrome's absence) keeps a mid-repaint capture
+		// of the SAME timed-out picker from dropping the guard and
+		// re-introducing the same-picker reset (#4740 review follow-up).
+		if state.pickerOpenAfterModelTimeout && t.codexPickerProvenClosed() {
+			state.pickerOpenAfterModelTimeout = false
+		}
 		if model != "" {
 			state.observeModel(model)
 		}
