@@ -182,11 +182,12 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// mid-replacement, not parked: the limit it carries is the outgoing
 	// identity's stale value, the replacement has not settled, and reporting
 	// `usage-limited` here would make fleet watch return early instead of
-	// waiting for the delivery. The InFlightOp axis below holds that actively
-	// executing replacement as `working`, which is the verdict a driver needs,
-	// so an automatic swap is left to fall through to it. Once the fence
-	// releases (OpNone) an automatic swap parked at the incoming identity's
-	// limit reaches the liveness switch the same way a non-swap row does.
+	// waiting for the delivery. An AUTOMATIC swap with OpRespawning (the
+	// active-resume view) is left to the InFlightOp axis below, which holds it
+	// as `working` — the verdict a driver needs while the replacement
+	// delivers. An AUTOMATIC swap with OpNone at LiveLimitReached is the
+	// crash-recovered pre-respawn view of the same mid-replacement row, and
+	// the gate below holds that as `working` too.
 	//
 	// The override is gated on InFlightOp for the same version-skew reason the
 	// InFlightOp axis below is fail-closed: a newer daemon can persist a
@@ -202,6 +203,29 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached &&
 		(d.InFlightOp == session.OpRespawning || d.InFlightOp == session.OpNone) {
 		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
+	}
+	// A crash-recovered AUTOMATIC swap at the original account's limit keeps
+	// PendingAccountSwap populated while its operation fence is gone: a
+	// daemon restart immediately after the swap's identity checkpoint strips
+	// OpRespawning on the way to disk, and FromInstanceData does not rebuild
+	// the fence for an unresolved PendingAccountSwap, so the restored row
+	// carries PendingAccountSwap (automatic, so the manual-only override
+	// above did not match) with the ORIGINAL account's stale LiveLimitReached
+	// and OpNone until the first ResumeLimitedSessions pass re-raises the
+	// fence and continues the replacement. Reading that row as
+	// `usage-limited` would make fleet watch return early and tell the driver
+	// the session is parked at a quota wall when it is not — the replacement
+	// is about to resume — so hold it as `working` the way the active-resume
+	// path above does, scoped to a pending automatic swap because a genuine
+	// re-park at the incoming identity's limit has already cleared
+	// PendingAccountSwap (the swap settled) and therefore falls through to
+	// the liveness switch and reports the limit the way a non-swap row does.
+	// Restricted to OpNone because an automatic swap with OpRespawning is the
+	// active-resume shape the InFlightOp axis below already holds as
+	// `working`, with the same verdict.
+	if d.PendingAccountSwap != nil && !d.PendingAccountSwap.Manual &&
+		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone {
+		return watchWorking, ""
 	}
 	// ANY operation in flight means the session is in motion, including one this
 	// binary does not recognise. That last part is the point: a newer daemon can
