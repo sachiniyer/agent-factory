@@ -30,8 +30,11 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// Run the deferred startup orphan sweep if this refresh repaired every
 			// skipped repo (drained skippedRepos to empty). A no-op unless the
 			// startup sweep was deferred for a known-incomplete session view; once
-			// the view is complete the destructive pass runs with no restart.
-			runDeferredOrphanSweepIfReady(manager)
+			// the view is complete the destructive pass runs with no restart. The
+			// sweep runs on a separately tracked worker (not inline here) so its
+			// external Docker list/reap cannot suspend the maintenance passes
+			// below on an unavailable engine or a large orphan set.
+			launchDeferredOrphanSweepIfReady(manager)
 
 			// Compute and persist each session's status (Ready/Dead/Running). The
 			// daemon is the sole

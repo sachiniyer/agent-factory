@@ -52,11 +52,11 @@ func sweepStartupOrphanContainers(manager *Manager) {
 
 // runDeferredOrphanSweepIfReady runs the startup orphan sweep that was deferred
 // because skippedRepos was non-empty, once the polling refresh has repaired
-// every skipped repo (drained the skip set to empty). It is called from the
-// instance poll loop after RefreshInstances, the only recurring trigger, so the
-// deferred sweep runs with no daemon restart. A no-op when the startup sweep was
-// not deferred or the skip set has not yet drained; if any repo is still
-// skipped the sweep stays deferred and re-evaluates on the next poll.
+// every skipped repo (drained the skip set to empty). It is the synchronous
+// sweep body invoked by launchDeferredOrphanSweepIfReady on a tracked worker
+// goroutine, and by tests directly. A no-op when the startup sweep was not
+// deferred or the skip set has not yet drained; if any repo is still skipped
+// the sweep stays deferred and re-evaluates on the next poll.
 //
 // Unlike the startup sweep, the deferred sweep runs AFTER the manager readiness
 // barrier has opened (finishInstanceRestore at daemon.go:322), so a CreateSession
@@ -109,4 +109,41 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses, so the protected set is complete.")
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, slugs)
+}
+
+// launchDeferredOrphanSweepIfReady starts the deferred orphan sweep on a
+// separately tracked worker goroutine so the daemon's only polling goroutine is
+// not blocked by the sweep's external Docker list/reap, which can spend 30
+// seconds obtaining/listing Docker state and up to another 30 seconds per orphan
+// in dockerProvisioner.reap — an unavailable engine or a large orphan set would
+// otherwise suspend RefreshStatuses, lost-session recovery, settlement retries,
+// and limit resumes for the whole window. The poll loop calls this instead of
+// runDeferredOrphanSweepIfReady directly so those maintenance passes proceed
+// while the sweep runs in parallel.
+//
+// A no-op when the startup sweep was not deferred, the skip set has not yet
+// drained, or a deferred sweep worker is already in flight (deferredOrphanSweepInFlight);
+// in the last case the in-flight worker is still holding the createSweepMu
+// admission barrier, so re-launching would only queue a redundant goroutine on
+// it. The create/sweep exclusion (#2632) is retained by the worker itself —
+// runDeferredOrphanSweepIfReady still holds createSweepMu across the
+// protected-slug snapshot and the SweepOrphanContainers call. m.mu guards only
+// the launch decision and the in-flight flag; it is released before the worker
+// is spawned, so a launch never blocks the poll loop on the manager lock.
+func launchDeferredOrphanSweepIfReady(manager *Manager) {
+	manager.mu.Lock()
+	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 || manager.deferredOrphanSweepInFlight {
+		manager.mu.Unlock()
+		return
+	}
+	manager.deferredOrphanSweepInFlight = true
+	manager.mu.Unlock()
+	go func() {
+		defer func() {
+			manager.mu.Lock()
+			manager.deferredOrphanSweepInFlight = false
+			manager.mu.Unlock()
+		}()
+		runDeferredOrphanSweepIfReady(manager)
+	}()
 }

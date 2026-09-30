@@ -145,6 +145,12 @@ type Manager struct {
 	// instances.json parsed), by which point the protected set is complete again.
 	// Guarded by m.mu.
 	deferredOrphanSweepArmed bool
+	// deferredOrphanSweepInFlight tracks whether the deferred orphan sweep
+	// worker is currently running, so the poll loop does not launch a second
+	// worker while one is still mid-sweep — the sweep's Docker list/reap can
+	// take many seconds or stall on an unavailable engine, and the poll loop
+	// ticks on a fixed cadence. Guarded by m.mu.
+	deferredOrphanSweepInFlight bool
 	// createSweepMu is the create/sweep admission barrier: it serializes the
 	// deferred orphan sweep with CreateSession's pendingCreates publication so a
 	// create admitted after the protected-slug snapshot cannot publish a

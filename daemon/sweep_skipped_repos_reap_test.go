@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -407,3 +408,121 @@ func TestDeferredSweep_StaysDeferredAcrossPollsWhileStillCorrupted_EndToEnd(t *t
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }
+
+// --- launchDeferredOrphanSweepIfReady: the poll-loop worker dispatch ---
+
+// blockingSweepStub replaces sweepOrphanContainers with a stub that records the
+// call and blocks until the test releases it via releaseCh, so a test can
+// observe the worker while it is still in flight. Restored on cleanup.
+func blockingSweepStub(t *testing.T) (*sweepRecorder, chan<- struct{}) {
+	t.Helper()
+	rec := &sweepRecorder{}
+	release := make(chan struct{})
+	prev := sweepOrphanContainers
+	sweepOrphanContainers = func(homeID string, slugs map[string]bool) session.OrphanSweepResult {
+		rec.record(homeID, slugs)
+		<-release
+		return session.OrphanSweepResult{}
+	}
+	t.Cleanup(func() { sweepOrphanContainers = prev })
+	return rec, release
+}
+
+// TestLaunchDeferredOrphanSweep_RunsOnWorkerWithoutBlockingLauncher verifies the
+// launcher returns immediately (the sweep runs on a separate goroutine): with
+// the sweep stub blocked, launchDeferredOrphanSweepIfReady returns and the
+// recorder still observes the call once the worker is released.
+func TestLaunchDeferredOrphanSweep_RunsOnWorkerWithoutBlockingLauncher(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec, release := blockingSweepStub(t)
+
+	m := newBareManagerForSweep()
+	m.deferredOrphanSweepArmed = true
+	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
+
+	// The launcher must return even though the sweep worker is blocked inside
+	// sweepOrphanContainers.
+	done := make(chan struct{})
+	go func() {
+		launchDeferredOrphanSweepIfReady(m)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("launchDeferredOrphanSweepIfReady blocked while the sweep worker was still in flight")
+	}
+
+	// The worker is in flight and holding createSweepMu.
+	m.mu.Lock()
+	assert.True(t, m.deferredOrphanSweepInFlight, "the in-flight flag is set while the worker runs")
+	m.mu.Unlock()
+
+	close(release)
+
+	// The deferred flag is cleared at commit time; give the worker a moment to
+	// finish and clear the in-flight flag.
+	require.Eventually(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return !m.deferredOrphanSweepInFlight
+	}, 5*time.Second, 10*time.Millisecond, "the in-flight flag must clear once the worker exits")
+
+	assert.Equal(t, 1, rec.count(), "the deferred sweep ran exactly once on the worker")
+}
+
+// TestLaunchDeferredOrphanSweep_DoesNotLaunchSecondWorkerWhileOneInFlight
+// verifies the in-flight tracking: while the sweep worker is blocked, a second
+// launch attempt is a no-op and does not queue a second sweep.
+func TestLaunchDeferredOrphanSweep_DoesNotLaunchSecondWorkerWhileOneInFlight(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec, release := blockingSweepStub(t)
+
+	m := newBareManagerForSweep()
+	m.deferredOrphanSweepArmed = true
+	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
+
+	launchDeferredOrphanSweepIfReady(m)
+	// Give the worker a moment to enter the blocked sweep.
+	require.Eventually(t, func() bool {
+		return rec.count() == 1
+	}, 5*time.Second, 10*time.Millisecond, "the first worker entered the sweep")
+
+	// A second launch while the first is in flight is a no-op.
+	launchDeferredOrphanSweepIfReady(m)
+	assert.Equal(t, 1, rec.count(), "no second worker is launched while one is in flight")
+
+	close(release)
+	require.Eventually(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return !m.deferredOrphanSweepInFlight
+	}, 5*time.Second, 10*time.Millisecond, "the in-flight flag clears after the worker exits")
+
+	// After the worker exits the flag is cleared, but the deferral flag was
+	// consumed (armed cleared at commit), so a subsequent launch is still a no-op.
+	launchDeferredOrphanSweepIfReady(m)
+	assert.Equal(t, 1, rec.count(), "armed was cleared at commit, so no further sweep launches")
+}
+
+// TestLaunchDeferredOrphanSweep_NoOpWhenNotArmed confirms a clean-startup steady
+// state: with no deferral armed the launcher spawns no worker.
+func TestLaunchDeferredOrphanSweep_NoOpWhenNotArmed(t *testing.T) {
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.instances[daemonInstanceKey("repo1", "live")] = &session.Instance{Title: "live"}
+
+	launchDeferredOrphanSweepIfReady(m)
+
+	// No worker is spawned; assert via a short poll since the launcher is async.
+	require.Eventually(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return !m.deferredOrphanSweepInFlight
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, 0, rec.count(), "no deferral armed → no sweep")
+}
