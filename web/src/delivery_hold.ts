@@ -273,6 +273,14 @@ function hasPrintable(data: string): boolean {
  *  would return "none" and leave the still-present line unprotected during
  *  those operations — the same window fixed for the other editing controls.
  *
+ *  Ctrl-G (\x07) is readline's abort: when an editing command such as
+ *  reverse-history search is active, it aborts that command and leaves the
+ *  still-present line restored in the PTY. The keybar emits it through the
+ *  general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts), and
+ *  startsADraft rejects it (it is below 0x20), so without this entry the
+ *  post-idle resume would return "none" and leave the restored draft
+ *  unprotected — the same window fixed for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -287,7 +295,8 @@ function isEditingControl(data: string): boolean {
     data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19") ||
     data.includes("\x14") || data.includes("\x12") || data.includes("\x1f") ||
     data.includes("\x16") || data.includes("\x0f") || data.includes("\x18") ||
-    data.includes("\x11") || data.includes("\x13") || data.includes("\x1d") || data.includes("\x00")
+    data.includes("\x11") || data.includes("\x13") || data.includes("\x1d") || data.includes("\x00") ||
+    data.includes("\x07")
   );
 }
 
