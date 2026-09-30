@@ -141,24 +141,21 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	// waited out, keeping a sliver of the budget for the spawn. Its deadline is
 	// where this REPORTS, never where it proceeds: the launch path below stops
 	// (SIGTERM, then SIGKILL) or restarts a daemon still joining durable work.
-	switch state, pid, answered := probeDaemonState(deadline); state {
+	switch state, pid, socketAbsent := probeDaemonState(deadline); state {
 	case daemonServing:
 		return nil
 	case daemonDraining:
 		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit before launching", pid)
-		if !answered {
-			// The silent signature — nothing answers, the home lock is held
-			// or daemon.pid names a live process — also matches a serving
-			// daemon made unreachable (its socket file was deleted or its
-			// listener wedged), which would otherwise pin this home forever.
+		if socketAbsent {
+			// A provably-absent socket with a live daemon.pid PID also matches
+			// a serving daemon made unreachable (socket file deleted under it,
+			// wedged listener) — left alone it would pin this home forever.
 			// One verified SIGTERM reclaims that daemon gracefully; a real
 			// drainer's sigChan goes unread inside drainDaemon, so the signal
-			// is absorbed and the joins finish. The deadline lapses inside
-			// stopDaemonUntil's graceful poll, so its SIGKILL escalation —
-			// the part that could cut durable work — never runs (#5007).
-			if _, err := stopDaemonUntil(time.Now().Add(2 * shutdownCompletePoll)); err != nil {
-				log.InfoLog.Printf("SIGTERM reclaim of a possibly unreachable daemon: %v", err)
-			}
+			// is absorbed and the joins finish. Timeouts and every other Ping
+			// failure stay out of this branch: one slow answer on a busy host
+			// must never signal a healthy daemon (#5007).
+			sigtermUnreachableDaemon()
 		}
 		drainDeadline := drainWaitDeadline(deadline)
 		switch waitOutDrain(deadline, drainDeadline) {

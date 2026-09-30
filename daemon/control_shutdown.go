@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -110,7 +111,9 @@ func RequestShutdown() (ShutdownResult, ShutdownPID, error) {
 	// names itself in Ping, which survives a renamed binary the PID-file check
 	// rejects. A failed Ping leaves it 0 and changes nothing below.
 	var pingPID int
-	if ping, pingErr := pingDaemonResponse(); pingErr == nil {
+	// Bounded: a daemon that accepts this connection but never replies must
+	// cost one dial timeout, not hang RequestShutdown short of Shutdown (#5007).
+	if ping, pingErr := pingDaemonResponseUntil(time.Now().Add(daemonDialTimeout)); pingErr == nil {
 		pingPID = ping.PID
 	}
 	var resp ShutdownResponse
@@ -225,11 +228,22 @@ func WaitForShutdownCompletion(stopped ShutdownPID) error {
 // durable joins), nor is a missing daemon.pid (unlinked when teardown begins).
 // The probe repeats after the loop: the last sleep can wake past the deadline.
 func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
+	dir, _ := config.GetConfigDir()
 	exited := func() bool {
 		if confirmed && pid > 0 && pid != os.Getpid() {
-			return !shutdownWaitPIDAliveFn(pid)
+			if !shutdownWaitPIDAliveFn(pid) {
+				return true
+			}
+			// The PID may already be recycled by an unrelated process, so
+			// aliveness alone can pin the wait forever — and aim the bound's
+			// kill -9 hint at the wrong process. A takeable daemon.lock file
+			// is kernel proof the lock-era target exited; absent means the
+			// question never applied (confirmed PIDs postdate the lock).
+			if lockFileTakeable(dir) {
+				return true
+			}
 		}
-		return exitState(pid, deadline) == daemonExited
+		return exitState(pid, confirmed, deadline) == daemonExited
 	}
 	for time.Now().Before(deadline) {
 		if exited() {
@@ -250,15 +264,17 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 // it.
 //
 // A serving answer proves exit only from a provably different process: a
-// responder PID that is known and differs from a known target. The target
-// itself can answer serving — a daemon predating quiescing-at-ack does so for
-// its whole ack grace, and one never asked to stop does so indefinitely — so
-// any other serving answer, like a quiescing one, is draining. With no answer,
-// a held lock is draining; otherwise a quiet socket is exited unless a live
-// daemon.pid PID still names the drainer (old-version daemons keep it until
-// exit), and any other probe failure is unknown. A home that never ran a
-// daemon reads exited.
-func exitState(targetPID int, deadline time.Time) daemonState {
+// responder PID that is known and differs from a CONFIRMED target — the PID in
+// the acker's own Shutdown reply. An unconfirmed target (the pre-Shutdown Ping
+// can observe daemon A while daemon B binds and acks) makes a different
+// responder unremarkable, so serving then reads draining like a quiescing one;
+// the target itself can also answer serving — a daemon predating quiescing-at-
+// ack does so for its whole ack grace, and one never asked to stop does so
+// indefinitely. With no answer, a held lock is draining; otherwise a quiet
+// socket is exited unless a verified live daemon.pid PID still names the
+// drainer (old-version daemons keep it until exit), and any other probe
+// failure is unknown. A home that never ran a daemon reads exited.
+func exitState(targetPID int, confirmed bool, deadline time.Time) daemonState {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnknown
@@ -271,7 +287,7 @@ func exitState(targetPID int, deadline time.Time) daemonState {
 	resp, err := pingDaemonResponseUntil(boundedPingDeadline(deadline))
 	state, respPID := pingState(resp, err)
 	switch {
-	case state == daemonServing && respPID > 0 && targetPID > 0 && respPID != targetPID:
+	case state == daemonServing && respPID > 0 && confirmed && targetPID > 0 && respPID != targetPID:
 		return daemonExited
 	case state != daemonUnknown, held:
 		return daemonDraining
@@ -285,12 +301,15 @@ func exitState(targetPID int, deadline time.Time) daemonState {
 	}
 }
 
-// livePIDFilePID returns the PID daemon.pid names while that process is still
-// alive, else 0. Old-version daemons keep the file until process exit (the
-// early unlink is #5007's behavior), and pre-lock daemons never take
-// daemon.lock — so on a quiet socket a live pidfile PID is a drainer either
-// way. A stale file naming a dead or recycled PID reads 0, never proof of a
-// drainer — but a live PID there means keep waiting, never signal.
+// livePIDFilePID returns the PID daemon.pid names while that process is both
+// alive and verifiably OURS, else 0. Old-version daemons keep the file until
+// process exit (the early unlink is #5007's behavior), and pre-lock daemons
+// never take daemon.lock — so on a quiet socket a live pidfile PID is a
+// drainer either way. Numeric aliveness alone is not evidence: a crashed
+// daemon's PID can be recycled by an unrelated long-lived process, and waiting
+// on that wedges every caller for the whole grace. Identity is argv for stock
+// installs, a --daemon flag for renamed ones, or the exec-time
+// AGENT_FACTORY_HOME marker as a last read — an unmatched PID reads 0.
 func livePIDFilePID() int {
 	pid, ok := readPIDFromFile()
 	if !ok || pid <= 0 || pid == os.Getpid() {
@@ -299,7 +318,36 @@ func livePIDFilePID() int {
 	if !shutdownWaitPIDAliveFn(pid) {
 		return 0
 	}
-	return pid
+	if isAgentFactoryDaemon(pid) || argsHaveDaemonFlag(daemonArgs(pid)) {
+		return pid
+	}
+	if dir, err := config.GetConfigDir(); err == nil {
+		if home, status := proctree.LookupEnv(pid, "AGENT_FACTORY_HOME"); status == proctree.EnvFound && home == dir {
+			return pid
+		}
+	}
+	return 0
+}
+
+// sigtermUnreachableDaemon sends one SIGTERM to a verified af daemon still
+// named by daemon.pid — the reclaim for the silent-socket cell, where the
+// holder may be a serving daemon made unreachable rather than a drainer
+// (#5007 addendum 5). Unlike stopDaemonUntil it never escalates to SIGKILL
+// and never unlinks the file: an unverifiable PID (a renamed install the argv
+// check cannot recognize, or a recycled one) keeps its exit evidence for the
+// surrounding wait instead of losing the file to stale-pidfile cleanup, and
+// the deadline-lapsed wait — not a signal — is what bounds a real drainer.
+func sigtermUnreachableDaemon() {
+	pid, ok := readPIDFromFile()
+	if !ok || pid <= 1 || pid == os.Getpid() {
+		return
+	}
+	if !pidLooksAlive(pid) || !isAgentFactoryDaemon(pid) {
+		return
+	}
+	if proc, err := os.FindProcess(pid); err == nil {
+		_ = proc.Signal(syscall.SIGTERM)
+	}
 }
 
 // shutdownWaitPIDAliveFn and shutdownWaitHomeLockFn are the exit probes. Vars
@@ -354,22 +402,25 @@ func boundedPingDeadline(deadline time.Time) time.Time {
 // exit, so it must never override a held lock (stopDaemonUntil would SIGKILL
 // that drainer). Only with the lock takeable or absent does the pidfile speak:
 // a live PID it names is a drainer predating the early unlink — or the lock.
-// The third return reports whether Ping produced a response at all, so a
-// consumer can tell an answering drainer (leave it be) from the silent cell
-// that may be a serving daemon made unreachable (#5007 addendum 5).
+// The third return reports whether the socket is PROVABLY absent (the dial
+// failed with ENOENT/ECONNREFUSED) rather than merely unanswered — the only
+// failure on which a consumer may consider reclaiming a possibly-serving
+// daemon. A timeout or any other error stays false: a slow Ping answer on a
+// busy host must never be the trigger to signal a healthy daemon (#5007).
 func probeDaemonState(deadline time.Time) (daemonState, int, bool) {
 	resp, err := pingDaemonResponseUntil(boundedPingDeadline(deadline))
 	state, pid := pingState(resp, err)
 	if state != daemonUnknown {
-		return state, pid, true
+		return state, pid, false
 	}
+	socketAbsent := isDaemonAbsentErr(err)
 	if lock := homeLockState(); lock != daemonExited {
-		return lock, 0, false
+		return lock, 0, socketAbsent
 	}
 	if pid := livePIDFilePID(); pid > 0 {
-		return daemonDraining, pid, false
+		return daemonDraining, pid, socketAbsent
 	}
-	return daemonExited, 0, false
+	return daemonExited, 0, socketAbsent
 }
 
 // homeLockState is probeDaemonState's instant read of this home's lock. An
@@ -411,6 +462,28 @@ func homeLockReleased(dir string) daemonState {
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return daemonExited
+}
+
+// lockFileTakeable answers whether a daemon.lock FILE exists and its flock is
+// free — distinct from homeLockReleased, which cannot tell "absent" from
+// "present but takeable". For the confirmed-PID arm that distinction is the
+// whole proof: a takeable file means the lock-era holder's flock was released
+// by the kernel at process exit even when the PID number has been recycled,
+// while an absent file (pre-lock daemon, or pre-creation) proves nothing.
+func lockFileTakeable(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	f, err := os.OpenFile(daemonLockPathIn(dir), os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return false
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true
 }
 
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a serving

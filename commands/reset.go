@@ -289,17 +289,24 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 		fmt.Fprintln(out, "No managed daemon was stopped (no PID file, or the recorded process was already gone)")
 	}
 
-	// 4b. Wait for the shutdown to COMPLETE, not merely to be requested. The
-	//     daemon persists its whole in-memory session set on the way out
-	//     (RunDaemon's final SaveInstances), and it closes its control socket
-	//     BEFORE that — so a quiet socket proves nothing. The wait watches the
-	//     per-home lock instead, which the kernel releases only when the daemon
-	//     process exits (#5007). Deleting instances.json while a flush is
-	//     pending is how a "factory reset" hands the user their sessions back.
-	if waitErr := waitForShutdownCompletionFn(daemon.ShutdownPID{}); waitErr != nil {
-		err = fmt.Errorf("the daemon did not finish shutting down: %w", waitErr)
-		fmt.Fprintln(out, "\nNothing was removed.")
-		return err
+	// 4b. Wait for the shutdown to COMPLETE, not merely to be requested — but
+	//     only when a managed daemon or unit was actually stopped above. When
+	//     nothing was stopped, a still-running PID-less daemon reads as
+	//     "draining" and this wait would burn the whole grace before failing,
+	//     never reaching the orphan scan in 4c that exists to find exactly
+	//     those daemons (#5007). The daemon persists its whole in-memory
+	//     session set on the way out (RunDaemon's final SaveInstances), and it
+	//     closes its control socket BEFORE that — so a quiet socket proves
+	//     nothing. The wait watches the per-home lock instead, which the
+	//     kernel releases only when the daemon process exits. Deleting
+	//     instances.json while a flush is pending is how a "factory reset"
+	//     hands the user their sessions back.
+	if stopped || paused {
+		if waitErr := waitForShutdownCompletionFn(daemon.ShutdownPID{}); waitErr != nil {
+			err = fmt.Errorf("the daemon did not finish shutting down: %w", waitErr)
+			fmt.Fprintln(out, "\nNothing was removed.")
+			return err
+		}
 	}
 
 	// 4c. Stop daemons the PID file never knew about — the leftover old binary
