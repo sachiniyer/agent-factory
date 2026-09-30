@@ -117,23 +117,54 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// session.ClassifyActivity, which gates on PendingAccountSwap before the
 	// liveness axis for the same reason (#4027).
 	//
-	// A terminal backing runtime outranks the swap, though: once the status
-	// loop has probed an automatic swap to LiveLost while the marker still sits
-	// on the row (TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows
-	// — the loop resumes normal probing once a swap leaves LiveLimitReached),
-	// fleet watch must report `lost` so a driver gets the restore instruction
-	// instead of holding the row as working until --timeout. Limit the gate to
-	// the in-motion liveness values a mid-swap record actually carries and let
-	// terminal liveness fall through to its own axis below.
+	// The swap gate holds the slot as `working` only for the in-motion states a
+	// mid-swap record carries while its mission settles. Three stop states
+	// outrank it, because each is a verdict a driver must hear instead of
+	// polling until --timeout:
+	//
+	//   - A terminal backing runtime (lost/dead/archived). The status loop
+	//     resumes normal probing once a swap leaves LiveLimitReached
+	//     (TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows),
+	//     so fleet watch reports the terminal reason and the restore
+	//     instruction rather than holding the row as working.
+	//   - A swap parked at a usage limit on the incoming identity.
+	//     ParkManualAccountSwapAtLimit holds PendingAccountSwap with
+	//     LiveLimitReached and keeps the OpRespawning fence, so reporting
+	//     `working` would suppress the documented `usage-limited` edge and a
+	//     driver would never learn the session is parked and must not be
+	//     prompted. It is reported below, ahead of the InFlightOp axis, because
+	//     that retained fence would otherwise read as in motion and mask it.
+	//   - A swap whose replacement vanished before readiness. The delivery path
+	//     marks the row StartupStateUnknown while keeping PendingAccountSwap
+	//     (TestHandoffAccountReadinessFailureBecomesInert); that row is inert
+	//     and operator-action-required, and holding it as `working` would mask
+	//     the `unknown` a driver needs to inspect and remove.
 	if d.PendingAccountSwap != nil &&
 		d.Liveness != session.LiveLost &&
 		d.Liveness != session.LiveDead &&
-		d.Liveness != session.LiveArchived {
+		d.Liveness != session.LiveArchived &&
+		d.Liveness != session.LiveLimitReached &&
+		!d.StartupStateUnknown {
 		return watchWorking, ""
 	}
 	if d.StartupStateUnknown {
 		return watchStopUnknown,
 			"af could not confirm which runtime owns this workspace; inspect it and remove it explicitly before retrying"
+	}
+	// ParkManualAccountSwapAtLimit leaves PendingAccountSwap populated with
+	// LiveLimitReached and does NOT release the OpRespawning fence (the settle
+	// path only lowers it on success), so a swap parked at a usage limit reaches
+	// the watch path as a row the InFlightOp axis below would otherwise hold as
+	// in motion. That suppresses the `usage-limited` edge a driver is owed: the
+	// incoming identity is at a quota wall, the scheduler waits for its reset
+	// window, and fleet watch would time out without saying the session is
+	// parked and must not be prompted. Report it here, ahead of the InFlightOp
+	// axis and with the liveness axis's own reason, mirroring how a terminal
+	// runtime outranks the swap above. Scoped to PendingAccountSwap because a
+	// non-swap row parked at a limit carries OpNone (the park clears the fence),
+	// so the InFlightOp axis already lets it fall through to the liveness switch.
+	if d.PendingAccountSwap != nil && d.Liveness == session.LiveLimitReached {
+		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
 	}
 	// ANY operation in flight means the session is in motion, including one this
 	// binary does not recognise. That last part is the point: a newer daemon can

@@ -680,4 +680,101 @@ func TestClassifyWatchStop_TerminalLivenessOutranksPendingAccountSwap(t *testing
 		"a mid-swap session going lost is reported as lost, not held as working")
 }
 
+// A pending swap parked at a usage limit on the incoming identity outranks the
+// swap. ParkManualAccountSwapAtLimit keeps PendingAccountSwap populated while
+// setting Liveness to LiveLimitReached, and it does NOT release the respawn
+// fence (the settle path lowers it only on success), so the row reaches the
+// watch path with OpRespawning still up. The InFlightOp axis below would
+// otherwise hold that row as in motion and suppress the `usage-limited` edge a
+// driver needs to leave the session alone through its reset window; the gate
+// reports the stop ahead of that axis instead.
+func TestClassifyWatchStop_UsageLimitOutranksPendingAccountSwap(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	// The daemon snapshot of a parked swap carries the respawn fence the park
+	// kept: ParkManualAccountSwapAtLimit requires OpRespawning and does not clear
+	// it, so the InFlightOp axis would mask the stop without the gate reporting it.
+	parked := withLiveness("s", session.LiveLimitReached)
+	parked.PendingAccountSwap = pending
+	parked.InFlightOp = session.OpRespawning
+	reason, detail := classifyWatchStop(parked)
+	require.Equal(t, watchStopUsageLimited, reason,
+		"a mid-swap row parked at a usage limit reports the stop, not working")
+	require.Contains(t, detail, "usage limit")
+
+	// A parked row with the fence released (the disk-scrubbed view, or after the
+	// limit lifts) still reports usage-limited rather than working: the swap gate
+	// lets LiveLimitReached fall through to the liveness axis below.
+	released := withLiveness("s", session.LiveLimitReached)
+	released.PendingAccountSwap = pending
+	released.InFlightOp = session.OpNone
+	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(released)),
+		"a mid-swap row parked at a usage limit with no in-flight op reports usage-limited")
+
+	// The watcher emits the working -> usage-limited edge, not silence.
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("s")}),
+		"the working baseline establishes no transition")
+	transitioned := fleetRunning("s")
+	transitioned.Liveness = session.LiveLimitReached
+	transitioned.PendingAccountSwap = pending
+	transitioned.InFlightOp = session.OpRespawning
+	events := w.observe([]session.InstanceData{transitioned})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopUsageLimited}, reasons(events),
+		"a mid-swap session parked at a usage limit is reported as usage-limited, not held as working")
+}
+
+// A pending swap whose replacement vanished before readiness outranks the swap:
+// the delivery path marks the row StartupStateUnknown while keeping
+// PendingAccountSwap (TestHandoffAccountReadinessFailureBecomesInert), so the
+// row is inert and operator-action-required. Holding it as `working` would mask
+// the `unknown` a driver needs to inspect and remove the runtime, leaving fleet
+// watch to time out instead. StartupStateUnknown outranks the swap the way a
+// terminal runtime does, and the gate lets it fall through to its own axis.
+func TestClassifyWatchStop_StartupUnknownOutranksPendingAccountSwap(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	// MarkStartupStateUnknown clears the in-flight op (the create attempt has
+	// settled into an explicit blocked outcome), so the row reaches the watch
+	// path as inert; the gate must still let it fall through to the unknown axis
+	// ahead of the in-flight-op axis below.
+	inert := withLiveness("s", session.LiveReady)
+	inert.PendingAccountSwap = pending
+	inert.StartupStateUnknown = true
+	inert.InFlightOp = session.OpNone
+	reason, detail := classifyWatchStop(inert)
+	require.Equal(t, watchStopUnknown, reason,
+		"a mid-swap row marked startup-unknown reports unknown, not working")
+	require.Contains(t, detail, "inspect it and remove it")
+
+	// StartupStateUnknown outranks the swap even when the liveness axis is also a
+	// stop: the inert row is operator-action-required, not parked at a limit.
+	limitAndUnknown := withLiveness("s", session.LiveLimitReached)
+	limitAndUnknown.PendingAccountSwap = pending
+	limitAndUnknown.StartupStateUnknown = true
+	limitAndUnknown.InFlightOp = session.OpNone
+	require.Equal(t, watchStopUnknown, mustReason(classifyWatchStop(limitAndUnknown)),
+		"startup-unknown outranks a usage limit on a mid-swap row")
+
+	// The watcher emits the working -> unknown edge, not silence.
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("s")}),
+		"the working baseline establishes no transition")
+	transitioned := fleetRunning("s")
+	transitioned.Liveness = session.LiveReady
+	transitioned.PendingAccountSwap = pending
+	transitioned.StartupStateUnknown = true
+	events := w.observe([]session.InstanceData{transitioned})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopUnknown}, reasons(events),
+		"a mid-swap session that went startup-unknown is reported as unknown, not held as working")
+}
+
 func mustReason(r watchStopReason, _ string) watchStopReason { return r }
