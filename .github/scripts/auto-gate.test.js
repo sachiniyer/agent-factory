@@ -10840,6 +10840,79 @@ test("#5004: a PR that ends during the settle window is never approved on a stal
     "the re-established guard refused the replay; the stale head's run was never approved");
 });
 
+// Codex on #5005: when the POST's outcome is unknown AND the read-back listing
+// stays unreadable for the whole settle window, that exhaustion is a guard
+// failure — the recovery failed on a READ, and reporting it as a run GitHub
+// kept parked ("not every parked run could be approved") misreports the
+// outcome and drops the classification. It must propagate.
+test("#5004: a read-back that never answers propagates its own failure", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  // The run-exists check and the parked list read fine; every read-back inside
+  // the settle window is unavailable, so convergence can never be proven.
+  let listCalls = 0;
+  const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    listCalls += 1;
+    if (listCalls > 2) throw Object.assign(new Error("listing unavailable"), { status: 500 });
+    return listRuns(options);
+  };
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, /could not confirm whether run 701 left the parked list/);
+      assert.doesNotMatch(error.message, /not every parked run .* could be approved/);
+      return true;
+    },
+  );
+  assert.equal(github.approveRunAttempts, 1, "the first ambiguous failure's unreadable read-back ends it");
+});
+
+// Codex on #5005: the post-update merge pass retried an approve with no
+// live-head check at all — a PR closed during the settle window still got its
+// stale head's run approved by the replay. The same guard recovery uses now
+// covers this lane.
+test("#5004: the post-update approve pass re-checks the live head before replaying", async () => {
+  const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+    // liveBefore, the post-update re-read, and attempt 1's guard all answer
+    // open at NEW_HEAD; the replay's re-check finds the PR closed.
+    pullGetSnapshots: [{}, {}, {}, { state: "closed" }],
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: { [NEW_HEAD]: [{ id: 101, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /Refusing to merge/,
+  );
+  assert.equal(github.approveRunAttempts, 1,
+    "the live-head guard refused the replay after the PR closed mid-settle");
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+// Same guard on the evaluate pass: the parked run belongs to the head the
+// evaluation read, and a head that moved meanwhile must not get its old
+// commit's run approved.
+test("#5004: the evaluate approve pass re-checks the live head before replaying", async () => {
+  const github = fakeGateGithub({
+    // The guard's first read already sees the head moved on — the pass cancels
+    // before the first POST, so no settle window is spent at all.
+    pullGetSnapshots: [{ head: { sha: OTHER_SHA } }],
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: { [HEAD_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  await autoGate.evaluate({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false });
+  assert.equal(github.approveRunAttempts, 0, "the moved head's parked run was never approved");
+  assert.deepEqual(github.approvedRuns, []);
+});
+
 test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
   const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
     approveRunError: Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),

@@ -3781,11 +3781,13 @@ async function approveParkedRuns({
       }
       approved.push(run);
     } catch (error) {
-      // A guard that could not answer is not an approval refusal: the recovery
-      // itself failed a precondition read, and "unapproved" would misreport
-      // that as a run GitHub kept parked. Real approve failures keep the
-      // warning shape — an explicit unmet item, not a hidden cancellation.
-      if (error?.autoGateRecoveryGuard) {
+      // A guard that could not answer is not an approval refusal: a failed
+      // precondition read — eligibility or the settle read-back itself — is an
+      // unknown about the write's safety, and "unapproved" would misreport it
+      // as a run GitHub kept parked. It propagates with the read-failure
+      // classification writeRetryGuardFailure preserved; real approve failures
+      // keep the warning shape — an explicit unmet item, not a hidden cancel.
+      if (error?.autoGateGuardFailure) {
         throw error;
       }
       core.warning(
@@ -3828,9 +3830,7 @@ async function approveParkedRun({ github, context, headSha, run, canRecover, sle
       try {
         recoverable = await canRecover();
       } catch (error) {
-        const failure = writeRetryGuardFailure(error);
-        failure.autoGateRecoveryGuard = true;
-        throw failure;
+        throw writeRetryGuardFailure(error);
       }
       if (!recoverable) {
         return { cancelled: true };
@@ -3850,6 +3850,29 @@ async function approveParkedRun({ github, context, headSha, run, canRecover, sle
     },
     { sleep },
   );
+}
+
+// The approve guard for lanes that are not successor-head recovery — the
+// post-update merge pass and the evaluate pass: the PR the parked runs belong
+// to must still be open and still point at that head when the POST fires. The
+// settle window can spend seconds, and a hand merge, a close, or a push
+// meanwhile leaves a replay approving a stale head's run (#5004, Codex on
+// #5005). Deliberately REST while the lanes' other reads are GraphQL — the
+// same cross-path reasoning as resolvedPullRequest.exists — with only a
+// definite 404 answering "gone": anything else is an unknown that escapes as a
+// guard failure rather than waving the write through unguarded.
+function liveHeadGuard({ github, context, prNumber, headSha }) {
+  const { owner, repo } = context.repo;
+  return async () => {
+    let live;
+    try {
+      live = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+    } catch (error) {
+      if (Number(error?.status ?? error?.response?.status) === 404) return false;
+      throw error;
+    }
+    return !pullRequestEnded(live?.data) && normalizeHeadSha(live?.data?.head?.sha) === headSha;
+  };
 }
 
 // The read-back of an approve whose POST did not report its outcome: whether
@@ -3941,7 +3964,7 @@ async function updateBranchToBase({ github, context, prNumber, headSha }) {
 
 async function merge({
   github, context, core, prNumber, expectedHeadSha, aggregateCheckRunId,
-  ruleViolationRetries = 1,
+  ruleViolationRetries = 1, sleep = delay,
 }) {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
@@ -4051,7 +4074,10 @@ async function merge({
         const newHead = normalizeHeadSha(updated?.data?.head?.sha);
         if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
           observedUpdatedHead = newHead;
-          const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
+          const stillOurs = liveHeadGuard({ github, context, prNumber, headSha: newHead });
+          const { approved } = await approveParkedRuns({
+            github, context, headSha: newHead, core, canRecover: stillOurs, sleep,
+          });
           if (approved.length > 0) {
             core.notice(
               `Approved ${approved.length} workflow run(s) parked on ${newHead} after update-branch: ` +
@@ -4064,6 +4090,8 @@ async function merge({
             core,
             headSha: newHead,
             headRefName: updated?.data?.head?.ref || gate.headRefName,
+            canRecover: stillOurs,
+            sleep,
           });
         }
       }
@@ -6458,7 +6486,12 @@ async function evaluateRequiredChecks({
   // (#5004), and the reasons below still describe whatever is genuinely still
   // parked.
   if (parkedRuns.length > 0) {
-    await approveParkedRuns({ github, context, headSha: sha, core });
+    await approveParkedRuns({
+      github, context, headSha: sha, core,
+      canRecover: subject?.number
+        ? liveHeadGuard({ github, context, prNumber: subject.number, headSha: sha })
+        : undefined,
+    });
   }
 
   const states = specs.map((spec) => latestRequiredState(spec, checkRuns, statuses));
