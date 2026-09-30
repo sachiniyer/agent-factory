@@ -163,6 +163,45 @@ func pidLooksAlive(pid int) bool {
 	return true
 }
 
+// processStartToken identifies one incarnation of pid by its start time, so a
+// wait that outlives the process can tell "still the daemon" from "the PID was
+// recycled to something else" (#5007). On Linux it is /proc/<pid>/stat field
+// 22 (starttime in clock ticks), read after the LAST ')' because comm may
+// itself contain spaces and parentheses; on macOS it is `ps -o lstart=`.
+// Returns "" when the start time cannot be observed (the process is gone,
+// another platform, a read failure) — callers then rely on liveness alone.
+func processStartToken(pid int) string {
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return ""
+		}
+		stat := string(data)
+		i := strings.LastIndexByte(stat, ')')
+		if i < 0 {
+			return ""
+		}
+		// Fields after comm start at field 3 (state), so field 22 is index 19.
+		fields := strings.Fields(stat[i+1:])
+		if len(fields) < 20 {
+			return ""
+		}
+		return fields[19]
+	case "darwin":
+		out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return ""
+}
+
+// processStartTokenFn is processStartToken, indirected so a test can simulate
+// PID reuse — a real reuse cannot be arranged on demand.
+var processStartTokenFn = processStartToken
+
 // scanDaemonCandidatesFn is the process-scan entry point used by
 // locateDaemonPID. It is a function var so tests can substitute a controlled
 // candidate list: the real pgrep scan is host-wide, so on any machine running

@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/rpc"
 	"os"
@@ -540,23 +541,44 @@ func TestPidLooksAliveTreatsZombieAsDead(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skipf("no zombie detection on %s", runtime.GOOS)
 	}
+	// The child holds the only write end of this pipe, and the kernel closes a
+	// process's descriptors as it exits, so EOF on the read end proves the child
+	// has exited — independently of pidLooksAlive, and without reaping it.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close()
 	cmd := exec.Command("sleep", "0.1")
+	cmd.Stdout = w
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep: %v", err)
 	}
+	_ = w.Close()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
 	pid := cmd.Process.Pid
 
-	// Deliberately not Wait-ing: once sleep exits it stays a zombie until the
-	// cleanup reaps it.
-	time.Sleep(300 * time.Millisecond)
-	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-		t.Skipf("pid %d was reaped already, so no zombie to observe: %v", pid, err)
+	// Deliberately not Wait-ing until cleanup: that is what keeps the zombie.
+	exited := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Skip("child did not exit within 5s on this host; no zombie to observe")
 	}
-	if pidLooksAlive(pid) {
-		t.Fatalf("pidLooksAlive(%d) = true for an exited, unreaped child", pid)
+	// The descriptors close just before the process turns zombie, so allow the
+	// exit to finish before judging.
+	deadline := time.Now().Add(2 * time.Second)
+	for pidLooksAlive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("pidLooksAlive(%d) = true 2s after the child exited (unreaped)", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

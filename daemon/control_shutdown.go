@@ -178,7 +178,8 @@ var (
 // exit, bounded by shutdownCompleteGrace. Process exit is a positive signal;
 // socket quietness is not — a draining daemon can stop answering pings well
 // before it releases what a successor needs. Renamed or relocated binaries are
-// irrelevant here because nothing checks the process name, only liveness. On
+// irrelevant here because nothing checks the process name, only liveness and
+// start time — a PID recycled to another process counts as the daemon's exit. On
 // the SIGTERM fallback path the process is already gone, so the first check
 // returns. With pid == 0 (unknown) it falls back to waiting for the control
 // socket to stop answering, bounded by shutdownSocketQuietGrace.
@@ -188,16 +189,29 @@ var (
 // so the caller can withhold the respawn and tell the user.
 func WaitForShutdownCompletion(pid int) error {
 	if pid > 0 {
+		// A start-time token taken now tells a recycled PID from the daemon: if
+		// the daemon exits and its PID is reused between polls, liveness alone
+		// would wait out the grace and the hint would name an unrelated process.
+		// "" (unobservable) falls back to liveness only, and a later read that
+		// fails is not a change: a failed read must not fabricate an exit.
+		token := processStartTokenFn(pid)
+		gone := func() bool {
+			if !pidLooksAlive(pid) {
+				return true
+			}
+			cur := processStartTokenFn(pid)
+			return token != "" && cur != "" && cur != token
+		}
 		deadline := time.Now().Add(shutdownCompleteGrace)
 		for time.Now().Before(deadline) {
-			if !pidLooksAlive(pid) {
+			if gone() {
 				return nil
 			}
 			time.Sleep(shutdownCompletePoll)
 		}
 		// The process may have exited between the last in-loop check and the
 		// deadline; do not report a daemon that is already gone as still running.
-		if !pidLooksAlive(pid) {
+		if gone() {
 			return nil
 		}
 		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)

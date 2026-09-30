@@ -5,6 +5,8 @@ import (
 	"net/rpc"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -155,5 +157,75 @@ func TestWaitForShutdownCompletionPIDTimesOut(t *testing.T) {
 	}
 	if !pidLooksAlive(pid) {
 		t.Fatalf("pid %d died during the wait; the wait must only observe, never signal", pid)
+	}
+}
+
+// TestProcessStartTokenIdentifiesIncarnation: the token is observable and
+// stable for a live process on the platforms that support it — including one
+// whose comm contains spaces and parentheses, which the Linux /proc/<pid>/stat
+// parse must read past.
+func TestProcessStartTokenIdentifiesIncarnation(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("no start token on %s", runtime.GOOS)
+	}
+	name := "sleep"
+	if runtime.GOOS == "linux" {
+		sleepPath, err := exec.LookPath("sleep")
+		if err != nil {
+			t.Skip("sleep not available")
+		}
+		data, err := os.ReadFile(sleepPath)
+		if err != nil {
+			t.Skipf("read %s: %v", sleepPath, err)
+		}
+		name = filepath.Join(t.TempDir(), "a) (b c")
+		if err := os.WriteFile(name, data, 0o755); err != nil {
+			t.Fatalf("copy sleep: %v", err)
+		}
+	}
+	pid := startReapedProcess(t, name, "30")
+
+	token := processStartToken(pid)
+	if token == "" {
+		t.Fatalf("processStartToken(%d) = \"\" for a live process", pid)
+	}
+	if again := processStartToken(pid); again != token {
+		t.Fatalf("processStartToken(%d) changed for the same process: %q then %q", pid, token, again)
+	}
+}
+
+// stubStartTokens replaces processStartTokenFn with one that returns tokens in
+// order, repeating the last.
+func stubStartTokens(t *testing.T, tokens ...string) {
+	t.Helper()
+	prev := processStartTokenFn
+	t.Cleanup(func() { processStartTokenFn = prev })
+	calls := 0
+	processStartTokenFn = func(int) string {
+		tok := tokens[min(calls, len(tokens)-1)]
+		calls++
+		return tok
+	}
+}
+
+// TestWaitForShutdownCompletionTreatsPIDReuseAsExit: a PID that is still alive
+// but now belongs to a different incarnation means the daemon exited and its
+// PID was recycled — the wait returns rather than burning the grace and naming
+// an unrelated process in the hint. A token read that fails midway is NOT a
+// change, so it cannot fabricate an exit.
+func TestWaitForShutdownCompletionTreatsPIDReuseAsExit(t *testing.T) {
+	pid := startReapedProcess(t, "sleep", "30")
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 300 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+
+	stubStartTokens(t, "daemon", "recycled")
+	if err := WaitForShutdownCompletion(pid); err != nil {
+		t.Fatalf("WaitForShutdownCompletion with a recycled pid: %v", err)
+	}
+
+	stubStartTokens(t, "daemon", "")
+	if err := WaitForShutdownCompletion(pid); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("WaitForShutdownCompletion with a failed token read = %v, want ErrShutdownIncomplete", err)
 	}
 }
