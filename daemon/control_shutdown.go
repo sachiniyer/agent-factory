@@ -231,17 +231,15 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 	dir, _ := config.GetConfigDir()
 	exited := func() bool {
 		if confirmed && pid > 0 && pid != os.Getpid() {
-			if !shutdownWaitPIDAliveFn(pid) {
-				return true
-			}
 			// The PID may already be recycled by an unrelated process, so
 			// aliveness alone can pin the wait forever — and aim the bound's
 			// kill -9 hint at the wrong process. A takeable daemon.lock file
 			// is kernel proof the lock-era target exited; absent means the
 			// question never applied (confirmed PIDs postdate the lock).
-			if lockFileTakeable(dir) {
-				return true
-			}
+			// Anything else still wears the PID or holds the lock: keep
+			// waiting — the quiet-socket arm of exitState cannot speak for a
+			// process proven alive.
+			return !shutdownWaitPIDAliveFn(pid) || lockFileTakeable(dir)
 		}
 		return exitState(pid, confirmed, deadline) == daemonExited
 	}
