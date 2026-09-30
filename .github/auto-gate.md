@@ -359,7 +359,11 @@ winner keeps the existing concession behavior (#3324). With no winner, it leaves
 the aggregate PASS, waits one second, and retries the merge once, re-running the
 full merge preflight first. If the second attempt gets the same refusal, the
 run reports the wait and leaves PASS green for propagation and the next run.
-If that preflight no longer passes, the aggregate is invalidated as before.
+When the gate can prove the aggregate's check-suite placement was superseded
+by a newer suite of the same workflow on the head, the report instead names a
+permanent placement whose remedy is to push a new head — an identical-tree
+commit re-rolls placement (#4802). If that preflight no longer passes,
+the aggregate is invalidated as before.
 An unreadable ownership check is not proof of no winner: it stays loud and does
 not overwrite an unknown owner. A successful merge still invalidates the old
 shared-head authorization because master has advanced.
