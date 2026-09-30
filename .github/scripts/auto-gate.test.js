@@ -10674,6 +10674,99 @@ for (const [name, fixture] of Object.entries(UNCONFIRMED_RECOVERIES)) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// #5004 — a transient failure approving a parked run. The bare
+// approveWorkflowRun was the one write in successor-head recovery with no
+// retry: a single 500 ("Unexpected end of JSON input", run 36667620661)
+// reddened a master run for a miss the next dispatch approved without
+// incident. The approve now shares the gate's write retry policy, and a failed
+// POST is never believed on its own word — the parked list is re-read, so a
+// run no longer parked (the POST committed anyway, or a concurrent approver
+// won) is already the goal state, not a failure.
+// ---------------------------------------------------------------------------
+
+function parkedRecoveryRuns(head = OTHER_SHA) {
+  return { [head]: [{ id: 701, name: "PR Validation", event: "pull_request",
+    status: "completed", conclusion: "action_required" }] };
+}
+
+test("#5004: a transient approve failure is retried and recovery succeeds", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2, "the transient answer was retried under the write policy");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+test("#5004: an approve that committed despite its failure is never replayed", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the read-back found the run out of the parked list, so the ambiguous write was not replayed");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+test("#5004: a persistent transient approve failure fails recovery with the same refusal", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const core = fakeCore();
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, new RegExp(`not every parked run on ${OTHER_SHA} could be approved`));
+      assert.match(error.message, RECOVERY_RERUN);
+      return true;
+    },
+  );
+  assert.equal(github.approveRunAttempts, 3, "retried to the write policy's bound, then reported");
+  assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*after 3 attempts: Unexpected end of JSON input/);
+});
+
+// A definitive refusal is decided by the parked list, not by the error's
+// wording: GitHub still reporting the run parked makes it the refusal it
+// always was — reported once, never replayed. The "not pending approval" case
+// is the flip side of the same read-back: the run already left action_required,
+// so the approval this lane owed is done and refusing again would fail a
+// recovery whose goal state already holds.
+test("#5004: a definitive refusal on a run still parked is reported once, not retried", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Resource not accessible by integration"), { status: 403 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const core = fakeCore();
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /not every parked run on .* could be approved/,
+  );
+  assert.equal(github.approveRunAttempts, 1, "a definitive refusal is not retried");
+  assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*Resource not accessible/);
+});
+
+test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
+    approveRunError: Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1, "the refusal was never replayed — the read-back answered it");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
 for (const [name, state] of Object.entries({ closed: { state: "CLOSED" }, merged: { merged: true }, retargeted: { baseRefName: "other" } })) {
   for (const duringPoll of [false, true]) {
     test(`#4210-r3: ${name} recovery is a successful no-op (during poll=${duringPoll})`, async () => {
@@ -15193,6 +15286,14 @@ function fakeGateGithub({
   runsByHeadSha = {},
   headAfterUpdate = null,
   approveRunError = null,
+  // Per-attempt approve failures, consulted before approveRunError — entry N is
+  // thrown on POST N, so a transient answer can be followed by a success
+  // (#5004).
+  approveRunErrors = [],
+  // A failed approve after which the run is no longer parked: the POST either
+  // committed and only its answer was lost, or a concurrent approver beat this
+  // lane — the gate cannot tell those apart and does not need to.
+  approveRunErrorUnparks = false,
   // GitHub creates the runs for a pushed head a few seconds AFTER the push, so a
   // fake that has them from the first list cannot reproduce #3814 — the first
   // approve pass would catch them and the gap would be invisible.
@@ -15456,6 +15557,7 @@ function fakeGateGithub({
     updatedChecks: [],
     workflowDispatchAttempts: 0,
     runListReads: [],
+    approveRunAttempts: 0,
     approvedRuns: [],
     recoveryComments: [],
     headShaAfterUpdate: null,
@@ -15488,21 +15590,27 @@ function fakeGateGithub({
           };
         },
         approveWorkflowRun: async (options) => {
-          if (approveRunError) {
-            throw approveRunError;
-          }
-          github.approvedRuns.push(options);
+          github.approveRunAttempts += 1;
+          const attemptError = approveRunErrors[github.approveRunAttempts - 1] || approveRunError;
           // Approving a run takes it OUT of action_required — a later pass finds
           // it running, not parked. A fake that leaves the conclusion alone makes
           // a second approve pass look like a double-approval bug when the real
-          // API would simply find nothing to do.
-          for (const runs of Object.values(runsByHeadSha)) {
-            for (const run of runs) {
-              if (run.id === options.run_id && run.conclusion === "action_required") {
-                run.conclusion = null;
-                run.status = "in_progress";
+          // API would simply find nothing to do. approveRunErrorUnparks models
+          // the same transition for a call that still FAILED: a 500 proves
+          // nothing about whether the POST committed (#5004).
+          if (!attemptError || approveRunErrorUnparks) {
+            github.approvedRuns.push(options);
+            for (const runs of Object.values(runsByHeadSha)) {
+              for (const run of runs) {
+                if (run.id === options.run_id && run.conclusion === "action_required") {
+                  run.conclusion = null;
+                  run.status = "in_progress";
+                }
               }
             }
+          }
+          if (attemptError) {
+            throw attemptError;
           }
         },
         createWorkflowDispatch: async (options) => {
