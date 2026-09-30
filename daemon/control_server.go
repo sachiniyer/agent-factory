@@ -61,6 +61,7 @@ const (
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
+	resp.GuardedRebind = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -664,7 +665,8 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	return nil
 }
 
- (fix(projects): make RebindProject a compare-and-set on the expected root (#4822))
+
+ (fix(projects): compare-and-set the guarded rebind on the observed (root, checkout) pair (#4888 review))
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through

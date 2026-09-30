@@ -68,3 +68,15 @@ func (c *Client) DaemonVersionPhrase(ctx context.Context) string {
 		return "version " + health.Version
 	}
 }
+
+// capabilities answers the daemon's Ping once per client, cached beside the
+// connection (#4822 spec): a guarded-rebind send must not re-ping for every
+// precondition it carries. A failed probe is cached as a failure too — the
+// fail-closed rule means its answer is a refusal either way, and a caller that
+// wants a fresh probe builds a new client.
+func (c *Client) capabilities() (daemon.PingResponse, error) {
+	c.capsOnce.Do(func() {
+		c.capsResp, c.capsErr = c.Health(context.Background())
+	})
+	return c.capsResp, c.capsErr
+}

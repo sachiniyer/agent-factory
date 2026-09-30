@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,6 +38,19 @@ func recordedRoot(t *testing.T, id string) string {
 	return ""
 }
 
+func recordedCheckoutID(t *testing.T, id string) string {
+	t.Helper()
+	projects, err := ListProjects()
+	require.NoError(t, err)
+	for _, p := range projects {
+		if p.ID == id {
+			return p.CheckoutID
+		}
+	}
+	t.Fatalf("project %s is not registered", id)
+	return ""
+}
+
 func TestRebindIfRootConcurrentRebindsFromOneRootExactlyOneWins(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	targets := []string{
@@ -52,7 +66,7 @@ func TestRebindIfRootConcurrentRebindsFromOneRootExactlyOneWins(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, errs[i] = RebindProjectIfRoot(project.ID, project.Root, target)
+			_, errs[i] = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, target)
 		}()
 	}
 	close(start)
@@ -82,14 +96,14 @@ func TestRebindIfRootRefusesAStaleExpectedRoot(t *testing.T) {
 	require.NoError(t, err)
 
 	stale := initProjectRegistryRepo(t, filepath.Join(base, "stale-choice"))
-	_, err = RebindProjectIfRoot(project.ID, project.Root, stale)
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, stale)
 	var refusal *ProjectReboundError
 	require.True(t, errors.As(err, &refusal), "a client that observed the old root must be refused, got %v", err)
 	assert.Equal(t, canonicalExistingPath(t, moved), refusal.Current)
 	assert.Equal(t, canonicalExistingPath(t, moved), recordedRoot(t, project.ID), "a refused rebind writes nothing")
 
 	// Re-armed against the refreshed root, the same choice applies.
-	_, err = RebindProjectIfRoot(project.ID, refusal.Current, stale)
+	_, err = RebindProjectIfRoot(project.ID, refusal.Current, refusal.CurrentCheckoutID, stale)
 	require.NoError(t, err)
 	assert.Equal(t, canonicalExistingPath(t, stale), recordedRoot(t, project.ID))
 }
@@ -98,9 +112,9 @@ func TestRebindIfRootOmittedExpectedRootKeepsLastWriterWins(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	first := initProjectRegistryRepo(t, filepath.Join(base, "first"))
 	second := initProjectRegistryRepo(t, filepath.Join(base, "second"))
-	_, err := RebindProjectIfRoot(project.ID, "", first)
+	_, err := RebindProjectIfRoot(project.ID, "", "", first)
 	require.NoError(t, err)
-	_, err = RebindProjectIfRoot(project.ID, "", second)
+	_, err = RebindProjectIfRoot(project.ID, "", "", second)
 	require.NoError(t, err, "a caller that sends no expected root is never refused on it")
 	assert.Equal(t, canonicalExistingPath(t, second), recordedRoot(t, project.ID))
 }
@@ -108,11 +122,11 @@ func TestRebindIfRootOmittedExpectedRootKeepsLastWriterWins(t *testing.T) {
 func TestRebindIfRootReplayOfALandedRebindIsNotAConflict(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	target := initProjectRegistryRepo(t, filepath.Join(base, "target"))
-	_, err := RebindProjectIfRoot(project.ID, project.Root, target)
+	_, err := RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, target)
 	require.NoError(t, err)
 	// The same request again (a retried or replayed send): the registry already
 	// says what it asks for, so it is not someone else's rebind.
-	_, err = RebindProjectIfRoot(project.ID, project.Root, target)
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, target)
 	require.NoError(t, err)
 	assert.Equal(t, canonicalExistingPath(t, target), recordedRoot(t, project.ID))
 }
@@ -126,7 +140,7 @@ func TestRebindIfRootReplayOfALandedRebindIsNotAConflict(t *testing.T) {
 func TestRebindIfRootExpectedRootComparesSpellingsNotAliases(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
-	_, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	_, err := RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, moved)
 	require.NoError(t, err)
 	current := recordedRoot(t, project.ID)
 
@@ -136,7 +150,7 @@ func TestRebindIfRootExpectedRootComparesSpellingsNotAliases(t *testing.T) {
 	require.NoError(t, os.Symlink(current, project.Root))
 
 	stale := initProjectRegistryRepo(t, filepath.Join(base, "stale-choice"))
-	_, err = RebindProjectIfRoot(project.ID, project.Root, stale)
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, stale)
 	var refusal *ProjectReboundError
 	require.True(t, errors.As(err, &refusal),
 		"an expected root that merely ALIASES the recorded root must be refused, got %v", err)
@@ -154,7 +168,7 @@ func TestRebindIfRootExpectedRootComparesSpellingsNotAliases(t *testing.T) {
 func TestRebindIfRootReplayRequiresTheSameCheckout(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
-	landed, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	landed, err := RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, moved)
 	require.NoError(t, err)
 	current := recordedRoot(t, project.ID)
 	require.NotEmpty(t, landed.CheckoutID, "precondition: the landed rebind recorded a checkout id")
@@ -169,7 +183,7 @@ func TestRebindIfRootReplayRequiresTheSameCheckout(t *testing.T) {
 
 	// The replay names the same root the landed rebind targeted, but the
 	// checkout behind it is new — the precondition must still refuse.
-	_, err = RebindProjectIfRoot(project.ID, project.Root, current)
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, current)
 	var refusal *ProjectReboundError
 	require.True(t, errors.As(err, &refusal),
 		"a replay against a REPLACED checkout must be refused, got %v", err)
@@ -192,7 +206,7 @@ func TestRebindIfRootReplayRequiresTheSameCheckout(t *testing.T) {
 func TestRebindIfRootReplayKeepsTheVerifiedMarker(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
-	landed, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	landed, err := RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, moved)
 	require.NoError(t, err)
 	current := recordedRoot(t, project.ID)
 
@@ -213,7 +227,7 @@ func TestRebindIfRootReplayKeepsTheVerifiedMarker(t *testing.T) {
 	}
 	t.Cleanup(func() { projectRegistryCommitRaceHookForTest = nil })
 
-	_, err = RebindProjectIfRoot(project.ID, project.Root, current)
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, current)
 	require.True(t, swapped, "the swap must run inside the replay's check/use window")
 	require.Error(t, err,
 		"a replay whose checkout was swapped between the marker reads must be refused")
@@ -242,7 +256,7 @@ func TestRebindIfRootReplayKeepsTheVerifiedMarker(t *testing.T) {
 func TestRebindIfRootReplayConsultsTheSpellingCompare(t *testing.T) {
 	base, project := registerForRebindCAS(t)
 	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
-	_, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	_, err := RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, moved)
 	require.NoError(t, err)
 	current := recordedRoot(t, project.ID)
 
@@ -257,7 +271,7 @@ func TestRebindIfRootReplayConsultsTheSpellingCompare(t *testing.T) {
 	// Replay the landed rebind: expectedRoot is stale (the pre-move root), the
 	// bound root is the recorded one verbatim — acceptance must run through the
 	// spelling compare, not os.SameFile.
-	_, err = RebindProjectIfRoot(project.ID, project.Root, current)
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, current)
 	require.NoError(t, err, "a true replay of the landed rebind is still accepted")
 
 	found := false
@@ -268,4 +282,99 @@ func TestRebindIfRootReplayConsultsTheSpellingCompare(t *testing.T) {
 	}
 	require.True(t, found,
 		"the replay bypass must compare the recorded root to the bound root by cleaned spelling — calls: %v", spellingChecked)
+}
+
+// TestRebindIfRootGuardedPairRefusesASamePathReclone pins the checkout half of
+// the guarded pair (#4822 spec): the compare is (root spelling, checkout id)
+// TOGETHER, so a precondition fails exactly where the root spelling still
+// passes — a reclone at the same path mints a new checkout marker, and the
+// caller that observed the old checkout must be refused rather than retarget
+// the replacement.
+func TestRebindIfRootGuardedPairRefusesASamePathReclone(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+	require.NotEmpty(t, project.CheckoutID, "precondition: registration recorded the marker it minted")
+
+	// Reclone the checkout in place, then have a peer rebind it onto the same
+	// recorded root: the root spelling never changes while the record's
+	// checkout marker moves to the reclone's.
+	require.NoError(t, os.RemoveAll(project.Root))
+	initProjectRegistryRepo(t, project.Root)
+	_, err := RebindProject(project.ID, project.Root) // another client, no precondition
+	require.NoError(t, err)
+	require.Equal(t, project.Root, recordedRoot(t, project.ID),
+		"precondition: the peer's rebind kept the same root spelling")
+	current := recordedCheckoutID(t, project.ID)
+	require.NotEqual(t, project.CheckoutID, current,
+		"precondition: the reclone minted a different checkout id")
+
+	// This client's observed pair (root, checkout) half-matches: the root
+	// spelling still does, but the checkout it watched is gone.
+	target := initProjectRegistryRepo(t, filepath.Join(base, "target"))
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, target)
+	var refusal *ProjectReboundError
+	require.True(t, errors.As(err, &refusal),
+		"a guarded send whose checkout half is stale must be refused, got %v", err)
+	assert.Equal(t, project.CheckoutID, refusal.ExpectedCheckout)
+	assert.Equal(t, current, refusal.CurrentCheckoutID,
+		"the refusal names the checkout the record holds now, so the caller can re-arm")
+	assert.Equal(t, current, recordedCheckoutID(t, project.ID), "a refused rebind writes nothing")
+}
+
+// TestRebindIfRootPreMarkerRecordCannotSatisfyTheGuard pins the #4822 spec's
+// unwritten-identity rule: a record with no checkout id — written before
+// markers existed — can never satisfy a guarded compare, because there is no
+// recorded checkout for the expected half to match. The schema makes that
+// refusal airtight: such a record fails validation outright, so the rebind
+// refuses loudly at the unreadable-records scan rather than comparing an
+// empty checkout to the caller's observed one.
+func TestRebindIfRootPreMarkerRecordCannotSatisfyTheGuard(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+	dir, err := projectRegistryDir()
+	require.NoError(t, err)
+
+	// Downgrade the record in place: the checkout field unwritten is the
+	// vintage a guarded precondition must not pass against.
+	recPath := projectRecordPath(dir, project.ID)
+	data, err := os.ReadFile(recPath)
+	require.NoError(t, err)
+	var record projectRecord
+	require.NoError(t, json.Unmarshal(data, &record))
+	require.NotEmpty(t, record.CheckoutID, "precondition: registration wrote a marker")
+	record.CheckoutID = ""
+	require.NoError(t, writeProjectRecord(dir, record))
+
+	target := initProjectRegistryRepo(t, filepath.Join(base, "target"))
+	_, err = RebindProjectIfRoot(project.ID, project.Root, project.CheckoutID, target)
+	require.Error(t, err, "a record that carries no checkout must refuse the guarded send")
+	var refusal *ProjectReboundError
+	require.False(t, errors.As(err, &refusal),
+		"the refusal is the unreadable-records repair refusal, not a compare-and-set rebound")
+	assert.Contains(t, err.Error(), "could not be read")
+	assert.Contains(t, err.Error(), "repair or remove")
+}
+
+// TestRebindIfRootGuardedPairRefusesAHalfGuardedSend pins the pair rule the
+// other way around: a send that names only one half of the pair is still a
+// GUARDED request — silently widening it to last-writer-wins would downgrade
+// the compare-and-set the caller asked for. Only the both-empty form is
+// unguarded.
+func TestRebindIfRootGuardedPairRefusesAHalfGuardedSend(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+
+	rootOnly := initProjectRegistryRepo(t, filepath.Join(base, "root-only"))
+	_, err := RebindProjectIfRoot(project.ID, project.Root, "", rootOnly)
+	var refusal *ProjectReboundError
+	require.True(t, errors.As(err, &refusal),
+		"a root-only guarded send must not silently downgrade to last-writer-wins, got %v", err)
+
+	checkoutOnly := initProjectRegistryRepo(t, filepath.Join(base, "checkout-only"))
+	_, err = RebindProjectIfRoot(project.ID, "", project.CheckoutID, checkoutOnly)
+	require.True(t, errors.As(err, &refusal),
+		"a checkout-only guarded send must not silently downgrade either, got %v", err)
+	assert.Equal(t, project.Root, recordedRoot(t, project.ID), "no half-guard wrote anything")
+
+	// Both empty is the explicit no-precondition form, and it still applies.
+	landed, err := RebindProjectIfRoot(project.ID, "", "", rootOnly)
+	require.NoError(t, err, "the unguarded form keeps last writer wins")
+	assert.Equal(t, canonicalExistingPath(t, rootOnly), landed.Root)
 }

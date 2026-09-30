@@ -1977,6 +1977,9 @@
         "cli": {
           "expected_root": {
             "ok": "The compare-and-set precondition (#4822) protects a root a UI DISPLAYED from a rebind that landed after the user read it; the TUI and web send the root they showed. `af projects rebind <id> <path>` shows nothing first — reading the registry and echoing its root back in the same process would only narrow the window, not close any race the user could see — so it keeps the documented last-writer-wins behaviour, which is also the contract for any client that omits the field (docs/http-api.md)."
+          },
+          "expected_checkout_id": {
+            "ok": "The second half of the guarded pair (#4822 spec): the checkout marker the row carried, which is what a same-path reclone changes while the root spelling stays put. The TUI and web send the pair they displayed. `af projects rebind` observes nothing — a read it makes in the same process is not the user's observation — so it sends no precondition, the documented last-writer-wins contract for any client that omits the fields (docs/http-api.md)."
           }
         }
       },

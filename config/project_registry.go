@@ -245,25 +245,28 @@ func sameProjectIdentity(leftCheckoutID, leftRelativeRoot, rightCheckoutID, righ
 }
 
 // ProjectReboundError is RebindProjectIfRoot's refusal when the project's
-// recorded root is no longer the one the caller observed: another rebind landed
-// between the caller reading the record and its request reaching the registry
-// (#4822). It is definitive — nothing was written — and names the root the
-// registry holds now, so the caller can show it and let the user decide again.
+// recorded identity is no longer the one the caller observed: another rebind —
+// or a reclone at the same path — landed between the caller reading the record
+// and its request reaching the registry (#4822). It is definitive — nothing
+// was written — and names the root and checkout id the registry holds now, so
+// the caller can show them and let the user decide again.
 type ProjectReboundError struct {
-	ID       string
-	Expected string
-	Current  string
+	ID                string
+	Expected          string
+	ExpectedCheckout  string
+	Current           string
+	CurrentCheckoutID string
 }
 
 func (e *ProjectReboundError) Error() string {
-	return fmt.Sprintf("project %s was rebound elsewhere: it is now bound to %s, not %s — refresh and retry", e.ID, e.Current, e.Expected)
+	return fmt.Sprintf("project %s was rebound elsewhere: it is now bound to %s (checkout %s), not %s (checkout %s) — refresh and retry", e.ID, e.Current, e.CurrentCheckoutID, e.Expected, e.ExpectedCheckout)
 }
 
 // RebindProject moves an existing stable project identity to path with no
 // precondition on where it points now: last writer wins. See
 // RebindProjectIfRoot for the compare-and-set form interactive callers use.
 func RebindProject(id, path string) (Project, error) {
-	return RebindProjectIfRoot(id, "", path)
+	return RebindProjectIfRoot(id, "", "", path)
 }
 
 // RebindProjectIfRoot moves an existing stable project identity to path. It
@@ -273,19 +276,25 @@ func RebindProject(id, path string) (Project, error) {
 // its marker and therefore its checkout ID; a genuine new clone receives a new
 // checkout ID.
 //
-// A non-empty expectedRoot makes the rebind a compare-and-set (#4822): it is
-// applied only while the record's stored root still spells expectedRoot —
-// compared as clean path TEXT, never resolved through the filesystem, so a
-// stale precondition cannot pass because its old path now aliases the new
-// root (#4888 review). The one bypass is a replay of the rebind that already
-// landed, and only while the resolved binding still sits on the recorded root
-// AND still carries the recorded checkout marker — a checkout replaced at the
-// same root is a different identity, so its replay is refused like any other
-// stale precondition. Anything else returns *ProjectReboundError. The check
-// runs under the registry lock, so two rebinds made against the same observed
-// root cannot both apply. An empty expectedRoot skips the check (last writer
-// wins), which is what a caller that predates the precondition sends.
-func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
+// A guarded rebind — either expected field non-empty — is a compare-and-set on
+// the PAIR the caller observed (#4822 spec, issue comment): the record's stored
+// root must still spell expectedRoot (clean-path TEXT, never resolved through
+// the filesystem, so a stale precondition cannot pass because its old path now
+// aliases the new root), AND the record's stored CheckoutID must equal
+// expectedCheckoutID. The checkout half is what sees a reclone at the same
+// path: the marker is re-minted, so the root spelling can keep matching while
+// the checkout the caller observed is gone (#4888 review). A record with no
+// checkout id — pre-marker vintage — can never satisfy a guarded compare.
+//
+// The one bypass is a replay of the rebind that already landed, and only while
+// the resolved binding still sits on the recorded root AND still carries the
+// recorded checkout marker — a checkout replaced at the same root is a
+// different identity, so its replay is refused like any other stale
+// precondition. Anything else returns *ProjectReboundError. The check runs
+// under the registry lock, so two rebinds made against the same observed pair
+// cannot both apply. Both fields empty skips the check (last writer wins),
+// which is what a caller that predates the precondition sends.
+func RebindProjectIfRoot(id, expectedRoot, expectedCheckoutID, path string) (Project, error) {
 	if err := ValidateProjectID(id); err != nil {
 		return Project{}, err
 	}
@@ -326,8 +335,19 @@ func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 
 		record := records[index]
 		var checkoutID string
-		if expectedRoot != "" && !sameProjectPathSpelling(record.Root, expectedRoot) {
-			// The precondition no longer names the recorded root. The only way
+		// Guarded iff either expected field was sent — a guarded client always
+		// sends the pair (#4822 spec). The precondition holds only when BOTH
+		// halves match what the caller observed: the stored root still spells
+		// expectedRoot as clean-path text, and the stored CheckoutID still
+		// equals expectedCheckoutID. A pre-marker record (CheckoutID "") can
+		// never satisfy it — the refusal path re-reads and re-arms, so the row
+		// self-heals once the registry has resolved its marker.
+		guarded := expectedRoot != "" || expectedCheckoutID != ""
+		preconditionHolds := !guarded ||
+			(sameProjectPathSpelling(record.Root, expectedRoot) &&
+				expectedCheckoutID != "" && record.CheckoutID == expectedCheckoutID)
+		if guarded && !preconditionHolds {
+			// The precondition no longer names the recorded pair. The only way
 			// through is a replay of the rebind that already landed — the
 			// resolved binding still sits on the recorded root AND still
 			// carries the recorded checkout marker, which the marker is READ
@@ -344,7 +364,10 @@ func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 			// spelling of the same directory) is not the landed rebind, and
 			// accepting it would rewrite the record's root to the alias.
 			if !sameProjectPathSpelling(record.Root, binding.root) || !bound || boundID != record.CheckoutID {
-				return &ProjectReboundError{ID: id, Expected: expectedRoot, Current: record.Root}
+				return &ProjectReboundError{
+					ID: id, Expected: expectedRoot, ExpectedCheckout: expectedCheckoutID,
+					Current: record.Root, CurrentCheckoutID: record.CheckoutID,
+				}
 			}
 			// The accepted replay keeps the marker it VERIFIED: re-reading
 			// through ensureCheckoutID would answer with whatever checkout sits

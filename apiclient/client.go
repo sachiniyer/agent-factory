@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -163,6 +164,12 @@ type Client struct {
 	// transport's independent dial + handshake timeouts, so a long-lived stream
 	// is never severed by an overall deadline.
 	requestTimeout time.Duration
+	// caps caches the daemon's Ping answer beside the connection (#4822 spec):
+	// a guarded-rebind send reads the capability once per client rather than
+	// re-pinging for every precondition it carries.
+	capsOnce sync.Once
+	capsResp daemon.PingResponse
+	capsErr  error
 }
 
 // New returns a Client dialing the daemon HTTP socket resolved from the current

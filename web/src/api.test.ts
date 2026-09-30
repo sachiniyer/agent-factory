@@ -1044,16 +1044,25 @@ test("rebindProject posts id + verbatim path to RebindProject", async () => {
   assert.equal(cap.auth, "Bearer tok");
 });
 
-test("rebindProject sends the expected root as expected_root", async () => {
+test("rebindProject sends the observed pair as expected_root + expected_checkout_id", async () => {
   const cap = stubFetch();
-  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old");
+  await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok", "/old", "chk_observed");
   assert.equal(cap.body.expected_root, "/old", "the daemon compares the registry against the root the UI showed (#4822)");
+  assert.equal(
+    cap.body.expected_checkout_id,
+    "chk_observed",
+    "the checkout half is what catches a same-path reclone the root spelling cannot (#4822 spec)",
+  );
 });
 
-test("rebindProject omits expected_root when there is no observed root", async () => {
+test("rebindProject omits the precondition when no pair was observed", async () => {
   const cap = stubFetch();
   await rebindProject("prj_0123456789abcdef0123456789abcdef", "/new", "tok");
   assert.ok(!("expected_root" in cap.body), "no observed root sends no precondition, not an empty one");
+  assert.ok(
+    !("expected_checkout_id" in cap.body),
+    "no observed checkout sends no field — an empty one would be a guard that cannot hold",
+  );
 });
 
 test("a project_rebound refusal classifies as a definitive rebind conflict", async () => {

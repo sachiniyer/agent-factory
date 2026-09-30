@@ -216,34 +216,44 @@ with response `data` of `{ "ok": true }`.
 ### Rebinding a project
 
 `POST /v1/RebindProject` moves a registered project's stable `id` to the
-checkout at `path`. It accepts an optional `expected_root`, the root the caller
-last saw the project bound to (the `root` from `POST /v1/ListProjects`):
+checkout at `path`. It accepts an optional observed pair — `expected_root`,
+the root the caller last saw the project bound to, and `expected_checkout_id`,
+the checkout marker behind it (the `root` and `checkout_id` from
+`POST /v1/ListProjects`):
 
 ```bash
 curl --unix-socket ~/.agent-factory/daemon-http.sock \
-    -X POST http://af/v1/RebindProject -d '{"id":"prj_…","path":"/home/me/src/repo","expected_root":"/home/me/old/repo"}'
+    -X POST http://af/v1/RebindProject -d '{"id":"prj_…","path":"/home/me/src/repo","expected_root":"/home/me/old/repo","expected_checkout_id":"chk_…"}'
 ```
 
-With `expected_root`, the rebind is a compare-and-set. The daemon applies it
-only if the registry still records that root when the registry lock is taken,
-so of two rebinds made from the same observed root, exactly one applies. The
-other gets `409` with `error.code: "project_rebound"`, and its message names the
-root the project is bound to now. Re-read the registry, show the user the
-current root, and retry with that as `expected_root` if they still want the
-move. A request whose `path` is already the recorded root also succeeds, so a
-retried request that already landed is not refused.
+With either expected field set, the rebind is a compare-and-set on the pair.
+The daemon applies it only if the registry still records that root *and* that
+checkout id when the registry lock is taken — the checkout half is what sees a
+reclone or repair at the same path, which keeps the root spelling but mints a
+new marker — so of two rebinds made from the same observed pair, exactly one
+applies. The other gets `409` with `error.code: "project_rebound"`, and its
+message names the root and checkout the project is bound to now. Re-read the
+registry, show the user the current pair, and retry with it if they still want
+the move. A request whose `path` is already the recorded root and whose
+checkout still matches also succeeds, so a retried request that already landed
+is not refused.
 
-`expected_root` is optional. A request that omits it (or sends it empty) is
-applied whatever the project is bound to, so the last writer wins. This is what
-clients written before the field existed get, and they are never refused
-because the field is missing. The TUI and web client send the root they displayed. `af
-projects rebind` does not; it rebinds unconditionally, as before.
+`expected_root` and `expected_checkout_id` are optional. A request that omits
+both is applied whatever the project is bound to, so the last writer wins —
+what clients written before the fields existed send, never refused for the
+omission. The TUI and web client send the pair they displayed. `af projects
+rebind` does not; it rebinds unconditionally, as before.
 
-A daemon that predates the field treats it like any unknown field (see
-[Unknown fields](#unknown-fields)). It rejects a hand-authored request with `400`.
-For a request with `X-AF-Client-Version`, such as the TUI's, it ignores the field
-and applies the rebind without the check. A client that needs the guarantee must
-run against a daemon at least as new as itself.
+A daemon that predates the fields treats them like any unknown fields (see
+[Unknown fields](#unknown-fields)). It rejects a hand-authored request with
+`400`. For a request with `X-AF-Client-Version`, such as the TUI's, it ignores
+them and applies the rebind without the check — which is why a client sending
+a guarded pair first reads `GET /v1/health`: a daemon that implements the
+precondition advertises `"guarded_rebind": true` in its `PingResponse`. When
+the bit is absent, or the capability answer cannot be obtained at all, the
+client refuses the send before the request goes out — the remedy is to upgrade
+the daemon or rebind from its host — rather than silently downgrade to last
+writer wins.
 
 **Not in the catalog.** The generated table is `af api`'s discovery surface — the
 client-facing session and task RPCs — so the daemon serves several routes it does

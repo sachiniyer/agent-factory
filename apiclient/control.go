@@ -400,12 +400,27 @@ func (c *Client) RegisterProject(path string) (config.Project, error) {
 // on its own filesystem, refuses a root another project owns, and publishes
 // projects.changed. HTTP twin of RebindProject.
 //
-// expectedRoot is the root the caller showed the user; the daemon applies the
-// rebind only while the registry still records it, and otherwise answers with a
-// *ProjectReboundError (#4822). Empty means no precondition.
-func (c *Client) RebindProject(id, expectedRoot, path string) (config.Project, error) {
+// expectedRoot and expectedCheckoutID are the (root, checkout) pair the caller
+// showed the user; the daemon applies the rebind only while the registry still
+// records BOTH, and otherwise answers with a *ProjectReboundError (#4822 spec).
+// Both empty means no precondition.
+//
+// A guarded send first confirms the daemon advertises the capability on Ping:
+// a daemon that omits the bit predates the checkout half and would apply the
+// rebind unconditionally, so this returns daemon.ErrGuardedRebindUnsupported
+// BEFORE the request goes out — never a silent last-writer-wins.
+func (c *Client) RebindProject(id, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
+	if expectedRoot != "" || expectedCheckoutID != "" {
+		ping, err := c.capabilities()
+		if err != nil {
+			return config.Project{}, fmt.Errorf("%w (capability check failed: %v)", daemon.ErrGuardedRebindUnsupported, err)
+		}
+		if !ping.GuardedRebind {
+			return config.Project{}, daemon.ErrGuardedRebindUnsupported
+		}
+	}
 	var resp daemon.RebindProjectResponse
-	req := daemon.RebindProjectRequest{ID: id, Path: path, ExpectedRoot: expectedRoot}
+	req := daemon.RebindProjectRequest{ID: id, Path: path, ExpectedRoot: expectedRoot, ExpectedCheckoutID: expectedCheckoutID}
 	if err := c.call("RebindProject", req, &resp); err != nil {
 		return config.Project{}, err
 	}

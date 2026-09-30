@@ -326,6 +326,7 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 		if rec, ok := registryRecordByRow[projects[i].RepoID]; ok {
 			projects[i].RegistryID = rec.ID
 			projects[i].RegistryRoot = rec.Root
+			projects[i].RegistryCheckoutID = rec.CheckoutID
 			projects[i].MissingPath = !rec.PathExists
 		}
 	}

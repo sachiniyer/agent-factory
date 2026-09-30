@@ -9,19 +9,19 @@ import (
 )
 
 // rebindRegisteredProject is RebindProject's registry write: a compare-and-set
-// against the root the caller last observed when it sent one (#4822), and last
-// writer wins when it did not. A refusal on that precondition leaves as a
-// projectReboundError, so both transports can tell it apart from every other
-// rejection.
+// against the (root, checkout id) pair the caller last observed when it sent
+// one (#4822 spec), and last writer wins when it sent neither. A refusal on
+// that precondition leaves as a projectReboundError, so both transports can
+// tell it apart from every other rejection.
 //
-// expectedRoot goes through verbatim — never trimmed or otherwise normalized.
-// An empty string is the "no precondition" form, so anything that rewrites a
-// nonempty value toward empty (a whitespace-only expected_root, a padded one
-// that only LOOKS empty) would silently strip the guard the caller asked for.
-// A precondition no recorded root can satisfy is refused, which is the failure
-// a compare-and-set exists to produce.
-func rebindRegisteredProject(id, expectedRoot, path string) (config.Project, error) {
-	project, err := config.RebindProjectIfRoot(id, expectedRoot, path)
+// expectedRoot/expectedCheckoutID go through verbatim — never trimmed or
+// otherwise normalized. An empty string is the "no value" form, so anything
+// that rewrites a nonempty value toward empty (a whitespace-only
+// expected_root, a padded one that only LOOKS empty) would silently strip the
+// guard the caller asked for. A precondition no recorded pair can satisfy is
+// refused, which is the failure a compare-and-set exists to produce.
+func rebindRegisteredProject(id, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
+	project, err := config.RebindProjectIfRoot(id, expectedRoot, expectedCheckoutID, path)
 	var rebound *config.ProjectReboundError
 	if errors.As(err, &rebound) {
 		return config.Project{}, &projectReboundError{err: err}
