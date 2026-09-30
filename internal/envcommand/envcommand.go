@@ -45,112 +45,147 @@ type Invocation struct {
 // modeling a different process environment or cwd.
 func Parse(args []string, policy Policy) (Invocation, error) {
 	result := Invocation{CommandIndex: -1}
-	options := true
-	assignments := false
+	state := Start
 	for idx := 0; idx < len(args); {
-		arg := args[idx]
-		if options {
-			switch {
-			case arg == "--":
-				options = false
-				idx++
-				continue
-			case arg == "-" || arg == "-i" || arg == "--ignore-environment":
-				result.ClearEnvironment = true
-				result.Mutations = nil
-				idx++
-				continue
-			case arg == "--help" || arg == "--version":
-				return result, unsupported(arg, "option exits env without running a command")
-			case arg == "-0" || arg == "--null":
-				return result, unsupported(arg, "null output mode cannot run a command")
-			case arg == "-v" || arg == "--debug" || arg == "--list-signal-handling":
-				idx++
-				continue
-			case arg == "-S" || strings.HasPrefix(arg, "-S") || arg == "--split-string" || strings.HasPrefix(arg, "--split-string="):
-				return result, unsupported(arg, "split-string constructs another command")
-			case arg == "-u" || arg == "--unset":
-				if idx+1 >= len(args) {
-					return result, unsupported(arg, "missing variable name")
-				}
-				name := args[idx+1]
-				if err := validateName(name); err != nil {
-					return result, err
-				}
-				result.Mutations = append(result.Mutations, Mutation{Name: name, Unset: true})
-				idx += 2
-				continue
-			case strings.HasPrefix(arg, "-u") && len(arg) > 2:
-				name := strings.TrimPrefix(arg, "-u")
-				if err := validateName(name); err != nil {
-					return result, err
-				}
-				result.Mutations = append(result.Mutations, Mutation{Name: name, Unset: true})
-				idx++
-				continue
-			case strings.HasPrefix(arg, "--unset="):
-				name := strings.TrimPrefix(arg, "--unset=")
-				if err := validateName(name); err != nil {
-					return result, err
-				}
-				result.Mutations = append(result.Mutations, Mutation{Name: name, Unset: true})
-				idx++
-				continue
-			case arg == "-C" || arg == "--chdir":
-				if idx+1 >= len(args) {
-					return result, unsupported(arg, "missing directory")
-				}
-				if err := validateNonEmptyLiteral(args[idx+1], "chdir"); err != nil {
-					return result, err
-				}
-				result.Chdir = args[idx+1]
-				idx += 2
-				continue
-			case strings.HasPrefix(arg, "-C") && len(arg) > 2:
-				dir := strings.TrimPrefix(arg, "-C")
-				if err := validateNonEmptyLiteral(dir, "chdir"); err != nil {
-					return result, err
-				}
-				result.Chdir = dir
-				idx++
-				continue
-			case strings.HasPrefix(arg, "--chdir="):
-				dir := strings.TrimPrefix(arg, "--chdir=")
-				if err := validateNonEmptyLiteral(dir, "chdir"); err != nil {
-					return result, err
-				}
-				result.Chdir = dir
-				idx++
-				continue
-			case signalOption(arg):
-				idx++
-				continue
-			case strings.HasPrefix(arg, "-"):
-				return result, unsupported(arg, "unknown option")
+		operand := func() (string, bool) {
+			if idx+1 >= len(args) {
+				return "", false
 			}
+			return args[idx+1], true
 		}
-
-		name, value, assignment := SplitAssignment(arg)
-		if assignment {
-			if !policy.AllowAssignments {
-				return result, unsupported(arg, "environment assignments are not allowed by this policy")
-			}
-			if err := validateLiteral(value, name); err != nil {
-				return result, err
-			}
-			assignments = true
-			options = false
-			result.Mutations = append(result.Mutations, Mutation{Name: name, Value: value})
-			idx++
-			continue
+		step, err := Advance(args[idx], operand, state, policy)
+		if err != nil {
+			return result, err
 		}
-		if assignments && strings.HasPrefix(arg, "-") {
-			return result, unsupported(arg, "option-like argument after an assignment")
+		if step.Clear {
+			result.ClearEnvironment = true
+			result.Mutations = nil
 		}
-		result.CommandIndex = idx
-		return result, nil
+		if step.HasMutation {
+			result.Mutations = append(result.Mutations, step.Mutation)
+		}
+		if step.HasChdir {
+			result.Chdir = step.Chdir
+		}
+		if step.Command {
+			result.CommandIndex = idx
+			return result, nil
+		}
+		idx += step.Width
+		state = step.Next
 	}
 	return result, nil
+}
+
+// State is the part of Parse's scan that carries from one argument to the
+// next: whether options are still recognized, and whether an assignment has
+// been seen. Every scan begins at Start.
+type State struct {
+	options     bool
+	assignments bool
+}
+
+// Start is the State Parse begins in.
+var Start = State{options: true}
+
+// Step is the effect of the argument at one position, as Parse applies it.
+// Command marks the position as env's command; otherwise the scan continues
+// Width arguments later in state Next.
+type Step struct {
+	Width       int
+	Next        State
+	Clear       bool
+	Mutation    Mutation
+	HasMutation bool
+	Chdir       string
+	HasChdir    bool
+	Command     bool
+}
+
+// Advance applies Parse's rule to one argument. operand returns the argument
+// after it, for the options that take one as a separate word; it is called
+// only by those options, so a caller may literalize lazily. The Step depends
+// only on (arg, operand, state, policy), which is what lets a caller that
+// scans many suffixes of one argv memoize the scan per (position, state)
+// instead of re-parsing every suffix (#4966).
+func Advance(arg string, operand func() (string, bool), state State, policy Policy) (Step, error) {
+	if state.options {
+		switch {
+		case arg == "--":
+			return Step{Width: 1, Next: State{assignments: state.assignments}}, nil
+		case arg == "-" || arg == "-i" || arg == "--ignore-environment":
+			return Step{Width: 1, Next: state, Clear: true}, nil
+		case arg == "--help" || arg == "--version":
+			return Step{}, unsupported(arg, "option exits env without running a command")
+		case arg == "-0" || arg == "--null":
+			return Step{}, unsupported(arg, "null output mode cannot run a command")
+		case arg == "-v" || arg == "--debug" || arg == "--list-signal-handling":
+			return Step{Width: 1, Next: state}, nil
+		case arg == "-S" || strings.HasPrefix(arg, "-S") || arg == "--split-string" || strings.HasPrefix(arg, "--split-string="):
+			return Step{}, unsupported(arg, "split-string constructs another command")
+		case arg == "-u" || arg == "--unset":
+			name, ok := operand()
+			if !ok {
+				return Step{}, unsupported(arg, "missing variable name")
+			}
+			if err := validateName(name); err != nil {
+				return Step{}, err
+			}
+			return Step{Width: 2, Next: state, Mutation: Mutation{Name: name, Unset: true}, HasMutation: true}, nil
+		case strings.HasPrefix(arg, "-u") && len(arg) > 2:
+			name := strings.TrimPrefix(arg, "-u")
+			if err := validateName(name); err != nil {
+				return Step{}, err
+			}
+			return Step{Width: 1, Next: state, Mutation: Mutation{Name: name, Unset: true}, HasMutation: true}, nil
+		case strings.HasPrefix(arg, "--unset="):
+			name := strings.TrimPrefix(arg, "--unset=")
+			if err := validateName(name); err != nil {
+				return Step{}, err
+			}
+			return Step{Width: 1, Next: state, Mutation: Mutation{Name: name, Unset: true}, HasMutation: true}, nil
+		case arg == "-C" || arg == "--chdir":
+			dir, ok := operand()
+			if !ok {
+				return Step{}, unsupported(arg, "missing directory")
+			}
+			if err := validateNonEmptyLiteral(dir, "chdir"); err != nil {
+				return Step{}, err
+			}
+			return Step{Width: 2, Next: state, Chdir: dir, HasChdir: true}, nil
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			dir := strings.TrimPrefix(arg, "-C")
+			if err := validateNonEmptyLiteral(dir, "chdir"); err != nil {
+				return Step{}, err
+			}
+			return Step{Width: 1, Next: state, Chdir: dir, HasChdir: true}, nil
+		case strings.HasPrefix(arg, "--chdir="):
+			dir := strings.TrimPrefix(arg, "--chdir=")
+			if err := validateNonEmptyLiteral(dir, "chdir"); err != nil {
+				return Step{}, err
+			}
+			return Step{Width: 1, Next: state, Chdir: dir, HasChdir: true}, nil
+		case signalOption(arg):
+			return Step{Width: 1, Next: state}, nil
+		case strings.HasPrefix(arg, "-"):
+			return Step{}, unsupported(arg, "unknown option")
+		}
+	}
+
+	name, value, assignment := SplitAssignment(arg)
+	if assignment {
+		if !policy.AllowAssignments {
+			return Step{}, unsupported(arg, "environment assignments are not allowed by this policy")
+		}
+		if err := validateLiteral(value, name); err != nil {
+			return Step{}, err
+		}
+		return Step{Width: 1, Next: State{assignments: true}, Mutation: Mutation{Name: name, Value: value}, HasMutation: true}, nil
+	}
+	if state.assignments && strings.HasPrefix(arg, "-") {
+		return Step{}, unsupported(arg, "option-like argument after an assignment")
+	}
+	return Step{Command: true}, nil
 }
 
 // SplitAssignment recognizes an env NAME=VALUE operand. GNU env accepts names

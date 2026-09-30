@@ -6,16 +6,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// operandTailMemo bounds the shadowed-wrapper operand walk. Every words slice
-// inside one validation is a suffix of the call's Args — the parser allocates
-// each Word once — so the first element's pointer names a distinct remaining
-// suffix, and the answer to "does the operand-onward tail mutate" depends only
-// on that suffix. Without it the same suffix is walked once by the operand
-// check and again by the enclosing unwrap loop's continuation, so nested
-// value-taking wrappers recurred exponentially (Codex on #4465: ~3s at depth
-// 20 of `nice -n nice ...`, unbounded at 25).
-type operandTailMemo map[*syntax.Word]bool
-
 // wrapperOperandTailMutates keeps a consumed option operand a candidate for
 // inspection. The modeled wrappers match by basename, which cannot prove the
 // binary is real util-linux: a repository-local or PATH-shadowed `ionice`
@@ -37,11 +27,11 @@ func wrapperOperandTailMutates(words []*syntax.Word, names map[string]struct{}, 
 	if len(words) == 0 {
 		return false
 	}
-	if answer, seen := memo[words[0]]; seen {
+	if answer, seen := memo.answers[words[0]]; seen {
 		return answer
 	}
 	answer := wrapperOperandTailMutatesUncached(words, names, memo)
-	memo[words[0]] = answer
+	memo.answers[words[0]] = answer
 	return answer
 }
 
@@ -114,23 +104,27 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 }
 
 func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("nice")
 	for len(words) > 0 {
+		if cached, seen := run.visit(words, nil); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch {
 		case option == "--":
-			return words[1:], false
+			return run.done(words[1:], false)
 		case option == "-n" || option == "--adjustment":
 			if len(words) < 2 {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if _, literal := literalShellWord(words[1]); !literal {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if wrapperOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
 			words = words[2:]
 		case strings.HasPrefix(option, "-n") || strings.HasPrefix(option, "--adjustment="):
@@ -138,45 +132,49 @@ func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTai
 		case strings.HasPrefix(option, "-") && len(option) > 1:
 			// Traditional nice accepts a bare numeric adjustment such as -10.
 			if strings.Trim(option[1:], "0123456789") != "" {
-				return nil, true
+				return run.done(nil, true)
 			}
 			words = words[1:]
 		default:
-			return words, false
+			return run.done(words, false)
 		}
 	}
-	return nil, false
+	return run.done(nil, false)
 }
 
 func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("timeout")
 	for len(words) > 0 {
+		if cached, seen := run.visit(words, nil); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch {
 		case option == "--":
 			words = words[1:]
 			if len(words) < 2 {
-				return nil, false
+				return run.done(nil, false)
 			}
 			if _, literal := literalShellWord(words[0]); !literal &&
 				!isSimpleQuotedParameterWord(words[0]) {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if wrapperOperandTailMutates(words, names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case option == "-k" || option == "--kill-after" || option == "-s" || option == "--signal":
 			if len(words) < 2 {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if _, literal := literalShellWord(words[1]); !literal {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if wrapperOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
 			words = words[2:]
 		case option == "--foreground" || option == "--preserve-status" || option == "-v" || option == "--verbose":
@@ -184,79 +182,87 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 		case strings.HasPrefix(option, "--kill-after=") || strings.HasPrefix(option, "--signal="):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			return nil, true
+			return run.done(nil, true)
 		default:
 			if len(words) < 2 {
-				return nil, false
+				return run.done(nil, false)
 			}
 			// The duration is an operand like taskset's mask: it stays a
 			// candidate for the shadowed reading.
 			if wrapperOperandTailMutates(words, names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		}
 	}
-	return nil, false
+	return run.done(nil, false)
 }
 
 func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("setsid")
 	for len(words) > 0 {
+		if cached, seen := run.visit(words, nil); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch option {
 		case "--":
-			return words[1:], false
+			return run.done(words[1:], false)
 		case "-h", "--help", "-V", "--version":
 			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
 			words = words[1:]
 		default:
 			if strings.HasPrefix(option, "-") && len(option) > 1 {
 				for _, flag := range option[1:] {
 					if flag != 'c' && flag != 'f' && flag != 'w' {
-						return nil, true
+						return run.done(nil, true)
 					}
 				}
 				words = words[1:]
 				continue
 			}
-			return words, false
+			return run.done(words, false)
 		}
 	}
-	return nil, false
+	return run.done(nil, false)
 }
 
 func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("stdbuf")
 	for len(words) > 0 {
+		if cached, seen := run.visit(words, nil); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch {
 		case option == "--":
-			return words[1:], false
+			return run.done(words[1:], false)
 		case option == "--help" || option == "--version":
 			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case option == "-i" || option == "--input" ||
 			option == "-o" || option == "--output" ||
 			option == "-e" || option == "--error":
 			if len(words) < 2 {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if _, literal := literalShellWord(words[1]); !literal {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if wrapperOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
 			words = words[2:]
 		case strings.HasPrefix(option, "--input=") ||
@@ -266,12 +272,12 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case len(option) > 2 && option[0] == '-' && strings.ContainsRune("ioe", rune(option[1])):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			return nil, true
+			return run.done(nil, true)
 		default:
-			return words, false
+			return run.done(words, false)
 		}
 	}
-	return nil, false
+	return run.done(nil, false)
 }
 
 // unwrapIonice removes an `ionice` prefix so the command it schedules is what
@@ -282,8 +288,12 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 // `ionice -c 3 sh -c 'unset CODEX_HOME; codex'` reached the default-safe
 // return and the nested shell removed the selected root before launch.
 func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("ionice")
 	var scope ioniceProofScope
 	for len(words) > 0 {
+		if cached, seen := run.visit(words, scope); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
 			// An option token carrying a quoted value is still ONE argv word when
@@ -293,7 +303,7 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// proof covers (ioniceQuotedOptionBoundaryPinned) are accepted here.
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
 			if !quoted {
-				return nil, true
+				return run.done(nil, true)
 			}
 			// A process selector needs no boundary decision for its OWN operand:
 			// it switches ionice to acting on already-running processes, so no
@@ -307,9 +317,9 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// command refuses only what a shadowed wrapper could actually run.
 			if ioniceProcessOnlyOption(prefix) {
 				if !scope.admitExtension() || shadowedOperandTailMutates(words[1:], names, memo) {
-					return nil, true
+					return run.done(nil, true)
 				}
-				return words[1:], false
+				return run.done(words[1:], false)
 			}
 			if !ioniceQuotedOptionBoundaryPinned(prefix) {
 				// `-c"$C"` / `-n"$N"` is admitted only when the empty-value reading
@@ -318,13 +328,13 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 				// scope keeps it out of commands that use #4465's options.
 				flag, ok := ioniceDynamicValueFlag(words[0])
 				if !ok || !scope.admitDynamicValue() || ioniceEmptyValueReadingLive(flag, words[1:]) {
-					return nil, true
+					return run.done(nil, true)
 				}
 				words = words[1:]
 				continue
 			}
 			if !scope.admitExtension() {
-				return nil, true
+				return run.done(nil, true)
 			}
 			// A pinned token is self-contained, so its value is never judged as
 			// a command head. The shadowed reading this file models forwards
@@ -337,19 +347,19 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			continue
 		}
 		if !scope.admitLiteralOption(option) {
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch {
 		case option == "--":
-			return words[1:], false
+			return run.done(words[1:], false)
 		case utilLinuxTerminalOption(option, "tpPu"):
 			// --help/--version exit before reaching a child on the real
 			// binary, but the basename match cannot prove this IS that binary;
 			// the words after the option still get inspected as a command.
 			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case ioniceProcessOnlyOption(option):
 			// -p/-P/-u select existing-process modes that never exec a child
 			// on real util-linux, so this external command cannot replace the
@@ -361,14 +371,14 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// accepted; an env or shell tail is refused. Process-control policy
 			// is outside this validator's environment-mutation contract.
 			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case option == "-t" || option == "--ignore":
 			words = words[1:]
 		case option == "-c" || option == "-n" || ioniceClassValueLongOption(option):
 			if len(words) < 2 {
-				return nil, true
+				return run.done(nil, true)
 			}
 			// This value selects a scheduling class. It cannot move the child
 			// boundary or touch the child's environment, so it only has to be
@@ -383,22 +393,22 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 			// operand leaves the following no-child modes reachable.
 			if _, literal := literalShellWord(words[1]); !literal &&
 				!isSimpleQuotedParameterWord(words[1]) {
-				return nil, true
+				return run.done(nil, true)
 			}
 			if wrapperOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
 			words = words[2:]
 		case strings.HasPrefix(option, "-c") || strings.HasPrefix(option, "-n") ||
 			ioniceClassValueLongOptionAttached(option):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			return nil, true
+			return run.done(nil, true)
 		default:
-			return words, false
+			return run.done(words, false)
 		}
 	}
-	return nil, false
+	return run.done(nil, false)
 }
 
 // literalPrefixBeforeSimpleQuotedParameter splits a word into a literal option
@@ -549,7 +559,11 @@ func ioniceProcessOnlyOption(option string) bool {
 // first OPERAND is the affinity mask (or, after -c, the cpu list), and the
 // command it runs begins only after it.
 func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("taskset")
 	for len(words) > 0 {
+		if cached, seen := run.visit(words, nil); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
 			// taskset's selector behaves as ionice's does: -p switches it to
@@ -562,20 +576,20 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(words[0])
 			if name, _, _ := strings.Cut(prefix, "="); quoted && tasksetProcessOnlyOption(name) {
 				if shadowedOperandTailMutates(words[1:], names, memo) {
-					return nil, true
+					return run.done(nil, true)
 				}
-				return words[1:], false
+				return run.done(words[1:], false)
 			}
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch {
 		case option == "--":
-			return tasksetCommandAfterMask(words[1:], names, memo)
+			return run.done(tasksetCommandAfterMask(words[1:], names, memo))
 		case utilLinuxTerminalOption(option, "acp"):
 			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case tasksetProcessOnlyOption(option):
 			// -p switches taskset from command execution to inspecting or
 			// updating an existing PID, so no child environment exists to
@@ -583,19 +597,19 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			// the basename match cannot distinguish taskset from a
 			// PATH-shadowed script that execs whatever follows the selector.
 			if shadowedOperandTailMutates(words[1:], names, memo) {
-				return nil, true
+				return run.done(nil, true)
 			}
-			return words[1:], false
+			return run.done(words[1:], false)
 		case option == "-a" || option == "--all-tasks" ||
 			option == "-c" || option == "--cpu-list":
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
-			return nil, true
+			return run.done(nil, true)
 		default:
-			return tasksetCommandAfterMask(words, names, memo)
+			return run.done(tasksetCommandAfterMask(words, names, memo))
 		}
 	}
-	return nil, false
+	return run.done(nil, false)
 }
 
 func utilLinuxTerminalOption(option, argumentFreeShortFlags string) bool {
@@ -672,14 +686,19 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 // an item spelling NAME=value becomes an assignment even when the marker sat
 // in env's command slot.
 func unwrapXargs(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
+	run := memo.optionRun("xargs")
 	substituting := false
 	markerKnown := true
 	marker := "{}"
 options:
 	for len(words) > 0 {
+		state := xargsLoopState{substituting: substituting, markerKnown: markerKnown, marker: marker}
+		if cached, seen := run.visit(words, state); seen {
+			return run.done(cached.words, cached.unsafe)
+		}
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			return nil, true
+			return run.done(nil, true)
 		}
 		switch {
 		case option == "--":
@@ -692,12 +711,12 @@ options:
 			switch name {
 			case "help", "version":
 				if shadowedOperandTailMutates(words[1:], names, memo) {
-					return nil, true
+					return run.done(nil, true)
 				}
-				return words[1:], false
+				return run.done(words[1:], false)
 			case "null", "interactive", "no-run-if-empty", "open-tty", "verbose", "exit", "show-limits":
 				if attached {
-					return nil, true
+					return run.done(nil, true)
 				}
 				words = words[1:]
 			case "eof", "max-lines":
@@ -712,12 +731,12 @@ options:
 			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
 				if !attached {
 					if len(words) < 2 {
-						return nil, true
+						return run.done(nil, true)
 					}
 					// The argument value itself is inert to this analysis on
 					// the real binary, but a shadowed xargs may exec it.
 					if wrapperOperandTailMutates(words[1:], names, memo) {
-						return nil, true
+						return run.done(nil, true)
 					}
 					words = words[1:]
 				}
@@ -729,20 +748,20 @@ options:
 					arg, argLiteral = value, true
 				} else {
 					if len(words) < 2 {
-						return nil, true
+						return run.done(nil, true)
 					}
 					arg, argLiteral = literalShellWord(words[1])
 					if wrapperOperandTailMutates(words[1:], names, memo) {
-						return nil, true
+						return run.done(nil, true)
 					}
 					words = words[1:]
 				}
 				if !argLiteral || accountEnvironmentOperandDenied(arg, names) {
-					return nil, true
+					return run.done(nil, true)
 				}
 				words = words[1:]
 			default:
-				return nil, true
+				return run.done(nil, true)
 			}
 		default:
 			flags := option[1:]
@@ -766,11 +785,11 @@ options:
 						arg, argLiteral = flags[idx+1:], true
 					} else {
 						if len(words) < 2 {
-							return nil, true
+							return run.done(nil, true)
 						}
 						arg, argLiteral = literalShellWord(words[1])
 						if wrapperOperandTailMutates(words[1:], names, memo) {
-							return nil, true
+							return run.done(nil, true)
 						}
 						words = words[1:]
 					}
@@ -784,7 +803,7 @@ options:
 					}
 					idx = len(flags)
 				default:
-					return nil, true
+					return run.done(nil, true)
 				}
 			}
 			words = words[1:]
@@ -793,54 +812,16 @@ options:
 	if len(words) == 0 {
 		// With no command operand xargs runs its default echo on each input
 		// item — nothing here to unwrap.
-		return nil, false
+		return run.done(nil, false)
 	}
 	if _, literal := literalShellWord(words[0]); !literal {
-		return nil, true
+		return run.done(nil, true)
 	}
-	for j := 0; j < len(words); j++ {
-		if !isAccountCommandName(words[j], "env") {
-			continue
-		}
-		invocation, err := envCallArgvParse(words[j+1:])
-		if err != nil || invocation.ClearEnvironment {
-			return nil, true
-		}
-		operandEnd := invocation.CommandIndex
-		if operandEnd < 0 {
-			operandEnd = len(words[j+1:])
-		} else {
-			// The command word counts as operand region: a substituted item
-			// landing there is re-parsed by env, and an item spelling
-			// NAME=value becomes an assignment rather than a program name.
-			operandEnd++
-		}
-		if substituting {
-			if !markerKnown {
-				return nil, true
-			}
-			for k := 0; k < operandEnd; k++ {
-				lit, ok := literalShellWord(words[j+1+k])
-				if !ok {
-					return nil, true
-				}
-				// Only the part before the first '=' is parsed as a name or
-				// option; a marker in an assignment's value feeds data env
-				// cannot reinterpret as a mutation.
-				namePart, _, _ := strings.Cut(lit, "=")
-				if strings.Contains(namePart, marker) {
-					return nil, true
-				}
-			}
-		} else if invocation.CommandIndex < 0 {
-			// Without substitution, input items append after the initial
-			// arguments — straight into env's operand region when env's own
-			// argv names no command, so `xargs env` can run `env ITEM` with
-			// ITEM spelling NAME=value.
-			return nil, true
-		}
+	state := xargsLoopState{substituting: substituting, markerKnown: markerKnown, marker: marker}
+	if xargsEnvOperandsFed(words, state, names, memo) {
+		return run.done(nil, true)
 	}
-	return words, false
+	return run.done(words, false)
 }
 
 // isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or

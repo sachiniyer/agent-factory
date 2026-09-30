@@ -405,8 +405,16 @@ async function connect(candidate: string): Promise<void> {
     // Either way we land on the login view exactly once — no retry loop.
     if (shouldForgetToken(e)) {
       clearToken();
+      // The credential was rejected. Flip authRequired so loginView routes to the
+      // paste form with the "Login expired" title — mirroring the resync path that
+      // calls disconnect(describeError(error), true). Without this flip a tokenless
+      // client (authRequired === false from an earlier probe) stays routed to
+      // noAuthLoginView, which re-issues the same empty-token request that just 401'd
+      // and never surfaces a token field for in-app recovery.
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : undefined });
     return;
   }
   if (!attempt.isCurrent()) return;
