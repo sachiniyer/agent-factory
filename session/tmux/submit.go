@@ -118,6 +118,13 @@ type deliveryProbe struct {
 	payload               string
 	baselineText          string
 	trailingNewlines      int
+	// pasteRunes and pasteLines are this payload's own size in the units the
+	// collapsed-paste chips declare ("[Pasted Content N chars]", "[Pasted text
+	// #k +N lines]"). The #4200 remedy's chip binding uses them to exclude a
+	// chip drawn by a concurrent user paste: a chip whose declared size is not
+	// this payload's cannot be ours (#4530 review).
+	pasteRunes int
+	pasteLines int
 }
 
 // pasteBufferSeq makes each bracketed-paste buffer name unique per call so two
@@ -713,7 +720,8 @@ func newDeliveryProbe(text string) deliveryProbe {
 	// capture — a fully drained paste would read as absent, and with #3293
 	// that misread would authorize a redelivery of an instruction whose Enter
 	// may already have submitted it.
-	n := []rune(normalizeDelivery(xansi.Strip(text)))
+	stripped := xansi.Strip(text)
+	n := []rune(normalizeDelivery(stripped))
 	const (
 		completionRunes = 32
 		witnessRunes    = 24
@@ -737,6 +745,8 @@ func newDeliveryProbe(text string) deliveryProbe {
 		completion:       string(n[len(n)-completionLen:]),
 		payload:          string(n),
 		trailingNewlines: trailingNewlines(xansi.Strip(text)),
+		pasteRunes:       len([]rune(stripped)),
+		pasteLines:       strings.Count(stripped, "\n") + 1,
 	}
 	if availablePrefix >= minDistinctiveFragment {
 		if availablePrefix > witnessRunes {

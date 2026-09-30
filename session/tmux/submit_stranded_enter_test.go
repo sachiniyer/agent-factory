@@ -39,6 +39,14 @@ type stagedDraftPane struct {
 	clearIsNoop     bool
 	swallowedEnters int
 	render          func(payload string) []string
+	// cursorCol, when non-zero, overrides the column cursorLineLocked reports —
+	// the hook that lets a test model the cursor moving off the insert column
+	// (e.g. a user typing a space onto a blank composer row).
+	cursorCol int
+	// afterPaste runs inside the paste-buffer command, after this delivery's
+	// own render lands — the hook that models input arriving between the
+	// pre-paste baseline and the Enter boundary.
+	afterPaste func(m *stagedDraftPane)
 	// afterSnapshot runs after the n-th atomic cursor+grid snapshot is
 	// answered — the hook that models input arriving between two reads.
 	afterSnapshot func(m *stagedDraftPane, n int)
@@ -90,7 +98,16 @@ func (m *stagedDraftPane) cursorLineLocked() string {
 	if m.hiddenCursor {
 		flag = 0
 	}
-	return fmt.Sprintf("%d 2 %d", row, flag)
+	// The cursor rests at the composer block's insert column: 2 on an unboxed
+	// composer (› / "  " prefixes) and 4 inside a "│ › … │" box.
+	col := 2
+	if m.boxed {
+		col = 4
+	}
+	if m.cursorCol != 0 {
+		col = m.cursorCol
+	}
+	return fmt.Sprintf("%d %d %d", row, col, flag)
 }
 
 // userPastes models an attached user pasting a multiline draft into the
@@ -120,6 +137,9 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 			case strings.Contains(joined, "paste-buffer"):
 				m.pastes++
 				m.composer = append(m.composer, m.render(m.lastLoaded)...)
+				if m.afterPaste != nil {
+					m.afterPaste(m)
+				}
 			}
 			return nil
 		},
@@ -267,9 +287,10 @@ func TestUserPasteAfterSubmitGetsNoRemedyEnter(t *testing.T) {
 // TestUserInputIntoStrandedDraftWithholdsRemedy: the Enter was swallowed, but
 // the user typed into the composer before the grace check. The composer now
 // holds more than our first Enter was sent to submit, so the remedy must not
-// fire. The status is not asserted: the cursor row holds the user's text, not
-// ours, so the remedy finds no staged evidence and leaves the observation as
-// master reports it.
+// fire — and the draft never left the composer, so the bound evidence still
+// inside it downgrades the report to sent-unverified rather than the landed
+// the pre-Enter observation recorded (#4530 review: a bound draft that stays
+// in the composer is not delivered, however it came to be contaminated).
 func TestUserInputIntoStrandedDraftWithholdsRemedy(t *testing.T) {
 	m := &stagedDraftPane{swallowedEnters: 1, render: literalRender}
 	mock := m.exec()
@@ -285,10 +306,43 @@ func TestUserInputIntoStrandedDraftWithholdsRemedy(t *testing.T) {
 	}
 	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
 	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), mock)
-	_, err := session.SendKeysCommandObserved(redeliverPrompt)
+	status, err := session.SendKeysCommandObserved(redeliverPrompt)
 	require.NoError(t, err)
 	_, enters := m.counts()
 	require.Equal(t, 1, enters, "the composer holds the user's text too; our Enter must not submit it")
+	require.Equal(t, PromptSentUnverified, status,
+		"bound evidence still inside the composer is a stranded draft, not a landed one")
+}
+
+// TestWhitespaceOnBlankComposerRowWithholdsRemedy is the Codex P2 on
+// normalization blindness: the user typed a space onto the composer's blank
+// continuation row during the grace window. normalizeDelivery erases
+// whitespace, so the grace frame compares still and the draft still anchors —
+// but the cursor moved one column past the insert column, which no input of
+// ours could have done. The remedy Enter must not fire.
+func TestWhitespaceOnBlankComposerRowWithholdsRemedy(t *testing.T) {
+	m := &stagedDraftPane{swallowedEnters: 1, render: literalRender, cursorCol: 3}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, 1, enters, "a draft whose cursor moved under unseen input must not get our Enter")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, PromptSentUnverified, status)
+}
+
+// TestConcurrentUserPasteChipIsNotBound is the Codex P2 on chip provenance:
+// the user's own paste collapsed into a chip in the same window ours did, so
+// the boundary frame holds TWO new chips — one of which is not this payload's.
+// Growth > 0 cannot tell them apart, and the user's chip declares a size that
+// is not ours, so neither can be bound to this delivery: no remedy Enter.
+func TestConcurrentUserPasteChipIsNotBound(t *testing.T) {
+	m := &stagedDraftPane{
+		swallowedEnters: 1,
+		render:          codexChipRender,
+		afterPaste:      func(m *stagedDraftPane) { m.userPastes() },
+	}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, 1, enters, "a chip that might be the user's must never receive our Enter")
+	require.Equal(t, 1, pastes)
+	require.Equal(t, PromptSentUnverified, status)
 }
 
 // TestUnclearedUserChipIsNotBoundEvidence: C-u could not clear a user's draft

@@ -2,8 +2,10 @@ package tmux
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
 
@@ -49,8 +51,94 @@ func (p deliveryProbe) boundEvidence(boundaryText string) stagedEvidence {
 	}
 	return stagedEvidence{
 		tail: strings.Count(boundaryText, p.completion) > p.completionBaseline,
-		chip: strings.Count(boundaryText, pasteChipMarker) > strings.Count(p.baselineText, pasteChipMarker),
+		chip: p.boundPasteChip(boundaryText),
 	}
+}
+
+// boundPasteChip reports whether the chip count grew by EXACTLY one between the
+// baseline and the Enter boundary, and whether that chip declares this
+// payload's size. Both halves are provenance (#4530 review): an attached user
+// can paste in the same window, and their chip grows the count exactly like
+// ours, so growth alone cannot attribute the chip. One delivery draws one
+// chip — a larger growth means a concurrent render we cannot attribute — and a
+// chip that does not declare this payload's size ("N chars", "+N lines") is as
+// likely to be the user's still-processing paste as ours. A chip with no
+// readable size cannot exclude concurrent input either, so it does not bind.
+func (p deliveryProbe) boundPasteChip(boundaryText string) bool {
+	growth := strings.Count(boundaryText, pasteChipMarker) - strings.Count(p.baselineText, pasteChipMarker)
+	if growth != 1 {
+		return false
+	}
+	chip, ok := newestPasteChip(boundaryText)
+	return ok && p.chipMatchesPayload(chip)
+}
+
+// newestPasteChip returns the last "[Pasted ...]" run in a normalized frame —
+// the bottom-most chip on the pane. The run must end at its "]": a chip still
+// being drawn has no terminator and cannot be sized.
+func newestPasteChip(normalized string) (string, bool) {
+	i := strings.LastIndex(normalized, pasteChipMarker)
+	if i < 0 {
+		return "", false
+	}
+	rest := normalized[i:]
+	end := strings.IndexByte(rest, ']')
+	if end < 0 {
+		return "", false
+	}
+	return rest[:end+1], true
+}
+
+// chipMatchesPayload compares the size a collapsed-paste chip declares against
+// this payload's own measured size. Codex prints the pasted character count
+// ("[Pasted Content 3207 chars]"); Claude prints the pasted line count
+// ("[Pasted text #1 +12 lines]"). Either metric matching is provenance; a chip
+// declaring neither — or a different number — cannot be attributed to this
+// paste.
+func (p deliveryProbe) chipMatchesPayload(chip string) bool {
+	if chars, ok := chipDeclaredCount(chip, "chars"); ok {
+		return chars == p.pasteRunes
+	}
+	if lines, ok := chipDeclaredCount(chip, "+", "lines"); ok {
+		return lines == p.pasteLines
+	}
+	return false
+}
+
+// chipDeclaredCount reads the integer that precedes a unit word in a
+// normalized chip: "…3207chars]" is 3207 chars, "+12lines]" is 12 lines. The
+// frame is normalized, so the digits sit directly against the unit.
+func chipDeclaredCount(chip string, parts ...string) (int, bool) {
+	s := chip
+	var num string
+	for _, part := range parts {
+		if part == "+" {
+			i := strings.Index(s, "+")
+			if i < 0 {
+				return 0, false
+			}
+			s = s[i+1:]
+			continue
+		}
+		i := strings.Index(s, part)
+		if i < 0 {
+			return 0, false
+		}
+		num = s[:i]
+	}
+	if num == "" {
+		return 0, false
+	}
+	// The digits are the count's trailing run: "#2+12lines" declares 12.
+	start := len(num)
+	for start > 0 && num[start-1] >= '0' && num[start-1] <= '9' {
+		start--
+	}
+	if start == len(num) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(num[start:])
+	return n, err == nil
 }
 
 // frameStill reports that nothing new was drawn between two normalized frames:
@@ -210,6 +298,175 @@ func blankComposerRow(raw string) bool {
 	}) == ""
 }
 
+// isComposerGlyphRow reports whether a normalized row opens with a composer
+// prompt glyph — Claude's ❯, Codex's ›, or the plain > some composers draw.
+// The composer's first row carries it; so does a submitted prompt's echo, so
+// only the LAST such row can anchor the live composer.
+func isComposerGlyphRow(norm string) bool {
+	return strings.HasPrefix(norm, claudeComposerGlyph) ||
+		strings.HasPrefix(norm, "›") || strings.HasPrefix(norm, ">")
+}
+
+// composerBlockBounds locates the live composer region in a pane's rows: from
+// the LAST prompt-glyph row down to the row before the next horizontal border
+// (or the frame's end). The last glyph row is the composer's own first row —
+// a submitted prompt's glyph'd echo is always above it, because the composer
+// repaints beneath the echo. found is false when no glyph row exists at all;
+// callers then cannot attribute any row to the composer.
+func composerBlockBounds(rows []string) (first, end int, ok bool) {
+	first = -1
+	for i, r := range rows {
+		if isComposerGlyphRow(normalizeDelivery(r)) {
+			first = i
+		}
+	}
+	if first < 0 {
+		return 0, 0, false
+	}
+	end = len(rows)
+	for j := first + 1; j < len(rows); j++ {
+		if normalizeDelivery(rows[j]) == "" && !blankComposerRow(rows[j]) {
+			end = j
+			break
+		}
+	}
+	return first, end, true
+}
+
+// composerBlockText joins the normalized text of the composer block: the last
+// glyph row plus its continuation rows, across blank continuation rows.
+func composerBlockText(rows []string) (string, bool) {
+	first, end, ok := composerBlockBounds(rows)
+	if !ok {
+		return "", false
+	}
+	var block strings.Builder
+	for j := first; j < end; j++ {
+		block.WriteString(normalizeDelivery(rows[j]))
+	}
+	return block.String(), true
+}
+
+// composerHoldsBoundEvidence reports whether the live composer region still
+// contains this delivery's bound evidence — the completion tail, or the bound
+// paste chip. stagedInComposer answers whether the evidence sits at the draft's
+// insertion point; this answers only whether it is still INSIDE the composer at
+// all, which is what decides "still staged, now mixed with foreign text" apart
+// from "submitted" (#4530 review).
+func composerHoldsBoundEvidence(pane string, probe deliveryProbe, bound stagedEvidence) bool {
+	block, ok := composerBlockText(strings.Split(strings.TrimSuffix(pane, "\n"), "\n"))
+	if !ok {
+		return false
+	}
+	if bound.tail && strings.Contains(block, probe.completion) {
+		return true
+	}
+	return bound.chip && strings.Contains(block, pasteChipMarker)
+}
+
+// composerRenderIsOursOnly reports that the composer block renders THIS
+// delivery and nothing else: the bound tail must reconstruct the whole block —
+// the payload plus its leading glyph, across however many rows the draft
+// wrapped to — and the bound chip must be the block's one and only row of
+// content. Anything else in the block (a stale draft C-u could not clear, an
+// attached user's typed or pasted text between baseline and boundary) means
+// the composer no longer holds only what our Enter was sent to submit (#4530
+// review). The check sits at the grace read, so input arriving between the
+// boundary and grace is excluded by frameStill first; this covers the
+// pre-boundary window stillness cannot see.
+func composerRenderPure(pane string, probe deliveryProbe, bound stagedEvidence) bool {
+	block, ok := composerBlockText(strings.Split(strings.TrimSuffix(pane, "\n"), "\n"))
+	if !ok {
+		return false
+	}
+	// The block's first row carries one prompt glyph; everything after it is
+	// payload render. Strip exactly one leading rune, not one of each glyph —
+	// the payload itself may open with '>'.
+	if r, size := utf8.DecodeRuneInString(block); r == '❯' || r == '›' || r == '>' {
+		block = block[size:]
+	}
+	if bound.tail && block == probe.payload {
+		return true
+	}
+	// A chip render is exactly one row: the chip is the block's whole text.
+	return bound.chip && strings.HasPrefix(block, pasteChipMarker) &&
+		strings.Count(block, pasteChipMarker) == 1 && strings.HasSuffix(block, "]")
+}
+
+// composerCursorIsHome reports whether the visible cursor rests where a
+// composer that drew nothing but our payload would leave it: at the block's
+// text-insert column when it sits on a blank continuation row (a swallowed
+// Enter parks it there), or at the content end of a content row. Whitespace is
+// invisible to the normalized stillness check — a user typing a space on a
+// continuation row draws no new normalized text — but it always moves the
+// cursor past where our own input could have left it (#4530 review). A pane
+// whose cursor cannot be measured carries no such signal, so it neither passes
+// nor vetoes: the check reports true and the residual stays with the glyph-less
+// and hidden-cursor geometries, which have no column to compare against.
+func composerCursorIsHome(pane string, cursor paneCursorState) bool {
+	if !cursor.Visible {
+		return true
+	}
+	rows := strings.Split(strings.TrimSuffix(pane, "\n"), "\n")
+	if cursor.Row < 0 || cursor.Row >= len(rows) {
+		return false
+	}
+	if !blankComposerRow(rows[cursor.Row]) {
+		return cursor.Col == contentEndCol(rows[cursor.Row])
+	}
+	insert, ok := composerInsertCol(rows)
+	return ok && cursor.Col == insert
+}
+
+// composerInsertCol measures the column where composer text begins: the
+// smallest first-content column across the block's content rows (rows of pure
+// decoration contribute nothing). For "› text" or its "  continuation" rows
+// that is 2; for a boxed "│ › x │" row, 4.
+func composerInsertCol(rows []string) (int, bool) {
+	first, end, ok := composerBlockBounds(rows)
+	if !ok {
+		return 0, false
+	}
+	insert := -1
+	for j := first; j < end; j++ {
+		if col := firstContentCol(rows[j]); col >= 0 && (insert < 0 || col < insert) {
+			insert = col
+		}
+	}
+	return insert, insert >= 0
+}
+
+// firstContentCol is the column of a row's first character that can be
+// composer content — anything but whitespace, box drawing, or a prompt glyph —
+// or -1 when the row is pure decoration.
+func firstContentCol(row string) int {
+	col := 0
+	for _, r := range row {
+		if unicode.IsSpace(r) || (r >= 0x2500 && r <= 0x259F) ||
+			r == '❯' || r == '›' || r == '>' || r == '|' {
+			col++
+			continue
+		}
+		return col
+	}
+	return -1
+}
+
+// contentEndCol is the column just past a row's last drawn character — where
+// an app parks the cursor at the end of what it rendered. Trailing whitespace
+// and the box's right edge are not content.
+func contentEndCol(row string) int {
+	end := -1
+	col := 0
+	for _, r := range row {
+		if !unicode.IsSpace(r) && !(r >= 0x2500 && r <= 0x259F) {
+			end = col + 1
+		}
+		col++
+	}
+	return end
+}
+
 // trailingNewlines counts the row breaks in a payload's trailing whitespace:
 // the blank rows a composer that renders pastes literally draws below the text.
 func trailingNewlines(s string) int {
@@ -268,15 +525,52 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 
 	pasteDeliverySleep(strandedSubmitGrace)
 	pane, cursor, ok := t.capturePaneAndCursorState()
-	if !ok || !stagedInComposer(pane, cursor, probe, bound, 1) {
+	if !ok {
 		return observation
 	}
 	graceText := normalizeDelivery(pane)
 	unverified := deliveryObservation{outcome: deliveryObservedUnverified, pane: pane}
+	if !stagedInComposer(pane, cursor, probe, bound, 1) {
+		// The evidence no longer anchors the draft's insertion point. If the
+		// live composer still contains it, the draft never submitted — it is
+		// stranded where the grace frame found it, now possibly merged with
+		// text that is not ours (a user typing moves the cursor off the tail
+		// and drops the anchor without removing the draft). The boundary bound
+		// this prompt, so a readable frame that still shows it must not round
+		// up to the earlier landed observation (#4530 review).
+		if composerHoldsBoundEvidence(pane, probe, bound) {
+			log.WarningLog.Printf("submit: session %q still shows this prompt's bound evidence inside the composer after Enter, "+
+				"but it no longer sits at the draft's insertion point, so the draft is stranded and possibly merged with other input; "+
+				"withholding the remedy Enter and reporting sent-unverified (#4200). Pane tail: %s",
+				t.sanitizedName, oneLineTail(pane))
+			return unverified
+		}
+		return observation
+	}
 	if !frameStill(boundaryText, graceText) {
 		log.WarningLog.Printf("submit: session %q shows this prompt staged in the composer after Enter, but the pane changed since the Enter, "+
 			"so the composer may no longer hold only this prompt; withholding the remedy Enter and reporting sent-unverified (#4200). Pane tail: %s",
 			t.sanitizedName, oneLineTail(pane))
+		return unverified
+	}
+
+	// Stillness is measured on NORMALIZED text, which erases whitespace: a user
+	// typing a space or a blank line into a continuation row during the grace
+	// changes the draft without changing the comparison. The cursor betrays it
+	// — typed input always moves it off the column the absorbed Enter left it
+	// at. Purity is the same property one level up: the composer block must
+	// render this payload and nothing else, or a paste the pre-boundary window
+	// interleaved submits along with our draft.
+	if !composerCursorIsHome(pane, cursor) {
+		log.WarningLog.Printf("submit: session %q still shows this prompt staged, but the composer cursor no longer rests where "+
+			"an undisturbed draft would leave it — input normalizeDelivery cannot see has moved it; "+
+			"withholding the remedy Enter and reporting sent-unverified (#4200)", t.sanitizedName)
+		return unverified
+	}
+	if !composerRenderPure(pane, probe, bound) {
+		log.WarningLog.Printf("submit: session %q still shows this prompt staged, but the composer also holds text that is not this "+
+			"delivery's render, so the remedy Enter could submit more than our draft; withholding it and reporting sent-unverified (#4200)",
+			t.sanitizedName)
 		return unverified
 	}
 
@@ -309,7 +603,8 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	pasteDeliverySleep(strandedSubmitSettle)
 	settled, settledCursor, ok := t.capturePaneAndCursorState()
 	if !ok || frameStill(graceText, normalizeDelivery(settled)) ||
-		stagedInComposer(settled, settledCursor, probe, bound, 2) {
+		stagedInComposer(settled, settledCursor, probe, bound, 2) ||
+		composerHoldsBoundEvidence(settled, probe, bound) {
 		return unverified
 	}
 	if observation.outcome == deliveryObservedLanded {
