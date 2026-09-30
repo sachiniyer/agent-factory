@@ -33,6 +33,12 @@ type operandTailMemo struct {
 	envArgvUnprovable map[*syntax.Word]bool
 	// wrapperTails: the unrecognized-wrapper tail scan from here, per head kind.
 	wrapperTails map[wrapperTailKey]bool
+	// wrapperOptions: a modeled wrapper's option loop from here, per loop state.
+	wrapperOptions map[wrapperOptionKey]unwrapResult
+	// xargsEnvScans: unwrapXargs's env operand-region scan from here, per state.
+	xargsEnvScans map[xargsEnvKey]bool
+	// xargsMarkers: where the first marker-carrying word from here sits.
+	xargsMarkers map[xargsMarkerKey]int
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -43,6 +49,9 @@ func newOperandTailMemo() operandTailMemo {
 		envScans:          map[envScanKey]envScanSummary{},
 		envArgvUnprovable: map[*syntax.Word]bool{},
 		wrapperTails:      map[wrapperTailKey]bool{},
+		wrapperOptions:    map[wrapperOptionKey]unwrapResult{},
+		xargsEnvScans:     map[xargsEnvKey]bool{},
+		xargsMarkers:      map[xargsMarkerKey]int{},
 	}
 }
 
@@ -169,18 +178,4 @@ func (memo operandTailMemo) envScan(words []*syntax.Word, state envcommand.State
 		memo.envScans[chain[i].key] = summary
 	}
 	return summary
-}
-
-// envCallArgvParse literalizes env's operand words with envArgvWord and parses
-// them; an unprovable word anywhere fails the parse.
-func envCallArgvParse(words []*syntax.Word) (envcommand.Invocation, error) {
-	literals := make([]string, 0, len(words))
-	for _, word := range words {
-		value, ok := envArgvWord(word)
-		if !ok {
-			return envcommand.Invocation{}, envcommand.ErrUnsupported
-		}
-		literals = append(literals, value)
-	}
-	return envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
 }
