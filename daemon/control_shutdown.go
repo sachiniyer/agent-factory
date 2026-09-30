@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -250,30 +249,16 @@ func WaitForShutdownCompletion(pid int) error {
 		}
 		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
 	}
-	dir, dirErr := config.GetConfigDir()
-	lockReleased := func() bool {
-		if dirErr != nil {
-			return false // unresolvable home: never proof of exit
-		}
-		released := false
-		shutdownWaitHomeLockFn(dir).Match(
-			func() {}, func() { released = true }, func() {}, func(error) {})
-		return released
-	}
 	for time.Now().Before(deadline) {
-		if lockReleased() {
+		if pingDaemon() != nil {
 			return nil
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
-	// Same boundary as above: the lock may have been released during the last sleep.
-	if lockReleased() {
+	if pingDaemon() != nil {
 		return nil
 	}
-	if dirErr != nil {
-		return fmt.Errorf("%w: cannot resolve the AF home to confirm the daemon released its lock: %v", ErrShutdownIncomplete, dirErr)
-	}
-	return fmt.Errorf("%w: the daemon still holds this home's lock %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, shutdownCompleteGrace)
+	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownCompleteGrace)
 }
 
 // shutdownWaitPIDAliveFn and shutdownWaitHomeLockFn are

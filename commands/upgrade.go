@@ -414,8 +414,7 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// is the process table.
 		fmt.Fprintln(out, "Upgraded successfully!")
 		fmt.Fprintf(errOut, "The old daemon is still finishing its shutdown (it may be completing in-flight session work): %v\n", restartErr)
-		fmt.Fprintln(errOut, "It normally exits on its own, and the next af command then starts the new daemon from the upgraded binary.")
-		fmt.Fprintln(errOut, shutdownIncompleteHint(outcome.OldPID))
+		fmt.Fprintln(errOut, "It exits on its own, and the next af command starts the new daemon from the upgraded binary.")
 		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.
