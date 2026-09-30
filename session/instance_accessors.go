@@ -100,6 +100,16 @@ func (i *Instance) RecordPendingHandoffMissionDelivery(mission string, status Pr
 	return nil
 }
 
+// PendingHandoffDeliveryStatus returns the verdict recorded for the pending
+// handoff mission, or "" when no mission is pending. A caller that raises the
+// attempt marker reads it first, so a failed marker write can put back the
+// verdict it replaced instead of assuming one.
+func (i *Instance) PendingHandoffDeliveryStatus() PromptDeliveryStatus {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.handoffDeliveryStatus
+}
+
 // PendingHandoffMissionAutoRetryable permits automatic redelivery only after a
 // mission-scoped observation proved that the exact pending mission did not land.
 func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
@@ -108,19 +118,148 @@ func (i *Instance) PendingHandoffMissionAutoRetryable() bool {
 	return i.pendingHandoffMission != "" && i.handoffDeliveryStatus == PromptNotDelivered
 }
 
+// pendingHandoffMissionNeedsFence reports whether a durable pending mission
+// must reconstruct the OpReplacing fence on load (#4429). The fence protects
+// the two verdicts that still own an in-flight obligation the daemon resolves
+// itself — positive non-delivery (automatic replay owns the resend; the row
+// stays inert until it lands) and the delivered crash window (the recovery
+// settle owns the bookkeeping). Ambiguous verdicts deliberately load WITHOUT
+// the fence: the remaining confirm-or-retry decision is the operator's, both
+// exits prove the runtime before acting, and rebuilding the fence there
+// manufactures the wedge. FromInstanceData spells out how an ambiguous verdict
+// can become durable.
+func pendingHandoffMissionNeedsFence(status PromptDeliveryStatus) bool {
+	return status == PromptNotDelivered || status == PromptDelivered
+}
+
+// PendingHandoffMissionSettleable reports whether the pending mission's
+// recorded verdict already proves delivery, so recovery can retire it without
+// a resend or an operator attestation — the crash window between a delivered
+// record and its clearing settle.
+func (i *Instance) PendingHandoffMissionSettleable() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingHandoffMission != "" && i.handoffDeliveryStatus == PromptDelivered &&
+		!i.userKilled
+}
+
 // CanRetryPendingHandoffMissionDelivery reports whether an operator can inspect
 // the known incoming pane and explicitly override an ambiguous mission verdict.
 // Positive non-delivery belongs to automatic recovery; delivered evidence and
 // an unknown/missing runtime never authorize another submission.
+//
+// A startup-unknown row DOES admit the explicit retry (#4429). Its `started`
+// bit is down, and every local send and pane capture refuses a row in that
+// state, so the daemon first probes the pane under the op lock: only a runtime
+// that answers restores `started` (ResolveStartupState) before the readiness
+// wait and the send run. A probe that does not answer refuses the retry and
+// leaves the row as it was.
 func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
-	ambiguous := i.handoffDeliveryStatus == PromptSentUnverified ||
-		i.handoffDeliveryStatus == PromptCouldNotConfirm
-	return i.pendingHandoffMission != "" && ambiguous && knownLive &&
-		!i.startupStateUnknown && !i.userKilled &&
-		(i.inFlightOp == OpNone || i.inFlightOp == OpReplacing)
+	ambiguous := ambiguousHandoffDelivery(i.handoffDeliveryStatus)
+	// Dead rows keep their restore/kill handles; neither a resend nor an
+	// attestation is meaningful against a runtime that no longer exists.
+	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
+	return i.pendingHandoffMission != "" && ambiguous && !i.userKilled && !dead &&
+		(i.inFlightOp == OpNone || i.inFlightOp == OpReplacing) &&
+		(i.liveness == LiveRunning || i.liveness == LiveReady || i.startupStateUnknown)
+}
+
+// CanConfirmPendingHandoffDelivery reports whether an operator can retire the
+// pending mission without resending it — the "it already landed" exit (#4429).
+// The verdict must already be recorded and ambiguous-or-positive: an
+// unrecorded or positively-absent delivery belongs to the send path, and
+// not-delivered belongs to automatic recovery. Startup-unknown rows are the
+// ones this verb exists FOR, so the flag is not a refusal here — the daemon
+// probes the pane before honoring the attestation.
+func (i *Instance) CanConfirmPendingHandoffDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.pendingHandoffMission == "" || i.userKilled ||
+		(i.inFlightOp != OpNone && i.inFlightOp != OpReplacing) ||
+		!confirmableHandoffDelivery(i.handoffDeliveryStatus) {
+		return false
+	}
+	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
+		return false
+	}
+	return i.startupStateUnknown ||
+		i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
+}
+
+// ConfirmPendingHandoffDelivery retires the pending handoff mission on the
+// operator's attestation that it already landed (#4429): no resend, no new
+// observation — the pane inspection happened at the terminal, not here. The
+// daemon probes the runtime before calling; this method re-checks only the
+// durable facts the attestation discharges.
+//
+// It resolves the whole wedge in one critical section: an OpReplacing fence
+// settles through the CommitHandoff edge (the runtime was proven to reach this
+// point — it accepted the paste), a startup-unknown flag lifts with started
+// restored (the probe that admitted this call is the identity proof that flag
+// was waiting for), and the mission plus its verdict clear together so no
+// later reader reconstructs the fence. Refusing not-delivered keeps automatic
+// recovery's ownership unambiguous.
+func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingHandoffMission == "" || i.pendingHandoffMission != mission {
+		return fmt.Errorf("session %q has no pending handoff mission matching this confirmation", i.Title)
+	}
+	if i.userKilled {
+		return fmt.Errorf("session %q has a pending kill", i.Title)
+	}
+	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
+		return fmt.Errorf("session %q has no live runtime to confirm against (liveness %v); restore owns this row", i.Title, i.liveness)
+	}
+	if !confirmableHandoffDelivery(i.handoffDeliveryStatus) {
+		return fmt.Errorf("session %q has no ambiguous handoff delivery to confirm (status %q); automatic recovery owns not-delivered missions", i.Title, i.handoffDeliveryStatus)
+	}
+	if i.inFlightOp != OpNone && i.inFlightOp != OpReplacing {
+		return fmt.Errorf("session %q is busy (%v)", i.Title, i.inFlightOp)
+	}
+	lv, op, resetAt := i.lifecycleStateLocked()
+	i.resolveStartupStateLocked()
+	if i.inFlightOp == OpReplacing {
+		if err := i.transitionLocked(CommitHandoff()); err != nil {
+			return err
+		}
+	}
+	i.pendingHandoffMission = ""
+	i.handoffDeliveryStatus = ""
+	i.touchLocked()
+	i.noteStateChangeLocked(lv, op, resetAt)
+	return nil
+}
+
+// resolveStartupStateLocked clears the startup-unknown fence once a fresh proof
+// — a live-pane probe or an operator attestation accepted under it — has
+// re-established the runtime binding. MarkStartupStateUnknown lifted `started`
+// to keep attach/probe paths from trusting the unconfirmed name; restoring it
+// here is the other half of the same fact. Caller holds i.mu. The task-run
+// marker is deliberately untouched: runs only ever go true→false.
+func (i *Instance) resolveStartupStateLocked() {
+	if i.startupStateUnknown {
+		i.startupStateUnknown = false
+		i.touchLocked()
+	}
+	if !i.started {
+		i.started = true
+		i.touchLocked()
+	}
+}
+
+// ResolveStartupState is the locking form of resolveStartupStateLocked. The
+// daemon calls it once a liveness probe has answered: before an explicit retry
+// sends to a startup-unknown row, and when recovery settles a delivered
+// mission on a live row.
+func (i *Instance) ResolveStartupState() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	lv, op, resetAt := i.lifecycleStateLocked()
+	i.resolveStartupStateLocked()
+	i.noteStateChangeLocked(lv, op, resetAt)
 }
 
 // ReconcilePendingHandoffSnapshot mirrors the daemon-owned agent handoff
@@ -142,6 +281,13 @@ func (i *Instance) ReconcilePendingHandoffSnapshot(mission string, status Prompt
 // ClearPendingHandoffMission clears the marker only if it still names mission.
 // The compare makes a delayed recovery attempt unable to erase a newer handoff's
 // brief after the same session has moved on.
+//
+// Its callers have just sent the mission, or handed it to the limit resume that
+// will, so the agent is about to work and its run ends on that work's own idle
+// edge. The held idle edge is dropped in the same critical section: left set, an
+// idle tick that lands before the agent picks the turn up would end the run —
+// and hand a working session to its task's on_complete policy. Retiring a
+// mission WITHOUT a resend is ConfirmPendingHandoffDelivery, which keeps it.
 func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -151,6 +297,7 @@ func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 	if i.pendingHandoffMission != "" {
 		i.pendingHandoffMission = ""
 		i.handoffDeliveryStatus = ""
+		i.taskRunIdleEdgeHeld = false
 		i.touchLocked()
 	}
 	return true

@@ -24,7 +24,7 @@ func shiftedMutationTabs(t *testing.T, agentName string) (*Instance, *Tab, *Tab)
 	require.Equal(t, 2, resolved, "premise: b starts at ordinal 2")
 
 	closed := make(chan error, 1)
-	go func() { closed <- inst.CloseTab(1) }()
+	go func() { closed <- inst.CloseTabByID(snapshot[1].ID) }()
 	require.NoError(t, <-closed)
 	requireIndex(t, inst, b.ID, 1)
 	requireIndex(t, inst, c.ID, 2)

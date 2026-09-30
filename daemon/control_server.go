@@ -727,6 +727,42 @@ func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *Regist
 	return nil
 }
 
+// RebindProject moves a registered project's stable identity to a replacement
+// checkout (`af projects rebind`) — the repair when the checkout a registration
+// names was moved or recloned elsewhere. The daemon is the single writer (#960),
+// the same reason RegisterProject routes here: the CLI, TUI, and web all call
+// this rather than writing the registry in-process, and for a web or remote
+// client the path is resolved on the daemon's filesystem, not the caller's.
+//
+// config.RebindProject does the work under its own file lock — resolving the
+// replacement path's binding, refusing a root another project owns, and carrying
+// or minting the checkout marker — so this handler adds only the admission gate
+// and the projects-changed publish a client showing a projects view re-fetches
+// on (the rebound row's root changes; without the event a web switcher would
+// keep naming the dead path until the next manual refresh).
+func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProjectResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	// Enforce RebindProjectRequest's contract here, before the registry moves:
+	// config.RebindProject would resolve a relative path against THIS process's
+	// cwd — an unrelated checkout for an ad-hoc daemon, / under systemd — and
+	// silently repoint the stable id there. The same boundary RegisterProject
+	// applies (#4821); the checked value is the one passed on.
+	path, err := config.ResolveDaemonHostPath(req.Path)
+	if err != nil {
+		return fmt.Errorf("rebind %w", err)
+	}
+	project, err := config.RebindProject(req.ID, path)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
+	return nil
+}
+
 // ListProjects returns every durable project in this daemon's #2355 registry
 // (#2456). It is a pure config read: config.ListProjects walks the registry
 // directory with no lock and no manager, so — like ListBackends — this handler

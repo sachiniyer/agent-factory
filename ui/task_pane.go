@@ -132,8 +132,17 @@ type TaskPane struct {
 	// save proved their task deleted (#4798), until the app takes them as one
 	// notice with TakeDiscardedDraftNotice.
 	discardedDrafts []string
-	deleted         []task.Task
-	hasFocus        bool
+	// unconfirmedIDs marks held edits whose save may have landed with only its
+	// reply lost (#4824). They stay in dirtyIDs, so the draft is kept and shown,
+	// but ConsumeDirty skips them: an automatic save must not re-send a patch
+	// the daemon may already hold. A new edit to the task clears the mark.
+	// settledDrafts and unconfirmedQuitWarned carry their notices; see
+	// task_pane_unconfirmed.go.
+	unconfirmedIDs        map[string]bool
+	settledDrafts         []string
+	unconfirmedQuitWarned bool
+	deleted               []task.Task
+	hasFocus              bool
 
 	// now is inherited from the owning AutomationsPane and passed to each
 	// schedule picker for its custom-cron next-run preview.
@@ -473,7 +482,13 @@ func (s *TaskPane) handleNormalMode(msg tea.KeyMsg) bool {
 		s.showActions = !s.showActions
 		return true
 	case "esc":
-		s.hasFocus = false
+		// Route the close through SetFocus(false) so the pendingCreate /
+		// pendingTrigger / pendingTriggerID clears the #1531 contract relies on
+		// actually run. Writing hasFocus directly bypasses them, so a pending
+		// run-now whose pre-trigger flush failed survives the close and fires on
+		// the first keypress after reopen (SetTasks preserves it deliberately for
+		// the mid-flush reload, #1474, so the close is the only drop).
+		s.SetFocus(false)
 		return true
 	case "up", "k":
 		if s.selectedIdx > 0 {
