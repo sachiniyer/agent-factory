@@ -114,6 +114,19 @@ type home struct {
 	// attachTransitioning re-entry guard (#1530), which exists for exactly this
 	// reason on the attach path. Cleared when the spawn reports back.
 	configAgentSpawning bool
+	// accountLoginInFlight is the in-flight guard for the account-login
+	// takeover, the structural twin of configAgentSpawning: it protects the
+	// "Starting the AGENT login for NAME…" notice from auto-hide clobber during
+	// the daemon round trip. handleAccountLogin posts that notice via
+	// setTransientNotice with NO auto-clear (the same path the config-agent flow
+	// documents its "stands until the spawn reports back" rationale for), so an
+	// unsuppressed setPaneAutoHideStatus — fired by a resize that crosses
+	// layout.MultiPaneMinWidth downward while ≥2 panes are open — would replace
+	// the login notice and bump transientNoticeID past the login's captured
+	// noticeID. setPaneAutoHideStatus is gated on this field for the same
+	// reason config-agent gating exists (#4955). Cleared unconditionally in
+	// handleAccountLoginStarted — including on error — so auto-hide resumes.
+	accountLoginInFlight bool
 	// namingInstance is the instance currently being named in stateNew.
 	// Stored as a direct pointer so background sync cannot change which
 	// instance the naming keystrokes target.

@@ -178,6 +178,11 @@ type accountLoginDoneMsg struct {
 // round trip that registers a directory and starts a process, and running it
 // inline would freeze the TUI for its duration.
 func (m *home) handleAccountLogin(agent, name string) tea.Cmd {
+	// Arm the in-flight guard before the notice so a resize arriving during the
+	// daemon round trip cannot clobber the persistent "Starting…" notice. The
+	// config-agent spawn's structural twin (#4955): setPaneAutoHideStatus is
+	// gated on this field exactly as it is gated on configAgentSpawning.
+	m.accountLoginInFlight = true
 	noticeID := m.setTransientNotice(fmt.Errorf("Starting the %s login for %q…", agent, name))
 	login := startAccountLogin
 	return func() tea.Msg {
@@ -199,6 +204,11 @@ func (m *home) handleAccountLogin(agent, name string) tea.Cmd {
 // handleAccountLoginStarted finalizes the spawn: hand the terminal over, or
 // report why there is nothing to hand it to.
 func (m *home) handleAccountLoginStarted(msg accountLoginStartedMsg) (tea.Model, tea.Cmd) {
+	// Clear the in-flight guard FIRST, and unconditionally: a failed login must
+	// leave the auto-hide notice available again, or one refusal would suppress
+	// layout guidance for the rest of the session. Mirrors the
+	// configAgentSpawning clear in handleConfigAgentSpawned.
+	m.accountLoginInFlight = false
 	// Retract the "Starting…" notice, but ONLY if it is still ours: the spawn ran
 	// async, so another action may have posted its own by now and clearing
 	// unconditionally would wipe a message the user has not read. Same generation
