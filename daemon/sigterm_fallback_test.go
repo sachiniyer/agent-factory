@@ -112,7 +112,7 @@ func TestRunDaemonPIDFileLifecycle(t *testing.T) {
 	}
 
 	// Ask the daemon to exit via the Shutdown RPC.
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestSigtermFallback_KillsPIDFileDaemon(t *testing.T) {
 		exited <- state
 	}()
 
-	result, err := sigtermFallback()
+	result, _, err := sigtermFallback()
 	if err != nil {
 		t.Fatalf("sigtermFallback: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestSigtermFallback_IgnoresNonMatchingCmdline(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	result, err := sigtermFallback()
+	result, _, err := sigtermFallback()
 	if result != ShutdownFailed {
 		t.Errorf("sigtermFallback returned %v, want ShutdownFailed (PID-file candidate rejected, scan empty)", result)
 	}
@@ -335,7 +335,7 @@ func TestSigtermFallback_DeadPID(t *testing.T) {
 		t.Fatalf("write PID file: %v", err)
 	}
 
-	result, err := sigtermFallback()
+	result, _, err := sigtermFallback()
 	if result != ShutdownFailed {
 		t.Fatalf("sigtermFallback returned %v for dead PID, want ShutdownFailed", result)
 	}
@@ -358,7 +358,7 @@ func TestSigtermFallback_AmbiguousCandidates(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	stubDaemonScan(t, []int{11111, 22222}, nil)
 
-	result, err := sigtermFallback()
+	result, _, err := sigtermFallback()
 	if result != ShutdownFailed {
 		t.Fatalf("sigtermFallback returned %v for ambiguous candidates, want ShutdownFailed", result)
 	}
@@ -390,7 +390,7 @@ func TestSigtermFallback_NoPIDFileAndNoPgrep(t *testing.T) {
 	// dir guarantees exec.LookPath("pgrep") fails.
 	t.Setenv("PATH", t.TempDir())
 
-	result, err := sigtermFallback()
+	result, _, err := sigtermFallback()
 	if result != ShutdownFailed {
 		t.Fatalf("sigtermFallback returned %v, want ShutdownFailed", result)
 	}
@@ -516,7 +516,7 @@ func TestRequestShutdown_PreShutdownDaemon(t *testing.T) {
 	// fake daemon answered Shutdown, which it does not implement), or
 	// ShutdownNoDaemon (would contradict the proven-alive socket).
 	stubDaemonScan(t, nil, nil)
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if result == ShutdownViaRPC {
 		t.Fatalf("RequestShutdown returned ShutdownViaRPC; fake daemon has no Shutdown method — routing into the SIGTERM fallback is broken (err=%v)", err)
 	}

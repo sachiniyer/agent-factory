@@ -96,7 +96,7 @@ func forwardJournal(home string) upgradetxn.Journal {
 // would still see the daemon up and the sequence would report StopStillRunning.
 func wireStopToState(state *fakeDaemon) {
 	stopDaemonFn = func() (bool, error) { state.up = false; return true, nil }
-	waitForShutdownFn = func() error {
+	waitForShutdownFn = func(int) error {
 		if state.up {
 			return errors.New("control socket still answering")
 		}
@@ -441,7 +441,7 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 			upgradeRecoveryHealthFn = func() HealthStatus { return tc.health }
 			stopped := false
 			stopDaemonFn = func() (bool, error) { stopped = true; return true, nil }
-			waitForShutdownFn = func() error { return nil }
+			waitForShutdownFn = func(int) error { return nil }
 			unitStarted := false
 			startPreviousViaUnitFn = func() error { unitStarted = true; return tc.unitStartErr }
 			adhocStarted := false

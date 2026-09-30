@@ -345,6 +345,18 @@ func startDaemonHint() string {
 	return "Running af starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
 }
 
+// shutdownIncompleteHint is the #5007 spec's bound-expired wording, shared by
+// the upgrade report and the withheld-respawn error. It never promises the
+// daemon exits (a wedged one may not), and the manual verb is `kill -9`: a
+// draining daemon absorbs SIGTERM by design, so a plain kill cannot stop it.
+func shutdownIncompleteHint(pid int) string {
+	manual := "look for a leftover `af --daemon` and `kill -9` it"
+	if pid > 0 {
+		manual = fmt.Sprintf("`ps -p %d` / `kill -9 %d`", pid, pid)
+	}
+	return "still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: " + manual + "; then run af again."
+}
+
 // reportUpgradeRestart tells the user what the restart actually did.
 //
 // The rule (#1947): never claim the daemon is on the new binary unless it is.
@@ -392,6 +404,13 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintf(errOut, "Could not determine whether a daemon is running: %v\n", restartErr)
 		fmt.Fprintln(errOut, "No daemon was found and its process could not be verified either, so this upgrade may or may not have reached one.")
 		fmt.Fprintln(errOut, "Check with `af daemon status` before assuming either way.")
+		return
+	case restartPhaseShutdownIncomplete:
+		// The old daemon agreed to stop but is still alive at the bound, so the
+		// respawn was withheld rather than raced against it (#5007). It is not
+		// "nothing is running" and not "it refused": it is still draining.
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintln(errOut, "The old daemon is "+shutdownIncompleteHint(outcome.OldPID))
 		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -616,6 +617,13 @@ const (
 	// may not exist — or, read the other way, lets them wait for one that is
 	// already gone. Both remedies are wrong when the answer is "we could not tell".
 	restartPhaseShutdownUnknown
+	// restartPhaseShutdownIncomplete: the old daemon acknowledged Shutdown but
+	// had not finished tearing down when the wait's bound expired, so it is STILL
+	// ALIVE (draining, or wedged) and the respawn was withheld rather than raced
+	// against it (#5007). Distinct from restartPhaseShutdown (it did agree to
+	// stop, and normally exits on its own) and from restartPhaseRespawn (no
+	// respawn was attempted, and a daemon is still running).
+	restartPhaseShutdownIncomplete
 )
 
 // restartOutcome is the whole story of a shutdown-then-respawn: how the old
@@ -628,6 +636,10 @@ type restartOutcome struct {
 	// FailedPhase is restartPhaseNone unless the accompanying error is
 	// non-nil, and names which half of the sequence broke.
 	FailedPhase restartPhase
+	// OldPID is the stopped daemon's PID as RequestShutdown reported it, 0 when
+	// unknown. Carried so the report can name the process a user may need to
+	// inspect when its shutdown did not finish.
+	OldPID int
 }
 
 // restartDaemonFromPath keeps the (result, error) shape the auto-update path is
@@ -642,8 +654,8 @@ func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 }
 
 func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
-	result, shutdownErr := requestDaemonShutdownFn()
-	outcome := restartOutcome{Shutdown: result}
+	result, oldPID, shutdownErr := requestDaemonShutdownFn()
+	outcome := restartOutcome{Shutdown: result, OldPID: oldPID}
 	if shutdownErr != nil {
 		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
 		// refused to stop" — it is RequestShutdown saying it could not determine
@@ -659,10 +671,13 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	if result == daemon.ShutdownNoDaemon {
 		return outcome, nil
 	}
-	respawn, err := respawnDaemonFn(execPath)
+	respawn, err := respawnDaemonFn(execPath, oldPID)
 	outcome.Respawn = respawn
 	if err != nil {
 		outcome.FailedPhase = restartPhaseRespawn
+		if errors.Is(err, daemon.ErrShutdownIncomplete) {
+			outcome.FailedPhase = restartPhaseShutdownIncomplete
+		}
 		return outcome, fmt.Errorf("failed to restart daemon: %w", err)
 	}
 	outcome.Respawned = true
@@ -755,18 +770,19 @@ func canonicalExec(p string) string {
 // The task gate belongs only on the cold-start path (ensureDaemonForTasks),
 // where nothing was running and "no enabled tasks" means there is nothing to
 // start.
-func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
-	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
-	// control socket can still answer pings here. Respawning into that window
-	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping
-	// guard — mistake the dying daemon for a live one and skip the spawn,
-	// leaving no daemon at all once it exits (#854). Wait for the socket to
-	// die first; the SIGTERM fallback already waited for process exit, so the
-	// wait returns immediately on that path. On timeout, warn and respawn
-	// anyway: a spawn skipped against a wedged daemon is no worse than not
-	// trying, and the next af invocation retries.
-	if err := waitForShutdownCompletionFn(); err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
+func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, error) {
+	// The Shutdown RPC acks before the daemon tears down, so the old daemon can
+	// still be alive — and still answering pings — here. Respawning into that
+	// window makes EnsureDaemon — or the unit-restarted daemon's own startup
+	// ping guard — mistake the dying daemon for a live one and skip the spawn,
+	// leaving no daemon at all once it exits (#854, #5007). Wait for the old
+	// process to exit first (or, with no PID, for its socket to go quiet); the
+	// SIGTERM fallback already waited for process exit, so the wait returns
+	// immediately on that path. If the bound expires the old daemon is still
+	// alive, so withhold the respawn on BOTH the unit and ad-hoc paths rather
+	// than race it, and hand the caller the reason to report.
+	if err := waitForShutdownCompletionFn(oldPID); err != nil {
+		return respawnResult{}, fmt.Errorf("the old daemon is %s (%w)", shutdownIncompleteHint(oldPID), err)
 	}
 	var unitErr error
 	useUnit, unitExec, gateErr := unitRestartTarget()
