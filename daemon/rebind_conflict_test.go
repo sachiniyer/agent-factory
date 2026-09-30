@@ -20,8 +20,9 @@ import (
 )
 
 // rebindConflictFixture registers one project and returns the control server,
-// its id, the root it was registered at, and two replacement checkouts.
-func rebindConflictFixture(t *testing.T) (cs *controlServer, id, start string, targets [2]string) {
+// its id, the (root, checkout) pair a client observing it would hold, and two
+// replacement checkouts.
+func rebindConflictFixture(t *testing.T) (cs *controlServer, id, start, startCheckout string, targets [2]string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	start = setupControlRepo(t)
@@ -35,7 +36,7 @@ func rebindConflictFixture(t *testing.T) (cs *controlServer, id, start string, t
 	cs = &controlServer{manager: manager}
 	var reg RegisterProjectResponse
 	require.NoError(t, cs.RegisterProject(RegisterProjectRequest{Path: start}, &reg))
-	return cs, reg.Project.ID, reg.Project.Root, targets
+	return cs, reg.Project.ID, reg.Project.Root, reg.Project.CheckoutID, targets
 }
 
 func registryRoot(t *testing.T, id string) string {
@@ -56,7 +57,7 @@ func registryRoot(t *testing.T, id string) string {
 // at once. Exactly one applies; the other is refused as rebound elsewhere,
 // naming the winner's root, instead of silently overwriting it.
 func TestControlServer_RebindProject_ConcurrentRebindsFromOneRootExactlyOneWins(t *testing.T) {
-	cs, id, start, targets := rebindConflictFixture(t)
+	cs, id, start, startCheckout, targets := rebindConflictFixture(t)
 
 	var wg sync.WaitGroup
 	errs := make([]error, len(targets))
@@ -67,7 +68,7 @@ func TestControlServer_RebindProject_ConcurrentRebindsFromOneRootExactlyOneWins(
 			defer wg.Done()
 			<-gate
 			var resp RebindProjectResponse
-			errs[i] = cs.RebindProject(RebindProjectRequest{ID: id, Path: target, ExpectedRoot: start}, &resp)
+			errs[i] = cs.RebindProject(RebindProjectRequest{ID: id, Path: target, ExpectedRoot: start, ExpectedCheckoutID: startCheckout}, &resp)
 		}()
 	}
 	close(gate)
@@ -92,12 +93,12 @@ func TestControlServer_RebindProject_ConcurrentRebindsFromOneRootExactlyOneWins(
 // TestControlServer_RebindProject_RefusesStaleExpectedRoot: a client whose
 // view predates another rebind is refused and the registry is left alone.
 func TestControlServer_RebindProject_RefusesStaleExpectedRoot(t *testing.T) {
-	cs, id, start, targets := rebindConflictFixture(t)
+	cs, id, start, startCheckout, targets := rebindConflictFixture(t)
 	var resp RebindProjectResponse
 	require.NoError(t, cs.RebindProject(RebindProjectRequest{ID: id, Path: targets[0]}, &resp))
 
 	_, ch := cs.manager.events.subscribe()
-	err := cs.RebindProject(RebindProjectRequest{ID: id, Path: targets[1], ExpectedRoot: start}, &resp)
+	err := cs.RebindProject(RebindProjectRequest{ID: id, Path: targets[1], ExpectedRoot: start, ExpectedCheckoutID: startCheckout}, &resp)
 
 	var rebound *projectReboundError
 	require.True(t, errors.As(err, &rebound), "a stale client must be refused, got %v", err)
@@ -109,7 +110,7 @@ func TestControlServer_RebindProject_RefusesStaleExpectedRoot(t *testing.T) {
 // that predates expected_root keeps last-writer-wins — absence is never a
 // refusal.
 func TestControlServer_RebindProject_OmittedExpectedRootStillApplies(t *testing.T) {
-	cs, id, _, targets := rebindConflictFixture(t)
+	cs, id, _, _, targets := rebindConflictFixture(t)
 	var resp RebindProjectResponse
 	require.NoError(t, cs.RebindProject(RebindProjectRequest{ID: id, Path: targets[0]}, &resp))
 	require.NoError(t, cs.RebindProject(RebindProjectRequest{ID: id, Path: targets[1]}, &resp))
@@ -123,7 +124,7 @@ func TestControlServer_RebindProject_OmittedExpectedRootStillApplies(t *testing.
 // never relaxed toward the empty "no precondition" form, or a malformed request
 // would silently drop the guard it asked for (#4888 review).
 func TestControlServer_RebindProject_WhitespaceExpectedRootFailsClosed(t *testing.T) {
-	cs, id, start, targets := rebindConflictFixture(t)
+	cs, id, start, _, targets := rebindConflictFixture(t)
 
 	for _, expected := range []string{"   ", "\t \n", " " + start + " "} {
 		var resp RebindProjectResponse
@@ -140,7 +141,7 @@ func TestControlServer_RebindProject_WhitespaceExpectedRootFailsClosed(t *testin
 // refusal: 409, error code project_rebound, marked as a daemon rejection — and
 // that a body with no expected_root at all (an old client) still applies.
 func TestHTTPRebindProject_ConflictIs409WithCode(t *testing.T) {
-	cs, id, start, targets := rebindConflictFixture(t)
+	cs, id, start, _, targets := rebindConflictFixture(t)
 	handler := rpcHandler(cs.RebindProject)
 	post := func(body map[string]string) *httptest.ResponseRecorder {
 		raw, err := json.Marshal(body)
