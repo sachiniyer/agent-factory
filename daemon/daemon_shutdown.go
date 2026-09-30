@@ -31,6 +31,18 @@ func drainDaemon(
 	// wait for those dispatched handlers, so nothing user-driven can begin or
 	// remain in flight across the checkpoint.
 	m.lifecycle.markQuiescing()
+	// Unlink the PID file as soon as teardown begins, not at process exit
+	// (#5007). The joins below can run arbitrarily long, and the control socket
+	// closes before them, so for that whole tail the file's only remaining
+	// readers are stop paths — EnsureDaemon's stale-daemon stop reads it and
+	// SIGTERMs, then SIGKILLs, whatever it names, which would kill a daemon
+	// mid-way through durable work. None of them needs it: RequestShutdown
+	// captured this PID before its Shutdown RPC, the per-home flock stays the
+	// singleton until this process exits, and a wedged drain is a
+	// manual-inspection case either way. Status surfaces reading the file just
+	// report the daemon as stopped a moment early. RunDaemon's deferred remove
+	// stays for the warm-up exits that never reach here.
+	removeDaemonPIDFile()
 	if closeHTTP != nil {
 		*httpClosed = true
 		if err := closeHTTP(); err != nil {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -513,5 +514,38 @@ func TestEnsureDaemonRefusesToRaceStillDrainingDaemon(t *testing.T) {
 	}
 	if !pidLooksAlive(fakePID) {
 		t.Fatalf("the draining daemon (pid %d) was stopped; it must be left to finish", fakePID)
+	}
+}
+
+// TestDrainDaemonUnlinksPIDFileBeforeJoins: drainDaemon's joins can outlast any
+// bound with the control socket already closed, and for that tail EnsureDaemon's
+// stale-daemon stop reads daemon.pid and SIGTERMs, then SIGKILLs, whatever it
+// names. The file must therefore be gone as soon as teardown begins — before
+// the control plane closes, let alone the joins — not at process exit.
+func TestDrainDaemonUnlinksPIDFileBeforeJoins(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	writeTestPIDFile(t, 999999)
+	path, err := daemonPIDFilePath()
+	if err != nil {
+		t.Fatalf("daemonPIDFilePath: %v", err)
+	}
+
+	pidFileAtControlClose := true
+	closeControl := func() error {
+		_, statErr := os.Stat(path)
+		pidFileAtControlClose = statErr == nil
+		return nil
+	}
+	manager := &Manager{lifecycle: readyLifecycle(t)}
+	stopCh := make(chan struct{})
+	var workers sync.WaitGroup
+	httpClosed, controlClosed := false, false
+	drainDaemon(manager, nil, closeControl, &httpClosed, &controlClosed, stopCh, &workers)
+
+	if pidFileAtControlClose {
+		t.Fatalf("daemon.pid still present when the control plane closed; it must be unlinked when teardown begins")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("daemon.pid after drainDaemon: stat err = %v, want not-exist", err)
 	}
 }

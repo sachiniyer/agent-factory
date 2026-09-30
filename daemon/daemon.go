@@ -240,7 +240,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// Write our PID as soon as the socket is bound so `af upgrade`'s SIGTERM
 	// fallback (#504) and StopDaemon can find a still-warming daemon. Both
 	// the SIGTERM and Shutdown-RPC exit paths fall through to the deferred
-	// cleanup, so the file is removed on any graceful shutdown. A stale file
+	// cleanup, so the file is removed on any graceful shutdown (drainDaemon
+	// unlinks it earlier, when teardown begins — #5007). A stale file
 	// is harmless — readers verify the live process's cmdline before
 	// signaling it.
 	if err := writeDaemonPIDFile(); err != nil {
