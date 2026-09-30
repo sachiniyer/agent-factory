@@ -495,6 +495,22 @@ func RebindableActions() []string {
 	return names
 }
 
+// IsRebindableAction reports whether name is one of the [keys] table's
+// rebindable action names (the same set RebindableActions returns), as a
+// membership check for the config loader. discardDeadShiftRuneOverrides must
+// tell a real action from a typo before dropping the action's dead bindings:
+// an unknown action whose every binding is a dead shift+<rune> spec has to
+// stay visible so keys.ValidateOverrides can still reject it, instead of being
+// silently hidden behind the dead-key warning.
+func IsRebindableAction(name string) bool {
+	for _, sp := range specs {
+		if sp.configKey == name {
+			return true
+		}
+	}
+	return false
+}
+
 // keyClaim is one action's claim on a key string while buildMaps resolves the
 // effective binding table: the action, whether a [keys] override placed it
 // there, and whether it dispatches (contextual claims participate in conflict

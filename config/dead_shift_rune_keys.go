@@ -50,6 +50,22 @@ func discardDeadShiftRuneOverrides(overrides map[string][]string, prettyConfigPa
 			cleaned[action] = keyList
 		case len(kept) > 0:
 			cleaned[action] = kept
+		default:
+			// Every binding was a dead shift+<rune> spec. Dropping them all
+			// would omit this action from cleaned, and a typo'd action such
+			// as `typo = "shift+a"` would reach keys.ValidateOverrides as an
+			// empty map and load — the unknown-action hard error that should
+			// catch the typo gets hidden behind the dead-key warning. Preserve
+			// the original entry for an UNKNOWN action so the validator can
+			// still reject it (its unknown-action check runs before any key
+			// validation, so the dead spec never reaches normalizeKeySpec). A
+			// KNOWN action whose only bindings were dead warns, drops them
+			// all, and resolves to its default keys — the upgrade case
+			// (`quit = ["shift+a"]`) the warn-and-skip exists for — so it is
+			// left out of cleaned as before.
+			if !keys.IsRebindableAction(action) {
+				cleaned[action] = keyList
+			}
 		}
 	}
 	return cleaned
