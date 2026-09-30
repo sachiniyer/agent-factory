@@ -975,4 +975,116 @@ func TestClassifyWatchStop_UnknownInFlightOpOutranksManualSwapUsageLimit(t *test
 		"a parked manual swap with an unrecognised in-flight op must not be reported as a stop")
 }
 
+// A MANUAL account swap that has committed its incoming identity but not yet
+// started its replacement must stay `working`, not report `usage-limited`.
+// handoffAccount on a session already at LiveLimitReached builds a manual swap
+// with reason HandoffReasonUsageLimit and runs it through
+// resumeFromLimitLockedOutcome: after commitNewAccountSwapIdentity but before
+// RespawnForAccountSwapWithLiveBoundary clears the outgoing account's stale
+// liveness, the snapshot carries PendingAccountSwap.Manual, the OUTGOING
+// identity's stale LiveLimitReached, OpRespawning, and
+// ReplacementPanesStarted=false. The parked-swap override above requires
+// ReplacementPanesStarted (a genuine ParkManualAccountSwapAtLimit park always
+// has it set), so this active-resume row falls through to the InFlightOp axis
+// and is held as `working` — the verdict a driver needs while the requested
+// replacement executes, instead of fleet watch returning early on the
+// outgoing account's stale limit.
+func TestClassifyWatchStop_ManualSwapActiveResumeStaysWorking(t *testing.T) {
+	// handoffAccount's swap commits the incoming identity, but the replacement
+	// panes have not started: ReplacementPanesStarted is false.
+	pending := &session.AccountSwapData{
+		Manual:  true,
+		From:    "ambient",
+		To:      "work",
+		Mission: "continue under the new account",
+	}
+	active := withLiveness("s", session.LiveLimitReached)
+	active.PendingAccountSwap = pending
+	active.InFlightOp = session.OpRespawning
+	reason, detail := classifyWatchStop(active)
+	require.Equal(t, watchWorking, reason,
+		"a manual swap whose replacement has not started is in motion, not parked at the incoming identity's limit")
+	require.Empty(t, detail,
+		"a working row carries no stop detail")
+
+	// The watcher holds the slot as working: neither the --include-current
+	// baseline nor an edge into the active-resume row emits a stop.
+	w := newFleetWatcher(true)
+	require.Empty(t, w.observe([]session.InstanceData{active}),
+		"a session mid-manual-swap active resume must not be reported as a stop")
+
+	// Sanity: once the replacement starts and the incoming identity itself
+	// parks at a limit (ParkManualAccountSwapAtLimit, reached only after the
+	// respawn marked ReplacementPanesStarted), the override fires and reports
+	// usage-limited — the active-resume gate does not swallow the genuine
+	// parked row.
+	parked := withLiveness("s", session.LiveLimitReached)
+	parked.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	parked.InFlightOp = session.OpRespawning
+	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(parked)),
+		"a manual swap parked at the incoming identity's limit reports usage-limited")
+}
+
+// An AUTOMATIC swap whose replacement itself reached the INCOMING identity's
+// usage wall must report `usage-limited`, not be held as `working`.
+// settleReplacementRuntime re-parks an automatic replacement at
+// LiveLimitReached while retaining PendingAccountSwap (it does NOT clear the
+// swap marker the way a settled swap does), and the error path's
+// EndLimitResume then lowers the fence to OpNone — a row genuinely parked at
+// the incoming identity's limit. It carries ReplacementPanesStarted=true
+// (RespawnForAccountSwapWithLiveBoundary completed before settle), which
+// distinguishes it from the crash-recovered pre-respawn row above. The
+// crash-recovery gate is scoped to !ReplacementPanesStarted, so this genuine
+// incoming-limit park falls through to the liveness switch and reports
+// `usage-limited` — the edge a driver is owed while the scheduler waits out
+// the incoming identity's reset window.
+func TestClassifyWatchStop_AutomaticSwapIncomingLimitParkReportsUsageLimited(t *testing.T) {
+	// SelectAccountAutomatically builds PendingAccountSwap without Manual; the
+	// replacement started (ReplacementPanesStarted=true) and then hit its own
+	// limit, so the fence was lowered to OpNone.
+	pending := &session.AccountSwapData{
+		From:                    "ambient",
+		To:                      "work",
+		Mission:                 "continue under the new account",
+		ReplacementPanesStarted: true,
+	}
+	parked := withLiveness("s", session.LiveLimitReached)
+	parked.PendingAccountSwap = pending
+	parked.InFlightOp = session.OpNone
+	reason, detail := classifyWatchStop(parked)
+	require.Equal(t, watchStopUsageLimited, reason,
+		"an automatic swap parked at the incoming identity's limit reports usage-limited, not working")
+	require.Contains(t, detail, "usage limit",
+		"the stop carries the liveness axis's usage-limit reason")
+
+	// The watcher emits the working -> usage-limited edge, not silence.
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("s")}),
+		"the working baseline establishes no transition")
+	transitioned := fleetRunning("s")
+	transitioned.Liveness = session.LiveLimitReached
+	transitioned.PendingAccountSwap = pending
+	transitioned.InFlightOp = session.OpNone
+	events := w.observe([]session.InstanceData{transitioned})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopUsageLimited}, reasons(events),
+		"a session that parks at the incoming identity's limit mid-automatic-swap is reported as usage-limited, not held as working")
+
+	// Sanity: the crash-recovered pre-respawn shape (ReplacementPanesStarted
+	// false) is still held as working by its gate above.
+	crashed := withLiveness("s", session.LiveLimitReached)
+	crashed.PendingAccountSwap = &session.AccountSwapData{
+		From:    "ambient",
+		To:      "work",
+		Mission: "continue under the new account",
+	}
+	crashed.InFlightOp = session.OpNone
+	require.Equal(t, watchWorking, mustReason(classifyWatchStop(crashed)),
+		"a crash-recovered automatic swap mid-replacement is still held as working")
+}
+
 func mustReason(r watchStopReason, _ string) watchStopReason { return r }

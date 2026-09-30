@@ -200,7 +200,25 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// disk-scrubbed view, or the fence released once the limit lifts) — so any
 	// other operation falls through to the InFlightOp axis and is held as
 	// working, the version-skew-safe verdict.
+	//
+	// Gated on ReplacementPanesStarted so the override fires only for a limit
+	// observed on the INCOMING identity. Both park paths —
+	// ParkManualAccountSwapAtLimit and the manual deliverManualAccountMission
+	// settle — run after RespawnForAccountSwapWithLiveBoundary marked the
+	// replacement panes started (ValidateAccountSwapReplacementPanes requires
+	// it before any settle/deliver), so a parked manual swap always carries it.
+	// A manual swap that has NOT started its replacement yet reaches this point
+	// with OpRespawning and ReplacementPanesStarted=false: handoffAccount on a
+	// session already at LiveLimitReached commits the incoming identity before
+	// RespawnForAccountSwapWithLiveBoundary clears the OUTGOING account's stale
+	// liveness, so the row carries the outgoing identity's stale limit while
+	// the requested replacement is actively executing. Reporting usage-limited
+	// there would end fleet watch early instead of waiting for the delivery, so
+	// the active-resume view falls through to the InFlightOp axis, which holds
+	// OpRespawning as working — the same verdict the automatic active-resume
+	// row below gets.
 	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached &&
+		d.PendingAccountSwap.ReplacementPanesStarted &&
 		(d.InFlightOp == session.OpRespawning || d.InFlightOp == session.OpNone) {
 		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
 	}
@@ -216,15 +234,31 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// `usage-limited` would make fleet watch return early and tell the driver
 	// the session is parked at a quota wall when it is not — the replacement
 	// is about to resume — so hold it as `working` the way the active-resume
-	// path above does, scoped to a pending automatic swap because a genuine
-	// re-park at the incoming identity's limit has already cleared
-	// PendingAccountSwap (the swap settled) and therefore falls through to
-	// the liveness switch and reports the limit the way a non-swap row does.
+	// path above does.
+	//
+	// Not every automatic OpNone row at LiveLimitReached with a pending swap
+	// is that crash-recovered pre-respawn shape. settleReplacementRuntime
+	// re-parks an automatic replacement that itself reached the INCOMING
+	// identity's wall at LiveLimitReached while retaining PendingAccountSwap,
+	// and the error path's EndLimitResume then lowers the fence to OpNone — a
+	// row genuinely parked at the incoming identity's limit that a driver is
+	// owed a `usage-limited` edge for while the scheduler waits out its reset
+	// window. The two share every field the snapshot carries except
+	// ReplacementPanesStarted: the crash-recovered row's replacement never
+	// started (the restart hit between the identity checkpoint and
+	// RespawnForAccountSwapWithLiveBoundary), while the incoming-limit park's
+	// replacement did start (RespawnForAccountSwapWithLiveBoundary completed
+	// before settle). Gate the `working` verdict on !ReplacementPanesStarted so
+	// the crash-recovered pre-respawn row is still held as working, and the
+	// genuine incoming-limit park (ReplacementPanesStarted) falls through to
+	// the liveness switch below and reports `usage-limited` the way a settled
+	// non-swap row does.
 	// Restricted to OpNone because an automatic swap with OpRespawning is the
 	// active-resume shape the InFlightOp axis below already holds as
 	// `working`, with the same verdict.
 	if d.PendingAccountSwap != nil && !d.PendingAccountSwap.Manual &&
-		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone {
+		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone &&
+		!d.PendingAccountSwap.ReplacementPanesStarted {
 		return watchWorking, ""
 	}
 	// ANY operation in flight means the session is in motion, including one this
