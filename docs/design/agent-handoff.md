@@ -7,7 +7,7 @@ Status: **Accepted — D1/D2/D3 confirmed by Sachin 2026-07-18** · Author: Capt
 >
 > - **D1 = prompted-first.** A detected limit surfaces a hand-off *action* the
 >   user confirms. Automatic mode is a later, separately gated addition — **not
->   built now** (§2.2 phase 2 is deferred, and §10 PR 6 with it).
+>   built now** (§2.2 phase 2 is deferred, and §10 PR 3 with it).
 > - **D2 = mission + worktree.** The swapped-in agent inherits the same
 >   worktree/branch plus a concise mission summary (goal · what's done · what's
 >   next). No transcript replay.
@@ -608,11 +608,16 @@ This one structure discharges three requirements at once:
 - **Loop detection** — the history makes "this session has bounced between two
   limited agents three times" directly answerable (§8).
 
-Surfaces: a `[handoff]`-style marker in the sidebar and web (the `[limit]` badge
-is the precedent, `ui/tree/render.go:97`), the full ledger in
-`af sessions get --json`, and a `session.handoff` event in
-`agentproto/message.go:87` for live clients. The event plane is **not** storage —
-it is drained, not retained — so the persisted ledger is the record of truth.
+Surfaces as built: the full ledger in `af sessions get --json` (each tab
+serializes its `Handoffs` list through `InstanceData`, `session/tab.go:285`), and
+the ordinary `session.updated` event for live clients — a swap republishes the
+session rather than minting a dedicated `session.handoff` type; the event enum
+(`agentproto/message.go`) still carries only created/updated/killed/archived/
+restored, and `daemon/handoff_event_test.go` asserts `EventSessionUpdated`. No
+`[handoff]`-style sidebar or web badge was added; the `[limit]` marker
+(`ui/tree/render.go:97`) remains the precedent if one is ever needed. The event
+plane is **not** storage — it is drained, not retained — so the persisted ledger
+is the record of truth.
 
 ---
 
@@ -727,7 +732,7 @@ target. It moves to the deferred set with the auto trigger.
 | PR | Scope | Status |
 |---|---|---|
 | **1** | `Instance.Program` write path + `AgentHandoff` ledger (§6) + mission builder (§3.2) + `HandoffSession` RPC + CLI verb + TUI action + parity entries + docs | **built — this PR** |
-| 2 | Web action (§7) — also closes the #1934 dead-end. `make web-build`. | deferred |
+| 2 | Web action (§7) — also closes the #1934 dead-end. `make web-build`. | **built — #2508** |
 | 3 | Automatic trigger: `limit_action`, tail-anchoring + stability gate (§2.1), no-stored-prompt refusal (§3.3), per-agent limit registry (§8), loop guard | deferred |
 
 The prompted feature is small enough to land coherently in one PR — splitting the
@@ -749,8 +754,10 @@ without a human in the loop.
    summary is goal · what's done · what's next (§3.2).
 3. **D3 — swap in place. ✅ Confirmed**, over successor+archive, on the §4.2
    evidence that a same-branch successor cannot exist while the original does.
-4. **Naming** — `af sessions handoff <title> --to <agent>` and the TUI `H` key,
-   as built.
+4. **Naming** — `af sessions handoff <title> --to <agent>` and the TUI `F` key,
+   as built. (`H`, the obvious mnemonic, is deliberately left unbound: it was the
+   pre-ergonomics hooks-editor key, and binding it to a different action would
+   convert stale muscle memory into an unintended swap — `keys/keys.go`.)
 5. **Agent restrictions** — none. Any supported agent may be a target; the only
    refusals are structural (§5.2, and see the note there on what is *warned*
    rather than refused).
