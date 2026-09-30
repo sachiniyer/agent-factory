@@ -137,6 +137,15 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs -I{} -n2 nohup", true},
 		{"xargs -I{} -L1 strace", true},
 		{"xargs -I{} -n ' 2' nohup", true},
+		// Codex on #4980, round 3. A '='-bearing marker reaches -E's name
+		// through the separator; counts past Go's int range and a nested
+		// count the outer line spells still cancel -I.
+		{"xargs -I= strace -E= codex", true},
+		{"xargs -I= strace --env== codex", true},
+		{"xargs -I{} -n9223372036854775808 nohup", true},
+		{"xargs -I{} -L99999999999999999999 nohup", true},
+		{"xargs -a /tmp/outer -I{} xargs -I[] -n{} nohup", true},
+		{"xargs -I{} xargs -I[] --max-args={} nohup", true},
 		// BSD xargs (macOS) keeps -I in force alongside -n/-L, so both
 		// readings are judged: the marker is still substituted there.
 		{"xargs -I{} -n2 nohup {} CODEX_HOME=/x codex", true},

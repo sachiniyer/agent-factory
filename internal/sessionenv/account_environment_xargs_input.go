@@ -157,10 +157,12 @@ func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker st
 }
 
 // straceEnvNameCarries reports whether the marker sits in the VAR part of an
-// -E/--env value (VAR or VAR=VAL), so the line picks the variable.
+// -E/--env value (VAR or VAR=VAL), so the line picks the variable. A marker
+// containing '=' is replaced wherever it occurs, separator included, so
+// there any occurrence counts: under -I=, `-E=` fed CODEX_HOME becomes
+// `-ECODEX_HOME` (Codex on #4980).
 func straceEnvNameCarries(value, marker string) bool {
-	name, _, _ := strings.Cut(value, "=")
-	return strings.Contains(name, marker)
+	return xargsMarkerInName(value, marker)
 }
 
 // straceShortValueFlags are the strace 6.8 short options that take an
