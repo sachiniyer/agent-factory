@@ -336,10 +336,59 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				if CanonicalTargetSession(existing.TargetSession) == CanonicalTargetSession(merged.TargetSession) && existing.TargetSession != merged.TargetSession {
 					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"target_session"}, nowFn())
 				}
+				// Store clear-repairs of fields the freshly-loaded row was ALREADY too
+				// misshapen to carry — a stale max_concurrent_runs on a non-watch task,
+				// or a non-keep on_complete alongside a target_session. Every in-process
+				// writer runs ValidateTrigger, so these rows reach disk only via a
+				// hand-edit of tasks.json; apply's clearInapplicableCap /
+				// clearInapplicableOnComplete silently repair them on the next write,
+				// and that repair fires even when the caller's patch never touched the
+				// field (update.MaxConcurrentRuns / update.OnComplete == nil). Attributing the
+				// cleared field to the caller's actor — the default, via changedFields'
+				// raw/canonical diff — would claim a surface moved a field it never did.
+				//
+				// The decisive test is whether the field was ALREADY inapplicable on
+				// the freshly-loaded record. A valid row the caller retargets still has
+				// capApplies()/onCompleteApplies() == true, so the clear there is a
+				// consequence of the caller's trigger change and stays attributed to
+				// the caller (see TestUpdateTaskClearsStaleCapForNonCLIWriters and
+				// TestRepro_GenuineRetargetCapClearAttributedToCaller). A hand-edited row
+				// already has it false, so the clear is purely the store's repair and
+				// is recorded under the store's own actor — the same class of
+				// store-initiated change as the repo_id backfill and the byte
+				// canonicalizations above. Those carves cover only canonical-equivalent
+				// changes ("Archive"→"archive"); a clear-repair like kill→keep changes
+				// the canonical value, so it falls through them and is handled here.
+				//
+				// The update.MaxConcurrentRuns / update.OnComplete == nil gate is what separates
+				// a store repair from a caller who explicitly cleared the field: an
+				// explicit clear patches the field, skips these blocks, and stays the
+				// caller's change in auditUpdate — so the trail never misses a write
+				// that actually happened.
+				//
+				// callerBefore is the existing record with a store-repaired field
+				// aligned to its post-repair value, so changedFields (called by
+				// auditUpdate below) does NOT also list that field under the caller's
+				// actor. This is the same exclusion the canonical-to-canonical diff in
+				// changedFields achieves for the byte-canonicalization carves above:
+				// there canonical-equality makes the diff see no change, and here the
+				// alignment does. The caller's entry then names only the fields the
+				// caller actually moved.
+				callerBefore := existing
+				if update.MaxConcurrentRuns == nil && existing.MaxConcurrentRuns > 0 && !existing.capApplies() &&
+					merged.MaxConcurrentRuns != existing.MaxConcurrentRuns {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"max_concurrent_runs"}, nowFn())
+					callerBefore.MaxConcurrentRuns = merged.MaxConcurrentRuns
+				}
+				if update.OnComplete == nil && existing.SessionLifecycle() != OnCompleteKeep && !existing.onCompleteApplies() &&
+					merged.OnComplete != existing.OnComplete {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"on_complete"}, nowFn())
+					callerBefore.OnComplete = merged.OnComplete
+				}
 				// Diffed against the record just loaded under this lock, and
 				// stamped before the write — so the trail records the change that
 				// actually landed, at the instant it landed.
-				auditUpdate(&existing, &merged, actor, nowFn())
+				auditUpdate(&callerBefore, &merged, actor, nowFn())
 				tasks[i] = merged
 				row = i
 				found = true
