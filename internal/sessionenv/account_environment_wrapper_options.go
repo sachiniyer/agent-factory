@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -68,6 +69,10 @@ type xargsLoopState struct {
 	substituting bool
 	markerKnown  bool
 	marker       string
+	// replaceCancelled and replaceMarker are GNU xargs's own reading of the
+	// replace options (unwrapXargs explains the difference).
+	replaceCancelled bool
+	replaceMarker    string
 }
 
 type xargsEnvKey struct {
@@ -170,9 +175,41 @@ func xargsWordCarriesMarker(word *syntax.Word, marker string) bool {
 	if !ok {
 		return true
 	}
-	namePart, value, _ := strings.Cut(lit, "=")
-	// --unset's value is a name env removes, not data (#4978): `env
-	// --unset={}` fed CODEX_HOME drops the account root.
+	return xargsMarkerInName(lit, marker)
+}
+
+// xargsMarkerInName reports whether substituting the marker can change a
+// word's name-or-option text: its part before the first '='. A marker only in
+// an assignment's value feeds data. A marker that itself contains '=' is
+// replaced wherever it occurs — GNU xargs 4.9 turns `A=b` into `AXXb` under
+// `-I=` — so there any occurrence counts (#4977). --unset's value is a name
+// env removes, not data (#4978): `env --unset={}` fed CODEX_HOME drops the
+// account root.
+func xargsMarkerInName(literal, marker string) bool {
+	if strings.Contains(marker, "=") {
+		return strings.Contains(literal, marker)
+	}
+	namePart, value, _ := strings.Cut(literal, "=")
 	return strings.Contains(namePart, marker) ||
 		(namePart == "--unset" && strings.Contains(value, marker))
+}
+
+// xargsCountCancelsReplace reports whether an -n/--max-args value cancels an
+// earlier -I. GNU xargs 4.9 lets a later -n win ("ignoring previous
+// --replace value") except -n1; a value that is not a number makes xargs exit
+// before running anything, so it changes nothing here.
+func xargsCountCancelsReplace(value string) bool {
+	n, err := strconv.Atoi(value)
+	return err == nil && n != 1
+}
+
+// xargsLineCountValid reports whether an -L/-l/--max-lines value is one GNU
+// xargs 4.9 accepts, so the option takes effect and cancels an earlier -I.
+// -l and --max-lines take an optional value; an absent one means 1.
+func xargsLineCountValid(value string) bool {
+	if value == "" {
+		return true
+	}
+	_, err := strconv.Atoi(value)
+	return err == nil
 }

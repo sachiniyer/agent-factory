@@ -42,9 +42,10 @@ import (
 
 // xargsInputKey memoizes xargsInputReaches by chain suffix and input mode.
 type xargsInputKey struct {
-	word         *syntax.Word
-	substituting bool
-	marker       string
+	word          *syntax.Word
+	substituting  bool
+	marker        string
+	headIsCommand bool
 }
 
 // xargsNestedKey memoizes the nested-xargs option-region scan by position,
@@ -68,7 +69,10 @@ const (
 // the suffix left after the region.
 type xargsNestedResult struct {
 	carries bool
-	rest    int
+	// valueCarries: a separate option value carries the marker. A shadowed
+	// xargs may exec that word, so it is a possible program on its own.
+	valueCarries bool
+	rest         int
 }
 
 // xargsChild peels the modeled wrappers off the argv xargs execs and refuses
@@ -79,7 +83,14 @@ func xargsChild(words []*syntax.Word, substituting bool, marker string, names ma
 		return nil, true
 	}
 	tail, unsafe := unwrapAccountCommand(words, names, memo)
-	if unsafe || xargsInputReaches(tail, substituting, marker, names, memo) {
+	if unsafe {
+		return nil, true
+	}
+	// With nothing peeled, the head is xargs's own COMMAND word, which xargs
+	// never substitutes: GNU xargs 4.9 replaces the marker only in
+	// INITIAL-ARGS (`printf 'env\n' | xargs -I{} {} A` runs a literal `{}`).
+	headIsCommand := len(tail) > 0 && tail[0] == words[0]
+	if xargsInputReaches(tail, substituting, marker, headIsCommand, names, memo) {
 		return nil, true
 	}
 	return tail, false
@@ -87,23 +98,23 @@ func xargsChild(words []*syntax.Word, substituting bool, marker string, names ma
 
 // xargsInputReaches judges a peeled chain: tail has had its modeled wrappers
 // removed, so its head is the program the chain runs, or it is empty.
-func xargsInputReaches(tail []*syntax.Word, substituting bool, marker string, names map[string]struct{}, memo operandTailMemo) bool {
+func xargsInputReaches(tail []*syntax.Word, substituting bool, marker string, headIsCommand bool, names map[string]struct{}, memo operandTailMemo) bool {
 	if len(tail) == 0 {
 		// No command: appended items become the program. A substituted
 		// command with no argv past its wrappers has nothing appended.
 		return !substituting
 	}
-	key := xargsInputKey{word: tail[0], substituting: substituting, marker: marker}
+	key := xargsInputKey{word: tail[0], substituting: substituting, marker: marker, headIsCommand: headIsCommand}
 	if answer, seen := memo.xargsInput[key]; seen {
 		return answer
 	}
-	answer := xargsInputReachesUncached(tail, substituting, marker, names, memo)
+	answer := xargsInputReachesUncached(tail, substituting, marker, headIsCommand, names, memo)
 	memo.xargsInput[key] = answer
 	return answer
 }
 
-func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker string, names map[string]struct{}, memo operandTailMemo) bool {
-	if substituting && xargsWordCarriesMarker(tail[0], marker) {
+func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker string, headIsCommand bool, names map[string]struct{}, memo operandTailMemo) bool {
+	if substituting && !headIsCommand && xargsWordCarriesMarker(tail[0], marker) {
 		// The program this link runs is the substituted line.
 		return true
 	}
@@ -142,7 +153,7 @@ func xargsInputReachesUncached(tail []*syntax.Word, substituting bool, marker st
 		// input can reach the link.
 		return !substituting || memo.xargsMarkerAnywhere(next, marker)
 	}
-	return xargsInputReaches(peeled, substituting, marker, names, memo)
+	return xargsInputReaches(peeled, substituting, marker, false, names, memo)
 }
 
 // straceEnvNameCarries reports whether the marker sits in the VAR part of an
@@ -190,12 +201,13 @@ func (memo operandTailMemo) straceInputRegion(words []*syntax.Word, substituting
 		carries := substituting && strings.Contains(literal, marker)
 		childFollows := memo.commandCanFollow(words[idx+1:])
 		if pending != straceNoValue {
-			if carries && childFollows {
-				switch {
-				case pending == straceEnvValue && straceEnvNameCarries(literal, marker),
-					pending == straceUnresolvedValue:
-					return 0, true
-				}
+			// A separate option value is its own argv word, and the walk
+			// cannot prove strace is the real binary: a shadowed `strace`
+			// doing `shift; exec "$@"` runs that word, as the modeled
+			// wrappers' consumed operands are judged (Codex on #4980). A
+			// marker there is a possible program, whatever the option.
+			if carries {
+				return 0, true
 			}
 			pending = straceNoValue
 			continue
@@ -283,7 +295,10 @@ func (memo operandTailMemo) commandCanFollow(words []*syntax.Word) bool {
 	for i := scanned - 1; i >= 0; i-- {
 		if !answer {
 			literal, ok := literalShellWord(words[i])
-			answer = !ok || !strings.HasPrefix(literal, "-") || literal == "-"
+			// After "--" any word is the program, even one spelled with a
+			// leading dash (Codex on #4980: `-- -dir/codex`).
+			answer = !ok || !strings.HasPrefix(literal, "-") || literal == "-" ||
+				(literal == "--" && i+1 < len(words))
 		}
 		memo.xargsCommandFollows[words[i]] = answer
 	}
@@ -324,18 +339,28 @@ const xargsShortValueFlags = "adEILnPseli"
 // runs echo, so the danger needs a command after its option region. The scan
 // matches xargs anywhere in the argv, which only over-approximates the
 // command positions.
+//
+// The answer from each position is memoized per marker, so every xargs level
+// that shares a marker shares one scan (Codex on #4979: `xargs -i xargs -i …`).
 func (memo operandTailMemo) xargsMarkerInNestedXargsOptions(words []*syntax.Word, marker string) bool {
-	for start, word := range words {
-		if !isAccountCommandName(word, "xargs") {
-			continue
-		}
-		options := words[start+1:]
-		region := memo.xargsNestedRegion(options, marker, xargsNestedNone)
-		if region.carries && memo.commandCanFollow(options[len(options)-region.rest:]) {
-			return true
+	answer := false
+	scanned := 0
+	for ; scanned < len(words); scanned++ {
+		if cached, seen := memo.xargsNestedAny[xargsMarkerKey{word: words[scanned], marker: marker}]; seen {
+			answer = cached
+			break
 		}
 	}
-	return false
+	for i := scanned - 1; i >= 0; i-- {
+		if !answer && isAccountCommandName(words[i], "xargs") {
+			options := words[i+1:]
+			region := memo.xargsNestedRegion(options, marker, xargsNestedNone)
+			answer = region.valueCarries ||
+				(region.carries && memo.commandCanFollow(options[len(options)-region.rest:]))
+		}
+		memo.xargsNestedAny[xargsMarkerKey{word: words[i], marker: marker}] = answer
+	}
+	return answer
 }
 
 // xargsNestedRegion walks the xargs option region at the head of words from
@@ -344,8 +369,9 @@ func (memo operandTailMemo) xargsMarkerInNestedXargsOptions(words []*syntax.Word
 // stays linear.
 func (memo operandTailMemo) xargsNestedRegion(words []*syntax.Word, marker string, pending xargsNestedPending) xargsNestedResult {
 	type step struct {
-		key   xargsNestedKey
-		local bool
+		key        xargsNestedKey
+		local      bool
+		localValue bool
 	}
 	var chain []step
 	result := xargsNestedResult{rest: 0}
@@ -366,13 +392,17 @@ func (memo operandTailMemo) xargsNestedRegion(words []*syntax.Word, marker strin
 		}
 		carries := strings.Contains(literal, marker)
 		if pending != xargsNestedNone {
-			chain = append(chain, step{key: key, local: carries && pending == xargsNestedDangerousValue})
+			// A separate value is a possible program for a shadowed xargs;
+			// -I's and --process-slot-var's also take the line where it
+			// reaches env.
+			chain = append(chain, step{key: key, local: carries && pending == xargsNestedDangerousValue, localValue: carries})
 			pending = xargsNestedNone
 			continue
 		}
 		if literal == "--" {
+			// The rest keeps "--" so commandCanFollow sees the terminator.
 			chain = append(chain, step{key: key})
-			result = xargsNestedResult{rest: len(words) - idx - 1}
+			result = xargsNestedResult{rest: len(words) - idx}
 			break
 		}
 		if !strings.HasPrefix(literal, "-") || literal == "-" {
@@ -418,9 +448,26 @@ func (memo operandTailMemo) xargsNestedRegion(words []*syntax.Word, marker strin
 	}
 	for i := len(chain) - 1; i >= 0; i-- {
 		result.carries = result.carries || chain[i].local
+		result.valueCarries = result.valueCarries || chain[i].localValue
 		memo.xargsNested[chain[i].key] = result
 	}
 	return result
+}
+
+// xargsMarkerLimit bounds the distinct replace markers one walk follows.
+// Every per-marker question is a scan of the remaining argv, memoized per
+// (position, marker), so a command nesting n xargs with n different markers
+// costs n scans: Codex on #4980 measured `xargs -IM000000Z xargs -IM000001Z …
+// echo` at 18s for 2,000 layers, and master's own env operand scan has the
+// same shape. Real commands nest one or two; past the limit the walk fails
+// closed, as shadowedTailOperandLimit does for childless tails.
+const xargsMarkerLimit = 8
+
+// xargsMarkerLimitExceeded records marker as followed and reports whether the
+// walk has now followed more distinct markers than xargsMarkerLimit.
+func (memo operandTailMemo) xargsMarkerLimitExceeded(marker string) bool {
+	memo.xargsMarkersFollowed[marker] = struct{}{}
+	return len(memo.xargsMarkersFollowed) > xargsMarkerLimit
 }
 
 // xargsNestedOptionDangerous reports whether a nested xargs option, as

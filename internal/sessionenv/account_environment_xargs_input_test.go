@@ -112,6 +112,30 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		// option the binary rejects from one it accepts under a prefix.
 		{"xargs -I{} strace -f nice -E{} codex", true},
 		{"xargs strace nice -E x", true},
+		// Codex on #4980, round 2. A separate option value of strace or a
+		// nested xargs is a possible program: a shadowed binary doing
+		// `shift; exec "$@"` runs it, as the modeled wrappers' consumed
+		// operands are judged.
+		{"xargs -I{} strace -o {} codex", true},
+		{"xargs -I{} strace -p {}", true},
+		{"xargs -I{} strace -E A={} codex", true},
+		{"xargs -I{} strace -E --chdir={} codex", true},
+		{"xargs -I{} strace --decode-pids {} codex", true},
+		{"xargs -I{} strace --output {} codex", true},
+		{"xargs -I{} strace --string-l {} codex", true},
+		{"xargs -I{} xargs --max-args {} echo", true},
+		{"xargs -I{} xargs -n {}", true},
+		{"xargs -I{} xargs -n {} echo", true},
+		{"xargs -I{} xargs -I {}", true},
+		// After "--" a dash-spelled word is still the program, so a nested
+		// xargs's --process-slot-var reaches it.
+		{"xargs -I{} xargs --process-slot-var={} -- -dir/codex", true},
+		{"xargs -I{} strace -f -{} -- -dir/codex", true},
+		// A marker containing '=' is replaced wherever it occurs.
+		{"xargs -I= nohup =", true},
+		// -I then -n2/-L cancels replace mode, so input is appended.
+		{"xargs -I{} -n2 nohup", true},
+		{"xargs -I{} -L1 strace", true},
 		// Controls: a named command takes appended items as its arguments,
 		// and a marker that only fills a data value stays accepted.
 		{"xargs", false},
@@ -126,34 +150,38 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		{"xargs xargs echo", false},
 		{"xargs -I{} echo {}", false},
 		{"xargs -I{} nohup", false},
-		{"xargs -I{} strace -o {} codex", false},
-		{"xargs -I{} strace -p {}", false},
 		{"xargs -I{} strace -f echo {}", false},
 		{"xargs -I{} strace -f echo -E{}", false},
 		// -E with no command after it runs no child, and a marker only in
 		// the value of a fixed variable name is data.
 		{"xargs -I{} strace -E{}", false},
-		{"xargs -I{} strace -E A={} codex", false},
-		{"xargs -I{} strace -E --chdir={} codex", false},
 		{"xargs -I{} strace --env=A={} codex", false},
 
 		{"xargs -I{} env --chdir={} codex", false},
 		{"xargs -I{} env PORT={} codex", false},
-		{"xargs -I{} xargs -n {} echo", false},
 		{"xargs -I{} xargs -I[] echo [] {}", false},
-		// Abbreviated and hidden value options consume the marker as data.
+		// xargs's own COMMAND word is never substituted (GNU xargs 4.9 runs a
+		// literal `{}`), so a marker there is a fixed program name.
+		{"xargs -I{} {}", false},
+		{"xargs -I{} {} codex", false},
+		// An attached value is part of one argv word; a shadowed strace
+		// cannot exec it on its own.
+		{"xargs -I{} strace -o{} codex", false},
+		{"xargs -I{} strace --output={} codex", false},
+		{"xargs -I{} strace --env=A={} codex", false},
+		// With nothing after "--" there is still no program.
+		{"xargs -I{} strace -f -{} --", false},
+		// -n1 keeps replace mode; a later -n2 cancels it and `cat` is data.
+		{"xargs -I{} -n1 echo {}", false},
+		{"xargs -Icat -n2 strace /bin/cat codex", false},
+		// Abbreviated and hidden options consume no marker here.
 		{"xargs -I{} strace --fol echo {}", false},
-		{"xargs -I{} strace --decode-pids {} codex", false},
-		{"xargs -I{} strace --output {} codex", false},
-		{"xargs -I{} strace --string-l {} codex", false},
-		{"xargs -I{} xargs --max-args {} echo", false},
 		// An unparseable link no input reaches keeps the walk's verdict.
 		{"xargs -I{} strace nice -E x", false},
 		// No child to run: strace with only options after the marker, and a
 		// nested xargs that names no command (it runs echo).
 		{"xargs -I{} strace -f -{} --", false},
 		{"xargs -I{} xargs -I{} --", false},
-		{"xargs -I{} xargs -I {}", false},
 		{"xargs -I{} xargs --process-slot-var={}", false},
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),

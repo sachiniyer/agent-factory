@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -86,8 +87,18 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"xargs strace -f xargs strace -f … echo x", func(n int) string { return strings.Repeat("xargs strace -f ", n) + "echo x" }, false},
 		{"xargs env A=1 strace xargs … echo x", func(n int) string { return strings.Repeat("xargs env A=1 strace ", n) + "echo x" }, false},
 		{"xargs strace --fol … echo x", func(n int) string { return "xargs strace" + strings.Repeat(" --fol", n) + " echo x" }, false},
-		{"xargs -I{} strace -o {} … echo x", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -o {}", n) + " echo x" }, false},
+		{"xargs -I{} strace -o {} … echo x", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -o {}", n) + " echo x" }, true},
 		{"xargs -I{} strace -f -f … {}", func(n int) string { return "xargs -I{} strace" + strings.Repeat(" -f", n) + " -{} echo" }, true},
+		// Distinct markers past xargsMarkerLimit fail closed (Codex on
+		// #4980: 18s at 2,000 layers).
+		{"xargs -IM0 xargs -IM1 … echo", func(n int) string {
+			var b strings.Builder
+			for i := range n {
+				fmt.Fprintf(&b, "xargs -IM%dZ ", i)
+			}
+			return b.String() + "echo"
+		}, true},
+		{"xargs -i xargs -i … echo hi", func(n int) string { return strings.Repeat("xargs -i ", n) + "echo hi" }, false},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {

@@ -49,6 +49,11 @@ type operandTailMemo struct {
 	xargsMarkerAnywhereMap map[xargsMarkerKey]bool
 	// xargsNested: a nested xargs's option-region scan from here, per state.
 	xargsNested map[xargsNestedKey]xargsNestedResult
+	// xargsMarkersFollowed: the distinct replace markers this walk has followed.
+	xargsMarkersFollowed map[string]struct{}
+	// xargsNestedAny: does any nested xargs from here take the marker in an
+	// env-reaching option.
+	xargsNestedAny map[xargsMarkerKey]bool
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -67,6 +72,8 @@ func newOperandTailMemo() operandTailMemo {
 		xargsCommandFollows:    map[*syntax.Word]bool{},
 		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
 		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
+		xargsMarkersFollowed:   map[string]struct{}{},
+		xargsNestedAny:         map[xargsMarkerKey]bool{},
 	}
 }
 
