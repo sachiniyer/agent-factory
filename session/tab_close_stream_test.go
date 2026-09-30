@@ -62,7 +62,7 @@ func TestCloseTabEndsOnlyThatTabsStream(t *testing.T) {
 		t.Fatalf("subscribe sibling tab: %v", err)
 	}
 
-	if err := inst.CloseTab(1); err != nil {
+	if err := inst.CloseTabByID(closedID); err != nil {
 		t.Fatalf("CloseTab: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestCloseTabStreamTeardownIsIdempotent(t *testing.T) {
 	// Already closed by a racing session teardown: closing the tab on top of it
 	// must not re-run the teardown or panic.
 	brokers[closedID].close()
-	if err := inst.CloseTab(1); err != nil {
+	if err := inst.CloseTabByID(closedID); err != nil {
 		t.Fatalf("CloseTab over an already-closed broker: %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestCloseTabStreamTeardownIsIdempotent(t *testing.T) {
 	las.mu.Lock()
 	delete(las.brokers, tabs[2].ID)
 	las.mu.Unlock()
-	if err := inst.CloseTab(1); err != nil { // beta is at index 1 now
+	if err := inst.CloseTabByID(tabs[2].ID); err != nil { // beta is at index 1 now
 		t.Fatalf("CloseTab for a tab with no broker: %v", err)
 	}
 

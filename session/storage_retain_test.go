@@ -227,12 +227,9 @@ func TestSaveInstances_RestoresReapedLocalTombstone(t *testing.T) {
 		t.Fatalf("reaped tombstone persisted a worktree: %+v", rows[0].Worktree)
 	}
 
-	restored, err := storage.LoadInstances()
-	if err != nil {
-		t.Fatalf("LoadInstances: %v", err)
-	}
+	restored := loadInstancesForTest(t, storage)
 	if len(restored) != 1 {
-		t.Fatalf("LoadInstances restored %d sessions, want the retained tombstone", len(restored))
+		t.Fatalf("restored %d sessions, want the retained tombstone", len(restored))
 	}
 	if !restored[0].UserKilled() {
 		t.Fatal("restored local session lost its kill tombstone")
@@ -736,8 +733,7 @@ func TestSaveInstances_RetainedNonGitAliasScope(t *testing.T) {
 		state.data[pinned] = data
 		storage, err := NewStorage(state, "")
 		require.NoError(t, err)
-		loaded, err := storage.LoadInstances()
-		require.NoError(t, err)
+		loaded := loadInstancesForTest(t, storage)
 		require.Len(t, loaded, 1)
 		require.NoError(t, storage.SaveInstances(loaded))
 		require.Len(t, state.data, 1)
