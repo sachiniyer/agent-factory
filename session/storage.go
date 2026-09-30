@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -761,61 +760,6 @@ func (s *Storage) SaveInstancesForShutdown(instances []*Instance) error {
 		<-archiveSettled
 	}
 	return s.SaveInstances(instances)
-}
-
-// LoadInstances loads the list of instances from disk.
-func (s *Storage) LoadInstances() ([]*Instance, error) {
-	var allJSON map[string]json.RawMessage
-	if s.repoID != "" {
-		// TUI mode: load just this repo. Surface read errors so startup can
-		// report "couldn't read your sessions" instead of silently showing
-		// an empty list that looks like a fresh install (#766).
-		raw, err := s.state.GetInstances(s.repoID)
-		if err != nil {
-			return nil, err
-		}
-		allJSON = map[string]json.RawMessage{s.repoID: raw}
-	} else {
-		// Daemon mode: load all repos. Surface a directory-level read error so
-		// the daemon reports "couldn't read your sessions" instead of silently
-		// presenting an empty list that looks like a fresh install while live
-		// sessions sit unreadable on disk (#868).
-		all, err := s.state.GetAllInstances()
-		if err != nil {
-			return nil, err
-		}
-		allJSON = all
-	}
-
-	var instances []*Instance
-	for repoID, jsonData := range allJSON {
-		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
-			continue
-		}
-		var instancesData []InstanceData
-		if err := json.Unmarshal(jsonData, &instancesData); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal instances: %w", err)
-		}
-		// Collapse duplicate records written before the dedup-on-save fix
-		// (#808) so a dup-containing file yields one sidebar row per session
-		// immediately, not just after the next save rewrites the file.
-		instancesData = dedupeInstanceData(instancesData)
-		for _, data := range instancesData {
-			data = data.ForStorage()
-			instance, err := FromInstanceData(data)
-			if err != nil {
-				// Instance's tmux session or worktree may have been
-				// destroyed externally. Log and skip rather than
-				// failing the entire load.
-				log.WarningLog.Printf("skipping instance %q: %v", data.Title, err)
-				continue
-			}
-			instance.PinStorageRepoID(repoID)
-			instances = append(instances, instance)
-		}
-	}
-
-	return instances, nil
 }
 
 // InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for

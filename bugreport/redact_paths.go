@@ -203,8 +203,8 @@ func normalizeRoot(path string) string {
 func (r *redactor) rootReplacements() []pathRoot {
 	out := make([]pathRoot, 0, 2*len(r.roots)+2)
 	out = append(out, r.roots...)
-	if r.home != "" && r.home != "/" {
-		out = append(out, pathRoot{path: r.home, token: "~"})
+	if home := normalizeRoot(r.home); home != "" {
+		out = append(out, pathRoot{path: home, token: "~"})
 	}
 	for _, root := range out[:len(out):len(out)] {
 		if display := strings.ToValidUTF8(root.path, "\uFFFD"); display != root.path {
