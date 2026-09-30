@@ -49,6 +49,20 @@ const (
 // below the option block other than its frame and footer. A question quoted
 // inside prose is not a whole row, so it never opens a region at all.
 //
+// The inline "❯ Yes  No" option row is the one shape a working composer's draft
+// can reproduce verbatim: the composer's prompt glyph is the same ❯ the picker
+// uses as its selection cursor (claudeTrustSelectionGlyph), and a user draft
+// "Yes No" reduces to the same inline-pair label. The frame rule is the only
+// thing that rejects a FRAMED composer, so an equivalent no-frame composer whose
+// question sits in the transcript above its draft would reach the option branch
+// unchanged and be classified as answerable — the Enter af then taps submits the
+// user's draft. A launch modal, by contrast, owns a fresh pane from the top, so
+// its question is the first non-blank content; a composer always sits below agent
+// output. The inline-pair branch therefore also requires no prose above the
+// question row (frame chrome is reduced to blank by claudeTrustRowOf, so a boxed
+// modal still satisfies it). The stacked picker needs no such guard: a single
+// composer line cannot paint two option rows.
+//
 // The hidden-cursor oracle the codex branch uses is not available here (Claude
 // Code hides the cursor in its composer too; see claudeTrustAffordancePrefix),
 // so the grammar carries the whole weight.
@@ -74,6 +88,8 @@ func claudeLegacyTrustDialogOf(content string) claudeLegacyTrustVerdict {
 	)
 	phase := inBody
 	var selected, yesSelected, hasNo bool
+	var optionRows int
+	var inlinePairBlock bool
 	for i := question + 1; i < len(rows); i++ {
 		row := rows[i]
 		rule := claudeTrustFrameRule(lines[i])
@@ -119,7 +135,9 @@ func claudeLegacyTrustDialogOf(content string) claudeLegacyTrustVerdict {
 			continue
 		}
 		// An option row.
+		optionRows++
 		yes, no := claudeLegacyOptionKinds(row.label)
+		inlinePairBlock = optionRows == 1 && yes && no
 		if row.selected {
 			if selected {
 				return claudeLegacyTrustNone
@@ -132,9 +150,33 @@ func claudeLegacyTrustDialogOf(content string) claudeLegacyTrustVerdict {
 	// phase == inBody (question and body painted, no option yet) falls through
 	// to partial with selected false.
 	if phase != inBody && selected && yesSelected && hasNo {
+		// The inline "❯ Yes  No" row is indistinguishable from a working
+		// composer's draft on a single visible capture — same glyph, same
+		// label — and a no-frame composer reaches this branch unchanged. A
+		// launch modal owns a fresh pane from the top, so its question is the
+		// first non-blank content; a composer always sits below agent output.
+		// Require that for the inline pair; the stacked picker needs no guard
+		// (a single composer line cannot paint two option rows).
+		if inlinePairBlock && claudeLegacyProseAboveQuestion(rows, question) {
+			return claudeLegacyTrustNone
+		}
 		return claudeLegacyTrustAnswerable
 	}
 	return claudeLegacyTrustPartial
+}
+
+// claudeLegacyProseAboveQuestion reports whether any non-blank row is painted
+// above the question row. claudeTrustRowOf reduces a frame-only row (box chrome)
+// to blank, so a boxed modal — whose only content above the question is its top
+// border — still passes; a transcript that quotes the question beneath other
+// agent output does not.
+func claudeLegacyProseAboveQuestion(rows []claudeTrustRow, question int) bool {
+	for i := 0; i < question; i++ {
+		if !rows[i].blank {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeLegacyYesLabels and claudeLegacyNoLabels are the option labels the

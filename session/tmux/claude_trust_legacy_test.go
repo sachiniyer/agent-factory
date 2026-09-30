@@ -65,6 +65,19 @@ func TestClaudeLegacyTrustDialogOf(t *testing.T) {
 			"────────────────────────────────────\n" +
 			"❯ Yes 2. No\n" +
 			"────────────────────────────────────\n", claudeLegacyTrustNone},
+		// Codex P1 (claude_trust_legacy.go): the same composer draft with NO
+		// frame — the grammar only rejected a composer via its frame rule, so
+		// an unframed composer whose question sits in the transcript above a
+		// "❯ Yes No" draft is indistinguishable from the inline picker on a
+		// single visible capture. A launch modal owns a fresh pane from the
+		// top, so its question is the first non-blank content; a composer
+		// always sits below agent output. Require that for the inline pair.
+		{"unframed composer draft Yes No below transcript that quotes the question", "I was asked: \"" + q + "\"\n" +
+			q + "\n" +
+			"❯ Yes No\n", claudeLegacyTrustNone},
+		{"unframed composer draft Yes 2. No below a whole-row question with prose above", "agent output above the quote\n" +
+			q + "\n" +
+			"❯ Yes 2. No\n", claudeLegacyTrustNone},
 		{"composer draft Yes No below a quoted question", "I was asked: \"" + q + "\"\n" +
 			"╭────────────────────────────────────╮\n" +
 			"│ ❯ Yes No                           │\n" +
@@ -110,6 +123,18 @@ func TestCheckAndHandleTrustPrompt_YesNoComposerDraftIsNotTheLegacyPicker(t *tes
 			"────────────────────────────────────\n" +
 			"❯ Yes 2. No\n" +
 			"────────────────────────────────────\n",
+		// The same composer draft with NO frame: the grammar only rejected a
+		// composer via its frame rule, so an unframed composer whose question
+		// sits in the transcript above a "❯ Yes No" draft is indistinguishable
+		// from the inline picker on a single capture. The inline-pair branch
+		// requires the question to be the first non-blank content (a launch
+		// modal owns a fresh pane from the top; a composer sits below output).
+		"I was asked: \"Do you trust the files in this folder?\"\n" +
+			"Do you trust the files in this folder?\n" +
+			"❯ Yes No\n",
+		"agent output above the quote\n" +
+			"Do you trust the files in this folder?\n" +
+			"❯ Yes 2. No\n",
 	} {
 		handled, cmds := pollStaticPane(t, content, 4)
 		require.False(t, handled, "a composer draft is not the legacy picker: %q", content)
