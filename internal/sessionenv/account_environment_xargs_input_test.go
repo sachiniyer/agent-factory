@@ -173,7 +173,13 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 
 		{"xargs -I{} env --chdir={} codex", false},
 		{"xargs -I{} env PORT={} codex", false},
-		{"xargs -I{} xargs -I[] echo [] {}", false},
+		// Both markers are substituted, so echo gets two unknown words, which
+		// the walk refuses as it refuses `echo "$y" "$y"` (#4977's "$y"
+		// parity).
+		{"xargs -I{} xargs -I[] echo [] {}", true},
+		// The outer marker reaches the nested -I, so the nested marker is an
+		// unknown word, refused as `xargs -I"$y" --` is (#4977).
+		{"xargs -I{} xargs -I{} --", true},
 		// xargs's own COMMAND word is never substituted (GNU xargs 4.9 runs a
 		// literal `{}`), so a marker there is a fixed program name.
 		{"xargs -I{} {}", false},
@@ -195,7 +201,6 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		// No child to run: strace with only options after the marker, and a
 		// nested xargs that names no command (it runs echo).
 		{"xargs -I{} strace -f -{} --", false},
-		{"xargs -I{} xargs -I{} --", false},
 		{"xargs -I{} xargs --process-slot-var={}", false},
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),
