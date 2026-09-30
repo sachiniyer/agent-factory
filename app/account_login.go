@@ -178,6 +178,16 @@ type accountLoginDoneMsg struct {
 // round trip that registers a directory and starts a process, and running it
 // inline would freeze the TUI for its duration.
 func (m *home) handleAccountLogin(agent, name string) tea.Cmd {
+	// Re-entry guard, the config-agent spawn's twin (handleConfigAgent): the
+	// overlay can be reopened while one login RPC is still pending, and without
+	// this guard a second start would arm a second notice and let the first
+	// completion clear accountLoginInFlight while the second RPC is still in
+	// flight — recreating the very clobber this change closes. Reject the
+	// overlap rather than track outstanding requests, exactly as C's guard
+	// does.
+	if m.accountLoginInFlight {
+		return nil
+	}
 	// Arm the in-flight guard before the notice so a resize arriving during the
 	// daemon round trip cannot clobber the persistent "Starting…" notice. The
 	// config-agent spawn's structural twin (#4955): setPaneAutoHideStatus is
