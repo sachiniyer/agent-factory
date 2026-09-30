@@ -1084,3 +1084,103 @@ func TestExposureWarningUsesTheDaemonsLoopbackPredicate(t *testing.T) {
 		}
 	}
 }
+
+// TestSetTOMLStructuredRemovesCommentIntroducingTargetTableNonLast pins the
+// fix for the headline bug: when a non-first target table has contiguous
+// introducing comments above its header, those comments belong to the target
+// (per leadingTableCommentStart's rule) and must be removed with the target.
+// The next table's own introducing comment must be preserved.
+func TestSetTOMLStructuredRemovesCommentIntroducingTargetTableNonLast(t *testing.T) {
+	in := "[pre]\nx = 1\n\n# leading for target\n[program_overrides]\nclaude = 'old'\n\n# next intro\n[unrelated]\nvalue = 'kept'\n"
+	got, err := setTOMLStructured(in, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "# leading for target") {
+		t.Errorf("target's introducing comment was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "# next intro\n[unrelated]") {
+		t.Errorf("next table's introducing comment was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "[pre]\n") || !strings.Contains(got, "x = 1") {
+		t.Errorf("previous table's content was disturbed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("replacement is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+// TestSetTOMLStructuredRemovesCommentIntroducingTargetTableEOF pins the EOF
+// (last-block) path: the target's introducing comment must be removed before
+// setTOMLStructured re-appends the table, so no orphan floats above the blank
+// line that precedes the re-appended table.
+func TestSetTOMLStructuredRemovesCommentIntroducingTargetTableEOF(t *testing.T) {
+	in := "[pre]\nx = 1\n\n# leading for target\n[program_overrides]\nclaude = 'old'\n"
+	got, err := setTOMLStructured(in, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "# leading for target") {
+		t.Errorf("target's introducing comment was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[pre]\n") || !strings.Contains(got, "x = 1") {
+		t.Errorf("previous table's content was disturbed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("replacement is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+// TestUnsetRemovesCommentIntroducingTargetTable pins the applyProjectUnset
+// path (removeTOMLTopLevelValue with no re-append): the target's introducing
+// comment is removed with the table; the next table's introducing comment is
+// preserved and not merged with the removed target's comment.
+func TestUnsetRemovesCommentIntroducingTargetTable(t *testing.T) {
+	in := "[pre]\nx = 1\n\n# leading for target\n[program_overrides]\nclaude = 'old'\n\n# next intro\n[unrelated]\nvalue = 'kept'\n"
+	got, err := removeTOMLTopLevelValue(in, "program_overrides")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "# leading for target") {
+		t.Errorf("target's introducing comment was not removed:\n%s", got)
+	}
+	if strings.Contains(got, "program_overrides") || strings.Contains(got, "claude = 'old'") {
+		t.Errorf("target table was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, "# next intro\n[unrelated]") {
+		t.Errorf("next table's introducing comment was not preserved:\n%s", got)
+	}
+	if !strings.Contains(got, "[pre]\n") || !strings.Contains(got, "x = 1") {
+		t.Errorf("previous table's content was disturbed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("result is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+// TestRemoveTOMLTopLevelValuePreservesFileHeaderComment pins the file-header
+// edge case: the comment immediately above the first-table target is
+// syntactically indistinguishable from a file-level header comment, so the
+// conservative fix must leave it in place rather than delete it. Passes under
+// both the old and the new code; guards against a regression that starts
+// deleting file headers.
+func TestRemoveTOMLTopLevelValuePreservesFileHeaderComment(t *testing.T) {
+	in := "# project config\n[program_overrides]\nclaude = 'old'\n[unrelated]\nvalue = 'kept'\n"
+	got, err := removeTOMLTopLevelValue(in, "program_overrides")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "# project config") {
+		t.Errorf("file-level header comment was deleted:\n%s", got)
+	}
+	if strings.Contains(got, "program_overrides") || strings.Contains(got, "claude = 'old'") {
+		t.Errorf("target table was not removed:\n%s", got)
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("result is not valid TOML: %v\n%s", err, got)
+	}
+}

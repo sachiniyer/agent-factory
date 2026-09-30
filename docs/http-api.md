@@ -220,8 +220,10 @@ not list. They fall into three groups:
   planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
   `GET /v1/events`; the config-assistant trio on `/v1/config-assistant` and the
   account-login stream `GET /v1/account-login/stream` (bare-session PTY WebSockets
-  that serve no Instance); `GET /v1/preview-auth`; and the web-tab reverse proxy
-  under `/v1/webtab/`.
+  that serve no Instance); `GET /v1/auth-info`, the tokenless probe that reports
+  whether this peer must present a token (see
+  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; and the
+  web-tab reverse proxy under `/v1/webtab/`.
 - **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
   on. It is **off by default**, is served on **this socket only** and never on
   `network.listen_addr`, and returns the ordinary 404 unknown-route envelope while

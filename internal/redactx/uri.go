@@ -149,6 +149,45 @@ func sourceMappedURIComponents(outer View, prov Provenance) ([]viewOut, []Range)
 					unknown = append(unknown, Range{Start: uriStart + pathStart, End: uriStart + pathEnd})
 				}
 			}
+			// A malformed percent escape in the userinfo makes url.Parse
+			// reject the whole URI, landing here, so the userinfo-extraction
+			// block below (gated on a successful parse) is never reached.
+			// Fail-close the userinfo carrier, gated on its own bytes
+			// containing a malformed % — mirroring the path gate above — so a
+			// url.Parse failure for any other reason (e.g. a bad authority
+			// bracket with clean userinfo) still preserves nested-URI
+			// recovery. The authority/userinfo offsets match the extraction
+			// block exactly.
+			if strings.HasPrefix(rawURI[colon-uriStart+1:], "//") {
+				authStart := colon - uriStart + 3
+				if at := strings.LastIndexByte(rawURI[authStart:pathStart], '@'); at >= 0 {
+					if _, malformed := PercentDecode(s[uriStart+authStart:uriStart+authStart+at], false); malformed {
+						unknown = append(unknown, Range{Start: uriStart + authStart, End: uriStart + authStart + at})
+					}
+				}
+			}
+			// A malformed percent escape in the host (reg-name) makes url.Parse
+			// reject the whole URI by the same route. The host is the one authority
+			// component path/query/fragment/userinfo leave unaccounted for, and
+			// unlike them it is never extracted as a view the producer can match,
+			// so a percent-encoded credential sitting in the host ships verbatim
+			// unless its own bytes fail closed. Fail-close the host range — the
+			// authority bytes after any userinfo, before the path — gated on its
+			// own bytes containing a malformed %, mirroring the path and userinfo
+			// gates and reserving the host for non-malformed parse failures so
+			// nested-URI recovery is preserved.
+			if strings.HasPrefix(rawURI[colon-uriStart+1:], "//") {
+				authStart := colon - uriStart + 3
+				hostStart := authStart
+				if at := strings.LastIndexByte(rawURI[authStart:pathStart], '@'); at >= 0 {
+					hostStart = authStart + at + 1
+				}
+				if hostStart < pathStart {
+					if _, malformed := PercentDecode(s[uriStart+hostStart:uriStart+pathStart], false); malformed {
+						unknown = append(unknown, Range{Start: uriStart + hostStart, End: uriStart + pathStart})
+					}
+				}
+			}
 			continue
 		}
 		// An established URI owns scheme-looking bytes inside its path, but not

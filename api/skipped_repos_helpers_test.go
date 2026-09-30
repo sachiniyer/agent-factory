@@ -36,3 +36,12 @@ func TestSkippedRepoReasonNewerSchemaWireValue(t *testing.T) {
 		t.Fatalf("daemon reason %q drifted from the wire value", daemon.SkippedRepoReasonNewerSchemaInstancesJSON)
 	}
 }
+
+// TestSkippedRepoReasonRowsFailedWireValue is the rows-failed counterpart: the
+// code is a contract with daemons of other versions, so the daemon constant and
+// the literal the client matches must not drift apart (#4876).
+func TestSkippedRepoReasonRowsFailedWireValue(t *testing.T) {
+	if daemon.SkippedRepoReasonRowsFailedToLoad != "rows-failed-to-load" {
+		t.Fatalf("daemon reason %q drifted from the wire value", daemon.SkippedRepoReasonRowsFailedToLoad)
+	}
+}

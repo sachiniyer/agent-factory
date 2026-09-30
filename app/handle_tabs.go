@@ -112,6 +112,13 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	}
 	response, err := createTabThroughDaemon(request)
 	if err != nil {
+		// A tab that may exist is not reported as a failure to retry: a second
+		// press would spawn a second tab (#4820). Nothing is projected locally —
+		// the next snapshot poll brings the tab in if the daemon made it.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("creating a tab in %q", selected.Title), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// Reflect the daemon-created tab locally for instant display. A shell binds to
@@ -270,6 +277,12 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 
 	target := captureSessionActionTarget(inst, m.repoID)
 	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
+		// A close that may have landed is not dropped locally or reported as
+		// refused (#4824): the next snapshot removes the tab if it is gone.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("closing tab %q", tabName), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// The daemon killed the tmux and persisted the shrunk list; drop the
@@ -471,6 +484,13 @@ func (m *home) handleStateRenameTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	resolved, err := renameTabThroughDaemon(target.session.renameTabRequest(tab.ID, tab.Name, newName))
 	if err != nil {
+		// A rename that may have landed is not projected locally or reported as
+		// refused (#4824): retrying it could clobber a concurrent rename, so the
+		// user checks the snapshot's name first.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("renaming tab %q", tab.Name), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	// Reflect the rename locally so the bar reads it before the next daemon
@@ -594,6 +614,12 @@ func (m *home) handleMoveTab(delta int) (tea.Model, tea.Cmd) {
 
 	resp, err := reorderTabThroughDaemon(target.reorderTabRequest(tab.ID, tab.Name, to))
 	if err != nil {
+		// A move that may have landed is not projected locally or reported as
+		// refused (#4820): the next snapshot shows where the tab ended up.
+		if mutationMayHaveLanded(err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("moving tab %q", tab.Name), "the session's tabs", err))
+		}
 		return m, m.handleError(err)
 	}
 	if tab.ID != "" {

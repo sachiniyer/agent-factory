@@ -244,3 +244,36 @@ func TestTaskPaneReloadKeepsTheEditedCopyOfADuplicatedID(t *testing.T) {
 		assert.False(t, *edits[0].Update.Enabled)
 	}
 }
+
+// The gone-from-load half of TestTaskPaneReloadKeepsTheEditedCopyOfADuplicatedID:
+// when a damaged file lists an ID twice and the user's edit is on a copy that is
+// not the first-iterated one, a reload that omits that ID must keep the copy
+// heldRows selected — not the iterated s.tasks copy. A genuine deletion on disk,
+// a scoped/partial reload, or a transient read failure all hit this path. Keeping
+// the unedited copy would make ConsumeDirty emit nothing (the kept copy matches
+// its baseline), so the next reload drops the orphaned row and the edit vanishes
+// with no signal — the silent drop SetTasks' docstring and the #4798 notice
+// machinery exist to prevent.
+func TestTaskPaneReloadKeepsEditedCopyOfDuplicatedIDAbsentFromLoad(t *testing.T) {
+	s := NewTaskPane()
+	s.SetTasks([]task.Task{reloadTask("a", "p"), reloadTask("b", "p"), reloadTask("a", "p")})
+	require.Equal(t, []string{"a", "b", "a"}, paneIDs(s))
+	s.SetFocus(true)
+	s.SelectTask(2) // the user edits the second copy of "a", not the first-iterated one
+	require.True(t, s.HandleKeyPress(keyRunes("x")))
+
+	// The reload omits "a" entirely: deleted on disk, a scoped reload, or a
+	// transient read failure. Only the second loop of SetTasks runs for it.
+	s.SetTasks([]task.Task{reloadTask("b", "p")})
+
+	require.Equal(t, []string{"b", "a"}, paneIDs(s),
+		"the draft a reload cannot see stays after the loaded rows")
+	require.False(t, s.tasks[1].Enabled,
+		"the edited copy must be kept; the unedited first copy would silently lose the draft")
+	assert.True(t, s.IsDirty(), "the retained edit still needs saving")
+	edits := s.ConsumeDirty()
+	require.Len(t, edits, 1, "the toggle must still be saved (otherwise silent draft loss)")
+	assert.Equal(t, "a", edits[0].ID)
+	require.NotNil(t, edits[0].Update.Enabled)
+	assert.False(t, *edits[0].Update.Enabled)
+}

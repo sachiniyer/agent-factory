@@ -8,6 +8,39 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## Sessions stuck in `loading` after a handoff recover on upgrade (upcoming release)
+
+- **Sessions stuck in `loading` recover on their own when you upgrade.** A
+  cross-agent handoff whose mission delivery came back `sent-unverified` or
+  `could-not-confirm` used to leave the session showing `loading` indefinitely,
+  including across daemon restarts. Every action on it was suppressed. Once the
+  upgraded daemon starts, those sessions load as `ready` (or whatever their
+  agent is actually doing), with no action needed (#4429, #4842).
+- **The handoff's mission is still marked as owed.** af cannot tell whether the
+  incoming agent received its takeover brief, so you decide. Look at the pane
+  (`af sessions preview <title>`), then choose one:
+  - **Mark delivered** if the agent already received the brief and acted on it:
+    `af sessions retry-limit <title> --delivered`, the **Mark delivered**
+    choice in the picker `c` opens in the TUI, or the session's **Mark
+    delivered** action on the web. This retires the mission without sending
+    anything.
+  - **Resend** if it did not: `af sessions retry-limit <title>`, the first
+    choice in the same TUI picker, or **Retry handoff** on the web. This sends
+    the mission again, so do not use it on an agent that already did the work.
+
+  These are also the manual exit for a session that does not recover on its
+  own: one whose startup af could not confirm, or one whose mission is still
+  owed after the upgrade. A mission recorded as `not-delivered` is different.
+  af knows that one never landed, so automatic recovery resends it, and the
+  session shows `loading` until that resend lands. These verbs do not apply
+  to it.
+- **Until the mission is resolved, a new handoff on that session is refused.**
+  The error names both verbs. A task-spawned session also keeps its task run
+  open, so its `on_complete` policy waits, and it applies on the first idle
+  poll after you resolve the mission.
+- `--delivered` needs the upgraded daemon. An older daemon refuses it rather
+  than resending.
+
 ## Warning: unknown `[docker]`/`[ssh]` keys in in-repo config (upcoming release)
 
 - **A typo'd leaf under `[docker]` or `[ssh]` in `.agent-factory/config.{toml,json}`

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +99,43 @@ func awaitParkedRestore(t *testing.T, parked <-chan struct{}) {
 	case <-parked:
 	case <-time.After(30 * time.Second):
 		t.Fatal("the manual restore never reached its operation-lock wait")
+	}
+}
+
+// watchRestoreOpLockWait reports the moment a restore is provably QUEUED on
+// key's operation lock, which parkRestoreAtItsOpLock cannot: that hook fires in
+// FRONT of the wait, and after resume() the restore goroutine can still be
+// descheduled for as long as the scheduler likes before its first TryLock. A
+// test that raises a fence and releases the peer in that gap has staged nothing
+// — the restore reaches an uncontended lock, lockWithin reports a zero wait, and
+// the refusal honestly omits "after waiting" (#4898).
+//
+// afterOperationLockPollSleep runs only past lockWithin's first TryLock, and
+// only when that TryLock FAILED, so its first call on this mutex proves a peer
+// held the lock when the restore arrived and that the wait it will report is
+// non-zero. Install it before starting the restore.
+func watchRestoreOpLockWait(t *testing.T, m *Manager, key string) (waiting <-chan struct{}) {
+	t.Helper()
+	target := m.opLockFor(key)
+	ch := make(chan struct{})
+	var once sync.Once
+	prev := afterOperationLockPollSleep
+	afterOperationLockPollSleep = func(mu *sync.Mutex) {
+		if mu == target {
+			once.Do(func() { close(ch) })
+		}
+		prev(mu)
+	}
+	t.Cleanup(func() { afterOperationLockPollSleep = prev })
+	return ch
+}
+
+func awaitRestoreQueuedOnOpLock(t *testing.T, waiting <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-waiting:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the manual restore never began waiting on the peer's operation lock")
 	}
 }
 
@@ -273,10 +311,15 @@ func TestRestore_DeleteFenceRaisedDuringTheOpLockWaitRefusesTheRestore(t *testin
 			releasePeer := holdOpLock(t, manager, key)
 
 			parked, resume := parkRestoreAtItsOpLock(t)
+			waiting := watchRestoreOpLockWait(t, manager, key)
 			restoreDone := make(chan error, 1)
 			go func() { restoreDone <- tc.restore(manager, repoID) }()
 			awaitParkedRestore(t, parked)
-			resume() // the restore is now genuinely blocked on the peer's lock
+			resume()
+			// Only now is the restore genuinely blocked on the peer's lock. Raising the
+			// fence any earlier lets a descheduled restore arrive after releasePeer and
+			// refuse without having waited (#4898).
+			awaitRestoreQueuedOnOpLock(t, waiting)
 
 			mutationReached := make(chan struct{})
 			resumeDelete := make(chan struct{})
@@ -390,13 +433,15 @@ func TestRestoreArchived_ProjectDeleteCompletingDuringTheOpLockWaitIsRefused(t *
 	releasePeer := holdOpLock(t, manager, key)
 
 	parked, resume := parkRestoreAtItsOpLock(t)
+	waiting := watchRestoreOpLockWait(t, manager, key)
 	restoreDone := make(chan error, 1)
 	go func() {
 		_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 		restoreDone <- err
 	}()
 	awaitParkedRestore(t, parked)
-	resume() // genuinely blocked on the peer's lock from here
+	resume()
+	awaitRestoreQueuedOnOpLock(t, waiting) // genuinely blocked on the peer's lock from here
 
 	// A REAL delete, start to finish, while the restore is queued.
 	_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
