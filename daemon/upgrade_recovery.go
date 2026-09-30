@@ -213,7 +213,9 @@ func stopDaemonForRecovery(journal upgradetxn.Journal, role string) (upgradetxn.
 	if _, err := stopDaemonFn(); err != nil {
 		return upgradetxn.StopUnknown, fmt.Errorf("stop upgrade %s daemon: %w", role, err)
 	}
-	if err := waitForShutdownFn(); err != nil {
+	// StopDaemon already waited on the process exit, so no PID: this wait is
+	// only confirmation that the control socket went quiet.
+	if err := waitForShutdownFn(0); err != nil {
 		// The socket is still answering at the deadline. Report it as still
 		// running rather than confirming a stop we could not observe.
 		return upgradetxn.StopStillRunning, nil

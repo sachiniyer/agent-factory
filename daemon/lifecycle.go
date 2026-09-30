@@ -125,7 +125,7 @@ func (l *daemonLifecycle) markRestoreComplete() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.restored = true
-	if l.transactionID != "" {
+	if l.transactionID != "" && !l.quiescing {
 		l.phase = DaemonPhaseUpgradeProbation
 	}
 }
@@ -139,6 +139,11 @@ func (l *daemonLifecycle) markReady() error {
 	if l.inProbationLocked() {
 		return fmt.Errorf("cannot mark a probationary daemon ready without a transaction supervisor")
 	}
+	if l.quiescing {
+		// Quiescence is terminal: a Shutdown acked mid-warm-up (#5007) must not
+		// be overwritten by a restore that finishes in the ack's grace window.
+		return nil
+	}
 	l.phase = DaemonPhaseReady
 	return nil
 }
@@ -147,7 +152,8 @@ func (l *daemonLifecycle) markReady() error {
 // mutations and reports DaemonPhaseQuiescing. Upgrade activation calls it after
 // authorization; ordinary shutdown calls it before draining the control planes.
 // A daemon stuck in either drain is therefore visible rather than reporting ready.
-// Idempotent.
+// The Shutdown RPC also calls it at ack time (#5007). Idempotent, and terminal:
+// no later phase transition overwrites it.
 func (l *daemonLifecycle) markQuiescing() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -193,7 +199,9 @@ func (l *daemonLifecycle) releaseUpgradeProbation(expectedTransactionID string) 
 		return fmt.Errorf("cannot release upgrade probation before instance restore completes")
 	}
 	l.released = true
-	l.phase = DaemonPhaseHandoffPending
+	if !l.quiescing {
+		l.phase = DaemonPhaseHandoffPending
+	}
 	return nil
 }
 

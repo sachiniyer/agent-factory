@@ -109,7 +109,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// socket from a live daemon and leave duplicate status/scheduler loops.
 	// Exiting cleanly matters: under the autostart unit a non-zero exit would
 	// trip Restart=on-failure into a retry loop against the live daemon.
-	if err := pingDaemon(); err == nil {
+	// A responder draining after an acked Shutdown does not count (#5007).
+	if daemonAlreadyServing() {
 		log.InfoLog.Printf("another agent-factory daemon is already serving the control socket; exiting")
 		return nil
 	}

@@ -21,7 +21,7 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	start := time.Now()
-	if err := WaitForShutdownCompletion(); err != nil {
+	if err := WaitForShutdownCompletion(0); err != nil {
 		t.Fatalf("WaitForShutdownCompletion with no daemon: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -80,7 +80,7 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 		}
 	})
 
-	result, err := RequestShutdown()
+	result, pid, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
@@ -88,7 +88,9 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 		t.Fatalf("shutdown result = %v, want ShutdownViaRPC", result)
 	}
 
-	if err := WaitForShutdownCompletion(); err != nil {
+	// The in-process fake reports this test's own PID, which the wait refuses
+	// to watch, so this exercises the socket-drain path end to end.
+	if err := WaitForShutdownCompletion(pid); err != nil {
 		t.Fatalf("WaitForShutdownCompletion: %v", err)
 	}
 	if pingDaemon() == nil {
@@ -119,7 +121,7 @@ func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
 	shutdownCompleteGrace = 250 * time.Millisecond
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 
-	if err := WaitForShutdownCompletion(); err == nil {
+	if err := WaitForShutdownCompletion(0); err == nil {
 		t.Fatalf("expected a timeout error while the daemon socket keeps answering")
 	}
 }

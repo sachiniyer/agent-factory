@@ -307,8 +307,18 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 // Shutdown acknowledges a request to terminate the daemon, then asynchronously
 // signals the main loop to tear down after a short grace period. The grace
 // lets the RPC response flush back to the caller before the listener closes.
+//
+// The ack carries this process's PID and moves the lifecycle to quiescing at
+// once (#5007): teardown can keep the socket answering for seconds, and every
+// Ping in that window must read "leaving", never "ready" — including the
+// warm-up exits that never reach drainDaemon's own markQuiescing — so a
+// respawn's liveness check cannot mistake this daemon for a live one.
 func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
+	resp.PID = os.Getpid()
+	if s.manager != nil && s.manager.lifecycle != nil {
+		s.manager.lifecycle.markQuiescing()
+	}
 	if s.shutdownCh == nil {
 		return nil
 	}

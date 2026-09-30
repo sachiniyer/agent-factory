@@ -748,6 +748,11 @@ type PingResponse struct {
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
+	// PID identifies the process that acknowledged the Shutdown, so the caller
+	// can wait for THAT process to exit before respawning (#5007) rather than
+	// inferring exit from a control socket that outlives the ack. Zero from a
+	// responder predating this additive field.
+	PID int `json:"pid,omitempty"`
 }
 
 // ReleaseUpgradeProbationRequest asks a probationary upgrade candidate to leave

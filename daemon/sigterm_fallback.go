@@ -28,22 +28,23 @@ import (
 //     filter out /tmp/Test* paths (Go test binaries) and the current
 //     process, and require exactly one candidate.
 //
-// Returns ShutdownViaSIGTERM when a signal was delivered, or ShutdownFailed
+// Returns ShutdownViaSIGTERM and the signaled PID when a signal was delivered
+// (signalAndWait has already confirmed that process exited), or ShutdownFailed
 // with an actionable error when the daemon (which is provably running — the
 // caller only invokes us after the Shutdown RPC returned method-not-found,
 // not ECONNREFUSED) could not be located or signaled. Returning
 // ShutdownNoDaemon here would contradict the established state and silently
 // leave the stale daemon running (#553).
-func sigtermFallback() (ShutdownResult, error) {
+func sigtermFallback() (ShutdownResult, int, error) {
 	pid, source, err := locateDaemonPID()
 	if err != nil {
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, 0, fmt.Errorf(
 			"sigterm fallback failed: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			err,
 		)
 	}
 	if pid == 0 {
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, 0, fmt.Errorf(
 			"sigterm fallback: daemon is running on the control socket but no PID candidate was found (%s); "+
 				"run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			source,
@@ -52,7 +53,7 @@ func sigtermFallback() (ShutdownResult, error) {
 
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
 	if err := signalAndWait(pid); err != nil {
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, 0, fmt.Errorf(
 			"sigterm fallback for daemon pid %d: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			pid, err,
 		)
@@ -62,7 +63,7 @@ func sigtermFallback() (ShutdownResult, error) {
 	// a stale file. StopDaemon does this on its happy path too; doing it
 	// here keeps state tidy when the daemon binary never wrote one itself.
 	removeDaemonPIDFile()
-	return ShutdownViaSIGTERM, nil
+	return ShutdownViaSIGTERM, pid, nil
 }
 
 // locateDaemonPID returns the PID of the running daemon to signal and the

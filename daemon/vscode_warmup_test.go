@@ -83,7 +83,7 @@ func TestRunDaemon_StopsVSCodeEditorsOnWarmUpShutdown(t *testing.T) {
 
 	// Shut down mid-warm-up: the restore is still gated and never completes, so
 	// RunDaemon takes the early return that skipped the old defer.
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown during warm-up: %v", err)
 	}

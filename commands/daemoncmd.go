@@ -642,7 +642,7 @@ func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 }
 
 func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
-	result, shutdownErr := requestDaemonShutdownFn()
+	result, oldPID, shutdownErr := requestDaemonShutdownFn()
 	outcome := restartOutcome{Shutdown: result}
 	if shutdownErr != nil {
 		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
@@ -659,7 +659,7 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	if result == daemon.ShutdownNoDaemon {
 		return outcome, nil
 	}
-	respawn, err := respawnDaemonFn(execPath)
+	respawn, err := respawnDaemonFn(execPath, oldPID)
 	outcome.Respawn = respawn
 	if err != nil {
 		outcome.FailedPhase = restartPhaseRespawn
@@ -755,18 +755,23 @@ func canonicalExec(p string) string {
 // The task gate belongs only on the cold-start path (ensureDaemonForTasks),
 // where nothing was running and "no enabled tasks" means there is nothing to
 // start.
-func respawnDaemonAfterUpgrade(execPath string) (respawnResult, error) {
+//
+// oldPID is the stopped daemon's PID as RequestShutdown reported it (0 when
+// unknown); the wait below watches that process exit.
+func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, error) {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
 	// control socket can still answer pings here. Respawning into that window
 	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping
 	// guard — mistake the dying daemon for a live one and skip the spawn,
-	// leaving no daemon at all once it exits (#854). Wait for the socket to
-	// die first; the SIGTERM fallback already waited for process exit, so the
-	// wait returns immediately on that path. On timeout, warn and respawn
-	// anyway: a spawn skipped against a wedged daemon is no worse than not
-	// trying, and the next af invocation retries.
-	if err := waitForShutdownCompletionFn(); err != nil {
-		log.WarningLog.Printf("post-upgrade respawn: %v; respawning anyway, but the new daemon may see the old one as alive and exit — run af again if schedules stay dark", err)
+	// leaving no daemon at all once it exits (#854, #5007). Wait for the old
+	// daemon's process to exit first; the SIGTERM fallback already waited for
+	// that, so the wait returns immediately on that path. A daemon wedged past
+	// the wait's bound is escalated inside it. If the exit still cannot be
+	// confirmed, warn and respawn anyway rather than wedge the upgrade: the old
+	// daemon answers pings as quiescing, so the respawn's own startup checks wait
+	// it out, and the per-home lock arbitrates a drain that outlives them.
+	if err := waitForShutdownCompletionFn(oldPID); err != nil {
+		log.WarningLog.Printf("post-upgrade respawn: could not confirm the old daemon exited: %v; respawning anyway — the new daemon waits out a still-draining one at startup, so run af again only if schedules stay dark", err)
 	}
 	var unitErr error
 	useUnit, unitExec, gateErr := unitRestartTarget()

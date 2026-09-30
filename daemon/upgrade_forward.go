@@ -136,7 +136,9 @@ func adoptAfterUpgradeCommit(expectedTransactionID, canonicalExecPath string) er
 		if _, err := stopDaemonFn(); err != nil {
 			return fmt.Errorf("stop the committed candidate before handing it off: %w", err)
 		}
-		if err := waitForShutdownFn(); err != nil {
+		// StopDaemon already waited on the process exit, so no PID: this wait is
+		// only confirmation that the control socket went quiet.
+		if err := waitForShutdownFn(0); err != nil {
 			return fmt.Errorf("the committed candidate did not release the control socket: %w", err)
 		}
 	case candidateAbsent:

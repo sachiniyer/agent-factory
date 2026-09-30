@@ -137,8 +137,16 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	}
 	defer ensureDaemonMu.Unlock()
 
-	if err := pingDaemonUntil(deadline); err == nil {
-		return nil
+	if resp, err := pingDaemonResponseUntil(deadline); err == nil {
+		if resp.Phase != DaemonPhaseQuiescing {
+			return nil
+		}
+		// The responder acknowledged a Shutdown and is leaving (#5007): it does
+		// not serve this home, and returning nil would strand the caller with no
+		// daemon once it exits. Wait for it to go, leaving a sliver of the
+		// admission budget for the spawn, then proceed as if the ping failed.
+		log.InfoLog.Printf("daemon pid %d on the control socket is draining after shutdown; waiting for it to exit before launching", resp.PID)
+		waitForDrainingDaemonExit(resp.PID, drainWaitDeadline(deadline))
 	}
 	if admissionDeadlineExpired(deadline) {
 		return daemonAdmissionDeadlineError()
@@ -288,13 +296,34 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 	return err
 }
 
+// errDaemonDraining is waitForDaemonReady's record of a responder that answered
+// but reported DaemonPhaseQuiescing: it acknowledged a Shutdown and is leaving,
+// so it is not the daemon being waited for (#5007).
+var errDaemonDraining = errors.New("daemon is shutting down")
+
+// drainWaitSpawnReserve is the slice of a bounded admission budget kept back
+// from waiting on a draining daemon, so the launch that follows still runs.
+const drainWaitSpawnReserve = 500 * time.Millisecond
+
+// drainWaitDeadline bounds EnsureDaemon's wait for a draining responder: the
+// admission deadline less drainWaitSpawnReserve, or shutdownCompleteGrace when
+// the caller set no deadline.
+func drainWaitDeadline(deadline time.Time) time.Time {
+	if deadline.IsZero() {
+		return time.Now().Add(shutdownCompleteGrace)
+	}
+	return deadline.Add(-drainWaitSpawnReserve)
+}
+
 func waitForDaemonReady(deadline time.Time) error {
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := pingDaemonUntil(deadline); err == nil {
-			return nil
-		} else {
+		if resp, err := pingDaemonResponseUntil(deadline); err != nil {
 			lastErr = err
+		} else if resp.Phase == DaemonPhaseQuiescing {
+			lastErr = errDaemonDraining
+		} else {
+			return nil
 		}
 		if !waitUntilAdmissionDeadline(deadline, 50*time.Millisecond) {
 			break
@@ -314,6 +343,14 @@ func pingDaemon() error {
 func pingDaemonUntil(deadline time.Time) error {
 	var resp PingResponse
 	return callDaemonNoEnsureBefore("Ping", PingRequest{}, &resp, deadline, true)
+}
+
+// pingDaemonResponseUntil is pingDaemonUntil returning the reply, so a liveness
+// check can tell a draining (DaemonPhaseQuiescing) responder from a live one.
+func pingDaemonResponseUntil(deadline time.Time) (PingResponse, error) {
+	var resp PingResponse
+	err := callDaemonNoEnsureBefore("Ping", PingRequest{}, &resp, deadline, true)
+	return resp, err
 }
 
 // pingDaemonResponse pings the daemon and returns its full reply, so callers
