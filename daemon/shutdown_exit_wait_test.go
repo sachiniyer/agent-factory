@@ -549,3 +549,62 @@ func TestDrainDaemonUnlinksPIDFileBeforeJoins(t *testing.T) {
 		t.Fatalf("daemon.pid after drainDaemon: stat err = %v, want not-exist", err)
 	}
 }
+
+// scriptShutdownWaitBoundary shrinks the wait to a grace of a few polls and
+// returns the instant the scripted daemon leaves: the grace's end, measured from
+// just before the wait starts. The wait's own deadline is taken a moment later,
+// so every in-bounds probe sees the daemon still there; only a probe made after
+// the loop's last sleep can see it gone.
+func scriptShutdownWaitBoundary(t *testing.T) time.Time {
+	t.Helper()
+	prevGrace, prevPoll := shutdownCompleteGrace, shutdownCompletePoll
+	prevAlive, prevPing := shutdownWaitPIDAliveFn, shutdownWaitPingFn
+	t.Cleanup(func() {
+		shutdownCompleteGrace, shutdownCompletePoll = prevGrace, prevPoll
+		shutdownWaitPIDAliveFn, shutdownWaitPingFn = prevAlive, prevPing
+	})
+	shutdownCompleteGrace = 120 * time.Millisecond
+	shutdownCompletePoll = 40 * time.Millisecond
+	return time.Now().Add(shutdownCompleteGrace)
+}
+
+// TestWaitForShutdownCompletionRechecksPIDAfterFinalPoll: a daemon that exits
+// during the loop's last sleep wakes the wait past its deadline. Classifying
+// that as ErrShutdownIncomplete would suppress the respawn and report a live
+// daemon that is already gone; the post-loop recheck must observe the exit.
+func TestWaitForShutdownCompletionRechecksPIDAfterFinalPoll(t *testing.T) {
+	leaves := scriptShutdownWaitBoundary(t)
+	probes := 0
+	shutdownWaitPIDAliveFn = func(int) bool {
+		probes++
+		return time.Now().Before(leaves)
+	}
+
+	if err := WaitForShutdownCompletion(4242); err != nil {
+		t.Fatalf("WaitForShutdownCompletion = %v, want nil: the daemon exited during the final poll", err)
+	}
+	if probes < 2 {
+		t.Fatalf("liveness probes = %d; the script never exercised the in-bounds loop", probes)
+	}
+}
+
+// TestWaitForShutdownCompletionRechecksSocketAfterFinalPoll: the PID-less loop
+// has the same boundary — a socket that goes quiet during the last sleep.
+func TestWaitForShutdownCompletionRechecksSocketAfterFinalPoll(t *testing.T) {
+	leaves := scriptShutdownWaitBoundary(t)
+	pings := 0
+	shutdownWaitPingFn = func() error {
+		pings++
+		if time.Now().Before(leaves) {
+			return nil // still answering
+		}
+		return errors.New("connection refused")
+	}
+
+	if err := WaitForShutdownCompletion(0); err != nil {
+		t.Fatalf("WaitForShutdownCompletion = %v, want nil: the socket went quiet during the final poll", err)
+	}
+	if pings < 2 {
+		t.Fatalf("pings = %d; the script never exercised the in-bounds loop", pings)
+	}
+}

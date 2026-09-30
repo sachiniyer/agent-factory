@@ -227,21 +227,38 @@ func WaitForShutdownCompletion(pid int) error {
 	deadline := time.Now().Add(shutdownCompleteGrace)
 	if pid > 0 {
 		for time.Now().Before(deadline) {
-			if !pidLooksAlive(pid) {
+			if !shutdownWaitPIDAliveFn(pid) {
 				return nil
 			}
 			time.Sleep(shutdownCompletePoll)
 		}
+		// The last sleep can wake past the deadline; an exit inside it must
+		// read as an exit, not as an unfinished shutdown.
+		if !shutdownWaitPIDAliveFn(pid) {
+			return nil
+		}
 		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
 	}
 	for time.Now().Before(deadline) {
-		if pingDaemon() != nil {
+		if shutdownWaitPingFn() != nil {
 			return nil
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
+	// Same boundary as above: the socket may have gone quiet during the last sleep.
+	if shutdownWaitPingFn() != nil {
+		return nil
+	}
 	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownCompleteGrace)
 }
+
+// shutdownWaitPIDAliveFn and shutdownWaitPingFn are WaitForShutdownCompletion's
+// liveness probes. Vars only so tests can script the exact moment a daemon
+// leaves relative to the wait's bound; production never assigns them.
+var (
+	shutdownWaitPIDAliveFn = pidLooksAlive
+	shutdownWaitPingFn     = pingDaemon
+)
 
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a responder
 // that is NOT quiescing counts as already serving: one reporting
