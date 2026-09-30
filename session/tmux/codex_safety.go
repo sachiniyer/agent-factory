@@ -52,16 +52,20 @@ type codexSafetyBufferingState struct {
 	verificationPolls  int
 	awaitingModelCheck bool
 	// pickerOpenAfterModelTimeout is set when the model-verification poll
-	// budget elapses while the answered picker is STILL rendered. The timeout
-	// branch of verifyCodexSafetyModel then calls finishModelVerification with
-	// the same picker on screen, clearing awaitingModelCheck along with
-	// selectionTarget, so without this flag the next poll's main flow would
-	// mistake that same picker for a fresh second instance and drop its
-	// completed Down Enter record before the retry Enter — anonymizing a death
-	// on the retry and losing the Down on a success (#4740 review follow-up).
-	// It is cleared by finishModelVerification's full-state reset on the normal
-	// path (footer readable, picker closed), the boundary that proves a later
-	// rendered picker is a genuinely new instance.
+	// budget elapses WITHOUT the normal finish (footer readable, picker closed)
+	// proving the answered picker is gone: either it stays rendered, or the
+	// final poll landed mid-repaint — picker chrome absent and the model footer
+	// still unreadable (dialogPresent == false && model == "") — so af has no
+	// positive proof of closure and the next poll may repaint that SAME picker.
+	// finishModelVerification just zeroed the state, so without this flag the
+	// next poll's main flow would mistake that same picker for a fresh second
+	// instance and drop its completed Down Enter record before the retry Enter
+	// — anonymizing a death on the retry and losing the Down on a success
+	// (#4740 review follow-up). It is cleared by finishModelVerification's
+	// full-state reset on the normal path (footer readable, picker closed), and
+	// by the !dialogPresent path at proven closure (a visible composer cursor)
+	// — the boundaries that prove a later rendered picker is a genuinely new
+	// instance.
 	pickerOpenAfterModelTimeout bool
 	selectionTarget             string
 	selectionStarted            time.Time
@@ -392,14 +396,23 @@ func (t *TmuxSession) verifyCodexSafetyModel(model string, dialogPresent bool) {
 			t.sanitizedName, state.verificationPolls,
 		)
 		state.finishModelVerification(model)
-		// The answered picker is still rendered on this timeout path, so the
-		// next main-flow poll must not treat it as a fresh second picker and
-		// drop its completed Down Enter record. finishModelVerification just
-		// zeroed the state, so re-establish the same-instance guard. The normal
-		// path below leaves it false because the picker had already closed.
-		if dialogPresent {
-			state.pickerOpenAfterModelTimeout = true
-		}
+		// Preserve the same-instance guard through the model-verification
+		// timeout. The timeout branch (dialogPresent || model == "") admits two
+		// shapes: the answered picker still rendered (dialogPresent), or a
+		// mid-repaint capture where the picker chrome is gone and the model
+		// footer is still unreadable (dialogPresent == false && model == "").
+		// The first plainly has the picker on screen; the second gives af no
+		// positive proof it closed either — no readable footer, and an absent
+		// chrome is the same frame a mid-repaint produces — so the next poll may
+		// repaint that SAME picker. Without the marker the main flow would treat
+		// the reappearance as a fresh second picker, reset the completed Down
+		// Enter record, and either anonymize a death on the retry Enter or lose
+		// the original Down — the misattribution this PR is closing (#4740 review
+		// follow-up). Set it unconditionally: the !dialogPresent path below
+		// clears it at proven closure (a visible composer cursor), so a picker
+		// that genuinely closed mid-timeout still resets before a later picker
+		// is handled.
+		state.pickerOpenAfterModelTimeout = true
 		return
 	}
 

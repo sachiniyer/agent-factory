@@ -493,6 +493,87 @@ func TestHandleCodexSafetyBuffering_PickerClosureClearsModelTimeoutMarkerBeforeL
 		"the second picker's record must carry only its own keys; the first picker's completed Down Enter must not survive the model-verification timeout once the picker closed")
 }
 
+// TestHandleCodexSafetyBuffering_ModelVerificationTimeoutPreservesGuardForMidRepaint
+// is the #4740 review follow-up at codex_safety.go's verifyCodexSafetyModel
+// timeout: the timeout branch is `dialogPresent || model == ""`, so it also
+// fires when the final model-verification poll lands mid-repaint — the picker
+// chrome is gone and the model footer is still unreadable
+// (dialogPresent == false && model == ""), giving af no positive proof the
+// answered picker closed. Setting pickerOpenAfterModelTimeout only on the
+// dialogPresent half left the mid-repaint timeout without the guard, so when
+// that SAME picker repainted on the next poll the main flow treated it as a
+// fresh second picker, reset the completed Down Enter record, and retried —
+// anonymizing a death on the retry Enter (the reset had already dropped the
+// Down) and losing the original Down on a successful retry (the record became
+// a bare Enter). The guard is now set on the mid-repaint timeout too, so the
+// re-rendered same picker keeps its Down Enter and the retry Enter appends to
+// it; a death on the retry reads Down Enter, never anonymous, and the Down is
+// never lost. Without the guard this test fails with the record becoming
+// ["Enter"] (the Down is dropped before the retry) instead of
+// ["Down", "Enter", "Enter"].
+func TestHandleCodexSafetyBuffering_ModelVerificationTimeoutPreservesGuardForMidRepaint(t *testing.T) {
+	const normalPane = `• Working
+
+  gpt-5.6-sol max · ~/agent-factory`
+	// A capture taken while Codex has cleared the answered picker's menu but has
+	// not yet repainted the ordinary composer or its model footer: no picker
+	// footer (so dialogPresent is false) and no readable model line
+	// (so model == ""). The model-verification timeout therefore fires on this
+	// shape too, not only while the answered picker stays rendered.
+	const midRepaint = "• Working"
+	frames := []trustPromptFrame{
+		{content: normalPane},
+		{content: codexSafetyBufferingDialog},
+		{content: codexSafetyBufferingKeepWaitingSelected},
+	}
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		frames = append(frames, trustPromptFrame{content: midRepaint})
+	}
+	frames = append(frames, trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected})
+
+	session, _ := runTrustPromptFrames(t, ProgramCodex, frames...)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(), "a normal Codex pane is not a modal")
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the safety-buffering picker must be answered (Down Enter)")
+
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af answered the picker; a Down Enter record must exist")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys, "the answer records Down Enter")
+
+	// Drive the model-verification polls as mid-repaint captures: the picker
+	// chrome is gone and the model footer is still unreadable, so the timeout
+	// branch of verifyCodexSafetyModel fires on the model == "" half. The poll
+	// that hits the budget times out with no positive proof the picker closed.
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		require.False(t, session.CheckAndHandleTrustPrompt(),
+			"the mid-repaint verification poll %d is not a modal; af keeps waiting", i)
+	}
+	record, _, ok = session.recentDialogKeystroke()
+	require.True(t, ok, "the mid-repaint timeout alone must not anonymize the answered picker's record")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys,
+		"the model-verification timeout preserves the same picker's Down Enter even when the timeout fired on an incomplete capture")
+
+	// The next poll repaints the SAME picker. The same-instance guard set on
+	// the mid-repaint timeout must keep the reset from firing, so the prior Down
+	// survives and only the retry Enter is appended — a death on the retry
+	// reads as Down Enter, never anonymous, and the Down is never lost.
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the same picker repaints after the mid-repaint timeout; af retries the Enter")
+	record, _, ok = session.recentDialogKeystroke()
+	require.True(t, ok, "the retried Enter leaves a record; it must not be anonymous")
+	require.Equal(t, []string{"Down", "Enter", "Enter"}, record.keys,
+		"the same-picker mid-repaint timeout keeps the recorded Down Enter and appends the retry Enter; the reset must not fire here")
+
+	// A death during the retry Enter reads the surviving record, not a bare
+	// anonymous startup death — the whole point of the #4740 diagnostic.
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone)
+	require.Contains(t, err.Error(), codexSafetyDialogName,
+		"a death on the retry Enter is attributed to the safety dialog af answered, not anonymous")
+	require.Contains(t, err.Error(), "Down",
+		"the Down af sent survives the mid-repaint timeout and is named in the death diagnostic")
+}
+
 // TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic is the
 // end-to-end guard against the same regression recurring: it drives the real
 // CheckAndHandleTrustPrompt through the safety picker the way the daemon's
