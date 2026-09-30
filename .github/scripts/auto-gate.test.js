@@ -10674,6 +10674,301 @@ for (const [name, fixture] of Object.entries(UNCONFIRMED_RECOVERIES)) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// #5004 — a transient failure approving a parked run. The bare
+// approveWorkflowRun was the one write in successor-head recovery with no
+// retry: a single 500 ("Unexpected end of JSON input", run 36667620661)
+// reddened a master run for a miss the next dispatch approved without
+// incident. The approve now shares the gate's write retry policy, and a failed
+// POST is never believed on its own word — the parked list is re-read, so a
+// run no longer parked (the POST committed anyway, or a concurrent approver
+// won) is already the goal state, not a failure.
+// ---------------------------------------------------------------------------
+
+function parkedRecoveryRuns(head = OTHER_SHA) {
+  return { [head]: [{ id: 701, name: "PR Validation", event: "pull_request",
+    status: "completed", conclusion: "action_required" }] };
+}
+
+test("#5004: a transient approve failure is retried and recovery succeeds", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2, "the transient answer was retried under the write policy");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+test("#5004: an approve that committed despite its failure is never replayed", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the read-back found the run out of the parked list, so the ambiguous write was not replayed");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+test("#5004: a persistent transient approve failure fails recovery with the same refusal", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const core = fakeCore();
+  const delays = [];
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      sleep: async (ms) => delays.push(ms),
+    }),
+    (error) => {
+      assert.match(error.message, new RegExp(`not every parked run on ${OTHER_SHA} could be approved`));
+      assert.match(error.message, RECOVERY_RERUN);
+      return true;
+    },
+  );
+  assert.equal(github.approveRunAttempts, 3, "retried to the write policy's bound, then reported");
+  assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*after 3 attempts: Unexpected end of JSON input/);
+  // The whole schedule — each failed attempt's settle window, then the write
+  // retry's own backoff — runs on the injected sleep. Without the seam the
+  // suite burns the production 1s/2s/4s settle and RETRY_DELAYS_MS per attempt
+  // (Codex on #5005): ~22s here alone.
+  assert.deepEqual(delays, [1000, 2000, 4000, 250, 1000, 2000, 4000, 1000, 1000, 2000, 4000]);
+});
+
+// A definitive refusal is decided by the parked list, not by the error's
+// wording: GitHub still reporting the run parked makes it the refusal it
+// always was — reported once, never replayed. The "not pending approval" case
+// is the flip side of the same read-back: the run already left action_required,
+// so the approval this lane owed is done and refusing again would fail a
+// recovery whose goal state already holds.
+test("#5004: a definitive refusal on a run still parked is reported once, not retried", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Resource not accessible by integration"), { status: 403 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const core = fakeCore();
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /not every parked run on .* could be approved/,
+  );
+  assert.equal(github.approveRunAttempts, 1, "a definitive refusal is not retried");
+  assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*Resource not accessible/);
+});
+
+// Codex review on this fix: the run listing can still report a run parked for
+// a while after the approve committed, and a read-back answered from that lag
+// would replay the POST — which GitHub then refuses 422 for a write that
+// already landed, failing a recovery whose goal state held. The read-back is
+// therefore polled to convergence on the ambiguous-create settle window rather
+// than read once.
+test("#5004: a listing still reporting parked cannot turn a committed approve into a replayed refusal", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true, approveListingLagReads: 2,
+    approveRunErrors: [
+      Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+      Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
+    ],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the settled read-back saw the committed approve; the POST was never replayed into its 422");
+});
+
+// Codex on #5005: an explicit rate-limit answer rejected the POST outright —
+// nothing committed, so the write retry can simply honor Retry-After. Running
+// it through the read-back first would let a rate-limited LISTING bury the
+// refusal behind an unretryable guard failure.
+test("#5004: a definitive rate-limit refusal reaches the write retry, not the read-back", async () => {
+  const rateLimited = () => Object.assign(new Error("API rate limit exceeded for installation"), {
+    status: 403,
+    response: { headers: { "retry-after": "1", "x-ratelimit-remaining": "0" } },
+  });
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunErrors: [rateLimited()],
+    runsByHeadSha: parkedRecoveryRuns() });
+  // The listing is throttled too, once it has served the two reads the approve
+  // pass needs: the run-exists check and the parked list itself. A read-back
+  // on this run could only turn that throttle into a guard failure.
+  let listCalls = 0;
+  const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    listCalls += 1;
+    if (listCalls > 2) throw rateLimited();
+    return listRuns(options);
+  };
+  const delays = [];
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async (ms) => delays.push(ms),
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2, "the write retry honored Retry-After and replayed");
+  assert.equal(listCalls, 2, "a definitive refusal never consulted the throttled listing");
+  assert.deepEqual(delays, [1000], "the retry waited out the advertised Retry-After");
+});
+
+// Codex on #5005: the read-back can spend the whole settle window, and a PR
+// that closed or moved meanwhile must not get a stale head's run approved by
+// the replay — the recovery guard is re-established before every attempt, as
+// the other retried writes do.
+test("#5004: a PR that ends during the settle window is never approved on a stale head", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    // Reads 1-4 answer open: the resolver's initial read, ensureValidationRun's
+    // two canRecover checks, and the first approval attempt's own guard. Read 5
+    // is the replay's re-check, after the failed approve spent its settle
+    // window — the PR has closed by then.
+    if (github.graphqlReadsByNumber[1465] >= 4) overrides[1465] = { state: "CLOSED" };
+    return graphql(query, variables);
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.deepEqual(targets, [], "the closed PR's recovery cancelled cleanly");
+  assert.equal(github.approveRunAttempts, 1,
+    "the re-established guard refused the replay; the stale head's run was never approved");
+});
+
+// Codex on #5005: when the POST's outcome is unknown AND the read-back stays
+// unreadable for the whole settle window, that exhaustion is a guard failure —
+// the recovery failed on a READ, and reporting it as a run GitHub kept parked
+// ("not every parked run could be approved") misreports the outcome and drops
+// the classification. It must propagate, marked as the read failure it is.
+test("#5004: a read-back that never answers propagates its own failure", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  // The listings the pass needs read fine; every run read-back inside the
+  // settle window is unavailable, so convergence can never be proven.
+  github.rest.actions.getWorkflowRun = async () => {
+    throw Object.assign(new Error("run read unavailable"), { status: 500 });
+  };
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, /could not confirm whether run 701 left the parked list/);
+      assert.doesNotMatch(error.message, /not every parked run .* could be approved/);
+      assert.equal(error.autoGateReadFailure, true,
+        "an exhausted read-back is a READ failure, not a deterministic approve failure");
+      return true;
+    },
+  );
+  assert.equal(github.approveRunAttempts, 1, "the first ambiguous failure's unreadable read-back ends it");
+});
+
+// Codex on #5005: the same eventually-consistent listing lags the OTHER way —
+// a run that only just appeared (the normal recovery shape) can be missing
+// from the repo-wide list while still parked, and "absent" is not proof the
+// approve committed. The read-back asks the run itself.
+test("#5004: a listing that omits the just-created run cannot pass its read-back", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    // The approve failed without committing: the run is still parked, but a
+    // lagging listing no longer reports it at all.
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  let listCalls = 0;
+  const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    listCalls += 1;
+    const listed = await listRuns(options);
+    if (listCalls > 2) {
+      return { data: { total_count: 0, workflow_runs: [] } };
+    }
+    return listed;
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2,
+    "the run's own read still showed parked, so the failed POST was replayed");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+// Codex on #5005: the post-update merge pass retried an approve with no
+// live-head check at all — a PR closed during the settle window still got its
+// stale head's run approved by the replay. The same guard recovery uses now
+// covers this lane.
+test("#5004: the post-update approve pass re-checks the live head before replaying", async () => {
+  const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+    // liveBefore, the post-update re-read, and attempt 1's guard all answer
+    // open at NEW_HEAD; the replay's re-check finds the PR closed.
+    pullGetSnapshots: [{}, {}, {}, { state: "closed" }],
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: { [NEW_HEAD]: [{ id: 101, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /Refusing to merge/,
+  );
+  assert.equal(github.approveRunAttempts, 1,
+    "the live-head guard refused the replay after the PR closed mid-settle");
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+// Same guard on the evaluate pass: the parked run belongs to the head the
+// evaluation read, and a head that moved meanwhile must not get its old
+// commit's run approved.
+test("#5004: the evaluate approve pass re-checks the live head before replaying", async () => {
+  const github = fakeGateGithub({
+    // The guard's first read already sees the head moved on — the pass cancels
+    // before the first POST, so no settle window is spent at all.
+    pullGetSnapshots: [{ head: { sha: OTHER_SHA } }],
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: { [HEAD_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  await autoGate.evaluate({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false });
+  assert.equal(github.approveRunAttempts, 0, "the moved head's parked run was never approved");
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+// Codex on #5005: the guard's REST read must ride the same read-retry policy
+// as every other GitHub read — a single transient failure aborted the whole
+// approve pass and misclassified the infrastructure error as a guard refusal.
+test("#5004: a transient live-head guard read is retried, not fatal", async () => {
+  const github = fakeGateGithub({
+    pullGetErrors: [Object.assign(new Error("PR read unavailable"), { status: 500 })],
+    runsByHeadSha: { [HEAD_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  const result = await autoGate.evaluate({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465,
+    setOutputs: false, sleep: async () => {} });
+  assert.doesNotMatch(result.reasons.join("\n"), /evaluation error|PR read unavailable/);
+  assert.equal(github.approveRunAttempts, 1, "the retried guard let the approve POST fire");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+  assert.ok(github.pullGetReads >= 2, "the transient guard read was retried");
+});
+
+test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
+    approveRunError: Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1, "the refusal was never replayed — the read-back answered it");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
 for (const [name, state] of Object.entries({ closed: { state: "CLOSED" }, merged: { merged: true }, retargeted: { baseRefName: "other" } })) {
   for (const duringPoll of [false, true]) {
     test(`#4210-r3: ${name} recovery is a successful no-op (during poll=${duringPoll})`, async () => {
@@ -15193,6 +15488,19 @@ function fakeGateGithub({
   runsByHeadSha = {},
   headAfterUpdate = null,
   approveRunError = null,
+  // Per-attempt approve failures, consulted before approveRunError — entry N is
+  // thrown on POST N, so a transient answer can be followed by a success
+  // (#5004).
+  approveRunErrors = [],
+  // A failed approve after which the run is no longer parked: the POST either
+  // committed and only its answer was lost, or a concurrent approver beat this
+  // lane — the gate cannot tell those apart and does not need to.
+  approveRunErrorUnparks = false,
+  // The run listing can LAG a committed approve: the POST already took the run
+  // out of action_required, yet the next reads still report it parked. This is
+  // the count of listing reads that see the stale state before the truth
+  // surfaces (#5004 — the reason a single read-back cannot be trusted).
+  approveListingLagReads = 0,
   // GitHub creates the runs for a pushed head a few seconds AFTER the push, so a
   // fake that has them from the first list cannot reproduce #3814 — the first
   // approve pass would catch them and the gap would be invisible.
@@ -15456,7 +15764,9 @@ function fakeGateGithub({
     updatedChecks: [],
     workflowDispatchAttempts: 0,
     runListReads: [],
+    approveRunAttempts: 0,
     approvedRuns: [],
+    approveListingLag: new Map(),
     recoveryComments: [],
     headShaAfterUpdate: null,
     rest: {
@@ -15481,28 +15791,60 @@ function fakeGateGithub({
           return {
             data: {
               total_count: runs.length,
-              workflow_runs: runs.filter(
-                (run) => !options.event || run.event === options.event,
-              ),
+              workflow_runs: runs
+                .filter((run) => !options.event || run.event === options.event)
+                .map((run) => {
+                  // A committed approve is truth now but parked on the listing
+                  // until its lag reads are spent.
+                  const lag = github.approveListingLag.get(run.id);
+                  if (lag > 0) {
+                    github.approveListingLag.set(run.id, lag - 1);
+                    return { ...run, conclusion: "action_required", status: "completed" };
+                  }
+                  return run;
+                }),
             },
           };
         },
-        approveWorkflowRun: async (options) => {
-          if (approveRunError) {
-            throw approveRunError;
+        getWorkflowRun: async (options) => {
+          for (const runs of Object.values(runsByHeadSha)) {
+            const run = runs.find((candidate) => candidate.id === options.run_id);
+            if (run) {
+              // The single-run read lags a committed approve the same way the
+              // repo-wide listing does; the counter is shared with it.
+              const lag = github.approveListingLag.get(run.id);
+              if (lag > 0) {
+                github.approveListingLag.set(run.id, lag - 1);
+                return { data: { ...run, conclusion: "action_required", status: "completed" } };
+              }
+              return { data: { ...run } };
+            }
           }
-          github.approvedRuns.push(options);
+          throw Object.assign(new Error(`Workflow run ${options.run_id} not found`), { status: 404 });
+        },
+        approveWorkflowRun: async (options) => {
+          github.approveRunAttempts += 1;
+          const attemptError = approveRunErrors[github.approveRunAttempts - 1] || approveRunError;
           // Approving a run takes it OUT of action_required — a later pass finds
           // it running, not parked. A fake that leaves the conclusion alone makes
           // a second approve pass look like a double-approval bug when the real
-          // API would simply find nothing to do.
-          for (const runs of Object.values(runsByHeadSha)) {
-            for (const run of runs) {
-              if (run.id === options.run_id && run.conclusion === "action_required") {
-                run.conclusion = null;
-                run.status = "in_progress";
+          // API would simply find nothing to do. approveRunErrorUnparks models
+          // the same transition for a call that still FAILED: a 500 proves
+          // nothing about whether the POST committed (#5004).
+          if (!attemptError || approveRunErrorUnparks) {
+            github.approvedRuns.push(options);
+            for (const runs of Object.values(runsByHeadSha)) {
+              for (const run of runs) {
+                if (run.id === options.run_id && run.conclusion === "action_required") {
+                  run.conclusion = null;
+                  run.status = "in_progress";
+                  github.approveListingLag.set(run.id, approveListingLagReads);
+                }
               }
             }
+          }
+          if (attemptError) {
+            throw attemptError;
           }
         },
         createWorkflowDispatch: async (options) => {
