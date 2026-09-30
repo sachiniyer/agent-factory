@@ -48,6 +48,11 @@ type ConfirmationOverlay struct {
 	ConfirmKey string
 	// Custom cancel key (defaults to 'n')
 	CancelKey string
+	// pending, when non-empty, is a static note saying the dialog is still
+	// assembling what the user would consent to (#4848). The dialog is already
+	// open, so the key visibly registered, but the confirm is withheld and the
+	// hint line shows the note in place of the confirm key until SetPending("").
+	pending string
 }
 
 // NewConfirmationOverlay creates a new confirmation dialog overlay with the given message
@@ -83,6 +88,12 @@ func (c *ConfirmationOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	// #1238, unmerged #2022) must not be dispatchable by the D+enter reflex — the
 	// same reason it already rejects a reflexive 'y' (#2405).
 	if key == strings.ToLower(c.ConfirmKey) || (key == "enter" && c.enterConfirms()) {
+		// A pending dialog has not finished stating the consequences, so a confirm
+		// now would consent to copy the user has not seen yet (#4848). Esc still
+		// cancels; the confirm key starts working once the result lands.
+		if c.pending != "" {
+			return false
+		}
 		// A guarded overlay too small to show its consequences must not collect a
 		// confirm (#1973). Refusing here — not merely rendering a warning — is
 		// what makes the guarantee real: the render and the key agree, so a confirm
@@ -162,6 +173,18 @@ func (c *ConfirmationOverlay) SetMaxSize(width, height int) {
 // SetConfirmKey sets the key used to confirm the action
 func (c *ConfirmationOverlay) SetConfirmKey(key string) {
 	c.ConfirmKey = key
+}
+
+// SetPending marks the dialog as still waiting on the result that completes its
+// copy, with note as the static text the hint line shows meanwhile (#4848). The
+// confirm key is refused until SetPending(""); cancel keeps working.
+func (c *ConfirmationOverlay) SetPending(note string) {
+	c.pending = note
+}
+
+// Pending reports the note set by SetPending, or "" once the dialog is complete.
+func (c *ConfirmationOverlay) Pending() string {
+	return c.pending
 }
 
 // SetDetail sets elaboration rendered below the message, and opts this overlay
@@ -354,6 +377,12 @@ func refusalNotices(short int) []string {
 }
 
 func (c *ConfirmationOverlay) instruction(compact bool) string {
+	if c.pending != "" {
+		// No confirm key while pending: advertising one the handler refuses would
+		// read as a dead key. The cancel words stay, so the no-zone still registers.
+		return ui.ActionStyle(false).Render(c.pending) + " · " +
+			ui.ActionStyle(false).Render(c.CancelKey+"/esc cancel")
+	}
 	confirm := c.ConfirmKey
 	if !compact && c.enterConfirms() {
 		confirm += "/enter"
