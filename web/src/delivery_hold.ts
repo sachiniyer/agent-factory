@@ -185,6 +185,15 @@ function hasPrintable(data: string): boolean {
  *  for an ordinary word-delete or cursor move. Failing toward holding covers
  *  the movement pair just as it covers the edits.
  *
+ *  Tab (\t, shell completion over the partial line) and the remaining readline
+ *  cursor moves Ctrl-B (\x02) and Ctrl-F (\x06) are the same resume class. The
+ *  keybar emits Tab verbatim (SPECIAL_BYTES, web/src/terminal-keybar.ts) and
+ *  Ctrl-B/Ctrl-F through the general Ctrl+letter map (upperCode & 31, same
+ *  function). None starts a draft under startsADraft (all three are below
+ *  0x20), so without this entry the post-idle resume would return "none" for
+ *  them and leave the stranded draft unprotected — the same window fixed above
+ *  for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -194,7 +203,8 @@ function hasPrintable(data: string): boolean {
 function isEditingControl(data: string): boolean {
   return (
     data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
-    data.includes("\x17") || data.includes("\x01") || data.includes("\x05")
+    data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
+    data.includes("\x02") || data.includes("\x06")
   );
 }
 
