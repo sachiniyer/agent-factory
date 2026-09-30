@@ -281,6 +281,16 @@ function hasPrintable(data: string): boolean {
  *  post-idle resume would return "none" and leave the restored draft
  *  unprotected — the same window fixed for the other editing controls.
  *
+ *  Ctrl-Z (\x1a, VSUSP) and Ctrl-\ (\x1c, VQUIT) are the termios signal
+ *  characters the keybar emits explicitly (SIGNAL_BYTES,
+ *  web/src/terminal-keybar.ts), and Ctrl-^ (\x1e) the keybar emits through its
+ *  general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts). At an
+ *  interactive shell prompt the signals and the unbound control leave the
+ *  current readline buffer intact, and startsADraft rejects each (all are below
+ *  0x20), so without these entries the post-idle resume would return "none"
+ *  and leave the still-present draft unprotected despite the renewed user
+ *  activity — the same window fixed for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -296,7 +306,8 @@ function isEditingControl(data: string): boolean {
     data.includes("\x14") || data.includes("\x12") || data.includes("\x1f") ||
     data.includes("\x16") || data.includes("\x0f") || data.includes("\x18") ||
     data.includes("\x11") || data.includes("\x13") || data.includes("\x1d") || data.includes("\x00") ||
-    data.includes("\x07")
+    data.includes("\x07") ||
+    data.includes("\x1a") || data.includes("\x1c") || data.includes("\x1e")
   );
 }
 
