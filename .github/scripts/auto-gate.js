@@ -509,10 +509,11 @@ async function retryRead(label, operation, subject = null) {
   });
 }
 
-async function retryCheckUpdate(label, operation) {
+async function retryCheckUpdate(label, operation, { sleep } = {}) {
   return retryTransient(label, operation, {
     failureName: "AutoGateCheckWriteError",
     readFailure: false,
+    sleep,
   });
 }
 
@@ -624,7 +625,7 @@ async function reconcileAmbiguousCreate(label, findCreated) {
 async function retryTransient(
   label,
   operation,
-  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS },
+  { failureName, readFailure, subject = null, delays = RETRY_DELAYS_MS, sleep = delay },
 ) {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -643,7 +644,7 @@ async function retryTransient(
       if (attempt >= delays.length) {
         throw retryFailure(label, attempt + 1, error, failureName, readFailure);
       }
-      await delay(retryDelayMilliseconds(error, delays[attempt]));
+      await sleep(retryDelayMilliseconds(error, delays[attempt]));
     }
   }
 }
@@ -3611,7 +3612,10 @@ async function ensureValidationRun({
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
       // again here, on what the wait actually found.
       if (!await canRecover()) return { cancelled: true };
-      const { parked, approved } = await approveParkedRuns({ github, context, headSha, core });
+      const { parked, approved, cancelled } = await approveParkedRuns({
+        github, context, headSha, core, canRecover, sleep,
+      });
+      if (cancelled) return { cancelled: true };
       return { dispatched: false, found: true, approved: parked.length === approved.length };
     }
     if (attempt < attempts - 1) {
@@ -3762,17 +3766,28 @@ async function dispatchMissingValidationRun({
   return { dispatched: true };
 }
 
-async function approveParkedRuns({ github, context, headSha, core }) {
+async function approveParkedRuns({
+  github, context, headSha, core,
+  canRecover = async () => true,
+  sleep = delay,
+}) {
   const parked = await listParkedRuns({ github, context, headSha });
   const approved = [];
   for (const run of parked) {
     try {
-      await approveParkedRun({ github, context, headSha, run });
+      const outcome = await approveParkedRun({ github, context, headSha, run, canRecover, sleep });
+      if (outcome?.cancelled) {
+        return { parked, approved, cancelled: true };
+      }
       approved.push(run);
     } catch (error) {
-      // Not fatal on its own: the decision reports what is still waiting, and a
-      // run the gate could not approve becomes an explicit unmet item rather than
-      // the misleading "required check is missing".
+      // A guard that could not answer is not an approval refusal: the recovery
+      // itself failed a precondition read, and "unapproved" would misreport
+      // that as a run GitHub kept parked. Real approve failures keep the
+      // warning shape — an explicit unmet item, not a hidden cancellation.
+      if (error?.autoGateRecoveryGuard) {
+        throw error;
+      }
       core.warning(
         `Could not approve workflow run ${run.id} (${run.name}) on ${headSha}: ${formatError(error)}`,
       );
@@ -3796,21 +3811,44 @@ async function approveParkedRuns({ github, context, headSha, core }) {
 // action_required IS the goal state, whether the "failed" call landed or a
 // concurrent approver beat this lane to it; only a run still parked through the
 // whole settle window earns a replay, or — on a definitive refusal — the report
-// the caller writes.
-async function approveParkedRun({ github, context, headSha, run }) {
+// the caller writes. Two exceptions stand outside that ambiguity: an explicit
+// rate-limit answer rejected the request outright (nothing committed, so it
+// goes straight back to the write retry, which honors Retry-After — routing it
+// through the read-back would let a rate-limited LISTING bury a refusal the
+// retry could have waited out), and a recovery precondition, which is
+// re-established before every attempt like every other retried write's guard —
+// the settle window can spend seconds, and a PR that closed or moved meanwhile
+// must not get a stale head's run approved.
+async function approveParkedRun({ github, context, headSha, run, canRecover, sleep }) {
   const { owner, repo } = context.repo;
-  await retryCheckUpdate(
+  return retryCheckUpdate(
     `could not approve workflow run ${run.id} (${run.name}) on ${headSha}`,
     async () => {
+      let recoverable;
+      try {
+        recoverable = await canRecover();
+      } catch (error) {
+        const failure = writeRetryGuardFailure(error);
+        failure.autoGateRecoveryGuard = true;
+        throw failure;
+      }
+      if (!recoverable) {
+        return { cancelled: true };
+      }
       try {
         await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
       } catch (error) {
-        if (await runLeftParkedList({ github, context, headSha, runId: run.id })) {
-          return;
+        if (isDefinitiveRateLimitResponse(error)) {
+          throw error;
+        }
+        if (await runLeftParkedList({ github, context, headSha, runId: run.id, sleep })) {
+          return {};
         }
         throw error;
       }
+      return {};
     },
+    { sleep },
   );
 }
 
@@ -3825,7 +3863,7 @@ async function approveParkedRun({ github, context, headSha, run }) {
 // stayed parked through the whole window, so the caller may retry or report the
 // original failure. A window that ends on an unreadable listing answers
 // nothing — it escapes marked as a guard failure, never as "still parked".
-async function runLeftParkedList({ github, context, headSha, runId }) {
+async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
   const { owner, repo } = context.repo;
   try {
     return await retryTransient(
@@ -3850,6 +3888,7 @@ async function runLeftParkedList({ github, context, headSha, runId }) {
         failureName: "AutoGateCheckWriteError",
         readFailure: false,
         delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+        sleep,
       },
     );
   } catch (error) {

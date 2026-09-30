@@ -10720,9 +10720,10 @@ test("#5004: a persistent transient approve failure fails recovery with the same
     approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
     runsByHeadSha: parkedRecoveryRuns() });
   const core = fakeCore();
+  const delays = [];
   await assert.rejects(
     () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
-      sleep: async () => {},
+      sleep: async (ms) => delays.push(ms),
     }),
     (error) => {
       assert.match(error.message, new RegExp(`not every parked run on ${OTHER_SHA} could be approved`));
@@ -10732,6 +10733,11 @@ test("#5004: a persistent transient approve failure fails recovery with the same
   );
   assert.equal(github.approveRunAttempts, 3, "retried to the write policy's bound, then reported");
   assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*after 3 attempts: Unexpected end of JSON input/);
+  // The whole schedule — each failed attempt's settle window, then the write
+  // retry's own backoff — runs on the injected sleep. Without the seam the
+  // suite burns the production 1s/2s/4s settle and RETRY_DELAYS_MS per attempt
+  // (Codex on #5005): ~22s here alone.
+  assert.deepEqual(delays, [1000, 2000, 4000, 250, 1000, 2000, 4000, 1000, 1000, 2000, 4000]);
 });
 
 // A definitive refusal is decided by the parked list, not by the error's
@@ -10774,6 +10780,64 @@ test("#5004: a listing still reporting parked cannot turn a committed approve in
   assert.equal(targets[0].headSha, OTHER_SHA);
   assert.equal(github.approveRunAttempts, 1,
     "the settled read-back saw the committed approve; the POST was never replayed into its 422");
+});
+
+// Codex on #5005: an explicit rate-limit answer rejected the POST outright —
+// nothing committed, so the write retry can simply honor Retry-After. Running
+// it through the read-back first would let a rate-limited LISTING bury the
+// refusal behind an unretryable guard failure.
+test("#5004: a definitive rate-limit refusal reaches the write retry, not the read-back", async () => {
+  const rateLimited = () => Object.assign(new Error("API rate limit exceeded for installation"), {
+    status: 403,
+    response: { headers: { "retry-after": "1", "x-ratelimit-remaining": "0" } },
+  });
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunErrors: [rateLimited()],
+    runsByHeadSha: parkedRecoveryRuns() });
+  // The listing is throttled too, once it has served the two reads the approve
+  // pass needs: the run-exists check and the parked list itself. A read-back
+  // on this run could only turn that throttle into a guard failure.
+  let listCalls = 0;
+  const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    listCalls += 1;
+    if (listCalls > 2) throw rateLimited();
+    return listRuns(options);
+  };
+  const delays = [];
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async (ms) => delays.push(ms),
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2, "the write retry honored Retry-After and replayed");
+  assert.equal(listCalls, 2, "a definitive refusal never consulted the throttled listing");
+  assert.deepEqual(delays, [1000], "the retry waited out the advertised Retry-After");
+});
+
+// Codex on #5005: the read-back can spend the whole settle window, and a PR
+// that closed or moved meanwhile must not get a stale head's run approved by
+// the replay — the recovery guard is re-established before every attempt, as
+// the other retried writes do.
+test("#5004: a PR that ends during the settle window is never approved on a stale head", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    // Reads 1-4 answer open: the resolver's initial read, ensureValidationRun's
+    // two canRecover checks, and the first approval attempt's own guard. Read 5
+    // is the replay's re-check, after the failed approve spent its settle
+    // window — the PR has closed by then.
+    if (github.graphqlReadsByNumber[1465] >= 4) overrides[1465] = { state: "CLOSED" };
+    return graphql(query, variables);
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.deepEqual(targets, [], "the closed PR's recovery cancelled cleanly");
+  assert.equal(github.approveRunAttempts, 1,
+    "the re-established guard refused the replay; the stale head's run was never approved");
 });
 
 test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
