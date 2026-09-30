@@ -47,6 +47,75 @@ func TestHelpReflectsKeymapRebinds(t *testing.T) {
 	}
 }
 
+// TestHelpTabsRowReflectsOpenPaneRebind is the scoped companion to
+// TestHelpReflectsKeymapRebinds. The general-help Tabs row embeds the rebindable
+// open_pane glyph inside its description prose ("… · s open · …") rather than its
+// key column, so the key-column-only assertions above never inspect it. That hid
+// a #1141 regression: the description hardcoded the default "s" instead of routing
+// it through helpKey, so a rebind of open_pane showed the new glyph in the
+// Workspace row one section up but left the stale "s" in this row — one help
+// screen, one action, two glyphs. The rebindable glyph must come from the binding
+// table here too; only the non-rebindable "enter" stays literal.
+func TestHelpTabsRowReflectsOpenPaneRebind(t *testing.T) {
+	// tabsRow locates the Tabs "Select tab 1–9" row by its description prefix,
+	// independent of the key column's padded width (which shifts under any
+	// unrelated rebind). "Select tab 1" is ASCII-safe and unique to this row.
+	tabsRow := func(content string) string {
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "Select tab 1") {
+				return line
+			}
+		}
+		return ""
+	}
+
+	t.Run("default glyphs", func(t *testing.T) {
+		content := xansi.Strip(helpTypeGeneral{}.toContent())
+		row := tabsRow(content)
+		require.NotEmpty(t, row, "general help must render its Tabs row")
+		require.Contains(t, row, "s open",
+			"at default bindings the Tabs row must advertise open_pane's default glyph; got:\n%s", row)
+		require.NotContains(t, row, "O open",
+			"nothing should assert the rebound glyph before any rebind; got:\n%s", row)
+	})
+
+	t.Run("open_pane rebind surfaces in the description", func(t *testing.T) {
+		// "O" is a single rune, not reserved, and conflicts with no default
+		// binding (KeyAttach is lowercase "o"), so ApplyOverrides accepts it.
+		require.NoError(t, keys.ApplyOverrides(map[string][]string{
+			"open_pane": {"O"},
+		}))
+		t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+		content := xansi.Strip(helpTypeGeneral{}.toContent())
+
+		// Control: the rebind reached the help screen at all — the Workspace
+		// row's key column now leads with the rebound glyph. (At default it
+		// is "s", so this discriminates the rebind from the default.)
+		var wsRow string
+		for _, line := range strings.Split(content, "\n") {
+			if strings.Contains(line, "Open or focus the tab") {
+				wsRow = strings.TrimSpace(line)
+				break
+			}
+		}
+		require.NotEmpty(t, wsRow)
+		require.True(t, strings.HasPrefix(wsRow, "O "),
+			"the Workspace key column must follow the open_pane rebind; got %q", wsRow)
+
+		// Load-bearing: the Tabs row's *description* — not its key column —
+		// must follow the same rebind. This is the assertion the existing
+		// key-column guard cannot make, and the one the hardcoded literal
+		// failed.
+		row := tabsRow(content)
+		require.NotEmpty(t, row, "general help must render its Tabs row after a rebind")
+		require.Contains(t, row, "O open",
+			"the Tabs row description must use the rebound open_pane glyph (one source of truth); got:\n%s", row)
+		require.NotContains(t, row, "s open",
+			"the Tabs row description must drop the default glyph after an open_pane rebind; got:\n%s", row)
+	})
+}
+
 func TestGeneralHelpReboundDismissKeyWinsOverPaging(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(map[string][]string{
 		"help": {"space"},
