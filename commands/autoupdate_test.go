@@ -408,7 +408,7 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string, _ int) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
 		return respawnResult{}, nil
@@ -422,9 +422,9 @@ func TestAutoUpdateCallsShutdownAfterBinarySwap(t *testing.T) {
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		shutdownCalls++
-		return daemon.ShutdownViaRPC, 0, nil
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 
 	if _, err := runAutoUpdate(); err != nil {
@@ -498,11 +498,11 @@ func TestAutoUpdateRefreshFailureSkipsDaemonRestart(t *testing.T) {
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		shutdownCalls++
-		return daemon.ShutdownViaRPC, 0, nil
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
-	respawnDaemonFn = func(string, int) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		t.Fatal("respawn must not run when systemd may still hold the destructive legacy unit")
 		return respawnResult{}, nil
 	}
@@ -554,7 +554,7 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string, int) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		return respawnResult{}, nil
 	}
@@ -565,8 +565,8 @@ func TestAutoUpdateSucceedsWhenShutdownErrors(t *testing.T) {
 	fetchLatestReleaseTagFn = func(string, time.Duration) (string, error) { return "v1.0.1", nil }
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-		return daemon.ShutdownNoDaemon, 0, errors.New("simulated rpc failure")
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, errors.New("simulated rpc failure")
 	}
 
 	if _, err := runAutoUpdate(); err != nil {
@@ -1132,10 +1132,10 @@ func TestAutoUpdateDownloadsByTag(t *testing.T) {
 		return []byte("new-binary"), nil
 	}
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-		return daemon.ShutdownNoDaemon, 0, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
 	}
-	respawnDaemonFn = func(string, int) (respawnResult, error) { return respawnResult{}, nil }
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) { return respawnResult{}, nil }
 
 	if _, err := runAutoUpdate(); err != nil {
 		t.Fatalf("autoUpdate: %v", err)

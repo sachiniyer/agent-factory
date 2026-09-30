@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 )
 
 // Tests for the #5007 PID-exit wait: RequestShutdown reports the shutdown
-// target's PID, and WaitForShutdownCompletion(pid) waits for that process to
+// target's PID, and WaitForShutdownCompletion(ShutdownTarget{PID: pid}) waits for that process to
 // exit — a positive signal — instead of for its socket to go quiet, which a
 // still-draining daemon can satisfy early. Every test points
 // AGENT_FACTORY_HOME at a temp dir, and the "daemons" whose exit is awaited are
@@ -31,21 +32,28 @@ func TestRequestShutdownReturnsAckPID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeFn() })
 
-	result, pid, err := RequestShutdown()
+	result, target, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
 	if result != ShutdownViaRPC {
 		t.Fatalf("shutdown result = %v, want ShutdownViaRPC", result)
 	}
-	if pid != os.Getpid() {
-		t.Fatalf("shutdown pid = %d, want the acknowledging process %d", pid, os.Getpid())
+	if target.PID != os.Getpid() {
+		t.Fatalf("shutdown pid = %d, want the acknowledging process %d", target.PID, os.Getpid())
+	}
+	if want := processStartToken(os.Getpid()); target.StartToken != want {
+		t.Fatalf("shutdown start token = %q, want the acknowledging process's %q", target.StartToken, want)
 	}
 }
 
 // pidlessShutdownControl is a daemon built before ShutdownResponse carried a
-// PID: Ping reports one, Shutdown acknowledges without.
-type pidlessShutdownControl struct{ pid int }
+// PID: Ping reports one, Shutdown acknowledges without. shutdown records that
+// the Shutdown RPC has arrived.
+type pidlessShutdownControl struct {
+	pid      int
+	shutdown *atomic.Bool
+}
 
 func (c pidlessShutdownControl) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.PID = c.pid
@@ -53,32 +61,50 @@ func (c pidlessShutdownControl) Ping(_ PingRequest, resp *PingResponse) error {
 }
 
 func (c pidlessShutdownControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	c.shutdown.Store(true)
 	resp.OK = true
 	return nil
 }
 
 // TestRequestShutdownFallsBackToPingPID: against a daemon whose Shutdown ack
-// has no PID, RequestShutdown returns the PID its pre-shutdown Ping reported.
+// has no PID, RequestShutdown returns the PID its pre-shutdown Ping reported,
+// with the start token sampled BEFORE Shutdown was sent — after it, the daemon
+// may already have exited and its PID been recycled.
 func TestRequestShutdownFallsBackToPingPID(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	const fakePID = 424242
+	var shutdown atomic.Bool
+	prevToken := processStartTokenFn
+	t.Cleanup(func() { processStartTokenFn = prevToken })
+	processStartTokenFn = func(pid int) string {
+		if pid != fakePID {
+			return ""
+		}
+		if shutdown.Load() {
+			return "sampled-after-shutdown"
+		}
+		return "sampled-before-shutdown"
+	}
 	srv := rpc.NewServer()
-	if err := srv.RegisterName(controlServiceName, pidlessShutdownControl{pid: fakePID}); err != nil {
+	if err := srv.RegisterName(controlServiceName, pidlessShutdownControl{pid: fakePID, shutdown: &shutdown}); err != nil {
 		t.Fatalf("register Control: %v", err)
 	}
 	_, cleanup := startFakeControlListener(t, srv)
 	t.Cleanup(cleanup)
 
-	result, pid, err := RequestShutdown()
+	result, target, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
 	if result != ShutdownViaRPC {
 		t.Fatalf("shutdown result = %v, want ShutdownViaRPC", result)
 	}
-	if pid != fakePID {
-		t.Fatalf("shutdown pid = %d, want the Ping-reported %d", pid, fakePID)
+	if target.PID != fakePID {
+		t.Fatalf("shutdown pid = %d, want the Ping-reported %d", target.PID, fakePID)
+	}
+	if target.StartToken != "sampled-before-shutdown" {
+		t.Fatalf("shutdown start token = %q, want the pre-shutdown sample", target.StartToken)
 	}
 }
 
@@ -110,7 +136,7 @@ func TestWaitForShutdownCompletionWaitsForPIDExit(t *testing.T) {
 	pid := startReapedProcess(t, "sleep", "0.3")
 
 	start := time.Now()
-	if err := WaitForShutdownCompletion(pid); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownTarget{PID: pid}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion(%d): %v", pid, err)
 	}
 	if elapsed := time.Since(start); elapsed >= shutdownCompleteGrace {
@@ -130,7 +156,7 @@ func TestWaitForShutdownCompletionIgnoresProcessName(t *testing.T) {
 	}
 	pid := startReapedProcess(t, "bash", "-c", "exec -a af-renamed sleep 0.5")
 
-	if err := WaitForShutdownCompletion(pid); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownTarget{PID: pid}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion(%d): %v", pid, err)
 	}
 	if pidLooksAlive(pid) {
@@ -148,7 +174,7 @@ func TestWaitForShutdownCompletionPIDTimesOut(t *testing.T) {
 	shutdownCompleteGrace = 200 * time.Millisecond
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 
-	err := WaitForShutdownCompletion(pid)
+	err := WaitForShutdownCompletion(ShutdownTarget{PID: pid})
 	if err == nil {
 		t.Fatalf("expected a timeout error while pid %d keeps running", pid)
 	}
@@ -194,18 +220,12 @@ func TestProcessStartTokenIdentifiesIncarnation(t *testing.T) {
 	}
 }
 
-// stubStartTokens replaces processStartTokenFn with one that returns tokens in
-// order, repeating the last.
-func stubStartTokens(t *testing.T, tokens ...string) {
+// stubStartToken makes processStartTokenFn report tok for every pid.
+func stubStartToken(t *testing.T, tok string) {
 	t.Helper()
 	prev := processStartTokenFn
 	t.Cleanup(func() { processStartTokenFn = prev })
-	calls := 0
-	processStartTokenFn = func(int) string {
-		tok := tokens[min(calls, len(tokens)-1)]
-		calls++
-		return tok
-	}
+	processStartTokenFn = func(int) string { return tok }
 }
 
 // TestWaitForShutdownCompletionTreatsPIDReuseAsExit: a PID that is still alive
@@ -219,13 +239,14 @@ func TestWaitForShutdownCompletionTreatsPIDReuseAsExit(t *testing.T) {
 	shutdownCompleteGrace = 300 * time.Millisecond
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 
-	stubStartTokens(t, "daemon", "recycled")
-	if err := WaitForShutdownCompletion(pid); err != nil {
+	target := ShutdownTarget{PID: pid, StartToken: "daemon"}
+	stubStartToken(t, "recycled")
+	if err := WaitForShutdownCompletion(target); err != nil {
 		t.Fatalf("WaitForShutdownCompletion with a recycled pid: %v", err)
 	}
 
-	stubStartTokens(t, "daemon", "")
-	if err := WaitForShutdownCompletion(pid); !errors.Is(err, ErrShutdownIncomplete) {
+	stubStartToken(t, "")
+	if err := WaitForShutdownCompletion(target); !errors.Is(err, ErrShutdownIncomplete) {
 		t.Fatalf("WaitForShutdownCompletion with a failed token read = %v, want ErrShutdownIncomplete", err)
 	}
 }

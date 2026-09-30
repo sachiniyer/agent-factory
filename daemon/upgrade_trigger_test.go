@@ -97,7 +97,7 @@ func stubTriggerEnv(t *testing.T) (string, string, []byte) {
 		unit    func() error
 		adhoc   func(string) error
 		stop    func() (bool, error)
-		wait    func(int) error
+		wait    func(ShutdownTarget) error
 		vg      time.Duration
 		vp      time.Duration
 	}{

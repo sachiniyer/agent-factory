@@ -654,8 +654,8 @@ func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
 }
 
 func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
-	result, oldPID, shutdownErr := requestDaemonShutdownFn()
-	outcome := restartOutcome{Shutdown: result, OldPID: oldPID}
+	result, target, shutdownErr := requestDaemonShutdownFn()
+	outcome := restartOutcome{Shutdown: result, OldPID: target.PID}
 	if shutdownErr != nil {
 		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
 		// refused to stop" — it is RequestShutdown saying it could not determine
@@ -671,7 +671,7 @@ func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	if result == daemon.ShutdownNoDaemon {
 		return outcome, nil
 	}
-	respawn, err := respawnDaemonFn(execPath, oldPID)
+	respawn, err := respawnDaemonFn(execPath, target)
 	outcome.Respawn = respawn
 	if err != nil {
 		outcome.FailedPhase = restartPhaseRespawn
@@ -770,7 +770,7 @@ func canonicalExec(p string) string {
 // The task gate belongs only on the cold-start path (ensureDaemonForTasks),
 // where nothing was running and "no enabled tasks" means there is nothing to
 // start.
-func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, error) {
+func respawnDaemonAfterUpgrade(execPath string, target daemon.ShutdownTarget) (respawnResult, error) {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon can
 	// still be alive — and still answering pings — here. Respawning into that
 	// window makes EnsureDaemon — or the unit-restarted daemon's own startup
@@ -781,8 +781,8 @@ func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, erro
 	// immediately on that path. If the bound expires the old daemon is still
 	// alive, so withhold the respawn on BOTH the unit and ad-hoc paths rather
 	// than race it, and hand the caller the reason to report.
-	if err := waitForShutdownCompletionFn(oldPID); err != nil {
-		return respawnResult{}, fmt.Errorf("the old daemon is %s (%w)", shutdownIncompleteHint(oldPID), err)
+	if err := waitForShutdownCompletionFn(target); err != nil {
+		return respawnResult{}, fmt.Errorf("the old daemon is %s (%w)", shutdownIncompleteHint(target.PID), err)
 	}
 	var unitErr error
 	useUnit, unitExec, gateErr := unitRestartTarget()

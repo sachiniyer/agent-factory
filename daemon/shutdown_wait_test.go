@@ -22,7 +22,7 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	start := time.Now()
-	if err := WaitForShutdownCompletion(0); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownTarget{}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion with no daemon: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -92,7 +92,7 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 	// The "old daemon" here is an in-process control server, so the PID the ack
 	// reports is this test's own and never exits; exercise the no-PID
 	// socket-quiet wait, which is what this #854 regression is about.
-	if err := WaitForShutdownCompletion(0); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownTarget{}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion: %v", err)
 	}
 	if pingDaemon() == nil {
@@ -123,7 +123,7 @@ func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
 	shutdownSocketQuietGrace = 250 * time.Millisecond
 	t.Cleanup(func() { shutdownSocketQuietGrace = prevGrace })
 
-	err = WaitForShutdownCompletion(0)
+	err = WaitForShutdownCompletion(ShutdownTarget{})
 	if err == nil {
 		t.Fatalf("expected a timeout error while the daemon socket keeps answering")
 	}

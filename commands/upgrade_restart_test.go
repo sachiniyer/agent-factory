@@ -59,9 +59,9 @@ func stubShutdown(t *testing.T, result daemon.ShutdownResult, err error) *int {
 	prev := requestDaemonShutdownFn
 	t.Cleanup(func() { requestDaemonShutdownFn = prev })
 	calls := new(int)
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		*calls++
-		return result, 0, err
+		return result, daemon.ShutdownTarget{}, err
 	}
 	return calls
 }
@@ -95,7 +95,7 @@ func TestRespawnAfterUpgrade_LeavesOtherHomesUnitAlone(t *testing.T) {
 		return false, true, nil
 	}
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -116,7 +116,7 @@ func TestRespawnAfterUpgrade_RestartsUnitServingThisHome(t *testing.T) {
 		return true, true, nil
 	}
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -154,7 +154,7 @@ func TestRespawnAfterUpgrade_UnprovableHomeLeavesUnitAlone(t *testing.T) {
 			autostartUnitServesHomeFn = tc.serves
 			configDirFn = tc.config
 
-			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 				t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 			}
 
@@ -218,9 +218,9 @@ func TestUpgradeRefreshesAutostartBeforeStoppingDaemon(t *testing.T) {
 		sequence = append(sequence, "refresh")
 		return nil
 	}
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		sequence = append(sequence, "shutdown")
-		return daemon.ShutdownViaRPC, 0, nil
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 
 	if err := runUpgrade(&bytes.Buffer{}, &bytes.Buffer{}, url, false); err != nil {

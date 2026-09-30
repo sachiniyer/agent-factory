@@ -296,7 +296,7 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 	//     is a daemon that may still flush. Deleting instances.json while that
 	//     is pending is how a "factory reset" hands the user their sessions
 	//     back.
-	if waitErr := waitForShutdownCompletionFn(0); waitErr != nil {
+	if waitErr := waitForShutdownCompletionFn(daemon.ShutdownTarget{}); waitErr != nil {
 		err = fmt.Errorf("the daemon did not finish shutting down: %w", waitErr)
 		fmt.Fprintln(out, "\nNothing was removed.")
 		return err
