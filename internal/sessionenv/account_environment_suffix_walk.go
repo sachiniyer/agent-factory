@@ -8,9 +8,11 @@ import (
 
 // operandTailMemo holds every per-suffix answer one account-command walk
 // computes. Every words slice inside one validation is a suffix of the call's
-// Args — the parser allocates each Word once and no walk builds a new slice —
-// so the first element's pointer names a distinct remaining suffix, and each
-// question below depends only on that suffix (plus the constant denied names).
+// Args — the parser allocates each Word once, and the one walk that builds a
+// new slice (xargsSubstitutedArgv) copies every word so its suffixes get
+// pointers of their own — so the first element's pointer names a distinct
+// remaining suffix, and each question below depends only on that suffix (plus
+// the constant denied names).
 //
 // Each map answers one question at most once per position, which is what
 // keeps the walk linear in the command's word count (#4966). Without them the
@@ -39,6 +41,26 @@ type operandTailMemo struct {
 	xargsEnvScans map[xargsEnvKey]bool
 	// xargsMarkers: where the first marker-carrying word from here sits.
 	xargsMarkers map[xargsMarkerKey]int
+	// xargsItems: is any word from here on a substituted xargs marker.
+	xargsItems map[*syntax.Word]bool
+	// xargsLiteralMarkers: does any literal word from here on carry the marker.
+	xargsLiteralMarkers map[xargsMarkerKey]bool
+	// xargsMarkersFollowed: the distinct replace markers this walk has followed.
+	xargsMarkersFollowed map[string]struct{}
+	// xargsInput: can xargs input reach env through the chain from here, per
+	// input mode (#4978).
+	xargsInput map[xargsInputKey]bool
+	// xargsCommandFollows: could any word from here on be a program.
+	xargsCommandFollows map[*syntax.Word]bool
+	// xargsMarkerAnywhereMap: does any word from here on carry the marker,
+	// anywhere in the word.
+	xargsMarkerAnywhereMap map[xargsMarkerKey]bool
+	// xargsNested: a nested xargs's option-region scan from here, per state.
+	xargsNested map[xargsNestedKey]xargsNestedResult
+	// xargsMarkersFollowed: the distinct replace markers this walk has followed.
+	// xargsNestedAny: does any nested xargs from here take the marker in an
+	// env-reaching option.
+	xargsNestedAny map[xargsMarkerKey]bool
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -52,6 +74,16 @@ func newOperandTailMemo() operandTailMemo {
 		wrapperOptions:    map[wrapperOptionKey]unwrapResult{},
 		xargsEnvScans:     map[xargsEnvKey]bool{},
 		xargsMarkers:      map[xargsMarkerKey]int{},
+		xargsItems:        map[*syntax.Word]bool{},
+
+		xargsLiteralMarkers:  map[xargsMarkerKey]bool{},
+		xargsMarkersFollowed: map[string]struct{}{},
+		xargsInput:           map[xargsInputKey]bool{},
+
+		xargsCommandFollows:    map[*syntax.Word]bool{},
+		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
+		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
+		xargsNestedAny:         map[xargsMarkerKey]bool{},
 	}
 }
 
@@ -87,11 +119,16 @@ type wrapperTailKey struct {
 
 // envArgvWord literalizes one env operand the way env itself parses it: a
 // non-literal word that still spells a NAME= assignment keeps its name (the
-// value is dynamic), and anything else is unprovable.
+// value is dynamic), and anything else is unprovable. A substituted xargs
+// marker passes as a placeholder: it is admitted only after env's command
+// slot, and envScan refuses it anywhere up to and including that slot.
 func envArgvWord(word *syntax.Word) (string, bool) {
 	value, literal := literalShellWord(word)
 	if literal {
 		return value, true
+	}
+	if isXargsItemWord(word) {
+		return xargsItemEnvPlaceholder, true
 	}
 	name, assignment := shellWordAssignmentName(word)
 	if !assignment {
@@ -158,6 +195,12 @@ func (memo operandTailMemo) envScan(words []*syntax.Word, state envcommand.State
 			return value, ok
 		}
 		step, err := envcommand.Advance(arg, operand, state, envcommand.Policy{AllowAssignments: true})
+		// An xargs item env steps on — as an option, an assignment, the
+		// command, or an option's operand — is one whose content could make
+		// it any of those, so the call is unprovable (#4977).
+		if err == nil && (isXargsItemWord(words[0]) || (step.Width > 1 && hasXargsItemWord(words[1:step.Width]))) {
+			err = envcommand.ErrUnsupported
+		}
 		if err != nil || step.Clear {
 			summary = envScanSummary{refused: true}
 			chain = append(chain, pending{key: key})
