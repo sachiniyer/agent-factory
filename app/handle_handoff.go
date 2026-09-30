@@ -65,6 +65,56 @@ func handoffConfirmMessage(title, from, target string) string {
 	return fmt.Sprintf("Hand '%s' from %s to %s?", title, from, target)
 }
 
+// handoffFreshStartDetail is the consent elaboration for every handoff the
+// picker offers except a same-agent carry-intended account swap. The new agent
+// gets the mission brief — a summary of the work so far — over a fresh
+// conversation it cannot see, and the working tree and branch are untouched.
+const handoffFreshStartDetail = "The new agent starts fresh with a summary of the work so far. " +
+	"Same worktree and branch — nothing is discarded."
+
+// handoffCarryIntendedDetail is the consent elaboration for a same-agent
+// claude/codex account swap the daemon will attempt to carry (#4367/#4504).
+// There the replacement is INTENDED to resume the previous conversation rather
+// than start fresh, so the consent copy must not assert "starts fresh with a
+// summary" the way the fresh-start branch does — that under-promised the
+// carry-succeeds case at the consent boundary and was only corrected in-band
+// by the replacement's first prompt seconds later. The clause HEDGES rather
+// than promises: carry eligibility is decided daemon-side after the user
+// confirms, and the carry can still fall back to a fresh start (a stale
+// transcript, an unresolved account home, a copy failure), so the wording
+// stays true whether the daemon reaches either outcome.
+const handoffCarryIntendedDetail = "The new agent is intended to continue the previous conversation if it can be " +
+	"carried over; otherwise it starts fresh. Same worktree and branch — nothing is discarded."
+
+// handoffConfirmDetail builds the elaboration shown under a handoff's consent
+// question. The fresh-start clause is the truth for every path the picker
+// offers except one: a same-agent claude/codex account swap whose conversation
+// carry the daemon will attempt. There the conversation is intended to
+// continue, and the consent copy must branch rather than assert a single
+// outcome for every account row (#4367/#4504).
+//
+// resolvedAgents is the daemon's resolved_agents answer from the picker load,
+// falling back to the enum for a target it did not classify; a nil map is the
+// same fallback, so an older daemon or an unscoped first frame keeps the
+// fresh-start copy it always had. The carry-intended check is
+// session.AccountSwapCarryIntended, a necessary-not-sufficient signal: it
+// judges only the cheap preconditions (same resolved identity, a
+// carry-supporting agent, a recorded conversation) and leaves the daemon's
+// filesystem-state re-check at admission to decide the actual outcome.
+func handoffConfirmDetail(account, target, current, recorded string, resolvedAgents map[string]string, outgoing session.AgentConversationData) string {
+	if account == "" {
+		return handoffFreshStartDetail
+	}
+	targetResolved := target
+	if r, ok := resolvedAgents[target]; ok {
+		targetResolved = r
+	}
+	if !session.AccountSwapCarryIntended(current, target, targetResolved, recorded, outgoing) {
+		return handoffFreshStartDetail
+	}
+	return handoffCarryIntendedDetail
+}
+
 // handleHandoff opens the agent picker for a handoff (#2013).
 //
 // Guards run BEFORE the picker, not after the choice: making the user pick an
@@ -86,6 +136,7 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	m.handoffResolvedAgents = nil
 	var choices []string
 	if account, _ := selected.AccountSelection(); account != "" {
 		// A scoped session's rows are rebuilt wholesale from the daemon's
@@ -135,12 +186,14 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	choices := m.handoffChoices
 	accounts := m.handoffAccounts
 	warnings := m.handoffWarnings
+	resolvedAgents := m.handoffResolvedAgents
 	pickerTarget := m.handoffTarget
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	m.handoffResolvedAgents = nil
 	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
@@ -165,8 +218,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if account != "" {
 		message = fmt.Sprintf("Hand %q to %s account %q?", title, target, account)
 	}
-	detail := "The new agent starts fresh with a summary of the work so far. " +
-		"Same worktree and branch — nothing is discarded."
+	detail := handoffConfirmDetail(account, target, from, selected.AgentProgram(), resolvedAgents, selected.AgentConversation())
 
 	if idx < len(warnings) {
 		detail = warnings[idx] + detail
