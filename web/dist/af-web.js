@@ -9562,6 +9562,9 @@ var AttachTerminal = class {
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
   onWheel = (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
@@ -9663,7 +9666,11 @@ var AttachTerminal = class {
     const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
     this.touchScrollRemainder = plan.remainder;
     if (plan.lines !== 0) {
-      this.term.scrollLines(plan.lines);
+      if (this.term.buffer.active.type === "alternate" && this.applicationOwnsWheel()) {
+        this.reportTouchWheel(plan.lines, event.touches[0].clientX, event.touches[0].clientY);
+      } else {
+        this.term.scrollLines(plan.lines);
+      }
     }
     event.preventDefault();
   };
@@ -9804,6 +9811,42 @@ var AttachTerminal = class {
   applicationOwnsWheel() {
     const mode = this.term.modes.mouseTrackingMode;
     return mode !== "none" && mode !== "x10";
+  }
+  /**
+   * Delivers a claimed touch drag on the alternate screen to a wheel-reporting
+   * application (#4982), one report per whole line of travel, sub-row travel
+   * already carried over by the caller's remainder.
+   *
+   * The report is delegated to xterm's OWN wheel path rather than encoded here:
+   * the reporting listener xterm binds on its element for a wheel-owning
+   * protocol translates a WheelEvent through the same sendEvent →
+   * CoreMouseService.triggerMouseEvent chain a real wheel uses, so the bytes
+   * are by construction identical — button 64 up / 65 down in whichever
+   * protocol and encoding the application selected (SGR 1006, the X10/UTF-8
+   * legacy form, pixel coordinates), with col/row resolved from the event's
+   * coordinates exactly as it resolves the pointer's. One event per line is
+   * also the wheel's own cadence: a real wheel notch is one DOM event and one
+   * report, so the application cannot tell the finger from a wheel.
+   */
+  reportTouchWheel(lines, x, y) {
+    const element = this.term.element;
+    if (!element) {
+      return;
+    }
+    const deltaY = Math.sign(lines);
+    for (let i = Math.abs(lines); i > 0; i -= 1) {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y,
+          // One line per event, the unit a wheel report carries.
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY
+        })
+      );
+    }
   }
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
