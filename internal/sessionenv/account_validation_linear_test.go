@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -78,6 +79,18 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"xargs -I{} echo env -u env … x", func(n int) string { return "xargs -I{} echo env" + strings.Repeat(" -u env", n) + " x" }, false},
 		{"xargs -I{} echo env … env x", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" env", n) + " x" }, false},
 		{"taskset -c 1 taskset -c 1 … x", func(n int) string { return strings.Repeat("taskset -c 1 ", n) + "x" }, false},
+		// #4977: replace-mode xargs copies an argv only when a marker is
+		// substituted (Codex on #4979: every layer of `xargs -i xargs -i …`
+		// copied its suffix, 11s at 2,000), and distinct markers past
+		// xargsMarkerLimit fail closed (Codex on #4980: 18s at 2,000).
+		{"xargs -i xargs -i … echo hi", func(n int) string { return strings.Repeat("xargs -i ", n) + "echo hi" }, false},
+		{"xargs -IM0 xargs -IM1 … echo", func(n int) string {
+			var b strings.Builder
+			for i := range n {
+				fmt.Fprintf(&b, "xargs -IM%dZ ", i)
+			}
+			return b.String() + "echo"
+		}, true},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {

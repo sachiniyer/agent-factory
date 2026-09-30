@@ -15,26 +15,29 @@ func xargsItemTestNames() map[string]struct{} {
 	return codex
 }
 
-// #4977: under -I/-i/--replace, xargs replaces the marker with an input line,
-// so a marker in a command slot names a program nobody can see at validation
-// time. `xargs -I{} {} CODEX_HOME=/x codex` fed the line `env` runs
-// `env CODEX_HOME=/x codex`, and the walk used to read `{}` as an ordinary
-// program name and accept it.
+// #4977: under -I/-i/--replace, xargs replaces the marker in its initial
+// arguments with an input line, so a marker in a command slot among them
+// names a program nobody can see at validation time: `xargs -I{} strace {}
+// CODEX_HOME=/x codex` fed the line `env` runs `strace env CODEX_HOME=/x
+// codex`, and the walk used to read `{}` as an ordinary program name.
 func TestValidateAccountEnvironmentCommand_RefusesXargsMarkerInCommandSlot(t *testing.T) {
 	account := scopedProcessTabAccount()
 	for _, command := range []string{
-		// The two shapes from the report.
-		"xargs -I{} {} CODEX_HOME=/x codex",
 		"xargs -I{} strace {} CODEX_HOME=/x codex",
+		"xargs -I{} nohup {} CODEX_HOME=/x codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
 		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 	}
-	// A plain substitution into an ordinary argument stays accepted.
+	// A plain substitution into an ordinary argument stays accepted. So does
+	// the report's first shape: xargs never substitutes its own COMMAND word
+	// (GNU xargs 4.9: `printf 'env\n' | xargs -I{} {} A` tries to execute a
+	// literal `{}`), so `{}` there is a fixed program name like any other.
 	for _, command := range []string{
 		"xargs -I{} echo {}",
 		"xargs -I{} env codex {}",
+		"xargs -I{} {} CODEX_HOME=/x codex",
 	} {
 		require.NoError(t, ValidateAccountEnvironmentCommand(command, account), "command %q", command)
 	}
@@ -46,19 +49,32 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		command string
 		want    bool
 	}{
-		// xargs's own command slot, under every replace spelling, and with the
-		// marker only part of the word: `/usr/bin/{}` is /usr/bin/env when the
-		// line is `env`.
-		{"xargs -I{} {} CODEX_HOME=/x codex", true},
-		{"xargs -I {} {} CODEX_HOME=/x codex", true},
-		{"xargs -i {} CODEX_HOME=/x codex", true},
-		{"xargs --replace {} CODEX_HOME=/x codex", true},
-		{"xargs --replace=@ @ CODEX_HOME=/x codex", true},
-		{"xargs -I{} /usr/bin/{} CODEX_HOME=/x codex", true},
-		// A command slot is refused even with nothing mutating after it: the
-		// program could be a shell reading its script from stdin or a file.
-		{"xargs -I{} {}", true},
-		{"xargs -I{} {} /tmp/launch-agent", true},
+		// An initial argument in a command slot, under every replace
+		// spelling, and with the marker only part of the word: `/usr/bin/{}`
+		// is /usr/bin/env when the line is `env`.
+		{"xargs -I {} nohup {} CODEX_HOME=/x codex", true},
+		{"xargs -i nohup {} CODEX_HOME=/x codex", true},
+		{"xargs --replace nohup {} CODEX_HOME=/x codex", true},
+		{"xargs --replace=@ nohup @ CODEX_HOME=/x codex", true},
+		{"xargs -I{} nohup /usr/bin/{} CODEX_HOME=/x codex", true},
+		// A command slot among the initial arguments is refused even with
+		// nothing mutating after it: the program could be a shell reading its
+		// script from stdin or a file.
+		{"xargs -I{} nohup {}", true},
+		{"xargs -I{} setsid {} /tmp/launch-agent", true},
+		// A marker that contains '=' is replaced wherever it occurs (GNU
+		// xargs 4.9 turns `A=b` into `AXXb` under -I=), so the assignment
+		// split does not make it data. Codex on #4979.
+		{"xargs -I= strace = -u CODEX_HOME codex", true},
+		{"xargs -I= env = codex", true},
+		{"xargs -I=x nohup A=x codex", true},
+		// -I then -n2/-L/-l cancels replace mode (the last one wins), so
+		// input is appended: `env` with no command gets it as operands.
+		// Codex on #4979; -n1 is GNU's exception and keeps replace.
+		{"xargs -I{} -n2 env", true},
+		{"xargs -I{} -L1 env", true},
+		{"xargs -I{} -l env", true},
+		{"xargs -I{} --max-args=2 env", true},
 		// A modeled wrapper's command slot.
 		{"xargs -I{} nohup {} CODEX_HOME=/x codex", true},
 		{"xargs -I{} nice -n 5 {}", true},
@@ -85,6 +101,21 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{} strace {}", false},
 		{"xargs -I{}", false},
 		{"xargs -I{} xargs -I[] echo []", false},
+		// xargs's own COMMAND word is never substituted, so the marker there
+		// is a literal program name. Codex on #4979.
+		{"xargs -I{} {} CODEX_HOME=/x codex", false},
+		{"xargs -I{} {}", false},
+		{"xargs -i {} echo hi", false},
+		{"xargs -I{} /usr/bin/{} echo", false},
+		// Replace mode cancelled by a later -n2 appends instead, and `cat`
+		// is no longer a marker. Codex on #4979.
+		{"xargs -Icat -n2 strace /bin/cat -u CODEX_HOME codex", false},
+		{"xargs -I{} -n1 echo {}", false},
+		// A later literal -I supersedes an earlier marker. Codex on #4979.
+		{"xargs -I M -I{} echo hi M", false},
+		{"xargs -I{} -i echo {} hi", false},
+		// A marker only in an assignment's value stays data.
+		{"xargs -I{} nohup env A={} codex", false},
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),
 			"command %q", test.command)
@@ -108,7 +139,8 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerMatchesDynamicWord(t *testi
 		for i, word := range words {
 			name, _, _ := strings.Cut(word, "=")
 			dynamic[i] = word
-			if strings.Contains(name, "{}") {
+			// xargs's own COMMAND word is never substituted.
+			if i > 0 && strings.Contains(name, "{}") {
 				dynamic[i] = `"$y"`
 			}
 		}

@@ -43,6 +43,10 @@ type operandTailMemo struct {
 	xargsMarkers map[xargsMarkerKey]int
 	// xargsItems: is any word from here on a substituted xargs marker.
 	xargsItems map[*syntax.Word]bool
+	// xargsLiteralMarkers: does any literal word from here on carry the marker.
+	xargsLiteralMarkers map[xargsMarkerKey]bool
+	// xargsMarkersFollowed: the distinct replace markers this walk has followed.
+	xargsMarkersFollowed map[string]struct{}
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -57,6 +61,9 @@ func newOperandTailMemo() operandTailMemo {
 		xargsEnvScans:     map[xargsEnvKey]bool{},
 		xargsMarkers:      map[xargsMarkerKey]int{},
 		xargsItems:        map[*syntax.Word]bool{},
+
+		xargsLiteralMarkers:  map[xargsMarkerKey]bool{},
+		xargsMarkersFollowed: map[string]struct{}{},
 	}
 }
 
