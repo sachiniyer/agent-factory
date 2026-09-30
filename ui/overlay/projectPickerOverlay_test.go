@@ -249,6 +249,95 @@ func TestProjectPickerRebindFlow(t *testing.T) {
 	}
 }
 
+// TestProjectPickerRebindConflictRebuildsRows pins the #4888-review follow-up
+// to #4822: a rebind conflict means the registration moved, so every field of
+// the row the picker returns to — Root, RepoID, name, missing-path — is stale.
+// The open picker is rebuilt from the caller's refreshed list rather than
+// patched in place, so an Esc back to it cannot select a checkout the registry
+// no longer records, and a retried rebind expects the root reported NOW.
+func TestProjectPickerRebindConflictRebuildsRows(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "old", Root: "/old/root", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/root", MissingPath: true},
+		{Name: "other", Root: "/repos/other", RepoID: "repo-other", RegistryID: "prj_bbb", RegistryRoot: "/repos/other"},
+	}, "")
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+
+	// The caller's registry re-read puts the project somewhere else entirely:
+	// different root, identity, display name, and no longer missing.
+	p.SetRebindConflict("Rebound elsewhere, to /new/root · Enter retries from there", []Project{
+		{Name: "moved", Root: "/new/root", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/root"},
+		{Name: "other", Root: "/repos/other", RepoID: "repo-other", RegistryID: "prj_bbb", RegistryRoot: "/repos/other"},
+	})
+
+	// Esc returns to the list — the row must describe the rebound
+	// registration, not the pre-conflict snapshot.
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	row, ok := p.HighlightedProject()
+	if !ok {
+		t.Fatalf("the rebuilt list should still have a highlighted row")
+	}
+	if row.Root != "/new/root" || row.RepoID != "repo-new" || row.Name != "moved" || row.MissingPath || row.RegistryRoot != "/new/root" {
+		t.Fatalf("the conflict row must be the refreshed one, got %+v", row)
+	}
+
+	// Rebinding again from that row carries the registry's CURRENT root as the
+	// expected root — the retry is a compare-and-set on present state.
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/final")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	req, ok := p.TakeRebindRequest()
+	if !ok || req.Project.RegistryRoot != "/new/root" || req.Project.Root != "/new/root" {
+		t.Fatalf("the retry must carry the refreshed row, got %+v (ok=%v)", req.Project, ok)
+	}
+}
+
+// TestProjectPickerRebindConflictClampsCursor: if the refreshed list is
+// shorter than the cursor position — the record was deleted outright, so it
+// has no row at all — the rebuild must not leave selectedIdx pointing past
+// the rows.
+func TestProjectPickerRebindConflictClampsCursor(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{
+		{Name: "a", Root: "/repos/a"},
+		{Name: "b", Root: "/repos/b"},
+		{Name: "gone", Root: "/old/gone", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/gone"},
+	}, "")
+	// The cursor sits on the last row, the registry record being rebound.
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('j'))
+	p.HandleKeyPress(keyRune('b'))
+	typeRunes(p, "/candidate")
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := p.TakeRebindRequest(); !ok {
+		t.Fatalf("the submitted rebind should reach the caller")
+	}
+	// The record is gone: two rows remain where the cursor was at index 2.
+	// Clamping lands it on the trailing add-project row — a valid cursor spot —
+	// never past it, and never on a stale row for the vanished record.
+	p.SetRebindConflict("Rebound elsewhere — its record is gone", []Project{
+		{Name: "a", Root: "/repos/a"},
+		{Name: "b", Root: "/repos/b"},
+	})
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if p.selectedIdx > len(p.all) {
+		t.Fatalf("cursor must stay within the navigable rows, got %d over %d projects", p.selectedIdx, len(p.all))
+	}
+	if row, ok := p.HighlightedProject(); ok && row.RegistryID == "prj_aaa" {
+		t.Fatalf("a deleted record's stale row must not be highlightable, got %+v", row)
+	}
+	// Navigating up off the add row lands on a live one that selects normally.
+	p.HandleKeyPress(keyRune('k'))
+	p.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	row, ok := p.SelectedProject()
+	if !ok || row.RegistryID == "prj_aaa" {
+		t.Fatalf("only a live row may be selectable after the record vanished, got %+v (ok=%v)", row, ok)
+	}
+}
+
 func TestProjectPickerRebindOnlyOnRegistryRows(t *testing.T) {
 	p := NewProjectPickerOverlay([]Project{
 		{Name: "derived", Root: "/repos/derived"}, // no RegistryID: session-derived

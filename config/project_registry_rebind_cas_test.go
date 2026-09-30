@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -114,4 +115,70 @@ func TestRebindIfRootReplayOfALandedRebindIsNotAConflict(t *testing.T) {
 	_, err = RebindProjectIfRoot(project.ID, project.Root, target)
 	require.NoError(t, err)
 	assert.Equal(t, canonicalExistingPath(t, target), recordedRoot(t, project.ID))
+}
+
+// TestRebindIfRootExpectedRootComparesSpellingsNotAliases is a #4888-review
+// follow-up to #4822: the expected-root precondition compares the recorded
+// root's SPELLING, not its filesystem identity. Once the record moved
+// /old -> /new and /old later became a symlink (or bind mount) to /new — a
+// common leftover of moving a checkout — an os.SameFile compare would satisfy
+// the stale precondition and let a second rebind land.
+func TestRebindIfRootExpectedRootComparesSpellingsNotAliases(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
+	_, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	require.NoError(t, err)
+	current := recordedRoot(t, project.ID)
+
+	// The old checkout path now aliases the new root: the moved checkout's
+	// directory is gone and a symlink keeps old references working.
+	require.NoError(t, os.RemoveAll(project.Root))
+	require.NoError(t, os.Symlink(current, project.Root))
+
+	stale := initProjectRegistryRepo(t, filepath.Join(base, "stale-choice"))
+	_, err = RebindProjectIfRoot(project.ID, project.Root, stale)
+	var refusal *ProjectReboundError
+	require.True(t, errors.As(err, &refusal),
+		"an expected root that merely ALIASES the recorded root must be refused, got %v", err)
+	assert.Equal(t, current, refusal.Current)
+	assert.Equal(t, current, recordedRoot(t, project.ID), "a refused rebind writes nothing")
+}
+
+// TestRebindIfRootReplayRequiresTheSameCheckout is the other #4888-review
+// follow-up: after a rebind /old -> /new lands, the checkout at /new is
+// REPLACED — a reclone to the same path, which mints a new checkout marker —
+// and the original request is replayed. The recorded root still matches the
+// resolved binding's root, but the precondition observed a checkout that no
+// longer exists, so the replay must be refused rather than silently
+// retargeting the record to the replacement checkout.
+func TestRebindIfRootReplayRequiresTheSameCheckout(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
+	landed, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	require.NoError(t, err)
+	current := recordedRoot(t, project.ID)
+	require.NotEmpty(t, landed.CheckoutID, "precondition: the landed rebind recorded a checkout id")
+
+	// Replace the checkout at the recorded root: wipe it and reclone at the
+	// same path, so the directory carries a different checkout marker.
+	require.NoError(t, os.RemoveAll(current))
+	initProjectRegistryRepo(t, current)
+	replacementID, err := ensureCheckoutID(projectCheckoutMarkerPath(t, current))
+	require.NoError(t, err)
+	require.NotEqual(t, landed.CheckoutID, replacementID, "precondition: the replacement is a different checkout")
+
+	// The replay names the same root the landed rebind targeted, but the
+	// checkout behind it is new — the precondition must still refuse.
+	_, err = RebindProjectIfRoot(project.ID, project.Root, current)
+	var refusal *ProjectReboundError
+	require.True(t, errors.As(err, &refusal),
+		"a replay against a REPLACED checkout must be refused, got %v", err)
+
+	after, err := ListProjects()
+	require.NoError(t, err)
+	for _, p := range after {
+		if p.ID == project.ID {
+			assert.Equal(t, landed.CheckoutID, p.CheckoutID, "a refused replay must not retarget the record's checkout identity")
+		}
+	}
 }

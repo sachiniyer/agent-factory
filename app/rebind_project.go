@@ -85,14 +85,28 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 	if msg.err != nil && !committed {
 		if !rebindOutcomeUnknown(msg.err) {
 			if apiclient.IsProjectRebound(msg.err) {
-				m.refreshSidebarProjects()
+				// A conflict moved a registration: the sidebar's Projects
+				// section and the row this picker returns to are both stale in
+				// every field, not just the recorded root. Refresh both from
+				// ONE snapshot — a second synchronous daemon RPC here would
+				// double the on-loop stall (#4888 review).
+				data, fetchErr := allReposSnapshotFetcher()
+				m.refreshSidebarProjectsFromSnapshot(data, fetchErr)
+				if owned {
+					if root, ok := registeredProjectRoot(msg.projectID); ok {
+						// Rebuild the open picker from the fresh list so an
+						// Esc back to it cannot select a checkout the registry
+						// no longer records; the same rebuild re-targets the
+						// rebind form at the root the registry reports now.
+						fresh, degraded := m.buildProjectListFrom(data)
+						m.projectPickerOverlay.SetDegraded(degraded)
+						m.projectPickerOverlay.SetRebindConflict(
+							fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root), fresh)
+						return m, nil
+					}
+				}
 			}
 			if owned {
-				if root, ok := registeredProjectRoot(msg.projectID); ok && apiclient.IsProjectRebound(msg.err) {
-					m.projectPickerOverlay.SetRebindConflict(
-						fmt.Sprintf("Rebound elsewhere, to %s · Enter retries from there", root), root)
-					return m, nil
-				}
 				m.projectPickerOverlay.SetRebindError(msg.err.Error())
 				return m, nil
 			}
