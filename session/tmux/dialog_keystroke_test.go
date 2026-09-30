@@ -574,6 +574,99 @@ func TestHandleCodexSafetyBuffering_ModelVerificationTimeoutPreservesGuardForMid
 		"the Down af sent survives the mid-repaint timeout and is named in the death diagnostic")
 }
 
+// TestHandleCodexSafetyBuffering_NewPickerReplacesTimedOutPickerBetweenPollsResetsPriorRecord is
+// the #4740 review follow-up at codex_safety.go line 229: the model-verification timeout sets
+// pickerOpenAfterModelTimeout, and the !dialogPresent proven-closure clear is the only thing
+// that previously cleared it. When Codex closes the timed-out picker AND replaces it with a
+// fresh safety picker between two Snapshot polls, no !dialogPresent capture with a visible
+// cursor ever fires to clear the marker; the new picker inherits it, skips
+// resetCompletedCodexSafetyKeystroke, and its navigation/Enter append to the prior picker's
+// completed Down Enter inside the 30s attribution window — folding keys from two separate
+// interactions into one death diagnostic. The same-instance retry the marker protects never
+// reaches the navigation block needing keys: the answered picker keeps its cursor on the row
+// af moved it to, so navigationKeys returns none and af only re-sends Enter. Needing to
+// navigate is therefore positive evidence of a newly rendered picker af has not yet
+// interacted with, distinct from that retry; the handler treats it as the boundary for the
+// unobserved modal transition — reset the prior completed record and clear the marker so the
+// new picker starts fresh. Without the boundary this test fails with the record becoming
+// ["Down", "Enter", "Down", "Enter"] (both pickers' keys folded) instead of
+// ["Down", "Enter"].
+func TestHandleCodexSafetyBuffering_NewPickerReplacesTimedOutPickerBetweenPollsResetsPriorRecord(t *testing.T) {
+	const normalPane = "gpt-5.6-sol max · ~/agent-factory"
+	frames := []trustPromptFrame{
+		{content: normalPane},
+		{content: codexSafetyBufferingDialog},
+		{content: codexSafetyBufferingKeepWaitingSelected},
+	}
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		frames = append(frames, trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected})
+	}
+	frames = append(frames,
+		// Between the timed-out first picker's final verification poll and this
+		// capture, Codex closed it and opened a fresh safety picker — no ordinary
+		// composer pane is ever on screen, so no !dialogPresent capture with a
+		// visible cursor fires to clear the marker. The fresh picker renders with
+		// its default row selected, so af must navigate it (len(keys) > 0); the
+		// same-instance retry the marker protects would already own the target row
+		// and need no keys.
+		trustPromptFrame{content: codexSafetyBufferingDialog},
+		trustPromptFrame{content: codexSafetyBufferingKeepWaitingSelected},
+		trustPromptFrame{content: normalPane},
+	)
+
+	session, _ := runTrustPromptFrames(t, ProgramCodex, frames...)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(), "a normal Codex pane is not a modal")
+	require.True(t, session.CheckAndHandleTrustPrompt(), "the first safety picker must be answered (Down Enter)")
+
+	record, _, ok := session.recentDialogKeystroke()
+	require.True(t, ok, "af answered the picker; a Down Enter record must exist")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys, "the first answer records Down Enter")
+
+	// Drive the model-verification polls in which the answered first picker stays
+	// rendered and no model footer is readable. The poll that hits the budget
+	// times out while the SAME first picker is still on screen, setting the
+	// marker.
+	for i := 0; i < codexSafetyModelVerificationPolls; i++ {
+		require.True(t, session.CheckAndHandleTrustPrompt(),
+			"the answered first picker is still rendered on verification poll %d; the handler keeps blocking", i)
+	}
+
+	// The fresh safety picker replaces the timed-out one between Snapshot polls.
+	// The handler must recognize needing to navigate it as a new-instance
+	// boundary — not the same-picker retry — reset the prior completed Down
+	// Enter, and start a fresh record carrying only the new picker's keys.
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"the fresh safety picker that replaced the timed-out one between polls must be handled")
+
+	record, _, ok = session.recentDialogKeystroke()
+	require.True(t, ok, "af just answered the fresh safety picker; there must be a recent keystroke")
+	require.Equal(t, codexSafetyDialogName, record.dialog,
+		"the recorded dialog must be the safety-check, not a stale prior dialog")
+	require.Equal(t, codexSafetyWaitLabel, record.choice,
+		"the recorded choice must be the row af navigated to and accepted on the fresh picker")
+	require.Equal(t, []string{"Down", "Enter"}, record.keys,
+		"the fresh picker's record must carry only its own keys; the first picker's completed Down Enter must not survive the unobserved modal transition between polls")
+	require.NotContains(t, strings.Join(record.keys, " "), "Down Enter Down Enter",
+		"keys from two separate picker instances must not fold into one record")
+
+	// A death now reads af having answered the fresh picker — the prior picker's
+	// Enter and keys are not misattributed to the new interaction.
+	err := session.sessionGoneError("capture-pane", errors.New("exit status 1"))
+	require.ErrorIs(t, err, ErrSessionGone)
+	require.Contains(t, err.Error(), codexSafetyDialogName,
+		"the death is attributed to the safety dialog af answered")
+	require.Contains(t, err.Error(), "Down Enter",
+		"the diagnostic names the fresh picker's keys")
+	require.NotContains(t, err.Error(), "Down Enter Down Enter",
+		"the prior picker's keys must not be misattributed to a death on the fresh picker")
+
+	// The fresh picker's model verification observes on the next poll and does
+	// not inject another key.
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"the fresh picker's model verification observes; it does not inject another key")
+}
+
 // TestHandleCodexSafetyBuffering_RecordsNavigationKeysForDiagnostic is the
 // end-to-end guard against the same regression recurring: it drives the real
 // CheckAndHandleTrustPrompt through the safety picker the way the daemon's

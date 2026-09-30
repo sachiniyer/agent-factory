@@ -62,10 +62,13 @@ type codexSafetyBufferingState struct {
 	// instance and drop its completed Down Enter record before the retry Enter
 	// — anonymizing a death on the retry and losing the Down on a success
 	// (#4740 review follow-up). It is cleared by finishModelVerification's
-	// full-state reset on the normal path (footer readable, picker closed), and
-	// by the !dialogPresent path at proven closure (a visible composer cursor)
-	// — the boundaries that prove a later rendered picker is a genuinely new
-	// instance.
+	// full-state reset on the normal path (footer readable, picker closed), by
+	// the !dialogPresent path at proven closure (a visible composer cursor),
+	// and by the navigation block when af has to navigate a newly rendered
+	// picker while the marker is set (positive evidence af is interacting with
+	// a fresh picker that replaced the timed-out one between Snapshot polls,
+	// not retrying the same one) — the boundaries that prove a later rendered
+	// picker is a genuinely new instance.
 	pickerOpenAfterModelTimeout bool
 	selectionTarget             string
 	selectionStarted            time.Time
@@ -221,14 +224,31 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 	// reach this reset for that same picker and drop its recorded Down Enter
 	// before the retry Enter — anonymizing a death on the retry and losing the
 	// Down on a success (#4740 review follow-up). pickerOpenAfterModelTimeout
-	// stays set across that timeout finish and is cleared only by the normal
-	// finish (footer readable, picker closed), the boundary that proves a
-	// later rendered picker is a genuinely new instance.
-	if !state.pickerOpenAfterModelTimeout {
-		t.resetCompletedCodexSafetyKeystroke()
-	}
-
+	// stays set across that timeout finish and is cleared by the normal finish
+	// (footer readable, picker closed) and the !dialogPresent path's
+	// proven-closure clear (a visible composer cursor) — the boundaries that
+	// prove a later rendered picker is a genuinely new instance.
+	//
+	// One unobserved modal transition still skips both clears: Codex can close
+	// the timed-out picker AND replace it with a fresh safety picker between
+	// Snapshot polls, so no !dialogPresent capture with a visible cursor ever
+	// fires. The new picker inherits the marker, skips this reset, and its
+	// navigation/Enter append to the prior picker's completed record — folding
+	// keys from two separate interactions into one death diagnostic. A
+	// same-instance retry never reaches this block needing navigation: the
+	// answered picker keeps its cursor on the row af already moved it to, so
+	// navigationKeys returns none and af only re-sends the confirming Enter.
+	// Needing to navigate here is therefore positive evidence of a newly
+	// rendered picker af has not yet interacted with, distinct from the
+	// same-instance retry the marker protects; treat that as the boundary for
+	// the unobserved transition — reset the prior completed record and clear
+	// the marker so the new picker's own later timeout / retry is not mistaken
+	// for a continuation of the old one (#4740 review follow-up).
 	keys := navigationKeys(dialog.selectedIndex, dialog.targetIndex)
+	if !state.pickerOpenAfterModelTimeout || len(keys) > 0 {
+		t.resetCompletedCodexSafetyKeystroke()
+		state.pickerOpenAfterModelTimeout = false
+	}
 	if len(keys) > 0 {
 		if err := t.tapPromptKeys(keys...); err != nil {
 			log.ErrorLog.Printf("could not navigate Codex additional safety checks for session %q: %v", t.sanitizedName, err)
