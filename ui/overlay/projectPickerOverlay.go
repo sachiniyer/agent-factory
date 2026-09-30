@@ -261,6 +261,81 @@ func (p *ProjectPickerOverlay) SetRebindError(msg string) {
 // definitively, as it should.
 func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project) {
 	p.all = projects
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
+}
+
+// SetRebindConflictPreserving is SetRebindConflict for a conflict refresh whose
+// session snapshot never answered (#4888 review): projects then carries only
+// the registry-side union, so installing it wholesale would drop every
+// session-derived row and zero the counts on registry rows — the daemon still
+// runs those sessions; this client merely could not recount them. The picker's
+// session-derived rows stay, each surviving registry row keeps the counts it
+// last displayed, and only registry truth replaces registry truth: a record
+// absent from a HEALTHY registry read still drops its stale row — the rebuild
+// exists to remove exactly those — while a failed registry read (degraded)
+// proves nothing about absence and keeps it.
+func (p *ProjectPickerOverlay) SetRebindConflictPreserving(msg string, projects []Project, registryDegraded bool) {
+	freshByRegistryID := make(map[string]Project, len(projects))
+	for _, row := range projects {
+		if row.RegistryID != "" {
+			freshByRegistryID[row.RegistryID] = row
+		}
+	}
+	merged := make([]Project, 0, len(p.all)+len(projects))
+	seenRepoIDs := make(map[string]bool, len(p.all)+len(projects))
+	seenRoots := make(map[string]bool, len(p.all)+len(projects))
+	for _, row := range p.all {
+		if row.RegistryID == "" {
+			// A session-derived row: the snapshot read that produced it never
+			// answered, so nothing fresher exists to replace it with.
+			merged = append(merged, row)
+			seenRepoIDs[row.RepoID] = true
+			seenRoots[row.Root] = true
+			continue
+		}
+		if fresh, ok := freshByRegistryID[row.RegistryID]; ok {
+			// The fresh registry row carries the record's new root, name and
+			// path state; the counts were last tallied by the snapshot that
+			// failed, so they carry over from the row it replaces.
+			fresh.SessionCount = row.SessionCount
+			fresh.InPlaceCount = row.InPlaceCount
+			merged = append(merged, fresh)
+			seenRepoIDs[fresh.RepoID] = true
+			seenRoots[fresh.Root] = true
+			continue
+		}
+		if registryDegraded {
+			// The registry read failed too — an absent record proves nothing
+			// under a read that read nothing. Keep the row rather than empty
+			// the list behind a warning it cannot confirm.
+			merged = append(merged, row)
+			seenRepoIDs[row.RepoID] = true
+			seenRoots[row.Root] = true
+		}
+		// Otherwise the healthy read proves the record is gone: drop the row.
+	}
+	// Registry-side rows with no counterpart in the old list — a registration
+	// newer than the picker, or the root_agents/active rows the snapshot used
+	// to supply — still land; an existing row claiming the same identity or
+	// root already wins.
+	for _, row := range projects {
+		if seenRepoIDs[row.RepoID] || seenRoots[row.Root] {
+			continue
+		}
+		merged = append(merged, row)
+		seenRepoIDs[row.RepoID] = true
+		seenRoots[row.Root] = true
+	}
+	p.all = merged
+	p.reseatAfterConflictRebuild()
+	p.SetRebindError(msg)
+}
+
+// reseatAfterConflictRebuild restores the cursor and rebind target after the
+// row set changed under a conflict: clamp the index into the navigable rows,
+// then land on the rebound row wherever the rebuild sorted it.
+func (p *ProjectPickerOverlay) reseatAfterConflictRebuild() {
 	// len(p.all) is the trailing add-project row — still a valid cursor spot.
 	if p.selectedIdx > len(p.all) {
 		p.selectedIdx = len(p.all)
@@ -277,7 +352,6 @@ func (p *ProjectPickerOverlay) SetRebindConflict(msg string, projects []Project)
 			break
 		}
 	}
-	p.SetRebindError(msg)
 }
 
 // SetRebindDenied refuses rebind before it can submit, carrying the refusal

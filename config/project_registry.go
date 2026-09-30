@@ -338,7 +338,12 @@ func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 			if rerr != nil {
 				return fmt.Errorf("re-read the checkout marker for %q before accepting a rebind replay: %w", binding.root, rerr)
 			}
-			if !sameProjectPath(record.Root, binding.root) || !bound || boundID != record.CheckoutID {
+			// The root compare is SPELLING, not filesystem identity — the same
+			// rule the expected-root check applies (#4888 review): a request
+			// that merely ALIASES the recorded root (a bind mount, a second
+			// spelling of the same directory) is not the landed rebind, and
+			// accepting it would rewrite the record's root to the alias.
+			if !sameProjectPathSpelling(record.Root, binding.root) || !bound || boundID != record.CheckoutID {
 				return &ProjectReboundError{ID: id, Expected: expectedRoot, Current: record.Root}
 			}
 			// The accepted replay keeps the marker it VERIFIED: re-reading
@@ -904,14 +909,20 @@ func sameProjectPath(left, right string) bool {
 
 // sameProjectPathSpelling is the first half of sameProjectPath WITHOUT the
 // filesystem fallback — clean path text only. It exists for the rebind
-// compare-and-set's expected-root compare (#4888 review): a precondition names
-// the registry value the caller OBSERVED, and a path that merely resolves to
-// the same inode today — a symlink or bind mount created at the old root after
-// the record moved — must not satisfy it. The collision checks that keep
+// compare-and-set's precondition compares (#4888 review): the expected root
+// names the registry value the caller OBSERVED, and the replay bypass asks the
+// same question of the request's bound root — a path that merely resolves to
+// the same inode today (a symlink or bind mount created at the old root after
+// the record moved) must satisfy neither. The collision checks that keep
 // sameProjectPath's os.SameFile fallback ask a different question (does this
-// path occupy the same directory), so only the precondition compare is
+// path occupy the same directory), so only the precondition compares are
 // spelling-only.
-func sameProjectPathSpelling(left, right string) bool {
+//
+// A var, not a func, for the same reason the race hooks below are: producing a
+// real same-inode/different-spelling pair needs a bind mount, which an
+// unprivileged test cannot create — the seam lets a test observe which
+// compare the replay actually consults.
+var sameProjectPathSpelling = func(left, right string) bool {
 	return filepath.Clean(left) == filepath.Clean(right)
 }
 

@@ -228,3 +228,44 @@ func TestRebindIfRootReplayKeepsTheVerifiedMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestRebindIfRootReplayConsultsTheSpellingCompare pins the #4888 round-4
+// review finding: the replay bypass must compare the request's bound root to
+// the recorded root by SPELLING — the way the expected-root compare above it
+// already does — not by filesystem identity. An os.SameFile compare accepts a
+// bind-mount alias of the recorded root as the landed rebind replaying, then
+// rewrites the record's root to the alias spelling. A real same-inode /
+// different-spelling pair needs a mount an unprivileged test cannot create,
+// so the test spies the spelling compare itself: a genuine replay (same
+// spelling, real acceptance) must consult it for the (recorded, bound) pair —
+// an implementation still calling sameProjectPath never does.
+func TestRebindIfRootReplayConsultsTheSpellingCompare(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
+	_, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	require.NoError(t, err)
+	current := recordedRoot(t, project.ID)
+
+	var spellingChecked [][2]string
+	old := sameProjectPathSpelling
+	sameProjectPathSpelling = func(left, right string) bool {
+		spellingChecked = append(spellingChecked, [2]string{left, right})
+		return old(left, right)
+	}
+	t.Cleanup(func() { sameProjectPathSpelling = old })
+
+	// Replay the landed rebind: expectedRoot is stale (the pre-move root), the
+	// bound root is the recorded one verbatim — acceptance must run through the
+	// spelling compare, not os.SameFile.
+	_, err = RebindProjectIfRoot(project.ID, project.Root, current)
+	require.NoError(t, err, "a true replay of the landed rebind is still accepted")
+
+	found := false
+	for _, call := range spellingChecked {
+		if call == [2]string{current, current} {
+			found = true
+		}
+	}
+	require.True(t, found,
+		"the replay bypass must compare the recorded root to the bound root by cleaned spelling — calls: %v", spellingChecked)
+}
