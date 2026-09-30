@@ -108,6 +108,47 @@ func TestRequestShutdownFallsBackToPingPID(t *testing.T) {
 	}
 }
 
+// slowPingControl answers Ping only after the RequestShutdown probe's bound,
+// and acknowledges Shutdown without a PID.
+type slowPingControl struct{ pid int }
+
+func (c slowPingControl) Ping(_ PingRequest, resp *PingResponse) error {
+	time.Sleep(4 * daemonDialTimeout)
+	resp.PID = c.pid
+	return nil
+}
+
+func (c slowPingControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	resp.OK = true
+	return nil
+}
+
+// TestRequestShutdownSlowPingStillShutsDown: a Ping that misses its bound
+// kills the shared connection, so Shutdown goes out on a fresh one — a slow
+// but healthy daemon is still stopped, not misreported as unstoppable — and
+// no PID from that unanswered Ping is trusted.
+func TestRequestShutdownSlowPingStillShutsDown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	srv := rpc.NewServer()
+	if err := srv.RegisterName(controlServiceName, slowPingControl{pid: 424242}); err != nil {
+		t.Fatalf("register Control: %v", err)
+	}
+	_, cleanup := startFakeControlListener(t, srv)
+	t.Cleanup(cleanup)
+
+	result, target, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown: %v", err)
+	}
+	if result != ShutdownViaRPC {
+		t.Fatalf("shutdown result = %v, want ShutdownViaRPC", result)
+	}
+	if target != (ShutdownTarget{}) {
+		t.Fatalf("shutdown target = %+v, want zero — a Ping that did not answer on the Shutdown's connection names no one", target)
+	}
+}
+
 // startReapedProcess starts name/args and reaps it in the background, so once
 // it exits it does not linger as a zombie that kill(pid, 0) still reports
 // alive (macOS has no /proc cmdline to tell the difference). The cleanup kills

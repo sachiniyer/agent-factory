@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/rpc"
 	"os"
 	"strings"
@@ -91,22 +92,52 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 		}
 		return ShutdownNoDaemon, ShutdownTarget{}, statErr
 	}
+	// Ping and Shutdown share ONE connection. A unix connection dies with the
+	// process that accepted it, so a Ping answered on the connection that then
+	// carries the Shutdown ack provably came from the acknowledging daemon. On
+	// separate connections the pinged daemon could exit and a replacement bind
+	// and acknowledge in between, and the wait would then track a PID that never
+	// acknowledged — see it dead and respawn into the drainer's race.
+	conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	if dialErr != nil {
+		if isDaemonAbsentErr(dialErr) {
+			return ShutdownNoDaemon, ShutdownTarget{}, nil
+		}
+		// The socket was present per the stat above, so an unclassifiable dial
+		// failure is the ambiguous contacted-but-errored outcome (#978).
+		return ShutdownError, ShutdownTarget{}, dialErr
+	}
+	defer conn.Close()
+	client := rpc.NewClient(conn)
+	defer client.Close()
 	// Capture the target's PID before asking it to stop: once it acknowledges it
 	// may stop answering, and a daemon predating ShutdownResponse.PID reports
-	// none. Bounded so a wedged responder cannot stall the upgrade, and its error
-	// is ignored — a failed ping only means the PID is unknown (0), and the
-	// Shutdown RPC below is the authority on whether a daemon is there at all.
+	// none. Bounded so a wedged responder cannot stall the upgrade.
 	var pingResp PingResponse
-	_ = callDaemonNoEnsureBefore("Ping", PingRequest{}, &pingResp, time.Now().Add(daemonDialTimeout), true)
-	// Pin the pinged process's incarnation now, while it is certainly still the
-	// daemon: for a daemon whose ack carries no PID this is the only sample
-	// taken before it could exit and have its PID recycled.
 	var pingToken string
-	if pingResp.PID > 0 {
-		pingToken = processStartTokenFn(pingResp.PID)
-	}
 	var resp ShutdownResponse
-	if rpcErr := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); rpcErr != nil {
+	var rpcErr error
+	_ = conn.SetDeadline(time.Now().Add(daemonDialTimeout))
+	if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &pingResp); pingErr != nil {
+		// A Ping that missed its bound shuts this client down, so a Shutdown sent
+		// on it would fail and misreport a slow-but-healthy daemon as one that
+		// could not be stopped. Send Shutdown on a fresh connection instead, as
+		// before the Ping existed; with no Ping answered on that connection, only
+		// the ack's own PID is trusted.
+		pingResp = PingResponse{}
+		rpcErr = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+	} else {
+		// Pin the pinged process's incarnation now, while it is certainly still
+		// the daemon: for a daemon whose ack carries no PID this is the only
+		// sample taken before it could exit and have its PID recycled.
+		if pingResp.PID > 0 {
+			pingToken = processStartTokenFn(pingResp.PID)
+		}
+		// Shutdown keeps its historical unbounded call once connected.
+		_ = conn.SetDeadline(time.Time{})
+		rpcErr = client.Call(controlServiceName+".Shutdown", ShutdownRequest{}, &resp)
+	}
+	if rpcErr != nil {
 		if isDaemonAbsentErr(rpcErr) {
 			return ShutdownNoDaemon, ShutdownTarget{}, nil
 		}
