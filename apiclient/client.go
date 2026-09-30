@@ -344,6 +344,18 @@ func (c *Client) roundTrip(httpReq *http.Request, resp any) error {
 		// skew, which is unactionable in its raw form.
 		return interpretEnvelopeError(env.Error.Message, env.Error.Code)
 	}
+	// The daemon pairs every non-200 status with a populated env.Error
+	// (daemon/httpserver.go writeHTTPError). A non-200 status carrying a benign
+	// envelope — env.Error == nil — can only have come from an intermediary in
+	// front of a remote daemon: the handler's outcome is unconfirmed, never a
+	// success. Without this guard, `{"data":null,"error":null}` on a 5xx
+	// unmarshals JSON null into resp (a no-op) and committedFromResponse
+	// returns nil, reporting a mutation that landed when its fate is unknown.
+	if httpResp.StatusCode != http.StatusOK && env.Error == nil {
+		return &UnconfirmedHTTPResponseError{
+			Route: httpReq.URL.Path, Status: httpResp.StatusCode, Detail: notServedDetail(raw),
+		}
+	}
 	if resp != nil {
 		if err := json.Unmarshal(env.Data, resp); err != nil {
 			return &malformedResponseError{err: fmt.Errorf("apiclient: malformed response data: %w", err)}
