@@ -497,9 +497,10 @@ const MAX_RATE_LIMIT_DELAY_MS = 10000;
 // mutations are also non-idempotent; never route them through these helpers.
 // The merge path retries only a definite ruleset refusal, after proving no
 // winner and re-running its preflight (#3902).
-// A parked-run approve does go through the helper, but its operation re-reads
-// the parked list before believing any failure — a committed-but-unanswered
-// approve reads as already done and is never replayed (#5004).
+// A parked-run approve does go through the helper, but its operation settles
+// the parked list to convergence before believing any failure — a
+// committed-but-unanswered approve reads as already done and is never replayed
+// (#5004).
 async function retryRead(label, operation, subject = null) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
@@ -3482,6 +3483,10 @@ async function commitsBehindBase({ github, context, baseRefName, headSha }) {
 // "Approve and run". Shared, because two callers need the same answer: the one
 // that approves them after an update-branch, and the one that has to describe an
 // absent required check honestly.
+function parkedRunsIn(workflowRuns) {
+  return (workflowRuns || []).filter((run) => run?.conclusion === "action_required");
+}
+
 async function listParkedRuns({ github, context, headSha, subject = null }) {
   const { owner, repo } = context.repo;
   const listed = await retryRead(
@@ -3496,7 +3501,7 @@ async function listParkedRuns({ github, context, headSha, subject = null }) {
       }),
     subject,
   );
-  return (listed?.data?.workflow_runs || []).filter((run) => run?.conclusion === "action_required");
+  return parkedRunsIn(listed?.data?.workflow_runs);
 }
 
 // The workflow the gate dispatches when nothing validated a head it created.
@@ -3784,12 +3789,14 @@ async function approveParkedRuns({ github, context, headSha, core }) {
 // run for a miss the next dispatch approved without incident.
 //
 // What makes retrying this POST safe is the read-back, not the response. A
-// failed approve says nothing about whether it committed, so every failure is
-// checked against the parked list itself before the error is believed — the
-// same shape reconcileAmbiguousCreate uses (#4763). A run no longer parked IS
-// the goal state, whether the "failed" call landed or a concurrent approver
-// beat this lane to it; only a run GitHub still reports parked earns a replay,
-// or — when the error is a definitive refusal — the report the caller writes.
+// failed approve says nothing about whether it committed, and a failed read-back
+// that ran ONCE would answer from a listing that can still lag the commit — the
+// same ambiguity reconcileAmbiguousCreate settles (#4763), so the parked list
+// is polled to convergence before the error is believed. A run that leaves
+// action_required IS the goal state, whether the "failed" call landed or a
+// concurrent approver beat this lane to it; only a run still parked through the
+// whole settle window earns a replay, or — on a definitive refusal — the report
+// the caller writes.
 async function approveParkedRun({ github, context, headSha, run }) {
   const { owner, repo } = context.repo;
   await retryCheckUpdate(
@@ -3798,19 +3805,61 @@ async function approveParkedRun({ github, context, headSha, run }) {
       try {
         await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
       } catch (error) {
-        let parked;
-        try {
-          parked = await listParkedRuns({ github, context, headSha });
-        } catch (listError) {
-          throw writeRetryGuardFailure(listError);
-        }
-        if (!parked.some((parkedRun) => parkedRun.id === run.id)) {
+        if (await runLeftParkedList({ github, context, headSha, runId: run.id })) {
           return;
         }
         throw error;
       }
     },
   );
+}
+
+// The read-back of an approve whose POST did not report its outcome: whether
+// the run still reads as parked, asked over the same settle window the
+// ambiguous-create reconcile uses — a listing can answer "parked" for a run
+// the commit already un-parked, and believing one stale answer replays the POST
+// into a refusal for a write that already landed (#5004, #4763's shape).
+// Nothing inside the poll is retried twice: the listing call is raw, so a
+// transient read failure occupies the same settle slot a "still parked" answer
+// would. Resolves true once the run is out of the parked list; false when it
+// stayed parked through the whole window, so the caller may retry or report the
+// original failure. A window that ends on an unreadable listing answers
+// nothing — it escapes marked as a guard failure, never as "still parked".
+async function runLeftParkedList({ github, context, headSha, runId }) {
+  const { owner, repo } = context.repo;
+  try {
+    return await retryTransient(
+      `could not confirm whether run ${runId} left the parked list on ${headSha}`,
+      async () => {
+        const listed = await github.rest.actions.listWorkflowRunsForRepo({
+          owner,
+          repo,
+          head_sha: headSha,
+          event: "pull_request",
+          per_page: 100,
+        });
+        if (!parkedRunsIn(listed?.data?.workflow_runs).some((parked) => parked.id === runId)) {
+          return true;
+        }
+        const stillParked = new Error(`run ${runId} still reads as parked on ${headSha}`);
+        stillParked.status = 503;
+        stillParked.autoGateRunStillParked = true;
+        throw stillParked;
+      },
+      {
+        failureName: "AutoGateCheckWriteError",
+        readFailure: false,
+        delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+      },
+    );
+  } catch (error) {
+    // The settle window ended on the sentinel itself — every read reported the
+    // run parked — rather than on a listing GitHub could not serve.
+    if (error.cause?.autoGateRunStillParked === true) {
+      return false;
+    }
+    throw writeRetryGuardFailure(error);
+  }
 }
 
 // A PR the gate does not own can end while a transaction on it is in flight

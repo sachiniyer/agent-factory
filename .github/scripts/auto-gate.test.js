@@ -10755,6 +10755,27 @@ test("#5004: a definitive refusal on a run still parked is reported once, not re
   assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*Resource not accessible/);
 });
 
+// Codex review on this fix: the run listing can still report a run parked for
+// a while after the approve committed, and a read-back answered from that lag
+// would replay the POST — which GitHub then refuses 422 for a write that
+// already landed, failing a recovery whose goal state held. The read-back is
+// therefore polled to convergence on the ambiguous-create settle window rather
+// than read once.
+test("#5004: a listing still reporting parked cannot turn a committed approve into a replayed refusal", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true, approveListingLagReads: 2,
+    approveRunErrors: [
+      Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+      Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
+    ],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the settled read-back saw the committed approve; the POST was never replayed into its 422");
+});
+
 test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
   const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
     approveRunError: Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
@@ -15294,6 +15315,11 @@ function fakeGateGithub({
   // committed and only its answer was lost, or a concurrent approver beat this
   // lane — the gate cannot tell those apart and does not need to.
   approveRunErrorUnparks = false,
+  // The run listing can LAG a committed approve: the POST already took the run
+  // out of action_required, yet the next reads still report it parked. This is
+  // the count of listing reads that see the stale state before the truth
+  // surfaces (#5004 — the reason a single read-back cannot be trusted).
+  approveListingLagReads = 0,
   // GitHub creates the runs for a pushed head a few seconds AFTER the push, so a
   // fake that has them from the first list cannot reproduce #3814 — the first
   // approve pass would catch them and the gap would be invisible.
@@ -15559,6 +15585,7 @@ function fakeGateGithub({
     runListReads: [],
     approveRunAttempts: 0,
     approvedRuns: [],
+    approveListingLag: new Map(),
     recoveryComments: [],
     headShaAfterUpdate: null,
     rest: {
@@ -15583,9 +15610,18 @@ function fakeGateGithub({
           return {
             data: {
               total_count: runs.length,
-              workflow_runs: runs.filter(
-                (run) => !options.event || run.event === options.event,
-              ),
+              workflow_runs: runs
+                .filter((run) => !options.event || run.event === options.event)
+                .map((run) => {
+                  // A committed approve is truth now but parked on the listing
+                  // until its lag reads are spent.
+                  const lag = github.approveListingLag.get(run.id);
+                  if (lag > 0) {
+                    github.approveListingLag.set(run.id, lag - 1);
+                    return { ...run, conclusion: "action_required", status: "completed" };
+                  }
+                  return run;
+                }),
             },
           };
         },
@@ -15605,6 +15641,7 @@ function fakeGateGithub({
                 if (run.id === options.run_id && run.conclusion === "action_required") {
                   run.conclusion = null;
                   run.status = "in_progress";
+                  github.approveListingLag.set(run.id, approveListingLagReads);
                 }
               }
             }
