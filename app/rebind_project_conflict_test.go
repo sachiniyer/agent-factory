@@ -130,7 +130,9 @@ func TestRebindConflictWithAVanishedRecordStillRebuildsTheList(t *testing.T) {
 	require.Same(t, displayed, h.projectPickerOverlay, "a conflict is a refusal: the picker stays open")
 	assert.False(t, displayed.RebindPending(), "a definitive refusal re-arms the form")
 	// The daemon's full refusal is longer than the overlay's rendered line
-	// width — widen it so the text the form re-armed on is visible.
+	// width — raise the layout cap too, or SetWidth loses to the maxSize the
+	// picker was opened with and the refusal is clipped before its tail.
+	displayed.SetMaxSize(400, 60)
 	displayed.SetWidth(200)
 	assert.Contains(t, displayed.Render(), "rebound elsewhere", "the daemon's refusal text re-arms the form")
 
