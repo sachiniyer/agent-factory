@@ -317,6 +317,25 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				if merged.ProjectPath == existing.ProjectPath && merged.RepoID != existing.RepoID {
 					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
 				}
+				// Store canonicalizations of on_complete and target_session, recorded
+				// here for the same reason repo_id is. apply canonicalizes both
+				// unconditionally on every write — to repair a legacy or hand-edited row
+				// the caller never asked to repair — so a write that changes nothing the
+				// caller requested can still land bytes ("Archive"→"archive", a
+				// whitespace-only target→""). That byte-change must not be invisible
+				// (audit.go: "cannot miss one that did") and must not be attributed to
+				// the caller (the caller did not move the field). It is keyed on canonical
+				// equality AND raw inequality: a genuine policy change (keep→kill)
+				// canonical-differs, so auditUpdate already records it as the caller's
+				// change, and this block stays out — exactly as a real rebind stays out
+				// of the repo_id block above. This fires at most once per non-canonical
+				// row, since the triggering write canonicalizes the on-disk value.
+				if CanonicalOnComplete(existing.OnComplete) == CanonicalOnComplete(merged.OnComplete) && existing.OnComplete != merged.OnComplete {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"on_complete"}, nowFn())
+				}
+				if CanonicalTargetSession(existing.TargetSession) == CanonicalTargetSession(merged.TargetSession) && existing.TargetSession != merged.TargetSession {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"target_session"}, nowFn())
+				}
 				// Diffed against the record just loaded under this lock, and
 				// stamped before the write — so the trail records the change that
 				// actually landed, at the instant it landed.
