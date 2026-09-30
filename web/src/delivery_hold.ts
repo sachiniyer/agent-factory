@@ -176,6 +176,15 @@ function hasPrintable(data: string): boolean {
  *  the same kind of in-place edit, so the post-idle resume must recognise it too
  *  or returning to a stranded draft with Ctrl+Backspace would take no lease.
  *
+ *  Ctrl-W (\x17, delete the preceding word) is the same in-place edit class as
+ *  Ctrl-U, and Ctrl-A (\x01) / Ctrl-E (\x05) move within the line the draft still
+ *  occupies. The terminal's general Ctrl+letter mapping emits all three
+ *  (web/src/terminal-keybar.ts), and each leaves the draft sitting in the PTY
+ *  just as Backspace and Ctrl-U do, so the post-idle resume must re-take the
+ *  lease for them too — or the draft-loss window this fix closes would reopen
+ *  for an ordinary word-delete or cursor move. Failing toward holding covers
+ *  the movement pair just as it covers the edits.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -184,7 +193,8 @@ function hasPrintable(data: string): boolean {
  *  clear) the live draft. */
 function isEditingControl(data: string): boolean {
   return (
-    data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08")
+    data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
+    data.includes("\x17") || data.includes("\x01") || data.includes("\x05")
   );
 }
 

@@ -346,11 +346,12 @@ test("delivery_hold: a queued report after queued Enter does NOT keep the hold",
 
 // The idle bound releases a draft that is STILL in the PTY. The ESC branch
 // re-acquires the lease for arrows/Delete/Home/End. The plain editing controls
-// the ABANDON comment names as edits — Backspace, Ctrl-D, Ctrl-U — are equally
-// how the user comes back to a stranded draft (deleting a char or word), so they
-// must re-acquire too instead of falling through the startsADraft gate to "none".
+// the ABANDON comment names as edits — Backspace, Ctrl-D, Ctrl-U — plus
+// Ctrl+Backspace, Ctrl-W (delete word), and the Ctrl-A/Ctrl-E line moves are
+// equally how the user comes back to a stranded draft, so they must re-acquire
+// too instead of falling through the startsADraft gate to "none".
 test("delivery_hold: plain editing controls re-acquire the lease after the idle bound", () => {
-  for (const edit of ["\x7f", "\x04", "\x15", "\x08"]) {
+  for (const edit of ["\x7f", "\x04", "\x15", "\x08", "\x17", "\x01", "\x05"]) {
     const h = new MidLineHold(1_000, 15_000);
     h.noteInput("half a thought", 0);
     assert.equal(h.tick(15_000), "none", "the idle bound released the still-present draft");
@@ -363,13 +364,16 @@ test("delivery_hold: plain editing controls re-acquire the lease after the idle 
 
 // A bare control key on a prompt that was NEVER holding is still not a draft:
 // releasedByIdleBound is false there, so the startsADraft gate returns "none" as
-// before — the empty-prompt guarantee is preserved.
+// before — the empty-prompt guarantee is preserved for every editing control.
 test("delivery_hold: a stray control key on a never-held prompt does not invent a draft", () => {
   const h = new MidLineHold(1_000, 15_000);
   assert.equal(h.noteInput("\x7f", 0), "none", "no draft, no idle release, nothing to resume");
   assert.equal(h.holding, false);
   assert.equal(h.noteInput("\x04", 5), "none");
   assert.equal(h.noteInput("\x15", 10), "none");
+  assert.equal(h.noteInput("\x17", 15), "none");
+  assert.equal(h.noteInput("\x01", 20), "none");
+  assert.equal(h.noteInput("\x05", 25), "none");
   assert.equal(h.holding, false);
 });
 
