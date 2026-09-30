@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
@@ -34,10 +35,12 @@ func (f fakeDaemon) health() HealthStatus {
 
 // stubForwardEnv binds a throwaway home (so recoveryHomeGuard passes and the real
 // StopDaemon/WaitForShutdownCompletion see no daemon → StopConfirmed), shortens
-// the polls, and restores every forward/recovery seam on cleanup.
+// the polls, and restores every forward/recovery seam on cleanup. The home is
+// socket-safe: the shutdown wait's Ping consult dials <home>/daemon.sock, and a
+// plain t.TempDir() overruns the unix socket path limit on darwin (#5007).
 func stubForwardEnv(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pg, pp := upgradeValidateGrace, upgradeValidatePoll

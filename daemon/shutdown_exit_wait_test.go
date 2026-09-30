@@ -801,6 +801,143 @@ func deadPID(t *testing.T) int {
 	return cmd.Process.Pid
 }
 
+// livePID returns a PID that stays alive until the test ends.
+func livePID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
+// writePIDFileFor drops a daemon.pid naming pid into the test home, as a
+// daemon predating drainDaemon's early unlink leaves behind mid-drain (#5007).
+func writePIDFileFor(t *testing.T, pid int) {
+	t.Helper()
+	path, err := daemonPIDFilePath()
+	if err != nil {
+		t.Fatalf("daemonPIDFilePath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(pid)), 0600); err != nil {
+		t.Fatalf("write daemon.pid: %v", err)
+	}
+}
+
+// TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverSignaled (#5007 addendum 4):
+// a daemon predating the early unlink keeps daemon.pid through its drain, so
+// mid-drain the socket is dead but the pidfile still names a live process AND
+// the lock stays held. EnsureDaemon must read that as draining — report
+// ErrDaemonStillDraining at the bound and never reach the launch path, whose
+// stale-daemon stop would SIGKILL the drainer.
+func TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverSignaled(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+	writePIDFileFor(t, livePID(t))
+
+	launches := 0
+	launch := func() error {
+		launches++
+		return errors.New("test launcher: must not be reached")
+	}
+	err = ensureDaemonWithLauncherUntil(launch, time.Now().Add(1500*time.Millisecond))
+	if !errors.Is(err, ErrDaemonStillDraining) {
+		t.Fatalf("ensure against a pidfile-keeping drainer = %v, want ErrDaemonStillDraining", err)
+	}
+	if launches != 0 {
+		t.Fatalf("launches = %d, want 0 while a live daemon.pid PID names the drainer", launches)
+	}
+}
+
+// TestEnsureDaemon_Draining_LivePIDFileWithoutLock: a drainer predating the
+// home lock never takes daemon.lock and keeps daemon.pid until exit — dead
+// socket, absent lock, live pidfile PID. The pid must still read draining:
+// absent lock alone would spawn beside it.
+func TestEnsureDaemon_Draining_LivePIDFileWithoutLock(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	writePIDFileFor(t, livePID(t))
+
+	launches := 0
+	launch := func() error {
+		launches++
+		return errors.New("test launcher: must not be reached")
+	}
+	err := ensureDaemonWithLauncherUntil(launch, time.Now().Add(1500*time.Millisecond))
+	if !errors.Is(err, ErrDaemonStillDraining) {
+		t.Fatalf("ensure against a pre-lock drainer = %v, want ErrDaemonStillDraining", err)
+	}
+	if launches != 0 {
+		t.Fatalf("launches = %d, want 0 while a live daemon.pid PID names the drainer", launches)
+	}
+}
+
+// TestWaitForShutdownCompletion_Draining_LivePIDFileKeepsWaiting (#5007
+// addendum 4): quiet socket, takeable leftover lock, but daemon.pid still
+// names a live process — a drainer that predates the early unlink. The wait
+// must not read exit until that PID is gone.
+func TestWaitForShutdownCompletion_Draining_LivePIDFileKeepsWaiting(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock() // leftover daemon.lock, as a past daemon leaves
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	lock.release()
+	writePIDFileFor(t, livePID(t))
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		path, _ := daemonPIDFilePath()
+		_ = os.Remove(path)
+	}()
+
+	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
+		t.Fatalf("WaitForShutdownCompletion = %v, want nil once the pidfile drainer is gone", err)
+	}
+}
+
+// hangingControl answers connects but its Ping never replies, so the client
+// read blocks until the conn deadline — the wedged-responder case the bounded
+// exit-wait ping exists for (#5007 addendum 4).
+type hangingControl struct{}
+
+func (h *hangingControl) Ping(_ PingRequest, _ *PingResponse) error {
+	select {} // never replies
+}
+
+// TestWaitForShutdownCompletion_Unknown_HungResponderBoundedByDeadline: a
+// responder that accepts the unix dial but never replies must cost one bounded
+// probe, not the wait — the wait still ends in ErrShutdownIncomplete at the
+// grace.
+func TestWaitForShutdownCompletion_Unknown_HungResponderBoundedByDeadline(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 800 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+	startFakeControlService(t, &hangingControl{})
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+
+	start := time.Now()
+	err = WaitForShutdownCompletion(ShutdownPID{})
+	if !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("hung responder: WaitForShutdownCompletion = %v, want ErrShutdownIncomplete", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("hung responder stalled the wait %s, past the %s grace", elapsed, shutdownCompleteGrace)
+	}
+}
+
 // TestRequestShutdown_PIDOrder_AckPIDIsConfirmed: only the PID the acker names
 // in its own Shutdown reply is confirmed, even when a Ping reported another.
 func TestRequestShutdown_PIDOrder_AckPIDIsConfirmed(t *testing.T) {

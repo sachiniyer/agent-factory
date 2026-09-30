@@ -229,7 +229,7 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 		if confirmed && pid > 0 && pid != os.Getpid() {
 			return !shutdownWaitPIDAliveFn(pid)
 		}
-		return exitState(pid) == daemonExited
+		return exitState(pid, deadline) == daemonExited
 	}
 	for time.Now().Before(deadline) {
 		if exited() {
@@ -254,11 +254,11 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 // itself can answer serving — a daemon predating quiescing-at-ack does so for
 // its whole ack grace, and one never asked to stop does so indefinitely — so
 // any other serving answer, like a quiescing one, is draining. With no answer,
-// a held lock is draining; otherwise a quiet socket is exited (for a pre-lock
-// daemon the only exit proxy, racing its post-close tail — the accepted
-// residual) and any other probe failure unknown. A home that never ran a
+// a held lock is draining; otherwise a quiet socket is exited unless a live
+// daemon.pid PID still names the drainer (old-version daemons keep it until
+// exit), and any other probe failure is unknown. A home that never ran a
 // daemon reads exited.
-func exitState(targetPID int) daemonState {
+func exitState(targetPID int, deadline time.Time) daemonState {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnknown
@@ -268,7 +268,7 @@ func exitState(targetPID int) daemonState {
 		return daemonUnknown
 	}
 	held := lock == daemonDraining
-	resp, err := pingDaemonResponse()
+	resp, err := pingDaemonResponseUntil(boundedPingDeadline(deadline))
 	state, respPID := pingState(resp, err)
 	switch {
 	case state == daemonServing && respPID > 0 && targetPID > 0 && respPID != targetPID:
@@ -276,10 +276,30 @@ func exitState(targetPID int) daemonState {
 	case state != daemonUnknown, held:
 		return daemonDraining
 	case isDaemonAbsentErr(err):
+		if pid := livePIDFilePID(); pid > 0 {
+			return daemonDraining
+		}
 		return daemonExited
 	default:
 		return daemonUnknown
 	}
+}
+
+// livePIDFilePID returns the PID daemon.pid names while that process is still
+// alive, else 0. Old-version daemons keep the file until process exit (the
+// early unlink is #5007's behavior), and pre-lock daemons never take
+// daemon.lock — so on a quiet socket a live pidfile PID is a drainer either
+// way. A stale file naming a dead or recycled PID reads 0, never proof of a
+// drainer — but a live PID there means keep waiting, never signal.
+func livePIDFilePID() int {
+	pid, ok := readPIDFromFile()
+	if !ok || pid <= 0 || pid == os.Getpid() {
+		return 0
+	}
+	if !shutdownWaitPIDAliveFn(pid) {
+		return 0
+	}
+	return pid
 }
 
 // shutdownWaitPIDAliveFn and shutdownWaitHomeLockFn are the exit probes. Vars
@@ -314,23 +334,38 @@ func pingState(resp PingResponse, err error) (daemonState, int) {
 	}
 }
 
-// probeDaemonState is the one state probe (#5007): Ping, then the home lock
-// when nothing answers. A daemon.pid still on disk means no teardown has begun
-// (drainDaemon unlinks it first), so there a failed ping is unknown and the
-// caller's usual recovery applies. Without one, a held lock is a daemon
-// draining past its closed socket — or, for an instant, one between taking its
-// lock and binding its socket, which callers recheck.
+// boundedPingDeadline gives one classification probe a dial-timeout-sized
+// share of deadline: a responder that accepts the dial but never replies
+// costs one probe — never the caller's whole budget. A nearer deadline
+// tightens it; a passed one (the post-loop recheck) still gets a genuine
+// probe, and no deadline gets the same fixed bound.
+func boundedPingDeadline(deadline time.Time) time.Time {
+	pingDeadline := time.Now().Add(daemonDialTimeout)
+	if remaining := time.Until(deadline); remaining > 0 && remaining < daemonDialTimeout {
+		pingDeadline = deadline
+	}
+	return pingDeadline
+}
+
+// probeDaemonState is the one state probe (#5007): Ping, then the home lock,
+// then daemon.pid when nothing answers. A held lock is a daemon — draining
+// past its socket close or, for an instant, between taking the lock and
+// binding — whatever daemon.pid says: old-version drainers keep the file until
+// exit, so it must never override a held lock (stopDaemonUntil would SIGKILL
+// that drainer). Only with the lock takeable or absent does the pidfile speak:
+// a live PID it names is a drainer predating the early unlink — or the lock.
 func probeDaemonState(deadline time.Time) (daemonState, int) {
-	state, pid := pingState(pingDaemonResponseUntil(deadline))
+	state, pid := pingState(pingDaemonResponseUntil(boundedPingDeadline(deadline)))
 	if state != daemonUnknown {
 		return state, pid
 	}
-	if path, err := daemonPIDFilePath(); err != nil {
-		return daemonUnknown, 0
-	} else if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
-		return daemonUnknown, 0
+	if lock := homeLockState(); lock != daemonExited {
+		return lock, 0
 	}
-	return homeLockState(), 0
+	if pid := livePIDFilePID(); pid > 0 {
+		return daemonDraining, pid
+	}
+	return daemonExited, 0
 }
 
 // homeLockState is probeDaemonState's instant read of this home's lock. An
