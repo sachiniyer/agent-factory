@@ -1,11 +1,7 @@
-// Focus-ring navigation for the home model: which region holds focus and how
-// keys move it. Split out of home_model.go (#1145).
-
 package app
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
-
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 

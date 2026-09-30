@@ -91,5 +91,9 @@ unavailable manager or older daemon is reported as unknown rather than guessed.
 The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
 (default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
 the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
-owner-only (`0600`) and local — never a TCP port, never the network. See the
+owner-only (`0600`). It also binds TCP listeners: the web listener on
+`network.listen_addr` (default `127.0.0.1:8443`) serves the bundled web client
+and the same HTTP API — set the key to `""` to turn it off — and, when
+`network.preview_listen_addr` is set (empty by default), a per-tab preview
+listener that hosts web-tab previews only. See the
 [HTTP API guide](http-api.md) for the transport and auth details.

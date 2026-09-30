@@ -158,17 +158,16 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 	for _, e := range entries {
 		value, _ := CurrentValue(cfg, e.Key)
 		out = append(out, ConfigEntry{
-			Key:           e.Key,
-			Type:          e.Type,
-			AcceptedTypes: e.AcceptedTypes,
-			Default:       e.Default,
-			Purpose:       e.Purpose,
-			Tier:          int(e.Tier),
-			TierName:      TierName(e.Tier),
-			Editable:      true,
-			Settable:      e.Settable,
-			Enum:          e.Enum,
-			Value:         value,
+			Key:      e.Key,
+			Type:     e.Type,
+			Default:  e.Default,
+			Purpose:  e.Purpose,
+			Tier:     int(e.Tier),
+			TierName: TierName(e.Tier),
+			Editable: true,
+			Settable: e.Settable,
+			Enum:     e.Enum,
+			Value:    value,
 			// Uniformly true — see the field's comment.
 			RequiresRestart: true,
 		})
