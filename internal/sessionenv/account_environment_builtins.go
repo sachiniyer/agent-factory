@@ -688,6 +688,14 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		if err != nil {
 			return true
 		}
+		// mvdan's arithmetic parser accepts a degenerate token such as `.` as a
+		// nil AST with no error, and syntax.Walk panics on a nil node. A nil AST
+		// carries nothing the walk can clear as inert, so treat it as unprovable
+		// (fail closed) rather than walking it. Buried `let .` reaches here once
+		// the child-tail suffix scan judges a `let` candidate (#4708).
+		if parsed == nil {
+			return true
+		}
 		// A command substitution (`$(...)` or backticks) inside a literal `let`
 		// argument is unprovable: bash re-evaluates the substitution's stdout as
 		// FRESH arithmetic before using it, so `arr[$(echo CODEX_HOME=1)]` runs

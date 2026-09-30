@@ -122,6 +122,11 @@ func laterChildSuffixMutates(words []*syntax.Word, names map[string]struct{}, me
 //   - `strace`'s `-E`/`--env` option is handled only inside the strace context
 //     of unrecognizedWrapperHidesAccountAssignment, which is words[0]-sensitive,
 //     so a buried strace only matches when judged from strace's own suffix.
+//   - A shell is unproven only when judged as the command head: the opaque-head
+//     scan flags a shell only while words follow it, so a bare trailing shell
+//     (which a shadowed wrapper can shift to and exec) is missed from any
+//     earlier prefix and must be judged from its own suffix, where
+//     shellCommandIsUnproven sees it as the head and refuses it.
 //
 // Every name is matched by basename, which covers both the basename form the
 // dispatch uses for wrappers (isAccountCommandName) and the bare form it uses
@@ -162,4 +167,10 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// unrecognizedWrapperHidesAccountAssignment, so a buried strace can begin a
 	// verdict only when judged from strace's own suffix.
 	"strace": {},
+	// Shells knownShellName recognizes. The opaque-head scan flags a buried
+	// shell only while words follow it, so a bare trailing shell — which a
+	// shadowed wrapper can shift to and exec — is judged at its own suffix,
+	// where shellCommandIsUnproven sees it as the head and refuses it.
+	"ash": {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
+	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
 }
