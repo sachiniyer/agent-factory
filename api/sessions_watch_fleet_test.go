@@ -638,4 +638,46 @@ func TestClassifyWatchStop_PendingAccountSwapClearReleasesToIdle(t *testing.T) {
 		"clearing the swap produces the working -> idle edge a driver has been waiting for")
 }
 
+// A pending swap does not mask a terminal backing runtime. Once the status
+// loop has probed an automatic swap to LiveLost while the marker still sits on
+// the row (TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows),
+// fleet watch must report `lost` so a driver gets the restore instruction
+// rather than holding the row as working until --timeout. The same outranks
+// dead and archived, which carry their own actionable instructions.
+func TestClassifyWatchStop_TerminalLivenessOutranksPendingAccountSwap(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	for _, liveness := range []session.Liveness{session.LiveLost, session.LiveDead, session.LiveArchived} {
+		data := withLiveness("s", liveness)
+		data.PendingAccountSwap = pending
+		data.InFlightOp = session.OpNone
+		reason, _ := classifyWatchStop(data)
+		require.NotEqual(t, watchWorking, reason,
+			"liveness=%v: a terminal backing runtime must not be masked as working by a pending swap", liveness)
+	}
+
+	// The reachable case from the daemon: an automatic swap probed to LiveLost
+	// while PendingAccountSwap is still set. The fleet classifier reports lost,
+	// and the watcher emits the lost edge a driver needs to restore from.
+	lost := withLiveness("s", session.LiveLost)
+	lost.PendingAccountSwap = pending
+	require.Equal(t, watchStopLost, mustReason(classifyWatchStop(lost)))
+
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("s")}),
+		"the working baseline establishes no transition")
+	// Probe lands LiveLost under the still-pending swap: the working -> lost
+	// edge is reported, not swallowed by the pending-swap gate.
+	transitioned := fleetRunning("s")
+	transitioned.Liveness = session.LiveLost
+	transitioned.PendingAccountSwap = pending
+	events := w.observe([]session.InstanceData{transitioned})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopLost}, reasons(events),
+		"a mid-swap session going lost is reported as lost, not held as working")
+}
+
 func mustReason(r watchStopReason, _ string) watchStopReason { return r }

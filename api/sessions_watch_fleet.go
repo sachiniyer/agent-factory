@@ -116,7 +116,19 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// makes the fleet form disagree with the single-title path. Match
 	// session.ClassifyActivity, which gates on PendingAccountSwap before the
 	// liveness axis for the same reason (#4027).
-	if d.PendingAccountSwap != nil {
+	//
+	// A terminal backing runtime outranks the swap, though: once the status
+	// loop has probed an automatic swap to LiveLost while the marker still sits
+	// on the row (TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows
+	// — the loop resumes normal probing once a swap leaves LiveLimitReached),
+	// fleet watch must report `lost` so a driver gets the restore instruction
+	// instead of holding the row as working until --timeout. Limit the gate to
+	// the in-motion liveness values a mid-swap record actually carries and let
+	// terminal liveness fall through to its own axis below.
+	if d.PendingAccountSwap != nil &&
+		d.Liveness != session.LiveLost &&
+		d.Liveness != session.LiveDead &&
+		d.Liveness != session.LiveArchived {
 		return watchWorking, ""
 	}
 	if d.StartupStateUnknown {
