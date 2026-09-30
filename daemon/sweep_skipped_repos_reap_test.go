@@ -1,0 +1,409 @@
+package daemon
+
+import (
+	"encoding/json"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
+)
+
+// stubSweepOrphanContainers replaces sweepOrphanContainers with a recording
+// stub so tests can verify whether the destructive pass ran and inspect the
+// protected slugs it was handed. Restored on cleanup. The stub is goroutine-safe
+// because the poll loop and the deferred sweep run on the poll goroutine while a
+// test's own goroutines may inspect the recorded state.
+func stubSweepOrphanContainers(t *testing.T) *sweepRecorder {
+	t.Helper()
+	rec := &sweepRecorder{}
+	prev := sweepOrphanContainers
+	sweepOrphanContainers = func(homeID string, slugs map[string]bool) session.OrphanSweepResult {
+		rec.record(homeID, slugs)
+		return session.OrphanSweepResult{}
+	}
+	t.Cleanup(func() { sweepOrphanContainers = prev })
+	return rec
+}
+
+// sweepRecorder captures every call to the stubbed sweepOrphanContainers.
+type sweepRecorder struct {
+	mu    sync.Mutex
+	calls []sweepCall
+}
+
+type sweepCall struct {
+	homeID string
+	slugs  map[string]bool
+}
+
+func (r *sweepRecorder) record(homeID string, slugs map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sweepCall{homeID: homeID, slugs: slugs})
+}
+
+func (r *sweepRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+func (r *sweepRecorder) lastCall() (sweepCall, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.calls) == 0 {
+		return sweepCall{}, false
+	}
+	return r.calls[len(r.calls)-1], true
+}
+
+// stubConfigDirForReap pins configDirForReap to a fixed home so tests don't
+// depend on the host's AGENT_FACTORY_HOME. Restored on cleanup.
+func stubConfigDirForReap(t *testing.T, homeID string) {
+	t.Helper()
+	prev := configDirForReap
+	configDirForReap = func() (string, error) { return homeID, nil }
+	t.Cleanup(func() { configDirForReap = prev })
+}
+
+// newBareManagerForSweep builds a minimal Manager for the orphan-sweep decision
+// loop: just the maps and the mu lock the sweep functions touch. No NewManager,
+// no disk, no goroutines — fully hermetic.
+func newBareManagerForSweep() *Manager {
+	return &Manager{
+		instances:      make(map[string]*session.Instance),
+		pendingCreates: make(map[string]session.InstanceData),
+	}
+}
+
+// --- sweepStartupOrphanContainers: the startup-side decision ---
+
+// TestSweepStartupOrphanContainers_RunsWhenSkippedReposEmpty is the no-regression
+// baseline: with no skipped repos the daemon's session view is complete, so the
+// destructive pass runs immediately exactly as it did before the fix.
+func TestSweepStartupOrphanContainers_RunsWhenSkippedReposEmpty(t *testing.T) {
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.instances[daemonInstanceKey("repo1", "live one")] = &session.Instance{Title: "live one"}
+
+	sweepStartupOrphanContainers(m)
+
+	assert.Equal(t, 1, rec.count(), "the sweep must run when no repo is skipped")
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepArmed, "the deferral flag must NOT be armed")
+	m.mu.Unlock()
+
+	call, ok := rec.lastCall()
+	require.True(t, ok)
+	assert.True(t, call.slugs[session.Slugify("live one")], "the protected set must include the live session's slug")
+}
+
+// TestSweepStartupOrphanContainers_DefersWhenSkippedReposNonEmpty is the core
+// fix: with a skipped repo the daemon's session view is known-incomplete (the
+// repo's live containers contributed zero rows to m.instances), so the
+// destructive pass is deferred rather than force-removing containers it cannot
+// distinguish from genuine orphans. The deferral flag is armed for the poll loop.
+func TestSweepStartupOrphanContainers_DefersWhenSkippedReposNonEmpty(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.skippedRepos = []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}
+	m.instances[daemonInstanceKey("healthy", "alive")] = &session.Instance{Title: "alive"}
+
+	sweepStartupOrphanContainers(m)
+
+	assert.Equal(t, 0, rec.count(), "the sweep must NOT run when a repo is skipped — its live containers cannot be distinguished from genuine orphans")
+	m.mu.Lock()
+	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag must be armed so the poll loop retries")
+	m.mu.Unlock()
+}
+
+// TestSweepStartupOrphanContainers_DefersForMultipleSkippedRepos verifies the
+// deferral fires for any non-empty skip set, not just a single repo.
+func TestSweepStartupOrphanContainers_DefersForMultipleSkippedRepos(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.skippedRepos = []SkippedRepo{
+		{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON},
+		{RepoID: "unreadable-r", Reason: SkippedRepoReasonUnreadableInstancesJSON},
+	}
+
+	sweepStartupOrphanContainers(m)
+
+	assert.Equal(t, 0, rec.count(), "the sweep must defer for any non-empty skip set")
+	m.mu.Lock()
+	assert.True(t, m.deferredOrphanSweepArmed)
+	m.mu.Unlock()
+}
+
+// TestSweepStartupOrphanContainers_DoesNotArmWhenHomeUnresolvable preserves the
+// pre-existing behavior: when the AF home cannot be resolved the sweep is
+// skipped (there is nothing to scope to), and the deferral flag must NOT be
+// armed — the sweep did not defer for an incomplete view, it skipped for an
+// unresolvable home, which is a different (non-recoverable-on-poll) condition.
+func TestSweepStartupOrphanContainers_DoesNotArmWhenHomeUnresolvable(t *testing.T) {
+	silenceWarnings(t)
+	rec := stubSweepOrphanContainers(t)
+	prev := configDirForReap
+	configDirForReap = func() (string, error) { return "", assertErr("home unresolvable") }
+	t.Cleanup(func() { configDirForReap = prev })
+
+	m := newBareManagerForSweep()
+	m.skippedRepos = []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}
+
+	sweepStartupOrphanContainers(m)
+
+	assert.Equal(t, 0, rec.count())
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepArmed, "an unresolvable home is not an incomplete-view deferral; the flag must stay clear")
+	m.mu.Unlock()
+}
+
+// --- runDeferredOrphanSweepIfReady: the poll-side recovery ---
+
+// TestRunDeferredOrphanSweep_NoOpWhenNotArmed: with no deferral armed, the
+// deferred-sweep check is a complete no-op — the sweep does not run and the flag
+// stays clear. This is the steady state for a clean startup.
+func TestRunDeferredOrphanSweep_NoOpWhenNotArmed(t *testing.T) {
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.instances[daemonInstanceKey("repo1", "live")] = &session.Instance{Title: "live"}
+
+	runDeferredOrphanSweepIfReady(m)
+
+	assert.Equal(t, 0, rec.count(), "no deferral armed → no sweep")
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepArmed)
+	m.mu.Unlock()
+}
+
+// TestRunDeferredOrphanSweep_StaysDeferredWhenSkipSetStillNonEmpty: the deferral
+// was armed but the skip set has not drained (the corrupted file is still
+// corrupted). The sweep stays deferred and re-evaluates on the next poll.
+func TestRunDeferredOrphanSweep_StaysDeferredWhenSkipSetStillNonEmpty(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.skippedRepos = []SkippedRepo{{RepoID: "corrupt-r", Reason: SkippedRepoReasonCorruptedInstancesJSON}}
+	m.deferredOrphanSweepArmed = true
+
+	runDeferredOrphanSweepIfReady(m)
+
+	assert.Equal(t, 0, rec.count(), "skip set still non-empty → sweep stays deferred")
+	m.mu.Lock()
+	assert.True(t, m.deferredOrphanSweepArmed, "the flag must stay armed for the next poll")
+	m.mu.Unlock()
+}
+
+// TestRunDeferredOrphanSweep_RunsWhenArmedAndSkipSetDrained: the deferral was
+// armed and every skipped repo has been repaired (the poll refresh re-read and
+// parsed its instances.json, draining the skip set). The sweep runs — with a
+// complete protected set — and the flag is cleared so it runs exactly once.
+func TestRunDeferredOrphanSweep_RunsWhenArmedAndSkipSetDrained(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.deferredOrphanSweepArmed = true
+	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
+
+	runDeferredOrphanSweepIfReady(m)
+
+	assert.Equal(t, 1, rec.count(), "skip set drained → the deferred sweep runs")
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepArmed, "the flag is cleared so the sweep runs exactly once")
+	m.mu.Unlock()
+
+	call, ok := rec.lastCall()
+	require.True(t, ok)
+	assert.True(t, call.slugs[session.Slugify("repaired-sess")], "the repaired session's slug must be protected now that the view is complete")
+}
+
+// TestRunDeferredOrphanSweep_RunsAtMostOnce: after the deferred sweep runs and
+// the flag is cleared, a second check is a no-op — the sweep does not run again.
+func TestRunDeferredOrphanSweep_RunsAtMostOnce(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.deferredOrphanSweepArmed = true
+	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
+
+	runDeferredOrphanSweepIfReady(m)
+	assert.Equal(t, 1, rec.count(), "first check runs the deferred sweep")
+
+	runDeferredOrphanSweepIfReady(m)
+	assert.Equal(t, 1, rec.count(), "second check is a no-op — the flag is cleared")
+}
+
+// --- End-to-end: the full restore → sweep → repair → deferred-sweep chain ---
+
+// TestSweepStartup_SkippedRepoLiveContainerIsSpared_EndToEnd exercises the full
+// causal chain the bug report names: a real corrupted instances.json on disk →
+// NewManager (production restore path) seeds m.skippedRepos and contributes zero
+// rows → sweepStartupOrphanContainers defers rather than reaping. Pre-fix the
+// sweep ran unconditionally and force-removed the skipped repo's live container;
+// post-fix the deferral spares it until the file is repaired.
+func TestSweepStartup_SkippedRepoLiveContainerIsSpared_EndToEnd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "ok"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
+	seedCorruptedRepo(t, "corrupt-r")
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err, "NewManager must start despite a corrupted repo")
+
+	// The production restore path seeded the skip set and left the corrupted
+	// repo out of m.instances (its live containers' slugs are absent from
+	// the protected set).
+	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
+		"startup must seed the skip set with the corrupted repo")
+	require.Nil(t, m.instances[daemonInstanceKey("corrupt-r", "anything")],
+		"corrupted repo must contribute zero rows")
+	require.NotNil(t, m.instances[daemonInstanceKey("valid-r", "ok")],
+		"healthy repo loads normally")
+
+	// The startup sweep defers — it does NOT force-remove the skipped repo's
+	// live containers.
+	sweepStartupOrphanContainers(m)
+	assert.Equal(t, 0, rec.count(),
+		"the sweep must NOT have run: a skipped repo's live containers cannot be distinguished from genuine orphans")
+	m.mu.Lock()
+	assert.True(t, m.deferredOrphanSweepArmed, "the deferral flag is armed for the poll loop")
+	m.mu.Unlock()
+}
+
+// TestDeferredSweep_RunsAfterRepair_EndToEnd exercises the self-healing half:
+// after the startup sweep defers, repairing the corrupted instances.json and
+// running a polling refresh (refreshLocked) drains the skip set and
+// re-materializes the session, so the next deferred-sweep check runs the
+// destructive pass — now with the repaired session's slug in the protected set,
+// so its container is spared while genuine orphans are reaped.
+func TestDeferredSweep_RunsAfterRepair_EndToEnd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "ok"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
+	seedCorruptedRepo(t, "corrupt-r")
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	// Startup sweep defers (skip set non-empty).
+	sweepStartupOrphanContainers(m)
+	require.Equal(t, 0, rec.count(), "startup sweep defers for the corrupted repo")
+
+	// Repair the corrupted file and run a polling refresh: the repo re-materializes
+	// its session and drops out of the skip set.
+	repairedJSON, err := json.Marshal([]session.InstanceData{{Title: "repaired"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("corrupt-r", repairedJSON))
+
+	m.mu.Lock()
+	require.NoError(t, m.refreshLocked(), "a polling refresh of a repaired repo must not error")
+	require.Empty(t, m.skippedRepos, "the repaired repo drops out of the skip set")
+	require.NotNil(t, m.instances[daemonInstanceKey("corrupt-r", "repaired")],
+		"the repaired session re-materializes in m.instances")
+	m.mu.Unlock()
+
+	// The deferred-sweep check now runs the destructive pass — with a complete
+	// view. The repaired session's slug is in the protected set, so its container
+	// would be spared; a genuine orphan (a slug not in the set) would be reaped.
+	runDeferredOrphanSweepIfReady(m)
+	assert.Equal(t, 1, rec.count(), "the deferred sweep runs once the skip set drains")
+
+	call, ok := rec.lastCall()
+	require.True(t, ok)
+	assert.True(t, call.slugs[session.Slugify("repaired")], "the repaired session's slug is now protected")
+	assert.True(t, call.slugs[session.Slugify("ok")], "the healthy session's slug is still protected")
+
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepArmed, "the deferral flag is cleared after the sweep runs")
+	m.mu.Unlock()
+}
+
+// TestDeferredSweep_StaysDeferredAcrossPollsWhileStillCorrupted_EndToEnd pins
+// the self-healing bound: while the file stays corrupted the deferred sweep
+// keeps deferring across polls (the sweep does not run with an incomplete view),
+// and runs the first poll after the repair drains the skip set.
+func TestDeferredSweep_StaysDeferredAcrossPollsWhileStillCorrupted_EndToEnd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	stubFromInstanceForRefresh(t)
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	validJSON, err := json.Marshal([]session.InstanceData{{Title: "ok"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("valid-r", validJSON))
+	seedCorruptedRepo(t, "corrupt-r")
+
+	m, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	sweepStartupOrphanContainers(m)
+	require.Equal(t, 0, rec.count(), "startup sweep defers")
+	m.mu.Lock()
+	require.True(t, m.deferredOrphanSweepArmed)
+	m.mu.Unlock()
+
+	// First poll: file still corrupted → skip set stays non-empty → sweep stays deferred.
+	m.mu.Lock()
+	require.NoError(t, m.refreshLocked())
+	require.Equal(t, []string{"corrupt-r"}, skippedRepoIDs(m.skippedRepos),
+		"a still-corrupted repo stays in the skip set")
+	m.mu.Unlock()
+	runDeferredOrphanSweepIfReady(m)
+	require.Equal(t, 0, rec.count(), "still-corrupted → sweep stays deferred")
+	m.mu.Lock()
+	require.True(t, m.deferredOrphanSweepArmed, "flag stays armed across the poll")
+	m.mu.Unlock()
+
+	// Second poll: repair the file → skip set drains → deferred sweep runs.
+	repairedJSON, err := json.Marshal([]session.InstanceData{{Title: "repaired"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("corrupt-r", repairedJSON))
+	m.mu.Lock()
+	require.NoError(t, m.refreshLocked())
+	require.Empty(t, m.skippedRepos, "repair drains the skip set")
+	m.mu.Unlock()
+	runDeferredOrphanSweepIfReady(m)
+	require.Equal(t, 1, rec.count(), "repair → deferred sweep runs")
+	m.mu.Lock()
+	require.False(t, m.deferredOrphanSweepArmed, "flag cleared after the sweep")
+	m.mu.Unlock()
+}
+
+// assertErr is a tiny sentinel error for stubs that need a non-nil error.
+type assertErr string
+
+func (e assertErr) Error() string { return string(e) }

@@ -137,6 +137,14 @@ type Manager struct {
 	// principle extended to the wire surface #1029 PR 2 introduced). Guarded by
 	// m.mu.
 	skippedRepos []SkippedRepo
+	// deferredOrphanSweepArmed is set at startup when the orphan-container sweep
+	// was deferred because skippedRepos was non-empty — the daemon's session view
+	// is known-incomplete, so the sweep's protected-slug set cannot distinguish a
+	// skipped repo's live container from a genuine orphan. The poll loop runs the
+	// deferred sweep once the skip set drains to empty (every skipped repo's
+	// instances.json parsed), by which point the protected set is complete again.
+	// Guarded by m.mu.
+	deferredOrphanSweepArmed bool
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before

@@ -27,6 +27,12 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 				log.WarningLog.Printf("failed to refresh daemon instances: %v", err)
 			}
 
+			// Run the deferred startup orphan sweep if this refresh repaired every
+			// skipped repo (drained skippedRepos to empty). A no-op unless the
+			// startup sweep was deferred for a known-incomplete session view; once
+			// the view is complete the destructive pass runs with no restart.
+			runDeferredOrphanSweepIfReady(manager)
+
 			// Compute and persist each session's status (Ready/Dead/Running). The
 			// daemon is the sole
 			// owner of status now (#935/#960 PR 5): it computes the liveness here
