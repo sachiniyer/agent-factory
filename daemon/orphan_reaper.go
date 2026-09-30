@@ -59,26 +59,30 @@ func sweepStartupOrphanContainers(manager *Manager) {
 // skipped the sweep stays deferred and re-evaluates on the next poll.
 //
 // Unlike the startup sweep, the deferred sweep runs AFTER the manager readiness
-// barrier has opened (finishInstanceRestore at daemon.go:322), so a
-// CreateSession can be admitted concurrently. A create sets pendingCreates under
-// m.mu and only then provisions its container (manager_create.go), so without a
-// guard a create admitted after the protected-slug snapshot but before
-// SweepOrphanContainers lists containers would publish a container whose slug
-// is absent from the stale protected set — the destructive pass would force-reap
-// a live session (#2632). The startup path is safe only because the not-yet-open
-// readiness barrier excludes creates entirely; this poll-time path holds m.mu
-// across the slug snapshot AND the sweep, which is the dedicated create/sweep
-// exclusion the reviewer asked for: a create that has not yet set pendingCreates
-// blocks on m.mu until the sweep releases it, and one that already set it is in
-// the protected set. The slug collection is inlined because
-// dockerReapProtectedSlugs acquires m.mu itself; holding m.mu across the sweep
-// also keeps the snapshot and the docker list in lockstep, so no container can
-// appear between them.
+// barrier has opened (finishInstanceRestore at daemon.go:322), so a CreateSession
+// can be admitted concurrently. A create sets pendingCreates under m.mu and only
+// then provisions its container (manager_create.go), so without a guard a create
+// admitted after the protected-slug snapshot but before SweepOrphanContainers
+// lists containers would publish a container whose slug is absent from the
+// stale protected set — the destructive pass would force-reap a live session
+// (#2632). The startup path is safe only because the not-yet-open readiness
+// barrier excludes creates entirely; this poll-time path uses the dedicated
+// createSweepMu admission barrier instead, held across the protected-slug
+// snapshot AND the SweepOrphanContainers call: a create that has not yet set
+// pendingCreates blocks on createSweepMu until the sweep releases it, and one
+// that already set it is in the protected set. m.mu is released before the
+// (potentially long) Docker list/reap so the barrier blocks only create
+// admission, not Snapshot/RefreshInstances and the other manager operations
+// that take m.mu alone — holding m.mu through external Docker work would stall
+// the whole daemon on an unavailable engine. The slug collection is inlined
+// because dockerReapProtectedSlugs acquires m.mu itself.
 func runDeferredOrphanSweepIfReady(manager *Manager) {
 	homeID, err := configDirForReap()
 	if err != nil {
 		return
 	}
+	manager.createSweepMu.Lock()
+	defer manager.createSweepMu.Unlock()
 	manager.mu.Lock()
 	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 {
 		manager.mu.Unlock()
@@ -86,8 +90,8 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	}
 	manager.deferredOrphanSweepArmed = false
 	// Collect the protected slugs inline under the already-held m.mu (instead of
-	// calling dockerReapProtectedSlugs, which acquires m.mu itself) so the lock
-	// spans the snapshot and the sweep as one critical section.
+	// calling dockerReapProtectedSlugs, which acquires m.mu itself) so the
+	// snapshot and the sweep stay in lockstep under createSweepMu.
 	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
 	for _, inst := range manager.instances {
 		titles = append(titles, inst.Title)
@@ -103,6 +107,6 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 		slugs[session.Slugify(t)] = true
 	}
 	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses, so the protected set is complete.")
-	sweepOrphanContainers(homeID, slugs)
 	manager.mu.Unlock()
+	sweepOrphanContainers(homeID, slugs)
 }

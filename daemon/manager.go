@@ -145,6 +145,17 @@ type Manager struct {
 	// instances.json parsed), by which point the protected set is complete again.
 	// Guarded by m.mu.
 	deferredOrphanSweepArmed bool
+	// createSweepMu is the create/sweep admission barrier: it serializes the
+	// deferred orphan sweep with CreateSession's pendingCreates publication so a
+	// create admitted after the protected-slug snapshot cannot publish a
+	// mid-sweep container whose slug is absent from the protected set (#2632). It
+	// is separate from m.mu because the deferred sweep's Docker list/reap can take
+	// many seconds (or stall on an unavailable engine), and holding m.mu through
+	// it would block Snapshot, RefreshInstances, and every other manager
+	// operation; createSweepMu blocks only CreateSession admission for that
+	// window, which is exactly the exclusion the race needs. Always taken before
+	// m.mu (createSweepMu -> m.mu) so the two never invert.
+	createSweepMu sync.Mutex
 	// pendingCreates is the daemon-owned projection of creates that have passed
 	// admission but have not finished provisioning. It is intentionally separate
 	// from instances: a docker/ssh/hook backend may block inside NewInstance before
