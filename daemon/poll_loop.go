@@ -34,7 +34,7 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// sweep runs on a separately tracked worker (not inline here) so its
 			// external Docker list/reap cannot suspend the maintenance passes
 			// below on an unavailable engine or a large orphan set.
-			launchDeferredOrphanSweepIfReady(manager)
+			launchDeferredOrphanSweepIfReady(manager, stopCh, wg)
 
 			// Compute and persist each session's status (Ready/Dead/Running). The
 			// daemon is the sole

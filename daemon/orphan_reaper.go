@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"sync"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -130,7 +132,17 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 // protected-slug snapshot and the SweepOrphanContainers call. m.mu guards only
 // the launch decision and the in-flight flag; it is released before the worker
 // is spawned, so a launch never blocks the poll loop on the manager lock.
-func launchDeferredOrphanSweepIfReady(manager *Manager) {
+//
+// The worker is registered with the daemon's shutdown wait group (wg) and
+// observes stopCh, so drainDaemon's wg.Wait() joins it rather than returning
+// while a destructive Docker reap is still in flight: without registration a
+// sweep started just before shutdown would outlive the terminal checkpoint and
+// could be interrupted by process exit. stopCh is checked once before the sweep
+// begins so a shutdown already in progress does not start a new destructive pass;
+// the sweep itself (SweepOrphanContainers) is not cancellable mid-flight, so the
+// wg registration — not stopCh — is what covers a sweep already running when
+// drainDaemon closes stopCh.
+func launchDeferredOrphanSweepIfReady(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
 	manager.mu.Lock()
 	if !manager.deferredOrphanSweepArmed || len(manager.skippedRepos) > 0 || manager.deferredOrphanSweepInFlight {
 		manager.mu.Unlock()
@@ -138,12 +150,19 @@ func launchDeferredOrphanSweepIfReady(manager *Manager) {
 	}
 	manager.deferredOrphanSweepInFlight = true
 	manager.mu.Unlock()
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer func() {
 			manager.mu.Lock()
 			manager.deferredOrphanSweepInFlight = false
 			manager.mu.Unlock()
 		}()
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
 		runDeferredOrphanSweepIfReady(manager)
 	}()
 }

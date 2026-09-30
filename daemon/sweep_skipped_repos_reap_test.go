@@ -441,11 +441,14 @@ func TestLaunchDeferredOrphanSweep_RunsOnWorkerWithoutBlockingLauncher(t *testin
 	m.deferredOrphanSweepArmed = true
 	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
 
+	stopCh := make(chan struct{})
+	wg := &sync.WaitGroup{}
+
 	// The launcher must return even though the sweep worker is blocked inside
 	// sweepOrphanContainers.
 	done := make(chan struct{})
 	go func() {
-		launchDeferredOrphanSweepIfReady(m)
+		launchDeferredOrphanSweepIfReady(m, stopCh, wg)
 		close(done)
 	}()
 	select {
@@ -461,13 +464,12 @@ func TestLaunchDeferredOrphanSweep_RunsOnWorkerWithoutBlockingLauncher(t *testin
 
 	close(release)
 
-	// The deferred flag is cleared at commit time; give the worker a moment to
-	// finish and clear the in-flight flag.
-	require.Eventually(t, func() bool {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		return !m.deferredOrphanSweepInFlight
-	}, 5*time.Second, 10*time.Millisecond, "the in-flight flag must clear once the worker exits")
+	// The worker is registered with wg, so wg.Wait joins it deterministically
+	// rather than polling the in-flight flag.
+	wg.Wait()
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag must clear once the worker exits")
+	m.mu.Unlock()
 
 	assert.Equal(t, 1, rec.count(), "the deferred sweep ran exactly once on the worker")
 }
@@ -484,26 +486,28 @@ func TestLaunchDeferredOrphanSweep_DoesNotLaunchSecondWorkerWhileOneInFlight(t *
 	m.deferredOrphanSweepArmed = true
 	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
 
-	launchDeferredOrphanSweepIfReady(m)
+	stopCh := make(chan struct{})
+	wg := &sync.WaitGroup{}
+
+	launchDeferredOrphanSweepIfReady(m, stopCh, wg)
 	// Give the worker a moment to enter the blocked sweep.
 	require.Eventually(t, func() bool {
 		return rec.count() == 1
 	}, 5*time.Second, 10*time.Millisecond, "the first worker entered the sweep")
 
 	// A second launch while the first is in flight is a no-op.
-	launchDeferredOrphanSweepIfReady(m)
+	launchDeferredOrphanSweepIfReady(m, stopCh, wg)
 	assert.Equal(t, 1, rec.count(), "no second worker is launched while one is in flight")
 
 	close(release)
-	require.Eventually(t, func() bool {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		return !m.deferredOrphanSweepInFlight
-	}, 5*time.Second, 10*time.Millisecond, "the in-flight flag clears after the worker exits")
+	wg.Wait()
+	m.mu.Lock()
+	require.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag clears after the worker exits")
+	m.mu.Unlock()
 
 	// After the worker exits the flag is cleared, but the deferral flag was
 	// consumed (armed cleared at commit), so a subsequent launch is still a no-op.
-	launchDeferredOrphanSweepIfReady(m)
+	launchDeferredOrphanSweepIfReady(m, stopCh, wg)
 	assert.Equal(t, 1, rec.count(), "armed was cleared at commit, so no further sweep launches")
 }
 
@@ -516,7 +520,7 @@ func TestLaunchDeferredOrphanSweep_NoOpWhenNotArmed(t *testing.T) {
 	m := newBareManagerForSweep()
 	m.instances[daemonInstanceKey("repo1", "live")] = &session.Instance{Title: "live"}
 
-	launchDeferredOrphanSweepIfReady(m)
+	launchDeferredOrphanSweepIfReady(m, make(chan struct{}), &sync.WaitGroup{})
 
 	// No worker is spawned; assert via a short poll since the launcher is async.
 	require.Eventually(t, func() bool {
@@ -525,4 +529,82 @@ func TestLaunchDeferredOrphanSweep_NoOpWhenNotArmed(t *testing.T) {
 		return !m.deferredOrphanSweepInFlight
 	}, time.Second, 10*time.Millisecond)
 	assert.Equal(t, 0, rec.count(), "no deferral armed → no sweep")
+}
+
+// TestLaunchDeferredOrphanSweep_WorkerIsJoinedByShutdownWaitGroup verifies the
+// worker is registered with RunDaemon's wait group so drainDaemon's wg.Wait()
+// joins it rather than returning while a destructive Docker reap is still in
+// flight (#4998): with the worker blocked inside the sweep, wg.Wait does not
+// return until the worker exits.
+func TestLaunchDeferredOrphanSweep_WorkerIsJoinedByShutdownWaitGroup(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	_, release := blockingSweepStub(t)
+
+	m := newBareManagerForSweep()
+	m.deferredOrphanSweepArmed = true
+	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
+
+	stopCh := make(chan struct{})
+	wg := &sync.WaitGroup{}
+
+	launchDeferredOrphanSweepIfReady(m, stopCh, wg)
+
+	// Wait for the worker to enter the (blocked) sweep, then close stopCh as
+	// drainDaemon would. The worker is still mid-sweep, so wg.Wait must block.
+	require.Eventually(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.deferredOrphanSweepInFlight
+	}, 5*time.Second, 10*time.Millisecond, "the worker entered the sweep")
+
+	wgDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(wgDone)
+	}()
+	select {
+	case <-wgDone:
+		t.Fatal("wg.Wait returned while the sweep worker was still in flight")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-wgDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wg.Wait did not return after the sweep worker exited")
+	}
+
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag cleared after the worker joined")
+	m.mu.Unlock()
+}
+
+// TestLaunchDeferredOrphanSweep_WorkerSkipsSweepWhenShutdownAlreadyRequested
+// verifies the worker observes stopCh before starting the destructive pass: a
+// worker launched after stopCh is closed bails without running the sweep, so a
+// shutdown already in progress does not start a new reap.
+func TestLaunchDeferredOrphanSweep_WorkerSkipsSweepWhenShutdownAlreadyRequested(t *testing.T) {
+	silenceWarnings(t)
+	stubConfigDirForReap(t, "/test/home")
+	rec := stubSweepOrphanContainers(t)
+
+	m := newBareManagerForSweep()
+	m.deferredOrphanSweepArmed = true
+	m.instances[daemonInstanceKey("repaired-r", "repaired-sess")] = &session.Instance{Title: "repaired-sess"}
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	wg := &sync.WaitGroup{}
+
+	launchDeferredOrphanSweepIfReady(m, stopCh, wg)
+
+	// The worker observes the closed stopCh before the sweep and returns; wg
+	// joins it deterministically.
+	wg.Wait()
+	assert.Equal(t, 0, rec.count(), "the sweep must not run when shutdown was requested before it began")
+	m.mu.Lock()
+	assert.False(t, m.deferredOrphanSweepInFlight, "the in-flight flag cleared without running the sweep")
+	m.mu.Unlock()
 }
