@@ -237,6 +237,15 @@ function hasPrintable(data: string): boolean {
  *  leave the transposed/recalled/restored draft unprotected — the same window
  *  fixed for the other editing controls.
  *
+ *  Ctrl-V (\x16, readline quoted-insert) does not edit the line itself: it
+ *  enters the quoted-insert state with the idle-released draft still in place,
+ *  then inserts the next key literally into the still-present line. The keybar
+ *  emits it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  still-present draft unprotected while readline waits for the quoted
+ *  character — the same window fixed for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -249,7 +258,8 @@ function isEditingControl(data: string): boolean {
     data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
     data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
     data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19") ||
-    data.includes("\x14") || data.includes("\x12") || data.includes("\x1f")
+    data.includes("\x14") || data.includes("\x12") || data.includes("\x1f") ||
+    data.includes("\x16")
   );
 }
 
