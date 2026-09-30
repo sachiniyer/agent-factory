@@ -27,7 +27,15 @@ import (
 // lingers as a zombie a liveness check could misread.
 func startFakeAFDaemon(t *testing.T, home, script string) (int, <-chan *os.ProcessState) {
 	t.Helper()
-	argv0 := filepath.Join(fakeBinDir(t), "af")
+	return startFakeDaemonNamed(t, home, "af", script)
+}
+
+// startFakeDaemonNamed is startFakeAFDaemon with the binary's basename chosen by
+// the caller, for a daemon installed under a name other than `af` — which
+// InstallAutostart permits, and which isAgentFactoryDaemon does not recognize.
+func startFakeDaemonNamed(t *testing.T, home, basename, script string) (int, <-chan *os.ProcessState) {
+	t.Helper()
+	argv0 := filepath.Join(fakeBinDir(t), basename)
 	cmd := fakeDaemonCmd(t, argv0, script, "--daemon")
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "AGENT_FACTORY_HOME=" + home}
 	if err := cmd.Start(); err != nil {
@@ -300,5 +308,54 @@ func TestWaitForDrainingDaemonExit(t *testing.T) {
 	}
 	if !pidLooksAlive(wedged) {
 		t.Fatalf("waitForDrainingDaemonExit must never signal the process it waits on")
+	}
+}
+
+// TestWaitForShutdownCompletionWaitsOnRenamedDaemonBinary: a PID the daemon
+// reported for itself names the stopped daemon whatever its binary is called.
+// The wait must not discard it because the basename is not `af`: falling back
+// to socket polling reopens #5007, since the socket can vanish while teardown
+// still holds the per-home lock and the replacement then fails to start.
+func TestWaitForShutdownCompletionWaitsOnRenamedDaemonBinary(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv rewrite needs /proc to observe")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	pid, exited := startFakeDaemonNamed(t, home, "af-renamed", "sleep 0.5; exit 0")
+	if isAgentFactoryDaemon(pid) {
+		t.Fatalf("fixture invalid: a renamed binary must not pass the basename heuristic")
+	}
+
+	if err := WaitForShutdownCompletion(pid); err != nil {
+		t.Fatalf("WaitForShutdownCompletion(%d): %v", pid, err)
+	}
+	if pidLooksAlive(pid) {
+		t.Fatalf("WaitForShutdownCompletion returned while renamed daemon pid %d was still alive", pid)
+	}
+	select {
+	case state := <-exited:
+		if state == nil || !state.Exited() || state.ExitCode() != 0 {
+			t.Fatalf("renamed daemon exit state = %v, want a clean exit, not a signal", state)
+		}
+	case <-time.After(testSpawnReadyTimeout):
+		t.Fatalf("renamed fake daemon was never reaped")
+	}
+}
+
+// TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary: PingResponse.PID is
+// always self-reported, so the drain wait trusts it under any basename too.
+func TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv rewrite needs /proc to observe")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	pid, _ := startFakeDaemonNamed(t, home, "af-renamed", "sleep 0.4; exit 0")
+	waitForDrainingDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout))
+	if pidLooksAlive(pid) {
+		t.Fatalf("waitForDrainingDaemonExit returned while renamed daemon pid %d was still alive", pid)
 	}
 }

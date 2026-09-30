@@ -79,9 +79,13 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 //
 // The int is the PID of the daemon that was stopped, or 0 when there was none
 // or it could not be identified. It is the positive handle
-// WaitForShutdownCompletion waits on (#5007): the PID the Shutdown reply
-// reports, else the PID file read BEFORE the RPC (the daemon removes that file
-// during teardown), else — on the SIGTERM path — the PID actually signaled.
+// WaitForShutdownCompletion waits on (#5007), and a nonzero value is one the
+// wait may trust without re-reading argv: the PID the daemon reported for
+// itself in the Shutdown reply (trusted whatever its binary is named — a
+// renamed install is legitimately not `af`), else the PID file read BEFORE the
+// RPC (the daemon removes that file during teardown) but only when it named an
+// af daemon at request time, since a stale file can name a recycled process,
+// else — on the SIGTERM path — the PID actually signaled.
 func RequestShutdown() (ShutdownResult, int, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
@@ -119,7 +123,11 @@ func RequestShutdown() (ShutdownResult, int, error) {
 	if resp.PID != 0 {
 		return ShutdownViaRPC, resp.PID, nil
 	}
-	return ShutdownViaRPC, pidFilePID, nil
+	// A reply predating ShutdownResponse.PID: the PID file is only a claim.
+	if pidFilePID > 0 && isAgentFactoryDaemon(pidFilePID) {
+		return ShutdownViaRPC, pidFilePID, nil
+	}
+	return ShutdownViaRPC, 0, nil
 }
 
 // ClassifyShutdownTarget turns the read-only ping made before a restart into
@@ -166,16 +174,20 @@ const shutdownKillConfirmGrace = 2 * time.Second
 // the old daemon exits (#854). Callers on the shutdown-then-respawn path must
 // not respawn until this returns.
 //
-// pid is RequestShutdown's second return. When it is positive the wait is on
-// that process exiting — a positive signal, not a socket that happens to have
-// stopped answering. If the PID stops naming an af daemon while still alive (a
-// recycled number, or a handle that never was the daemon), the process watch
-// has nothing more to say and the wait falls back to socket-drain polling for
-// the rest of the same bound. pid == 0 polls the socket alone.
+// pid is RequestShutdown's second return, and the contract is that it names the
+// stopped daemon or is 0: RequestShutdown establishes that at request time
+// (self-reported by the daemon, or verified against argv). When it is positive
+// the wait is on that process exiting — a positive signal, not a socket that
+// happens to have stopped answering, which can vanish while teardown still
+// holds the per-home lock. The argv heuristic is deliberately not re-applied
+// mid-wait: a renamed install's basename is not `af`, and dropping its PID
+// would fall back to exactly that socket race. pid == 0 polls the socket alone.
 //
 // At shutdownCompleteGrace a daemon that acknowledged Shutdown but is still
 // alive is wedged: it is SIGKILLed, after re-verifying it is an af daemon of
-// this uid serving this AF home, and the kill is confirmed. So the old
+// this uid serving this AF home, and the kill is confirmed. That escalation is
+// the only place argv is re-verified — the TOCTOU guard against signaling a
+// recycled PID. So the old
 // 5s-then-respawn-anyway hole (#5007) is closed — a daemon still answering at
 // the bound means escalation or an error, never a blind respawn beside it.
 // Returns an error when the daemon could not be confirmed gone; the caller
@@ -190,15 +202,9 @@ func WaitForShutdownCompletion(pid int) error {
 			if !pidLooksAlive(pid) {
 				return nil
 			}
-			if !isAgentFactoryDaemon(pid) {
-				pid = 0
-				break
-			}
 			time.Sleep(shutdownCompletePoll)
 		}
-		if pid > 0 {
-			return killWedgedShutdownDaemon(pid)
-		}
+		return killWedgedShutdownDaemon(pid)
 	}
 	for time.Now().Before(deadline) {
 		if pingDaemon() != nil {
@@ -270,9 +276,10 @@ func daemonAlreadyServing() bool {
 }
 
 // waitForDrainingDaemonExit is a best-effort wait for a responder that reported
-// DaemonPhaseQuiescing to finish leaving, bounded by deadline. With a PID it
-// waits for that process to exit (or to stop naming an af daemon); without one
-// it waits for the control socket to stop answering. It never errors: callers
+// DaemonPhaseQuiescing to finish leaving, bounded by deadline. With a PID —
+// PingResponse.PID, always self-reported, so trusted without the argv basename
+// heuristic a renamed install would fail — it waits for that process to exit;
+// without one it waits for the control socket to stop answering. It never errors: callers
 // fall through afterwards, and the per-home lock and socket liveness arbitrate
 // a drain that outlived the bound.
 func waitForDrainingDaemonExit(pid int, deadline time.Time) {
@@ -281,7 +288,7 @@ func waitForDrainingDaemonExit(pid int, deadline time.Time) {
 	}
 	for time.Now().Before(deadline) {
 		if pid > 0 {
-			if !pidLooksAlive(pid) || !isAgentFactoryDaemon(pid) {
+			if !pidLooksAlive(pid) {
 				return
 			}
 		} else if pingDaemon() != nil {
