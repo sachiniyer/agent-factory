@@ -1062,6 +1062,8 @@ func staleLockFile(t *testing.T) {
 	lock.release()
 }
 
+func boolPtr(b bool) *bool { return &b }
+
 // shortShutdownGrace shrinks the post-ack bound for cells that expect it to run out.
 func shortShutdownGrace(t *testing.T) {
 	t.Helper()
@@ -1089,8 +1091,13 @@ func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForConfirmedDifferentPI
 			target     func(t *testing.T) int
 			confirmed  bool
 			wantExited bool
+			// wantExitedHeld overrides wantExited when the home lock stays
+			// held: a serving responder is then provably NOT the lock holder,
+			// and a still-alive confirmed target may be mid-drain — no exit
+			// proof either way.
+			wantExitedHeld *bool
 		}{
-			{name: "confirmed different responder PID is exited", target: livePID, confirmed: true, wantExited: true},
+			{name: "confirmed different responder PID is exited", target: livePID, confirmed: true, wantExited: true, wantExitedHeld: boolPtr(false)},
 			{name: "unconfirmed different responder keeps waiting", target: livePID, wantExited: false},
 			{name: "confirmed responder is the target: keeps waiting", target: func(*testing.T) int { return os.Getpid() }, confirmed: true, wantExited: false},
 			{name: "target unknown: keeps waiting", target: func(*testing.T) int { return 0 }, wantExited: false},
@@ -1110,11 +1117,15 @@ func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForConfirmedDifferentPI
 				}
 				serveAsResponder(t)
 
+				wantExited := tc.wantExited
+				if tc.wantExitedHeld != nil && lockMode == "held" {
+					wantExited = *tc.wantExitedHeld
+				}
 				err := WaitForShutdownCompletion(ShutdownPID{PID: tc.target(t), Confirmed: tc.confirmed})
 				switch {
-				case tc.wantExited && err != nil:
+				case wantExited && err != nil:
 					t.Fatalf("WaitForShutdownCompletion = %v, want nil: a different process serves", err)
-				case !tc.wantExited && !errors.Is(err, ErrShutdownIncomplete):
+				case !wantExited && !errors.Is(err, ErrShutdownIncomplete):
 					t.Fatalf("WaitForShutdownCompletion = %v, want ErrShutdownIncomplete: the responder may be the target", err)
 				}
 			})
