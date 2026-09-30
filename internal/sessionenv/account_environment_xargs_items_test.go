@@ -75,6 +75,15 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{} -L1 env", true},
 		{"xargs -I{} -l env", true},
 		{"xargs -I{} --max-args=2 env", true},
+		// GNU parses counts with leading whitespace. Codex on #4979.
+		{"xargs -I{} -n ' 2' env", true},
+		{"xargs -I{} -L ' 2' env", true},
+		// BSD xargs (macOS) keeps -I in force alongside -n/-L, so the marker
+		// is still substituted there. Codex on #4979. That makes `cat` a
+		// marker in `/bin/cat` on macOS even though GNU drops it.
+		{"xargs -I{} -n2 nohup {} CODEX_HOME=/x codex", true},
+		{"xargs -I{} -L1 nohup {}", true},
+		{"xargs -Icat -n2 strace /bin/cat -u CODEX_HOME codex", true},
 		// A modeled wrapper's command slot.
 		{"xargs -I{} nohup {} CODEX_HOME=/x codex", true},
 		{"xargs -I{} nice -n 5 {}", true},
@@ -107,10 +116,11 @@ func TestCommandMutatesAccountEnvironment_XargsMarkerPositions(t *testing.T) {
 		{"xargs -I{} {}", false},
 		{"xargs -i {} echo hi", false},
 		{"xargs -I{} /usr/bin/{} echo", false},
-		// Replace mode cancelled by a later -n2 appends instead, and `cat`
-		// is no longer a marker. Codex on #4979.
-		{"xargs -Icat -n2 strace /bin/cat -u CODEX_HOME codex", false},
+		// -n1 keeps replace mode in GNU's count grammar (` 1`, `+1`, `01`).
 		{"xargs -I{} -n1 echo {}", false},
+		{"xargs -I{} -n ' 1' echo {}", false},
+		{"xargs -I{} -n +1 echo {}", false},
+		{"xargs -I{} -n 01 env codex", false},
 		// A later literal -I supersedes an earlier marker. Codex on #4979.
 		{"xargs -I M -I{} echo hi M", false},
 		{"xargs -I{} -i echo {} hi", false},

@@ -1,7 +1,6 @@
 package sessionenv
 
 import (
-	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -191,22 +190,18 @@ func xargsMarkerInName(literal, marker string) bool {
 	return strings.Contains(namePart, marker)
 }
 
-// xargsCountCancelsReplace reports whether an -n/--max-args value cancels an
-// earlier -I. GNU xargs 4.9 lets a later -n win ("ignoring previous
-// --replace value") except -n1; a value that is not a number makes xargs exit
-// before running anything, so it changes nothing here.
+// xargsCountCancelsReplace reports whether an -n/--max-args value may cancel
+// an earlier -I, so that GNU xargs appends input. GNU 4.9 lets a later -n win
+// ("ignoring previous --replace value") except when its value is 1, which it
+// parses with leading whitespace, an optional '+', and leading zeros (` 1`,
+// `+1` and `01` all keep -I; ` 2` cancels it). Only a value provably equal to
+// 1 in that grammar keeps -I here. Any other spelling, including one xargs
+// rejects, counts as cancelling, which only adds the appended-input checks.
 func xargsCountCancelsReplace(value string) bool {
-	n, err := strconv.Atoi(value)
-	return err == nil && n != 1
-}
-
-// xargsLineCountValid reports whether an -L/-l/--max-lines value is one GNU
-// xargs 4.9 accepts, so the option takes effect and cancels an earlier -I.
-// -l and --max-lines take an optional value; an absent one means 1.
-func xargsLineCountValid(value string) bool {
-	if value == "" {
+	digits := strings.TrimLeft(value, " \t\n\v\f\r")
+	digits = strings.TrimPrefix(digits, "+")
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
 		return true
 	}
-	_, err := strconv.Atoi(value)
-	return err == nil
+	return strings.TrimLeft(digits, "0") != "1"
 }
