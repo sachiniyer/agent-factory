@@ -661,7 +661,17 @@ func (i *Instance) ArchivedCandidateBranchIsFree(candidate string) bool {
 // reversible half — a renamed branch with the worktree still at its old path is
 // undone by one more rename, whereas a moved worktree whose branch rename then
 // failed would need the bytes moved back to recover.
-func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
+//
+// relinquishBranch records whether this rename deliberately LEFT the recorded
+// branch behind for the title's re-user to adopt (#2127). The caller — the
+// reuse-rename path — is the only place that can answer it: an empty newBranch
+// is the yield ONLY when nothing held the branch, while every other empty is a
+// decline (off-box create, published or external branch, not blocking, someone
+// else's hold) after which the row still owns what it records. A moved branch
+// likewise stays owned under its new name. The value persists as
+// InstanceData.RelinquishedBranch so the defense survives a restart (#4562
+// review).
+func (i *Instance) RenameArchived(newTitle, dest, newBranch string, relinquishBranch bool) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.liveness != LiveArchived {
@@ -701,6 +711,10 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 		i.Branch = gw.GetBranchName()
 		i.touchLocked()
 	}
+	// Assignment, not OR: the flag describes the branch the row records NOW. A
+	// second reuse rename that moves that branch aside leaves the row defending
+	// the moved name, which is exactly what the false value says.
+	i.branchRelinquished = relinquishBranch
 	return nil
 }
 

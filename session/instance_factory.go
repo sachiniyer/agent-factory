@@ -321,8 +321,8 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 // refusal apart from the provisioning-config errors it used to hide behind.
 var ErrInPlaceRemoteBackend = errors.New("an in-place session cannot run on a non-local backend")
 
-// InPlaceBackendConflict reports the in-place/remote contradiction for a create
-// with these options against absPath, or nil when there is none. NewInstance
+// InPlaceBackendConflictForKind reports the in-place/remote contradiction for a
+// create whose backend resolved to kind, or nil when there is none. NewInstance
 // enforces it, so an ordinary caller never needs this.
 //
 // It is exported for callers that MUTATE state before reaching NewInstance. The
@@ -343,19 +343,20 @@ var ErrInPlaceRemoteBackend = errors.New("an in-place session cannot run on a no
 // fully configured one it SUCCEEDS, and the session's record claims the user's
 // working tree while its agent runs in a sandbox clone that cannot see it.
 //
-// Resolving here mirrors LocalPrereqsRequired (#2592) for the same reason: a
-// check that reimplements the backend precedence rules drifts from them.
+// And the kind arrives ALREADY resolved rather than being resolved here: the
+// daemon pins its resolution at admission so NewInstance provisions that exact
+// answer, and a second read of the repo config could disagree with the pin
+// after a mid-create config save — letting a contradiction through that the
+// pinned runtime then rejects only after state was already mutated (#4562
+// review). A caller without a kind in hand resolves one with BackendKindFor.
 //
-// A kind that will not RESOLVE yields nil. That is not a local create and not a
-// remote one — it is an unusable `backend` value, and the runtime factory
-// reports it in one place. Converting it into an in-place refusal would name the
-// wrong problem.
-func InPlaceBackendConflict(opts InstanceOptions, absPath string) error {
-	if !opts.InPlace {
-		return nil
-	}
-	kind, err := resolveBackendKind(opts, absPath)
-	if err != nil || kind == BackendLocal {
+// A kind that will not RESOLVE — empty here, the conservative default the
+// daemon keeps when BackendKindFor errored — yields nil. That is not a local
+// create and not a remote one — it is an unusable `backend` value, and the
+// runtime factory reports it in one place. Converting it into an in-place
+// refusal would name the wrong problem.
+func InPlaceBackendConflictForKind(kind BackendKind, opts InstanceOptions) error {
+	if !opts.InPlace || kind == "" || kind == BackendLocal {
 		return nil
 	}
 	return inPlaceBackendConflict(kind, opts)

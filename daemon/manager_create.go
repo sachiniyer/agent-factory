@@ -641,7 +641,13 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	// must not hoist the refusal: reserveCreate's admission order is load-bearing
 	// (#2778/#2415), and this check has to stay ahead of the archived-name-reuse
 	// rename and behind the project-delete fence, exactly where it was.
-	inPlaceConflict := session.InPlaceBackendConflict(backendOpts, workspace)
+	//
+	// The check consumes runtimeKind — the SAME resolution NewInstance will be
+	// given — rather than re-resolving the repo config. A `backend` save landing
+	// between the two reads would otherwise split the answers: admission sees
+	// docker, the late check sees local, the archived rename proceeds, and the
+	// create fails inside NewInstance leaving that rename standing (#4562 review).
+	inPlaceConflict := session.InPlaceBackendConflictForKind(runtimeKind, backendOpts)
 	nameNamespace := runtimeNamespaceForKind(runtimeKind)
 	// The ONE branch_prefix read for this create (#4539), resolved outside the
 	// manager lock like the backend above. Every title rule below and the worktree
@@ -719,9 +725,9 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	// docker/ssh/hook repo now fails before a title is reserved, rather than
 	// after provisioning work has begun.
 	//
-	// Through session.InPlaceBackendConflict rather than a local comparison
-	// against runtimeKind, so the daemon's answer and NewInstance's cannot drift
-	// — including on the deliberate non-firing for a backend value that will not
+	// Through session.InPlaceBackendConflictForKind rather than a local
+	// comparison, so the daemon's answer and NewInstance's cannot drift —
+	// including on the deliberate non-firing for a backend value that will not
 	// resolve, which belongs to the factory's canonical error.
 	if inPlaceConflict != nil {
 		return createReservation{}, inPlaceConflict

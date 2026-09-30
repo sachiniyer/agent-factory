@@ -112,6 +112,7 @@ func reservedClaim(naming branchNaming, title string, inPlace bool) git.BranchCl
 	claim := git.BranchClaim{Title: title, Local: naming.local}
 	if !inPlace {
 		claim.Branch = naming.branchFor(title)
+		claim.Pinned = true
 	}
 	return claim
 }

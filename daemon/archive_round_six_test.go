@@ -47,7 +47,7 @@ func TestArchiveMismatchedPathPreservesFutureClaim(t *testing.T) {
 	m, repoID, repoPath := newStatusTestManager(t)
 	archived, _ := seedArchivedSession(t, m, repoID, repoPath, "feature/login", "feature-login")
 	oldPath := filepath.Join(filepath.Dir(archived.GetWorktreePath()), "old-name")
-	require.NoError(t, archived.RenameArchived(archived.Title, oldPath, ""))
+	require.NoError(t, archived.RenameArchived(archived.Title, oldPath, "", false))
 	require.NoError(t, m.persistInstanceErr(repoID, archived))
 	installInstantBackend(t)
 	_, err := m.CreateSession(context.Background(), CreateSessionRequest{Title: "feature-login", RepoPath: repoPath, Program: "claude"})

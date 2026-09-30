@@ -47,3 +47,42 @@ func TestPendingCreateRowWithoutBackendClaimsOffBox(t *testing.T) {
 	assert.True(t, (&Instance{Title: "running", backend: &LocalBackend{}}).BranchClaim().Local,
 		"control: a settled instance with no pending marker remains a local claim")
 }
+
+// TestRelinquishedBranchIsPersistedNotImpliedByArchived (#4562 review): an
+// archived row that was never renamed for title reuse still owns the branch
+// its record points at — its worktree may sit on it, and its restore still
+// names it. Marking every archived row relinquished lets a later create that
+// derives the recorded branch adopt it out from under the record. Only a row
+// whose reuse rename deliberately left the branch (RelinquishedBranch) yields
+// the defense.
+func TestRelinquishedBranchIsPersistedNotImpliedByArchived(t *testing.T) {
+	wt := GitWorktreeData{RepoPath: "/repo", WorktreePath: "/arch/wt", BranchName: "foo-x"}
+	unrenamed := InstanceData{
+		Title: "#x", Liveness: LiveArchived, Status: Archived, Branch: "foo-x",
+		Worktree: wt,
+	}
+	assert.False(t, unrenamed.BranchClaim().Relinquished,
+		"an archived row never renamed still defends the branch its record points at")
+
+	yielded := InstanceData{
+		Title: "foo (archived)", Liveness: LiveArchived, Status: Archived,
+		Branch: "global/foo", RelinquishedBranch: true,
+		Worktree: GitWorktreeData{RepoPath: "/repo", WorktreePath: "/arch/wt2", BranchName: "global/foo"},
+	}
+	assert.True(t, yielded.BranchClaim().Relinquished,
+		"the reuse rename's deliberate leave persists as the claim's Relinquished")
+
+	// And the flag round-trips through the instance: FromInstanceData restores
+	// what ToInstanceData wrote, so a daemon restart cannot turn a yielded row
+	// back into a defender or an owning row into a yielded one.
+	inst, err := FromInstanceData(yielded)
+	require.NoError(t, err)
+	assert.True(t, inst.BranchClaim().Relinquished)
+	assert.True(t, inst.ToInstanceData().RelinquishedBranch,
+		"the flag must ride ToInstanceData or the next restart loses it")
+
+	kept, err := FromInstanceData(unrenamed)
+	require.NoError(t, err)
+	assert.False(t, kept.BranchClaim().Relinquished)
+	assert.False(t, kept.ToInstanceData().RelinquishedBranch)
+}

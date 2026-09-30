@@ -45,6 +45,16 @@ type InstanceData struct {
 	Title  string `json:"title"`
 	Path   string `json:"path"`
 	Branch string `json:"branch"`
+	// RelinquishedBranch is the durable record that an archived-name-reuse
+	// rename deliberately left this row's recorded Branch for the re-user to
+	// adopt (#2127): the rename moved nothing because nothing held the branch.
+	// It must be persisted because it cannot be re-derived — an unrenamed
+	// archived row whose branch_prefix changed since creation shows the same
+	// title/branch mismatch but still owns the branch its record points at
+	// (#4562 review). omitempty + additive: records written before the field
+	// existed decode false and keep defending their branch — the safe side of
+	// an unknowable answer.
+	RelinquishedBranch bool `json:"relinquished_branch,omitempty"`
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.
@@ -364,7 +374,15 @@ func (d InstanceData) UsesLocalTmux() bool {
 
 // BranchClaim is Instance.BranchClaim for a durable row.
 func (d InstanceData) BranchClaim() git.BranchClaim {
-	return git.BranchClaim{Title: d.Title, Branch: d.Branch, Local: d.UsesLocalTmux(), Relinquished: IsArchivedData(d)}
+	return git.BranchClaim{
+		Title:        d.Title,
+		Branch:       d.Branch,
+		Local:        d.UsesLocalTmux(),
+		Relinquished: d.RelinquishedBranch,
+		// A pending-create snapshot row's Branch is the admission-pinned name,
+		// not an observed ref (#4562 review).
+		Pinned: d.InFlightOp == OpCreating,
+	}
 }
 
 // RestoreArchiveRollbackFence removes the previous-release safety projection

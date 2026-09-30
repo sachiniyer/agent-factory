@@ -75,6 +75,14 @@ type Instance struct {
 	// admission judges it under the global prefix the way the daemon judges a
 	// genuinely off-box create (#4562 review). Set once by FromInstanceData.
 	pendingLocalityUnknown bool
+	// branchRelinquished marks a row whose recorded branch was deliberately
+	// left for a re-user to adopt: the archived-name-reuse rename freed its
+	// title and, finding the branch held by nothing, declined to move it
+	// (#2127). It is persisted (RelinquishedBranch) because the fact cannot be
+	// re-derived — a renamed row and an unrenamed archived row whose prefix
+	// changed since creation both carry a branch their title no longer
+	// derives, but only the former gave it up (#4562 review).
+	branchRelinquished bool
 	// lostRestoreFailure is the durable terminal outcome of automatic recovery.
 	// It gates only the automatic retry loop; an explicit restore may replace the
 	// runtime and clear it at the live boundary.

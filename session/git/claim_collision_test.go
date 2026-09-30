@@ -80,15 +80,44 @@ func TestClaimCollision(t *testing.T) {
 			name:  "an off-box reservation keeps the prefix it pinned, not the live global",
 			title: "-x",
 			// The global prefix moved to "new-" after "#x" reserved "global/x";
-			// "-x" derives "new-x", which nothing holds (#4562 review).
+			// "-x" derives "new-x", which nothing holds. The reservation's
+			// pinned name is its whole answer — no sandbox ref exists yet to
+			// collide with (#4562 review).
 			naming: TitleNaming{Prefix: "new-", GlobalPrefix: "new-", Local: false},
-			claim:  BranchClaim{Title: "#x", Branch: "global/x", Local: false},
+			claim:  BranchClaim{Title: "#x", Branch: "global/x", Local: false, Pinned: true},
 		},
 		{
 			name:  "an off-box pair still collides where it did before per-project prefixes",
 			title: "A B", naming: offBox,
 			claim:      BranchClaim{Title: "a-b", Local: false},
 			wantBranch: "global/a-b", want: true,
+		},
+		{
+			name:  "an off-box recorded branch under a foreign prefix keeps the sanitizer collision",
+			title: "a-b", naming: offBox,
+			// The settled row's sandbox derived "sandbox/a-b"; the host checks
+			// under "global/", so the recorded-arm compare misses — but a new
+			// sandbox with the same config derives "sandbox/a-b" again, so the
+			// title-level collision must still refuse (#4562 review).
+			claim:      BranchClaim{Title: "A B", Branch: "sandbox/a-b", Local: false},
+			wantBranch: "global/a-b", want: true,
+		},
+		{
+			name:  "a local recorded branch under a foreign prefix is judged by that branch alone",
+			title: "a-b", naming: local,
+			// Contrast with the off-box row above: a host-local record holds
+			// "old/a-b" as a real ref, "a-b" derives "proj-a-b" — distinct
+			// refs — so re-deriving its title under the live prefix is an
+			// artifact, not a collision.
+			claim: BranchClaim{Title: "A B", Branch: "old/a-b", Local: true},
+		},
+		{
+			name:  "a relinquished claim still holds its sanitizer-level title",
+			title: "foo-archived", naming: TitleNaming{Prefix: "global/", GlobalPrefix: "global/", Local: true},
+			// Relinquished drops only the recorded-branch defense; a new title
+			// sanitizing to the renamed row's title still collides.
+			claim:      BranchClaim{Title: "foo (archived)", Branch: "global/foo", Local: true, Relinquished: true},
+			wantBranch: "global/foo-archived", want: true,
 		},
 	}
 	for _, tt := range tests {

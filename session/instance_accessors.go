@@ -332,12 +332,16 @@ func (i *Instance) BranchClaim() git.BranchClaim {
 		Title:  i.Title,
 		Branch: i.Branch,
 		Local:  local,
-		// An archived row does not defend the branch it recorded: its reuse
-		// rename either moved that branch aside or left it for the title's
-		// re-user to adopt (#2127). A row carrying a recorded branch it never
-		// derived is only reachable here past that rename, where the branch
-		// was deliberately relinquished.
-		Relinquished: i.liveness == LiveArchived,
+		// Only a row whose recorded branch the reuse rename deliberately left
+		// for the re-user stops defending it (#2127). An archived row that was
+		// never renamed — or whose rename declined to move the branch — still
+		// owns the branch its record points at; marking it relinquished would
+		// let a later create adopt that branch and contaminate the archived
+		// history (#4562 review).
+		Relinquished: i.branchRelinquished,
+		// A pending create's Branch is the name admission pinned, not a ref
+		// already made; a settled row's is the observed one (#4562 review).
+		Pinned: i.inFlightOp == OpCreating,
 	}
 }
 

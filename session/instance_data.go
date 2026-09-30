@@ -30,6 +30,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
+		RelinquishedBranch:       i.branchRelinquished,
 		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil),
 		CanKill:                  canKillFor(i.ID, i.inFlightOp),
 		CanHandoff:               i.canHandoffLocked(),
@@ -346,6 +347,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Branch:     data.Branch,
 		liveness:   liveness,
 		inFlightOp: inFlightOp,
+		// An archived-name-reuse rename that yielded the branch persists the
+		// fact (#2127); it cannot be re-derived from title vs recorded branch,
+		// because an unrenamed row whose prefix changed shows the same shape
+		// while still owning its branch (#4562 review).
+		branchRelinquished: data.RelinquishedBranch,
 		// Carried across the restart (#1892). An outage that loses sessions is the
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a

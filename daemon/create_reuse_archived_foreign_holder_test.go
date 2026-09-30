@@ -138,10 +138,12 @@ func TestReclaimArchivedBranch_ArchivedHolderStillQualifies(t *testing.T) {
 		"the archived session's own worktree must be recognized as the holder, or reuse-archived-name can never complete")
 
 	manager.mu.Lock()
-	candidate := manager.reclaimArchivedBranchLocked(manager.globalBranchNaming(), repoPath, archived, "foo", "foo (archived)")
+	candidate, yielded := manager.reclaimArchivedBranchLocked(manager.globalBranchNaming(), repoPath, archived, "foo", "foo (archived)")
 	manager.mu.Unlock()
 	assert.Equal(t, manager.branchForTitle("foo (archived)"), candidate,
 		"the reclaim must still offer the archived session's own branch a new name")
+	assert.False(t, yielded,
+		"a branch moved aside stays owned under its new name — nothing was left for adoption")
 }
 
 // Fail-closed, stated as its own case: an unresolvable holder is not a licence to

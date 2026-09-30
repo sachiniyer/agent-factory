@@ -204,11 +204,21 @@ type BranchClaim struct {
 	Title  string
 	Branch string
 	Local  bool
-	// Relinquished marks a claim that no longer defends its recorded branch.
-	// An archived row's branch is either moved aside with the reuse rename or
-	// deliberately left for the title's re-user to adopt (#2127) — in both
-	// outcomes the row does not keep the branch away from a later create.
+	// Relinquished marks a claim that no longer defends its recorded branch:
+	// the archived-name-reuse rename deliberately left that branch for the
+	// title's re-user to adopt (#2127), and the row persisted the fact
+	// (InstanceData.RelinquishedBranch). An archived row that was never
+	// renamed — or whose rename declined to move the branch — still owns what
+	// it records, so Relinquished is NOT implied by Archived.
 	Relinquished bool
+	// Pinned marks a claim whose Branch was assigned at admission — an
+	// in-flight create's reservation or the pending row it materializes —
+	// rather than a ref observed to exist. The pinned name is the create's
+	// whole answer: the sandbox it eventually provisions may derive a branch
+	// under a config the host never saw, which admission cannot know. A
+	// SETTLED off-box row's recorded branch is the opposite — a real ref its
+	// sandbox already made — so it keeps the sanitizer floor below.
+	Pinned bool
 }
 
 // TitleNaming is how ONE create derives its branch: Prefix is the prefix its
@@ -240,24 +250,36 @@ type TitleNaming struct {
 // title never derived. While the claim still defends the recorded branch
 // (Relinquished unset), a title that derives THAT branch collides with it —
 // taking the ref would confiscate it from the record that still points at it,
-// and local setup's leftover-branch delete could destroy it outright. The
-// surviving name-level check is literal title equality; sanitized-title
-// equality under a prefix the claim was never admitted against is a
-// re-derivation, not something the claim holds. An archived claim sets
-// Relinquished because its reuse rename either moved the branch aside or left
-// it for the re-user to adopt. A claim with no recorded branch yet is derived.
+// and local setup's leftover-branch delete could destroy it outright. A claim
+// sets Relinquished only when the reuse rename deliberately left its recorded
+// branch for the re-user. A claim with no recorded branch yet is derived.
 // EqualFold, not ==: on a case-insensitive filesystem two loose refs that
 // differ only in case are one file.
+//
+// Which rule answers a recorded-branch mismatch depends on what the claim is.
+// A host-local record or an admission-PINNED name (a reservation, a pending
+// row) is judged by the recorded branch alone plus literal title equality:
+// re-deriving its title under the live prefix is an artifact, and a pinned
+// name says nothing about the ref its sandbox will actually make. A SETTLED
+// off-box record instead falls through to the TitlesCollide floor: its
+// recorded branch is a real ref its sandbox already pushed under a prefix the
+// host never saw (sandbox/), so a new title sanitizing to the claim's title
+// must still be refused — a same-configured sandbox would derive the same ref
+// (#4562 review). A Relinquished claim falls through too: its renamed title
+// stands in the namespace like any other.
 func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, bool) {
 	prefix := n.Prefix
 	if !n.Local || !claim.Local {
 		prefix = n.GlobalPrefix
 	}
 	if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
-		if !claim.Relinquished && strings.EqualFold(claim.Branch, BranchForTitle(prefix, title)) {
+		if !claim.Relinquished &&
+			strings.EqualFold(claim.Branch, BranchForTitle(prefix, title)) {
 			return BranchForTitle(prefix, title), true
 		}
-		return "", strings.EqualFold(title, claim.Title)
+		if !claim.Relinquished && (claim.Local || claim.Pinned) {
+			return "", strings.EqualFold(title, claim.Title)
+		}
 	}
 	if !TitlesCollide(title, claim.Title, prefix) {
 		return "", false

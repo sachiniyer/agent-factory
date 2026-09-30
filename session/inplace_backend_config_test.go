@@ -139,3 +139,22 @@ func TestNewInstance_UnresolvableBackendKeepsItsCanonicalError(t *testing.T) {
 	assert.Contains(t, err.Error(), "kubernetes",
 		fmt.Sprintf("the unparseable backend value must be what the error names, got %v", err))
 }
+
+// TestInPlaceBackendConflictForKindUsesThePinnedKind pins the admission-side
+// variant (#4562 review): the contradiction is judged on the kind the create
+// resolved ONCE — the answer NewInstance will provision — never a second read
+// of the repo's `backend` key that a mid-create config save could have changed.
+func TestInPlaceBackendConflictForKindUsesThePinnedKind(t *testing.T) {
+	for _, kind := range remoteBackendKinds {
+		err := InPlaceBackendConflictForKind(kind, InstanceOptions{InPlace: true})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInPlaceRemoteBackend)
+		assert.Contains(t, err.Error(), string(kind))
+	}
+	assert.NoError(t, InPlaceBackendConflictForKind(BackendLocal, InstanceOptions{InPlace: true}),
+		"a local in-place create — the root agent's shape — never conflicts")
+	assert.NoError(t, InPlaceBackendConflictForKind("", InstanceOptions{InPlace: true}),
+		"an unresolvable kind keeps the factory's canonical error, not an in-place one")
+	assert.NoError(t, InPlaceBackendConflictForKind(BackendDocker, InstanceOptions{}),
+		"a non-in-place create never conflicts")
+}
