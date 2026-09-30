@@ -98,13 +98,13 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyShiftUp:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
-			pane.ScrollUp()
+			pane.ScrollHalfPageUp()
 		}
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
-			pane.ScrollDown()
+			pane.ScrollHalfPageDown()
 		}
 		return m, m.selectionChanged()
 
@@ -387,7 +387,23 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		if inst == nil {
 			return nil
 		}
-		_ = inst.Transition(session.BeginArchive())
+		// BeginArchive is non-total (s.op == OpNone && s.liveness != LiveArchived),
+		// so a background snapshot settling the row to LiveArchived while this
+		// overlay is open refuses here. The row is already where the user asked it
+		// to go — the row's own press-time gate (lifecycleAction != Archive ⇒
+		// no-op) reaches the same answer for an Archived row — so a refused
+		// transition on LiveArchived is a silent no-op: suppress the redundant
+		// archive RPC the daemon would reject with ErrAlreadyArchived (the
+		// contradictory "Cannot archive session … already archived" recovery
+		// modal). The busy-op refusal (OpRestoring/OpKilling/OpRespawning from
+		// another client) still falls through and lets the daemon authoritatively
+		// refuse with its "busy; try again" modal — that feedback is accurate, not
+		// contradictory, so its UX is preserved unchanged.
+		if err := inst.Transition(session.BeginArchive()); err != nil {
+			if inst.GetLiveness() == session.LiveArchived {
+				return nil
+			}
+		}
 		return startArchiveMsg{target: target}
 	})
 }
