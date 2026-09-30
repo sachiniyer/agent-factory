@@ -1306,11 +1306,15 @@ function openRebindProject(projectId: string, label: string): void {
   }
   // The root the registration points at NOW: a selection still on it is the user
   // still in this rebind, which a confirmed success may follow.
-  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
-  // The root the next submission tells the daemon it expects. It starts as the
-  // one the switcher showed, and moves only when a "rebound elsewhere" refusal
-  // re-reads the registry and tells the user where the project is now.
+  const shown = store.get().registeredProjects.find((r) => r.id === projectId);
+  const oldRoot = shown?.root ?? null;
+  // The (root, checkout id) pair the next submission tells the daemon it
+  // expects (#4822 spec): it starts as the pair the switcher showed, and moves
+  // only when a "rebound elsewhere" refusal re-reads the registry and reports
+  // the pair it records now — a same-path reclone changes the checkout half
+  // while leaving the root spelling alone.
   let expectedRoot = oldRoot;
+  let expectedCheckoutID = shown?.checkout_id ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -1400,10 +1404,13 @@ function openRebindProject(projectId: string, label: string): void {
               // A read under a credential this page no longer holds says nothing
               // it may act on; the form still re-arms, on the daemon's message.
               const own = token === tok;
-              const now = own ? projects.find((p) => p.id === projectId)?.root : undefined;
+              const now = own ? projects.find((p) => p.id === projectId) : undefined;
               if (own) {
                 commitRegisteredProjects(projects);
-                if (now !== undefined) expectedRoot = now;
+                if (now !== undefined) {
+                  expectedRoot = now.root;
+                  expectedCheckoutID = now.checkout_id;
+                }
                 // Settle anything that raced this read — the same trailing
                 // fenced refetch followConfirmedRebind uses.
                 refreshRegisteredProjects();
@@ -1413,7 +1420,7 @@ function openRebindProject(projectId: string, label: string): void {
                 return;
               }
               m.setBusy(false);
-              m.setError(now !== undefined ? `Rebound elsewhere, to ${now} · submit again to move it from there` : errorText(e));
+              m.setError(now !== undefined ? `Rebound elsewhere, to ${now.root} · submit again to move it from there` : errorText(e));
             })
             .catch(() => {
               if (readSettled) return;
@@ -1435,7 +1442,7 @@ function openRebindProject(projectId: string, label: string): void {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok, expectedRoot)
+        void rebindProject(projectId, path, tok, expectedRoot, expectedCheckoutID)
           .then(() => {
             if (!current()) return;
             if (!settle()) {

@@ -18,14 +18,14 @@ import (
 
 // stubRebindCAS makes the daemon seam run the real compare-and-set rebind and
 // answer a precondition refusal the way the HTTP client does, recording the
-// expected root each request carried.
-func stubRebindCAS(t *testing.T) *[]string {
+// expected (root, checkout) pair each request carried.
+func stubRebindCAS(t *testing.T) *[][2]string {
 	t.Helper()
-	var expected []string
+	var expected [][2]string
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, expectedRoot, path string) (config.Project, error) {
-		expected = append(expected, expectedRoot)
-		project, err := config.RebindProjectIfRoot(projectID, expectedRoot, path)
+	rebindProjectThroughDaemon = func(projectID, expectedRoot, expectedCheckoutID, path string) (config.Project, error) {
+		expected = append(expected, [2]string{expectedRoot, expectedCheckoutID})
+		project, err := config.RebindProjectIfRoot(projectID, expectedRoot, expectedCheckoutID, path)
 		var rebound *config.ProjectReboundError
 		if errors.As(err, &rebound) {
 			return config.Project{}, &apiclient.ProjectReboundError{Detail: err.Error()}
@@ -45,15 +45,16 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	h, id := activeRebindHome(t)
 	displayed := h.projectPickerOverlay
 	expected := stubRebindCAS(t)
-	var recorded string
+	var recorded, recordedCheckout string
 	projects, err := config.ListProjects()
 	require.NoError(t, err)
 	for _, p := range projects {
 		if p.ID == id {
-			recorded = p.Root
+			recorded, recordedCheckout = p.Root, p.CheckoutID
 		}
 	}
 	require.NotEmpty(t, recorded)
+	require.NotEmpty(t, recordedCheckout)
 
 	elsewhere := initTestGitRepo(t)
 	moved, err := config.RebindProject(id, elsewhere) // another client, meanwhile
@@ -64,7 +65,8 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	require.NotNil(t, cmd, "the conflict refresh is dispatched off the event loop")
 	h.Update(cmd())
 
-	require.Equal(t, []string{recorded}, *expected, "the rebind must carry the root the picker displayed")
+	require.Equal(t, [][2]string{{recorded, recordedCheckout}}, *expected,
+		"the rebind must carry the (root, checkout) pair the picker displayed")
 	require.Same(t, displayed, h.projectPickerOverlay, "a conflict is a refusal: the picker stays open")
 	assert.Equal(t, stateSwitchProject, h.state)
 	assert.False(t, displayed.RebindPending(), "a definitive refusal re-arms the form")
@@ -94,7 +96,8 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	h.Update(cmd())
 
 	require.Len(t, *expected, 2)
-	assert.Equal(t, moved.Root, (*expected)[1], "the retry expects the root the refresh found")
+	assert.Equal(t, [2]string{moved.Root, moved.CheckoutID}, (*expected)[1],
+		"the retry expects the (root, checkout) pair the refresh found")
 	root, ok = registeredProjectRoot(id)
 	require.True(t, ok)
 	assert.Equal(t, mine, root, "the retry, made against the current root, lands")
@@ -113,7 +116,7 @@ func TestRebindConflictWithAVanishedRecordStillRebuildsTheList(t *testing.T) {
 	displayed := h.projectPickerOverlay
 
 	old := rebindProjectThroughDaemon
-	rebindProjectThroughDaemon = func(projectID, _, path string) (config.Project, error) {
+	rebindProjectThroughDaemon = func(projectID, _, _, path string) (config.Project, error) {
 		// The daemon already computed its refusal; before this reply reaches
 		// the TUI another client deletes the record outright.
 		dir, err := config.ProjectRegistryDir()
@@ -195,18 +198,27 @@ func TestRebindConflictWithAFailedSnapshotKeepsSessionRows(t *testing.T) {
 	h, id := activeRebindHome(t)
 	root, ok := registeredProjectRoot(id)
 	require.True(t, ok)
+	var recordedCheckout string
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	for _, p := range projects {
+		if p.ID == id {
+			recordedCheckout = p.CheckoutID
+		}
+	}
+	require.NotEmpty(t, recordedCheckout)
 	sessionOnly := initTestGitRepo(t)
 	// The picker lists the registered row beside one that only live sessions
 	// produce — the row a failed snapshot cannot re-derive.
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
-		{Name: "active", Root: root, RepoID: h.repoID, RegistryID: id, RegistryRoot: root, MissingPath: true, SessionCount: 4, InPlaceCount: 1},
+		{Name: "active", Root: root, RepoID: h.repoID, RegistryID: id, RegistryRoot: root, RegistryCheckoutID: recordedCheckout, MissingPath: true, SessionCount: 4, InPlaceCount: 1},
 		{Name: "sessonly", Root: sessionOnly, RepoID: config.RepoIDFromRoot(sessionOnly), SessionCount: 3},
 	}, h.repoRoot)
 	h.projectPickerOverlay.SetMaxSize(80, 24)
 	displayed := h.projectPickerOverlay
 
 	moved := initTestGitRepo(t)
-	_, err := config.RebindProject(id, moved) // another client, meanwhile
+	_, err = config.RebindProject(id, moved) // another client, meanwhile
 	require.NoError(t, err)
 	stubRebindCAS(t)
 

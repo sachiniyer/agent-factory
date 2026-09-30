@@ -715,18 +715,31 @@ export async function registerProject(path: string, token: string): Promise<Regi
  *  message for inline display; on success the echoed projects.changed refetches
  *  the registry and the rebound root lands in the switcher union.
  *
- *  `expectedRoot` is the root the UI showed for the project. The daemon applies
- *  the rebind only while the registry still records it, and otherwise refuses
- *  with PROJECT_REBOUND_ERROR_CODE (#4822). Null sends no precondition. */
+ *  `expectedRoot`/`expectedCheckoutID` are the pair the UI showed for the
+ *  project — its recorded root and the checkout marker behind it. The daemon
+ *  applies the rebind only while the registry still records BOTH, and otherwise
+ *  refuses with PROJECT_REBOUND_ERROR_CODE (#4822): a reclone at the same path
+ *  keeps the root spelling but mints a new checkout marker, so the pair is what
+ *  a same-path replacement fails on. Each rides verbatim — a value the record
+ *  never showed is sent as no field rather than an empty one, because a guarded
+ *  precondition the client cannot fully name is a refusal, not a silent
+ *  last-writer-wins. */
 export async function rebindProject(
   id: string,
   path: string,
   token: string,
   expectedRoot: string | null = null,
+  expectedCheckoutID: string | null = null,
 ): Promise<RegisteredProject> {
-  const request: { id: string; path: string; expected_root?: string } = { id, path };
+  const request: { id: string; path: string; expected_root?: string; expected_checkout_id?: string } = {
+    id,
+    path,
+  };
   if (expectedRoot !== null && expectedRoot !== "") {
     request.expected_root = expectedRoot;
+  }
+  if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
+    request.expected_checkout_id = expectedCheckoutID;
   }
   const resp = await af<{ ok: boolean; project: RegisteredProject }>("RebindProject", request, token);
   return resp.project;

@@ -41,6 +41,12 @@ type Project struct {
 	// highest-priority path (a live session, the active workspace). Whether a
 	// rebind MOVED the record is judged against this, never the display root.
 	RegistryRoot string
+	// RegistryCheckoutID is the checkout marker the registration recorded —
+	// the second half of the guarded rebind's observed pair (#4822 spec). A
+	// reclone at the same path mints a new marker, so root spelling alone
+	// cannot see the checkout the picker displayed being replaced. Empty on a
+	// pre-marker record, which a guarded rebind always refuses.
+	RegistryCheckoutID string
 	// MissingPath marks a registry-backed row whose recorded root the registry
 	// reports absent (path_exists=false) — the checkout moved or was recloned,
 	// which is exactly what rebind repairs.

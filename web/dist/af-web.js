@@ -6710,10 +6710,16 @@ async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
   return resp.project;
 }
-async function rebindProject(id, path, token2, expectedRoot = null) {
-  const request = { id, path };
+async function rebindProject(id, path, token2, expectedRoot = null, expectedCheckoutID = null) {
+  const request = {
+    id,
+    path
+  };
   if (expectedRoot !== null && expectedRoot !== "") {
     request.expected_root = expectedRoot;
+  }
+  if (expectedCheckoutID !== null && expectedCheckoutID !== "") {
+    request.expected_checkout_id = expectedCheckoutID;
   }
   const resp = await af("RebindProject", request, token2);
   return resp.project;
@@ -18564,8 +18570,10 @@ function openRebindProject(projectId, label) {
     showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
     return;
   }
-  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  const shown = store.get().registeredProjects.find((r) => r.id === projectId);
+  const oldRoot = shown?.root ?? null;
   let expectedRoot = oldRoot;
+  let expectedCheckoutID = shown?.checkout_id ?? null;
   openModal(
     rebindProjectModal({
       projectLabel: label,
@@ -18625,10 +18633,13 @@ function openRebindProject(projectId, label) {
             window.clearTimeout(bound);
             if (!current()) return;
             const own = token === tok;
-            const now = own ? projects.find((p) => p.id === projectId)?.root : void 0;
+            const now = own ? projects.find((p) => p.id === projectId) : void 0;
             if (own) {
               commitRegisteredProjects(projects);
-              if (now !== void 0) expectedRoot = now;
+              if (now !== void 0) {
+                expectedRoot = now.root;
+                expectedCheckoutID = now.checkout_id;
+              }
               refreshRegisteredProjects();
             }
             if (modal !== m) {
@@ -18636,7 +18647,7 @@ function openRebindProject(projectId, label) {
               return;
             }
             m.setBusy(false);
-            m.setError(now !== void 0 ? `Rebound elsewhere, to ${now} \xB7 submit again to move it from there` : errorText(e));
+            m.setError(now !== void 0 ? `Rebound elsewhere, to ${now.root} \xB7 submit again to move it from there` : errorText(e));
           }).catch(() => {
             if (readSettled) return;
             readSettled = true;
@@ -18653,7 +18664,7 @@ function openRebindProject(projectId, label) {
           if (!current() || !settle()) return;
           unknownOutcome();
         }, REBIND_ANSWER_MS);
-        void rebindProject(projectId, path, tok, expectedRoot).then(() => {
+        void rebindProject(projectId, path, tok, expectedRoot, expectedCheckoutID).then(() => {
           if (!current()) return;
           if (!settle()) {
             refreshRegisteredProjects();

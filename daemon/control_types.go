@@ -344,9 +344,18 @@ type RegisterProjectResponse struct {
 // whatever the project points at now — last writer wins, which is what a client
 // that predates the field gets.
 type RebindProjectRequest struct {
-	ID           string `json:"id"`
-	Path         string `json:"path"`
-	ExpectedRoot string `json:"expected_root,omitempty"`
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	// ExpectedRoot, when set, is the root the caller last saw the project bound
+	// to. ExpectedCheckoutID is the checkout marker that row carried — the pair
+	// is the precondition the daemon compares under the registry lock (#4822
+	// spec): a reclone at the same path mints a new marker, so the root
+	// spelling alone cannot see the checkout the caller read being replaced.
+	// Guarded clients always send both; a request carrying only one is still
+	// guarded, and a record that cannot satisfy both halves refuses rather
+	// than applying the half it got.
+	ExpectedRoot       string `json:"expected_root,omitempty"`
+	ExpectedCheckoutID string `json:"expected_checkout_id,omitempty"`
 }
 
 // RebindProjectResponse carries the re-bound durable identity: the same ID,
@@ -721,6 +730,15 @@ type PingResponse struct {
 	// safe account-aware admission rules. Older daemons omit the field, decode
 	// as false, and therefore never receive the destructive mutation.
 	AccountHandoff bool `json:"account_handoff,omitempty"`
+	// GuardedRebind is an affirmative protocol capability, not a version guess
+	// — same rule as AccountHandoff above (#4822 spec). A client about to send
+	// RebindProject's expected_root/expected_checkout_id pair must see true
+	// first: a daemon that omits the bit predates the precondition's checkout
+	// half and would apply the rebind unconditionally — "applied
+	// unconditionally" is the unsafe interpretation of a dropped expected_*,
+	// so the client refuses the rebind before any request goes out rather than
+	// falling back to last-writer-wins.
+	GuardedRebind bool `json:"guarded_rebind,omitempty"`
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's

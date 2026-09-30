@@ -35,6 +35,7 @@ const (
 func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 	resp.OK = true
 	resp.AccountHandoff = true
+	resp.GuardedRebind = true
 	resp.Version = Version()
 	resp.PID = os.Getpid()
 	if s.manager != nil && s.manager.lifecycle != nil {
@@ -753,7 +754,7 @@ func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProj
 	if err != nil {
 		return fmt.Errorf("rebind %w", err)
 	}
-	project, err := rebindRegisteredProject(req.ID, req.ExpectedRoot, path)
+	project, err := rebindRegisteredProject(req.ID, req.ExpectedRoot, req.ExpectedCheckoutID, path)
 	if err != nil {
 		return err
 	}

@@ -636,11 +636,44 @@ func RegisterProject(req RegisterProjectRequest) (config.Project, error) {
 	return resp.Project, nil
 }
 
+// ErrGuardedRebindUnsupported is returned before a guarded rebind is sent when
+// the responding daemon does not affirm the precondition capability: a daemon
+// that omits Ping's GuardedRebind bit predates the expected_checkout_id half
+// of the compare and would apply the rebind unconditionally — exactly the
+// silent last-writer-wins the caller asked a precondition to prevent (#4822
+// spec). Refusing, with a message that names the upgrade path, beats sending
+// the request and believing the precondition was honored.
+var ErrGuardedRebindUnsupported = errors.New("this daemon predates guarded rebinds — upgrade it, or rebind from the daemon host")
+
 // RebindProject asks the daemon to move a registered project's stable identity
 // to the checkout at req.Path (`af projects rebind`) — the same single-writer
 // registry path RegisterProject takes, so a running client is told through
 // projects.changed rather than discovering the move on a later read.
+//
+// pingGuardedRebindCapability asks the daemon on the socket whether it
+// implements the guarded-rebind precondition. It is a var so tests can stand
+// a pre-upgrade daemon in for the real Ping — one that answered the call but
+// carried no capability bit.
+var pingGuardedRebindCapability = func() (PingResponse, error) {
+	var ping PingResponse
+	err := callDaemon("Ping", PingRequest{}, &ping)
+	return ping, err
+}
+
+// A request carrying expected_root or expected_checkout_id is guarded (#4822):
+// before it goes out the daemon must affirm the capability on Ping, else this
+// returns ErrGuardedRebindUnsupported without sending. An unguarded request —
+// the explicit CLI form — keeps last-writer-wins on every daemon vintage.
 func RebindProject(req RebindProjectRequest) (config.Project, error) {
+	if req.ExpectedRoot != "" || req.ExpectedCheckoutID != "" {
+		ping, err := pingGuardedRebindCapability()
+		if err != nil {
+			return config.Project{}, fmt.Errorf("%w (capability check failed: %v)", ErrGuardedRebindUnsupported, err)
+		}
+		if !ping.GuardedRebind {
+			return config.Project{}, ErrGuardedRebindUnsupported
+		}
+	}
 	var resp RebindProjectResponse
 	if err := callDaemon("RebindProject", req, &resp); err != nil {
 		return config.Project{}, err

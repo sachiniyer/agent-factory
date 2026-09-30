@@ -38,9 +38,10 @@ func (m *home) handleRebindProject(req overlay.RebindRequest) (tea.Model, tea.Cm
 // apart from a reply to any other picker.
 func (m *home) rebindProjectCmd(req overlay.RebindRequest) tea.Cmd {
 	return func() tea.Msg {
-		// The registration's recorded root as the picker read it: the rebind
-		// applies only if no other rebind has moved it since (#4822).
-		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Project.RegistryRoot, req.Path)
+		// The registration's recorded (root, checkout) pair as the picker read
+		// it: the rebind applies only if no other rebind — and no reclone at
+		// the same path — has moved either half since (#4822 spec).
+		project, err := rebindProjectThroughDaemon(req.Project.RegistryID, req.Project.RegistryRoot, req.Project.RegistryCheckoutID, req.Path)
 		root := project.Root
 		if root == "" {
 			root = req.Path

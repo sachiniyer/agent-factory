@@ -175,7 +175,7 @@ func TestRebindProject_UnverifiedReboundStaysUnconfirmed(t *testing.T) {
 				t.Fatalf("NewRemote: %v", err)
 			}
 
-			_, err = c.RebindProject("prj_A", "/old", "/new")
+			_, err = c.RebindProject("prj_A", "", "", "/new")
 			if err == nil {
 				t.Fatal("a refusal envelope must produce an error")
 			}
@@ -215,7 +215,7 @@ func TestRebound_CommittedOnGatewayStatusStaysUnconfirmed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewRemote: %v", err)
 		}
-		_, err = c.RebindProject("prj_A", "/old", "/new")
+		_, err = c.RebindProject("prj_A", "", "", "/new")
 		srv.Close()
 		if err == nil {
 			t.Fatalf("status %d: a failure envelope must produce an error", status)
