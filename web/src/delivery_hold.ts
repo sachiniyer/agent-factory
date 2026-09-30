@@ -202,6 +202,14 @@ function hasPrintable(data: string): boolean {
  *  resume would return "none" and leave the recalled/stranded line without a
  *  renewed lease — the same window fixed above for the other editing controls.
  *
+ *  Ctrl-K (\x0b, kill to end of line) is the same in-place edit class as Ctrl-U:
+ *  it removes text from the cursor forward, so a prefix can remain in the PTY.
+ *  The keybar emits it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  remaining-prefix draft unprotected — the same window fixed for the other
+ *  editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -212,7 +220,8 @@ function isEditingControl(data: string): boolean {
   return (
     data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
     data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
-    data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e")
+    data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
+    data.includes("\x0b")
   );
 }
 
