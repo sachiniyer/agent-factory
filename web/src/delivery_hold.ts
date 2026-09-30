@@ -194,6 +194,14 @@ function hasPrintable(data: string): boolean {
  *  them and leave the stranded draft unprotected — the same window fixed above
  *  for the other editing controls.
  *
+ *  Ctrl-P (\x10) and Ctrl-N (\x0e) are readline's previous/next-history recall —
+ *  the same draft-resuming operation as the arrow sequences the ESC branch
+ *  already covers. The keybar emits both through the general Ctrl+letter map
+ *  (upperCode & 31, web/src/terminal-keybar.ts), and neither starts a draft
+ *  under startsADraft (both are below 0x20), so without this entry the post-idle
+ *  resume would return "none" and leave the recalled/stranded line without a
+ *  renewed lease — the same window fixed above for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -204,7 +212,7 @@ function isEditingControl(data: string): boolean {
   return (
     data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
     data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
-    data.includes("\x02") || data.includes("\x06")
+    data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e")
   );
 }
 
