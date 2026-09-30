@@ -61,6 +61,13 @@ type operandTailMemo struct {
 	// xargsNestedAny: does any nested xargs from here take the marker in an
 	// env-reaching option.
 	xargsNestedAny map[xargsMarkerKey]bool
+	// childTails: shadowedChildTailMutates — does any suffix from here mutate,
+	// for a wrapper's returned child tail (ionice --/default and taskset mask).
+	childTails map[*syntax.Word]bool
+	// childJudgements counts the suffix judgements child-tail walks have
+	// started in this validation. It is shared by pointer so every copy of
+	// the memo draws on one budget; see shadowedChildTailMutates.
+	childJudgements *int
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -84,6 +91,8 @@ func newOperandTailMemo() operandTailMemo {
 		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
 		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
 		xargsNestedAny:         map[xargsMarkerKey]bool{},
+		childTails:             map[*syntax.Word]bool{},
+		childJudgements:        new(int),
 	}
 }
 
