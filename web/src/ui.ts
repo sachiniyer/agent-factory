@@ -24,7 +24,7 @@ import { icon } from "./icon.js";
 import type { KeyboardFocus, View } from "./nav.js";
 import { h } from "./dom.js";
 import { isSessionFirst, sessionFirstComposition, appbarControls, viewNavigation, terminalChrome, actionsDisclosure } from "./components.js";
-import { type DragPayload, resolveDragTab, TAB_DND_MIME } from "./layout.js";
+import { type DragPayload, type TabDropResult, resolveDragTab, TAB_DND_MIME } from "./layout.js";
 import {
   FILTER_KINDS,
   filterLabel,
@@ -35,6 +35,7 @@ import {
   type StatusFilter,
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
+import type { RegisteredProject } from "./api.js";
 import { replaceProjectMenuChildren } from "./project-menu-focus.js";
 import {
   archiveWarningText,
@@ -45,7 +46,9 @@ import {
   idleReasonDetail,
   isLimitReached,
   isPendingAgentHandoffDeliveryUnconfirmed,
+  isPendingAgentHandoffDeliveryConfirmable,
   isPendingManualHandoffDeliveryUnconfirmed,
+  isPendingManualSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
@@ -133,6 +136,25 @@ function patchRetryButton(button: HTMLElement, action: RetryActionPresentation |
   }
 }
 
+/** The selected row's no-resend delivery exit (#4429). Distinct from
+ *  retryActionForSession: a confirmable row may ALSO be retryable, in which case
+ *  the head offers both verbs side by side and the operator's pane inspection
+ *  decides between them. Kept off Retry itself so a resend never silently wears
+ *  a "delivered" meaning. */
+export function markDeliveredActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (
+    isPendingAgentHandoffDeliveryConfirmable(s) ||
+    isPendingManualSwapDeliveryConfirmable(s)
+  ) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed — retire it without resending",
+    };
+  }
+  return null;
+}
+
 /** Fail-closed narrowing for the daemon's independent teardown capability. */
 export function isKillableSession(s: SessionData): s is KillableSession {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
@@ -201,11 +223,13 @@ export interface AppState {
   mutationError?: MutationOutcomeNotice;
   /** the live task projection (ListTasks + task.* events), the tasks view's data. */
   tasks: TaskData[];
-  /** the daemon's registered-project roots (listProjects, #2456 union) — the extra
-   *  input, beside sessions + tasks, that projectSummaries / pickerProjects union so a
-   *  registered-but-sessionless repo shows in the switcher and is creatable-into.
+  /** the daemon's registered-project records (listProjects, #2456 union) — the
+   *  extra input, beside sessions + tasks, whose ROOTS projectSummaries /
+   *  pickerProjects union so a registered-but-sessionless repo shows in the
+   *  switcher and is creatable-into. The whole record is kept (not just roots)
+   *  because id + path_exists are what the rebind affordance acts on.
    *  Refetched on connect and on every projects.changed event. */
-  registeredProjects: string[];
+  registeredProjects: RegisteredProject[];
   /** the config manifest zipped with the user's live values (GetConfig), the config
    *  view's data. There is no local key list: this IS the description of config, so
    *  a key added to config_types.go arrives here with no change to the bundle. */
@@ -268,6 +292,11 @@ export interface Actions {
    *  TUI: it is not destructive (it re-delivers the prompt the session was already
    *  going to run) and it is the obvious next step for a session that is stuck. */
   retryLimit(): void;
+  /** Retires the selection's pending handoff mission WITHOUT resending it
+   *  (#4429) — the web half of the TUI resolve picker's "Mark delivered" row.
+   *  Opens a confirm modal: the attestation is the operator's, so the click must
+   *  be deliberate, unlike the no-confirm Retry. */
+  markDelivered(): void;
   /** Hands the current selection off to a different agent (#2013) — the web's
    *  analogue of the TUI's `F`. Opens the agent picker; on confirm it swaps the
    *  agent in place, keeping the worktree and branch. Offered only for a
@@ -307,8 +336,10 @@ export interface Actions {
   clearPaneDropHint(): void;
   /** Lands a touch-dragged tab on whichever pane is under the point, splitting or
    *  replacing exactly as a mouse drop does — the same body, not a copy of it
-   *  (split.ts applyTabDrop). False means no pane was under the release. */
-  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): boolean;
+   *  (split.ts applyTabDrop). `landed` false means no pane was under the release;
+   *  `changed` false means the pane rejected the drop and the layout is untouched
+   *  (#4434 — one boolean cannot answer both questions). */
+  dropTabOnPaneAt(clientX: number, clientY: number, drag: DragPayload): TabDropResult;
   /** Sets one global config key. index.ts POSTs SetConfigValue (the same validated,
    *  locked, atomic writer `af config set` uses), then re-reads the manifest so the
    *  form shows what the file actually holds. Validation is deliberately NOT done
@@ -388,6 +419,10 @@ export interface Actions {
   /** Opens the add-project modal (#2456): register a git checkout by path via
    *  RegisterProject so it appears as an empty project you can create into. */
   addProject(): void;
+  /** Opens the rebind-project modal (`af projects rebind`): repoint a registered
+   *  project's stable identity at the checkout it should track now — the repair
+   *  after that checkout was moved or recloned. */
+  rebindProject(id: string, label: string): void;
   /** Sets the theme preference (redesign PR1): persists it, stamps data-theme on
    *  <html>, and re-themes the live terminals. */
   setTheme(choice: ThemeChoice): void;
@@ -656,7 +691,7 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
   if (input) input.value = draft;
 }
 
-function loginView(state: AppState, actions: Actions): HTMLElement {
+export function loginView(state: AppState, actions: Actions): HTMLElement {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
       detail: state.loginError ?? "Check the daemon address, then retry.", action: state.connecting ? "Connecting…" : "Retry",
@@ -740,8 +775,19 @@ function connectingView(): HTMLElement {
 /** The tokenless login view (#1696): the daemon exempts this client, so there is no
  *  token to paste — just a Connect button that dials in with the empty-token
  *  sentinel. Normally auto-connected on load; this view is what a user sees only if
- *  they explicitly Disconnect on such a daemon. */
-function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+ *  they explicitly Disconnect on such a daemon.
+ *
+ *  Defense in depth against a stale `authRequired: false`: if a 401 reaches this
+ *  view (`loginCondition === "expired"` — the daemon started requiring a token after
+ *  the tokenless probe), degrade into a paste-token form instead of the
+ *  self-contradictory "No token needed." screen that re-issues the just-rejected
+ *  empty-token request. The primary fix flips `authRequired` in connect()'s catch so
+ *  the paste form is reached directly, but this keeps the screen coherent regardless
+ *  of how the staleness arose. */
+export function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -759,6 +805,57 @@ function noAuthLoginView(state: AppState, actions: Actions): HTMLElement {
       "p",
       { class: "af-subtitle" },
       "No token needed.",
+    ),
+    form,
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+
+/** The degraded form `noAuthLoginView` falls back to when a 401 reached the tokenless
+ *  branch (`loginCondition === "expired"`): the daemon now requires a token this
+ *  client has none of, so surface a paste field instead of the empty-token Connect.
+ *  Mirrors loginView's paste-form branch (title degrades to "Login expired"). */
+function expiredTokenlessView(state: AppState, actions: Actions): HTMLElement {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting,
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting…" : "Connect",
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button,
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token = input.value.trim();
+    if (token !== "") {
+      actions.connect(token);
+    }
+  });
+
+  const children: (Node | string)[] = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host.",
     ),
     form,
   ];
@@ -898,7 +995,7 @@ export class AppShell {
   // highlight; the task set can add/drop a task-only project).
   private lastProjectSessions: SessionData[] | null = null;
   private lastProjectTasks: TaskData[] | null = null;
-  private lastRegisteredProjects: string[] | null = null;
+  private lastRegisteredProjects: RegisteredProject[] | null = null;
   private lastSelectedProject: string | null = null;
 
   // The rail's status filter control (feat: hide archived by default): a rail-head
@@ -941,6 +1038,11 @@ export class AppShell {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   private retryBtn: HTMLElement | null = null;
   private retryKind: RetryActionPresentation["kind"] | null = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  private deliverBtn: HTMLElement | null = null;
+  private deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -1808,7 +1910,7 @@ export class AppShell {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   private renderProjectSwitch(state: AppState): void {
-    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root));
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     // The switcher is ALWAYS openable, even with no projects (#2456): its menu now
@@ -1822,7 +1924,8 @@ export class AppShell {
       children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet — add one below."));
     }
     for (const p of summaries) {
-      children.push(this.projectItem(p, p.root === current));
+      const record = state.registeredProjects.find((r) => r.root === p.root);
+      children.push(this.projectItem(p, p.root === current, record));
     }
 
     // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
@@ -1844,9 +1947,29 @@ export class AppShell {
 
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
+      if (currentRecord) {
+        // Rebind (`af projects rebind`): repoint the registration at the checkout
+        // it should track now — the repair when the recorded root was moved or
+        // recloned. Only a REGISTERED project can rebind — the verb moves a
+        // registry identity, and a session-derived project has none.
+        const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind…");
+        rebind.dataset.projectFocus = "rebind";
+        rebind.setAttribute(
+          "title",
+          `Point ${currentSummary.name} at a different checkout — the repair after it was moved or recloned`,
+        );
+        rebind.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.appControls.dismiss();
+          this.actions.rebindProject(currentRecord.id, currentSummary.name);
+        });
+        footChildren.push(rebind);
+      }
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       del.dataset.projectFocus = "delete";
-      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      const isRegistered = currentRecord !== undefined;
       // Delete-project ARCHIVES the project's regular live sessions (#1735) AND, for
       // a registered project, removes its durable registry record (#2456) so it leaves
       // the switcher. It is a silent no-op ONLY for a project with neither: a task-only,
@@ -1882,8 +2005,11 @@ export class AppShell {
 
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
-   *  switches the active project and closes the menu. */
-  private projectItem(p: ProjectSummary, current: boolean): HTMLElement {
+   *  switches the active project and closes the menu. `record` is the registry
+   *  registration behind the row, when there is one — a registration whose
+   *  recorded root is gone (path_exists=false) is marked missing, the state the
+   *  footer Rebind action repairs. */
+  private projectItem(p: ProjectSummary, current: boolean, record?: RegisteredProject): HTMLElement {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
@@ -1893,7 +2019,15 @@ export class AppShell {
       h("span", { class: "af-project-item-name" }, p.name),
       h("span", { class: "af-project-item-path" }, p.path),
     );
-    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    // The missing marker leads the glance: a dead checkout is the consequential
+    // half, the counts the reassuring one (same order delete results use).
+    const meta = h(
+      "span",
+      { class: "af-project-item-meta" },
+      ...(record && !record.path_exists
+        ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` · ${projectMeta(p)}`]
+        : [projectMeta(p)]),
+    );
     const item = h("button", { type: "button", class: cls }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
@@ -1974,8 +2108,15 @@ export class AppShell {
     // Hit-test before dismissal so a release outside both the bar and every pane
     // remains a cancel. The drop itself can synchronously recompose the active kind.
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    // Dismiss only when the drop committed: a landed-but-rejected drop (stale
+    // payload, sole tab on its own edge) changed nothing, so retiring a
+    // user-opened disclosure would imply a transition that did not happen
+    // (#4434). The gesture is still consumed either way — landed means landed.
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
 
   /** Keyboard twin of the New tab button, including its per-kind availability. */
@@ -2228,6 +2369,8 @@ export class AppShell {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -2255,6 +2398,7 @@ export class AppShell {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
+      markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.(),
     });
     this.terminalChrome = chrome;
@@ -2263,6 +2407,9 @@ export class AppShell {
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -2867,6 +3014,15 @@ export class AppShell {
     if (this.retryBtn && retryKind !== this.retryKind) {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
+    }
+
+    // Show/hide Mark delivered as the selected session's pending mission becomes
+    // (or stops being) confirmable without a selection change (#4429) — the same
+    // in-place path Retry above uses, for the same reason.
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
     }
 
     // Show/hide Handoff as the selected session becomes (or stops being)

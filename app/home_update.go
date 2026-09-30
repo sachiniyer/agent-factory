@@ -24,6 +24,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case hideErrMsg:
 		if msg.noticeID == m.transientNoticeID {
+			if m.namingNoticePinned(msg.noticeID) {
+				return m, m.clearTransientMessageAfterDelay(msg.noticeID)
+			}
 			// Expire, not Clear: the notice leaves the bar but stays readable
 			// through `E details`. Clearing here is what made that key dead 3
 			// seconds after every notice (#2618).
@@ -108,9 +111,22 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		// A save since the last poll dropped a draft whose task was deleted;
-		// say so once (#4798).
-		if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
-			cmds = append(cmds, m.showTransientMessage(notice))
+		// say so once (#4798). Do not consume the notice while the recovery
+		// screen shadows the notice bar: the save that drops a draft can
+		// itself raise that screen (a sibling edit's generic failure), and
+		// Take clears the only durable copy, so an unguarded poll would
+		// swallow the very notice it is the fallback for. Hold it for a
+		// frame whose bar is actually painted.
+		if m.recovery == nil {
+			if notice := m.automations.TaskPane().TakeDiscardedDraftNotice(); notice != "" {
+				cmds = append(cmds, m.showTransientMessage(notice))
+			}
+			// A reload showed a kept, unconfirmed edit did land (#4824); held
+			// by the same recovery-shadows-the-bar guard, since its Take
+			// clears the durable settledDrafts copy just as lossily.
+			if notice := m.automations.TaskPane().TakeSettledDraftNotice(); notice != "" {
+				cmds = append(cmds, m.showTransientMessage(notice))
+			}
 		}
 		if changed {
 			// A snapshot poll is a background refresh, not a user action, so its
@@ -129,6 +145,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// short positive acknowledgement while the resulting session and updated
 		// task status live-project in from the daemon snapshot.
 		if msg.err != nil {
+			// A run that may have started is never reported as failed: pressing
+			// run again would fire it twice (#4820). The snapshot and task polls
+			// show whether it ran.
+			if mutationMayHaveLanded(msg.err) {
+				return m, m.handleError(mutationOutcomeError(
+					fmt.Sprintf("running task %q", msg.title), "the sidebar and the task's last run", msg.err))
+			}
 			return m, m.handleError(fmt.Errorf("failed to trigger task %q: %w", msg.title, msg.err))
 		}
 		return m, m.showTransientMessage(fmt.Sprintf("triggered %s", msg.title))
@@ -232,8 +255,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProjectDeleted(msg)
 	case projectAddedMsg:
 		return m.handleProjectAdded(msg)
+	case projectReboundMsg:
+		return m.handleProjectRebound(msg)
 	case limitRetriedMsg:
 		return m.handleLimitRetried(msg)
+	case handoffDeliveryConfirmedMsg:
+		return m.handleHandoffDeliveryConfirmed(msg)
 	case configAgentSpawnedMsg:
 		return m.handleConfigAgentSpawned(msg)
 	case configAgentDoneMsg:
@@ -295,17 +322,26 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backendCatalogMsg:
 		// The naming form's backend field asked the daemon which backends this repo
 		// can use (#1933); open the picker over the answer, if the form is still open.
-		return m.handleBackendCatalog(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleBackendCatalog(msg) })
 	case accountRegistryMsg:
 		// The naming form's account field asked the daemon which credential accounts
 		// it holds (#3844); open the picker over the answer, if the form is still
 		// open ON THE SAME PROGRAM — see handleAccountRegistry.
-		return m.handleAccountRegistry(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountRegistry(msg) })
 	case accountDefaultMsg:
 		// The naming form asked which account this PROJECT would apply to a create
 		// that names none (#3386); preselect it, so the default is visible and
 		// changeable rather than applied in silence.
-		return m.handleAccountDefault(msg)
+		if m.deferNamingReply(msg, msg.naming) {
+			return m, nil
+		}
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleAccountDefault(msg) })
 	case instanceStartedMsg:
 		// The user may have navigated elsewhere while the instance was
 		// starting. Don't yank their selection or pop a modal onto them.
@@ -331,6 +367,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// No instances.json write: the failed instance was a Loading
 			// placeholder, which is never persisted, and the daemon is the sole
 			// writer (#960 PR 4). Removing the in-memory row is the whole cleanup.
+
+			// The create may have landed with only its reply lost (#4820). The
+			// draft is NOT re-armed — resubmitting it would create a second
+			// session — and the removed placeholder is not a claim either way:
+			// the next snapshot poll adds the session back if the daemon made it.
+			if mutationMayHaveLanded(msg.err) {
+				return m, tea.Batch(m.handleError(mutationOutcomeError(
+					fmt.Sprintf("creating session %q", msg.instance.Title), "the sidebar", msg.err)),
+					m.selectionChanged())
+			}
 
 			if msg.draft != nil {
 				m.failedCreate = &msg
@@ -550,12 +596,17 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 // dispatchKeyAction runs a key's action for the current state — the half of
 // handleKeyPress after the menu highlight.
 func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
+	// The details key goes first, so the status bar's hint and this dispatch
+	// answer from the same function (#4940).
+	if mod, cmd, opened := m.openNoticeDetails(msg); opened {
+		return mod, cmd
+	}
 	// Dispatch to state-specific handlers
 	switch m.state {
 	case stateHelp:
 		return m.handleHelpState(msg)
 	case stateNew:
-		return m.handleStateNew(msg)
+		return m.handleNamingFormKey(msg)
 	case stateConfirm:
 		return m.handleStateConfirm(msg)
 	case stateSearch:
@@ -563,21 +614,23 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case stateSwitchProject:
 		return m.handleStateSwitchProject(msg)
 	case stateSelectProgram:
-		return m.handleStateSelectProgram(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectProgram(msg) })
 	case stateSelectTabKind:
 		return m.handleStateSelectTabKind(msg)
 	case statePromptInput:
-		return m.handleStateInitialPrompt(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateInitialPrompt(msg) })
 	case stateJumpTab:
 		return m.handleStateJumpTab(msg)
 	case stateRenameTab:
 		return m.handleStateRenameTab(msg)
 	case stateSelectHandoffAgent:
 		return m.handleStateSelectHandoffAgent(msg)
+	case stateSelectHandoffResolve:
+		return m.handleStateSelectHandoffResolve(msg)
 	case stateSelectBackend:
-		return m.handleStateSelectBackend(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectBackend(msg) })
 	case stateSelectAccount:
-		return m.handleStateSelectAccount(msg)
+		return m.pinningNamingNotice(func() (tea.Model, tea.Cmd) { return m.handleStateSelectAccount(msg) })
 	case stateHooks:
 		return m.handleStateHooks(msg)
 	case stateTasks:
