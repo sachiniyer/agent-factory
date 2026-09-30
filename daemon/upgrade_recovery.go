@@ -223,7 +223,7 @@ func stopDaemonForRecovery(journal upgradetxn.Journal, role string) (upgradetxn.
 	// No PID: StopDaemon may have found no pid file (drainDaemon unlinks it when
 	// teardown begins), so this wait is the proof — the home lock released,
 	// which only happens once the daemon process is gone.
-	if err := waitForShutdownFn(0); err != nil {
+	if err := waitForShutdownFn(ShutdownPID{}); err != nil {
 		// The lock is still held (or unprovable) at the deadline. Report it as
 		// still running rather than confirming a stop we could not observe.
 		return upgradetxn.StopStillRunning, nil

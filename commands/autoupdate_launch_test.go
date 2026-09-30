@@ -84,8 +84,10 @@ func seedNewerRelease(t *testing.T, current, latest string) string {
 	// Bypass the tarball extract by returning the raw binary directly.
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) { return daemon.ShutdownNoDaemon, 0, nil }
-	respawnDaemonFn = func(string, int) (respawnResult, error) { return respawnResult{}, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownPID{}, nil
+	}
+	respawnDaemonFn = func(string, daemon.ShutdownPID) (respawnResult, error) { return respawnResult{}, nil }
 	return tempBin
 }
 
@@ -366,17 +368,19 @@ func drainingRestartSeams(t *testing.T, oldPID int, secondWait, retryErr error) 
 	prevWait := waitForShutdownCompletionFn
 	t.Cleanup(func() { waitForShutdownCompletionFn = prevWait })
 	waitPIDs, respawnPIDs = new([]int), new([]int)
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-		return daemon.ShutdownViaRPC, oldPID, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) {
+		return daemon.ShutdownViaRPC, daemon.ShutdownPID{PID: oldPID, Confirmed: oldPID > 0}, nil
 	}
-	respawnDaemonFn = func(_ string, pid int) (respawnResult, error) {
+	respawnDaemonFn = func(_ string, stopped daemon.ShutdownPID) (respawnResult, error) {
+		pid := stopped.PID
 		*respawnPIDs = append(*respawnPIDs, pid)
 		if len(*respawnPIDs) == 1 {
 			return respawnResult{}, fmt.Errorf("the old daemon is still finishing its shutdown (%w)", daemon.ErrShutdownIncomplete)
 		}
 		return respawnResult{}, retryErr
 	}
-	waitForShutdownCompletionFn = func(pid int) error {
+	waitForShutdownCompletionFn = func(stopped daemon.ShutdownPID) error {
+		pid := stopped.PID
 		*waitPIDs = append(*waitPIDs, pid)
 		return secondWait
 	}
@@ -396,12 +400,12 @@ func TestAutoUpdateLaunch_Draining_BoundStandsDown(t *testing.T) {
 		{
 			name:       "pid known",
 			oldPID:     4242,
-			wantNotice: "af updated to v1.0.1 — the previous daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: `ps -p 4242` / `kill 4242`; then run af again.\n",
+			wantNotice: "af updated to v1.0.1 — the previous daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: `ps -p 4242` / `kill -9 4242`; then run af again.\n",
 		},
 		{
 			name:       "pid unknown",
 			oldPID:     0,
-			wantNotice: "af updated to v1.0.1 — the previous daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: look for a leftover `af --daemon`; then run af again.\n",
+			wantNotice: "af updated to v1.0.1 — the previous daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: look for a leftover `af --daemon` and `kill -9` it; then run af again.\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

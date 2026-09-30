@@ -23,7 +23,7 @@ func TestWaitForShutdownCompletion_Exited_NoDaemonReturnsAtOnce(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	start := time.Now()
-	if err := WaitForShutdownCompletion(0); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion with no daemon: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -137,7 +137,7 @@ func TestWaitForShutdownCompletion_Draining_BoundIsShutdownIncomplete(t *testing
 	shutdownCompleteGrace = 250 * time.Millisecond
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 
-	if err := WaitForShutdownCompletion(0); !errors.Is(err, ErrShutdownIncomplete) {
-		t.Fatalf("WaitForShutdownCompletion(0) = %v, want ErrShutdownIncomplete while the home lock is held", err)
+	if err := WaitForShutdownCompletion(ShutdownPID{}); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("WaitForShutdownCompletion(ShutdownPID{}) = %v, want ErrShutdownIncomplete while the home lock is held", err)
 	}
 }

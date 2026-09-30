@@ -139,7 +139,7 @@ func adoptAfterUpgradeCommit(expectedTransactionID, canonicalExecPath string) er
 		// No PID: StopDaemon may have found no pid file (drainDaemon unlinks it
 		// when teardown begins), so this wait is the proof — the home lock
 		// released, which only happens once the candidate process is gone.
-		if err := waitForShutdownFn(0); err != nil {
+		if err := waitForShutdownFn(ShutdownPID{}); err != nil {
 			return fmt.Errorf("the committed candidate did not release the home lock: %w", err)
 		}
 	case candidateAbsent:

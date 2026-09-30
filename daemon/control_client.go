@@ -147,7 +147,7 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	case daemonDraining:
 		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit before launching", pid)
 		drainDeadline := drainWaitDeadline(deadline)
-		if !waitForDaemonExit(pid, drainDeadline) {
+		if !waitForDaemonExit(pid, false, drainDeadline) {
 			// A held lock with no answer can also be a daemon that took its lock
 			// and has not bound its socket yet; if it answers now, it serves.
 			if again, _ := probeDaemonState(deadline); again == daemonServing {

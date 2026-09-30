@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -73,7 +74,7 @@ func TestWaitForShutdownCompletion_DrainingToExited_PIDDies(t *testing.T) {
 
 	pid, exited := startFakeAFDaemon(t, home, "sleep 0.5; exit 0")
 
-	if err := WaitForShutdownCompletion(pid); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownPID{PID: pid, Confirmed: true}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion(%d): %v", pid, err)
 	}
 	if pidLooksAlive(pid) {
@@ -120,7 +121,7 @@ func TestWaitForShutdownCompletion_Draining_BoundNeverSignals(t *testing.T) {
 			}
 			pid, exited := startFakeAFDaemon(t, daemonHome, "sleep 60; :")
 
-			err := WaitForShutdownCompletion(pid)
+			err := WaitForShutdownCompletion(ShutdownPID{PID: pid, Confirmed: true})
 			if !errors.Is(err, ErrShutdownIncomplete) {
 				t.Fatalf("WaitForShutdownCompletion(%d) = %v, want an error wrapping ErrShutdownIncomplete while the daemon is still running", pid, err)
 			}
@@ -308,7 +309,7 @@ func TestWaitForDaemonExit_DrainingToExited_PIDDiesOrBound(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pid, _ := startFakeAFDaemon(t, home, "sleep 0.4; exit 0")
-	if !waitForDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout)) {
+	if !waitForDaemonExit(pid, true, time.Now().Add(testSpawnReadyTimeout)) {
 		t.Fatalf("waitForDaemonExit reported pid %d still there after it exited", pid)
 	}
 	if pidLooksAlive(pid) {
@@ -317,7 +318,7 @@ func TestWaitForDaemonExit_DrainingToExited_PIDDiesOrBound(t *testing.T) {
 
 	wedged, _ := startFakeAFDaemon(t, home, "sleep 60; :")
 	start := time.Now()
-	if waitForDaemonExit(wedged, time.Now().Add(200*time.Millisecond)) {
+	if waitForDaemonExit(wedged, true, time.Now().Add(200*time.Millisecond)) {
 		t.Fatalf("waitForDaemonExit reported a still-running pid %d as gone", wedged)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
@@ -345,7 +346,7 @@ func TestWaitForShutdownCompletion_DrainingToExited_RenamedBinaryPIDTrusted(t *t
 		t.Fatalf("fixture invalid: a renamed binary must not pass the basename heuristic")
 	}
 
-	if err := WaitForShutdownCompletion(pid); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownPID{PID: pid, Confirmed: true}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion(%d): %v", pid, err)
 	}
 	if pidLooksAlive(pid) {
@@ -371,7 +372,7 @@ func TestWaitForDaemonExit_DrainingToExited_RenamedBinaryPIDTrusted(t *testing.T
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
 	pid, _ := startFakeDaemonNamed(t, home, "af-renamed", "sleep 0.4; exit 0")
-	waitForDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout))
+	waitForDaemonExit(pid, true, time.Now().Add(testSpawnReadyTimeout))
 	if pidLooksAlive(pid) {
 		t.Fatalf("waitForDaemonExit returned while renamed daemon pid %d was still alive", pid)
 	}
@@ -385,6 +386,7 @@ type preShutdownPIDControl struct {
 	pingPID   int
 	pingPhase DaemonPhase
 	pingFails bool
+	ackPID    int // 0 is the pre-field ack shape
 }
 
 func (c *preShutdownPIDControl) Ping(_ PingRequest, resp *PingResponse) error {
@@ -398,7 +400,8 @@ func (c *preShutdownPIDControl) Ping(_ PingRequest, resp *PingResponse) error {
 }
 
 func (c *preShutdownPIDControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
-	resp.OK = true // and no PID: the pre-field reply shape
+	resp.OK = true
+	resp.PID = c.ackPID
 	return nil
 }
 
@@ -470,8 +473,10 @@ func TestRequestShutdown_PIDOrder_PrePIDDaemonUsesPingPID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
-	if result != ShutdownViaRPC || pid != fakePID {
-		t.Fatalf("RequestShutdown = (%v, %d), want (ShutdownViaRPC, %d) — the Ping self-report must name a pre-PID daemon", result, pid, fakePID)
+	// Named for reporting, but advisory: Ping and Shutdown are separate
+	// connections, so the Ping PID is not proof it was the acker.
+	if want := (ShutdownPID{PID: fakePID}); result != ShutdownViaRPC || pid != want {
+		t.Fatalf("RequestShutdown = (%v, %+v), want (ShutdownViaRPC, %+v) — the Ping self-report names a pre-PID daemon, unconfirmed", result, pid, want)
 	}
 }
 
@@ -493,8 +498,8 @@ func TestRequestShutdown_PIDOrder_VerifiedPIDFileWhenPingFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
-	if result != ShutdownViaRPC || pid != fakePID {
-		t.Fatalf("RequestShutdown = (%v, %d), want (ShutdownViaRPC, %d) from the verified PID file", result, pid, fakePID)
+	if want := (ShutdownPID{PID: fakePID}); result != ShutdownViaRPC || pid != want {
+		t.Fatalf("RequestShutdown = (%v, %+v), want (ShutdownViaRPC, %+v) from the verified PID file, unconfirmed", result, pid, want)
 	}
 }
 
@@ -596,7 +601,7 @@ func TestWaitForShutdownCompletion_DrainingToExited_PIDBoundaryRecheck(t *testin
 		return time.Now().Before(leaves)
 	}
 
-	if err := WaitForShutdownCompletion(4242); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownPID{PID: 4242, Confirmed: true}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion = %v, want nil: the daemon exited during the final poll", err)
 	}
 	if probes < 2 {
@@ -609,15 +614,15 @@ func TestWaitForShutdownCompletion_DrainingToExited_PIDBoundaryRecheck(t *testin
 func TestWaitForShutdownCompletion_DrainingToExited_LockBoundaryRecheck(t *testing.T) {
 	leaves := scriptShutdownWaitBoundary(t)
 	probes := 0
-	shutdownWaitHomeLockFn = func(string) daemonState {
+	shutdownWaitHomeLockFn = func(string) (daemonState, bool) {
 		probes++
 		if time.Now().Before(leaves) {
-			return daemonDraining // lock still held
+			return daemonDraining, true // lock still held
 		}
-		return daemonExited
+		return daemonExited, true
 	}
 
-	if err := WaitForShutdownCompletion(0); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion = %v, want nil: the lock was released during the final poll", err)
 	}
 	if probes < 2 {
@@ -631,11 +636,11 @@ func TestWaitForShutdownCompletion_DrainingToExited_LockBoundaryRecheck(t *testi
 // leave.
 func TestWaitForShutdownCompletion_Unknown_UnprovableLockIsNotExit(t *testing.T) {
 	scriptShutdownWaitBoundary(t)
-	shutdownWaitHomeLockFn = func(string) daemonState {
-		return daemonUnknown // e.g. flock: input/output error
+	shutdownWaitHomeLockFn = func(string) (daemonState, bool) {
+		return daemonUnknown, true // e.g. flock: input/output error
 	}
 
-	if err := WaitForShutdownCompletion(0); !errors.Is(err, ErrShutdownIncomplete) {
+	if err := WaitForShutdownCompletion(ShutdownPID{}); !errors.Is(err, ErrShutdownIncomplete) {
 		t.Fatalf("WaitForShutdownCompletion = %v, want ErrShutdownIncomplete while the lock is unprovable", err)
 	}
 }
@@ -659,11 +664,11 @@ func TestWaitForShutdownCompletion_Draining_LockReleaseNotSocketQuiet(t *testing
 		lock.release()
 	}()
 
-	if err := WaitForShutdownCompletion(0); err != nil {
-		t.Fatalf("WaitForShutdownCompletion(0): %v", err)
+	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
+		t.Fatalf("WaitForShutdownCompletion(ShutdownPID{}): %v", err)
 	}
 	if !released.Load() {
-		t.Fatalf("WaitForShutdownCompletion(0) returned while the home lock was still held")
+		t.Fatalf("WaitForShutdownCompletion(ShutdownPID{}) returned while the home lock was still held")
 	}
 }
 
@@ -783,5 +788,100 @@ func TestEnsureDaemon_Exited_Spawns(t *testing.T) {
 	}
 	if spawns != 1 {
 		t.Fatalf("spawns = %d, want 1", spawns)
+	}
+}
+
+// deadPID returns the PID of a process that has already exited and been reaped.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run true: %v", err)
+	}
+	return cmd.Process.Pid
+}
+
+// TestRequestShutdown_PIDOrder_AckPIDIsConfirmed: only the PID the acker names
+// in its own Shutdown reply is confirmed, even when a Ping reported another.
+func TestRequestShutdown_PIDOrder_AckPIDIsConfirmed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	startFakeControlService(t, &preShutdownPIDControl{pingPID: 1111, ackPID: 2222})
+
+	result, pid, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown: %v", err)
+	}
+	if want := (ShutdownPID{PID: 2222, Confirmed: true}); result != ShutdownViaRPC || pid != want {
+		t.Fatalf("RequestShutdown = (%v, %+v), want (ShutdownViaRPC, %+v)", result, pid, want)
+	}
+}
+
+// TestWaitForShutdownCompletion_Draining_UnconfirmedPIDWaitsOnLock (#5007
+// amendment §1): Ping and Shutdown are separate connections, so a pre-ack PID
+// can name a daemon that exited and was replaced by the one that acked. Here
+// that advisory PID is dead while the acker still holds the home lock: the
+// wait must keep waiting on the lock, not report exit on the wrong process's
+// death. A confirmed PID, by contrast, is waited on directly.
+func TestWaitForShutdownCompletion_Draining_UnconfirmedPIDWaitsOnLock(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 300 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	t.Cleanup(lock.release)
+	gone := deadPID(t)
+
+	if err := WaitForShutdownCompletion(ShutdownPID{PID: gone}); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("unconfirmed dead PID with the lock held = %v, want ErrShutdownIncomplete", err)
+	}
+	if err := WaitForShutdownCompletion(ShutdownPID{PID: gone, Confirmed: true}); err != nil {
+		t.Fatalf("confirmed dead PID = %v, want nil: the acker itself has exited", err)
+	}
+}
+
+// TestWaitForShutdownCompletion_Draining_PreLockAnsweringSocketKeepsWaiting
+// (#5007 amendment §2): a daemon predating the home lock acks Shutdown and
+// never creates daemon.lock. A missing lock file is not exit — with the socket
+// still answering, it is draining, and the bound reports ErrShutdownIncomplete.
+func TestWaitForShutdownCompletion_Draining_PreLockAnsweringSocketKeepsWaiting(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 300 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+	closeFn, err := startControlServer(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeFn() })
+
+	if err := WaitForShutdownCompletion(ShutdownPID{}); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("pre-lock daemon still answering = %v, want ErrShutdownIncomplete", err)
+	}
+}
+
+// TestWaitForShutdownCompletion_DrainingToExited_PreLockSocketQuiet: for a
+// pre-lock daemon the control socket going quiet is the only exit proxy left,
+// so the wait returns once it stops answering, and not before.
+func TestWaitForShutdownCompletion_DrainingToExited_PreLockSocketQuiet(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	closeFn, err := startControlServer(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	var closed atomic.Bool
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		closed.Store(true)
+		_ = closeFn()
+	}()
+
+	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
+		t.Fatalf("pre-lock daemon whose socket went quiet = %v, want nil", err)
+	}
+	if !closed.Load() {
+		t.Fatalf("the wait returned while the pre-lock daemon's socket still answered")
 	}
 }

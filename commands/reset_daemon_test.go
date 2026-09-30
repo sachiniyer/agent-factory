@@ -70,7 +70,7 @@ func fakeDaemonSeams(t *testing.T) {
 	pauseAutostartUnitFn = func() error { t.Fatal("pauseAutostartUnitFn called without a fake"); return nil }
 	resumeAutostartUnitFn = func() error { t.Fatal("resumeAutostartUnitFn called without a fake"); return nil }
 	stopDaemonFn = func() (bool, error) { return false, nil }
-	waitForShutdownCompletionFn = func(int) error { return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { return nil }
 	stopOrphanDaemonsFn = func(string) ([]int, []int, error) { return nil, nil, nil }
 	assertNoLiveDaemonFn = func(string) error { return nil }
 	removeRuntimeSocketFn = func(string) ([]string, error) { return nil, nil }
@@ -151,7 +151,7 @@ func TestFactoryReset_WaitsForDaemonFlushBeforeWipe(t *testing.T) {
 		}()
 		return true, nil // signal delivered; the process has NOT exited yet
 	}
-	waitForShutdownCompletionFn = func(int) error {
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error {
 		select {
 		case <-flushed:
 			return nil
@@ -229,7 +229,7 @@ func TestFactoryReset_AbortsWhenShutdownDoesNotComplete(t *testing.T) {
 	fakeDaemonSeams(t)
 
 	stopDaemonFn = func() (bool, error) { return true, nil }
-	waitForShutdownCompletionFn = func(int) error {
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error {
 		return errors.New("daemon control socket still answering 5s after shutdown was acknowledged")
 	}
 	wiped := false

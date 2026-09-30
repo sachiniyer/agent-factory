@@ -337,10 +337,12 @@ func stopDaemonHint(h daemon.HealthStatus) string {
 // daemon exits (a wedged one may not), and it points at the process table
 // rather than `af daemon status`, which may already report the daemon stopped:
 // mid-teardown its pid file and socket are gone while it still holds the lock.
+// The manual verb is `kill -9`: a draining daemon absorbs SIGTERM by design, so
+// a plain kill cannot stop a wedged one.
 func shutdownIncompleteHint(pid int) string {
-	manual := "look for a leftover `af --daemon`"
+	manual := "look for a leftover `af --daemon` and `kill -9` it"
 	if pid > 0 {
-		manual = fmt.Sprintf("`ps -p %d` / `kill %d`", pid, pid)
+		manual = fmt.Sprintf("`ps -p %d` / `kill -9 %d`", pid, pid)
 	}
 	return "still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: " + manual + "; then run af again."
 }
@@ -411,7 +413,7 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// acknowledged the shutdown and is still finishing it (#5007). Saying no
 		// daemon is running would be false, and starting one now would race it.
 		fmt.Fprintln(out, "Upgraded successfully!")
-		fmt.Fprintln(errOut, "The old daemon is "+shutdownIncompleteHint(outcome.OldPID))
+		fmt.Fprintln(errOut, "The old daemon is "+shutdownIncompleteHint(outcome.OldPID.PID))
 		fmt.Fprintf(errOut, "Detail: %v\n", restartErr)
 		return
 	case restartPhaseRespawn:

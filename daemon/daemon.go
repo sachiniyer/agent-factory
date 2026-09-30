@@ -238,12 +238,10 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	}
 
 	// Write our PID as soon as the socket is bound so `af upgrade`'s SIGTERM
-	// fallback (#504) and StopDaemon can find a still-warming daemon. Both
-	// the SIGTERM and Shutdown-RPC exit paths fall through to the deferred
-	// cleanup, so the file is removed on any graceful shutdown (drainDaemon
-	// unlinks it earlier, when teardown begins — #5007). A stale file
-	// is harmless — readers verify the live process's cmdline before
-	// signaling it.
+	// fallback (#504) and StopDaemon can find a still-warming daemon. The
+	// deferred cleanup removes it on every graceful exit (drainDaemon unlinks it
+	// earlier, when teardown begins — #5007). A stale file is harmless — readers
+	// verify the live process's cmdline before signaling it.
 	if err := writeDaemonPIDFile(); err != nil {
 		log.WarningLog.Printf("failed to write daemon PID file: %v", err)
 	} else {
@@ -254,6 +252,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
 	// binary so the next RPC respawns the daemon from the fresh image (#498).
 	// Registered before the restore so both exit paths work during warm-up.
+	// Deliberately never Stop()ped: past the main select nothing reads sigChan,
+	// so a routine SIGTERM during drainDaemon is absorbed instead of cutting its
+	// durable joins short (#5007). A wedged drainer is a `kill -9` job.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 

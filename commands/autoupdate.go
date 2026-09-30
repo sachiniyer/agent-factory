@@ -240,7 +240,7 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 			if errors.Is(restartErr, daemon.ErrShutdownIncomplete) {
 				restartErr = retryRespawnAfterDrain(resolvedPath, outcome.OldPID, latestVersion)
 				if restartErr != nil {
-					draining = &shutdownIncompleteError{pid: outcome.OldPID}
+					draining = &shutdownIncompleteError{pid: outcome.OldPID.PID}
 				}
 			}
 			switch {
@@ -289,7 +289,7 @@ func (e *shutdownIncompleteError) Unwrap() error { return daemon.ErrShutdownInco
 // is STILL running at the second bound. Once it is gone the update proceeds
 // whatever the retry does: the re-exec'd TUI's own EnsureDaemon starts a daemon
 // if the retry could not.
-func retryRespawnAfterDrain(resolvedPath string, oldPID int, latestVersion string) error {
+func retryRespawnAfterDrain(resolvedPath string, oldPID daemon.ShutdownPID, latestVersion string) error {
 	if err := waitForShutdownCompletionFn(oldPID); err != nil {
 		return err
 	}

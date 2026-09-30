@@ -643,11 +643,11 @@ type restartOutcome struct {
 	// FailedPhase is restartPhaseNone unless the accompanying error is
 	// non-nil, and names which half of the sequence broke.
 	FailedPhase restartPhase
-	// OldPID is the stopped daemon's PID as RequestShutdown established it
-	// (self-reported, Ping-derived, or a verified PID file), or 0 when none was
-	// identified. A caller that got restartPhaseShutdownIncomplete waits on it
-	// before retrying the withheld respawn (#5007).
-	OldPID int
+	// OldPID is the stopped daemon's PID and its provenance as RequestShutdown
+	// established it (zero when none was identified). A caller that got
+	// restartPhaseShutdownIncomplete waits on it before retrying the withheld
+	// respawn, and reports OldPID.PID either way (#5007).
+	OldPID daemon.ShutdownPID
 }
 
 func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
@@ -769,14 +769,13 @@ func canonicalExec(p string) string {
 // start.
 //
 // The one exception is a shutdown that has not finished: oldPID (the stopped
-// daemon's PID as RequestShutdown reported it, 0 when unknown) is waited on
-// first, and if the wait reports the old daemon still running at its bound,
+// daemon as RequestShutdown reported it) is waited on first, and if the wait reports the old daemon still running at its bound,
 // this returns that error WITHOUT respawning. A daemon past the bound is
 // usually still joining durable work in drainDaemon, with its control socket
 // already closed, so quiescing-aware startup checks cannot see it: a respawn
 // would lose the per-home lock to it and exit, and the old daemon's own exit
 // would then leave nothing running (#5007).
-func respawnDaemonAfterUpgrade(execPath string, oldPID int) (respawnResult, error) {
+func respawnDaemonAfterUpgrade(execPath string, oldPID daemon.ShutdownPID) (respawnResult, error) {
 	// The Shutdown RPC acks before the daemon tears down, so the old daemon's
 	// control socket can still answer pings here. Respawning into that window
 	// makes EnsureDaemon — or the unit-restarted daemon's own startup ping

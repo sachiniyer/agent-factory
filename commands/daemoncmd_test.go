@@ -79,7 +79,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 		*ensureCalls++
 		return nil
 	}
-	waitForShutdownCompletionFn = func(int) error { return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { return nil }
 	return restartCalls, ensureCalls
 }
 
@@ -90,7 +90,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownPID{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownPID{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -125,7 +125,7 @@ func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, errors.New("systemctl exited 1"))
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownPID{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	_, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownPID{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 		return nil
 	}
 
-	if _, err := respawnDaemonAfterUpgrade("/opt/af/new", 0); err != nil {
+	if _, err := respawnDaemonAfterUpgrade("/opt/af/new", daemon.ShutdownPID{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -193,7 +193,8 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 			stubRespawnCollaborators(t, tc.installed, nil)
 			var seq []string
 			gotPID := -1
-			waitForShutdownCompletionFn = func(pid int) error {
+			waitForShutdownCompletionFn = func(stopped daemon.ShutdownPID) error {
+				pid := stopped.PID
 				seq = append(seq, "wait")
 				gotPID = pid
 				return nil
@@ -208,7 +209,7 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 				return prevEnsure(path)
 			}
 
-			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 4242); err != nil {
+			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownPID{PID: 4242, Confirmed: true}); err != nil {
 				t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 			}
 
@@ -236,9 +237,9 @@ func TestRespawn_Draining_BoundWithholdsRespawn(t *testing.T) {
 		t.Run(fmt.Sprintf("unit installed=%v", installed), func(t *testing.T) {
 			restartCalls, ensureCalls := stubRespawnCollaborators(t, installed, nil)
 			waitErr := errors.New("daemon pid 4242 still running 60s after shutdown was acknowledged")
-			waitForShutdownCompletionFn = func(int) error { return waitErr }
+			waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { return waitErr }
 
-			_, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, 4242)
+			_, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownPID{PID: 4242, Confirmed: true})
 			if !errors.Is(err, waitErr) {
 				t.Fatalf("respawnDaemonAfterUpgrade error = %v, want it to wrap the wait error", err)
 			}
@@ -254,48 +255,58 @@ func TestRespawn_Draining_BoundWithholdsRespawn(t *testing.T) {
 // respawn and, through it, the shutdown wait — so the respawn waits on that
 // process exiting rather than on a control socket that outlives the ack.
 func TestRespawn_Exited_WaitsOnEstablishedPIDThenRespawns(t *testing.T) {
-	stubRespawnCollaborators(t, false, nil)
-	prevShutdown := requestDaemonShutdownFn
-	prevRespawn := respawnDaemonFn
-	t.Cleanup(func() {
-		requestDaemonShutdownFn = prevShutdown
-		respawnDaemonFn = prevRespawn
-	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-		return daemon.ShutdownViaRPC, 4242, nil
-	}
-	var seq []string
-	waitPID, respawnPID, respawnPath := -1, -1, ""
-	waitForShutdownCompletionFn = func(pid int) error {
-		seq = append(seq, "wait")
-		waitPID = pid
-		return nil
-	}
-	prevEnsure := ensureDaemonFromPathFn
-	ensureDaemonFromPathFn = func(path string) error {
-		seq = append(seq, "ensure")
-		return prevEnsure(path)
-	}
-	respawnDaemonFn = func(path string, pid int) (respawnResult, error) {
-		respawnPath, respawnPID = path, pid
-		return respawnDaemonAfterUpgrade(path, pid)
-	}
+	for _, stopped := range []daemon.ShutdownPID{
+		{PID: 4242, Confirmed: true}, // the acker named itself
+		{PID: 4242},                  // advisory: Ping or PID file, reported only
+	} {
+		t.Run(fmt.Sprintf("confirmed=%v", stopped.Confirmed), func(t *testing.T) {
+			stubRespawnCollaborators(t, false, nil)
+			prevShutdown := requestDaemonShutdownFn
+			prevRespawn := respawnDaemonFn
+			t.Cleanup(func() {
+				requestDaemonShutdownFn = prevShutdown
+				respawnDaemonFn = prevRespawn
+			})
+			requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) {
+				return daemon.ShutdownViaRPC, stopped, nil
+			}
+			var seq []string
+			var waitGot, respawnGot daemon.ShutdownPID
+			respawnPath := ""
+			waitForShutdownCompletionFn = func(got daemon.ShutdownPID) error {
+				seq = append(seq, "wait")
+				waitGot = got
+				return nil
+			}
+			prevEnsure := ensureDaemonFromPathFn
+			ensureDaemonFromPathFn = func(path string) error {
+				seq = append(seq, "ensure")
+				return prevEnsure(path)
+			}
+			respawnDaemonFn = func(path string, got daemon.ShutdownPID) (respawnResult, error) {
+				respawnPath, respawnGot = path, got
+				return respawnDaemonAfterUpgrade(path, got)
+			}
 
-	outcome, err := restartDaemonFromPathDetailed("/opt/af/current")
-	if err != nil {
-		t.Fatalf("restartDaemonFromPathDetailed: %v", err)
-	}
-	if !outcome.Respawned {
-		t.Fatalf("outcome.Respawned = false, want true")
-	}
-	if respawnPath != "/opt/af/current" || respawnPID != 4242 {
-		t.Fatalf("respawn got (%q, %d), want (%q, 4242)", respawnPath, respawnPID, "/opt/af/current")
-	}
-	if waitPID != 4242 {
-		t.Fatalf("shutdown wait got pid %d, want 4242", waitPID)
-	}
-	if len(seq) != 2 || seq[0] != "wait" || seq[1] != "ensure" {
-		t.Fatalf("call sequence = %v, want [wait ensure]", seq)
+			outcome, err := restartDaemonFromPathDetailed("/opt/af/current")
+			if err != nil {
+				t.Fatalf("restartDaemonFromPathDetailed: %v", err)
+			}
+			if !outcome.Respawned {
+				t.Fatalf("outcome.Respawned = false, want true")
+			}
+			// The provenance must survive the threading: an advisory PID that
+			// arrived at the wait as confirmed would be waited on as the acker.
+			if respawnPath != "/opt/af/current" || respawnGot != stopped {
+				t.Fatalf("respawn got (%q, %+v), want (%q, %+v)", respawnPath, respawnGot, "/opt/af/current", stopped)
+			}
+			if waitGot != stopped {
+				t.Fatalf("shutdown wait got %+v, want %+v", waitGot, stopped)
+			}
+			if len(seq) != 2 || seq[0] != "wait" || seq[1] != "ensure" {
+				t.Fatalf("call sequence = %v, want [wait ensure]", seq)
+			}
+		})
 	}
 }
 
@@ -306,10 +317,10 @@ func TestRestartDaemonFromPathNoDaemonIsNoOp(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 		respawnDaemonFn = prevRespawn
 	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-		return daemon.ShutdownNoDaemon, 0, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownPID{}, nil
 	}
-	respawnDaemonFn = func(string, int) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownPID) (respawnResult, error) {
 		t.Fatalf("respawn must not run when no daemon is present")
 		return respawnResult{}, nil
 	}
@@ -331,11 +342,11 @@ func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 		respawnDaemonFn = prevRespawn
 	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-		return daemon.ShutdownViaRPC, 0, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) {
+		return daemon.ShutdownViaRPC, daemon.ShutdownPID{}, nil
 	}
 	var gotPath string
-	respawnDaemonFn = func(path string, _ int) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownPID) (respawnResult, error) {
 		gotPath = path
 		return respawnResult{}, nil
 	}
@@ -428,8 +439,8 @@ func daemonRestartPresentHarness(t *testing.T, shutdown daemon.ShutdownResult, r
 	})
 	daemonRestartPresenceFn = func() daemon.ProbeAnswer { return daemon.AnswerYes() }
 	osExecutableFn = func() (string, error) { return binPath, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) { return shutdown, 0, nil }
-	respawnDaemonFn = func(string, int) (respawnResult, error) { return respawn, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) { return shutdown, daemon.ShutdownPID{}, nil }
+	respawnDaemonFn = func(string, daemon.ShutdownPID) (respawnResult, error) { return respawn, nil }
 	stubAutostartScope(t, false, false, nil) // no unit serves this home -> refresh no-ops
 	daemonRestartQuiet = false
 

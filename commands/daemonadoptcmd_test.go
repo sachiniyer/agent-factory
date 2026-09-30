@@ -50,7 +50,10 @@ func stubAdoptVars(t *testing.T) {
 		return daemon.SupervisionInfo{Supported: true, UnitPresent: true}
 	}
 	daemonStopFn = func() (bool, error) { t.Fatal("StopDaemon must not be called on this path"); return false, nil }
-	waitForShutdownCompletionFn = func(int) error { t.Fatal("WaitForShutdownCompletion must not be called on this path"); return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error {
+		t.Fatal("WaitForShutdownCompletion must not be called on this path")
+		return nil
+	}
 	restartAutostartUnitFn = func() error { t.Fatal("RestartAutostartUnit must not be called on this path"); return nil }
 }
 
@@ -134,7 +137,7 @@ func TestAdopt_UndeterminedSupervision_ForceDisplaces(t *testing.T) {
 	started := false
 	stopCalls, restartCalls := 0, 0
 	daemonStopFn = func() (bool, error) { stopCalls++; return true, nil }
-	waitForShutdownCompletionFn = func(int) error { return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { return nil }
 	restartAutostartUnitFn = func() error { started = true; restartCalls++; return nil }
 	daemonHealthFn = func() daemon.HealthStatus {
 		if started {
@@ -165,7 +168,7 @@ func TestAdopt_DetachedDaemon_StopsStartsVerifies(t *testing.T) {
 	started := false
 	stopCalls, waitCalls, restartCalls := 0, 0, 0
 	daemonStopFn = func() (bool, error) { stopCalls++; return true, nil }
-	waitForShutdownCompletionFn = func(int) error { waitCalls++; return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { waitCalls++; return nil }
 	restartAutostartUnitFn = func() error { started = true; restartCalls++; return nil }
 	daemonHealthFn = func() daemon.HealthStatus {
 		if started {
@@ -222,7 +225,7 @@ func TestAdopt_VerifyFails_ReportsDoctor(t *testing.T) {
 	stubAdoptVars(t)
 	started := false
 	daemonStopFn = func() (bool, error) { return true, nil }
-	waitForShutdownCompletionFn = func(int) error { return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { return nil }
 	restartAutostartUnitFn = func() error { started = true; return nil }
 	daemonHealthFn = func() daemon.HealthStatus {
 		if started {

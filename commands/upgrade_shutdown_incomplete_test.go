@@ -42,11 +42,11 @@ func TestRespawn_Draining_BoundIsShutdownIncompletePhase(t *testing.T) {
 				requestDaemonShutdownFn = prevShutdown
 				respawnDaemonFn = prevRespawn
 			})
-			requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
-				return daemon.ShutdownViaRPC, 4242, nil
+			requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownPID, error) {
+				return daemon.ShutdownViaRPC, daemon.ShutdownPID{PID: 4242, Confirmed: true}, nil
 			}
 			respawnDaemonFn = respawnDaemonAfterUpgrade
-			waitForShutdownCompletionFn = func(int) error { return tc.waitErr }
+			waitForShutdownCompletionFn = func(daemon.ShutdownPID) error { return tc.waitErr }
 
 			outcome, err := restartDaemonFromPathDetailed("/usr/local/bin/af")
 
@@ -80,12 +80,12 @@ func TestUpgradeReport_Draining_BoundWording(t *testing.T) {
 		{
 			name:     "pid known",
 			oldPID:   4242,
-			wantLine: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: `ps -p 4242` / `kill 4242`; then run af again.",
+			wantLine: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: `ps -p 4242` / `kill -9 4242`; then run af again.",
 		},
 		{
 			name:     "pid unknown",
 			oldPID:   0,
-			wantLine: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: look for a leftover `af --daemon`; then run af again.",
+			wantLine: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: look for a leftover `af --daemon` and `kill -9` it; then run af again.",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestUpgradeReport_Draining_BoundWording(t *testing.T) {
 			outcome := restartOutcome{
 				Shutdown:    daemon.ShutdownViaRPC,
 				FailedPhase: restartPhaseShutdownIncomplete,
-				OldPID:      tc.oldPID,
+				OldPID:      daemon.ShutdownPID{PID: tc.oldPID},
 			}
 			restartErr := fmt.Errorf("failed to restart daemon: %w", daemon.ErrShutdownIncomplete)
 

@@ -123,7 +123,7 @@ func runDaemonAdopt(w io.Writer, force bool) error {
 		if _, err := daemonStopFn(); err != nil {
 			return fmt.Errorf("failed to stop the unsupervised daemon before adopting: %w", err)
 		}
-		if err := waitForShutdownCompletionFn(0); err != nil {
+		if err := waitForShutdownCompletionFn(daemon.ShutdownPID{}); err != nil {
 			return fmt.Errorf("the unsupervised daemon did not release its home lock (it may still be finishing its shutdown), so the installed unit cannot take it over: %w", err)
 		}
 		stoppedDetached = true

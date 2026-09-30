@@ -296,7 +296,7 @@ func runReset(cmd *cobra.Command, _ []string) (err error) {
 	//     per-home lock instead, which the kernel releases only when the daemon
 	//     process exits (#5007). Deleting instances.json while a flush is
 	//     pending is how a "factory reset" hands the user their sessions back.
-	if waitErr := waitForShutdownCompletionFn(0); waitErr != nil {
+	if waitErr := waitForShutdownCompletionFn(daemon.ShutdownPID{}); waitErr != nil {
 		err = fmt.Errorf("the daemon did not finish shutting down: %w", waitErr)
 		fmt.Fprintln(out, "\nNothing was removed.")
 		return err
