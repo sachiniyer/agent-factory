@@ -245,7 +245,7 @@ returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
-`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
+`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
 `{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
 (the merged record); the rest return `{ "ok": true }`. The `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
