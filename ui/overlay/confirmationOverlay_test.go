@@ -354,3 +354,49 @@ func TestConfirmationOverlay_UnguardedKeepsConfirming(t *testing.T) {
 	assert.True(t, c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}))
 	assert.True(t, confirmed, "unguarded confirms keep working exactly as before")
 }
+
+// TestConfirmationOverlay_PendingWithholdsConfirm: a dialog opened before its
+// copy is complete (#4848) must refuse every confirm gesture — the named key and
+// the enter alias — while cancel still works, and must confirm normally once the
+// pending note is cleared.
+func TestConfirmationOverlay_PendingWithholdsConfirm(t *testing.T) {
+	c := NewConfirmationOverlay("Delete session 'alpha'?")
+	c.SetWidth(60)
+	confirmed := 0
+	c.OnConfirm = func() { confirmed++ }
+	c.SetPending("Checking for unsaved work…")
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("y")},
+		{Type: tea.KeyEnter},
+	} {
+		assert.False(t, c.HandleKeyPress(key), "%q must not close a pending dialog", key.String())
+	}
+	assert.Zero(t, confirmed, "a pending dialog must not confirm")
+	assert.False(t, c.Dismissed)
+
+	rendered := c.Render()
+	assert.Contains(t, rendered, "Checking for unsaved work…", "the pending note is the visible affordance")
+	assert.NotContains(t, rendered, "y/enter confirm", "a refused confirm key must not be advertised")
+	assert.Contains(t, rendered, "n/esc cancel", "cancel stays available and advertised")
+
+	c.SetPending("")
+	assert.True(t, c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}))
+	assert.Equal(t, 1, confirmed, "clearing the note restores the confirm")
+}
+
+// TestConfirmationOverlay_PendingStillCancels: esc and the cancel key are never
+// withheld, or a slow result would trap the user in the dialog.
+func TestConfirmationOverlay_PendingStillCancels(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyEsc},
+		{Type: tea.KeyRunes, Runes: []rune("n")},
+	} {
+		c := NewConfirmationOverlay("Delete session 'alpha'?")
+		c.SetPending("Checking for unsaved work…")
+		cancelled := false
+		c.OnCancel = func() { cancelled = true }
+		assert.True(t, c.HandleKeyPress(key), "%q must close a pending dialog", key.String())
+		assert.True(t, cancelled)
+	}
+}
