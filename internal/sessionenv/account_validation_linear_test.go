@@ -36,14 +36,16 @@ func countLiteralShellWordCalls(t *testing.T, limit int, fn func()) int {
 
 // TestAccountValidationWorkIsLinearInWordCount pins #4966's property: the
 // account-command walk visits each word a bounded number of times, so growing
-// a command 4x grows the work about 4x. On master the env families doubled per
-// added env word (exponential) and the long argument list grew 16x per 4x
-// (quadratic, via fileHasProvenShell), so both fail this ratio at once.
+// a command 4x grows the work about 4x. Before #4966 the env families doubled
+// per added env word (exponential) and the long argument list grew 16x per 4x
+// (quadratic, via fileHasProvenShell). Before #4968 a run of value-taking
+// options whose operands are the wrapper itself (`nice -n nice -n …`) and
+// xargs's per-env operand scan were quadratic.
 func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 	const small, large = 512, 2048
 	// maxVisitsPerWord is generous: every family measures 2-62 visits per
-	// word, flat from 250 to 2000 words. It catches a large constant sneaking
-	// in; the ratio below is what catches superlinear growth.
+	// word, flat from 250 to 2000 repetitions. It catches a large constant
+	// sneaking in; the ratio below is what catches superlinear growth.
 	const maxVisitsPerWord = 100
 	families := []struct {
 		name    string
@@ -62,12 +64,26 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"echo env -v env -v … x", func(n int) string { return "echo" + strings.Repeat(" env -v", n) + " x" }, false},
 		{"strace -E x … x", func(n int) string { return "strace" + strings.Repeat(" -E x", n) + " x" }, false},
 		{"nohup … nohup x", func(n int) string { return strings.Repeat("nohup ", n) + "x" }, false},
+		// #4968: option runs whose operands start nested wrapper layers, and
+		// xargs's env operand-region scan.
+		{"nice -n nice -n … x", func(n int) string { return "nice -n" + strings.Repeat(" nice -n", n) + " x" }, false},
+		{"timeout -k timeout -k … 1 x", func(n int) string { return "timeout -k" + strings.Repeat(" timeout -k", n) + " 1 x" }, false},
+		{"stdbuf -o stdbuf -o … x", func(n int) string { return "stdbuf -o" + strings.Repeat(" stdbuf -o", n) + " x" }, false},
+		{"ionice -c ionice -c … x", func(n int) string { return "ionice -c" + strings.Repeat(" ionice -c", n) + " x" }, false},
+		{"xargs -E xargs -E … x", func(n int) string { return "xargs -E" + strings.Repeat(" xargs -E", n) + " x" }, false},
+		{"xargs -I xargs -I … x", func(n int) string { return "xargs -I" + strings.Repeat(" xargs -I", n) + " x" }, false},
+		{"xargs -n 1 xargs -n 1 … x", func(n int) string { return strings.Repeat("xargs -n 1 ", n) + "x" }, false},
+		{"xargs a env … env x", func(n int) string { return "xargs a" + strings.Repeat(" env", n) + " x" }, false},
+		{"xargs env xargs env … x", func(n int) string { return strings.Repeat("xargs env ", n) + "x" }, false},
+		{"xargs -I{} echo env -u env … x", func(n int) string { return "xargs -I{} echo env" + strings.Repeat(" -u env", n) + " x" }, false},
+		{"xargs -I{} echo env … env x", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" env", n) + " x" }, false},
+		{"taskset -c 1 taskset -c 1 … x", func(n int) string { return strings.Repeat("taskset -c 1 ", n) + "x" }, false},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {
 			work := func(n int) int {
 				command := family.command(n)
-				return countLiteralShellWordCalls(t, maxVisitsPerWord*n, func() {
+				return countLiteralShellWordCalls(t, maxVisitsPerWord*len(strings.Fields(command)), func() {
 					err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
 					if family.refused {
 						require.Error(t, err)
