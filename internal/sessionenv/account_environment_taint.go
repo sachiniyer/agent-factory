@@ -271,7 +271,11 @@ func wordIsNumericLiteralForArith(word *syntax.Word) bool {
 	if !ok || len(lit.Value) == 0 {
 		return false
 	}
-	for _, ch := range lit.Value {
+	val := lit.Value
+	if len(val) > 1 && val[0] == '-' {
+		val = val[1:]
+	}
+	for _, ch := range val {
 		if ch < '0' || ch > '9' {
 			return false
 		}

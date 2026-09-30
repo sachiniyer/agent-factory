@@ -59,7 +59,7 @@ func TestRenameTab_SpawnDodgesTheStillLiveTmuxSession(t *testing.T) {
 	// the underlying rename the way a process tab would be renamed: the collision
 	// is a property of the NAME/token decoupling, not of the kind.
 	first.Kind = TabKindProcess
-	resolved, err := inst.RenameTab(1, "editor")
+	resolved, err := inst.RenameTabByID(inst.Tabs[1].ID, "editor")
 	require.NoError(t, err)
 	require.Equal(t, "editor", resolved)
 	assert.Equal(t, firstTmux, first.tmux.SanitizedName(),
@@ -96,7 +96,7 @@ func TestRenameTab_TmuxTokenSurvivesSeparatorInName(t *testing.T) {
 
 	// Decouple name from token: rename away so "logs__api" is free as a NAME while
 	// the live session is still bound to the "logs__api" token.
-	_, err = inst.RenameTab(1, "editor")
+	_, err = inst.RenameTabByID(inst.Tabs[1].ID, "editor")
 	require.NoError(t, err)
 	require.Equal(t, firstTmux, first.tmux.SanitizedName(), "rename leaves the live session alone")
 
@@ -124,11 +124,11 @@ func TestRenameTab_ReclaimsItsOwnName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "logs", tab.Name)
 
-	renamed, err := inst.RenameTab(1, "metrics")
+	renamed, err := inst.RenameTabByID(inst.Tabs[1].ID, "metrics")
 	require.NoError(t, err)
 	require.Equal(t, "metrics", renamed)
 
-	back, err := inst.RenameTab(1, "logs")
+	back, err := inst.RenameTabByID(inst.Tabs[1].ID, "logs")
 	require.NoError(t, err)
 	assert.Equal(t, "logs", back, "a tab must be able to reclaim its own former name unsuffixed")
 }
@@ -150,6 +150,7 @@ func TestRenameTab_DoesNotMutateHandedOutTabs(t *testing.T) {
 	inst := startedMockInstance(t, "af_racy_agent")
 	_, err := inst.AddProcessTab("btop", "logs")
 	require.NoError(t, err)
+	id := inst.Tabs[1].ID
 
 	const rounds = 200
 	var wg sync.WaitGroup
@@ -166,7 +167,7 @@ func TestRenameTab_DoesNotMutateHandedOutTabs(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for n := 0; n < rounds; n++ {
-			if _, rerr := inst.RenameTab(1, fmt.Sprintf("logs-%d", n)); rerr != nil {
+			if _, rerr := inst.RenameTabByID(id, fmt.Sprintf("logs-%d", n)); rerr != nil {
 				assert.NoError(t, rerr)
 				return
 			}
@@ -190,7 +191,7 @@ func TestRenameTab_SnapshotKeepsItsValue(t *testing.T) {
 	before := inst.GetTabs()
 	require.Equal(t, "logs", before[1].Name)
 
-	_, err = inst.RenameTab(1, "metrics")
+	_, err = inst.RenameTabByID(inst.Tabs[1].ID, "metrics")
 	require.NoError(t, err)
 
 	assert.Equal(t, "logs", before[1].Name,
@@ -255,7 +256,7 @@ func TestRenameTab_SuffixesOnCollision(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "other", other.Name)
 
-	resolved, err := inst.RenameTab(2, "dup")
+	resolved, err := inst.RenameTabByID(inst.Tabs[2].ID, "dup")
 	require.NoError(t, err)
 	assert.Equal(t, "dup-2", resolved)
 	assert.Equal(t, []string{"agent", "dup", "dup-2"}, tabNames(inst))
@@ -271,7 +272,7 @@ func TestRenameTab_Sanitizes(t *testing.T) {
 	_, err := inst.AddProcessTab("btop", "proc")
 	require.NoError(t, err)
 
-	resolved, err := inst.RenameTab(1, "my tab:2")
+	resolved, err := inst.RenameTabByID(inst.Tabs[1].ID, "my tab:2")
 	require.NoError(t, err)
 	assert.Equal(t, "my-tab-2", resolved)
 }
@@ -288,7 +289,7 @@ func TestRenameTab_RejectsSanitizeToEmpty(t *testing.T) {
 	tab, err := inst.AddProcessTab("btop", "proc")
 	require.NoError(t, err)
 
-	_, err = inst.RenameTab(1, "....")
+	_, err = inst.RenameTabByID(inst.Tabs[1].ID, "....")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no usable characters")
 	assert.Equal(t, "proc", tab.Name, "a rejected rename must leave the name untouched")
@@ -305,10 +306,10 @@ func TestRenameTab_RejectsUndisplayedKinds(t *testing.T) {
 	shell, err := inst.AddShellTab()
 	require.NoError(t, err)
 
-	_, err = inst.RenameTab(0, "boss")
+	_, err = inst.RenameTabByID(inst.Tabs[0].ID, "boss")
 	assert.Error(t, err, "the agent tab must not be renameable")
 
-	_, err = inst.RenameTab(1, "editor")
+	_, err = inst.RenameTabByID(inst.Tabs[1].ID, "editor")
 	assert.Error(t, err, "a shell tab must not be renameable")
 	assert.Equal(t, "shell", shell.Name)
 }

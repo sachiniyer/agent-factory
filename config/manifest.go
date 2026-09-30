@@ -65,10 +65,6 @@ type ManifestEntry struct {
 	// "table", or "list". It describes what a user writes, which can be more
 	// specific than the Go field used for the normalized in-memory value.
 	Type string
-	// AcceptedTypes lists every config shape the decoder accepts when Type alone
-	// is incomplete. It includes Type itself and is nil for ordinary one-shape
-	// keys. Type continues to describe the normalized Go value.
-	AcceptedTypes []string
 	// Default is the default value rendered for a human. For a key whose default
 	// is deterministic, TestManifestDefaultsMatchDefaultConfig pins this against
 	// DefaultConfig(); the rest (a username-derived prefix, a detected binary
@@ -649,11 +645,6 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 	out := make([]ManifestEntry, len(entries))
 	copy(out, entries)
 	for i := range out {
-		if out[i].AcceptedTypes != nil {
-			acceptedTypes := make([]string, len(out[i].AcceptedTypes))
-			copy(acceptedTypes, out[i].AcceptedTypes)
-			out[i].AcceptedTypes = acceptedTypes
-		}
 		if out[i].Enum != nil {
 			enum := make([]string, len(out[i].Enum))
 			copy(enum, out[i].Enum)
@@ -669,10 +660,7 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 }
 
 func (e ManifestEntry) acceptedTypes() []string {
-	if len(e.AcceptedTypes) == 0 {
-		return []string{e.Type}
-	}
-	return e.AcceptedTypes
+	return []string{e.Type}
 }
 
 func (e ManifestEntry) typeLabel() string {

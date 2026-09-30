@@ -102,7 +102,7 @@ func TestCloseTab_StaleSessionAlreadyDead(t *testing.T) {
 	}
 	require.Equal(t, 2, inst.TabCount())
 
-	require.NoError(t, inst.CloseTab(1),
+	require.NoError(t, inst.CloseTabByID(inst.GetTabs()[1].ID),
 		"closing a tab whose tmux already died must succeed, not error (#967)")
 	require.Equal(t, 1, inst.TabCount(), "the stale tab must be removed")
 }
