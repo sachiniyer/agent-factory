@@ -241,7 +241,7 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 			// process proven alive.
 			return !shutdownWaitPIDAliveFn(pid) || lockFileTakeable(dir)
 		}
-		return exitState(pid, confirmed, deadline) == daemonExited
+		return exitState(deadline) == daemonExited
 	}
 	for time.Now().Before(deadline) {
 		if exited() {
@@ -261,18 +261,17 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 // the lock — daemon.lock persists once created and such a daemon never flocks
 // it.
 //
-// A serving answer proves exit only from a provably different process: a
-// responder PID that is known and differs from a CONFIRMED target — the PID in
-// the acker's own Shutdown reply. An unconfirmed target (the pre-Shutdown Ping
-// can observe daemon A while daemon B binds and acks) makes a different
-// responder unremarkable, so serving then reads draining like a quiescing one;
-// the target itself can also answer serving — a daemon predating quiescing-at-
-// ack does so for its whole ack grace, and one never asked to stop does so
-// indefinitely. With no answer, a held lock is draining; otherwise a quiet
-// socket is exited unless a verified live daemon.pid PID still names the
-// drainer (old-version daemons keep it until exit), and any other probe
-// failure is unknown. A home that never ran a daemon reads exited.
-func exitState(targetPID int, confirmed bool, deadline time.Time) daemonState {
+// Any answer — serving or quiescing — reads draining: the target itself can
+// answer serving while it predates quiescing-at-ack (its whole ack grace), a
+// daemon never asked to stop answers indefinitely, and a different responder
+// PID is no proof either — the Ping/Shutdown responder swap can leave an
+// advisory PID naming a process that is not the acker, and a confirmed target
+// that is still alive may be draining beside whatever replaced it. Positive
+// exit proofs are only the confirmed-PID arm's (pid death or a takeable
+// daemon.lock file) and, with no answer here, a quiet socket beside a free or
+// absent lock and no live daemon.pid — plus any other probe failure stays
+// unknown. A home that never ran a daemon reads exited.
+func exitState(deadline time.Time) daemonState {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnknown
@@ -283,10 +282,8 @@ func exitState(targetPID int, confirmed bool, deadline time.Time) daemonState {
 	}
 	held := lock == daemonDraining
 	resp, err := pingDaemonResponseUntil(boundedPingDeadline(deadline))
-	state, respPID := pingState(resp, err)
+	state, _ := pingState(resp, err)
 	switch {
-	case state == daemonServing && respPID > 0 && confirmed && targetPID > 0 && respPID != targetPID:
-		return daemonExited
 	case state != daemonUnknown, held:
 		return daemonDraining
 	case isDaemonAbsentErr(err):

@@ -1062,8 +1062,6 @@ func staleLockFile(t *testing.T) {
 	lock.release()
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 // shortShutdownGrace shrinks the post-ack bound for cells that expect it to run out.
 func shortShutdownGrace(t *testing.T) {
 	t.Helper()
@@ -1072,35 +1070,39 @@ func shortShutdownGrace(t *testing.T) {
 	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
 }
 
-// TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForConfirmedDifferentPID
-// (#5007 addendum 2): in the post-ack wait a serving answer proves exit only
-// from a provably different process — responder PID known and unequal to a
-// CONFIRMED target, the PID in the acker's own Shutdown reply. An unconfirmed
-// advisory PID is not proof: the Ping/Shutdown responder swap can hand the
-// socket to daemon B while A's PID is still the advisory one, and B's serving
-// answer is no evidence A exited. The target itself also answers serving while
-// it predates quiescing-at-ack (its whole ack grace), and a daemon never asked
-// to stop answers serving indefinitely; reading any of those as exited
-// respawns beside a live daemon. Pinned for every lock reading Ping is
-// consulted on: held, absent (a pre-lock daemon), and takeable — a stale file
-// a pre-lock daemon never flocks (addendum 3).
-func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForConfirmedDifferentPID(t *testing.T) {
+// TestWaitForShutdownCompletion_ServingAnswer_NeverProvesExit (#5007 addenda
+// 2+6): no Ping answer can prove exit in the post-ack wait. The target itself
+// answers serving while it predates quiescing-at-ack, a daemon never asked to
+// stop answers indefinitely, and a responder PID differing from the target is
+// no proof either — the Ping/Shutdown responder swap can leave an advisory PID
+// naming a process that is not the acker, and a confirmed target still alive
+// may be draining beside whatever now serves. Exit is proven only by the
+// confirmed-PID arm: the PID itself dying, or a takeable daemon.lock file —
+// which is why the confirmed+takeable cell is the single exited outcome.
+// Pinned for every lock reading: held, absent (a pre-lock daemon), and
+// stale-takeable (addendum 3).
+func TestWaitForShutdownCompletion_ServingAnswer_NeverProvesExit(t *testing.T) {
 	for _, lockMode := range []string{"held", "absent", "stale-takeable"} {
 		for _, tc := range []struct {
-			name       string
-			target     func(t *testing.T) int
-			confirmed  bool
-			wantExited bool
-			// wantExitedHeld overrides wantExited when the home lock stays
-			// held: a serving responder is then provably NOT the lock holder,
-			// and a still-alive confirmed target may be mid-drain — no exit
-			// proof either way.
-			wantExitedHeld *bool
+			name      string
+			target    func(t *testing.T) int
+			confirmed bool
+			// wantExited, keyed by lockMode: a serving answer never proves
+			// exit — the kernel proofs do, so only the confirmed target with a
+			// released lock file resolves the wait early.
+			wantExited map[string]bool
 		}{
-			{name: "confirmed different responder PID is exited", target: livePID, confirmed: true, wantExited: true, wantExitedHeld: boolPtr(false)},
-			{name: "unconfirmed different responder keeps waiting", target: livePID, wantExited: false},
-			{name: "confirmed responder is the target: keeps waiting", target: func(*testing.T) int { return os.Getpid() }, confirmed: true, wantExited: false},
-			{name: "target unknown: keeps waiting", target: func(*testing.T) int { return 0 }, wantExited: false},
+			{
+				name:      "confirmed target alive, different responder PID",
+				target:    livePID,
+				confirmed: true,
+				wantExited: map[string]bool{
+					"stale-takeable": true, // released lock = target exited; the live PID is recycled
+				},
+			},
+			{name: "unconfirmed target, different responder PID", target: livePID, wantExited: map[string]bool{}},
+			{name: "confirmed responder is the target", target: func(*testing.T) int { return os.Getpid() }, confirmed: true, wantExited: map[string]bool{}},
+			{name: "target unknown", target: func(*testing.T) int { return 0 }, wantExited: map[string]bool{}},
 		} {
 			t.Run(lockMode+"/"+tc.name, func(t *testing.T) {
 				t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
@@ -1117,16 +1119,12 @@ func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForConfirmedDifferentPI
 				}
 				serveAsResponder(t)
 
-				wantExited := tc.wantExited
-				if tc.wantExitedHeld != nil && lockMode == "held" {
-					wantExited = *tc.wantExitedHeld
-				}
 				err := WaitForShutdownCompletion(ShutdownPID{PID: tc.target(t), Confirmed: tc.confirmed})
 				switch {
-				case wantExited && err != nil:
-					t.Fatalf("WaitForShutdownCompletion = %v, want nil: a different process serves", err)
-				case !wantExited && !errors.Is(err, ErrShutdownIncomplete):
-					t.Fatalf("WaitForShutdownCompletion = %v, want ErrShutdownIncomplete: the responder may be the target", err)
+				case tc.wantExited[lockMode] && err != nil:
+					t.Fatalf("WaitForShutdownCompletion = %v, want nil: the kernel released the target's lock", err)
+				case !tc.wantExited[lockMode] && !errors.Is(err, ErrShutdownIncomplete):
+					t.Fatalf("WaitForShutdownCompletion = %v, want ErrShutdownIncomplete: a Ping answer is not an exit proof", err)
 				}
 			})
 		}
