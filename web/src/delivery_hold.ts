@@ -246,6 +246,14 @@ function hasPrintable(data: string): boolean {
  *  still-present draft unprotected while readline waits for the quoted
  *  character — the same window fixed for the other editing controls.
  *
+ *  Ctrl-O (\x0f, readline operate-and-get-next) accepts the current line and
+ *  then loads the next history entry for editing, so a recalled line ends up in
+ *  the PTY the same way Ctrl-P/Ctrl-N recall one. The keybar emits it through
+ *  the general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts), and
+ *  startsADraft rejects it (it is below 0x20), so without this entry the
+ *  post-idle resume would return "none" and leave the recalled history line
+ *  unprotected — the same window fixed for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -259,7 +267,7 @@ function isEditingControl(data: string): boolean {
     data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
     data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19") ||
     data.includes("\x14") || data.includes("\x12") || data.includes("\x1f") ||
-    data.includes("\x16")
+    data.includes("\x16") || data.includes("\x0f")
   );
 }
 
