@@ -13806,17 +13806,21 @@ var SplitView = class {
    */
   applyTabDrop(pane, drag, clientX, clientY) {
     if (!this.tree) {
-      return;
+      return false;
     }
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
+      return false;
+    }
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
     if (opened === null) {
-      return;
+      return false;
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     const landed = leaves(this.tree).find((l) => l.tab === opened);
@@ -13825,6 +13829,7 @@ var SplitView = class {
     }
     this.commit();
     this.refocus();
+    return true;
   }
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
    *  which has no browser hit-testing to route a drop for it. */
@@ -13858,17 +13863,18 @@ var SplitView = class {
       this.hideZone(pane);
     }
   }
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
   dropTabAt(clientX, clientY, drag) {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
    *  center. */
@@ -15793,6 +15799,9 @@ function connectingView() {
   ));
 }
 function noAuthLoginView(state, actions2) {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions2);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -15809,6 +15818,50 @@ function noAuthLoginView(state, actions2) {
       "p",
       { class: "af-subtitle" },
       "No token needed."
+    ),
+    form
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+function expiredTokenlessView(state, actions2) {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting\u2026" : "Connect"
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token2 = input.value.trim();
+    if (token2 !== "") {
+      actions2.connect(token2);
+    }
+  });
+  const children = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host."
     ),
     form
   ];
@@ -16774,8 +16827,11 @@ var AppShell = class {
   /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
   dropTabOnPaneAt(clientX, clientY, drag) {
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -17913,8 +17969,10 @@ async function connect(candidate) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
       clearToken();
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
