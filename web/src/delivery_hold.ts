@@ -226,6 +226,17 @@ function hasPrintable(data: string): boolean {
  *  yank-extended draft unprotected — the same window fixed for the other editing
  *  controls.
  *
+ *  Ctrl-T (\x14, transpose characters) reorders text within the still-present
+ *  line while preserving the buffer, so it is the same in-place edit class.
+ *  Ctrl-R (\x12) is readline's reverse-incremental-history search, which can
+ *  recall a history line into the still-present draft. Ctrl-_ (\x1f) is
+ *  readline's undo, which can restore previously edited text into that line. The
+ *  keybar emits all three through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects each (all are below
+ *  0x20), so without these entries the post-idle resume would return "none" and
+ *  leave the transposed/recalled/restored draft unprotected — the same window
+ *  fixed for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -237,7 +248,8 @@ function isEditingControl(data: string): boolean {
     data.includes("\x7f") || data.includes("\x04") || data.includes("\x15") || data.includes("\x08") ||
     data.includes("\x17") || data.includes("\x01") || data.includes("\x05") || data.includes("\t") ||
     data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
-    data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19")
+    data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19") ||
+    data.includes("\x14") || data.includes("\x12") || data.includes("\x1f")
   );
 }
 
