@@ -203,18 +203,24 @@ func TestPendingCreateRowCarriesItsBackendAndBranch(t *testing.T) {
 	m, first, _, _ := projectBranchPrefixFixture(t)
 	repoID := repoIDFor(t, first)
 
-	// Hold provisioning so the pending row stays visible while asserted.
+	// Hold provisioning so the pending row stays visible while asserted. The
+	// create goroutine must finish before the factory seam is restored —
+	// NewInstance reads the package var inside it — so the deferred teardown
+	// opens the gate, drains the create, and only then swaps the factory back.
+	done := make(chan error, 1)
 	gate := make(chan struct{})
-	defer close(gate)
 	restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
 		<-gate
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
 		return readyFakeBackend{backend}, nil
 	})
-	defer restore()
+	defer func() {
+		close(gate)
+		<-done
+		restore()
+	}()
 
-	done := make(chan error, 1)
 	go func() {
 		_, err := m.CreateSession(context.Background(), CreateSessionRequest{
 			RepoPath: first, Title: "dock", Program: "claude", Backend: string(session.BackendDocker),
