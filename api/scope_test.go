@@ -924,3 +924,78 @@ func TestTasksList_RelativeProjectPathIsNotAdoptedByCwd(t *testing.T) {
 	out := captureTasksList(t)
 	assert.Empty(t, out, "a relative recorded path must not adopt the current directory's project")
 }
+
+// mustRepoFromPath resolves the repo context for a path, failing the test on a
+// resolution error so the test states the scope it builds rather than the
+// plumbing to build one.
+func mustRepoFromPath(t *testing.T, path string) *config.RepoContext {
+	t.Helper()
+	repo, err := config.RepoFromPath(path)
+	require.NoError(t, err)
+	return repo
+}
+
+// TestRequireTaskInScope_SamePathDeadPatchRetainsWorktreeBinding pins the CLI
+// scoping path (requireTaskInScope / matchesTask) that gates every id-taking
+// task verb. A task bound to a linked worktree at a sibling path is in scope
+// while the binding lives; a same-path ProjectPath reassertion over the now-dead
+// worktree path must NOT erase the retained RepoID, so the task stays in its own
+// project's scope — not stranded the way an unconditional overwrite would. The
+// retained id must also NOT match an unrelated project (the id is meaningful,
+// not a vacuous always-match).
+func TestRequireTaskInScope_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+
+	base := t.TempDir()
+	mainRoot := filepath.Join(base, "main")
+	require.NoError(t, os.MkdirAll(mainRoot, 0o755))
+	require.NoError(t, exec.Command("git", "init", mainRoot).Run())
+	for _, args := range [][]string{
+		{"-C", mainRoot, "config", "user.email", "test@example.com"},
+		{"-C", mainRoot, "config", "user.name", "Test User"},
+		{"-C", mainRoot, "commit", "--allow-empty", "-m", "init"},
+	} {
+		require.NoError(t, exec.Command("git", args...).Run(), "git %v", args)
+	}
+	wtRaw := filepath.Join(base, "linked")
+	out, err := exec.Command("git", "-C", mainRoot, "worktree", "add", "-b", "feature", wtRaw).CombinedOutput()
+	require.NoError(t, err, "git worktree add: %s", out)
+	worktree, err := filepath.EvalSymlinks(wtRaw)
+	require.NoError(t, err)
+	mainRoot, err = filepath.EvalSymlinks(mainRoot)
+	require.NoError(t, err)
+
+	created, err := task.AddTaskChecked(task.Task{
+		ID: "wtsc0001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: worktree, Program: "claude", Enabled: false,
+	}, task.ActorCLI, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
+	retained := created.RepoID
+
+	scope := projectScope{Repo: mustRepoFromPath(t, mainRoot)}
+	ids := newProjectIDCache()
+	assert.True(t, scope.matchesTask(&created, ids), "the worktree task is in its project's scope while the binding lives")
+	require.NoError(t, requireTaskInScope(&created, scope), "the task is reachable from its project before the re-patch")
+
+	// Kill the worktree's .git and reassert the same (now-dead) path.
+	require.NoError(t, os.Remove(filepath.Join(worktree, ".git")))
+	same := worktree
+	_, err = task.UpdateTaskChecked("wtsc0001", task.TaskUpdate{ProjectPath: &same}, task.ProjectExpectation{}, task.ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := task.GetTask("wtsc0001")
+	require.NoError(t, err)
+	assert.Equal(t, retained, stored.RepoID, "the retained RepoID is preserved through the dead-path re-patch")
+
+	ids = newProjectIDCache()
+	assert.True(t, scope.matchesTask(stored, ids), "the retained id keeps the task in scope after the dead-path re-patch")
+	assert.NoError(t, requireTaskInScope(stored, scope), "the task stays reachable from its own project — not stranded")
+
+	// A different project's scope does NOT match: the retained id is meaningful.
+	other := mkRepo(t, "other")
+	otherScope := projectScope{Repo: mustRepoFromPath(t, other)}
+	ids = newProjectIDCache()
+	assert.False(t, otherScope.matchesTask(stored, ids), "the retained id must not match an unrelated project")
+}

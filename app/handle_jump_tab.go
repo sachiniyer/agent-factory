@@ -99,8 +99,10 @@ func (m *home) handleStateJumpTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Said out loud rather than swallowed. "No such tab" and "ambiguous" are both
 		// answers the user can act on; a prompt that closes with nothing happening is
 		// indistinguishable from a bug, which is the #3021 shape all over again.
-		m.errBox.SetNotice(jumpTabMiss(query, tabs))
-		return m, nil
+		// Through handleNotice, not errBox.SetNotice: it advances the notice
+		// generation and schedules the usual expiry, so the miss neither lingers
+		// forever nor gets erased early by an older notice's timer.
+		return m, m.handleNotice(jumpTabMiss(query, tabs))
 	}
 	return m.handleTabJump(idx)
 }
