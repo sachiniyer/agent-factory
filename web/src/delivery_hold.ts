@@ -165,6 +165,22 @@ function hasPrintable(data: string): boolean {
   return false;
 }
 
+/** Plain (non-ESC) editing controls that may leave text behind in the PTY — the
+ *  same "context-dependent editing controls, not abandonments" the ABANDON
+ *  comment names: Backspace (\x7f), Ctrl-D (\x04), Ctrl-U (\x15). On a readline-
+ *  style composer each edits the draft rather than discarding it, so they are
+ *  how the user comes back to a draft the idle bound left sitting in the PTY.
+ *
+ *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
+ *  after the idle bound released a still-present draft, these keys re-acquire
+ *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
+ *  the safe direction the file's polarity states — a spurious re-acquire is
+ *  bounded and re-fires, a missing one lets a delivery splice into (or C-u
+ *  clear) the live draft. */
+function isEditingControl(data: string): boolean {
+  return data.includes("\x7f") || data.includes("\x04") || data.includes("\x15");
+}
+
 /**
  * Tracks whether the user has an uncommitted line, and says when to take or
  * extend the daemon's pause lease.
@@ -179,6 +195,17 @@ export class MidLineHold {
   private lastInputMs = 0;
   private lastPauseMs = 0;
   private queuedEndsLine = false;
+  /**
+   * Set when the idle bound released a hold whose draft is still in the PTY, and
+   * cleared by every client-observable genuine commit/abandon (the lastCommit
+   * branch, a flushed queued commit) and by teardown (release). While it is true,
+   * a plain editing control byte re-acquires the lease instead of returning
+   * "none" — matching the ESC branch's post-idle re-acquisition. The daemon
+   * delivering into the pane is not observable here, so the flag can stay stale
+   * after a daemon-side clear/submit; that is the same bounded spurious-hold
+   * staleness the ESC branch already accepts.
+   */
+  private releasedByIdleBound = false;
 
   /**
    * @param renewIntervalMs how often to re-send the pause while the line stays
@@ -245,6 +272,10 @@ export class MidLineHold {
 
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
+      // A genuine commit/abandon reached the PTY: whatever draft the idle bound
+      // left behind is gone, so a later plain editing control byte must not
+      // re-acquire over a prompt whose line was already submitted or discarded.
+      this.releasedByIdleBound = false;
       const tail = data.slice(lastCommit + 1);
       if (!startsADraft(tail)) {
         // Ended on the commit: nothing of the user's is left unsent.
@@ -256,6 +287,13 @@ export class MidLineHold {
     }
 
     if (!this.uncommitted && !startsADraft(data)) {
+      if (this.releasedByIdleBound && isEditingControl(data)) {
+        // A plain editing control byte resuming a draft the idle bound left in
+        // the PTY — the same resume the ESC branch re-acquires for arrows,
+        // Delete and Home/End. Re-acquire rather than leaving the live text
+        // unprotected for the rest of the session.
+        return this.beginOrRenew(nowMs);
+      }
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -275,6 +313,10 @@ export class MidLineHold {
     }
     if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
       this.uncommitted = false;
+      // The draft is STILL in the PTY; only the hold lapsed. Remember that so a
+      // plain editing control byte resuming it re-acquires, the way the ESC
+      // branch re-acquires for arrows/Delete.
+      this.releasedByIdleBound = true;
       return "none";
     }
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
@@ -336,8 +378,12 @@ export class MidLineHold {
   noteFlushed(nowMs: number): void {
     this.lastInputMs = nowMs;
     if (this.queuedEndsLine) {
+      // The queued Enter reached the PTY and committed the line, so there is no
+      // stranded draft left to resume — clear the post-idle flag too, or a stray
+      // editing control byte would re-acquire over an already-submitted prompt.
       this.uncommitted = false;
       this.queuedEndsLine = false;
+      this.releasedByIdleBound = false;
     }
   }
 
@@ -347,6 +393,9 @@ export class MidLineHold {
    *  may not be the only holder of. */
   release(): void {
     this.uncommitted = false;
+    // The pane/session is gone, so the draft the idle bound left behind is moot
+    // — a later editing control byte must not re-acquire over nothing.
+    this.releasedByIdleBound = false;
   }
 
   private beginOrRenew(nowMs: number): HoldAction {

@@ -343,3 +343,98 @@ test("delivery_hold: a queued report after queued Enter does NOT keep the hold",
     assert.equal(h.holding, false, `${JSON.stringify(report)} must not override the queued commit`);
   }
 });
+
+// The idle bound releases a draft that is STILL in the PTY. The ESC branch
+// re-acquires the lease for arrows/Delete/Home/End. The plain editing controls
+// the ABANDON comment names as edits — Backspace, Ctrl-D, Ctrl-U — are equally
+// how the user comes back to a stranded draft (deleting a char or word), so they
+// must re-acquire too instead of falling through the startsADraft gate to "none".
+test("delivery_hold: plain editing controls re-acquire the lease after the idle bound", () => {
+  for (const edit of ["\x7f", "\x04", "\x15"]) {
+    const h = new MidLineHold(1_000, 15_000);
+    h.noteInput("half a thought", 0);
+    assert.equal(h.tick(15_000), "none", "the idle bound released the still-present draft");
+    assert.equal(h.holding, false, "released, but the draft is still in the PTY");
+
+    assert.equal(h.noteInput(edit, 20_000), "pause", `${JSON.stringify(edit)} resumes the stranded draft and re-takes the lease`);
+    assert.equal(h.holding, true, `${JSON.stringify(edit)} must re-acquire, matching the ESC branch`);
+  }
+});
+
+// A bare control key on a prompt that was NEVER holding is still not a draft:
+// releasedByIdleBound is false there, so the startsADraft gate returns "none" as
+// before — the empty-prompt guarantee is preserved.
+test("delivery_hold: a stray control key on a never-held prompt does not invent a draft", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  assert.equal(h.noteInput("\x7f", 0), "none", "no draft, no idle release, nothing to resume");
+  assert.equal(h.holding, false);
+  assert.equal(h.noteInput("\x04", 5), "none");
+  assert.equal(h.noteInput("\x15", 10), "none");
+  assert.equal(h.holding, false);
+});
+
+// Ctrl-C is an ABANDON, caught by the lastCommit scan BEFORE the plain gate, so it
+// can never reach the isEditingControl branch. After the idle bound, a Ctrl-C
+// abandons the stranded draft rather than re-acquiring over it.
+test("delivery_hold: Ctrl-C after the idle bound routes as abandon, not a resume", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("half a thought", 0);
+  assert.equal(h.tick(15_000), "none");
+  assert.equal(h.holding, false);
+
+  assert.equal(h.noteInput("\x03", 20_000), "none", "Ctrl-C abandons, it does not re-acquire");
+  assert.equal(h.holding, false, "Ctrl-C never reaches the editing-control branch");
+});
+
+// Fix-critical guard: after the idle bound sets the flag, a commit (Enter) must
+// CLEAR it, so a stray Backspace over an already-submitted prompt returns "none".
+// On a broken fix that forgets to clear the flag, releasedByIdleBound stays true
+// and the isEditingControl branch spuriously re-acquires ("pause", holding true).
+test("delivery_hold: a commit after the idle bound clears the resume flag", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("draft", 0);
+  assert.equal(h.tick(15_000), "none", "idle bound released the draft and set the flag");
+  assert.equal(h.holding, false);
+
+  assert.equal(h.noteInput("\r", 20_000), "none", "commit the resumed draft");
+  assert.equal(h.holding, false, "the line is submitted: nothing left to protect");
+
+  assert.equal(h.noteInput("\x7f", 21_000), "none", "the commit cleared the flag; a stray Backspace does not re-acquire");
+  assert.equal(h.holding, false);
+});
+
+// release() (teardown) clears the flag: a Backspace after the pane closes does
+// not re-acquire over a moot draft.
+test("delivery_hold: release clears the resume flag", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("draft", 0);
+  h.tick(15_000);
+  assert.equal(h.holding, false);
+
+  h.release();
+  assert.equal(h.noteInput("\x7f", 20_000), "none", "release cleared the flag; no draft to resume");
+  assert.equal(h.holding, false);
+});
+
+// A queued Enter that the flush puts on the wire commits the line; the flag must
+// clear so a later Backspace does not re-acquire over an already-submitted
+// prompt. Without this, noteQueued -> idle bound -> noteFlushed -> Backspace
+// would see a stale releasedByIdleBound === true and spuriously re-acquire.
+test("delivery_hold: a flushed queued commit clears the resume flag", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("deploy prod", 0);
+  assert.equal(h.noteQueued("\r", 1_100), "pause", "queued Enter keeps protecting the line in the PTY");
+  assert.equal(h.holding, true);
+
+  // The stream stays down past the idle bound: tick releases the hold and sets
+  // the flag, while the queued Enter is still waiting to reach the PTY.
+  assert.equal(h.tick(16_100), "none", "idle bound released the hold");
+  assert.equal(h.holding, false);
+
+  // Reconnect: the flush commits the queued Enter, which must clear the flag.
+  h.noteFlushed(17_000);
+  assert.equal(h.holding, false, "the queued commit reached the PTY");
+
+  assert.equal(h.noteInput("\x7f", 20_000), "none", "the flush cleared the flag; the line was already submitted");
+  assert.equal(h.holding, false);
+});
