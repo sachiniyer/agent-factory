@@ -6,16 +6,6 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// operandTailMemo bounds the shadowed-wrapper operand walk. Every words slice
-// inside one validation is a suffix of the call's Args — the parser allocates
-// each Word once — so the first element's pointer names a distinct remaining
-// suffix, and the answer to "does the operand-onward tail mutate" depends only
-// on that suffix. Without it the same suffix is walked once by the operand
-// check and again by the enclosing unwrap loop's continuation, so nested
-// value-taking wrappers recurred exponentially (Codex on #4465: ~3s at depth
-// 20 of `nice -n nice ...`, unbounded at 25).
-type operandTailMemo map[*syntax.Word]bool
-
 // wrapperOperandTailMutates keeps a consumed option operand a candidate for
 // inspection. The modeled wrappers match by basename, which cannot prove the
 // binary is real util-linux: a repository-local or PATH-shadowed `ionice`
@@ -37,11 +27,11 @@ func wrapperOperandTailMutates(words []*syntax.Word, names map[string]struct{}, 
 	if len(words) == 0 {
 		return false
 	}
-	if answer, seen := memo[words[0]]; seen {
+	if answer, seen := memo.answers[words[0]]; seen {
 		return answer
 	}
 	answer := wrapperOperandTailMutatesUncached(words, names, memo)
-	memo[words[0]] = answer
+	memo.answers[words[0]] = answer
 	return answer
 }
 
