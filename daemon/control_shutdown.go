@@ -82,10 +82,13 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // WaitForShutdownCompletion waits on (#5007), and a nonzero value is one the
 // wait may trust without re-reading argv: the PID the daemon reported for
 // itself in the Shutdown reply (trusted whatever its binary is named — a
-// renamed install is legitimately not `af`), else the PID file read BEFORE the
-// RPC (the daemon removes that file during teardown) but only when it named an
-// af daemon at request time, since a stale file can name a recycled process,
-// else — on the SIGTERM path — the PID actually signaled.
+// renamed install is legitimately not `af`); else, for a daemon predating that
+// field, the PID it self-reported in a Ping sent just BEFORE the Shutdown
+// (PingResponse.PID, same trust class; after the ack the socket may be gone);
+// else the PID file read before the RPC (the daemon removes that file during
+// teardown) but only when it named an af daemon at request time, since a stale
+// file can name a recycled process; else — on the SIGTERM path — the PID
+// actually signaled.
 func RequestShutdown() (ShutdownResult, int, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
@@ -100,6 +103,13 @@ func RequestShutdown() (ShutdownResult, int, error) {
 	// Captured before the RPC: while the old daemon is up the PID file names the
 	// lock holder, and teardown removes it.
 	pidFilePID, _ := readPIDFromFile()
+	// Also captured before the RPC: a daemon predating ShutdownResponse.PID still
+	// names itself in Ping, which survives a renamed binary the PID-file check
+	// rejects. A failed Ping leaves it 0 and changes nothing below.
+	var pingPID int
+	if ping, pingErr := pingDaemonResponse(); pingErr == nil {
+		pingPID = ping.PID
+	}
 	var resp ShutdownResponse
 	if rpcErr := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); rpcErr != nil {
 		if isDaemonAbsentErr(rpcErr) {
@@ -123,7 +133,11 @@ func RequestShutdown() (ShutdownResult, int, error) {
 	if resp.PID != 0 {
 		return ShutdownViaRPC, resp.PID, nil
 	}
-	// A reply predating ShutdownResponse.PID: the PID file is only a claim.
+	// A reply predating ShutdownResponse.PID: its Ping self-report is trusted
+	// like the field; the PID file is only a claim.
+	if pingPID > 0 {
+		return ShutdownViaRPC, pingPID, nil
+	}
 	if pidFilePID > 0 && isAgentFactoryDaemon(pidFilePID) {
 		return ShutdownViaRPC, pidFilePID, nil
 	}

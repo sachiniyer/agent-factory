@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"errors"
+	"net"
+	"net/rpc"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -357,5 +361,124 @@ func TestWaitForDrainingDaemonExitWaitsOnRenamedDaemonBinary(t *testing.T) {
 	waitForDrainingDaemonExit(pid, time.Now().Add(testSpawnReadyTimeout))
 	if pidLooksAlive(pid) {
 		t.Fatalf("waitForDrainingDaemonExit returned while renamed daemon pid %d was still alive", pid)
+	}
+}
+
+// preShutdownPIDControl is the control service of a daemon built before
+// ShutdownResponse.PID existed: its Shutdown ack carries no PID, but its Ping
+// self-reports one (PingResponse.PID predates the Shutdown field). pingFails
+// models a Ping that errors, so RequestShutdown's fallbacks are exercised.
+type preShutdownPIDControl struct {
+	pingPID   int
+	pingFails bool
+}
+
+func (c *preShutdownPIDControl) Ping(_ PingRequest, resp *PingResponse) error {
+	if c.pingFails {
+		return errors.New("ping unavailable")
+	}
+	resp.OK = true
+	resp.PID = c.pingPID
+	return nil
+}
+
+func (c *preShutdownPIDControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	resp.OK = true // and no PID: the pre-field reply shape
+	return nil
+}
+
+// startFakeControlService binds svc as the control service on this test home's
+// socket, mirroring startControlServer's bind, and closes it on cleanup.
+func startFakeControlService(t *testing.T, svc any) {
+	t.Helper()
+	socketPath, err := DaemonSocketPath()
+	if err != nil {
+		t.Fatalf("DaemonSocketPath: %v", err)
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen %s: %v", socketPath, err)
+	}
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatalf("chmod socket: %v", err)
+	}
+	server := rpc.NewServer()
+	if err := server.RegisterName(controlServiceName, svc); err != nil {
+		_ = listener.Close()
+		t.Fatalf("register fake control service: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go server.ServeConn(conn)
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close() })
+}
+
+func writeTestPIDFile(t *testing.T, pid int) {
+	t.Helper()
+	path, err := daemonPIDFilePath()
+	if err != nil {
+		t.Fatalf("daemonPIDFilePath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0600); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+}
+
+// TestRequestShutdownTakesPingPIDFromPrePIDDaemon: a daemon predating
+// ShutdownResponse.PID acks with PID 0. When it is a renamed install, the PID
+// file fallback cannot name it (the basename check rejects `af-renamed`), so
+// without the Ping self-report RequestShutdown returned 0 and the respawn fell
+// back to the socket race #5007 closes. The Ping PID — captured before the
+// Shutdown, while the daemon is provably up — must be returned.
+func TestRequestShutdownTakesPingPIDFromPrePIDDaemon(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv rewrite needs /proc to observe")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	fakePID, _ := startFakeDaemonNamed(t, home, "af-renamed", "sleep 60; :")
+	if isAgentFactoryDaemon(fakePID) {
+		t.Fatalf("fixture invalid: a renamed binary must not pass the basename heuristic")
+	}
+	writeTestPIDFile(t, fakePID)
+	startFakeControlService(t, &preShutdownPIDControl{pingPID: fakePID})
+
+	result, pid, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown: %v", err)
+	}
+	if result != ShutdownViaRPC || pid != fakePID {
+		t.Fatalf("RequestShutdown = (%v, %d), want (ShutdownViaRPC, %d) — the Ping self-report must name a pre-PID daemon", result, pid, fakePID)
+	}
+}
+
+// TestRequestShutdownFallsBackToVerifiedPIDFileWhenPingFails: the Ping capture
+// adds a source, it does not replace one. A failed Ping leaves the verified
+// PID-file fallback exactly as it was.
+func TestRequestShutdownFallsBackToVerifiedPIDFileWhenPingFails(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv rewrite needs /proc to observe")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	fakePID, _ := startFakeAFDaemon(t, home, "sleep 60; :")
+	writeTestPIDFile(t, fakePID)
+	startFakeControlService(t, &preShutdownPIDControl{pingFails: true})
+
+	result, pid, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown: %v", err)
+	}
+	if result != ShutdownViaRPC || pid != fakePID {
+		t.Fatalf("RequestShutdown = (%v, %d), want (ShutdownViaRPC, %d) from the verified PID file", result, pid, fakePID)
 	}
 }
