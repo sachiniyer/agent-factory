@@ -182,3 +182,49 @@ func TestRebindIfRootReplayRequiresTheSameCheckout(t *testing.T) {
 		}
 	}
 }
+
+// TestRebindIfRootReplayKeepsTheVerifiedMarker is the check/use half of the
+// #4888-review replay finding: the marker the replay check verifies and the
+// marker ensureCheckoutID re-reads are TWO reads, and a checkout swap between
+// them mints the REPLACEMENT's id — which the commit-time verification then
+// compares to itself and accepts. The commit must keep the verified marker so
+// the swap fails the recheck instead of adopting the new identity.
+func TestRebindIfRootReplayKeepsTheVerifiedMarker(t *testing.T) {
+	base, project := registerForRebindCAS(t)
+	moved := initProjectRegistryRepo(t, filepath.Join(base, "moved"))
+	landed, err := RebindProjectIfRoot(project.ID, project.Root, moved)
+	require.NoError(t, err)
+	current := recordedRoot(t, project.ID)
+
+	// On the replay, once its marker read accepts the recorded checkout, the
+	// checkout at the recorded root is replaced — a reclone to the same path
+	// mints a new marker before the commit reaches ensureCheckoutID.
+	swapped := false
+	projectRegistryCommitRaceHookForTest = func() {
+		if swapped {
+			return
+		}
+		swapped = true
+		marker := projectCheckoutMarkerPath(t, current)
+		require.NoError(t, os.Remove(marker))
+		replacementID, err := ensureCheckoutID(marker)
+		require.NoError(t, err)
+		require.NotEqual(t, landed.CheckoutID, replacementID, "the replacement mints a different marker")
+	}
+	t.Cleanup(func() { projectRegistryCommitRaceHookForTest = nil })
+
+	_, err = RebindProjectIfRoot(project.ID, project.Root, current)
+	require.True(t, swapped, "the swap must run inside the replay's check/use window")
+	require.Error(t, err,
+		"a replay whose checkout was swapped between the marker reads must be refused")
+	assert.Contains(t, err.Error(), "changed while")
+
+	after, err := ListProjects()
+	require.NoError(t, err)
+	for _, p := range after {
+		if p.ID == project.ID {
+			assert.Equal(t, landed.CheckoutID, p.CheckoutID,
+				"the refused replay must not adopt the replacement's identity")
+		}
+	}
+}

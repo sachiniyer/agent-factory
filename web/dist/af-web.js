@@ -18542,6 +18542,7 @@ function openAddProject() {
 var rebindInFlight = null;
 var rebindInFlightGeneration = 0;
 var REBIND_ANSWER_MS = 3e4;
+var REBIND_REFRESH_MS = 1e4;
 function rebindOutcomeUnknown(label) {
   return new Error(`Rebind of ${label} \xB7 outcome unknown \xB7 check the project list`);
 }
@@ -18602,7 +18603,26 @@ function openRebindProject(projectId, label) {
         };
         const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
         const reArmAfterRebound = (e) => {
+          const missed = () => {
+            if (!current()) return;
+            refreshRegisteredProjects();
+            if (modal !== m) {
+              surfaceTabError(e);
+              return;
+            }
+            m.setBusy(false);
+            m.setError(errorText(e));
+          };
+          let readSettled = false;
+          const bound = window.setTimeout(() => {
+            if (readSettled) return;
+            readSettled = true;
+            missed();
+          }, REBIND_REFRESH_MS);
           void listProjects(tok).then((projects) => {
+            if (readSettled) return;
+            readSettled = true;
+            window.clearTimeout(bound);
             if (!current()) return;
             const own = token === tok;
             const now = own ? projects.find((p) => p.id === projectId)?.root : void 0;
@@ -18618,14 +18638,10 @@ function openRebindProject(projectId, label) {
             m.setBusy(false);
             m.setError(now !== void 0 ? `Rebound elsewhere, to ${now} \xB7 submit again to move it from there` : errorText(e));
           }).catch(() => {
-            if (!current()) return;
-            refreshRegisteredProjects();
-            if (modal !== m) {
-              surfaceTabError(e);
-              return;
-            }
-            m.setBusy(false);
-            m.setError(errorText(e));
+            if (readSettled) return;
+            readSettled = true;
+            window.clearTimeout(bound);
+            missed();
           });
         };
         const unknownOutcome = () => {

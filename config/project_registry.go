@@ -325,6 +325,7 @@ func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 		}
 
 		record := records[index]
+		var checkoutID string
 		if expectedRoot != "" && !sameProjectPathSpelling(record.Root, expectedRoot) {
 			// The precondition no longer names the recorded root. The only way
 			// through is a replay of the rebind that already landed — the
@@ -340,10 +341,24 @@ func RebindProjectIfRoot(id, expectedRoot, path string) (Project, error) {
 			if !sameProjectPath(record.Root, binding.root) || !bound || boundID != record.CheckoutID {
 				return &ProjectReboundError{ID: id, Expected: expectedRoot, Current: record.Root}
 			}
+			// The accepted replay keeps the marker it VERIFIED: re-reading
+			// through ensureCheckoutID would answer with whatever checkout sits
+			// at the path now — minting one for a reclone — and the commit-time
+			// verification would compare that replacement to itself, adopting
+			// an identity the precondition never vouched for (#4888 review).
+			// Carrying boundID through means a swap after this read fails the
+			// marker recheck below instead of passing on the replacement.
+			checkoutID = boundID
+			if projectRegistryCommitRaceHookForTest != nil {
+				projectRegistryCommitRaceHookForTest()
+			}
 		}
-		checkoutID, err := ensureCheckoutID(binding.checkoutMarkerPath)
-		if err != nil {
-			return err
+		if checkoutID == "" {
+			var err error
+			checkoutID, err = ensureCheckoutID(binding.checkoutMarkerPath)
+			if err != nil {
+				return err
+			}
 		}
 		for i, candidate := range records {
 			if i == index {
