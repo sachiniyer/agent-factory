@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // bash re-evaluates the stdout of a command substitution as FRESH arithmetic
@@ -385,6 +386,27 @@ func TestValidateAccountEnvironmentCommand_AllowsProvableArithmeticAndExternalCm
 		// [[ ]] numeric operators with numeric-literal operands stay allowed.
 		"[[ 0 -eq 0 ]]; codex",
 		"[[ 1 -lt 2 ]]; codex",
+		// [[ ]] numeric operators with NEGATIVE numeric-literal operands stay
+		// allowed. mvdan.cc/sh v3.13.1 fuses a negative literal in a [[ ]]
+		// operand into a single Lit with Value like "-1" (the leading '-' is
+		// not a separate Lit part), so wordIsNumericLiteralForArith must
+		// accept a fused leading minus in addition to the split-minus shape.
+		// All six numeric operators, negative on the right, left, and both.
+		"[[ 0 -eq -1 ]]; codex",
+		"[[ 0 -ne -1 ]]; codex",
+		"[[ 0 -lt -1 ]]; codex",
+		"[[ 0 -gt -1 ]]; codex",
+		"[[ 0 -le -1 ]]; codex",
+		"[[ 0 -ge -1 ]]; codex",
+		"[[ -1 -eq 0 ]]; codex",
+		"[[ -1 -ne 0 ]]; codex",
+		"[[ -1 -lt 0 ]]; codex",
+		"[[ -1 -gt 0 ]]; codex",
+		"[[ -1 -le 0 ]]; codex",
+		"[[ -1 -ge 0 ]]; codex",
+		"[[ -1 -eq -2 ]]; codex",
+		"[[ -42 -lt -1 ]]; codex",
+		"[[ -0 -eq 0 ]]; codex",
 		// A variable assigned from a command substitution but used OUTSIDE
 		// arithmetic is still just data — the stdout is a string, not re-evaluated.
 		"x=$(echo CODEX_HOME=1); echo $x; codex",
@@ -615,4 +637,107 @@ func TestValidateAccountEnvironmentCommand_ArithmeticNonConstantHasSpecificMessa
 		"a direct identity assignment keeps the generic refusal")
 	require.NotContains(t, identityErr.Error(), "arithmetic whose operand is not a numeric constant",
 		"a direct identity assignment does not take the arithmetic-specific refusal")
+}
+
+// TestWordIsNumericLiteralForArith is a direct white-box test of the helper
+// behind the [[ ]] numeric-operator guard. It has no direct unit tests
+// otherwise; the guard is exercised only indirectly through
+// ValidateAccountEnvironmentCommand. Asserting the predicate directly locks
+// the two minus-literal shapes the helper must accept:
+//
+//   - the fused form (Lit{Value: "-1"}) that mvdan.cc/sh v3.13.1 produces for a
+//     `[[ ]]` negative operand, and
+//   - the split form (Lit{Value: "-"}, Lit{Value: "1"}) the minus-stripping
+//     branch was originally written for, retained as robustness against a
+//     future parser bump that re-splits the literal. No known input under
+//     v3.13.1 exercises the split branch.
+//
+// The fail-closed direction is also locked: non-numeric literals, lone-minus,
+// a minus followed by non-digits, double-minus, multi-part words, and non-Lit
+// parts all return false so the guard refuses rather than silently accepting.
+func TestWordIsNumericLiteralForArith(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		word *syntax.Word
+		want bool
+	}{
+		// Positive integer literals.
+		{"positive single digit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "0"}}}, true},
+		{"positive multi-digit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "42"}}}, true},
+		{"leading zeros", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "007"}}}, true},
+		// Fused-minus negatives — the form v3.13.1 actually produces.
+		{"fused negative single digit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-1"}}}, true},
+		{"fused negative multi-digit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-42"}}}, true},
+		{"fused negative zero", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-0"}}}, true},
+		// Split-minus negatives — robustness-only on v3.13.1.
+		{"split negative single digit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-"}, &syntax.Lit{Value: "1"}}}, true},
+		{"split negative multi-digit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-"}, &syntax.Lit{Value: "42"}}}, true},
+		// Non-Lit part as the only part -> not a numeric literal.
+		{"paramexp only", &syntax.Word{Parts: []syntax.WordPart{&syntax.ParamExp{}}}, false},
+		// Fail-closed: non-numeric literals.
+		{"identifier", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "CODEX_HOME"}}}, false},
+		{"bare variable", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "x"}}}, false},
+		{"digits then letters", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "1a"}}}, false},
+		{"letters then digits", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "a1"}}}, false},
+		{"decimal point", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "1.5"}}}, false},
+		{"whitespace", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: " 1"}}}, false},
+		// Fail-closed: minus shapes that are not numbers.
+		{"lone minus", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-"}}}, false},
+		{"fused double minus", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "--1"}}}, false},
+		{"minus then letters", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-x"}}}, false},
+		{"minus then empty", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-"}, &syntax.Lit{Value: ""}}}, false},
+		// Fail-closed: empty / multi-part words.
+		{"empty literal", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: ""}}}, false},
+		{"empty word", &syntax.Word{}, false},
+		{"nil parts", &syntax.Word{Parts: nil}, false},
+		{"split then extra lit", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-"}, &syntax.Lit{Value: "1"}, &syntax.Lit{Value: "2"}}}, false},
+		{"split then paramexp", &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: "-"}, &syntax.ParamExp{}}}, false},
+	} {
+		require.Equal(t, tc.want, wordIsNumericLiteralForArith(tc.word),
+			"case %q: word verdict mismatch", tc.name)
+	}
+}
+
+// TestValidateAccountEnvironmentCommand_NegativeLiteralNumericTestsDoNotWeakenGuard
+// verifies that accepting constant [[ ]] numeric tests with negative literals
+// does not weaken the guard's fail-closed direction. The fix only makes the
+// provably-constant forms pass; every operand that is NOT a numeric literal
+// must still be refused exactly as before. Concretely:
+//
+//   - a $x (ParamExp) or bare-variable operand is refused regardless of the
+//     literal operand's sign, and
+//   - a non-numeric literal operand (e.g. an identifier) is refused regardless
+//     of the other operand, and
+//   - the separate arithmExprIsNumericConstant path used by `let`, `(( ))`,
+//     and `$(( ))` is untouched by the fix and still refuses variable
+//     operands even when a negative literal is present.
+//
+// Only refusal is asserted: which message a refusal takes (the arithmetic
+// cause vs. the generic identity message) is incidental and depends on whether
+// the POSIX identity walk independently catches the operand, not on this fix.
+func TestValidateAccountEnvironmentCommand_NegativeLiteralNumericTestsDoNotWeakenGuard(t *testing.T) {
+	for _, command := range []string{
+		// Variable operand ($x), the other operand a negative literal: refused.
+		"[[ $x -eq -1 ]]; codex",
+		"[[ -1 -eq $x ]]; codex",
+		"[[ $x -lt -2 ]]; codex",
+		// Variable operand ($y on both sides): refused.
+		"[[ $x -eq $y ]]; codex",
+		// Bare (un-prefixed) variable operand, the other a negative literal.
+		"x=42; [[ x -eq -1 ]]; codex",
+		"x=42; [[ -1 -eq x ]]; codex",
+		"x=42; [[ x -lt -2 ]]; codex",
+		// Non-numeric literal operand (identifier) paired with a literal.
+		"[[ 0 -eq CODEX_HOME ]]; codex",
+		"[[ -1 -eq CODEX_HOME ]]; codex",
+		"[[ CODEX_HOME -eq -1 ]]; codex",
+		"[[ 0 -eq notanumber ]]; codex",
+		// The separate arithmetic paths are unaffected by the fix.
+		"let 'x = -1'; codex",
+		"(( x = -1 )); codex",
+		"x=$(printf CODEX_HOME=1); : $((x)); codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q has a non-numeric-literal operand and must stay refused", command)
+	}
 }
