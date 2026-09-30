@@ -128,41 +128,45 @@ func laterChildSuffixMutates(words []*syntax.Word, names map[string]struct{}, me
 //     earlier prefix and must be judged from its own suffix, where
 //     shellCommandIsUnproven sees it as the head and refuses it.
 //
-// Every name is matched by basename, which covers both the basename form the
-// dispatch uses for wrappers (isAccountCommandName) and the bare form it uses
-// for builtins (isBareName): no listed name contains a slash. Matching a
-// builtin by basename too is a deliberate over-approximation — a redundant
-// candidate only adds one suffix judgement that returns false along the same
-// path the dispatch would take, never a wrong verdict. The word's literal is
-// read once, because this runs for every word of every child tail.
+// The dispatch controls how each listed name is matched, so the candidate
+// filter follows the same shape the dispatch actually triggers on: an
+// executable wrapper or shell is recognized by basename (isAccountCommandName
+// uses filepath.Base; knownShellName is fed one), so a path form
+// (/usr/bin/nice, /bin/sh) is the same command a shadowed wrapper can shift to
+// and stays a candidate. A builtin is recognized by isBareName, which rejects
+// any path component, so a path or empty operand that merely shares a basename
+// with a builtin (filepath.Base("/tmp/test") == "test", filepath.Base("") ==
+// ".") is an external binary, not the builtin, and is inert here: matching it
+// by basename spent the verdict budget on operands that cannot trigger the
+// verdict and refused a benign long child argv (#4708 Codex review). Builtins
+// are therefore matched by exact bare name. The word's literal is read once,
+// because this runs for every word of every child tail.
 func accountChildTailSuffixStartsVerdict(word *syntax.Word) bool {
 	value, literal := literalShellWord(word)
 	if !literal {
 		return true
 	}
-	_, verdict := accountChildTailSuffixVerdictNames[filepath.Base(value)]
+	if _, verdict := accountChildTailSuffixVerdictNames[filepath.Base(value)]; verdict {
+		return true
+	}
+	_, verdict := accountChildTailSuffixBuiltinVerdictNames[value]
 	return verdict
 }
 
-// accountChildTailSuffixVerdictNames lists the literal command names a
-// per-suffix wrapperOperandTailMutates judgement must still inspect after an
+// accountChildTailSuffixVerdictNames lists the executable wrappers and shells
+// a per-suffix wrapperOperandTailMutates judgement must still inspect after an
 // earlier suffix's judgement has already covered a buried env word, shell, and
-// option value.
+// option value. Every entry is matched by basename: the form the dispatch
+// recognizes for wrappers (isAccountCommandName) and shells (knownShellName).
 var accountChildTailSuffixVerdictNames = map[string]struct{}{
-	// Recognized wrappers peeled by unwrapAccountCommand.
-	"exec": {}, "command": {}, "builtin": {},
+	// Recognized wrappers peeled by unwrapAccountCommand that are dispatched
+	// by isAccountCommandName, so a path form is the same wrapper.
 	"nohup": {}, "nice": {}, "timeout": {}, "setsid": {}, "stdbuf": {}, "ionice": {}, "taskset": {}, "xargs": {},
-	// Direct account-mutating builtins named in unwrappedAccountCommandMutates.
-	// `env` is also matched inside that scan's buried-env arm, so a buried env
-	// word is judged from any prefix; it is listed here only for the
-	// same-position form a bare env child tail takes at suffix 0.
-	"env":   {},
-	"unset": {}, "set": {}, "hash": {},
-	"read": {}, "getopts": {}, "printf": {}, "let": {}, "mapfile": {}, "readarray": {},
-	"wait": {}, "test": {}, "[": {},
-	"eval": {}, ".": {}, "source": {}, "trap": {}, "alias": {}, "fc": {}, "history": {}, "enable": {},
-	// The declaration builtins isAccountDeclarationBuiltin matches.
-	"export": {}, "readonly": {}, "declare": {}, "typeset": {}, "local": {},
+	// `env` is matched by isAccountCommandName in unwrappedAccountCommandMutates
+	// and inside the buried-env arm of unrecognizedWrapperHidesAccountAssignment,
+	// so a buried env word is judged from any prefix; it is listed here only
+	// for the same-position form a bare env child tail takes at suffix 0.
+	"env": {},
 	// `strace`'s option-value mutation lives only inside the strace context of
 	// unrecognizedWrapperHidesAccountAssignment, so a buried strace can begin a
 	// verdict only when judged from strace's own suffix.
@@ -173,4 +177,24 @@ var accountChildTailSuffixVerdictNames = map[string]struct{}{
 	// where shellCommandIsUnproven sees it as the head and refuses it.
 	"ash": {}, "bash": {}, "csh": {}, "dash": {}, "fish": {},
 	"ksh": {}, "mksh": {}, "sh": {}, "tcsh": {}, "zsh": {},
+}
+
+// accountChildTailSuffixBuiltinVerdictNames lists the builtins a per-suffix
+// judgement must still inspect: the wrappers peeled by isBareName
+// (exec/command/builtin) and the direct account-mutating and declaration
+// builtins named in unwrappedAccountCommandMutates. Every entry is matched by
+// exact bare name — the form isBareName recognizes — so a path or empty
+// operand that shares only a basename with one of these does not spend the
+// verdict budget.
+var accountChildTailSuffixBuiltinVerdictNames = map[string]struct{}{
+	// Recognized wrappers peeled by unwrapAccountCommand that are dispatched
+	// by isBareName (shell builtins, never a path).
+	"exec": {}, "command": {}, "builtin": {},
+	// Direct account-mutating builtins named in unwrappedAccountCommandMutates.
+	"unset": {}, "set": {}, "hash": {},
+	"read": {}, "getopts": {}, "printf": {}, "let": {}, "mapfile": {}, "readarray": {},
+	"wait": {}, "test": {}, "[": {},
+	"eval": {}, ".": {}, "source": {}, "trap": {}, "alias": {}, "fc": {}, "history": {}, "enable": {},
+	// The declaration builtins isAccountDeclarationBuiltin matches.
+	"export": {}, "readonly": {}, "declare": {}, "typeset": {}, "local": {},
 }

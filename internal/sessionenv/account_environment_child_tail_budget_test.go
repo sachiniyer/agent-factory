@@ -45,6 +45,51 @@ func TestValidateAccountEnvironmentCommand_ChildTailVerdictWordsShareOneBudget(t
 		scopedProcessTabAccount()))
 }
 
+// Inert operands that share only a basename with a builtin — a path such as
+// /tmp/test (filepath.Base is "test"), or an empty word (filepath.Base("") is
+// ".") — were matched by basename and so consumed the verdict budget: a long
+// child tail of them was refused past shadowedChildJudgementLimit even though
+// none runs the builtin a shadowed wrapper would have to exec. The dispatch
+// recognizes builtins by isBareName (exact, no path), so the candidate filter
+// now matches them by bare name too, while wrappers and shells stay
+// basename-matched (#4708 Codex review).
+func TestValidateAccountEnvironmentCommand_InertOperandsDoNotConsumeVerdictBudget(t *testing.T) {
+	names := map[string]struct{}{"CODEX_HOME": {}, "OPENAI_API_KEY": {}}
+	for _, tc := range []struct {
+		name    string
+		operand string
+	}{
+		{"path sharing a builtin basename", "/tmp/test"},
+		{"empty word whose base is dot", "''"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repeated := "ionice -- echo " + strings.Repeat(tc.operand+" ", shadowedChildJudgementLimit+2) + "x"
+			require.NoError(t, ValidateAccountEnvironmentCommand(repeated, scopedProcessTabAccount()),
+				"%q runs no builtin a shadowed wrapper can shift to, so it stays admitted", repeated)
+
+			// The work is one verdict for the whole tail, not one per operand.
+			file, err := syntax.NewParser().Parse(strings.NewReader(repeated), "")
+			require.NoError(t, err)
+			call := file.Stmts[0].Cmd.(*syntax.CallExpr)
+			memo := newOperandTailMemo()
+			_, unsafe := unwrapAccountCommand(call.Args, names, memo)
+			require.False(t, unsafe)
+			require.Equal(t, 1, *memo.childJudgements,
+				"inert operands share no verdict the suffix-0 judgement misses")
+		})
+	}
+
+	// A bare builtin still starts its own verdict and shares the budget: a
+	// shadowed wrapper CAN shift to and exec a bare `test`.
+	bareBuiltin := "ionice -- echo " + strings.Repeat("test ", shadowedChildJudgementLimit+1) + "x"
+	require.Error(t, ValidateAccountEnvironmentCommand(bareBuiltin, scopedProcessTabAccount()))
+
+	// A path sharing a wrapper basename is the same wrapper a shadowed child
+	// can exec, so it keeps consuming the budget (wrappers stay basename-matched).
+	wrapperPath := "ionice -- echo " + strings.Repeat("/usr/bin/ionice ", shadowedChildJudgementLimit+1) + "x"
+	require.Error(t, ValidateAccountEnvironmentCommand(wrapperPath, scopedProcessTabAccount()))
+}
+
 // The work a child-tail walk does is bounded by the budget, not by the tail's
 // length: the adversarial shapes stop after limit+1 judgements, and a benign
 // argv of ordinary words costs exactly one, however long it is. The counters
