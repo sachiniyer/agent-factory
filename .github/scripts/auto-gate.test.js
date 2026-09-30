@@ -10940,6 +10940,23 @@ test("#5004: the evaluate approve pass re-checks the live head before replaying"
   assert.deepEqual(github.approvedRuns, []);
 });
 
+// Codex on #5005: the guard's REST read must ride the same read-retry policy
+// as every other GitHub read — a single transient failure aborted the whole
+// approve pass and misclassified the infrastructure error as a guard refusal.
+test("#5004: a transient live-head guard read is retried, not fatal", async () => {
+  const github = fakeGateGithub({
+    pullGetErrors: [Object.assign(new Error("PR read unavailable"), { status: 500 })],
+    runsByHeadSha: { [HEAD_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  const result = await autoGate.evaluate({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465,
+    setOutputs: false, sleep: async () => {} });
+  assert.doesNotMatch(result.reasons.join("\n"), /evaluation error|PR read unavailable/);
+  assert.equal(github.approveRunAttempts, 1, "the retried guard let the approve POST fire");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+  assert.ok(github.pullGetReads >= 2, "the transient guard read was retried");
+});
+
 test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
   const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
     approveRunError: Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),

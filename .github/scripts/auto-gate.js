@@ -501,11 +501,12 @@ const MAX_RATE_LIMIT_DELAY_MS = 10000;
 // the parked list to convergence before believing any failure — a
 // committed-but-unanswered approve reads as already done and is never replayed
 // (#5004).
-async function retryRead(label, operation, subject = null) {
+async function retryRead(label, operation, subject = null, { sleep } = {}) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
     readFailure: true,
     subject,
+    sleep,
   });
 }
 
@@ -910,7 +911,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
+async function evaluate({ github, context, core, prNumber, setOutputs = true, sleep }) {
   // The resolved PR's node id is what reportDecision's NOT_FOUND
   // classification reads, so evaluatePullRequest publishes it here the moment
   // it is known — a mid-evaluation failure then still writes its scoped
@@ -918,7 +919,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   // (#4484, Codex on #4486).
   const resolved = {};
   try {
-    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved });
+    return await evaluatePullRequest({ github, context, core, prNumber, setOutputs, resolved, sleep });
   } catch (error) {
     // A PR that no longer exists is a conclusion, not an evaluation failure: it
     // cannot be evaluated and there is nothing to report on it. isOpen false
@@ -949,7 +950,7 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   }
 }
 
-async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved }) {
+async function evaluatePullRequest({ github, context, core, prNumber, setOutputs = true, resolved, sleep }) {
   const number = prNumber || (await findPullRequestNumber({ github, context, core }));
 
   if (!number) {
@@ -1094,6 +1095,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     core,
     subject,
     validationRef,
+    sleep,
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
@@ -3859,14 +3861,21 @@ async function approveParkedRun({ github, context, headSha, run, canRecover, sle
 // meanwhile leaves a replay approving a stale head's run (#5004, Codex on
 // #5005). Deliberately REST while the lanes' other reads are GraphQL — the
 // same cross-path reasoning as resolvedPullRequest.exists — with only a
-// definite 404 answering "gone": anything else is an unknown that escapes as a
-// guard failure rather than waving the write through unguarded.
-function liveHeadGuard({ github, context, prNumber, headSha }) {
+// definite 404 answering "gone". The read rides the same read-retry policy as
+// every other GitHub read in the gate: a transient failure must not abort the
+// approval, and an exhausted one escapes as a READ-marked guard failure
+// rather than waving the write through unguarded.
+function liveHeadGuard({ github, context, prNumber, headSha, sleep }) {
   const { owner, repo } = context.repo;
   return async () => {
     let live;
     try {
-      live = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+      live = await retryRead(
+        `could not re-read PR #${prNumber} before approving its parked runs`,
+        () => github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+        null,
+        { sleep },
+      );
     } catch (error) {
       if (Number(error?.status ?? error?.response?.status) === 404) return false;
       throw error;
@@ -3978,7 +3987,7 @@ async function merge({
     throw new Error(`Invalid PR number for merge: ${prNumber}`);
   }
 
-  const gate = await evaluate({ github, context, core, prNumber, setOutputs: false });
+  const gate = await evaluate({ github, context, core, prNumber, setOutputs: false, sleep });
   if (evaluationFailed(gate)) {
     throw evaluationFailure(
       `Auto Gate merge evaluation failed for PR #${prNumber}: ${gate.summary}`,
@@ -4082,7 +4091,7 @@ async function merge({
         const newHead = normalizeHeadSha(updated?.data?.head?.sha);
         if (newHead && newHead !== normalizeHeadSha(gate.headSha)) {
           observedUpdatedHead = newHead;
-          const stillOurs = liveHeadGuard({ github, context, prNumber, headSha: newHead });
+          const stillOurs = liveHeadGuard({ github, context, prNumber, headSha: newHead, sleep });
           const { approved } = await approveParkedRuns({
             github, context, headSha: newHead, core, canRecover: stillOurs, sleep,
           });
@@ -6421,7 +6430,7 @@ function isPRValidationSpec(spec) {
 }
 
 async function evaluateRequiredChecks({
-  github, context, branch, sha, core, subject = null, validationRef = null,
+  github, context, branch, sha, core, subject = null, validationRef = null, sleep,
 }) {
   const required = await getRequiredCheckSpecs({ github, context, branch, core, subject });
   const syntheticDecisionSpecs = required.specs.filter(
@@ -6495,9 +6504,9 @@ async function evaluateRequiredChecks({
   // parked.
   if (parkedRuns.length > 0) {
     await approveParkedRuns({
-      github, context, headSha: sha, core,
+      github, context, headSha: sha, core, sleep,
       canRecover: subject?.number
-        ? liveHeadGuard({ github, context, prNumber: subject.number, headSha: sha })
+        ? liveHeadGuard({ github, context, prNumber: subject.number, headSha: sha, sleep })
         : undefined,
     });
   }
