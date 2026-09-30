@@ -309,10 +309,11 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 // invisible until relaunch (#1168 — the tasks sibling of the #959 tab fix).
 // Tasks are a disk-backed store shared between the TUI and the daemon, so the
 // TUI re-reads them on the snapshot poll rather than through the daemon's
-// session Snapshot. The automations rail (store) always mirrors the fresh list;
-// the tasks overlay pane is re-synced only when the user is not mid-edit, so a
-// background refresh can never clobber an in-progress create/edit or unsaved
-// deletions. Returns whether anything visible changed (the caller repaints on a
+// session Snapshot. The automations rail (store) and the tasks overlay pane both
+// mirror the fresh list; the pane reconciles it around whatever the user is
+// holding — an open form, unsaved or failed edits, queued deletions — so a
+// background refresh never clobbers them and never leaves the rest stale
+// (#4487). Returns whether anything visible changed (the caller repaints on a
 // diff). A read error leaves the last-known list intact, matching handleSnapshot.
 func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 	changed := m.automations.TaskPane().SetUnavailable(tasksErr)
@@ -324,15 +325,11 @@ func (m *home) refreshTasks(tasks []task.Task, tasksErr error) bool {
 		m.store.SetTasks(tasks)
 		changed = true
 	}
-	// The overlay pane owns transient edit state (create/edit buffers, pending
-	// deletions): only re-sync it while idle so a background refresh never wipes
-	// the user's in-flight form or unsaved deletes.
+	// A held draft keeps the pane's list different from disk, so the pane, not
+	// this comparison, says whether the reconcile changed anything visible.
 	sp := m.automations.TaskPane()
-	if !sp.IsEditing() && !sp.IsCreating() && !sp.IsDirty() {
-		if !reflect.DeepEqual(sp.GetTasks(), tasks) {
-			sp.SetTasks(tasks)
-			changed = true
-		}
+	if !reflect.DeepEqual(sp.GetTasks(), tasks) && sp.SetTasks(tasks) {
+		changed = true
 	}
 	return changed
 }
@@ -610,7 +607,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// Account identity and its pending delivery obligation can change while the
 	// row stays Running/Ready. Mirror them before action predicates are evaluated,
 	// so Retry addresses the daemon's transaction instead of stale local state.
-	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAutoSelected, d.PendingAccountSwap) {
+	if inst.ReconcileAccountHandoffSnapshot(d.Account, d.AccountAgent, d.AccountAutoSelected, d.PendingAccountSwap) {
 		changed = true
 	}
 	if inst.ReconcilePendingHandoffSnapshot(d.PendingHandoffMission, d.HandoffDeliveryStatus) {

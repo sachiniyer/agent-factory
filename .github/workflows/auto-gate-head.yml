@@ -1,0 +1,37 @@
+name: Auto Gate head
+
+# The push-time half of Auto Gate: pull_request_target opened and synchronize.
+# It lives in its own workflow so that its check suite is the only suite of this
+# workflow on a head (#4802).
+#
+# The gate's aggregate check run is created through checks.create, which takes
+# no suite. GitHub files it in the earliest github-actions suite on the head,
+# and that suite is whichever push-time workflow GitHub created first: usually
+# CodeQL, sometimes this one. The ruleset ignores check runs in a suite that a
+# newer suite of the same workflow has superseded. When opened/synchronize
+# shared auto-gate.yml with labeled, edited and the rest, the play-tested label
+# on the final head superseded the placement, and the PASS stayed "expected"
+# forever (#3893, #4799). Here, a head gets exactly one suite of this workflow.
+#
+# Everything else, including the jobs themselves, stays in auto-gate.yml, which
+# this calls. The called workflow sees this run's event and payload, and applies
+# its own workflow-level concurrency group, so do NOT add one here: a caller and
+# callee holding the same group deadlock.
+#
+# Do not add another event or activity type here. A second trigger that can
+# fire on the same head brings the supersession back.
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  checks: write
+  statuses: read
+  issues: write
+
+jobs:
+  gate:
+    uses: ./.github/workflows/auto-gate.yml

@@ -78,9 +78,9 @@ func TestScrubbersDecodeSourceMappedURISiblingPath(t *testing.T) {
 			want:  "editor target file://[repo:1]%2d[redacted]",
 		},
 		{
-			name:  "malformed fragment cannot revoke path evidence",
+			name:  "malformed fragment fails closed",
 			input: "editor target file:///srv/Confidential%43lient/repo%2Dfix-bug-%75rgent#%ZZ",
-			want:  "editor target file://[repo:1]%2D[redacted]#%ZZ",
+			want:  "editor target file://[repo:1]%2D[redacted]#[redacted]",
 		},
 	}
 	for _, path := range paths {
@@ -127,8 +127,8 @@ func TestScrubbersDecodeSourceMappedURISiblingPath(t *testing.T) {
 	invalidOuterQuery := "redirect https://example.test/%ZZ?next=" +
 		"file:///srv/Confidential%43lient/repo%2Dfix-bug-%75rgent&ok=1"
 	if got, want := r.scrub(invalidOuterQuery),
-		"redirect https://example.test/%ZZ?next=file://[repo:1]%2D[redacted]&ok=1"; got != want {
-		t.Errorf("invalid outer URI hid the recovered URI's query boundary:\n got: %s\nwant: %s", got, want)
+		"redirect https://example.test[redacted]?next=file://[repo:1]%2D[redacted]&ok=1"; got != want {
+		t.Errorf("invalid outer URI fail-closed over malformed path:\n got: %s\nwant: %s", got, want)
 	}
 	deeplyMalformed := "editor " + strings.Repeat("bad://[", 6) +
 		"file:///srv/Confidential%43lient/repo%2Dfix-bug-%75rgent"

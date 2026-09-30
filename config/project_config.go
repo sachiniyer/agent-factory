@@ -519,7 +519,7 @@ func WithProjectConfigLockForRoot(root string, fn func() error) error {
 // filesystem path — to a registered project. It never registers or mutates: a
 // path is normalized to its canonical checkout root (so any subdirectory selects
 // the whole project) and matched against the registry read-only. An unregistered
-// or unknown target is an actionable error naming `af projects register`, never
+// or unknown target is an actionable error naming `af projects add`, never
 // a silent fall-through to the global value.
 func ResolveProjectSelector(selector string) (Project, error) {
 	if strings.TrimSpace(selector) == "" {
@@ -563,7 +563,7 @@ func ResolveProjectSelector(selector string) (Project, error) {
 			}
 		}
 	}
-	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects register %s` first, then set per-project config",
+	return Project{}, fmt.Errorf("%s is not a registered project — run `af projects add %s` first, then set per-project config",
 		binding.root, selector)
 }
 
