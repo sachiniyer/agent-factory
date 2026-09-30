@@ -38,6 +38,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
 		// Menu.SetState rebuilds the options slice; call it synchronously
 		// on the event-loop goroutine rather than from a tea.Cmd closure
 		// that runs off-loop and races with home.View -> Menu.String.
@@ -177,6 +178,22 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// began — re-raising it here would be a second BeginCreate from OpCreating,
 		// an illegal edge the chokepoint rejects (#1350). Set it exactly once.
 		instance.Program = m.pendingProgram
+		// The WIRE value is different from the shown one (#4889 review): a
+		// program the field only DISPLAYS — the config-derived seed the
+		// synchronous refresh left — is submitted as "" so the daemon resolves
+		// default_program at create time, on the daemon's host, against the
+		// session's own repo. Committing the displayed string would freeze a
+		// stale cache into an explicit request.
+		//
+		// Only a choice the user actually made — a picker pick, a launch
+		// --program flag, or a restored failed-create draft — goes out as a
+		// concrete program. A REMOTE target keeps master's behaviour: the
+		// launch-time default is sent explicitly, since the TUI has no
+		// synchronous read of a remote daemon's default_program at all.
+		sendProgram := ""
+		if m.pendingProgramChosen || !m.programFollowsConfig || isRemoteTarget() {
+			sendProgram = m.pendingProgram
+		}
 		// Read the pending prompt here, on the event loop, and clear it with the
 		// rest of the naming state: the cmd below runs off-loop, so reading
 		// m.pendingPrompt from inside the closure would race the next create's
@@ -193,6 +210,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// And for the ctrl+o account field (#3844), on the loop for the same reason.
 		account := m.pendingAccount
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
 		m.namingInstance = nil
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
@@ -207,7 +225,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			req := sessionStartRequest{
 				Title:    instance.Title,
 				RepoPath: instance.Path,
-				Program:  instance.Program,
+				Program:  sendProgram,
 				// The initial prompt typed into the naming form's shift+tab
 				// field (#1936). session_control.go forwards it to the daemon,
 				// which delivers it once the agent is ready — the same path
@@ -323,6 +341,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingBackend = ""
 		m.backendPickerPending = false
 		m.pendingAccount = ""
+		m.pendingProgramChosen = false
 		m.state = stateDefault
 		cmd := m.selectionChanged()
 
@@ -356,12 +375,20 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	if m.repoRoot == "" {
 		return m, m.handleNotice(errors.New(noActiveProjectNotice(m.enterPicksAProject(), m.projectsFocused())))
 	}
-	m.pendingProgram = m.program
+	// Re-read the live default_program synchronously before seeding the field:
+	// `af config set default_program` applies live (#2480), so the launch-time
+	// cache alone can show a stale agent (#4889). The read is a bounded local
+	// probe — the same class of synchronous config read the project switch and
+	// preflight already run on this goroutine — and a remote target keeps the
+	// launch-time value untouched.
+	m.refreshDefaultProgram()
+	m.pendingProgram = m.defaultProgram()
 	// Every create starts with an empty prompt field and an unchosen backend. The
 	// cancel paths clear both too, but this is the authoritative reset: it also
 	// covers a create that ended by any route other than Enter/Esc/ctrl+c.
 	m.pendingPrompt = ""
 	m.pendingBackend = ""
+	m.pendingProgramChosen = false
 	m.clearPendingAccount()
 	if m.pendingProgram == "" && m.appConfig != nil {
 		m.pendingProgram = m.appConfig.DefaultProgram

@@ -23,6 +23,11 @@ func (m *home) handleStateSelectProgram(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			idx := m.selectionOverlay.GetSelectedIndex()
 			picked := tmux.SupportedPrograms[idx]
 			changed := picked != m.pendingProgram
+			// A picker submit is an explicit choice even when it re-picks the
+			// value already shown: it submits the concrete program on the wire
+			// rather than "" (#4889 review). String equality cannot tell this
+			// pick apart from an untouched field — this flag is what can.
+			m.pendingProgramChosen = true
 			if changed {
 				// An account belongs to ONE agent — claude's "work" and codex's "work"
 				// are different identities in different registries — so a program change
