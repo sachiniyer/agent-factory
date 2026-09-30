@@ -106,6 +106,33 @@ func TestSelectionOverlayRegistersRowZones(t *testing.T) {
 	}
 }
 
+// A row too long for the overlay box renders truncated with an ellipsis. It
+// still has to be clickable: matching the full item text registered no zone at
+// all, so every picker whose labels are a sentence — the #4429 resolve picker
+// is one — answered the keyboard and swallowed the mouse (#4528).
+func TestSelectionOverlayRegistersTruncatedRowZones(t *testing.T) {
+	items := []string{
+		"Retry send — submit the pending mission again",
+		"Mark delivered — retire the pending mission without resending (the pane already shows it landed)",
+	}
+	s := NewSelectionOverlay("Resolve delivery for 'alpha' — inspect the pane first", items)
+	s.SetWidth(50)
+	reg := zones.NewRegistry()
+	origin := layout.Point{X: 8, Y: 4}
+	s.RegisterZones(reg, origin)
+
+	lines := strings.Split(s.Render(), "\n")
+	for i := range items {
+		r, ok := reg.Find(zones.OverlaySelectRow(i))
+		require.True(t, ok, "row zone for item %d; got %v", i, reg.IDs())
+		line := xansi.Strip(lines[r.Y-origin.Y])
+		require.Contains(t, line, "…", "fixture: row %d must render truncated", i)
+		head := strings.TrimSuffix(strings.Trim(line, "│ ▸"), "…")
+		assert.True(t, strings.HasPrefix(items[i], head),
+			"row %d's zone must sit on the line rendering its own item: %q", i, line)
+	}
+}
+
 func TestSelectionOverlayRegistersBudgetedWindowZones(t *testing.T) {
 	items := []string{"claude", "aider", "codex"}
 	s := NewSelectionOverlay("Select program", items)

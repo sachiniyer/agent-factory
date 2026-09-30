@@ -95,6 +95,27 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 	return nil
 }
 
+// ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
+// on the operator's attestation that it already landed (#4429) — the "mark
+// delivered" exit for a sent-unverified or could-not-confirm verdict, and the
+// supported way out of a startup-unknown wedge. It never resends: a daemon
+// predating the verb refuses loudly (route not served) rather than run a retry
+// against a mission that may already be executing.
+func (c *Client) ConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) error {
+	var resp daemon.ConfirmHandoffDeliveryResponse
+	err := c.call("ConfirmHandoffDelivery", req, &resp)
+	if IsRouteNotServed(err) {
+		return fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
+	}
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
+	}
+	return nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013) — the TUI's handoff action. Returns the swap the daemon
 // actually performed (outgoing agent, incoming agent, attribution boundary).
@@ -369,6 +390,18 @@ func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResp
 func (c *Client) RegisterProject(path string) (config.Project, error) {
 	var resp daemon.RegisterProjectResponse
 	if err := c.call("RegisterProject", daemon.RegisterProjectRequest{Path: path}, &resp); err != nil {
+		return config.Project{}, err
+	}
+	return resp.Project, nil
+}
+
+// RebindProject moves a registered project's stable identity to the checkout at
+// path through the daemon — the single writer (#960) — which resolves the path
+// on its own filesystem, refuses a root another project owns, and publishes
+// projects.changed. HTTP twin of RebindProject.
+func (c *Client) RebindProject(id, path string) (config.Project, error) {
+	var resp daemon.RebindProjectResponse
+	if err := c.call("RebindProject", daemon.RebindProjectRequest{ID: id, Path: path}, &resp); err != nil {
 		return config.Project{}, err
 	}
 	return resp.Project, nil

@@ -126,7 +126,13 @@ func renderTaskShow(w io.Writer, t task.Task, now time.Time, daemonURL string) {
 	row("Enabled", enabled)
 	row("Arming", describeArming(t))
 	if t.NextRunAt != nil {
-		row("Next run", t.NextRunAt.Format(showTimeFormat))
+		next := t.NextRunAt.Format(showTimeFormat)
+		if task.NextRunFarOut(t, now) {
+			// The year is already in showTimeFormat; the distance is what makes a
+			// dated cron re-armed for next year stand out (#4843).
+			next += " · " + task.FarOutDistance(*t.NextRunAt, now)
+		}
+		row("Next run", next)
 	}
 	row("Last run", describeLastRun(t))
 	row("Schedule", describeScheduleHealth(t, now, daemonURL != ""))

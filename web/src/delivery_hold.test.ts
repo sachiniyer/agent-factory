@@ -292,3 +292,54 @@ test("delivery_hold: a queued terminal report starts no hold", () => {
   assert.equal(h.noteQueued("\x1b[I", 0), "none");
   assert.equal(h.holding, false);
 });
+
+// Regression: a queued editing key (history recall via arrow-up ESC[A) after a
+// queued Enter must NOT leave the queued commit's queuedEndsLine=true standing.
+// noteQueued previously skipped its queuedEndsLine update for every ESC-prefixed
+// key, so the stale true survived into noteFlushed, which released the hold over
+// a line the flush had just populated with the recalled draft. The live path
+// (noteInput) treats ESC editing keys as draft-starting edits, so the queued path
+// must agree and keep the hold (#3025, #1586/#1638 defect class).
+test("delivery_hold: a queued editing key after queued Enter keeps the hold on flush", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("ls", 0);
+  assert.equal(h.holding, true);
+  assert.equal(h.noteQueued("\r", 1_100), "pause");
+  assert.equal(h.holding, true);
+  // The renew interval has not elapsed, so this returns "none" — but it is still
+  // an edit that resets the queued commit and renews the hold. Only holding is
+  // load-bearing here; the action value is renew-timing, not commit-tracking.
+  h.noteQueued("\x1b[A", 1_200);
+  assert.equal(h.holding, true);
+  h.noteFlushed(1_300);
+  assert.equal(h.holding, true, "queued ESC[A after queued Enter should NOT release the hold on flush");
+});
+
+// The fix does not pin the hold forever: a real commit on the live path after the
+// flush still ends it, so the recall survives the reconnect but is released by the
+// user's next genuine Enter.
+test("delivery_hold: a recalled draft surviving the flush is released by a later live Enter", () => {
+  const h = new MidLineHold(1_000, 15_000);
+  h.noteInput("cmd", 0);
+  h.noteQueued("\r", 1_000);
+  h.noteQueued("\x1b[A", 1_100);
+  h.noteFlushed(1_200);
+  assert.equal(h.holding, true, "the recalled draft is now live in the PTY");
+  assert.equal(h.noteInput("\r", 1_300), "none");
+  assert.equal(h.holding, false, "a real Enter commits the recalled line");
+});
+
+// Guard against over-widening the fix: a queued terminal REPORT after a queued
+// Enter must be a no-op for commit tracking. Reports return early in noteQueued
+// and never touch queuedEndsLine, so the prior queued Enter still ends the line
+// and the flush releases — a focus/cursor-position reply is not the user editing.
+test("delivery_hold: a queued report after queued Enter does NOT keep the hold", () => {
+  for (const report of ["\x1b[I", "\x1b[O", "\x1b[12;40R", "\x1b]11;rgb:0/0/0\x07"]) {
+    const h = new MidLineHold(1_000, 15_000);
+    h.noteInput("one", 0);
+    h.noteQueued("\r", 1_100);
+    assert.equal(h.noteQueued(report, 1_200), "none", `${JSON.stringify(report)} is a report, not an edit`);
+    h.noteFlushed(1_300);
+    assert.equal(h.holding, false, `${JSON.stringify(report)} must not override the queued commit`);
+  }
+});

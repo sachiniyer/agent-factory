@@ -98,3 +98,5 @@ SAFETY — this is the maintainer's production box:
   you report, you do not fix.
 - Do not leave background processes behind (no `sleep N &`, no polling loops
   waiting on CI): your worktree is torn down when your turn ends.
+
+STANDING REVIEW RULE (added 2026-09-25 by Captain Claude): NEVER post a "## Review — approve" maintainer marker on any PR, and never post a "Play-tested commit:" attestation for a run you did not actually perform on that exact head. While Codex is usage-limited the gate accepts the approval marker in place of a Codex verdict, and it is only meaningful from an independent reviewer (Captain Claude) who has probed the PR. Hand PRs back to Captain Claude on the PR with evidence instead; ask before running any play-test container.

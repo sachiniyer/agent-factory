@@ -144,3 +144,48 @@ func TestListSessions_DaemonUpNewerSchemaSkipSaysUpgrade(t *testing.T) {
 		t.Fatalf("must not give the corrupted or unreadable remedy, got: %s", msg)
 	}
 }
+
+// rowsFailedSkip builds a SkippedRepo whose instances.json parsed but whose rows
+// could not be loaded (worktree or tmux gone, #4876), carrying the count the
+// refusal renders.
+func rowsFailedSkip(repoID string, failedRows int) daemon.SkippedRepo {
+	return daemon.SkippedRepo{RepoID: repoID, Reason: "rows-failed-to-load", FailedRows: failedRows}
+}
+
+// TestListSessions_DaemonUpRowsFailedSkipSaysRowsFailed: a repo whose file
+// parsed but whose rows could not be loaded (worktree or tmux gone) must not
+// read as "corrupted" or "could not read" — the file is fine — and the refusal
+// must name the count and say to restore or delete the unloadable sessions
+// (#4876); the get/whoami caveat says the same.
+func TestListSessions_DaemonUpRowsFailedSkipSaysRowsFailed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	skip := []daemon.SkippedRepo{rowsFailedSkip("unloadable-repo", 3)}
+	corruptStub(t, nil, skip)
+
+	_, err := listSessions("")
+	if err == nil {
+		t.Fatal("list must refuse when a repo's rows failed to load, got nil error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "unloadable-repo") {
+		t.Fatalf("must name the repo, got: %s", msg)
+	}
+	if !strings.Contains(msg, "could not be loaded") || !strings.Contains(msg, "3 session") || !strings.Contains(msg, "worktree or tmux") {
+		t.Fatalf("must say rows could not be loaded, carry the count, and name the cause, got: %s", msg)
+	}
+	if !strings.Contains(msg, "af sessions restore") || !strings.Contains(msg, "af sessions delete") {
+		t.Fatalf("must carry the restore/delete remedy, got: %s", msg)
+	}
+	if strings.Contains(msg, "corrupt") || strings.Contains(msg, "could not read") || strings.Contains(msg, "fix the JSON") {
+		t.Fatalf("a rows-failed repo is not a corrupt/unreadable one; must not say so, got: %s", msg)
+	}
+
+	// The get/whoami miss caveat carries the same rows-failed wording and remedy.
+	suffix := skippedReposSuffix(skip)
+	if !strings.Contains(suffix, "could not be loaded") || !strings.Contains(suffix, "af sessions restore") {
+		t.Fatalf("suffix must carry the rows-failed wording and remedy, got: %s", suffix)
+	}
+	if strings.Contains(suffix, "corrupt") || strings.Contains(suffix, "could not read") {
+		t.Fatalf("suffix must not read as corrupted/unreadable, got: %s", suffix)
+	}
+}
