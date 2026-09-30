@@ -688,3 +688,220 @@ func TestAudit_CanonicalRowNoOpAddsNoDaemonUpgradeEntry(t *testing.T) {
 	require.Len(t, trail, 1, "a canonical row with no-op patches gains no entry of any kind")
 	assert.Equal(t, AuditCreated, trail[0].Action)
 }
+
+// handEditedCronTaskWithCap is handEditedCronTask plus a stale positive cap — a
+// shape ValidateTrigger rejects (a cap on a cron task), reachable only via a
+// hand-edit of tasks.json. Seeded separately because the canonicalization
+// fixtures deliberately keep the two invalid shapes on different rows.
+func handEditedCronTaskWithCap(id string, cap int) Task {
+	t := handEditedCronTask(id, "", "")
+	t.MaxConcurrentRuns = cap
+	return t
+}
+
+// TestAudit_CapStoreRepairIsAttributedToTheStore is the headline regression for
+// the clear-repair misattribution: a hand-edited cron task carrying a stale
+// max_concurrent_runs, patched through an empty TaskUpdate{}, has its cap
+// repaired to 0 by clearInapplicableCap. The caller never touched the cap, so
+// the repair is recorded as ActorDaemonUpgrade — not folded into the caller's
+// entry the way a genuine retarget's cap-clear is.
+func TestAudit_CapStoreRepairIsAttributedToTheStore(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap01", 5)})
+
+	_, err := UpdateTaskChecked("handcap01", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handcap01")
+	require.Len(t, trail, 1, "the empty patch changed only a store-repaired cap")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor,
+		"a store repair of a stale cap on a hand-edited row is the store's change")
+	assert.Equal(t, AuditUpdated, trail[0].Action)
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	stored, err := GetTask("handcap01")
+	require.NoError(t, err)
+	assert.Equal(t, 0, stored.MaxConcurrentRuns, "the cap really was repaired on disk")
+}
+
+// TestAudit_OnCompleteStoreRepairIsAttributedToTheStore: a hand-edited cron task
+// carrying on_complete="kill" AND a target_session (a shape ValidateTrigger
+// rejects), patched through an empty TaskUpdate{}, has its on_complete repaired
+// to keep by clearInapplicableOnComplete. The caller never touched on_complete,
+// so the repair is recorded as ActorDaemonUpgrade, not the caller's move.
+func TestAudit_OnCompleteStoreRepairIsAttributedToTheStore(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTask("handoc01", "kill", "my-sess")})
+
+	_, err := UpdateTaskChecked("handoc01", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handoc01")
+	require.Len(t, trail, 1, "the empty patch changed only a store-repaired on_complete")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor,
+		"a store repair of a contradictory on_complete is the store's change")
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	stored, err := GetTask("handoc01")
+	require.NoError(t, err)
+	assert.Equal(t, "", stored.OnComplete, "on_complete was repaired to keep on disk")
+	assert.Equal(t, "my-sess", stored.TargetSession, "target_session is untouched; only on_complete was repaired")
+}
+
+// TestAudit_CapStoreRepairAndCallerChangeCoexist: a hand-edited invalid cron
+// with a stale cap, patched with a prompt-only change. The store repairs the
+// cap (one daemon-upgrade line), and the caller's entry names ONLY the prompt —
+// the carve-out excluded the cap from the caller's diff the same way
+// canonical-to-canonical diffing excludes a byte-canonicalization. An operator
+// chasing a cap regression is not sent to a CLI edit that never touched it.
+func TestAudit_CapStoreRepairAndCallerChangeCoexist(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap02", 5)})
+
+	np := "changed"
+	_, err := UpdateTaskChecked("handcap02", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handcap02")
+	require.Len(t, trail, 2,
+		"the store's repair and the CLI's move — not one entry attributing both to the CLI")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor, "the store's repair is recorded first, as repo_id is")
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor, "the CLI's entry is the prompt it moved")
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields,
+		"the cap-clear is the store's repair, not the CLI's change")
+}
+
+// TestAudit_OnCompleteStoreRepairAndCallerChangeCoexist: the on_complete twin of
+// the cap test above — a prompt-only patch on a row holding a contradictory
+// on_complete plus a target session. The store's on_complete repair is a
+// daemon-upgrade line; the CLI's entry names only the prompt.
+func TestAudit_OnCompleteStoreRepairAndCallerChangeCoexist(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTask("handoc02", "kill", "my-sess")})
+
+	np := "changed"
+	_, err := UpdateTaskChecked("handoc02", TaskUpdate{Prompt: &np}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handoc02")
+	require.Len(t, trail, 2)
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"prompt"}, trail[1].Fields)
+}
+
+// TestAudit_BothStoreRepairsFireOnOneRow: a single hand-edited row invalid for
+// BOTH fields — a cron task with a stale cap AND a target_session-bearing
+// on_complete=kill (cap + target_session is itself invalid, and so is kill +
+// target_session). An empty patch repairs both; each is its own daemon-upgrade
+// line, and no caller entry is written.
+func TestAudit_BothStoreRepairsFireOnOneRow(t *testing.T) {
+	row := handEditedCronTask("handboth", OnCompleteKill, "my-sess")
+	row.MaxConcurrentRuns = 5
+	handEditedStore(t, []Task{row})
+
+	_, err := UpdateTaskChecked("handboth", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handboth")
+	require.Len(t, trail, 2, "one daemon-upgrade line per store-repaired field")
+	assert.Equal(t, ActorDaemonUpgrade, trail[0].Actor)
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	assert.Equal(t, ActorDaemonUpgrade, trail[1].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[1].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorCLI, e.Actor, "the empty patch moved nothing on the caller's behalf")
+	}
+	stored, err := GetTask("handboth")
+	require.NoError(t, err)
+	assert.Equal(t, 0, stored.MaxConcurrentRuns, "cap repaired")
+	assert.Equal(t, "", stored.OnComplete, "on_complete repaired to keep")
+	assert.Equal(t, "my-sess", stored.TargetSession, "target_session untouched")
+}
+
+// TestAudit_ExplicitCapClearOnInvalidRowIsTheCallersChange guards the
+// update.MaxConcurrentRuns == nil gate on the carve-out. When the caller
+// EXPLICITLY clears a stale cap (MaxConcurrentRuns: &0) on a hand-edited invalid
+// row, the clear is the caller's change, not a store repair: the carve-out stays
+// out (the patch set the field), and the trail must NOT drop the write ("cannot
+// miss one that did"), so the cap appears in the caller's entry — never as a
+// daemon-upgrade line.
+func TestAudit_ExplicitCapClearOnInvalidRowIsTheCallersChange(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap03", 5)})
+
+	zero := 0
+	_, err := UpdateTaskChecked("handcap03", TaskUpdate{MaxConcurrentRuns: &zero}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handcap03")
+	require.Len(t, trail, 1, "the explicit clear is a single caller entry")
+	assert.Equal(t, ActorCLI, trail[0].Actor,
+		"an explicit cap clear is the caller's change, even on an already-invalid row")
+	assert.Equal(t, []string{"max_concurrent_runs"}, trail[0].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "the store did not repair what the caller cleared")
+	}
+}
+
+// TestAudit_ExplicitOnCompleteClearOnInvalidRowIsTheCallersChange: the on_complete
+// twin — the caller explicitly reverts a contradictory on_complete to keep on a
+// hand-edited invalid row. The carve-out stays out (the patch set the field), so
+// the move is the caller's, recorded as such, and not dropped or mis-attributed
+// to the store.
+func TestAudit_ExplicitOnCompleteClearOnInvalidRowIsTheCallersChange(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTask("handoc03", "kill", "my-sess")})
+
+	keep := OnCompleteKeep
+	_, err := UpdateTaskChecked("handoc03", TaskUpdate{OnComplete: &keep}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "handoc03")
+	require.Len(t, trail, 1, "the explicit revert is a single caller entry")
+	assert.Equal(t, ActorCLI, trail[0].Actor)
+	assert.Equal(t, []string{"on_complete"}, trail[0].Fields)
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor)
+	}
+}
+
+// TestAudit_CapStoreRepairFiresAtMostOnce guards the "fires at most once" property
+// the comment on the canonicalization carves claims: the triggering write
+// repairs the on-disk value, so a second empty patch on the now-valid row has
+// nothing left to repair and writes no daemon-upgrade line.
+func TestAudit_CapStoreRepairFiresAtMostOnce(t *testing.T) {
+	handEditedStore(t, []Task{handEditedCronTaskWithCap("handcap04", 5)})
+
+	_, err := UpdateTaskChecked("handcap04", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	require.Len(t, auditOf(t, "handcap04"), 1, "first write repaired and recorded")
+
+	_, err = UpdateTaskChecked("handcap04", TaskUpdate{}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+	assert.Len(t, auditOf(t, "handcap04"), 1, "a now-valid row has nothing left to repair")
+}
+
+// TestAudit_GenuineRetargetCapClearStaysAttributedToTheCaller is the case the
+// fix must NOT regress: a VALID watch task the caller retargets to cron has its
+// cap cleared as a consequence of the caller's own trigger change. The existing
+// row had capApplies()==true, so the carve-out does not fire, and the cap-clear
+// stays in the caller's entry alongside the trigger fields it moved.
+func TestAudit_GenuineRetargetCapClearStaysAttributedToTheCaller(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	seed := Task{ID: "retarget01", Name: "capped", WatchCmd: "tail -f x", MaxConcurrentRuns: 3, Enabled: true}
+	require.NoError(t, AddTask(seed))
+
+	edited := seed
+	edited.CronExpr = "0 9 * * *"
+	edited.WatchCmd = ""
+	edited.Prompt = "run it"
+	patch := DiffTask(seed, edited)
+	require.Nil(t, patch.MaxConcurrentRuns, "a TUI/API edit never patches the cap")
+
+	_, err := UpdateTaskChecked("retarget01", patch, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "retarget01")
+	require.Len(t, trail, 2, "the create, and the CLI's retarget — no daemon-upgrade line")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"prompt", "cron_expr", "watch_cmd", "max_concurrent_runs"}, trail[1].Fields,
+		"the cap-clear is a consequence of the caller's retarget and stays attributed to the caller")
+	for _, e := range trail {
+		assert.NotEqual(t, ActorDaemonUpgrade, e.Actor, "a genuine retarget is not a store repair")
+	}
+}
