@@ -828,20 +828,28 @@ func writePIDFileFor(t *testing.T, pid int) {
 	}
 }
 
-// TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverSignaled (#5007 addendum 4):
+// TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverKilled (#5007 addendum 4):
 // a daemon predating the early unlink keeps daemon.pid through its drain, so
 // mid-drain the socket is dead but the pidfile still names a live process AND
 // the lock stays held. EnsureDaemon must read that as draining — report
 // ErrDaemonStillDraining at the bound and never reach the launch path, whose
-// stale-daemon stop would SIGKILL the drainer.
-func TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverSignaled(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+// stale-daemon stop would SIGKILL the drainer. Its one SIGTERM reclaim is
+// absorbed the way a real drainer's is (the fake's trap drops it like an
+// unread sigChan), so the process surviving to the end proves the SIGKILL
+// escalation never ran.
+func TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverKilled(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv classification needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
 	lock, err := acquireHomeLock()
 	if err != nil {
 		t.Fatalf("acquireHomeLock: %v", err)
 	}
 	t.Cleanup(lock.release)
-	writePIDFileFor(t, livePID(t))
+	pid, _ := startFakeAFDaemon(t, home, "trap '' TERM; sleep 60")
+	writePIDFileFor(t, pid)
 
 	launches := 0
 	launch := func() error {
@@ -855,6 +863,9 @@ func TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverSignaled(t *testing.T) {
 	if launches != 0 {
 		t.Fatalf("launches = %d, want 0 while a live daemon.pid PID names the drainer", launches)
 	}
+	if !pidLooksAlive(pid) {
+		t.Fatalf("draining daemon pid %d died during the wait; the reclaim must never escalate to SIGKILL", pid)
+	}
 }
 
 // TestEnsureDaemon_Draining_LivePIDFileWithoutLock: a drainer predating the
@@ -862,8 +873,13 @@ func TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverSignaled(t *testing.T) {
 // socket, absent lock, live pidfile PID. The pid must still read draining:
 // absent lock alone would spawn beside it.
 func TestEnsureDaemon_Draining_LivePIDFileWithoutLock(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	writePIDFileFor(t, livePID(t))
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("fake-daemon argv classification needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	pid, _ := startFakeAFDaemon(t, home, "trap '' TERM; sleep 60")
+	writePIDFileFor(t, pid)
 
 	launches := 0
 	launch := func() error {
@@ -876,6 +892,9 @@ func TestEnsureDaemon_Draining_LivePIDFileWithoutLock(t *testing.T) {
 	}
 	if launches != 0 {
 		t.Fatalf("launches = %d, want 0 while a live daemon.pid PID names the drainer", launches)
+	}
+	if !pidLooksAlive(pid) {
+		t.Fatalf("draining daemon pid %d died during the wait; the reclaim must never escalate to SIGKILL", pid)
 	}
 }
 

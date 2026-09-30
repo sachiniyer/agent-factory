@@ -146,6 +146,19 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 		return nil
 	case daemonDraining:
 		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit before launching", pid)
+		// The same probe signature — nothing answers, the home lock is held,
+		// daemon.pid names a live process — also matches a serving daemon made
+		// unreachable (its socket file was deleted or its listener wedged),
+		// which would otherwise pin this home forever. One verified SIGTERM
+		// reclaims that daemon gracefully; a real drainer's sigChan goes
+		// unread inside drainDaemon, so the signal is absorbed and the joins
+		// finish. The deadline lapses inside stopDaemonUntil's graceful poll,
+		// so its SIGKILL escalation — the part that could cut durable work —
+		// never runs, and a drainer without a pidfile returns untouched
+		// (#5007).
+		if _, err := stopDaemonUntil(time.Now().Add(2 * shutdownCompletePoll)); err != nil {
+			log.InfoLog.Printf("SIGTERM reclaim of a possibly unreachable daemon: %v", err)
+		}
 		drainDeadline := drainWaitDeadline(deadline)
 		switch waitOutDrain(deadline, drainDeadline) {
 		case daemonServing:
