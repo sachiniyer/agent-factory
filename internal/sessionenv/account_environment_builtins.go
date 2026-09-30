@@ -77,7 +77,10 @@ const shadowedTailOperandLimit = 64
 //
 // Each suffix judgment re-walks the rest of the tail, so the scan is quadratic
 // in its length — 8000 literal PIDs took 8s against 6ms on master — and a tail
-// past shadowedTailOperandLimit fails closed instead.
+// past shadowedTailOperandLimit fails closed instead. That bound is a property
+// of CHILDLESS tails: PIDs and permuted operands are meaningless past a handful
+// of words, so length there is a reasonable fail-closed signal. A wrapper's
+// returned child tail uses shadowedChildTailMutates instead, which drops it.
 func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if len(words) > shadowedTailOperandLimit {
 		return true
@@ -351,6 +354,17 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		switch {
 		case option == "--":
+			// `--` ends option parsing, so the real binary's child is exactly
+			// words[1:]. The basename match cannot prove this IS real util-linux,
+			// so a shadowed `./ionice` with `shift N; exec "$@"` can discard the
+			// `--` and any prefix of the child and exec any literal suffix of it.
+			// Every suffix is judged; because these words ARE the real child's
+			// argv, the child-tail scan drops the childless PID bound — their
+			// length is not a mutation (the selector and terminal branches keep
+			// the capped shadowedOperandTailMutates for their childless tails).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		case utilLinuxTerminalOption(option, "tpPu"):
 			// --help/--version exit before reaching a child on the real
@@ -405,6 +419,24 @@ func unwrapIonice(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case strings.HasPrefix(option, "-"):
 			return run.done(nil, true)
 		default:
+			// The child head word: option parsing has ended, so the real binary
+			// runs words as COMMAND + args. The basename match cannot prove this
+			// IS real util-linux, and a shadowed `./ionice` with
+			// `shift N; exec "$@"` can discard any prefix of the child and exec
+			// any literal suffix of it. The head itself is judged by the outer
+			// unwrapAccountCommand loop that re-enters on this return; the tail
+			// after the head is judged here, every suffix. Because this tail is
+			// the real child's argv, it uses the child-tail scan that drops the
+			// childless PID bound (a command may take any number of operands, so
+			// length is not a mutation) — the selector and terminal branches keep
+			// the capped shadowedOperandTailMutates for their childless tails.
+			// This covers the non-terminal option branches (-t/--ignore, -c/-n/
+			// --class/--classdata value, and the attached -c/-n forms) whose loops
+			// land here once the real child is reached, while staying clear of
+			// their future option words (#4460/#4532 dynamic `-c"$CLASS"`).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words, false)
 		}
 	}
@@ -654,6 +686,14 @@ func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{
 		}
 		parsed, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Arithmetic(strings.NewReader(expression))
 		if err != nil {
+			return true
+		}
+		// mvdan's arithmetic parser accepts a degenerate token such as `.` as a
+		// nil AST with no error, and syntax.Walk panics on a nil node. A nil AST
+		// carries nothing the walk can clear as inert, so treat it as unprovable
+		// (fail closed) rather than walking it. Buried `let .` reaches here once
+		// the child-tail suffix scan judges a `let` candidate (#4708).
+		if parsed == nil {
 			return true
 		}
 		// A command substitution (`$(...)` or backticks) inside a literal `let`
