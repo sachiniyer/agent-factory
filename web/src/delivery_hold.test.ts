@@ -352,11 +352,13 @@ test("delivery_hold: a queued report after queued Enter does NOT keep the hold",
 // Ctrl-P/Ctrl-N history recall, Ctrl-K (kill to end of line), Ctrl-L
 // (clear-screen redraw), Ctrl-Y (yank), Ctrl-T (transpose), Ctrl-R
 // (reverse-history search), Ctrl-_ (undo), Ctrl-V (quoted-insert), Ctrl-O
-// (operate-and-get-next), and Ctrl-X (command prefix) are equally how the user comes back to a stranded
-// draft, so they must re-acquire too instead of falling through the
-// startsADraft gate to "none".
+// (operate-and-get-next), Ctrl-X (command prefix), and the remaining
+// readline resume controls — Ctrl-Q (quoted-insert), Ctrl-S (forward
+// history search), Ctrl-] (character search), and Ctrl-@ (set the mark) —
+// are equally how the user comes back to a stranded draft, so they must
+// re-acquire too instead of falling through the startsADraft gate to "none".
 test("delivery_hold: plain editing controls re-acquire the lease after the idle bound", () => {
-  for (const edit of ["\x7f", "\x04", "\x15", "\x08", "\x17", "\x01", "\x05", "\t", "\x02", "\x06", "\x10", "\x0e", "\x0b", "\x0c", "\x19", "\x14", "\x12", "\x1f", "\x16", "\x0f", "\x18"]) {
+  for (const edit of ["\x7f", "\x04", "\x15", "\x08", "\x17", "\x01", "\x05", "\t", "\x02", "\x06", "\x10", "\x0e", "\x0b", "\x0c", "\x19", "\x14", "\x12", "\x1f", "\x16", "\x0f", "\x18", "\x11", "\x13", "\x1d", "\x00"]) {
     const h = new MidLineHold(1_000, 15_000);
     h.noteInput("half a thought", 0);
     assert.equal(h.tick(15_000), "none", "the idle bound released the still-present draft");
@@ -393,6 +395,10 @@ test("delivery_hold: a stray control key on a never-held prompt does not invent 
   assert.equal(h.noteInput("\x16", 85), "none");
   assert.equal(h.noteInput("\x0f", 90), "none");
   assert.equal(h.noteInput("\x18", 95), "none");
+  assert.equal(h.noteInput("\x11", 100), "none");
+  assert.equal(h.noteInput("\x13", 105), "none");
+  assert.equal(h.noteInput("\x1d", 110), "none");
+  assert.equal(h.noteInput("\x00", 115), "none");
   assert.equal(h.holding, false);
 });
 

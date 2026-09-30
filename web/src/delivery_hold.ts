@@ -262,6 +262,17 @@ function hasPrintable(data: string): boolean {
  *  "none" and leave the still-present draft unprotected during that command
  *  sequence — the same window fixed for the other editing controls.
  *
+ *  Ctrl-Q (\x11, readline quoted-insert) and Ctrl-S (\x13, forward history
+ *  search) each preserve the still-present line; a raw terminal may also
+ *  consume them as XON/XOFF flow control before readline sees them, which
+ *  still leaves the draft in place. Ctrl-] (\x1d) is readline's character
+ *  search and Ctrl-@ (\x00) sets the mark. The keybar emits all four through
+ *  the general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts)
+ *  — Ctrl-@ and Ctrl+Space both fold to \x00 there — and startsADraft rejects
+ *  each (all are below 0x20), so without these entries the post-idle resume
+ *  would return "none" and leave the still-present line unprotected during
+ *  those operations — the same window fixed for the other editing controls.
+ *
  *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
  *  after the idle bound released a still-present draft, these keys re-acquire
  *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
@@ -275,7 +286,8 @@ function isEditingControl(data: string): boolean {
     data.includes("\x02") || data.includes("\x06") || data.includes("\x10") || data.includes("\x0e") ||
     data.includes("\x0b") || data.includes("\x0c") || data.includes("\x19") ||
     data.includes("\x14") || data.includes("\x12") || data.includes("\x1f") ||
-    data.includes("\x16") || data.includes("\x0f") || data.includes("\x18")
+    data.includes("\x16") || data.includes("\x0f") || data.includes("\x18") ||
+    data.includes("\x11") || data.includes("\x13") || data.includes("\x1d") || data.includes("\x00")
   );
 }
 
