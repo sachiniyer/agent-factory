@@ -521,3 +521,121 @@ func TestFleetWatcher_OrderingBreaksTiesOnIdentity(t *testing.T) {
 			"attempt %d: same-titled sessions must order deterministically", attempt)
 	}
 }
+
+// A session committed to an account swap whose replacement has reached LiveReady
+// before the swap's mission delivery settles is still IN MOTION. The shared
+// classifier session.ClassifyActivity gates on PendingAccountSwap before the
+// liveness axis (TestPendingAccountSwapActivityRemainsPending, #4027), and the
+// fleet form is the half an unattended driver consumes — an `idle` there is an
+// instruction to act, and acting on it interrupts the swap mid-transaction. This
+// pair of tests (the fleet classifier and the watcher) regression-guards the
+// agreement that was lost when PendingAccountSwap became *AccountSwapData and the
+// fleet classifier was not updated alongside ClassifyActivity.
+func TestClassifyWatchStop_PendingAccountSwapMustNotBeIdle(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	data := session.InstanceData{Liveness: session.LiveReady, PendingAccountSwap: pending}
+
+	activity, _ := session.ClassifyActivity(data)
+	reason, _ := classifyWatchStop(data)
+	require.Equal(t, session.ActivityPending, activity,
+		"sanity: the shared classifier holds the slot for a mid-swap LiveReady record")
+	require.Equal(t, watchWorking, reason,
+		"classifyWatchStop=%s; the fleet form must report working for a mid-swap session, not idle (the one verdict it must not fabricate). ClassifyActivity=%s", reason, activity)
+}
+
+// The watcher itself — not just the classifier — must keep a mid-swap session out
+// of any event: neither the --include-current baseline nor an edge transition into
+// a mid-swap LiveReady row may emit, because both carry an `idle` that a driver acts
+// on. The record is reachable populated: the daemon's manual delivery path drops
+// the OpRespawning fence before ClearPendingAccountSwap on an unconfirmed prompt
+// (CanRetryPendingManualAccountSwapDelivery documents the exact
+// LiveReady/OpNone/PendingAccountSwap!=nil combination).
+func TestFleetWatcher_EmitsIdleForPendingAccountSwapRepro(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+
+	t.Run("include-current baseline omits a mid-swap session", func(t *testing.T) {
+		midSwap := fleetRunning("alpha")
+		midSwap.Liveness = session.LiveReady
+		midSwap.PendingAccountSwap = pending
+		w := newFleetWatcher(true)
+		require.Empty(t, w.observe([]session.InstanceData{midSwap}),
+			"a starting snapshot must not report a mid-swap session as a stop")
+	})
+
+	t.Run("edge transition into a mid-swap session is omitted", func(t *testing.T) {
+		w2 := newFleetWatcher(false)
+		require.Empty(t, w2.observe([]session.InstanceData{fleetRunning("alpha")}),
+			"the baseline working session establishes no transition")
+
+		transitioned := fleetRunning("alpha")
+		transitioned.Liveness = session.LiveReady
+		transitioned.PendingAccountSwap = pending
+		require.Empty(t, w2.observe([]session.InstanceData{transitioned}),
+			"a session crossing into a mid-swap LiveReady row is not a stop edge")
+	})
+}
+
+// A committed kill is terminal even while a swap is pending: MarkUserKilled does
+// not clear the swap, and "finish-this-kill" outranks "resume the replacement". This
+// matches the order in ClassifyActivity, where UserKilled is checked before
+// PendingAccountSwap.
+func TestClassifyWatchStop_UserKilledOutranksPendingAccountSwap(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	data := withLiveness("s", session.LiveReady)
+	data.PendingAccountSwap = pending
+	data.UserKilled = true
+
+	activity, _ := session.ClassifyActivity(data)
+	reason, detail := classifyWatchStop(data)
+	require.Equal(t, session.ActivityTerminal, activity,
+		"sanity: a kill is terminal even when a swap is pending")
+	require.Equal(t, watchStopKilled, reason,
+		"the fleet classifier reports killed, not working, when both are set")
+	require.Contains(t, detail, "teardown")
+}
+
+// No regression: once the swap settles (PendingAccountSwap cleared), a LiveReady
+// row returns to idle on both paths. The gate must not swallow the normal finished
+// case that --include-current and the edge path exist to report.
+func TestClassifyWatchStop_PendingAccountSwapClearReleasesToIdle(t *testing.T) {
+	// Mid-swap: working.
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	midSwap := withLiveness("s", session.LiveReady)
+	midSwap.PendingAccountSwap = pending
+	require.Equal(t, watchWorking, mustReason(classifyWatchStop(midSwap)))
+
+	// Settled: nil pointer, and the same LiveReady row reports idle again.
+	settled := withLiveness("s", session.LiveReady)
+	settled.PendingAccountSwap = nil
+	require.Equal(t, watchStopIdle, mustReason(classifyWatchStop(settled)),
+		"once the swap clears, a LiveReady row returns to idle on both paths")
+
+	// And the watcher reports the working -> idle edge once it clears.
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{midSwap})) // working baseline
+	events := w.observe([]session.InstanceData{settled})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopIdle}, reasons(events),
+		"clearing the swap produces the working -> idle edge a driver has been waiting for")
+}
+
+func mustReason(r watchStopReason, _ string) watchStopReason { return r }

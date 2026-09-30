@@ -107,9 +107,18 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	if d.UserKilled {
 		return watchStopKilled, "killed; its teardown may still be running"
 	}
-	// A record whose startup could not be confirmed has a liveness value that
-	// describes nothing, so it is asked before the liveness axis. Reading it would
-	// produce exactly the fabricated-idle this command must not emit.
+	// A pending account swap is a durable replacement transaction whose mission
+	// delivery may not have settled, and it reaches the watch path populated
+	// even on a LiveReady record with no operation in flight: the manual
+	// delivery path drops the OpRespawning fence before ClearPendingAccountSwap
+	// when the prompt cannot be confirmed. Reading such a row as idle would
+	// fabricate the one verdict this surface is documented never to emit, and
+	// makes the fleet form disagree with the single-title path. Match
+	// session.ClassifyActivity, which gates on PendingAccountSwap before the
+	// liveness axis for the same reason (#4027).
+	if d.PendingAccountSwap != nil {
+		return watchWorking, ""
+	}
 	if d.StartupStateUnknown {
 		return watchStopUnknown,
 			"af could not confirm which runtime owns this workspace; inspect it and remove it explicitly before retrying"
