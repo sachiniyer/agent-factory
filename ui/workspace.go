@@ -68,5 +68,5 @@ func emptyWorkspaceContent(r layout.Rect, lines []string) string {
 
 // NoRegisteredProjectWorkspace offers registration rather than an empty picker.
 func NoRegisteredProjectWorkspace(r layout.Rect) string {
-	return RecoveryScreen(r, "No project registered", "", "Run af projects register <path> to register a checkout.", false)
+	return RecoveryScreen(r, "No project registered", "", "Run af projects add <path> to register a checkout.", false)
 }

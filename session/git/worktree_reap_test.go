@@ -48,6 +48,36 @@ func TestReapWorktreeWriters_DoesNotKillTmuxServer(t *testing.T) {
 		"a tmux server whose cwd is inside a removed worktree must not enter the kill set")
 }
 
+// A tmux CLIENT parked in the worktree is protected too (#4678). The reaper uses
+// proctree.IsTmuxProcess, not IsTmuxServer: af's own short-lived clients inherit
+// the self-matching daemon's cwd, and a client writes nothing into a worktree, so
+// killing one would only break the daemon's in-flight tmux command for some
+// other session. A client's argv[0] is plain `tmux` — the shape IsTmuxServer now
+// refuses — so this pins the reaper to the leave-alone predicate.
+func TestReapWorktreeWriters_DoesNotKillTmuxClient(t *testing.T) {
+	worktree := t.TempDir()
+	cmd := exec.Command("sleep", "300")
+	cmd.Args[0] = "tmux"
+	cmd.Dir = worktree
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	process, err := proctree.Lookup(cmd.Process.Pid)
+	require.NoError(t, err)
+	requireEventually(t, 5*time.Second, func() bool {
+		_, ok := proctree.WorkingDir(process.PID)
+		return ok
+	}, "the tmux-client fixture cwd never became observable")
+
+	reapWorktreeWriters(worktree)
+
+	require.True(t, proctree.AliveSame(process),
+		"a tmux client whose cwd is inside a removed worktree must not enter the kill set")
+}
+
 // The scanning process may itself inherit a cwd inside the worktree (the daemon
 // does this when an af client auto-starts it there). Selecting that process as a
 // root is unsafe even though proctree refuses to signal its own PID: TreeOf also

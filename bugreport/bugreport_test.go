@@ -1228,7 +1228,10 @@ func TestBuildIssueDraftBoundsBodyToURLCapWithBrokenInstall(t *testing.T) {
 func TestBuildIssueDraftAccountsForBundlePathInBudget(t *testing.T) {
 	r := &redactor{home: "/home/tester", users: []string{"tester"}}
 	var hugeLog strings.Builder
-	for i := 0; i < 5000; i++ {
+	// 1000 lines (~70KB) still dwarfs the 6KB body cap — the whole input is
+	// scrubbed before the tail is fitted, so a larger fixture only multiplies
+	// wall-clock without reaching new code (#4464).
+	for i := 0; i < 1000; i++ {
 		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d, state=Ready\n", i)
 	}
 	nested := strings.Repeat("nested/", 30)
@@ -1281,10 +1284,18 @@ func TestBuildIssueDraftBodyIsFinalAfterBudgeting(t *testing.T) {
 			// Lines are realistically long so the BYTE budget binds rather than
 			// issueLogMaxLines, which would cap the body at ~4.3KB and make every
 			// assertion vacuous.
+			//
+			// The step and line count are sized for the -race preflight budget
+			// (#4464): the sweep used to walk every even length and feed 120
+			// lines per shape — ~400 full scrub+build cycles, ~200s instrumented.
+			// Halving both keeps the same plateau coverage: once the log is deep
+			// enough into the cap that the tail is byte-bound, the encoded body
+			// still lands flush and the nearCap assertion below proves the sweep
+			// reached the boundary rather than skipping over the band.
 			nearCap := 0
-			for lineLen := 60; lineLen <= 260; lineLen += 2 {
+			for lineLen := 60; lineLen <= 260; lineLen += 4 {
 				var log strings.Builder
-				for i := 0; i < 120; i++ {
+				for i := 0; i < 60; i++ {
 					line := fmt.Sprintf("[DAEMON] INFO:2026/07/16 05:03:33 taskrun.go:100: task %06d reconciled session ", i)
 					for len(line) < lineLen {
 						line += "x"
@@ -1376,15 +1387,20 @@ func TestFenceForOutrunsLongestRun(t *testing.T) {
 // TestBuildIssueDraftBoundsBodyToURLCap is the guard on the inline summary's
 // core risk: the draft reaches GitHub as an issues/new URL, and a body past the
 // cap yields a dead link (or a 414) instead of a draft. A pathological bundle —
-// a megabyte of log, a verbose daemon status, a pile of collection errors — must
-// still produce a body that fits ONCE PERCENT-ENCODED, which is the length that
-// actually matters: these log lines are newline- and space-dense, so the encoded
-// form is far larger than the raw one.
+// a log far over the body cap, a verbose daemon status, a pile of collection
+// errors — must still produce a body that fits ONCE PERCENT-ENCODED, which is
+// the length that actually matters: these log lines are newline- and
+// space-dense, so the encoded form is far larger than the raw one.
+//
+// The log is sized for the -race preflight budget (#4464): the whole input is
+// scrubbed before the tail is fitted, so every extra line costs full redactor
+// time — 2000 lines still overshoots the 6KB cap ~30x, and a megabyte-scale log
+// exercised the same path at ~10x the wall-clock.
 func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 	r := &redactor{home: "/home/tester", users: []string{"tester"}}
 
 	var hugeLog strings.Builder
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < 2000; i++ {
 		fmt.Fprintf(&hugeLog, "2026-01-01 12:00:00 daemon: reconciled session %d of many, state=Ready\n", i)
 	}
 	b := Bundle{
@@ -1408,7 +1424,7 @@ func TestBuildIssueDraftBoundsBodyToURLCap(t *testing.T) {
 		"Earlier lines elided", truncatedNote,
 		"more (see the attached bundle)", "~/af-bug-report-20260716-080519.txt")
 	// The newest lines are what explain a bug, so those are the ones kept.
-	mustContain(t, "capped body", body, "session 19999 of many")
+	mustContain(t, "capped body", body, "session 1999 of many")
 	mustNotContain(t, "capped body", body, "session 0 of many")
 }
 

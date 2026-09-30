@@ -87,6 +87,15 @@ func (t *TmuxSession) SetAccountForAgent(agent, name string) {
 	t.accountAgent = agent
 }
 
+// AccountAgentForTest reports the namespace the declared account is pinned to,
+// so session-package tests can assert which command the environment refresh
+// derived it from (#4430 review round 3).
+func (t *TmuxSession) AccountAgentForTest() string {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	return t.accountAgent
+}
+
 // SetAccountEnvironmentForAgent scopes a shell/process sibling to the selected
 // account while keeping its own command shape. This is distinct from claiming
 // the sibling command is the agent executable.

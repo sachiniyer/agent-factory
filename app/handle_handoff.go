@@ -19,16 +19,28 @@ type handoffPickerTarget = sessionActionTarget
 // handoffAgentChoices returns the agents the selected session may be handed to:
 // every supported agent except the one already running.
 //
+// "Already running" is a resolved-identity question, not an enum one (#4430
+// review): program_overrides.aider = "codex" makes the aider enum a
+// self-handoff the daemon's guard refuses, while the codex enum — resolving
+// to aider — is a legitimate cross-agent target the enum compare would hide.
+// resolvedAgents maps each enum to the agent its configured command launches
+// ("" when the command is not a provable agent invocation — never the current
+// agent); a nil map falls back to the enum answer for callers without one.
+//
 // It returns the display list and a parallel slice of agent names rather than
 // indexing SupportedPrograms directly the way the create-time picker does. That
 // picker can index the canonical slice because it offers all of it; this one
 // filters, so positions no longer line up — and SupportedPrograms is explicitly
 // documented as positionally load-bearing. Carrying the names alongside removes
 // the chance of an off-by-one silently handing off to the wrong agent.
-func handoffAgentChoices(current string) []string {
+func handoffAgentChoices(current, recorded string, resolvedAgents map[string]string) []string {
 	choices := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
-		if agent == current {
+		resolved, known := resolvedAgents[agent]
+		if !known {
+			resolved = agent
+		}
+		if session.HandoffTargetIsCurrent(current, agent, resolved, recorded) {
 			continue
 		}
 		choices = append(choices, agent)
@@ -53,6 +65,56 @@ func handoffConfirmMessage(title, from, target string) string {
 	return fmt.Sprintf("Hand '%s' from %s to %s?", title, from, target)
 }
 
+// handoffFreshStartDetail is the consent elaboration for every handoff the
+// picker offers except a same-agent carry-intended account swap. The new agent
+// gets the mission brief — a summary of the work so far — over a fresh
+// conversation it cannot see, and the working tree and branch are untouched.
+const handoffFreshStartDetail = "The new agent starts fresh with a summary of the work so far. " +
+	"Same worktree and branch — nothing is discarded."
+
+// handoffCarryIntendedDetail is the consent elaboration for a same-agent
+// claude/codex account swap the daemon will attempt to carry (#4367/#4504).
+// There the replacement is INTENDED to resume the previous conversation rather
+// than start fresh, so the consent copy must not assert "starts fresh with a
+// summary" the way the fresh-start branch does — that under-promised the
+// carry-succeeds case at the consent boundary and was only corrected in-band
+// by the replacement's first prompt seconds later. The clause HEDGES rather
+// than promises: carry eligibility is decided daemon-side after the user
+// confirms, and the carry can still fall back to a fresh start (a stale
+// transcript, an unresolved account home, a copy failure), so the wording
+// stays true whether the daemon reaches either outcome.
+const handoffCarryIntendedDetail = "The new agent is intended to continue the previous conversation if it can be " +
+	"carried over; otherwise it starts fresh. Same worktree and branch — nothing is discarded."
+
+// handoffConfirmDetail builds the elaboration shown under a handoff's consent
+// question. The fresh-start clause is the truth for every path the picker
+// offers except one: a same-agent claude/codex account swap whose conversation
+// carry the daemon will attempt. There the conversation is intended to
+// continue, and the consent copy must branch rather than assert a single
+// outcome for every account row (#4367/#4504).
+//
+// resolvedAgents is the daemon's resolved_agents answer from the picker load,
+// falling back to the enum for a target it did not classify; a nil map is the
+// same fallback, so an older daemon or an unscoped first frame keeps the
+// fresh-start copy it always had. The carry-intended check is
+// session.AccountSwapCarryIntended, a necessary-not-sufficient signal: it
+// judges only the cheap preconditions (same resolved identity, a
+// carry-supporting agent, a recorded conversation) and leaves the daemon's
+// filesystem-state re-check at admission to decide the actual outcome.
+func handoffConfirmDetail(account, target, current, recorded string, resolvedAgents map[string]string, outgoing session.AgentConversationData) string {
+	if account == "" {
+		return handoffFreshStartDetail
+	}
+	targetResolved := target
+	if r, ok := resolvedAgents[target]; ok {
+		targetResolved = r
+	}
+	if !session.AccountSwapCarryIntended(current, target, targetResolved, recorded, outgoing) {
+		return handoffFreshStartDetail
+	}
+	return handoffCarryIntendedDetail
+}
+
 // handleHandoff opens the agent picker for a handoff (#2013).
 //
 // Guards run BEFORE the picker, not after the choice: making the user pick an
@@ -71,17 +133,30 @@ func (m *home) handleHandoff() (tea.Model, tea.Cmd) {
 	}
 
 	current := selected.CurrentAgentName()
-	choices := handoffAgentChoices(current)
-	if len(choices) == 0 {
-		return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
-	}
-
-	m.handoffChoices = choices
+	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	m.handoffResolvedAgents = nil
+	var choices []string
 	if account, _ := selected.AccountSelection(); account != "" {
-		m.handoffChoices = nil
+		// A scoped session's rows are rebuilt wholesale from the daemon's
+		// account answer — a synchronous repo-config read here would block
+		// Update only to be discarded (#4430 review).
 		choices = []string{"Loading accounts…"}
+	} else {
+		// Unscoped sessions get an optimistic first frame from the local
+		// inspection-scope read — the same predicate the daemon's picker
+		// answer applies. Handoff is only offered for local-worktree
+		// sessions (guarded above), so this repo's config IS the config the
+		// daemon resolves against; the daemon's ResolvedAgents rebuild is
+		// still authoritative once the answer lands, and this frame is the
+		// fallback if that call fails (#4430 review).
+		choices = handoffAgentChoices(current, selected.AgentProgram(),
+			session.HandoffEffectiveAgentsForPathInspection(selected.GetRepoPath(), tmux.SupportedPrograms))
+		if len(choices) == 0 {
+			return m, m.handleNotice(fmt.Errorf("no other agent is available to hand '%s' off to", selected.Title))
+		}
+		m.handoffChoices = choices
 	}
 	m.handoffTarget = captureSessionActionTarget(selected, m.repoID)
 	m.selectionOverlay = overlay.NewSelectionOverlay("Hand off to", choices)
@@ -111,12 +186,14 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	choices := m.handoffChoices
 	accounts := m.handoffAccounts
 	warnings := m.handoffWarnings
+	resolvedAgents := m.handoffResolvedAgents
 	pickerTarget := m.handoffTarget
 
 	m.selectionOverlay = nil
 	m.handoffChoices = nil
 	m.handoffAccounts = nil
 	m.handoffWarnings = nil
+	m.handoffResolvedAgents = nil
 	m.handoffTarget = handoffPickerTarget{}
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
@@ -141,8 +218,7 @@ func (m *home) handleStateSelectHandoffAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd
 	if account != "" {
 		message = fmt.Sprintf("Hand %q to %s account %q?", title, target, account)
 	}
-	detail := "The new agent starts fresh with a summary of the work so far. " +
-		"Same worktree and branch — nothing is discarded."
+	detail := handoffConfirmDetail(account, target, from, selected.AgentProgram(), resolvedAgents, selected.AgentConversation())
 
 	if idx < len(warnings) {
 		detail = warnings[idx] + detail
@@ -205,6 +281,13 @@ func (m *home) handleHandoffDone(msg handoffDoneMsg) (tea.Model, tea.Cmd) {
 				from = "its previous agent"
 			}
 			return m, m.showTransientMessage(fmt.Sprintf("'%s' handed from %s to %s, with warning: %v", msg.title, handoffIdentityLabel(from, msg.fromAccount), handoffIdentityLabel(msg.target, msg.toAccount), msg.err))
+		}
+		// A handoff whose reply was lost may already have swapped the agent and
+		// delivered the mission (#4824). Reporting it as failed invites a second
+		// handoff, which swaps again and delivers the brief twice.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("handing '%s' to %s", msg.title, msg.target), "the session's agent", msg.err))
 		}
 		return m, m.handleError(fmt.Errorf("handoff of '%s' to %s failed: %w", msg.title, msg.target, msg.err))
 	}

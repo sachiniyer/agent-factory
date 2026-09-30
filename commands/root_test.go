@@ -126,3 +126,38 @@ func TestHelpDoesNotAdvertiseAutoYes(t *testing.T) {
 
 	checkTree(rootCmd)
 }
+
+// TestConfigWarningsToStderr pins where the #4599 in-repo config warning may
+// print: an ordinary command gets it on stderr, but the daemon and any --json
+// invocation (stderr is the envelope, #3169) stay log-only.
+func TestConfigWarningsToStderr(t *testing.T) {
+	origDaemon := daemonFlag
+	t.Cleanup(func() { daemonFlag = origDaemon })
+
+	newCmd := func(jsonFlag bool) *cobra.Command {
+		c := &cobra.Command{Use: "x"}
+		var v bool
+		c.Flags().BoolVar(&v, "json", false, "")
+		if jsonFlag {
+			if err := c.Flags().Set("json", "true"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return c
+	}
+
+	daemonFlag = false
+	if !configWarningsToStderr(newCmd(false)) {
+		t.Error("a plain command should print config warnings to stderr")
+	}
+	if !configWarningsToStderr(&cobra.Command{Use: "no-json-flag"}) {
+		t.Error("a command without a --json flag should print config warnings to stderr")
+	}
+	if configWarningsToStderr(newCmd(true)) {
+		t.Error("--json reserves stderr for the envelope; the warning must stay log-only")
+	}
+	daemonFlag = true
+	if configWarningsToStderr(newCmd(false)) {
+		t.Error("the daemon must keep config warnings log-only")
+	}
+}

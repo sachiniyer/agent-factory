@@ -140,6 +140,14 @@ func TestApplyConfigReportsBranchPrefixPending(t *testing.T) {
 // the daemon diffs is classified applied-live or next-daemon-start — never
 // client-side, never unclassified — so ApplyConfig can never file a key into a
 // bucket the notice would describe a different way.
+//
+// It also pins the REVERSE direction: every daemon-applied effect key
+// (EffectAppliedLive or EffectNextDaemonStart) must have a keyDiff entry, or a
+// change to it falls through the bucketing loop in ApplyConfig and is silently
+// dropped from ApplyConfigResult.Applied/Pending — the wire-contract gap that
+// dropped watcher_events_per_minute and upgrade_clear_unverifiable_artifacts.
+// Client-only (EffectNextAfLaunch) keys are intentionally absent from keyDiff:
+// the daemon never reads them, so there is nothing for ApplyConfig to diff.
 func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 	for key := range keyDiff {
 		switch config.KeyEffectClass(key) {
@@ -148,6 +156,15 @@ func TestApplyBucketsAgreeWithEffectClasses(t *testing.T) {
 		default:
 			t.Errorf("keyDiff key %q has effect class %v; a diffed key must be applied-live or next-daemon-start",
 				key, config.KeyEffectClass(key))
+		}
+	}
+	for _, key := range config.AllEffectClassifiedKeys() {
+		switch config.KeyEffectClass(key) {
+		case config.EffectAppliedLive, config.EffectNextDaemonStart:
+			if _, ok := keyDiff[key]; !ok {
+				t.Errorf("daemon-applied key %q is missing from keyDiff, so ApplyConfig silently drops changes to it from Applied/Pending",
+					key)
+			}
 		}
 	}
 }

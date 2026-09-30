@@ -6654,6 +6654,24 @@ async function resumeFromLimit(id, title, token2) {
     throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
   }
 }
+var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
+async function confirmHandoffDelivery(id, title, token2) {
+  let result;
+  try {
+    result = await af("ConfirmHandoffDelivery", { id, title, repo_id: "" }, token2);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404 && e.daemonRejected) {
+      throw new ApiError(404, CONFIRM_HANDOFF_UNSUPPORTED, e.code, true);
+    }
+    throw e;
+  }
+  if (!result.ok) {
+    throw new Error(result.reason || "delivery was not confirmed");
+  }
+  if (result.warning) {
+    throw new ApiError(200, result.warning, result.code || MUTATION_COMMITTED_ERROR_CODE);
+  }
+}
 var ACCOUNT_AWARE_HANDOFF_METHOD = "HandoffSessionV2";
 var ACCOUNT_AWARE_HANDOFF_UNSUPPORTED = "daemon does not serve the version-bound account-aware handoff endpoint (likely an older daemon \u2014 upgrade it); the handoff was not sent";
 async function handoffSession(id, title, to, token2, account = "") {
@@ -6686,6 +6704,10 @@ async function deleteProject(root2, token2) {
 }
 async function registerProject(path, token2) {
   const resp = await af("RegisterProject", { path }, token2);
+  return resp.project;
+}
+async function rebindProject(id, path, token2) {
+  const resp = await af("RebindProject", { id, path }, token2);
   return resp.project;
 }
 async function listProjects(token2) {
@@ -6859,7 +6881,7 @@ async function reapConfigAssistant(token2) {
 async function listAccounts(token2, repoPath = "") {
   const body = repoPath === "" ? {} : { repo_path: repoPath };
   const resp = await af("ListAccounts", body, token2);
-  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {} };
+  return { entries: resp?.entries ?? [], agents: resp?.agents ?? [], defaults: resp?.defaults ?? {}, resolved_agents: resp?.resolved_agents ?? {} };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -7305,6 +7327,9 @@ function terminalChrome(opts) {
   actions2.hidden = true;
   const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
+  const deliver = action("Mark delivered", "", opts.markDelivered);
+  deliver.title = "Retire the pending handoff mission without resending \u2014 the pane already shows it landed";
+  deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
   const copy = action("Copy link", "af-copy-link af-copy-link-phone", opts.copyLink);
@@ -7317,9 +7342,9 @@ function terminalChrome(opts) {
   const newTabSlot = h("div", { class: "af-term-new-slot" });
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(newTabSlot, copy, handoff, actions2, closePane);
+  menu.panel.append(newTabSlot, copy, handoff, deliver, actions2, closePane);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, desktopCopy, keyboard, retry, menu.el);
-  return { head, title, tabs, keyboard, retry, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
+  return { head, title, tabs, keyboard, retry, deliver, handoff, closePane, actions: actions2, newTabSlot, menu, dispose: menu.dispose };
 }
 function paneChrome(onClose) {
   const glyph = h("span", { class: "af-pane-glyph", ariaHidden: "true" });
@@ -9085,6 +9110,8 @@ var MidLineHold = class {
       const payload = data.startsWith(PASTE_START) ? "" : data;
       const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
       this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    } else {
+      this.queuedEndsLine = false;
     }
     return this.beginOrRenew(nowMs);
   }
@@ -10733,6 +10760,7 @@ function openConfigAssistant(opts) {
 // src/events.ts
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
+var AUTH_FAILURE_THRESHOLD = 3;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -10746,6 +10774,10 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
+  // Streak of attempts closed before onopen, and the streak length at which
+  // onAuthFailure next fires (see AUTH_FAILURE_THRESHOLD).
+  consecutiveCloseBeforeOpen = 0;
+  nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
     this.stopped = false;
@@ -10774,13 +10806,17 @@ var EventStream = class {
     try {
       ws = new WebSocket(url);
     } catch {
-      this.scheduleReconnect();
+      this.handleClose(false);
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.retry = 0;
       this.everOpened = true;
+      this.consecutiveCloseBeforeOpen = 0;
+      this.nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
       this.cb.onStatus("open");
       this.cb.onResync();
     };
@@ -10798,13 +10834,21 @@ var EventStream = class {
         this.cb.onEvent(ev);
       }
     };
-    ws.onclose = () => this.scheduleReconnect();
+    ws.onclose = () => this.handleClose(opened);
     ws.onerror = () => {
       try {
         ws.close();
       } catch {
       }
     };
+  }
+  /** Single funnel for every socket end; only a close-before-open extends
+   *  the streak. */
+  handleClose(opened) {
+    if (!opened) {
+      this.consecutiveCloseBeforeOpen += 1;
+    }
+    this.scheduleReconnect();
   }
   scheduleReconnect() {
     if (this.stopped || this.reconnectTimer !== null) {
@@ -10820,6 +10864,10 @@ var EventStream = class {
         this.open();
       }
     }, delay2);
+    if (this.consecutiveCloseBeforeOpen >= this.nextAuthEscalationAt) {
+      this.nextAuthEscalationAt = this.consecutiveCloseBeforeOpen + AUTH_FAILURE_THRESHOLD;
+      this.cb.onAuthFailure();
+    }
   }
 };
 
@@ -11348,7 +11396,7 @@ function newSessionModal(projects, defaultProject2, callbacks) {
   queueMicrotask(() => titleInput.focus());
   return handle;
 }
-function handoffModal(sessionTitle, currentAgent, callbacks) {
+function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
   const { handle, body, confirmBtn } = modalChrome({
     title: `Hand off ${sessionTitle}`,
     confirmLabel: "Hand off",
@@ -11358,24 +11406,33 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   let accounts = { entries: [], agents: [] };
   let accountsLoaded = !callbacks.loadAccounts;
   let accountsFailed = false;
-  const requiresAccount = (agent) => agent === currentAgent || !!callbacks.currentAccount;
+  const resolvedAgent = (agent) => accounts.resolved_agents?.[agent] ?? agent;
+  const scopableTarget = (agent) => accountsFailed || accountAgentSupported(accounts, resolvedAgent(agent));
+  const isCurrentAgent = (agent) => handoffTargetIsCurrent(currentAgent, agent, resolvedAgent(agent), recordedProgram);
+  const requiresAccount = (agent) => isCurrentAgent(agent) || !!callbacks.currentAccount && scopableTarget(agent);
   let accountRows = [];
   const accountHint = h("p", { class: "af-modal-hint af-account-hint", role: "status" });
   const accountSelect = h("select", { class: "af-input" });
   accountSelect.setAttribute("aria-label", "New account");
   const syncAccountSelection = () => {
-    accountHint.textContent = accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "";
+    const target = agentSelect.value;
+    const resolved = resolvedAgent(target);
+    accountHint.textContent = callbacks.currentAccount && !scopableTarget(target) ? resolved !== target ? `${target} launches ${resolved}, which cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : `${target} cannot carry an account \u2014 the "${callbacks.currentAccount}" scope is dropped on handoff.` : (resolved !== "" && resolved !== target ? `${target} launches ${resolved} \u2014 the account must be a ${resolved} account. ` : "") + (accountRows.find((choice) => choice.value === accountSelect.value)?.note ?? "");
     confirmBtn.disabled = !accountsLoaded || !agentSelect.value || requiresAccount(agentSelect.value) && !accountSelect.value;
   };
   const refreshAccounts2 = () => {
     const agent = agentSelect.value;
-    const choices = handoffAccountChoices(accounts, agent, agent === currentAgent ? callbacks.currentAccount : "");
+    const choices = handoffAccountChoices(
+      accounts,
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
+    );
     accountRows = choices;
     accountSelect.replaceChildren();
     if (!requiresAccount(agent)) accountSelect.append(h("option", { value: "" }, "Ambient identity"));
     else if (!choices.some((choice) => choice.logged_in)) accountSelect.append(h("option", { value: "" }, "Choose an account"));
     for (const choice of choices) accountSelect.append(h("option", { value: choice.value }, choice.label));
-    const fallback = accounts.defaults?.[agent];
+    const fallback = accounts.defaults?.[resolvedAgent(agent)];
     const selected = choices.find((choice) => choice.value === fallback && choice.logged_in) ?? (requiresAccount(agent) ? choices.find((choice) => choice.logged_in) : void 0);
     accountSelect.value = selected?.value ?? "";
     accountSelect.disabled = choices.length === 0;
@@ -11396,12 +11453,18 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     if (catalogChoices === null || !accountsLoaded) return;
     const hasAccount = (agent) => handoffAccountChoices(
       accounts,
-      agent,
-      agent === currentAgent ? callbacks.currentAccount : ""
+      resolvedAgent(agent),
+      isCurrentAgent(agent) ? callbacks.currentAccount : ""
     ).length > 0;
-    const choices = catalogChoices.filter((choice) => !callbacks.currentAccount || hasAccount(choice.value));
-    if (accountsLoaded && !accountsFailed && currentAgent && hasAccount(currentAgent)) {
-      choices.unshift({ value: currentAgent, label: currentAgent + " (another account)" });
+    const currentTarget = handoffSameAgentTarget(
+      catalogChoices.map((choice) => choice.value),
+      currentAgent,
+      recordedProgram,
+      accounts.resolved_agents
+    );
+    const choices = catalogChoices.filter((choice) => !isCurrentAgent(choice.value) && (!callbacks.currentAccount || hasAccount(choice.value) || resolvedAgent(choice.value) !== "" && !scopableTarget(choice.value)));
+    if (accountsLoaded && !accountsFailed && currentTarget && hasAccount(currentTarget)) {
+      choices.unshift({ value: currentTarget, label: currentTarget + " (another account)" });
     }
     const previous = agentSelect.value;
     renderChoices(choices);
@@ -11420,7 +11483,7 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
     )
   );
   void callbacks.loadPrograms().then((catalog) => {
-    catalogChoices = handoffAgentChoices(catalog, currentAgent);
+    catalogChoices = handoffAgentChoices(catalog, "");
     refreshAgentChoices();
   }).catch(() => {
     renderChoices([]);
@@ -11456,6 +11519,17 @@ function handoffModal(sessionTitle, currentAgent, callbacks) {
   });
   queueMicrotask(() => agentSelect.focus());
   return handle;
+}
+function handoffTargetIsCurrent(currentAgent, target, resolved, recordedProgram) {
+  if (resolved !== "") {
+    return currentAgent !== "" && resolved === currentAgent;
+  }
+  return recordedProgram !== "" && recordedProgram === target;
+}
+function handoffSameAgentTarget(catalogValues, currentAgent, recordedProgram, resolvedAgents) {
+  const matched = catalogValues.find((value) => handoffTargetIsCurrent(currentAgent, value, resolvedAgents?.[value] ?? value, recordedProgram));
+  if (matched !== void 0) return matched;
+  return resolvedAgents === void 0 ? currentAgent : void 0;
 }
 function deletionConfirmationBody(opts) {
   if (opts.archived && opts.offBox) {
@@ -11586,11 +11660,28 @@ function confirmDeleteProjectModal(opts) {
   return handle;
 }
 function addProjectModal(callbacks) {
-  const { handle, body, confirmBtn } = modalChrome({
+  return checkoutPathModal({
     title: "Add project",
     confirmLabel: "Add project",
+    hint: "Enter an absolute repo path on the daemon host (~ works).",
+    ...callbacks
+  });
+}
+function rebindProjectModal(opts) {
+  const { projectLabel: projectLabel2, ...shared } = opts;
+  return checkoutPathModal({
+    title: `Rebind project ${projectLabel2}`,
+    confirmLabel: "Rebind",
+    hint: "Enter the checkout this project should track now \u2014 an absolute repo path on the daemon host (~ works).",
+    ...shared
+  });
+}
+function checkoutPathModal(opts) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: opts.title,
+    confirmLabel: opts.confirmLabel,
     confirmClass: "af-primary",
-    onCancel: callbacks.onCancel
+    onCancel: opts.onCancel
   });
   const pathInput = h("input", {
     type: "text",
@@ -11599,7 +11690,7 @@ function addProjectModal(callbacks) {
     autocomplete: "off"
   });
   pathInput.setAttribute("aria-label", "Repository path");
-  const { loadDirectory, errorText: errorText2 } = callbacks;
+  const { loadDirectory, errorText: errorText2 } = opts;
   let picker = null;
   if (loadDirectory && errorText2) {
     picker = directoryPicker({
@@ -11625,7 +11716,7 @@ function addProjectModal(callbacks) {
     h(
       "p",
       { class: "af-modal-hint" },
-      "Enter an absolute repo path on the daemon host (~ works)."
+      opts.hint
     )
   );
   pathInput.addEventListener("input", () => handle.setError(null));
@@ -11637,7 +11728,7 @@ function addProjectModal(callbacks) {
       return;
     }
     handle.setError(null);
-    callbacks.onSubmit(path);
+    opts.onSubmit(path);
   });
   queueMicrotask(() => {
     if (picker) {
@@ -11658,6 +11749,23 @@ function projectLabel(root2) {
 function removeTaskModal(name, onConfirm, onCancel) {
   const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
   body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
+  asForm(handle.el.firstElementChild, onConfirm);
+  return handle;
+}
+function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
+  const { handle, body } = modalChrome({
+    title: `Mark ${sessionTitle} delivered?`,
+    confirmLabel: "Mark delivered",
+    confirmClass: "af-primary",
+    onCancel
+  });
+  body.append(
+    h(
+      "p",
+      { class: "af-modal-text" },
+      "Confirm only if the pane already shows the incoming agent acting on its handoff mission. This retires the pending delivery and clears the leftover operation state WITHOUT sending the mission again. If the pane does not show it, cancel and use Retry instead \u2014 that submits the mission a second time."
+    )
+  );
   asForm(handle.el.firstElementChild, onConfirm);
   return handle;
 }
@@ -11981,11 +12089,33 @@ function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
+function ambiguousHandoffDelivery(status) {
+  return status === "sent-unverified" || status === "could-not-confirm";
+}
+function confirmableHandoffDelivery(status) {
+  return ambiguousHandoffDelivery(status) || status === "delivered";
+}
 function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && (status === "sent-unverified" || status === "could-not-confirm") && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+}
+function isPendingAgentHandoffDeliveryConfirmable(s) {
+  const liveness = livenessOf(s);
+  const status = s.pending_handoff_delivery_status;
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+}
+function isPendingManualSwapDeliveryConfirmable(s) {
+  const pending = s.pending_account_swap;
+  const liveness = livenessOf(s);
+  const op = s.in_flight_op ?? InFlightOp.None;
+  const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
+  const status = pending?.mission_delivery_status;
+  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -12774,16 +12904,20 @@ function previewProbeMs() {
   return typeof override === "number" ? override : 2500;
 }
 var previewReachable = /* @__PURE__ */ new Map();
-function previewOriginReachable(origin) {
+function previewOriginReachable(origin, fresh = false) {
   let port;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== void 0) {
-    return cached;
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== void 0) {
+      return cached;
+    }
   }
   const probe = new Promise((resolve) => {
     const frame = document.createElement("iframe");
@@ -12800,7 +12934,7 @@ function previewOriginReachable(origin) {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -13498,7 +13632,7 @@ var SplitView = class {
           if (origin === "") {
             return "";
           }
-          return await previewOriginReachable(origin) ? previewOriginSrc(origin, target) : "";
+          return await previewOriginReachable(origin, fresh) ? previewOriginSrc(origin, target) : "";
         }) : Promise.resolve("");
       }
       return previewSrcOnce;
@@ -13528,6 +13662,9 @@ var SplitView = class {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;
@@ -13661,17 +13798,21 @@ var SplitView = class {
    */
   applyTabDrop(pane, drag, clientX, clientY) {
     if (!this.tree) {
-      return;
+      return false;
     }
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
+      return false;
+    }
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
     if (opened === null) {
-      return;
+      return false;
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     const landed = leaves(this.tree).find((l) => l.tab === opened);
@@ -13680,6 +13821,7 @@ var SplitView = class {
     }
     this.commit();
     this.refocus();
+    return true;
   }
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
    *  which has no browser hit-testing to route a drop for it. */
@@ -13713,17 +13855,18 @@ var SplitView = class {
       this.hideZone(pane);
     }
   }
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
   dropTabAt(clientX, clientY, drag) {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
    *  center. */
@@ -14668,8 +14811,20 @@ function taskHealthSummary(t) {
   }
   return t.unassessable ? "Health unknown" : "";
 }
+function farOutNote(nextRunAt, now = /* @__PURE__ */ new Date()) {
+  const next = new Date(nextRunAt);
+  if (Number.isNaN(next.getTime())) return "";
+  let months = (next.getFullYear() - now.getFullYear()) * 12 + next.getMonth() - now.getMonth();
+  const nextClock = next.getHours() * 36e5 + next.getMinutes() * 6e4 + next.getSeconds() * 1e3 + next.getMilliseconds();
+  const nowClock = now.getHours() * 36e5 + now.getMinutes() * 6e4 + now.getSeconds() * 1e3 + now.getMilliseconds();
+  if (next.getDate() < now.getDate() || next.getDate() === now.getDate() && nextClock < nowClock) months--;
+  const date = `${next.getFullYear()}-${pad22(next.getMonth() + 1)}-${pad22(next.getDate())}`;
+  return `${date} (in ${months} ${months === 1 ? "month" : "months"})`;
+}
 function taskArmingSummary(t, now = /* @__PURE__ */ new Date()) {
   if (t.next_run_at) {
+    const far = t.next_run_far ? farOutNote(t.next_run_at, now) : "";
+    if (far) return `Next run ${far}`;
     return `Next run ${formatTime(t.next_run_at, now)}`;
   }
   return "";
@@ -15329,7 +15484,7 @@ function replaceProjectMenuChildren(menu, children, fallback) {
   const key = active && menu.contains(active) ? active.dataset.projectFocus : void 0;
   menu.replaceChildren(...children);
   if (key === void 0) return;
-  if (menu.hidden) {
+  if (menu.getClientRects().length === 0) {
     fallback.focus({ preventScroll: true });
     return;
   }
@@ -15436,6 +15591,16 @@ function patchRetryButton(button, action) {
     button.textContent = action.label;
     button.title = action.title;
   }
+}
+function markDeliveredActionForSession(s) {
+  if (isPendingAgentHandoffDeliveryConfirmable(s) || isPendingManualSwapDeliveryConfirmable(s)) {
+    return {
+      kind: "handoff",
+      label: "Mark delivered",
+      title: "The pane already shows the mission landed \u2014 retire it without resending"
+    };
+  }
+  return null;
 }
 function isKillableSession(s) {
   return typeof s.id === "string" && s.id !== "" && s.can_kill === true;
@@ -15626,6 +15791,9 @@ function connectingView() {
   ));
 }
 function noAuthLoginView(state, actions2) {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions2);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -15642,6 +15810,50 @@ function noAuthLoginView(state, actions2) {
       "p",
       { class: "af-subtitle" },
       "No token needed."
+    ),
+    form
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+function expiredTokenlessView(state, actions2) {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting\u2026" : "Connect"
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token2 = input.value.trim();
+    if (token2 !== "") {
+      actions2.connect(token2);
+    }
+  });
+  const children = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host."
     ),
     form
   ];
@@ -15937,6 +16149,11 @@ var AppShell = class {
   // only thing that rebuilds the header, so patchMainHead toggles it in place.
   retryBtn = null;
   retryKind = null;
+  // The "Mark delivered" button and whether it is currently shown (#4429). Same
+  // in-place treatment as retryBtn: a verdict becomes confirmable — or settles —
+  // on a session.updated event with no selection change to rebuild the header.
+  deliverBtn = null;
+  deliverVisible = false;
   // The Handoff button and whether it is currently shown (#2013). Same in-place
   // treatment as retryBtn: a session becomes (or stops being) handoff-capable —
   // e.g. it goes Ready, or is archived from another client — WITHOUT a selection
@@ -16465,7 +16682,7 @@ var AppShell = class {
    *  menu's open/closed state (`hidden`) is preserved across rebuilds so a rebuild
    *  triggered by a live event doesn't snap an open menu shut. */
   renderProjectSwitch(state) {
-    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects);
+    const summaries = projectSummaries(state.sessions, state.tasks, state.registeredProjects.map((p) => p.root));
     const current = state.selectedProject;
     this.projectSwitchName.textContent = current ? projectName(current) : "No project";
     this.projectSwitchBtn.disabled = false;
@@ -16474,7 +16691,8 @@ var AppShell = class {
       children.push(h("div", { class: "af-project-menu-empty" }, "No projects yet \u2014 add one below."));
     }
     for (const p of summaries) {
-      children.push(this.projectItem(p, p.root === current));
+      const record = state.registeredProjects.find((r) => r.root === p.root);
+      children.push(this.projectItem(p, p.root === current, record));
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
@@ -16489,9 +16707,25 @@ var AppShell = class {
     footChildren.push(add);
     const currentSummary = summaries.find((p) => p.root === current);
     if (currentSummary) {
+      const currentRecord = state.registeredProjects.find((r) => r.root === currentSummary.root);
+      if (currentRecord) {
+        const rebind = h("button", { type: "button", class: "af-ghost af-project-rebind" }, "Rebind\u2026");
+        rebind.dataset.projectFocus = "rebind";
+        rebind.setAttribute(
+          "title",
+          `Point ${currentSummary.name} at a different checkout \u2014 the repair after it was moved or recloned`
+        );
+        rebind.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.closeProjectMenu();
+          this.appControls.dismiss();
+          this.actions.rebindProject(currentRecord.id, currentSummary.name);
+        });
+        footChildren.push(rebind);
+      }
       const del = h("button", { type: "button", class: "af-ghost af-project-delete" }, "Delete project");
       del.dataset.projectFocus = "delete";
-      const isRegistered = state.registeredProjects.includes(currentSummary.root);
+      const isRegistered = currentRecord !== void 0;
       if (currentSummary.liveCount === 0 && !isRegistered) {
         del.disabled = true;
         del.setAttribute(
@@ -16518,8 +16752,11 @@ var AppShell = class {
   }
   /** One project row in the switcher menu: a check on the current project, the name +
    *  full path, and the cross-project glance (session + working counts). Clicking it
-   *  switches the active project and closes the menu. */
-  projectItem(p, current) {
+   *  switches the active project and closes the menu. `record` is the registry
+   *  registration behind the row, when there is one — a registration whose
+   *  recorded root is gone (path_exists=false) is marked missing, the state the
+   *  footer Rebind action repairs. */
+  projectItem(p, current, record) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
@@ -16529,7 +16766,11 @@ var AppShell = class {
       h("span", { class: "af-project-item-name" }, p.name),
       h("span", { class: "af-project-item-path" }, p.path)
     );
-    const meta = h("span", { class: "af-project-item-meta" }, projectMeta(p));
+    const meta = h(
+      "span",
+      { class: "af-project-item-meta" },
+      ...record && !record.path_exists ? [h("span", { class: "af-project-missing" }, "checkout missing"), ` \xB7 ${projectMeta(p)}`] : [projectMeta(p)]
+    );
     const item = h("button", { type: "button", class: cls }, check, label, meta);
     item.dataset.projectFocus = `project:${p.root}`;
     item.setAttribute("role", "option");
@@ -16578,8 +16819,11 @@ var AppShell = class {
   /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
   dropTabOnPaneAt(clientX, clientY, drag) {
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -16793,6 +17037,8 @@ var AppShell = class {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryKind = null;
+      this.deliverBtn = null;
+      this.deliverVisible = false;
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.afTheme;
@@ -16825,6 +17071,7 @@ var AppShell = class {
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
       retry: () => this.actions.retryLimit(),
+      markDelivered: () => this.actions.markDelivered(),
       closePane: () => this.actions.closePane?.()
     });
     this.terminalChrome = chrome;
@@ -16833,6 +17080,9 @@ var AppShell = class {
     const retryAction = retryActionForSession(selected);
     this.retryKind = retryAction?.kind ?? null;
     patchRetryButton(chrome.retry, retryAction);
+    this.deliverBtn = chrome.deliver;
+    this.deliverVisible = markDeliveredActionForSession(selected) !== null;
+    chrome.deliver.hidden = !this.deliverVisible;
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
@@ -17287,6 +17537,11 @@ var AppShell = class {
       this.retryKind = retryKind;
       patchRetryButton(this.retryBtn, retryAction);
     }
+    const nowDeliver = markDeliveredActionForSession(selected) !== null;
+    if (this.deliverBtn && nowDeliver !== this.deliverVisible) {
+      this.deliverVisible = nowDeliver;
+      this.deliverBtn.hidden = !nowDeliver;
+    }
     const nowHandoff = canHandoff(selected);
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
@@ -17706,8 +17961,10 @@ async function connect(candidate) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
       clearToken();
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -17720,7 +17977,7 @@ async function connect(candidate) {
   const { tasks, error: tasksError } = taskResult;
   const { projects: registeredProjects, error: projectsError } = projectResult;
   if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
-  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
+  const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, projectRoots(registeredProjects));
   connectionGeneration++;
   optimisticSessions.reset(sessions);
   resolvingRoute = true;
@@ -17759,10 +18016,12 @@ async function connect(candidate) {
     requestResync();
   }
 }
+function projectRoots(projects) {
+  return projects.map((p) => p.root);
+}
 async function fetchRegisteredProjects(tok) {
   try {
-    const projects = (await listProjects(tok)).map((p) => p.root);
-    return { projects, error: "" };
+    return { projects: await listProjects(tok), error: "" };
   } catch (e) {
     return { projects: [], error: errorText(e) };
   }
@@ -17771,6 +18030,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
   store.set({ loginCondition: loginError ? "expired" : void 0 });
   connectionGate.invalidate();
   connectionGeneration++;
+  rebindInFlight = null;
   pendingRestores.reset();
   optimisticSessions.reset();
   stopStream();
@@ -18013,7 +18273,8 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const invoker = captureModalInvoker();
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
       // The backend catalog is per-repo and read at choose time (#1933), so the
@@ -18068,8 +18329,10 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) openModal(m);
-          else surfaceMutationError(e);
+          if (!modal && token === tok) {
+            openModal(m, true, invoker);
+            m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
+          } else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
@@ -18260,6 +18523,122 @@ function openAddProject() {
         void registerProject(path, tok).then(() => {
           if (modal === m) closeModal();
         }).catch((e) => {
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      onCancel: closeModal
+    })
+  );
+}
+var rebindInFlight = null;
+var rebindInFlightGeneration = 0;
+var REBIND_ANSWER_MS = 3e4;
+function rebindOutcomeUnknown(label) {
+  return new Error(`Rebind of ${label} \xB7 outcome unknown \xB7 check the project list`);
+}
+function followConfirmedRebind(projectId, tok, connection) {
+  void listProjects(tok).then((projects) => {
+    if (connection !== connectionGeneration || token !== tok) return;
+    const root2 = projects.find((p) => p.id === projectId)?.root;
+    if (root2 !== void 0) {
+      store.set({ registeredProjects: projects });
+      switchProject(root2);
+    }
+    refreshRegisteredProjects();
+  }).catch(() => {
+    if (connection === connectionGeneration && token === tok) refreshRegisteredProjects();
+  });
+}
+function openRebindProject(projectId, label) {
+  if (rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+    showTransientNotice(`Rebind of ${rebindInFlight} is still running \u2014 try again when it finishes.`);
+    return;
+  }
+  const oldRoot = store.get().registeredProjects.find((r) => r.id === projectId)?.root ?? null;
+  openModal(
+    rebindProjectModal({
+      projectLabel: label,
+      // Same per-call token + daemon read as add-project's browser.
+      loadDirectory: (path) => {
+        const tok = token;
+        if (tok === null) {
+          return Promise.reject(new Error("not connected"));
+        }
+        return listDirectory(path, tok);
+      },
+      errorText,
+      onSubmit: (path) => {
+        const tok = token;
+        if (tok === null || !modal || rebindInFlight !== null && rebindInFlightGeneration === connectionGeneration) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        rebindInFlight = label;
+        const connection = connectionGeneration;
+        rebindInFlightGeneration = connection;
+        const current = () => connection === connectionGeneration;
+        let settled = false;
+        const settle = () => {
+          if (settled) {
+            return false;
+          }
+          settled = true;
+          window.clearTimeout(unanswered);
+          if (rebindInFlightGeneration === connection) {
+            rebindInFlight = null;
+          }
+          return true;
+        };
+        const stillHere = () => modal === m || oldRoot !== null && store.get().selectedProject === oldRoot;
+        const unknownOutcome = () => {
+          if (modal === m) closeModal();
+          refreshRegisteredProjects();
+          surfaceMutationError(rebindOutcomeUnknown(label), "uncertain");
+        };
+        const unanswered = window.setTimeout(() => {
+          if (!current() || !settle()) return;
+          unknownOutcome();
+        }, REBIND_ANSWER_MS);
+        void rebindProject(projectId, path, tok).then(() => {
+          if (!current()) return;
+          if (!settle()) {
+            refreshRegisteredProjects();
+            return;
+          }
+          const follow = stillHere();
+          if (modal === m) closeModal();
+          if (follow) {
+            followConfirmedRebind(projectId, tok, connection);
+          } else {
+            refreshRegisteredProjects();
+          }
+        }).catch((e) => {
+          if (!current()) return;
+          if (!settle()) {
+            refreshRegisteredProjects();
+            return;
+          }
+          if (isMutationCommittedError(e)) {
+            const follow = stillHere();
+            if (modal === m) closeModal();
+            if (follow) {
+              followConfirmedRebind(projectId, tok, connection);
+            } else {
+              refreshRegisteredProjects();
+            }
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          if (isMutationOutcomeUncertain(e)) {
+            unknownOutcome();
+            return;
+          }
+          if (modal !== m) {
+            surfaceTabError(e);
+            return;
+          }
           m.setBusy(false);
           m.setError(errorText(e));
         });
@@ -18613,7 +18992,7 @@ var tasksRefetcher = createFencedRefetcher({
       tasks,
       loadProjectChoice(),
       store.get().selectedProject,
-      store.get().registeredProjects
+      projectRoots(store.get().registeredProjects)
     );
     store.set({ tasks, selectedProject, tasksError: "" });
   },
@@ -18634,19 +19013,19 @@ function requestTaskResync() {
 var projectsRefetcher = createFencedRefetcher({
   readToken: () => token,
   fetch: listProjects,
-  commit: (projects) => {
-    const registeredProjects = projects.map((p) => p.root);
-    const selectedProject = reconcileProject(
-      store.get().sessions,
-      store.get().tasks,
-      loadProjectChoice(),
-      store.get().selectedProject,
-      registeredProjects
-    );
-    store.set({ registeredProjects, selectedProject, projectsError: "" });
-  },
+  commit: commitRegisteredProjects,
   onError: (e) => store.set({ projectsError: errorText(e) })
 });
+function commitRegisteredProjects(projects) {
+  const selectedProject = reconcileProject(
+    store.get().sessions,
+    store.get().tasks,
+    loadProjectChoice(),
+    store.get().selectedProject,
+    projectRoots(projects)
+  );
+  store.set({ registeredProjects: projects, selectedProject, projectsError: "" });
+}
 function refreshRegisteredProjects() {
   projectsRefetcher.refresh();
 }
@@ -18660,7 +19039,7 @@ function requestProjectsResync() {
   }, 150);
 }
 function openAddTask() {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     addTaskModal(projects, store.get().selectedProject, {
       loadPrograms,
@@ -18691,7 +19070,7 @@ function openAddTask() {
   );
 }
 function openEditTask(task) {
-  const projects = pickerProjects(store.get().sessions, store.get().tasks, store.get().registeredProjects);
+  const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     editTaskModal(projects, task, {
       loadPrograms,
@@ -18768,6 +19147,37 @@ function doRetryLimit() {
     surfaceTabError(e);
   });
 }
+function doMarkDelivered() {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id) {
+    return;
+  }
+  const target = { id: sel.id, title: sel.title };
+  openModal(
+    markDeliveredModal(
+      target.title,
+      () => {
+        const tok = token;
+        if (tok === null || !modal) {
+          return;
+        }
+        const m = modal;
+        m.setBusy(true);
+        void confirmHandoffDelivery(target.id, target.title, tok).then(closeModal).catch((e) => {
+          if (isMutationCommittedError(e)) {
+            if (modal === m) closeModal();
+            requestResync();
+            surfaceMutationError(e, "confirmed");
+            return;
+          }
+          m.setBusy(false);
+          m.setError(errorText(e));
+        });
+      },
+      closeModal
+    )
+  );
+}
 function doHandoff() {
   const sel = selectedSessionData();
   if (!sel || !sel.id || !canHandoff(sel)) {
@@ -18775,7 +19185,7 @@ function doHandoff() {
   }
   const target = { id: sel.id, title: sel.title };
   openModal(
-    handoffModal(sel.title, sel.current_agent ?? "", {
+    handoffModal(sel.title, sel.current_agent ?? "", sel.program ?? "", {
       // The agent enum is global (#1970), so the picker asks with no repo scope.
       loadPrograms: () => loadPrograms(""),
       loadAccounts: () => loadCreateAccounts(sel.worktree?.repo_path ?? ""),
@@ -18817,6 +19227,12 @@ function doRemoveTask(task) {
       if (modal === handle) closeModal();
       return refreshTasks();
     }).catch((error) => {
+      if (isMutationCommittedError(error)) {
+        if (modal === handle) closeModal();
+        refreshTasks();
+        surfaceTabError(error);
+        return;
+      }
       handle.setBusy(false);
       handle.setError(errorText(error));
     });
@@ -18866,6 +19282,7 @@ var actions = {
   archive: (session) => openConfirm("archive", session),
   restore: (session) => openConfirm("restore", session),
   retryLimit: doRetryLimit,
+  markDelivered: doMarkDelivered,
   handoff: doHandoff,
   switchTab,
   layoutChanged: () => splitView.refit(),
@@ -18902,6 +19319,7 @@ var actions = {
   removeTask: doRemoveTask,
   deleteProject: openDeleteProject,
   addProject: openAddProject,
+  rebindProject: openRebindProject,
   setTheme
 };
 function syncSplit(state) {
@@ -18941,7 +19359,17 @@ function startStream(tok) {
     onResync: () => {
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s })
+    onStatus: (s) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    }
   });
   stream.start();
 }
@@ -18992,7 +19420,7 @@ function applySessions(sessions, evidence, authoritative = optimisticSessions.au
     store.get().tasks,
     loadProjectChoice(),
     store.get().selectedProject,
-    store.get().registeredProjects
+    projectRoots(store.get().registeredProjects)
   );
   let selectedId = pickSelection(sessions, prevSel);
   if (selectedId) {
