@@ -864,4 +864,55 @@ func TestClassifyWatchStop_UnknownLivenessOutranksPendingAccountSwap(t *testing.
 		"a mid-swap session carrying an unreadable liveness is reported as unknown, not held as working")
 }
 
+// A manual pending swap parked at a usage limit must not be reported as
+// `usage-limited` when its InFlightOp is a value this build does not recognise.
+// A newer daemon can persist PendingAccountSwap.Manual at LiveLimitReached with
+// an InFlightOp this client has no constant for; the override reports
+// `usage-limited` ahead of the InFlightOp axis, so fleet watch would return
+// early on a stale limit while an operation it cannot read is still running —
+// the fail-closed guarantee that axis makes, inverted. The override is gated
+// on the two values a parked swap actually carries (OpRespawning, the fence
+// the park keeps; and OpNone, the disk-scrubbed view or the fence released), so
+// any other operation falls through to the InFlightOp axis and is held as
+// working, the version-skew-safe verdict.
+func TestClassifyWatchStop_UnknownInFlightOpOutranksManualSwapUsageLimit(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+
+	// The recognized parked values still report the usage-limited stop.
+	for _, op := range []session.InFlightOp{session.OpRespawning, session.OpNone} {
+		parked := withLiveness("s", session.LiveLimitReached)
+		parked.PendingAccountSwap = pending
+		parked.InFlightOp = op
+		require.Equalf(t, watchStopUsageLimited, mustReason(classifyWatchStop(parked)),
+			"op %v: a parked manual swap reports usage-limited, not working", op)
+	}
+
+	// A newer daemon's unrecognised InFlightOp value falls through to the
+	// InFlightOp axis and is held as working instead of returning early on the
+	// stale limit.
+	unknown := withLiveness("s", session.LiveLimitReached)
+	unknown.PendingAccountSwap = pending
+	unknown.InFlightOp = session.InFlightOp(9999)
+	reason, detail := classifyWatchStop(unknown)
+	require.Equal(t, watchWorking, reason,
+		"a parked manual swap carrying an unrecognised in-flight op is held as working, not reported usage-limited")
+	require.Empty(t, detail,
+		"a working row carries no stop detail")
+
+	// The watcher holds the slot as working: neither the --include-current
+	// baseline nor an edge into the unrecognised-op row emits a stop.
+	midSwap := fleetRunning("s")
+	midSwap.Liveness = session.LiveLimitReached
+	midSwap.PendingAccountSwap = pending
+	midSwap.InFlightOp = session.InFlightOp(9999)
+	w := newFleetWatcher(true)
+	require.Empty(t, w.observe([]session.InstanceData{midSwap}),
+		"a parked manual swap with an unrecognised in-flight op must not be reported as a stop")
+}
+
 func mustReason(r watchStopReason, _ string) watchStopReason { return r }

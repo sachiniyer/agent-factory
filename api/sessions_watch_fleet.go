@@ -187,7 +187,20 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// so an automatic swap is left to fall through to it. Once the fence
 	// releases (OpNone) an automatic swap parked at the incoming identity's
 	// limit reaches the liveness switch the same way a non-swap row does.
-	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached {
+	//
+	// The override is gated on InFlightOp for the same version-skew reason the
+	// InFlightOp axis below is fail-closed: a newer daemon can persist a
+	// PendingAccountSwap.Manual row at LiveLimitReached carrying an InFlightOp
+	// value this build has no name for, and matching it here would emit
+	// `usage-limited` ahead of that axis, returning early on a stale limit
+	// while an operation this client cannot read is still running. Restrict the
+	// override to the two values a parked swap actually carries — OpRespawning
+	// (the fence ParkManualAccountSwapAtLimit keeps) and OpNone (the
+	// disk-scrubbed view, or the fence released once the limit lifts) — so any
+	// other operation falls through to the InFlightOp axis and is held as
+	// working, the version-skew-safe verdict.
+	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached &&
+		(d.InFlightOp == session.OpRespawning || d.InFlightOp == session.OpNone) {
 		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
 	}
 	// ANY operation in flight means the session is in motion, including one this
