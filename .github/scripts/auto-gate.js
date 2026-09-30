@@ -3880,26 +3880,34 @@ function liveHeadGuard({ github, context, prNumber, headSha }) {
 // ambiguous-create reconcile uses — a listing can answer "parked" for a run
 // the commit already un-parked, and believing one stale answer replays the POST
 // into a refusal for a write that already landed (#5004, #4763's shape).
-// Nothing inside the poll is retried twice: the listing call is raw, so a
-// transient read failure occupies the same settle slot a "still parked" answer
-// would. Resolves true once the run is out of the parked list; false when it
-// stayed parked through the whole window, so the caller may retry or report the
-// original failure. A window that ends on an unreadable listing answers
-// nothing — it escapes marked as a guard failure, never as "still parked".
+//
+// Read the run directly, never the repository-wide listing: that index lags in
+// BOTH directions — still showing a just-approved run parked, and omitting a
+// just-created parked run entirely — so "absent from the list" proves nothing
+// (Codex on #5005). The run's own GET carries its conclusion, which flips off
+// action_required only when approval actually committed. Nothing inside the
+// poll is retried twice: a transient failure or a vanished run (404 is a
+// stale read, not a verdict — a run listed parked seconds ago cannot be gone)
+// occupies the same settle slot a "still parked" answer would. Resolves true
+// once the run is out of action_required; false when it stayed parked through
+// the whole window, so the caller may retry or report the original failure. A
+// window that ends on unreadable answers escapes as a guard failure marked a
+// READ failure — that is what exhausted — never as "still parked".
 async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
   const { owner, repo } = context.repo;
   try {
     return await retryTransient(
       `could not confirm whether run ${runId} left the parked list on ${headSha}`,
       async () => {
-        const listed = await github.rest.actions.listWorkflowRunsForRepo({
-          owner,
-          repo,
-          head_sha: headSha,
-          event: "pull_request",
-          per_page: 100,
-        });
-        if (!parkedRunsIn(listed?.data?.workflow_runs).some((parked) => parked.id === runId)) {
+        let run;
+        try {
+          run = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId });
+        } catch (error) {
+          if (Number(error?.status ?? error?.response?.status) !== 404) {
+            throw error;
+          }
+        }
+        if (run && run.data?.conclusion !== "action_required") {
           return true;
         }
         const stillParked = new Error(`run ${runId} still reads as parked on ${headSha}`);
@@ -3908,15 +3916,15 @@ async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
         throw stillParked;
       },
       {
-        failureName: "AutoGateCheckWriteError",
-        readFailure: false,
+        failureName: "AutoGateReadError",
+        readFailure: true,
         delays: CHECK_CREATE_SETTLE_DELAYS_MS,
         sleep,
       },
     );
   } catch (error) {
     // The settle window ended on the sentinel itself — every read reported the
-    // run parked — rather than on a listing GitHub could not serve.
+    // run parked — rather than on an answer GitHub could not serve.
     if (error.cause?.autoGateRunStillParked === true) {
       return false;
     }
