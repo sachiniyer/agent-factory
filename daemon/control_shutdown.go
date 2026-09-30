@@ -241,39 +241,39 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 }
 
 // exitState is the post-ack exit proof without a confirmed PID (#5007 spec
-// amendment and addenda); targetPID is the advisory PID of the daemon asked to
-// stop, or 0. A lock-era daemon always leaves daemon.lock behind (nothing
-// unlinks it), so with the file present the lock decides: takeable is exited,
-// unprovable is unknown. A held lock is ambiguous — a drainer past its socket
-// close, or a new daemon between taking the lock and binding — so Ping is
-// consulted, as it is when the file is absent (a daemon predating the lock, or
-// none at all).
+// amendment and addenda 1–3); targetPID is the advisory PID of the daemon asked
+// to stop, or 0. Only an unprovable lock settles it alone (unknown). Every other
+// lock reading is consulted against Ping, because none proves exit by itself: a
+// held lock may be a drainer past its socket close or a new daemon not yet
+// bound, and a takeable or absent lock may sit beside a daemon that predates
+// the lock — daemon.lock persists once created and such a daemon never flocks
+// it.
 //
 // A serving answer proves exit only from a provably different process: a
 // responder PID that is known and differs from a known target. The target
 // itself can answer serving — a daemon predating quiescing-at-ack does so for
-// its whole ack grace, and one never asked to stop does so indefinitely — so a
-// serving answer from the target or from an unidentified side keeps waiting,
-// as does a quiescing answer. With no answer, a held lock is draining; an
-// absent one is exited when the socket is quiet (the pre-lock vintage's only
-// exit proxy; it races that daemon's post-close tail, the accepted residual)
-// and unknown on any other probe failure. A home that never ran a daemon reads
-// exited.
+// its whole ack grace, and one never asked to stop does so indefinitely — so
+// any other serving answer, like a quiescing one, is draining. With no answer,
+// a held lock is draining; otherwise a quiet socket is exited (for a pre-lock
+// daemon the only exit proxy, racing its post-close tail — the accepted
+// residual) and any other probe failure unknown. A home that never ran a
+// daemon reads exited.
 func exitState(targetPID int) daemonState {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnknown
 	}
-	lock, present := shutdownWaitHomeLockFn(dir)
-	if present && lock != daemonDraining {
-		return lock
+	lock := shutdownWaitHomeLockFn(dir)
+	if lock == daemonUnknown {
+		return daemonUnknown
 	}
+	held := lock == daemonDraining
 	resp, err := pingDaemonResponse()
 	state, respPID := pingState(resp, err)
 	switch {
 	case state == daemonServing && respPID > 0 && targetPID > 0 && respPID != targetPID:
 		return daemonExited
-	case present, state != daemonUnknown:
+	case state != daemonUnknown, held:
 		return daemonDraining
 	case isDaemonAbsentErr(err):
 		return daemonExited
@@ -342,38 +342,36 @@ func homeLockState() daemonState {
 	if err != nil {
 		return daemonUnknown
 	}
-	state, _ := shutdownWaitHomeLockFn(dir)
-	return state
+	return shutdownWaitHomeLockFn(dir)
 }
 
 // homeLockReleased asks what a replacement daemon's acquireHomeLock will ask:
 // could this home's lock be taken right now? Takeable is exited, held
-// (EWOULDBLOCK) is draining, and any other failure to look is unknown. present
-// reports whether daemon.lock exists at all; when it does not, state is
-// exited — the replacement would create and take it — and the caller decides
-// what an absent file means (see exitState).
+// (EWOULDBLOCK) is draining, and any other failure to look is unknown. A
+// missing daemon.lock is exited too — the replacement would create and take
+// it — which is why exitState never trusts a non-held lock without Ping.
 //
 // Deliberately not ProbeHomeLock, which answers doctor's may-this-home-be-
 // deleted question and reads an unrecognized filesystem as unknown — that
 // would stall every PID-less wait on a home on NFS/FUSE. The probe holds the
 // lock only for the instant between its flock and its unlock.
-func homeLockReleased(dir string) (state daemonState, present bool) {
+func homeLockReleased(dir string) daemonState {
 	f, err := os.OpenFile(daemonLockPathIn(dir), os.O_RDWR, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return daemonExited, false
+			return daemonExited
 		}
-		return daemonUnknown, true
+		return daemonUnknown
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return daemonDraining, true
+			return daemonDraining
 		}
-		return daemonUnknown, true
+		return daemonUnknown
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return daemonExited, true
+	return daemonExited
 }
 
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a serving

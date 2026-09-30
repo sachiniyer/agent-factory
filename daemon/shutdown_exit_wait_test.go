@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"net/rpc"
 	"os"
@@ -615,12 +614,12 @@ func TestWaitForShutdownCompletion_DrainingToExited_PIDBoundaryRecheck(t *testin
 func TestWaitForShutdownCompletion_DrainingToExited_LockBoundaryRecheck(t *testing.T) {
 	leaves := scriptShutdownWaitBoundary(t)
 	probes := 0
-	shutdownWaitHomeLockFn = func(string) (daemonState, bool) {
+	shutdownWaitHomeLockFn = func(string) daemonState {
 		probes++
 		if time.Now().Before(leaves) {
-			return daemonDraining, true // lock still held
+			return daemonDraining // lock still held
 		}
-		return daemonExited, true
+		return daemonExited
 	}
 
 	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
@@ -637,8 +636,8 @@ func TestWaitForShutdownCompletion_DrainingToExited_LockBoundaryRecheck(t *testi
 // leave.
 func TestWaitForShutdownCompletion_Unknown_UnprovableLockIsNotExit(t *testing.T) {
 	scriptShutdownWaitBoundary(t)
-	shutdownWaitHomeLockFn = func(string) (daemonState, bool) {
-		return daemonUnknown, true // e.g. flock: input/output error
+	shutdownWaitHomeLockFn = func(string) daemonState {
+		return daemonUnknown // e.g. flock: input/output error
 	}
 
 	if err := WaitForShutdownCompletion(ShutdownPID{}); !errors.Is(err, ErrShutdownIncomplete) {
@@ -899,13 +898,25 @@ func startQuiescingControlServer(t *testing.T) func() error {
 // serveAsResponder binds a control server that answers serving, as a daemon
 // that has not acked Shutdown does. It is in-process, so its Ping reports this
 // test's own PID — the responder PID the cells below compare targets against.
-func serveAsResponder(t *testing.T) {
+func serveAsResponder(t *testing.T) func() error {
 	t.Helper()
 	closeFn, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
 	t.Cleanup(func() { _ = closeFn() })
+	return closeFn
+}
+
+// staleLockFile leaves daemon.lock on disk and free, as a lock-era daemon that
+// ran in this home earlier does: the file persists and nothing unlinks it.
+func staleLockFile(t *testing.T) {
+	t.Helper()
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	lock.release()
 }
 
 // shortShutdownGrace shrinks the post-ack bound for cells that expect it to run out.
@@ -922,9 +933,11 @@ func shortShutdownGrace(t *testing.T) {
 // advisory target. The target itself answers serving while it predates
 // quiescing-at-ack (its whole ack grace), and a daemon never asked to stop
 // answers serving indefinitely; reading either as exited respawns beside a live
-// daemon. Pinned for the lock-held and the absent-lock (pre-lock) branches.
+// daemon. Pinned for every lock reading Ping is consulted on: held, absent (a
+// pre-lock daemon), and takeable — a stale file a pre-lock daemon never flocks
+// (addendum 3).
 func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForDifferentPID(t *testing.T) {
-	for _, lockHeld := range []bool{true, false} {
+	for _, lockMode := range []string{"held", "absent", "stale-takeable"} {
 		for _, tc := range []struct {
 			name       string
 			target     func(t *testing.T) int
@@ -934,15 +947,18 @@ func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForDifferentPID(t *test
 			{name: "responder is the target: keeps waiting", target: func(*testing.T) int { return os.Getpid() }},
 			{name: "target unknown: keeps waiting", target: func(*testing.T) int { return 0 }},
 		} {
-			t.Run(fmt.Sprintf("lockHeld=%v/%s", lockHeld, tc.name), func(t *testing.T) {
+			t.Run(lockMode+"/"+tc.name, func(t *testing.T) {
 				t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 				shortShutdownGrace(t)
-				if lockHeld {
+				switch lockMode {
+				case "held":
 					lock, err := acquireHomeLock()
 					if err != nil {
 						t.Fatalf("acquireHomeLock: %v", err)
 					}
 					t.Cleanup(lock.release)
+				case "stale-takeable":
+					staleLockFile(t)
 				}
 				serveAsResponder(t)
 
@@ -961,18 +977,19 @@ func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForDifferentPID(t *test
 // TestWaitForShutdownCompletion_Draining_TargetServingInAckGraceWaitsForLock:
 // a pre-quiescing acker answers serving under its own PID through its ack
 // grace. The wait keeps going on that answer and is resolved by what does
-// prove exit — the lock's release.
+// prove exit — the daemon leaving: its socket closes and its lock is released.
 func TestWaitForShutdownCompletion_Draining_TargetServingInAckGraceWaitsForLock(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	lock, err := acquireHomeLock()
 	if err != nil {
 		t.Fatalf("acquireHomeLock: %v", err)
 	}
-	serveAsResponder(t)
+	closeFn := serveAsResponder(t)
 	var released atomic.Bool
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		released.Store(true)
+		_ = closeFn()
 		lock.release()
 	}()
 
@@ -1056,4 +1073,31 @@ func TestDaemonAlreadyServing_Draining_StarterAnswersServingCounts(t *testing.T)
 	if !daemonAlreadyServing() {
 		t.Fatalf("daemonAlreadyServing = false, want true once the starter answers serving")
 	}
+}
+
+// TestWaitForShutdownCompletion_StaleLockFile_PreLockDaemonAnswerDecides (#5007
+// addendum 3): daemon.lock persists once created, and a daemon predating the
+// lock never flocks it, so on a home that once ran a lock-era daemon the file
+// can read takeable while a pre-lock daemon still drains. A takeable lock is
+// therefore exit only once Ping rules out a responder: a quiescing answer is
+// draining, a quiet socket is exited.
+func TestWaitForShutdownCompletion_StaleLockFile_PreLockDaemonAnswerDecides(t *testing.T) {
+	t.Run("quiescing answer keeps waiting", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		shortShutdownGrace(t)
+		staleLockFile(t)
+		startQuiescingControlServer(t)
+
+		if err := WaitForShutdownCompletion(ShutdownPID{}); !errors.Is(err, ErrShutdownIncomplete) {
+			t.Fatalf("takeable lock beside a quiescing pre-lock daemon = %v, want ErrShutdownIncomplete", err)
+		}
+	})
+	t.Run("quiet socket is exited", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		staleLockFile(t)
+
+		if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
+			t.Fatalf("takeable lock, nothing answering = %v, want nil", err)
+		}
+	})
 }
