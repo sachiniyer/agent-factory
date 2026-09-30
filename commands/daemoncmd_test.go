@@ -314,10 +314,11 @@ func TestRestartDaemonFromPathNoDaemonIsNoOp(t *testing.T) {
 		return respawnResult{}, nil
 	}
 
-	result, err := restartDaemonFromPath(testUpgradeDaemonPath)
+	outcome, err := restartDaemonFromPathDetailed(testUpgradeDaemonPath)
 	if err != nil {
-		t.Fatalf("restartDaemonFromPath: %v", err)
+		t.Fatalf("restartDaemonFromPathDetailed: %v", err)
 	}
+	result := outcome.Shutdown
 	if result != daemon.ShutdownNoDaemon {
 		t.Fatalf("restart result = %v, want ShutdownNoDaemon", result)
 	}
@@ -339,10 +340,11 @@ func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
 		return respawnResult{}, nil
 	}
 
-	result, err := restartDaemonFromPath("/opt/af/current")
+	outcome, err := restartDaemonFromPathDetailed("/opt/af/current")
 	if err != nil {
-		t.Fatalf("restartDaemonFromPath: %v", err)
+		t.Fatalf("restartDaemonFromPathDetailed: %v", err)
 	}
+	result := outcome.Shutdown
 	if result != daemon.ShutdownViaRPC {
 		t.Fatalf("restart result = %v, want ShutdownViaRPC", result)
 	}
@@ -438,7 +440,7 @@ func daemonRestartPresentHarness(t *testing.T, shutdown daemon.ShutdownResult, r
 // demotion under `af daemon restart`. When the respawn falls back to an ad-hoc
 // daemon after the autostart unit's restart fails, the daemon is up but
 // unsupervised: it dies with the session and will not return at next login.
-// runDaemonRestart used to call the discarding restartDaemonFromPath wrapper and
+// runDaemonRestart used to call the discarding restartDaemonFromPath wrapper (since removed) and
 // print a bare "daemon restarted" over the demotion — the exact anti-pattern
 // respawnDaemonAfterUpgrade's contract names as "half of #1947", and the one
 // TestUpgrade_FailedUnitRestartIsLoud already fixed for `af upgrade`. The fix

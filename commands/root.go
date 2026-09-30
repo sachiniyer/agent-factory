@@ -132,8 +132,12 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			// and opt-out are known, and before anything owns the terminal.
 			// Throttled to one check every few hours, so the common launch
 			// pays nothing; when an update does land this re-execs and never
-			// returns (#1466).
-			autoUpdateOnLaunch(&cfg.Config)
+			// returns (#1466). It returns false only when the update installed
+			// but the previous daemon is still draining: the TUI could not
+			// reach a daemon yet, so the launch stands down (#5007).
+			if !autoUpdateOnLaunch(&cfg.Config) {
+				return nil
+			}
 
 			// Apply [keys] rebinds before the TUI starts (#1026): the maps
 			// are read concurrently once bubbletea runs, and the config was

@@ -1,12 +1,14 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/autoupdate"
 	"github.com/sachiniyer/agent-factory/log"
 
@@ -40,10 +42,18 @@ var autoUpdateNotice = func(format string, a ...any) { fmt.Printf(format, a...) 
 // yanking the screen out from under them, and a half-finished download racing
 // TUI init is worse than a short, explained pause.
 //
-// Every failure mode here is a silent skip. The update is a convenience; the
-// launch is the thing the user asked for, and nothing in this path may block
-// it, abort it, or print an error at it. Detail goes to the log.
-func autoUpdateOnLaunch(cfg *config.Config) {
+// It reports whether the launch should proceed. Every failure mode here is a
+// silent skip that returns true: the update is a convenience, the launch is the
+// thing the user asked for, and no update failure may block it, abort it, or
+// print an error at it. Detail goes to the log.
+//
+// The one exception is not an update failure. When the new binary installed
+// but the previous daemon is still finishing its shutdown past both waits
+// (daemon.ErrShutdownIncomplete, #5007), it still holds the home lock, so the
+// TUI — re-exec'd or not — would open on an EnsureDaemon it cannot win. That
+// prints one line saying so and returns false: the launch stands down, and the
+// next one starts the new daemon once the old one has exited.
+func autoUpdateOnLaunch(cfg *config.Config) bool {
 	// Consume the guard before anything else: it is a one-shot handoff from
 	// the process that exec'd us, and it has to come out of the environment
 	// either way. This TUI goes on to spawn tmux sessions and agents that
@@ -55,7 +65,7 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 			log.WarningLog.Printf("auto-update: failed to clear %s: %v", reexecGuardEnv, err)
 		}
 		log.InfoLog.Printf("auto-update: already re-exec'd this launch; skipping")
-		return
+		return true
 	}
 	if cfg == nil {
 		// The TUI launch hands us its already-resolved config; anyone else
@@ -67,7 +77,7 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 	}
 	if !autoupdate.Enabled(cfg) {
 		log.InfoLog.Printf("auto-update: disabled")
-		return
+		return true
 	}
 	// A script, a pipe, or CI calling `af` must never get a binary swapped
 	// out from under it: the caller pinned a version by installing one, and
@@ -75,7 +85,7 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 	// interactive launch is the only place an update is welcome.
 	if !stdoutIsTTYFn() {
 		log.InfoLog.Printf("auto-update: stdout is not a terminal; skipping")
-		return
+		return true
 	}
 	// Stand down while a daemon upgrade transaction owns the executable
 	// (#2212). Checked here, before the throttle cache is even opened, so a
@@ -86,7 +96,7 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 	if active := upgradeOwningThisExecutable(); active != nil {
 		log.InfoLog.Printf("auto-update: daemon upgrade to %s in progress (transaction %s, phase %s); skipping the launch-time install",
 			active.ToVersion, active.ID, active.Phase)
-		return
+		return true
 	}
 
 	channel := config.UpdateChannelStable
@@ -102,9 +112,14 @@ func autoUpdateOnLaunch(cfg *config.Config) {
 		log.ErrorLog.Printf("auto-update: %v", err)
 	}
 	if installed == "" {
-		return
+		return true
+	}
+	if errors.Is(err, daemon.ErrShutdownIncomplete) {
+		autoUpdateNotice("af updated to v%s — the previous daemon is still finishing its shutdown and exits on its own; run af again shortly.\n", installed)
+		return false
 	}
 	reexecIntoNewBinary(installed)
+	return true
 }
 
 // reexecIntoNewBinary replaces this process with the freshly installed binary,

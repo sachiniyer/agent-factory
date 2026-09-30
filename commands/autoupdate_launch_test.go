@@ -2,6 +2,7 @@ package commands
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -20,6 +21,10 @@ type reexecCapture struct {
 	argv0 string
 	argv  []string
 	env   []string
+	// proceed is autoUpdateOnLaunch's answer: whether the launch goes on.
+	proceed bool
+	// notices are the user-facing lines the launch path printed.
+	notices []string
 }
 
 // launchWithTTY drives autoUpdateOnLaunch with the TTY gate forced open and
@@ -48,8 +53,10 @@ func launchWith(t *testing.T, isTTY bool, cfg *config.Config) *reexecCapture {
 		got.argv0, got.argv, got.env = argv0, argv, env
 		return nil // a real exec never returns; the capture is the observation
 	}
-	autoUpdateNotice = func(string, ...any) {}
-	autoUpdateOnLaunch(cfg)
+	autoUpdateNotice = func(format string, a ...any) {
+		got.notices = append(got.notices, fmt.Sprintf(format, a...))
+	}
+	got.proceed = autoUpdateOnLaunch(cfg)
 	return got
 }
 
@@ -346,5 +353,110 @@ func TestAutoUpdateOnLaunchConfigOptOutSkipsCheck(t *testing.T) {
 	}
 	if got.calls != 0 {
 		t.Fatalf("re-exec calls = %d, want 0 with auto_update = false", got.calls)
+	}
+}
+
+// drainingRestartSeams wires a launch update whose daemon restart hits an
+// unfinished shutdown (#5007): the old daemon acked Shutdown as oldPID, and the
+// first respawn is withheld with daemon.ErrShutdownIncomplete. secondWait is
+// what the one extra wait on oldPID reports, retryErr what the retried respawn
+// returns. It returns the recorded wait PIDs and respawn calls.
+func drainingRestartSeams(t *testing.T, oldPID int, secondWait, retryErr error) (waitPIDs *[]int, respawnPIDs *[]int) {
+	t.Helper()
+	prevWait := waitForShutdownCompletionFn
+	t.Cleanup(func() { waitForShutdownCompletionFn = prevWait })
+	waitPIDs, respawnPIDs = new([]int), new([]int)
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, int, error) {
+		return daemon.ShutdownViaRPC, oldPID, nil
+	}
+	respawnDaemonFn = func(_ string, pid int) (respawnResult, error) {
+		*respawnPIDs = append(*respawnPIDs, pid)
+		if len(*respawnPIDs) == 1 {
+			return respawnResult{}, fmt.Errorf("the old daemon is still finishing its shutdown (%w)", daemon.ErrShutdownIncomplete)
+		}
+		return respawnResult{}, retryErr
+	}
+	waitForShutdownCompletionFn = func(pid int) error {
+		*waitPIDs = append(*waitPIDs, pid)
+		return secondWait
+	}
+	return waitPIDs, respawnPIDs
+}
+
+// TestAutoUpdateOnLaunchStandsDownWhileOldDaemonDrains: the binary installed,
+// but the previous daemon outlived both shutdown waits and still holds the home
+// lock. Re-execing would land the new TUI on an EnsureDaemon it cannot win, so
+// the launch must stand down with one line saying why and what to do.
+func TestAutoUpdateOnLaunchStandsDownWhileOldDaemonDrains(t *testing.T) {
+	withTestHome(t)
+	captureLogs(t)
+	tempBin := seedNewerRelease(t, "1.0.0", "v1.0.1")
+	waitPIDs, respawnPIDs := drainingRestartSeams(t, 4242,
+		fmt.Errorf("%w: daemon pid 4242 still running", daemon.ErrShutdownIncomplete), nil)
+
+	got := launchWithTTY(t, nil)
+
+	if got.proceed {
+		t.Fatalf("autoUpdateOnLaunch = true, want false while the old daemon still drains")
+	}
+	if got.calls != 0 {
+		t.Fatalf("re-exec calls = %d, want 0 — the new TUI could not reach a daemon yet", got.calls)
+	}
+	if !slices.Equal(*waitPIDs, []int{4242}) {
+		t.Fatalf("second wait PIDs = %v, want [4242]", *waitPIDs)
+	}
+	if !slices.Equal(*respawnPIDs, []int{4242}) {
+		t.Fatalf("respawn calls = %v, want only the withheld first attempt", *respawnPIDs)
+	}
+	notice := strings.Join(got.notices, "")
+	if !strings.Contains(notice, "still finishing its shutdown") || !strings.Contains(notice, "run af again") {
+		t.Fatalf("notice = %q, want the still-finishing shutdown and run-again guidance", notice)
+	}
+	if contents, err := os.ReadFile(tempBin); err != nil || string(contents) != "new-binary" {
+		t.Fatalf("binary contents = %q (err %v), want the update installed even though the launch stood down", contents, err)
+	}
+}
+
+// TestAutoUpdateOnLaunchRetriesRespawnOnceDrainFinishes: the first respawn was
+// withheld, but the old daemon exits during the second wait. The withheld
+// respawn is retried with the old PID and the launch re-execs as normal.
+func TestAutoUpdateOnLaunchRetriesRespawnOnceDrainFinishes(t *testing.T) {
+	withTestHome(t)
+	captureLogs(t)
+	tempBin := seedNewerRelease(t, "1.0.0", "v1.0.1")
+	waitPIDs, respawnPIDs := drainingRestartSeams(t, 4242, nil, nil)
+
+	got := launchWithTTY(t, nil)
+
+	if !got.proceed {
+		t.Fatalf("autoUpdateOnLaunch = false, want true once the old daemon has exited")
+	}
+	if got.calls != 1 || got.argv0 != tempBin {
+		t.Fatalf("re-exec calls = %d into %q, want 1 into %q", got.calls, got.argv0, tempBin)
+	}
+	if !slices.Equal(*waitPIDs, []int{4242}) {
+		t.Fatalf("second wait PIDs = %v, want [4242]", *waitPIDs)
+	}
+	if !slices.Equal(*respawnPIDs, []int{4242, 4242}) {
+		t.Fatalf("respawn calls = %v, want the withheld attempt and one retry, both with pid 4242", *respawnPIDs)
+	}
+}
+
+// TestAutoUpdateOnLaunchProceedsWhenRespawnRetryFails: once the old daemon has
+// exited, a failed retry does not stand the launch down — the re-exec'd TUI's
+// own EnsureDaemon starts a daemon now that nothing holds the home lock.
+func TestAutoUpdateOnLaunchProceedsWhenRespawnRetryFails(t *testing.T) {
+	withTestHome(t)
+	captureLogs(t)
+	seedNewerRelease(t, "1.0.0", "v1.0.1")
+	_, respawnPIDs := drainingRestartSeams(t, 4242, nil, errors.New("unit restart failed"))
+
+	got := launchWithTTY(t, nil)
+
+	if !got.proceed || got.calls != 1 {
+		t.Fatalf("proceed = %v, re-exec calls = %d; want true and 1 once the old daemon is gone", got.proceed, got.calls)
+	}
+	if len(*respawnPIDs) != 2 {
+		t.Fatalf("respawn calls = %v, want 2", *respawnPIDs)
 	}
 }

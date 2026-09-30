@@ -314,7 +314,7 @@ func runUpgrade(out, errOut io.Writer, downloadURL string, noRestart bool) error
 // straight back through it: daemon.RequestShutdown stats the socket and
 // returns (ShutdownNoDaemon, nil) on fs.ErrNotExist or ECONNREFUSED — the
 // SIGTERM fallback fires only for a method-not-found reply on a socket that
-// DID answer — so restartDaemonFromPath returns early and `af daemon restart`
+// DID answer — so restartDaemonFromPathDetailed returns early and `af daemon restart`
 // prints "no running daemon to restart" and stops nothing. Recommending the
 // thing that just failed is how a user ends up on the old daemon believing
 // they are patched, which is the whole bug.

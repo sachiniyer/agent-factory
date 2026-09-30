@@ -99,6 +99,9 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 	goos := runtimeGOOS
 	goarch := runtime.GOARCH
 
+	// stillDraining records that the previous daemon outlived both shutdown
+	// waits (#5007); it is reported after the install is recorded.
+	var stillDraining bool
 	err = withUpdateCheckLock(func(cache *autoupdate.CheckCache, now time.Time) error {
 		currentVersion := strings.TrimPrefix(version, "v")
 		if !cache.Due(channel, currentVersion, now) {
@@ -224,14 +227,28 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		// immediately from the freshly written binary. Quiet on the no-daemon path
 		// since this runs on every launch. Pre-#501 daemons don't speak the
 		// Shutdown RPC; RequestShutdown falls back to PID-file-based SIGTERM (#504).
+		//
+		// An unfinished shutdown (daemon.ErrShutdownIncomplete) withheld the
+		// respawn: the old daemon is still draining durable work, socket closed,
+		// home lock held (#5007). The launch is about to re-exec into a TUI whose
+		// first EnsureDaemon cannot win that lock, so give the drain one more
+		// bounded wait on its PID and retry the withheld respawn. If it still has
+		// not exited, report it so autoUpdateOnLaunch stands the launch down
+		// instead of re-execing into it.
 		if unitRefreshErr == nil {
-			result, restartErr := restartDaemonFromPath(resolvedPath)
+			outcome, restartErr := restartDaemonFromPathDetailed(resolvedPath)
+			if errors.Is(restartErr, daemon.ErrShutdownIncomplete) {
+				restartErr = retryRespawnAfterDrain(resolvedPath, outcome.OldPID, latestVersion)
+				if restartErr != nil {
+					stillDraining = true
+				}
+			}
 			switch {
 			case restartErr != nil:
 				log.WarningLog.Printf("auto-update: updated to %s but failed to restart daemon: %v", latestVersion, restartErr)
-			case result == daemon.ShutdownViaRPC:
+			case outcome.Shutdown == daemon.ShutdownViaRPC:
 				log.InfoLog.Printf("auto-update: updated to %s and restarted running daemon", latestVersion)
-			case result == daemon.ShutdownViaSIGTERM:
+			case outcome.Shutdown == daemon.ShutdownViaSIGTERM:
 				log.InfoLog.Printf("auto-update: updated to %s and restarted pre-#501 running daemon via SIGTERM fallback", latestVersion)
 			default:
 				log.InfoLog.Printf("auto-update: updated to %s", latestVersion)
@@ -243,11 +260,32 @@ func autoUpdateForChannel(channel string, checkTimeout, downloadBudget time.Dura
 		installed = latestVersion
 		return cache.Record(channel, latestTag, latestVersion, now)
 	})
-	// installed is reported even alongside an error: the only way to reach
-	// here with both set is a successful install whose bookkeeping write
-	// failed, and the new binary is on disk either way. Swallowing that would
-	// strand the user on the old image for no reason.
+	// installed is reported even alongside an error: a successful install whose
+	// bookkeeping write failed, or whose previous daemon is still draining, has
+	// the new binary on disk either way. Swallowing that would strand the user
+	// on the old image for no reason.
+	if stillDraining {
+		err = errors.Join(err, fmt.Errorf("auto-update installed %s but the previous daemon is still finishing its shutdown: %w", installed, daemon.ErrShutdownIncomplete))
+	}
 	return installed, err
+}
+
+// retryRespawnAfterDrain finishes a post-install restart whose respawn was
+// withheld because the old daemon was still draining (#5007). It waits once
+// more for that daemon's PID to exit, then retries the respawn, which picks the
+// supervised unit or an ad-hoc daemon exactly as the first attempt would. It
+// returns an error wrapping daemon.ErrShutdownIncomplete only when the daemon
+// is STILL running at the second bound. Once it is gone the update proceeds
+// whatever the retry does: the re-exec'd TUI's own EnsureDaemon starts a daemon
+// if the retry could not.
+func retryRespawnAfterDrain(resolvedPath string, oldPID int, latestVersion string) error {
+	if err := waitForShutdownCompletionFn(oldPID); err != nil {
+		return err
+	}
+	if _, err := respawnDaemonFn(resolvedPath, oldPID); err != nil {
+		log.WarningLog.Printf("auto-update: updated to %s; the previous daemon has exited, but restarting it failed: %v; the next daemon request starts one", latestVersion, err)
+	}
+	return nil
 }
 
 // updateChannel returns the release channel auto-update and `af upgrade`

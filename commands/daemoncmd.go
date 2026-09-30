@@ -642,22 +642,16 @@ type restartOutcome struct {
 	// FailedPhase is restartPhaseNone unless the accompanying error is
 	// non-nil, and names which half of the sequence broke.
 	FailedPhase restartPhase
-}
-
-// restartDaemonFromPath keeps the (result, error) shape the auto-update path is
-// written against. Callers that must report on the restart's fidelity — `af
-// upgrade` and `af daemon restart` — use restartDaemonFromPathDetailed, which
-// returns the full restartOutcome including the respawn demotion fields; this
-// wrapper discards them and must not be adopted by any caller that surfaces the
-// restart's result to a user.
-func restartDaemonFromPath(execPath string) (daemon.ShutdownResult, error) {
-	outcome, err := restartDaemonFromPathDetailed(execPath)
-	return outcome.Shutdown, err
+	// OldPID is the stopped daemon's PID as RequestShutdown established it
+	// (self-reported, Ping-derived, or a verified PID file), or 0 when none was
+	// identified. A caller that got restartPhaseShutdownIncomplete waits on it
+	// before retrying the withheld respawn (#5007).
+	OldPID int
 }
 
 func restartDaemonFromPathDetailed(execPath string) (restartOutcome, error) {
 	result, oldPID, shutdownErr := requestDaemonShutdownFn()
-	outcome := restartOutcome{Shutdown: result}
+	outcome := restartOutcome{Shutdown: result, OldPID: oldPID}
 	if shutdownErr != nil {
 		// ShutdownNoDaemon alongside an ERROR is not "no daemon" and not "a daemon
 		// refused to stop" — it is RequestShutdown saying it could not determine
