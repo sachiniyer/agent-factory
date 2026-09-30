@@ -49,8 +49,7 @@ func TestRespawn_Draining_WaitsForLockReleaseThenSpawns(t *testing.T) {
 	}
 	var lockReleased atomic.Bool
 	shutdownCh := make(chan struct{})
-	// A real lifecycle, so the ack flips it to quiescing as a live daemon's does:
-	// a serving answer would read as a new lock holder, not the acker.
+	// A real lifecycle, so the ack flips it to quiescing as a live daemon's does.
 	closeFn, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, shutdownCh)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)

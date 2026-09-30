@@ -219,7 +219,8 @@ func WaitForShutdownCompletion(stopped ShutdownPID) error {
 // the daemon is provably gone, false if not proven by deadline. It never
 // signals. With a confirmed PID (see ShutdownPID) the proof is that process
 // dying — never re-checked against argv, since a renamed install is not `af`.
-// Otherwise pid is advisory and ignored, and the proof is exitState's. A quiet
+// Otherwise pid is advisory: never waited on, only used by exitState to tell
+// the target from a different responder. A quiet
 // socket is never proof for a lock-era daemon (drainDaemon closes it before its
 // durable joins), nor is a missing daemon.pid (unlinked when teardown begins).
 // The probe repeats after the loop: the last sleep can wake past the deadline.
@@ -228,7 +229,7 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 		if confirmed && pid > 0 && pid != os.Getpid() {
 			return !shutdownWaitPIDAliveFn(pid)
 		}
-		return exitState() == daemonExited
+		return exitState(pid) == daemonExited
 	}
 	for time.Now().Before(deadline) {
 		if exited() {
@@ -240,21 +241,25 @@ func waitForDaemonExit(pid int, confirmed bool, deadline time.Time) bool {
 }
 
 // exitState is the post-ack exit proof without a confirmed PID (#5007 spec
-// amendment and addendum). A lock-era daemon always leaves daemon.lock behind
-// (nothing unlinks it), so with the file present the lock decides: takeable is
-// exited, unprovable is unknown. A held lock is ambiguous — a drainer past its
-// socket close, or a new daemon between taking the lock and binding — so Ping
-// settles it: an answer that is not quiescing is a new lock holder serving
-// (quiescing is terminal, so it cannot be the acker), which means the old one
-// released the lock: exited. Quiescing or no answer stays draining.
+// amendment and addenda); targetPID is the advisory PID of the daemon asked to
+// stop, or 0. A lock-era daemon always leaves daemon.lock behind (nothing
+// unlinks it), so with the file present the lock decides: takeable is exited,
+// unprovable is unknown. A held lock is ambiguous — a drainer past its socket
+// close, or a new daemon between taking the lock and binding — so Ping is
+// consulted, as it is when the file is absent (a daemon predating the lock, or
+// none at all).
 //
-// An absent file marks a daemon that predates the lock (#501-era Shutdown,
-// pre-#1773 lock), or none at all; its only exit proxy is the control socket:
-// quiet is exited, quiescing is draining, a serving answer is exited (it cannot
-// be the acker, and the spawn path dedupes on serving), any other probe failure
-// unknown. That still races a pre-lock daemon's post-close tail, the accepted
-// residual for that vintage. A home that never ran a daemon reads exited.
-func exitState() daemonState {
+// A serving answer proves exit only from a provably different process: a
+// responder PID that is known and differs from a known target. The target
+// itself can answer serving — a daemon predating quiescing-at-ack does so for
+// its whole ack grace, and one never asked to stop does so indefinitely — so a
+// serving answer from the target or from an unidentified side keeps waiting,
+// as does a quiescing answer. With no answer, a held lock is draining; an
+// absent one is exited when the socket is quiet (the pre-lock vintage's only
+// exit proxy; it races that daemon's post-close tail, the accepted residual)
+// and unknown on any other probe failure. A home that never ran a daemon reads
+// exited.
+func exitState(targetPID int) daemonState {
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return daemonUnknown
@@ -264,10 +269,11 @@ func exitState() daemonState {
 		return lock
 	}
 	resp, err := pingDaemonResponse()
-	switch state, _ := pingState(resp, err); {
-	case state == daemonServing:
+	state, respPID := pingState(resp, err)
+	switch {
+	case state == daemonServing && respPID > 0 && targetPID > 0 && respPID != targetPID:
 		return daemonExited
-	case present, state == daemonDraining:
+	case present, state != daemonUnknown:
 		return daemonDraining
 	case isDaemonAbsentErr(err):
 		return daemonExited
@@ -373,8 +379,9 @@ func homeLockReleased(dir string) (state daemonState, present bool) {
 // daemonAlreadyServing is RunDaemon's startup liveness guard. Only a serving
 // daemon counts: a draining one is leaving (#5007), so exiting on its answer
 // would leave no daemon once it finishes. For a draining one it waits (bounded)
-// for the exit, then reports false unless a new daemon now serves; the per-home
-// lock the caller takes next arbitrates a drain that outlived the bound — a held lock is a non-zero
+// out the drain (see waitOutDrain) and reports true only if a new daemon comes
+// up serving; the per-home lock the caller takes next arbitrates a drain that
+// outlived the bound — a held lock is a non-zero
 // exit, which the unit's Restart=on-failure retries. Unlike EnsureDaemon this
 // never stops anything, so proceeding is safe here.
 func daemonAlreadyServing() bool {
@@ -384,16 +391,33 @@ func daemonAlreadyServing() bool {
 		return true
 	case daemonDraining:
 		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit", pid)
-		if !waitForDaemonExit(pid, false, time.Now().Add(shutdownCompleteGrace)) {
-			log.InfoLog.Printf("the daemon for this home is still draining at the bound; proceeding to home-lock arbitration")
-		}
-		// The wait also ends when a new daemon answers serving (#5007): then it
-		// is already serving, exactly as if the first probe had seen it.
-		if again, _ := probeDaemonState(time.Time{}); again == daemonServing {
+		switch waitOutDrain(time.Time{}, time.Now().Add(shutdownCompleteGrace)) {
+		case daemonServing:
 			return true
+		case daemonDraining:
+			log.InfoLog.Printf("the daemon for this home is still draining at the bound; proceeding to home-lock arbitration")
 		}
 	}
 	return false
+}
+
+// waitOutDrain polls the state probe (#5007) until a drain seen by a pre-launch
+// consumer ends: serving, when a new lock holder has come up — a drainer's
+// socket never re-opens, so inside a drain wait a serving answer can only be
+// that — or exited, once nothing holds the home. Draining and unknown keep
+// polling; at until it reports draining. probeDeadline bounds each probe's
+// dial. It is not the post-ack exit wait: that one must not read serving as
+// exit (see exitState), because there the target itself may still answer.
+func waitOutDrain(probeDeadline, until time.Time) daemonState {
+	for {
+		if state, _ := probeDaemonState(probeDeadline); state == daemonServing || state == daemonExited {
+			return state
+		}
+		if !time.Now().Before(until) {
+			return daemonDraining
+		}
+		time.Sleep(shutdownCompletePoll)
+	}
 }
 
 // isDaemonAbsentErr reports whether err from a dial/RPC call indicates that

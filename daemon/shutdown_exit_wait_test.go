@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/rpc"
 	"os"
@@ -895,34 +896,102 @@ func startQuiescingControlServer(t *testing.T) func() error {
 	return closeFn
 }
 
-// TestWaitForShutdownCompletion_Exited_PreLockServingAnswerIsNotTheAcker (#5007
-// addendum): with no lock file, a responder that answers NOT quiescing cannot be
-// the daemon that acked (quiescing is terminal), so the wait reads exited at
-// once instead of waiting out the bound on someone else's socket.
-func TestWaitForShutdownCompletion_Exited_PreLockServingAnswerIsNotTheAcker(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+// serveAsResponder binds a control server that answers serving, as a daemon
+// that has not acked Shutdown does. It is in-process, so its Ping reports this
+// test's own PID — the responder PID the cells below compare targets against.
+func serveAsResponder(t *testing.T) {
+	t.Helper()
 	closeFn, err := startControlServer(&Manager{lifecycle: readyLifecycle(t)}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startControlServer: %v", err)
 	}
 	t.Cleanup(func() { _ = closeFn() })
+}
 
-	start := time.Now()
-	if err := WaitForShutdownCompletion(ShutdownPID{}); err != nil {
-		t.Fatalf("serving responder with no lock file = %v, want nil", err)
+// shortShutdownGrace shrinks the post-ack bound for cells that expect it to run out.
+func shortShutdownGrace(t *testing.T) {
+	t.Helper()
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 300 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+}
+
+// TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForDifferentPID (#5007
+// addendum 2): in the post-ack wait a serving answer proves exit only from a
+// provably different process — responder PID known and unequal to a known
+// advisory target. The target itself answers serving while it predates
+// quiescing-at-ack (its whole ack grace), and a daemon never asked to stop
+// answers serving indefinitely; reading either as exited respawns beside a live
+// daemon. Pinned for the lock-held and the absent-lock (pre-lock) branches.
+func TestWaitForShutdownCompletion_ServingAnswer_ExitOnlyForDifferentPID(t *testing.T) {
+	for _, lockHeld := range []bool{true, false} {
+		for _, tc := range []struct {
+			name       string
+			target     func(t *testing.T) int
+			wantExited bool
+		}{
+			{name: "different responder PID is exited", target: deadPID, wantExited: true},
+			{name: "responder is the target: keeps waiting", target: func(*testing.T) int { return os.Getpid() }},
+			{name: "target unknown: keeps waiting", target: func(*testing.T) int { return 0 }},
+		} {
+			t.Run(fmt.Sprintf("lockHeld=%v/%s", lockHeld, tc.name), func(t *testing.T) {
+				t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+				shortShutdownGrace(t)
+				if lockHeld {
+					lock, err := acquireHomeLock()
+					if err != nil {
+						t.Fatalf("acquireHomeLock: %v", err)
+					}
+					t.Cleanup(lock.release)
+				}
+				serveAsResponder(t)
+
+				err := WaitForShutdownCompletion(ShutdownPID{PID: tc.target(t)})
+				switch {
+				case tc.wantExited && err != nil:
+					t.Fatalf("WaitForShutdownCompletion = %v, want nil: a different process serves", err)
+				case !tc.wantExited && !errors.Is(err, ErrShutdownIncomplete):
+					t.Fatalf("WaitForShutdownCompletion = %v, want ErrShutdownIncomplete: the responder may be the target", err)
+				}
+			})
+		}
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("wait took %s; a serving answer is exit and must end it at once", elapsed)
+}
+
+// TestWaitForShutdownCompletion_Draining_TargetServingInAckGraceWaitsForLock:
+// a pre-quiescing acker answers serving under its own PID through its ack
+// grace. The wait keeps going on that answer and is resolved by what does
+// prove exit — the lock's release.
+func TestWaitForShutdownCompletion_Draining_TargetServingInAckGraceWaitsForLock(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	lock, err := acquireHomeLock()
+	if err != nil {
+		t.Fatalf("acquireHomeLock: %v", err)
+	}
+	serveAsResponder(t)
+	var released atomic.Bool
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		released.Store(true)
+		lock.release()
+	}()
+
+	if err := WaitForShutdownCompletion(ShutdownPID{PID: os.Getpid()}); err != nil {
+		t.Fatalf("WaitForShutdownCompletion: %v", err)
+	}
+	if !released.Load() {
+		t.Fatalf("the wait read the target's own serving answer as exit before the lock was released")
 	}
 }
 
 // TestEnsureDaemon_Draining_StarterAnswersServingMidWait (#5007 addendum): a
 // new daemon holds the home lock from before it binds its socket or writes
 // daemon.pid, so in that window EnsureDaemon sees a held lock and no answer —
-// indistinguishable from a drainer — and waits. Once the starter binds and
-// answers serving, that answer proves the lock moved to a new holder: the wait
-// must end early and EnsureDaemon return nil without spawning. A lock-only wait
-// stalled until the drain deadline.
+// indistinguishable from a drainer — and waits. A drainer's socket never
+// re-opens, so a serving answer inside that wait can only be the new holder:
+// the state-probe poll must end early and EnsureDaemon return nil without
+// spawning (addendum 2 keeps this cell off the post-ack wait's proof). A
+// lock-only wait stalled until the drain deadline.
 func TestEnsureDaemon_Draining_StarterAnswersServingMidWait(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	lock, err := acquireHomeLock() // the starter's lock, held for its whole life

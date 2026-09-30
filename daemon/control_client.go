@@ -147,14 +147,10 @@ func ensureDaemonWithPolicyUntil(launch func() error, preferUnit bool, deadline 
 	case daemonDraining:
 		log.InfoLog.Printf("the daemon for this home (pid %d, 0 if unknown) is draining after shutdown; waiting for it to exit before launching", pid)
 		drainDeadline := drainWaitDeadline(deadline)
-		exited := waitForDaemonExit(pid, false, drainDeadline)
-		// Re-probe whichever way the wait ended. A held lock with no answer can
-		// be a new daemon between its lock and its bind, and its serving answer
-		// is what ended the wait: launching now would stop or duplicate it.
-		if again, _ := probeDaemonState(deadline); again == daemonServing {
-			return nil
-		}
-		if !exited {
+		switch waitOutDrain(deadline, drainDeadline) {
+		case daemonServing:
+			return nil // a new daemon came up and serves this home
+		case daemonDraining:
 			return fmt.Errorf("%w: the daemon for this home (pid %d, 0 if unknown) was still finishing durable work at %s and must not be killed to make room; retry shortly", ErrDaemonStillDraining, pid, drainDeadline.Format(time.RFC3339))
 		}
 	}
