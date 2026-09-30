@@ -777,4 +777,40 @@ func TestClassifyWatchStop_StartupUnknownOutranksPendingAccountSwap(t *testing.T
 		"a mid-swap session that went startup-unknown is reported as unknown, not held as working")
 }
 
+// A pending swap does not license an unrecognized liveness value to read as
+// `working`. A newer daemon may persist a Liveness this build has no constant for
+// alongside PendingAccountSwap; the gate above holds only the recognized in-motion
+// values, so the unknown value falls through to the unknown-liveness branch —
+// failure-closed, the same guarantee TestClassifyWatchStop_UnknownLivenessDoesNotUseTheLegacyFallback
+// makes for a non-swap row. Holding it as `working` would make fleet watch time
+// out without telling the driver to upgrade, regressing that fail-closed behaviour.
+func TestClassifyWatchStop_UnknownLivenessOutranksPendingAccountSwap(t *testing.T) {
+	pending := &session.AccountSwapData{
+		Manual:                  true,
+		ReplacementPanesStarted: true,
+		Mission:                 "continue under the new account",
+		MissionDeliveryStatus:   session.PromptCouldNotConfirm,
+	}
+	// A liveness value from a future daemon, with the swap marker a newer daemon
+	// can persist alongside it and no in-flight op to mask the stop.
+	data := withLiveness("s", session.Liveness(9999))
+	data.PendingAccountSwap = pending
+	data.InFlightOp = session.OpNone
+	reason, detail := classifyWatchStop(data)
+	require.Equal(t, watchStopUnknown, reason,
+		"a mid-swap row with an unreadable liveness reports unknown, not working")
+	require.Contains(t, detail, "upgrade af")
+
+	// The watcher emits the working -> unknown edge, not silence.
+	w := newFleetWatcher(false)
+	require.Empty(t, w.observe([]session.InstanceData{fleetRunning("s")}),
+		"the working baseline establishes no transition")
+	transitioned := fleetRunning("s")
+	transitioned.Liveness = session.Liveness(9999)
+	transitioned.PendingAccountSwap = pending
+	events := w.observe([]session.InstanceData{transitioned})
+	require.Equal(t, map[string]watchStopReason{"s": watchStopUnknown}, reasons(events),
+		"a mid-swap session carrying an unreadable liveness is reported as unknown, not held as working")
+}
+
 func mustReason(r watchStopReason, _ string) watchStopReason { return r }

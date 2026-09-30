@@ -117,10 +117,12 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// session.ClassifyActivity, which gates on PendingAccountSwap before the
 	// liveness axis for the same reason (#4027).
 	//
-	// The swap gate holds the slot as `working` only for the in-motion states a
-	// mid-swap record carries while its mission settles. Three stop states
-	// outrank it, because each is a verdict a driver must hear instead of
-	// polling until --timeout:
+	// The swap gate holds the slot as `working` only for the in-motion liveness
+	// values a mid-swap record carries while its mission settles — LiveRunning,
+	// and LiveReady (the latter because the manual delivery path can leave a
+	// mid-swap row at LiveReady with no operation in flight). Every other value
+	// is a verdict a driver must hear instead of polling until --timeout, so the
+	// gate positively names the in-motion set and lets the rest fall through:
 	//
 	//   - A terminal backing runtime (lost/dead/archived). The status loop
 	//     resumes normal probing once a swap leaves LiveLimitReached
@@ -139,12 +141,17 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	//     (TestHandoffAccountReadinessFailureBecomesInert); that row is inert
 	//     and operator-action-required, and holding it as `working` would mask
 	//     the `unknown` a driver needs to inspect and remove.
+	//   - An unrecognized liveness value a newer daemon persists alongside the
+	//     swap (e.g. session.Liveness(9999)). It is not an in-motion value this
+	//     build knows, so matching it here would return `working` and fleet
+	//     watch would time out without telling the driver to upgrade — the
+	//     fail-closed guarantee TestClassifyWatchStop_UnknownLivenessDoesNotUseTheLegacyFallback
+	//     makes for a non-swap row, inverted on the one path an automated
+	//     driver acts on. Leaving it out lets it fall through to the
+	//     unknown-liveness branch below.
 	if d.PendingAccountSwap != nil &&
-		d.Liveness != session.LiveLost &&
-		d.Liveness != session.LiveDead &&
-		d.Liveness != session.LiveArchived &&
-		d.Liveness != session.LiveLimitReached &&
-		!d.StartupStateUnknown {
+		!d.StartupStateUnknown &&
+		(d.Liveness == session.LiveRunning || d.Liveness == session.LiveReady) {
 		return watchWorking, ""
 	}
 	if d.StartupStateUnknown {
