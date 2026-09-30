@@ -217,8 +217,33 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// the active-resume view falls through to the InFlightOp axis, which holds
 	// OpRespawning as working — the same verdict the automatic active-resume
 	// row below gets.
+	//
+	// ReplacementPanesStarted is still not enough on its own. A manual swap that
+	// HAS started its replacement can reach the watch path with the OUTGOING
+	// account's stale LiveLimitReached still set: RespawnForAccountSwapWithLiveBoundary
+	// marks the replacement panes started, then resumeFromLimitLockedOutcome's
+	// restorePendingLiveness re-parks the limit under the resume fence before
+	// settleReplacementRuntime has checked or delivered to the incoming runtime
+	// (daemon/limit.go; session/liveness.go), and that re-park restores
+	// LiveLimitReached without touching limitAccount/limitAgent. The post-respawn
+	// snapshot therefore carries PendingAccountSwap.Manual, the outgoing
+	// identity's stale LiveLimitReached, OpRespawning (actively delivering), and
+	// ReplacementPanesStarted=true — every field this gate names — while the
+	// replacement is still executing, not parked. Reporting usage-limited there
+	// would let fleet watch return early on the outgoing account's stale wall.
+	// Gate the override on the limit's IDENTITY as well: ParkManualAccountSwapAtLimit
+	// is the only settle path that attributes the wall to the incoming identity,
+	// and it sets limitAccount/limitAgent to the current account/agent, so
+	// requiring LimitAccount == Account and LimitAgent == CurrentAgent proves the
+	// wall is the committed incoming identity's. The post-respawn active-resume
+	// row still carries the outgoing identity's limitAccount/limitAgent, so it no
+	// longer matches and falls through to the InFlightOp axis, which holds
+	// OpRespawning as working until the replacement delivers — the verdict a
+	// driver needs instead of an early return on the outgoing account's stale
+	// limit.
 	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached &&
 		d.PendingAccountSwap.ReplacementPanesStarted &&
+		d.LimitAccount == d.Account && d.LimitAgent == d.CurrentAgent &&
 		(d.InFlightOp == session.OpRespawning || d.InFlightOp == session.OpNone) {
 		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
 	}
