@@ -1153,4 +1153,138 @@ func TestClassifyWatchStop_ManualSwapPostRespawnStaleLimitStaysWorking(t *testin
 		"a manual swap parked at the incoming identity's limit reports usage-limited")
 }
 
+// A crash-recovered MANUAL swap whose replacement HAD started (the post-respawn
+// checkpoint landed) must stay `working`, not report `usage-limited`, when the
+// row still carries the OUTGOING account's stale limit. RespawnForAccountSwapWithLiveBoundary
+// sets ReplacementPanesStarted, then a daemon crash after the post-respawn
+// checkpoint (daemon/limit.go) strips OpRespawning on the way to disk, and
+// restorePendingLiveness re-parks the outgoing account's stale LiveLimitReached
+// via ReparkLimitUnderResumeFence (session/liveness.go), which restores the
+// liveness without touching limitAccount/limitAgent. The row therefore carries
+// PendingAccountSwap.Manual, the OUTGOING identity's stale LiveLimitReached,
+// OpNone, and ReplacementPanesStarted=true — every field the InFlightOp axis
+// does NOT gate on (OpNone), so without this gate it would fall through to the
+// liveness switch and report `usage-limited`, ending fleet watch early while
+// ResumeLimitedSessions still owes the replacement's mission delivery. The
+// limit is attributed to the OUTGOING identity (limitAccount/limitAgent) while
+// the committed incoming identity is the current account/agent, which
+// distinguishes this crash-recovery row from the genuine ParkManualAccountSwapAtLimit
+// park (the override above requires the incoming identity); the gate holds it
+// as `working` instead.
+func TestClassifyWatchStop_ManualSwapPostRespawnCrashStaysWorking(t *testing.T) {
+	// The replacement started, but a crash after the post-respawn checkpoint
+	// stripped OpRespawning: OpNone, ReplacementPanesStarted=true, and the
+	// outgoing identity's stale limit is still on the row.
+	crashed := withLiveness("s", session.LiveLimitReached)
+	crashed.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "personal",
+		Mission:                 "continue under the new account",
+		ReplacementPanesStarted: true,
+	}
+	crashed.InFlightOp = session.OpNone
+	crashed.Account = "personal"
+	crashed.CurrentAgent = "codex"
+	crashed.LimitAccount = "work"
+	crashed.LimitAgent = "aider"
+	reason, detail := classifyWatchStop(crashed)
+	require.Equal(t, watchWorking, reason,
+		"a crash-recovered manual swap mid-post-respawn delivery carrying the outgoing account's stale limit stays working, not parked at the incoming identity's limit")
+	require.Empty(t, detail,
+		"a working row carries no stop detail")
+
+	// The watcher holds the slot as working: neither the --include-current
+	// baseline nor an edge into the crash-recovered row emits a stop.
+	w := newFleetWatcher(true)
+	require.Empty(t, w.observe([]session.InstanceData{crashed}),
+		"a session crash-recovered mid-manual-swap must not be reported as a stop")
+
+	// Sanity: the same row with the limit attributed to the INCOMING identity
+	// (ParkManualAccountSwapAtLimit sets limitAccount/limitAgent to the current
+	// account/agent) reports usage-limited — the gate does not swallow the
+	// genuine parked row.
+	parked := withLiveness("s", session.LiveLimitReached)
+	parked.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "personal",
+		Mission:                 "continue under the new account",
+		ReplacementPanesStarted: true,
+		MissionDeliveryStatus:   session.PromptNotDelivered,
+	}
+	parked.InFlightOp = session.OpNone
+	parked.Account = "personal"
+	parked.CurrentAgent = "codex"
+	parked.LimitAccount = "personal"
+	parked.LimitAgent = "codex"
+	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(parked)),
+		"a manual swap parked at the incoming identity's limit still reports usage-limited")
+}
+
+// A crash-recovered MANUAL swap whose replacement had NOT started yet must stay
+// `working`, not report `usage-limited`. A manual handoff that begins at
+// LiveLimitReached durably commits PendingAccountSwap before its replacement
+// panes start (daemon/account_swap.go): commitNewAccountSwapIdentity commits
+// the incoming identity, and if the daemon crashes before
+// RespawnForAccountSwapWithLiveBoundary, storage strips OpRespawning on the
+// way to disk. The restored row carries PendingAccountSwap.Manual, the OUTGOING
+// identity's stale LiveLimitReached, OpNone, and ReplacementPanesStarted=false.
+// The parked-swap override above requires ReplacementPanesStarted (a genuine
+// ParkManualAccountSwapAtLimit park always has it set), and the automatic-only
+// crash-recovery gate above requires !Manual, so without this gate the row
+// falls through to the liveness switch and reports `usage-limited`, ending
+// fleet watch early when the scheduler in fact recognises the retained wall as
+// the outgoing identity's and resumes the pending swap immediately. The gate
+// holds it as `working` — the verdict a driver needs while the replacement
+// restarts.
+func TestClassifyWatchStop_ManualSwapPreRespawnCrashStaysWorking(t *testing.T) {
+	// The swap's identity checkpoint landed but the replacement never started:
+	// OpNone, ReplacementPanesStarted=false, and the outgoing identity's stale
+	// limit is still on the row.
+	crashed := withLiveness("s", session.LiveLimitReached)
+	crashed.PendingAccountSwap = &session.AccountSwapData{
+		Manual:  true,
+		From:    "work",
+		To:      "personal",
+		Mission: "continue under the new account",
+	}
+	crashed.InFlightOp = session.OpNone
+	crashed.Account = "personal"
+	crashed.CurrentAgent = "codex"
+	crashed.LimitAccount = "work"
+	crashed.LimitAgent = "aider"
+	reason, detail := classifyWatchStop(crashed)
+	require.Equal(t, watchWorking, reason,
+		"a crash-recovered manual swap whose replacement never started stays working, not parked at the incoming identity's limit")
+	require.Empty(t, detail,
+		"a working row carries no stop detail")
+
+	// The watcher holds the slot as working: neither the --include-current
+	// baseline nor an edge into the crash-recovered row emits a stop.
+	w := newFleetWatcher(true)
+	require.Empty(t, w.observe([]session.InstanceData{crashed}),
+		"a session crash-recovered mid-manual-swap must not be reported as a stop")
+
+	// Sanity: a manual swap parked at the incoming identity's limit
+	// (ReplacementPanesStarted, incoming identity) still reports usage-limited,
+	// so the gate does not swallow the genuine parked row.
+	parked := withLiveness("s", session.LiveLimitReached)
+	parked.PendingAccountSwap = &session.AccountSwapData{
+		Manual:                  true,
+		From:                    "work",
+		To:                      "personal",
+		Mission:                 "continue under the new account",
+		ReplacementPanesStarted: true,
+		MissionDeliveryStatus:   session.PromptNotDelivered,
+	}
+	parked.InFlightOp = session.OpNone
+	parked.Account = "personal"
+	parked.CurrentAgent = "codex"
+	parked.LimitAccount = "personal"
+	parked.LimitAgent = "codex"
+	require.Equal(t, watchStopUsageLimited, mustReason(classifyWatchStop(parked)),
+		"a manual swap parked at the incoming identity's limit still reports usage-limited")
+}
+
 func mustReason(r watchStopReason, _ string) watchStopReason { return r }

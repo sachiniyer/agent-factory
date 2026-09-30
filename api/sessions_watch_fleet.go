@@ -286,6 +286,48 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 		!d.PendingAccountSwap.ReplacementPanesStarted {
 		return watchWorking, ""
 	}
+	// A crash-recovered MANUAL swap at the original (outgoing) account's limit
+	// keeps PendingAccountSwap populated while its operation fence is gone, and
+	// ResumeLimitedSessions restarts the swap and continues the pending mission
+	// delivery. Reading such a row as `usage-limited` would make fleet watch
+	// return early instead of waiting for the delivery, so it is held as
+	// `working` the way the automatic crash-recovery gate above and the
+	// InFlightOp axis below do.
+	//
+	// ParkManualAccountSwapAtLimit is the only manual settle path that attributes
+	// the wall to the INCOMING identity: it sets limitAccount/limitAgent to the
+	// current account/agent (session/handoff_account.go) and runs only after
+	// RespawnForAccountSwapWithLiveBoundary marked ReplacementPanesStarted. So a
+	// manual row at LiveLimitReached with OpNone that does NOT match that profile
+	// is a crash-recovery view of an in-flight replacement, not a parked one:
+	//
+	//   - !ReplacementPanesStarted: the daemon crashed between the durable
+	//     PendingAccountSwap commit and RespawnForAccountSwapWithLiveBoundary
+	//     (daemon/account_swap.go), so storage stripped OpRespawning while the
+	//     replacement never started. The genuine park always carries
+	//     ReplacementPanesStarted.
+	//   - ReplacementPanesStarted with the OUTGOING identity's limitAccount/
+	//     limitAgent: the daemon crashed after the post-respawn checkpoint
+	//     (daemon/limit.go) stripped OpRespawning, and restorePendingLiveness
+	//     re-parked the outgoing account's stale wall via
+	//     ReparkLimitUnderResumeFence (session/liveness.go), which restores
+	//     LiveLimitReached without touching limitAccount/limitAgent — so the
+	//     row carries the outgoing limit while Account/CurrentAgent are the
+	//     committed incoming identity. The genuine park carries the incoming
+	//     identity (it sets limitAccount/limitAgent to the current account/agent).
+	//
+	// Both are snapshot-distinguishable from the genuine manual park, which the
+	// override above already reports as `usage-limited` (it requires
+	// ReplacementPanesStarted and the incoming identity), so this gate fires only
+	// on the complement. Restricted to OpNone because a manual swap with
+	// OpRespawning is the active-resume shape the InFlightOp axis below already
+	// holds as `working`.
+	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual &&
+		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone &&
+		(!d.PendingAccountSwap.ReplacementPanesStarted ||
+			d.LimitAccount != d.Account || d.LimitAgent != d.CurrentAgent) {
+		return watchWorking, ""
+	}
 	// ANY operation in flight means the session is in motion, including one this
 	// binary does not recognise. That last part is the point: a newer daemon can
 	// send an InFlightOp value this build has no name for, JSON decoding accepts it
