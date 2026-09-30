@@ -39,6 +39,21 @@ type operandTailMemo struct {
 	xargsEnvScans map[xargsEnvKey]bool
 	// xargsMarkers: where the first marker-carrying word from here sits.
 	xargsMarkers map[xargsMarkerKey]int
+	// xargsInput: can xargs input reach env through the chain from here, per
+	// input mode (#4978).
+	xargsInput map[xargsInputKey]bool
+	// xargsCommandFollows: could any word from here on be a program.
+	xargsCommandFollows map[*syntax.Word]bool
+	// xargsMarkerAnywhereMap: does any word from here on carry the marker,
+	// anywhere in the word.
+	xargsMarkerAnywhereMap map[xargsMarkerKey]bool
+	// xargsNested: a nested xargs's option-region scan from here, per state.
+	xargsNested map[xargsNestedKey]xargsNestedResult
+	// xargsMarkersFollowed: the distinct replace markers this walk has followed.
+	xargsMarkersFollowed map[string]struct{}
+	// xargsNestedAny: does any nested xargs from here take the marker in an
+	// env-reaching option.
+	xargsNestedAny map[xargsMarkerKey]bool
 }
 
 func newOperandTailMemo() operandTailMemo {
@@ -52,6 +67,13 @@ func newOperandTailMemo() operandTailMemo {
 		wrapperOptions:    map[wrapperOptionKey]unwrapResult{},
 		xargsEnvScans:     map[xargsEnvKey]bool{},
 		xargsMarkers:      map[xargsMarkerKey]int{},
+		xargsInput:        map[xargsInputKey]bool{},
+
+		xargsCommandFollows:    map[*syntax.Word]bool{},
+		xargsMarkerAnywhereMap: map[xargsMarkerKey]bool{},
+		xargsNested:            map[xargsNestedKey]xargsNestedResult{},
+		xargsMarkersFollowed:   map[string]struct{}{},
+		xargsNestedAny:         map[xargsMarkerKey]bool{},
 	}
 }
 
