@@ -530,8 +530,12 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	if !ok {
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
-		// words after it as that invocation's argv.
-		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
+		// words after it as that invocation's argv. envScan admits a
+		// substituted xargs marker after a literal env's command slot, but
+		// this env is only a hypothesis, so a later marker is refused here as
+		// a later "$x" is.
+		return 1, memo.xargsItemFollows(words[1:]) ||
+			envCallMutatesAccountEnvironment(words[1:], names, true, memo)
 	}
 	if !strings.HasPrefix(literal, "-") {
 		// A shell in the wrapper's tail gets the same verdict a bare

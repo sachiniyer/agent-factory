@@ -690,9 +690,21 @@ func unwrapXargs(words []*syntax.Word, names map[string]struct{}, memo operandTa
 	substituting := false
 	markerKnown := true
 	marker := "{}"
+	// substituting/markerKnown/marker keep the walk's long-standing reading,
+	// which the env operand scan below relies on. The real binaries differ,
+	// tracked separately so the xargs input checks follow them while every
+	// existing refusal stands (#4977). A bare -i/--replace means the marker {}.
+	// And GNU xargs 4.9 makes -I, -L/-l and -n mutually exclusive with the
+	// last one winning ("ignoring previous --replace value"), except -n1,
+	// while BSD xargs (macOS) keeps -I in force alongside them. So a later
+	// -L/-l/-n sets replaceCancelled, meaning input may be appended, and both
+	// readings are judged.
+	replaceCancelled := false
+	replaceMarker := "{}"
 options:
 	for len(words) > 0 {
-		state := xargsLoopState{substituting: substituting, markerKnown: markerKnown, marker: marker}
+		state := xargsLoopState{substituting: substituting, markerKnown: markerKnown, marker: marker,
+			replaceCancelled: replaceCancelled, replaceMarker: replaceMarker}
 		if cached, seen := run.visit(words, state); seen {
 			return run.done(cached.words, cached.unsafe)
 		}
@@ -721,14 +733,19 @@ options:
 				words = words[1:]
 			case "eof", "max-lines":
 				// Optional-argument long options take a value only via =.
+				if name == "max-lines" {
+					replaceCancelled = true
+				}
 				words = words[1:]
 			case "replace":
 				substituting = true
+				replaceCancelled, replaceMarker = false, "{}"
 				if attached {
-					marker = value
+					marker, replaceMarker = value, value
 				}
 				words = words[1:]
 			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
+				arg := value
 				if !attached {
 					if len(words) < 2 {
 						return run.done(nil, true)
@@ -738,7 +755,11 @@ options:
 					if wrapperOperandTailMutates(words[1:], names, memo) {
 						return run.done(nil, true)
 					}
+					arg, _ = literalShellWord(words[1])
 					words = words[1:]
+				}
+				if name == "max-args" && xargsCountCancelsReplace(arg) {
+					replaceCancelled = true
 				}
 				words = words[1:]
 			case "process-slot-var":
@@ -771,11 +792,15 @@ options:
 				case 'e', 'l':
 					// -e/-l take an optional attached argument; whatever
 					// remains in this word is the value.
+					if flags[idx] == 'l' {
+						replaceCancelled = true
+					}
 					idx = len(flags)
 				case 'i':
 					substituting = true
+					replaceCancelled, replaceMarker = false, "{}"
 					if idx+1 < len(flags) {
-						marker = flags[idx+1:]
+						marker, replaceMarker = flags[idx+1:], flags[idx+1:]
 					}
 					idx = len(flags)
 				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
@@ -793,12 +818,20 @@ options:
 						}
 						words = words[1:]
 					}
-					if flags[idx] == 'I' {
+					switch flags[idx] {
+					case 'I':
 						substituting = true
+						replaceCancelled, replaceMarker = false, arg
 						if argLiteral {
 							marker = arg
 						} else {
 							markerKnown = false
+						}
+					case 'L':
+						replaceCancelled = true
+					case 'n':
+						if xargsCountCancelsReplace(arg) {
+							replaceCancelled = true
 						}
 					}
 					idx = len(flags)
@@ -821,7 +854,12 @@ options:
 	if xargsEnvOperandsFed(words, state, names, memo) {
 		return run.done(nil, true)
 	}
-	return run.done(words, false)
+	if !substituting {
+		return run.done(xargsChild(words, false, "", names, memo))
+	}
+	replace := xargsLoopState{substituting: true, markerKnown: markerKnown, marker: marker,
+		replaceCancelled: replaceCancelled, replaceMarker: replaceMarker}
+	return run.done(xargsReplaceChild(words, replace, names, memo))
 }
 
 // isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or

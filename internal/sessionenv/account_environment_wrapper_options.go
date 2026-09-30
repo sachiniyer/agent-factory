@@ -68,6 +68,10 @@ type xargsLoopState struct {
 	substituting bool
 	markerKnown  bool
 	marker       string
+	// replaceCancelled and replaceMarker are GNU xargs's own reading of the
+	// replace options (unwrapXargs explains the difference).
+	replaceCancelled bool
+	replaceMarker    string
 }
 
 type xargsEnvKey struct {
@@ -170,6 +174,37 @@ func xargsWordCarriesMarker(word *syntax.Word, marker string) bool {
 	if !ok {
 		return true
 	}
-	namePart, _, _ := strings.Cut(lit, "=")
-	return strings.Contains(namePart, marker)
+	return xargsMarkerInName(lit, marker)
+}
+
+// xargsMarkerInName reports whether substituting the marker can change a
+// word's name-or-option text: its part before the first '='. A marker only in
+// an assignment's value feeds data. A marker that itself contains '=' is
+// replaced wherever it occurs — GNU xargs 4.9 turns `A=b` into `AXXb` under
+// `-I=` — so there any occurrence counts (#4977). --unset's value is a name
+// env removes, not data (#4978): `env --unset={}` fed CODEX_HOME drops the
+// account root.
+func xargsMarkerInName(literal, marker string) bool {
+	if strings.Contains(marker, "=") {
+		return strings.Contains(literal, marker)
+	}
+	namePart, value, _ := strings.Cut(literal, "=")
+	return strings.Contains(namePart, marker) ||
+		(namePart == "--unset" && strings.Contains(value, marker))
+}
+
+// xargsCountCancelsReplace reports whether an -n/--max-args value may cancel
+// an earlier -I, so that GNU xargs appends input. GNU 4.9 lets a later -n win
+// ("ignoring previous --replace value") except when its value is 1, which it
+// parses with leading whitespace, an optional '+', and leading zeros (` 1`,
+// `+1` and `01` all keep -I; ` 2` cancels it). Only a value provably equal to
+// 1 in that grammar keeps -I here. Any other spelling, including one xargs
+// rejects, counts as cancelling, which only adds the appended-input checks.
+func xargsCountCancelsReplace(value string) bool {
+	digits := strings.TrimLeft(value, " \t\n\v\f\r")
+	digits = strings.TrimPrefix(digits, "+")
+	if digits == "" || strings.Trim(digits, "0123456789") != "" {
+		return true
+	}
+	return strings.TrimLeft(digits, "0") != "1"
 }
