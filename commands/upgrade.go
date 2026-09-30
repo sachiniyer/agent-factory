@@ -346,15 +346,16 @@ func startDaemonHint() string {
 }
 
 // shutdownIncompleteHint is the #5007 spec's bound-expired wording, shared by
-// the upgrade report and the withheld-respawn error. It never promises the
-// daemon exits (a wedged one may not), and the manual verb is `kill -9`: a
-// draining daemon absorbs SIGTERM by design, so a plain kill cannot stop it.
+// the upgrade report and the withheld-respawn error. Its steps are ordered by
+// safety: wait and run af again first, since a draining daemon normally exits
+// on its own; escalate to `kill -9` only if it is still there after several
+// minutes, and say that the kill loses in-flight shutdown work. The verb is
+// `kill -9` because a draining daemon absorbs SIGTERM by design.
 func shutdownIncompleteHint(pid int) string {
-	manual := "look for a leftover `af --daemon` and `kill -9` it"
 	if pid > 0 {
-		manual = fmt.Sprintf("`ps -p %d` / `kill -9 %d`", pid, pid)
+		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait a moment and run af again. If ps -p %d still shows it after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
 	}
-	return "still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: " + manual + "; then run af again."
+	return "still finishing its shutdown — it normally exits on its own: wait a moment and run af again. If a leftover `af --daemon` still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost)."
 }
 
 // reportUpgradeRestart tells the user what the restart actually did.

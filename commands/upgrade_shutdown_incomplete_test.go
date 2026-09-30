@@ -83,13 +83,13 @@ func TestReportUpgradeRestartShutdownIncomplete(t *testing.T) {
 	}{
 		{
 			pid: 4242,
-			want: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: " +
-				"`ps -p 4242` / `kill -9 4242`" + "; then run af again.\n",
+			want: "The old daemon is still finishing its shutdown (pid 4242) — it normally exits on its own: wait a moment and run af again. " +
+				"If ps -p 4242 still shows it after several minutes, it may be wedged: kill -9 4242 (in-flight shutdown work may be lost).\n",
 		},
 		{
 			pid: 0,
-			want: "The old daemon is still finishing its shutdown — it normally exits on its own, but if it persists it may be wedged: " +
-				"look for a leftover `af --daemon` and `kill -9` it; then run af again.\n",
+			want: "The old daemon is still finishing its shutdown — it normally exits on its own: wait a moment and run af again. " +
+				"If a leftover `af --daemon` still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost).\n",
 		},
 	} {
 		t.Run(fmt.Sprintf("pid=%d", tc.pid), func(t *testing.T) {
