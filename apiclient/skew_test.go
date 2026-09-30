@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,101 @@ func TestEnvelopeError_NonSkew_StaysVerbatim(t *testing.T) {
 	var skew *VersionSkewError
 	if errors.As(err, &skew) {
 		t.Fatal("an ordinary daemon error must not be misread as a version skew")
+	}
+}
+
+// TestRebindProject_UnverifiedReboundStaysUnconfirmed pins the provenance rule
+// the web client already applies (web/src/api.ts isDaemonRejection): a remote
+// client behind an intermediary must not read a 502/504 — or an envelope
+// missing daemon_rejected — as the daemon's definitive project_rebound refusal,
+// because the forwarded mutation may already have reached the daemon. An
+// unverified outcome code is an UnconfirmedHTTPResponseError, so the outcome
+// classifies as unknown rather than "nothing was written" (#4888 review).
+func TestRebindProject_UnverifiedReboundStaysUnconfirmed(t *testing.T) {
+	reboundEnv := func(marked bool) apiproto.Envelope {
+		env := apiproto.FailureWithCode("project prj_A was rebound elsewhere", apiproto.ErrorCodeProjectRebound)
+		env.Error.DaemonRejected = marked
+		return env
+	}
+	cases := []struct {
+		name   string
+		status int
+		env    apiproto.Envelope
+		// wantRebound asserts the definitive classification; everything else must
+		// be an unconfirmed, outcome-unknown answer.
+		wantRebound bool
+	}{
+		{"marked 409 is the daemon's refusal", http.StatusConflict, reboundEnv(true), true},
+		{"unmarked 409 does not establish provenance", http.StatusConflict, reboundEnv(false), false},
+		{"marked 502 is the intermediary's answer", http.StatusBadGateway, reboundEnv(true), false},
+		{"marked 504 is the intermediary's answer", http.StatusGatewayTimeout, reboundEnv(true), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/RebindProject", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = apiproto.WriteEnvelope(w, tc.env)
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			c, err := NewRemote(srv.URL, "tok")
+			if err != nil {
+				t.Fatalf("NewRemote: %v", err)
+			}
+
+			_, err = c.RebindProject("prj_A", "/old", "/new")
+			if err == nil {
+				t.Fatal("a refusal envelope must produce an error")
+			}
+			if got := IsProjectRebound(err); got != tc.wantRebound {
+				t.Fatalf("IsProjectRebound = %v, want %v (err %T: %v)", got, tc.wantRebound, err, err)
+			}
+			if tc.wantRebound {
+				if IsMutationOutcomeUncertain(err) {
+					t.Fatal("a verified daemon refusal is definitive, not uncertain")
+				}
+				return
+			}
+			var unconfirmed *UnconfirmedHTTPResponseError
+			if !errors.As(err, &unconfirmed) {
+				t.Fatalf("an unverified rebound must be an UnconfirmedHTTPResponseError, got %T: %v", err, err)
+			}
+			if !IsMutationOutcomeUncertain(err) {
+				t.Fatal("an unverified rebound is an unknown outcome: the request may have reached the daemon")
+			}
+		})
+	}
+}
+
+// TestRebound_CommittedOnGatewayStatusStaysUnconfirmed is the same provenance
+// check on the sibling code: a 502/504 carrying mutation_committed is an
+// intermediary's answer, so the mutation must NOT classify as committed.
+func TestRebound_CommittedOnGatewayStatusStaysUnconfirmed(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/RebindProject", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = apiproto.WriteEnvelope(w, apiproto.FailureWithCode("upstream lost", apiproto.ErrorCodeMutationCommitted))
+		})
+		srv := httptest.NewServer(mux)
+		c, err := NewRemote(srv.URL, "tok")
+		if err != nil {
+			t.Fatalf("NewRemote: %v", err)
+		}
+		_, err = c.RebindProject("prj_A", "/old", "/new")
+		srv.Close()
+		if err == nil {
+			t.Fatalf("status %d: a failure envelope must produce an error", status)
+		}
+		if IsMutationCommitted(err) {
+			t.Fatalf("status %d: an intermediary's committed code must not classify as committed", status)
+		}
+		if !IsMutationOutcomeUncertain(err) {
+			t.Fatalf("status %d: an unverified committed code is an unknown outcome, got %T: %v", status, err, err)
+		}
 	}
 }
 
