@@ -354,18 +354,22 @@ func boundedPingDeadline(deadline time.Time) time.Time {
 // exit, so it must never override a held lock (stopDaemonUntil would SIGKILL
 // that drainer). Only with the lock takeable or absent does the pidfile speak:
 // a live PID it names is a drainer predating the early unlink — or the lock.
-func probeDaemonState(deadline time.Time) (daemonState, int) {
-	state, pid := pingState(pingDaemonResponseUntil(boundedPingDeadline(deadline)))
+// The third return reports whether Ping produced a response at all, so a
+// consumer can tell an answering drainer (leave it be) from the silent cell
+// that may be a serving daemon made unreachable (#5007 addendum 5).
+func probeDaemonState(deadline time.Time) (daemonState, int, bool) {
+	resp, err := pingDaemonResponseUntil(boundedPingDeadline(deadline))
+	state, pid := pingState(resp, err)
 	if state != daemonUnknown {
-		return state, pid
+		return state, pid, true
 	}
 	if lock := homeLockState(); lock != daemonExited {
-		return lock, 0
+		return lock, 0, false
 	}
 	if pid := livePIDFilePID(); pid > 0 {
-		return daemonDraining, pid
+		return daemonDraining, pid, false
 	}
-	return daemonExited, 0
+	return daemonExited, 0, false
 }
 
 // homeLockState is probeDaemonState's instant read of this home's lock. An
@@ -418,7 +422,7 @@ func homeLockReleased(dir string) daemonState {
 // exit, which the unit's Restart=on-failure retries. Unlike EnsureDaemon this
 // never stops anything, so proceeding is safe here.
 func daemonAlreadyServing() bool {
-	state, pid := probeDaemonState(time.Time{})
+	state, pid, _ := probeDaemonState(time.Time{})
 	switch state {
 	case daemonServing:
 		return true
@@ -443,7 +447,7 @@ func daemonAlreadyServing() bool {
 // exit (see exitState), because there the target itself may still answer.
 func waitOutDrain(probeDeadline, until time.Time) daemonState {
 	for {
-		if state, _ := probeDaemonState(probeDeadline); state == daemonServing || state == daemonExited {
+		if state, _, _ := probeDaemonState(probeDeadline); state == daemonServing || state == daemonExited {
 			return state
 		}
 		if !time.Now().Before(until) {

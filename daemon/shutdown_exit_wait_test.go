@@ -815,19 +815,6 @@ func livePID(t *testing.T) int {
 	return cmd.Process.Pid
 }
 
-// writePIDFileFor drops a daemon.pid naming pid into the test home, as a
-// daemon predating drainDaemon's early unlink leaves behind mid-drain (#5007).
-func writePIDFileFor(t *testing.T, pid int) {
-	t.Helper()
-	path, err := daemonPIDFilePath()
-	if err != nil {
-		t.Fatalf("daemonPIDFilePath: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(strconv.Itoa(pid)), 0600); err != nil {
-		t.Fatalf("write daemon.pid: %v", err)
-	}
-}
-
 // TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverKilled (#5007 addendum 4):
 // a daemon predating the early unlink keeps daemon.pid through its drain, so
 // mid-drain the socket is dead but the pidfile still names a live process AND
@@ -848,8 +835,8 @@ func TestEnsureDaemon_Draining_PIDFileAndHeldLockNeverKilled(t *testing.T) {
 		t.Fatalf("acquireHomeLock: %v", err)
 	}
 	t.Cleanup(lock.release)
-	pid, _ := startFakeAFDaemon(t, home, "trap '' TERM; sleep 60")
-	writePIDFileFor(t, pid)
+	pid, _ := startFakeAFDaemon(t, home, "trap '' TERM; while :; do sleep 60; done")
+	writeTestPIDFile(t, pid)
 
 	launches := 0
 	launch := func() error {
@@ -878,8 +865,8 @@ func TestEnsureDaemon_Draining_LivePIDFileWithoutLock(t *testing.T) {
 	}
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
-	pid, _ := startFakeAFDaemon(t, home, "trap '' TERM; sleep 60")
-	writePIDFileFor(t, pid)
+	pid, _ := startFakeAFDaemon(t, home, "trap '' TERM; while :; do sleep 60; done")
+	writeTestPIDFile(t, pid)
 
 	launches := 0
 	launch := func() error {
@@ -909,7 +896,7 @@ func TestWaitForShutdownCompletion_Draining_LivePIDFileKeepsWaiting(t *testing.T
 		t.Fatalf("acquireHomeLock: %v", err)
 	}
 	lock.release()
-	writePIDFileFor(t, livePID(t))
+	writeTestPIDFile(t, livePID(t))
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
