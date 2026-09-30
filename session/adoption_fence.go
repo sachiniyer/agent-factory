@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -110,6 +111,28 @@ import (
 // being silently swallowed by a session that is about to stop existing.
 var ErrAdoptionFenced = errors.New("session is being torn down; input refused")
 
+// ErrDischargeRefusedDelivery marks NoteAdoptionDelivery's OTHER refusal: the
+// delivery cleared the in-memory owedOnComplete marker but the durable
+// discharge did not land, so the caller's PTY write is refused before any byte
+// is sent (#4738). Unlike an arbitrary send error — which cannot distinguish
+// "never sent" from "sent, reply lost" — this refusal provably precedes the
+// write, so the daemon's task-delivery accounting can classify it as
+// not-attempted and refund the rate slot the attempt reserved (#4984). The
+// sentinel itself survives only in-process; daemon.SendPromptWithStatus
+// re-tags the refusal with the wire-visible marker for the control-socket hop.
+var ErrDischargeRefusedDelivery = errors.New("the adoption discharge did not land, so the delivery is refused before any byte reaches the PTY")
+
+// dischargeRefusal tags a failed durable adoption discharge with
+// ErrDischargeRefusedDelivery — on the caller's own notify failure and on the
+// shared in-flight discharge future alike, since both refuse the delivery
+// before the write. nil in, nil out.
+func dischargeRefusal(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrDischargeRefusedDelivery, err)
+}
+
 // adoptionFence is the per-instance state described above. Guarded by i.mu; it
 // is a plain value on Instance so it cannot be lost across a runtime swap the
 // way the agent-server cache is.
@@ -173,7 +196,10 @@ type adoptionDischarge struct {
 // half-discharged, and a re-attempted delivery re-runs the durable clear. The
 // caller — SendPromptWithStatus/InputTab/Input — must NOT write to the PTY
 // when this returns an error; the PTY write on top of an unset durable marker
-// is exactly the work-losing window.
+// is exactly the work-losing window. The refusal carries
+// ErrDischargeRefusedDelivery, which is what lets the daemon's task-delivery
+// accounting tell this provably-pre-write refusal apart from an ambiguous
+// send error and refund the attempt's rate slot (#4984).
 //
 // Two callers racing into a marked session serialize through that durable
 // discharge via i.discharge: the first to take i.mu clears the marker in
@@ -213,7 +239,7 @@ func (i *Instance) NoteAdoptionDelivery() error {
 		i.touchLocked()
 		i.mu.Unlock()
 		<-wait.done
-		return wait.err
+		return dischargeRefusal(wait.err)
 	}
 	var notify func(*Instance) error
 	var marker *PendingOnCompleteData
@@ -257,7 +283,7 @@ func (i *Instance) NoteAdoptionDelivery() error {
 			}
 			i.touchLocked()
 			i.mu.Unlock()
-			return err
+			return dischargeRefusal(err)
 		}
 		// The durable discharge landed. Release any concurrent caller parked
 		// on the future with nil so its PTY write may proceed: the marker is
