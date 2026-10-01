@@ -49,6 +49,19 @@ func TestDetectAgentFromCommand(t *testing.T) {
 		{"opencode ionice wrapper", "ionice -c 3 opencode", ProgramOpencode},
 		{"opencode env wrapper", "env FOO=1 opencode --continue", ProgramOpencode},
 
+		// A bare `env -` (or `env --`) ends option parsing, so the next token
+		// — even an option-looking one — is env's command. GNU env execs that
+		// token and passes the words after it only as its arguments, so an
+		// agent-shaped argument is not the running agent (#5036/#5052). The
+		// command itself still counts when it names a supported agent.
+		{"dash command is the agent", "env - claude", ProgramClaude},
+		{"dash option-looking command not its arg", "env - -u claude", ""},
+		{"dash chdir-looking command not its arg", "env - -C /evilpath claude", ""},
+		{"dash terminator before ignore flag not agent", "env - -i claude", ""},
+		{"double dash option-looking command not its arg", "env -- -u claude", ""},
+		{"double dash runs the agent command", "env -- claude", ProgramClaude},
+		{"dash agent keeps its own flags", "env - claude --continue", ProgramClaude},
+
 		// devin: bare, absolute path, the af-injected trust flag, and a wrapper.
 		// The default install symlinks ~/.local/bin/devin at a versioned path, so
 		// the absolute-path shape is common for it.

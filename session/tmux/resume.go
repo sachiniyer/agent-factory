@@ -466,10 +466,59 @@ func claudeConversationSelectorArgs(args []string) []string {
 // prefixes like `ionice -c 3 claude` still match (#742), and a token counts
 // only when filepath.Base equals a SupportedPrograms entry verbatim — a path
 // like /opt/claude-wrapper/run never matches on substring.
+//
+// One shape is excluded from that scan: a GNU env wrapper whose option
+// parsing was terminated by a bare `-` or `--` names an option-looking token
+// as its command (`env - -u claude`, `env -- -C /x claude`). GNU env then
+// execs that option-looking token and passes everything after it only as its
+// argument, so a later agent-shaped word is not the running agent. Bare `-`
+// ending option parsing is the #5036 fix; without this guard the scan reaches
+// the argument and agent-specific flag/readiness behavior attaches to a
+// non-agent command, the regression Codex flagged on #5052.
 func DetectAgentFromCommand(command string) string {
 	tokens, _ := splitShellTokens(command)
-	_, agent := findAgentToken(tokens)
+	idx, agent := findAgentToken(tokens)
+	if agent == "" {
+		return ""
+	}
+	if agentTokenIsEnvOptionCommandArg(tokens, idx) {
+		return ""
+	}
 	return agent
+}
+
+// agentTokenIsEnvOptionCommandArg reports whether the agent token at agentIdx
+// is an argument to a GNU env command whose option parsing was terminated by a
+// bare `-` or `--` — equivalently, the command env execs is itself
+// option-looking. In that shape GNU env runs the option-looking token and the
+// agent-shaped word after it is only its argument, so the detected agent token
+// is not the running agent. The walk mirrors findAgentToken's: it follows
+// nested env wrappers, and only an env command that strictly precedes
+// agentIdx (so the agent is past it, not the command itself) and is
+// option-looking qualifies. Non-env wrapper prefixes such as `ionice` are not
+// env wrappers, so they are unaffected and still scan per #742.
+func agentTokenIsEnvOptionCommandArg(tokens []string, agentIdx int) bool {
+	for i := 0; i < agentIdx && i < len(tokens); {
+		tok := tokens[i]
+		if _, _, assignment := shellAssignment(tok); assignment {
+			i++
+			continue
+		}
+		if strings.EqualFold(baseCommand(tok), "env") {
+			invocation, err := envcommand.Parse(tokens[i+1:], envcommand.Policy{AllowAssignments: true})
+			if err != nil || invocation.CommandIndex < 0 {
+				return false
+			}
+			commandIdx := i + 1 + invocation.CommandIndex
+			if commandIdx < agentIdx && strings.HasPrefix(tokens[commandIdx], "-") {
+				return true
+			}
+			i = commandIdx
+			continue
+		}
+		i++
+	}
+	return false
 }
 
 // DetectAgentExecutable returns the canonical agent name that the executable
