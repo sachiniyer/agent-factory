@@ -8589,6 +8589,7 @@ function ctrlModifiedEmission(text) {
   }
   if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
   if (code === 56) return "\x7F";
+  if (text === "/") return "";
   return void 0;
 }
 function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {

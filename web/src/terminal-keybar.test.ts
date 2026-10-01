@@ -28,6 +28,46 @@ test("sticky Ctrl encodes every supported soft-keyboard digit chord", () => {
   }
 });
 
+// Xterm's legacy Ctrl fold for one produced character — transcribed from
+// evaluateKeyboardEvent's default branch in @xterm/xterm
+// (node_modules/@xterm/xterm/src/common/input/Keyboard.ts): Ctrl alone maps
+// keyCodes 65-90 (a letter, either case) to 0x01-0x1a, 32 (Space) to NUL,
+// 51-55 ("3"-"7") to 0x1b-0x1f, 56 ("8") to DEL, and 219-221 ("[", "\", "]")
+// to ESC/FS/GS; produced keys "_" (Ctrl+Shift+Minus), "@" (Ctrl+Shift+2) and
+// "^" (Ctrl+Shift+6) fold to US/NUL/RS, and "/" folds to US — the slash alias
+// is upstream's fix for xtermjs/xterm.js#5457, landed after our pinned 5.5.0.
+// A key xterm gives no Ctrl encoding keeps its own character.
+const XTERM_CTRL_KEY_BYTES: Record<string, string> = {
+  " ": "\x00", "@": "\x00",
+  "3": "\x1b", "4": "\x1c", "5": "\x1d", "6": "\x1e",
+  "/": "\x1f", "7": "\x1f", "_": "\x1f",
+  "8": "\x7f",
+  "[": "\x1b", "\\": "\x1c", "]": "\x1d", "^": "\x1e",
+};
+
+test("sticky Ctrl agrees with xterm's legacy Ctrl encoding for every printable ASCII key", () => {
+  for (let code = 0x20; code <= 0x7e; code++) {
+    const key = String.fromCharCode(code);
+    const folded: string | undefined = /^[A-Za-z]$/.test(key)
+      ? String.fromCharCode(key.toUpperCase().charCodeAt(0) & 31)
+      : XTERM_CTRL_KEY_BYTES[key];
+    const expected = folded ?? key;
+    assert.equal(keyBytes(key, true), expected, `keyBytes ${JSON.stringify(key)}`);
+
+    const soft = new StickyModifiers();
+    soft.tap("Ctrl", 0);
+    assert.equal(soft.input(key, "user"), expected, `soft ${JSON.stringify(key)}`);
+    assert.equal(soft.state("Ctrl"), "off");
+
+    const merged = new StickyModifiers();
+    merged.tap("Ctrl", 0);
+    assert.equal(merged.input(key, "user", {
+      key, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+    }), expected, `merged ${JSON.stringify(key)}`);
+    assert.equal(merged.state("Ctrl"), "off");
+  }
+});
+
 test("one shot consumes only the next non-composed character", () => {
   const state = new StickyModifiers();
   state.tap("Ctrl", 0);
