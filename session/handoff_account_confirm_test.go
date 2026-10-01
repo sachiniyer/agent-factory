@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -31,32 +32,47 @@ func confirmableManualSwap(status PromptDeliveryStatus) *Instance {
 // daemon restarted.
 func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 	for _, status := range []PromptDeliveryStatus{PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered} {
-		t.Run(string(status), func(t *testing.T) {
-			inst := confirmableManualSwap(status)
-			require.Error(t, inst.TabSpawnBlocked(), "fixture: the pending swap blocks tab creation")
-			require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
+		for _, lv := range []struct {
+			name string
+			lv   Liveness
+		}{
+			{"from running", LiveRunning},
+			{"from ready", LiveReady},
+		} {
+			t.Run(string(status)+lv.name, func(t *testing.T) {
+				inst := confirmableManualSwap(status)
+				inst.liveness = lv.lv
+				require.Error(t, inst.TabSpawnBlocked(), "fixture: the pending swap blocks tab creation")
+				require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
 
-			require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+				require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
 
-			swapPending, _ := inst.PendingManualAccountSwap()
-			require.False(t, swapPending, "the confirm retires the pending swap")
-			require.Nil(t, inst.accountSwapLaunch, "the confirm retires the admitted launch plan with it")
-			require.NoError(t, inst.TabSpawnBlocked(),
-				"a confirmed swap must not keep refusing new tabs")
-			require.Equal(t, LiveRunning, inst.GetLiveness(), "confirm does not move liveness")
-		})
+				swapPending, _ := inst.PendingManualAccountSwap()
+				require.False(t, swapPending, "the confirm retires the pending swap")
+				require.Nil(t, inst.accountSwapLaunch, "the confirm retires the admitted launch plan with it")
+				require.NoError(t, inst.TabSpawnBlocked(),
+					"a confirmed swap must not keep refusing new tabs")
+				require.Equal(t, LiveRunning, inst.GetLiveness(),
+					"a confirmed delivery is a working session (#5023): the agent already has its mission, "+
+						"so the row reads running until the monitor's own idle observation")
+			})
+		}
 	}
 }
 
 // The startup-unknown and orphaned-fence shapes are the ones this verb exists
-// for: the daemon has probed the pane, so the confirm lifts both and keeps the
-// row's liveness.
+// for: the daemon has probed the pane, so the confirm lifts both. A row parked
+// at its usage-limit wall keeps LiveLimitReached (#5023): it is already
+// not-idle to fleet watch, and ResumeLimitedSessions only owns rows still
+// carrying it — flattening it to LiveRunning would strand the session while an
+// attached client's paused poll never re-detects the wall.
 func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	inst := confirmableManualSwap(PromptSentUnverified)
 	inst.startupStateUnknown = true
 	inst.started = false
 	inst.inFlightOp = OpRespawning
 	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
 	require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
 
 	require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
@@ -64,7 +80,11 @@ func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	require.False(t, inst.StartupStateUnknown(), "the probe-backed confirm resolves the unknown flag")
 	require.True(t, inst.Started(), "and restores the started bit the flag lowered")
 	require.Equal(t, OpNone, inst.GetInFlightOp(), "the orphaned respawn fence is dropped")
-	require.Equal(t, LiveLimitReached, inst.GetLiveness(), "dropping the fence keeps liveness")
+	require.Equal(t, LiveLimitReached, inst.GetLiveness(),
+		"a confirmed delivery on a limit-blocked row keeps the wall — ResumeLimitedSessions owns it")
+	if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
+		t.Fatal("the limit reset time must survive the confirm or the resume pass loses its schedule")
+	}
 	require.Nil(t, inst.accountSwapLaunch)
 	require.NoError(t, inst.TabSpawnBlocked())
 }
