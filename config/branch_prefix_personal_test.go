@@ -25,6 +25,8 @@ func TestSetProjectConfigValueBranchPrefixWarnsButWrites(t *testing.T) {
 	require.NotNil(t, res)
 	require.Contains(t, res.Warnings,
 		"branch_prefix is not supported per project yet; the global branch_prefix (global/) applies to all projects. See #4539.")
+	assert.False(t, res.RequiresRestart,
+		"no restart can apply a stored-but-ignored value — the write must not promise one")
 
 	cfg, err := LoadProjectConfig(project.ID)
 	require.NoError(t, err)

@@ -31,13 +31,14 @@ func projectBranchPrefixWarning() string {
 }
 
 // globalBranchPrefixValue reports the effective global branch_prefix the
-// warning names: the loaded global value, or the built-in default when the
-// global file cannot be read — the warning must still identify a value rather
-// than fail with the file.
+// warning names, resolved exactly the way `af config get` resolves it — the
+// global file over the built-in default. Resolution (rather than a raw file
+// read) keeps the named value consistent with what inspection reports; a
+// resolution failure still falls back to the built-in rather than failing
+// with the file.
 func globalBranchPrefixValue() string {
-	loaded, err := LoadConfigReadOnly()
-	if err == nil && loaded.Config != nil {
-		return loaded.Config.BranchPrefix
+	if resolved, err := ResolveGlobalConfig(); err == nil && resolved != nil {
+		return resolved.BranchPrefix
 	}
 	return DefaultConfig().BranchPrefix
 }
