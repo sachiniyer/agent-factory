@@ -44,6 +44,7 @@ import {
   sameLayout,
   sameTabs,
   setRatio,
+  siblingSubtreeOf,
   singleLeaf,
   type SplitNode,
   splitLeaf,
@@ -722,14 +723,30 @@ export class SplitView {
     if (!this.tree) {
       return;
     }
+    // The sibling subtree that closeLeaf will substitute into the freed space — read
+    // on the tree BEFORE the close, since closeLeaf preserves the sibling's reference
+    // as it collapses the parent. null only for a single-leaf tree, which closeLeaf
+    // rejects as the un-closable last pane. Computed here so the focus re-point below
+    // names the pane that GREW into the closed pane's region rather than the leftmost
+    // leaf of the WHOLE tree — which, for a nested close inside a non-leftmost branch,
+    // lives in an unrelated root branch and would intercept the keystrokes.
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return; // the last pane can't be closed
     }
     this.tree = next;
-    // Re-point focus if the closed pane held it.
+    // Re-point focus if the closed pane held it: to the first leaf of the sibling
+    // subtree that expanded to fill the closed pane's space. Falls back to the new
+    // tree's first leaf only when no sibling exists (a single-leaf tree, which
+    // closeLeaf already rejected above, so the fallback is defensive). The previous
+    // leaves(this.tree)[0] formula picked the leftmost leaf of the whole tree; for a
+    // nested close in a non-leftmost branch that is an unrelated pane, and
+    // reconcile()'s validity guard (it only re-routes an INVALID focusedId) never
+    // corrected it — so refocus() handed the keyboard to the wrong terminal.
     if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();

@@ -12702,6 +12702,21 @@ function closeLeaf(root2, leafId) {
   };
   return remove(root2);
 }
+function siblingSubtreeOf(root2, leafId) {
+  if (root2.kind === "leaf") {
+    return null;
+  }
+  if (root2.a.kind === "leaf" && root2.a.id === leafId) {
+    return root2.b;
+  }
+  if (root2.b.kind === "leaf" && root2.b.id === leafId) {
+    return root2.a;
+  }
+  if (findLeaf(root2.a, leafId)) {
+    return siblingSubtreeOf(root2.a, leafId);
+  }
+  return siblingSubtreeOf(root2.b, leafId);
+}
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
   let cur = root2;
@@ -13393,13 +13408,15 @@ var SplitView = class {
     if (!this.tree) {
       return;
     }
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return;
     }
     this.tree = next;
     if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
