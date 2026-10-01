@@ -366,3 +366,22 @@ func TestCopySymlinkXattrs_DestinationOnlyTooLongRouteIsNonFatal(t *testing.T) {
 	require.ErrorIs(t, err, errXattrPathTooLong,
 		"copySymlinkXattrs must surface errXattrPathTooLong so the move continues rather than aborting")
 }
+
+// TestProbeDestinationRouteTooLong pins the limit the unsupported-source and
+// empty-names branches of copySymlinkSourceXattrs rely on: a route longer than
+// PATH_MAX makes the L* family fail with ENAMETOOLONG before the kernel resolves
+// it, so the probe surfaces errXattrPathTooLong and the caller skips the
+// path-based prune and route recheck that would otherwise Lstat the too-long
+// destination and abort a cross-device move the descriptor-anchored F* paths copy
+// fine. The unsupported-source branch (Llistxattr returns EOPNOTSUPP/ENOTSUP on a
+// no-xattr filesystem) is not reachable on the CI runners' filesystems (a tmpfs or
+// ext4 symlink with no attributes lists as empty, not unsupported), so the branch's
+// shared probe is pinned directly here the same way the empty-names branch's
+// end-to-end test pins its inlined call. The path need not exist: the kernel rejects
+// a route longer than PATH_MAX before resolving it.
+func TestProbeDestinationRouteTooLong(t *testing.T) {
+	tooLong := strings.Repeat("a", unix.PathMax+1)
+	err := probeDestinationRouteTooLong(tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"a route longer than PATH_MAX must be reported as errXattrPathTooLong so the caller skips the path-based prune and route recheck")
+}

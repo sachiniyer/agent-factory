@@ -282,7 +282,15 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 	names, err := listSymlinkXattrNames(sourcePath)
 	if err != nil {
 		if isXattrUnsupported(err) {
-			return nil // the SOURCE filesystem has no xattrs; nothing to carry
+			// The source filesystem has no xattr support, so nothing is carried
+			// from the source; but the destination route can still exceed PATH_MAX
+			// when the roots have different lengths, and no L* call ran on it here
+			// to surface that. copySymlinkEntry's path-based prune and route recheck
+			// would Lstat that too-long destination and abort a cross-device move the
+			// descriptor-anchored F* paths copy fine — the same abort the empty-names
+			// path below surfaces errXattrPathTooLong for. Probe the destination route
+			// here too, since this branch returns before the probe below runs.
+			return probeDestinationRouteTooLong(destinationPath)
 		}
 		if errors.Is(err, unix.ENAMETOOLONG) {
 			// The L* family has no *at form, so the link's path is the full textual
@@ -311,8 +319,12 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 	// lengths, so probe the destination with the same L* family here to surface
 	// the sentinel, matching the source-side and holdsNone paths.
 	if len(names) == 0 {
-		if _, err := unix.Llistxattr(destinationPath, nil); err != nil && errors.Is(err, unix.ENAMETOOLONG) {
-			return errXattrPathTooLong
+		// No L* call below will touch the destination, so a too-long destination
+		// route is not surfaced by an Lsetxattr the way a source with attributes
+		// would surface it; probe it here so copySymlinkEntry skips the path-based
+		// prune and route recheck the same way the unsupported-source branch does.
+		if err := probeDestinationRouteTooLong(destinationPath); err != nil {
+			return err
 		}
 	}
 	for _, name := range names {
@@ -371,6 +383,26 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 				)
 			}
 		}
+	}
+	return nil
+}
+
+// probeDestinationRouteTooLong reports whether the L* xattr family cannot address
+// destinationPath because the route exceeds PATH_MAX. The L* family has no *at form,
+// so the link's path is the full textual route; a tree the copier reaches
+// component-by-component through directory descriptors can carry a link whose route
+// exceeds PATH_MAX even when the walker's descriptor-anchored F* xattr paths copy it
+// fine. When the source has nothing to copy (an unsupported source filesystem, or a
+// source link with no attributes) the copy loop makes no L* call on the destination,
+// so a too-long destination route is not surfaced by an Lsetxattr the way a source
+// with attributes would surface it. copySymlinkEntry's path-based prune and route
+// recheck would then Lstat that too-long destination and abort the cross-device move
+// — the exact abort errXattrPathTooLong exists to prevent. This probe surfaces the
+// sentinel so the caller can skip those path-based operations. The path need not
+// exist: the kernel rejects a route longer than PATH_MAX before resolving it.
+func probeDestinationRouteTooLong(destinationPath string) error {
+	if _, err := unix.Llistxattr(destinationPath, nil); err != nil && errors.Is(err, unix.ENAMETOOLONG) {
+		return errXattrPathTooLong
 	}
 	return nil
 }
