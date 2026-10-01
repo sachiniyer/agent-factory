@@ -69,8 +69,17 @@ options:
 			case "replace":
 				substituting = true
 				replaceCancelled, replaceMarker = false, "{}"
-				if attached {
+				// An explicitly empty --replace= marker is treated like a bare
+				// --replace and defaults to {}: an empty marker would make every
+				// strings.Contains/HasPrefix scan in the xargs-input walk report
+				// every word as carrying substituted input (#4980). The default
+				// also resets any prior replacement state, so a preceding -I
+				// marker (e.g. -I@) or dynamic -I "$M" does not leak through the
+				// newly defaulted {}.
+				if attached && value != "" {
 					marker, replaceMarker = value, value
+				} else if attached {
+					marker, markerKnown = "{}", true
 				}
 				words = words[1:]
 			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
@@ -150,11 +159,26 @@ options:
 					switch flags[idx] {
 					case 'I':
 						substituting = true
-						replaceCancelled, replaceMarker = false, arg
+						replaceCancelled, replaceMarker = false, "{}"
 						if argLiteral {
-							marker = arg
+							if arg != "" {
+								marker, replaceMarker = arg, arg
+							} else {
+								// An explicitly empty -I "" marker is treated
+								// like a bare -i/--replace and defaults to {}:
+								// an empty marker would make every
+								// strings.Contains/HasPrefix scan in the
+								// xargs-input walk report every word as
+								// carrying substituted input (#4980). The
+								// default also resets any prior replacement
+								// state, so a preceding -I marker (e.g. -I@)
+								// or dynamic -I "$M" does not leak through
+								// the newly defaulted {}.
+								marker, markerKnown = "{}", true
+							}
 						} else {
 							markerKnown = false
+							replaceMarker = arg
 						}
 					case 'L':
 						replaceCancelled = true
