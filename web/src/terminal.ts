@@ -649,6 +649,10 @@ export class AttachTerminal {
           this.cb.onFocusChange(false);
         }
       });
+      // Phone soft-keyboard and IME input arrive as beforeinput on xterm's helper
+      // textarea — keydown-less, so the key handler above never sees it. Synthetic
+      // wheel reports are DOM WheelEvents and can never fire this (#5020).
+      textarea.addEventListener("beforeinput", () => this.fling.stop());
     }
 
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string

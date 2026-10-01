@@ -912,32 +912,41 @@ async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
-/** Polls a scroll offset until two samples `quietMs` apart are equal — i.e. a
- *  momentum coast has run out — then returns the settled value (#5020). */
-async function settledScrollTop(viewport: Locator, quietMs = 300, timeoutMs = 12_000): Promise<number> {
+/** Polls a scroll offset until it has been still for `quietMs` wall time — i.e. a
+ *  momentum coast has run out — then returns the settled value (#5020). One equal
+ *  sample is NOT enough: near the decay floor a coast emits a whole row only every
+ *  ~400ms, so a single quiet interval can fall mid-coast. */
+async function settledScrollTop(viewport: Locator, quietMs = 600, timeoutMs = 15_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let prev = await viewport.evaluate((el) => el.scrollTop);
+  let quietSince = Date.now();
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, quietMs));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     const next = await viewport.evaluate((el) => el.scrollTop);
-    if (next === prev) {
+    if (next !== prev) {
+      prev = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= quietMs) {
       return next;
     }
-    prev = next;
   }
   return prev;
 }
 
 /** The same settle, for the wheel-report stream on the alternate-screen path. */
-async function settledReportCount(reports: readonly unknown[], quietMs = 300, timeoutMs = 12_000): Promise<number> {
+async function settledReportCount(reports: readonly unknown[], quietMs = 600, timeoutMs = 15_000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let prev = reports.length;
+  let quietSince = Date.now();
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, quietMs));
-    if (reports.length === prev) {
-      return prev;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const next = reports.length;
+    if (next !== prev) {
+      prev = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= quietMs) {
+      return next;
     }
-    prev = reports.length;
   }
   return prev;
 }

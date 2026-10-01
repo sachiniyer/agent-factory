@@ -9470,6 +9470,7 @@ var AttachTerminal = class {
           this.cb.onFocusChange(false);
         }
       });
+      textarea.addEventListener("beforeinput", () => this.fling.stop());
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
