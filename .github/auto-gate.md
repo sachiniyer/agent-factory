@@ -304,9 +304,11 @@ Docs or Dependency review run cannot satisfy that wait. If PR Validation never
 appears, the helper dispatches it. Recovery rechecks the PR before those
 writes and after the wait; a changed head must itself be recovered before it
 becomes a target. Six bounded recovery attempts prevent endless polling.
-A poll that never observed a successor ends quietly (#5064): the successor's own
-events re-evaluate the head once its push lands. Otherwise exhaustion
-fails with a recovery command instead of publishing a stale target.
+A poll that never observed a successor ends quietly only when every read
+confirmed the initiating SHA (#5064): the successor's own events re-evaluate
+the head once its push lands. A read that answered without a resolvable head
+spoils that exit and fails loudly instead. Otherwise exhaustion fails with a
+recovery command instead of publishing a stale target.
 Ordinary manual dispatch without `previous_head_sha` keeps its single-read
 behavior. Queued/running runs still receive no approval writes.
 
