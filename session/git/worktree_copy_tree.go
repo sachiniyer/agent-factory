@@ -600,6 +600,25 @@ func copySymlinkEntry(
 	if err := copySymlinkXattrs(support, sourcePath, destinationPath); err != nil {
 		return created, err
 	}
+	// copySymlinkXattrs reads the source link through sourcePath rather than the
+	// source descriptor the walk validated: the L* family is the only API that
+	// addresses a symlink's own attributes, and it has no *at form in
+	// golang.org/x/sys/unix (v0.47.0), so the path is the only handle. A path read
+	// re-derives sourcePath, so a writer that swaps the entry between the
+	// validation above and those calls could publish a transient node's
+	// attributes onto the destination. It cannot be PREVENTED for the same
+	// portability reason the mtime stamp below cannot — there is no *at xattr
+	// variant to anchor the read to the verified node — so it is DETECTED
+	// instead, the same way the stamp is: re-identify the source by directory
+	// descriptor right after the path-based read and refuse the move if it
+	// changed. Detection narrows the race to the gap between the last Lsetxattr
+	// and this re-check rather than the much longer span up to the destination
+	// validation, which is the standard this function already applies to the
+	// stamp, and it keeps the loss LOGGED (#2919) rather than silent.
+	sourceRecheck, err := statAt(source, name)
+	if err != nil || !inspected.same(identityFromStat(sourceRecheck)) {
+		return created, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while its extended attributes were copied", sourcePath)
+	}
 	// The link's OWN mtime. AT_SYMLINK_NOFOLLOW means this addresses the link
 	// rather than following it to its target.
 	//
