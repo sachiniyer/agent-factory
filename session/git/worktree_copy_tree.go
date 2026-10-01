@@ -598,50 +598,66 @@ func copySymlinkEntry(
 	// does not move the mtime, but keeping the stamp last is what the copy's
 	// race bookkeeping already assumes.
 	if err := copySymlinkXattrs(support, sourcePath, destinationPath); err != nil {
-		return created, err
-	}
-	// The destination link can inherit an attribute the source does not carry —
-	// an SELinux-enabled destination assigns security.selinux during symlinkat
-	// while the source is unlabeled — and the file and directory paths prune
-	// exactly such an inherited attribute via pruneDestinationXattrs. The link
-	// path is no exception, so pruneSymlinkXattrs removes any destination-only
-	// attribute the source link does not have. It is path-based for the same
-	// reason the copy is (no *at xattr variant), so it shares the route check
-	// below.
-	pruneSymlinkXattrs(sourcePath, destinationPath)
-	// copySymlinkXattrs and pruneSymlinkXattrs read the source link through
-	// sourcePath and write the destination through destinationPath rather than
-	// the source/destination descriptors the walk validated: the L* family is
-	// the only API that addresses a symlink's own attributes, and it has no *at
-	// form in golang.org/x/sys/unix (v0.47.0), so the path is the only handle. A
-	// descriptor-anchored recheck (statAt(parent, name)) proves the LEAF in the
-	// held parent did not change, but it does not prove the textual path still
-	// resolves through the same ANCESTORS to that leaf: a writer that swaps an
-	// ancestor and installs a replacement at the same name during the L* calls
-	// reads the replacement's attributes (or writes the source's onto the
-	// replacement) while the held parent's name still resolves to the original,
-	// and the final tree validation re-walks by descriptor so it misses the swap
-	// too. It cannot be PREVENTED for the same portability reason the mtime stamp
-	// below cannot — there is no *at xattr variant to anchor the L* calls to the
-	// verified node — so it is DETECTED instead: re-identify each leaf by
-	// descriptor AND re-derive each path with Lstat to confirm the path-resolved
-	// leaf is the same node the held parent's name reached. A swap that is
-	// restored before this check is the residual the *at-less API leaves, the
-	// same detection-only standard the mtime stamp already applies; the loss stays
-	// LOGGED (#2919) rather than silent.
-	sourceRecheck, err := statAt(source, name)
-	if err != nil || !inspected.same(identityFromStat(sourceRecheck)) {
-		return created, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while its extended attributes were copied", sourcePath)
-	}
-	if err := assertPathResolvesToVerifiedLeaf(sourcePath, sourceRecheck); err != nil {
-		return created, fmt.Errorf("cannot move worktree across filesystems: source symlink %s resolved to a different node than the verified source while its extended attributes were copied: %w", sourcePath, err)
-	}
-	destinationRecheck, err := statAt(destination, name)
-	if err != nil || !destinationIdentity.same(identityFromStat(destinationRecheck)) {
-		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while its extended attributes were copied", destinationPath)
-	}
-	if err := assertPathResolvesToVerifiedLeaf(destinationPath, destinationRecheck); err != nil {
-		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s resolved to a different node than the verified destination while its extended attributes were copied: %w", destinationPath, err)
+		if errors.Is(err, errXattrPathTooLong) {
+			// The L* xattr family has no *at form, so the link's path is the full
+			// textual route. A tree the walker reaches component-by-component through
+			// directory descriptors can carry a link whose route exceeds PATH_MAX, and
+			// the L* calls (Llistxattr/Lgetxattr/Lsetxattr) — and the Lstat the route
+			// recheck below uses on the same path — then return ENAMETOOLONG even for a
+			// link with no attributes. That would abort a cross-device move the
+			// descriptor-anchored F* paths copy fine, so the link's attributes are not
+			// reproduced, the prune and the route recheck are skipped (they use the same
+			// too-long path, and nothing was read or written through it to recheck), and
+			// the copy continues — the #2919 invariant the per-attribute refusal follows.
+			// copySymlinkXattrs already logged the loss; no L* call ran, so no swap could
+			// have diverted one, and the mtime stamp below is descriptor-anchored.
+		} else {
+			return created, err
+		}
+	} else {
+		// The destination link can inherit an attribute the source does not carry —
+		// an SELinux-enabled destination assigns security.selinux during symlinkat
+		// while the source is unlabeled — and the file and directory paths prune
+		// exactly such an inherited attribute via pruneDestinationXattrs. The link
+		// path is no exception, so pruneSymlinkXattrs removes any destination-only
+		// attribute the source link does not have. It is path-based for the same
+		// reason the copy is (no *at xattr variant), so it shares the route check
+		// below.
+		pruneSymlinkXattrs(sourcePath, destinationPath)
+		// copySymlinkXattrs and pruneSymlinkXattrs read the source link through
+		// sourcePath and write the destination through destinationPath rather than
+		// the source/destination descriptors the walk validated: the L* family is
+		// the only API that addresses a symlink's own attributes, and it has no *at
+		// form in golang.org/x/sys/unix (v0.47.0), so the path is the only handle. A
+		// descriptor-anchored recheck (statAt(parent, name)) proves the LEAF in the
+		// held parent did not change, but it does not prove the textual path still
+		// resolves through the same ANCESTORS to that leaf: a writer that swaps an
+		// ancestor and installs a replacement at the same name during the L* calls
+		// reads the replacement's attributes (or writes the source's onto the
+		// replacement) while the held parent's name still resolves to the original,
+		// and the final tree validation re-walks by descriptor so it misses the swap
+		// too. It cannot be PREVENTED for the same portability reason the mtime stamp
+		// below cannot — there is no *at xattr variant to anchor the L* calls to the
+		// verified node — so it is DETECTED instead: re-identify each leaf by
+		// descriptor AND re-derive each path with Lstat to confirm the path-resolved
+		// leaf is the same node the held parent's name reached. A swap that is
+		// restored before this check is the residual the *at-less API leaves, the
+		// same detection-only standard the mtime stamp already applies; the loss stays
+		// LOGGED (#2919) rather than silent.
+		sourceRecheck, err := statAt(source, name)
+		if err != nil || !inspected.same(identityFromStat(sourceRecheck)) {
+			return created, fmt.Errorf("cannot move worktree across filesystems: source symlink %s changed while its extended attributes were copied", sourcePath)
+		}
+		if err := assertPathResolvesToVerifiedLeaf(sourcePath, sourceRecheck); err != nil {
+			return created, fmt.Errorf("cannot move worktree across filesystems: source symlink %s resolved to a different node than the verified source while its extended attributes were copied: %w", sourcePath, err)
+		}
+		destinationRecheck, err := statAt(destination, name)
+		if err != nil || !destinationIdentity.same(identityFromStat(destinationRecheck)) {
+			return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while its extended attributes were copied", destinationPath)
+		}
+		if err := assertPathResolvesToVerifiedLeaf(destinationPath, destinationRecheck); err != nil {
+			return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s resolved to a different node than the verified destination while its extended attributes were copied: %w", destinationPath, err)
+		}
 	}
 	// The link's OWN mtime. AT_SYMLINK_NOFOLLOW means this addresses the link
 	// rather than following it to its target.

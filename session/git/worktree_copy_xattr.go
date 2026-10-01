@@ -64,6 +64,18 @@ var errXattrValueTooLarge = errors.New("extended attribute value exceeds the cop
 // caller stops attempting the rest of the tree rather than re-learning it per file.
 var errXattrUnsupportedDestination = errors.New("destination filesystem does not support extended attributes")
 
+// errXattrPathTooLong marks a route the path-based L* xattr family cannot address
+// because the textual path exceeds the kernel's PATH_MAX. The descriptor-anchored
+// F* family the file and directory paths use has no such limit (it takes an fd),
+// but the symlink path has no *at variant in golang.org/x/sys/unix (v0.47.0), so a
+// tree the copier reaches component-by-component through directory descriptors can
+// carry a link whose route is too long for L* even though the walker itself copied
+// it. It is non-fatal — the #2919 invariant the file and directory paths follow is
+// "log the loss, do not abort the archive" — so the caller skips the link's xattr
+// copy, prune, and route recheck and continues, rather than aborting a cross-device
+// move of a tree the descriptor-anchored walker already copied.
+var errXattrPathTooLong = errors.New("symlink path too long for the L* xattr family")
+
 func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string, acl bool) error {
 	names, err := listXattrNames(sourceFD)
 	if err != nil {
@@ -226,6 +238,19 @@ func copySymlinkXattrs(support *xattrDestination, sourcePath, destinationPath st
 		// this is logged, not silent (#2919).
 		return nil
 	}
+	if errors.Is(err, errXattrPathTooLong) {
+		// The link's route exceeds PATH_MAX, so the L* family cannot address it and
+		// the descriptor-anchored F* paths cannot reach a symlink either — there is
+		// no *at xattr variant. copySymlinkEntry recognizes the sentinel and skips
+		// the prune and the route recheck (which Lstat the same too-long path), so
+		// the cross-device move continues for a tree the walker already copied. The
+		// loss is logged here, not silent (#2919).
+		log.WarningLog.Printf(
+			"archive: could not reproduce extended attributes on symlink %s because its path is too long for the L* xattr family (no *at variant exists); the attributes are left in place: %v",
+			sourcePath, err,
+		)
+		return err
+	}
 	return err
 }
 
@@ -237,6 +262,17 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 	if err != nil {
 		if isXattrUnsupported(err) {
 			return nil // the source filesystem has no xattrs; nothing to carry
+		}
+		if errors.Is(err, unix.ENAMETOOLONG) {
+			// The L* family has no *at form, so the link's path is the full textual
+			// route. A tree the walker reaches component-by-component through directory
+			// descriptors can carry a link whose route exceeds PATH_MAX, and Llistxattr
+			// then returns ENAMETOOLONG even for a link with no attributes — which would
+			// abort a cross-device move the descriptor-anchored F* paths copy fine. There
+			// is no descriptor-relative L* variant to fall back to, so the attribute loss
+			// is reported and the copy continues, the #2919 invariant the per-attribute
+			// refusal follows.
+			return errXattrPathTooLong
 		}
 		return fmt.Errorf(
 			"cannot move worktree across filesystems: failed to list extended attributes for destination symlink %s: %w",
@@ -260,6 +296,9 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 				)
 				continue
 			}
+			if errors.Is(err, unix.ENAMETOOLONG) {
+				return errXattrPathTooLong
+			}
 			return fmt.Errorf(
 				"cannot move worktree across filesystems: failed to read extended attribute %q from symlink %s: %w",
 				name, destinationPath, err,
@@ -267,6 +306,10 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 		}
 		if err := unix.Lsetxattr(destinationPath, name, value, 0); err != nil {
 			switch {
+			case errors.Is(err, unix.ENAMETOOLONG):
+				// The destination route is too long for the L* family for the same
+				// reason the source route above can be; see errXattrPathTooLong.
+				return errXattrPathTooLong
 			case isXattrUnsupported(err):
 				if !destinationSymlinkRejectsAllXattrs(destinationPath) {
 					log.WarningLog.Printf(

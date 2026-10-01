@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -281,4 +282,32 @@ func TestCopyTree_ReproducesSymlinkXattrs(t *testing.T) {
 	copied := filepath.Join(destination, "link")
 	require.Equal(t, []byte("linkval"), readSymlinkAttr(t, copied, "user.af_symlink"),
 		"a symlink's extended attributes must be reproduced on the cross-device copy, not dropped silently")
+}
+
+// TestCopySymlinkXattrs_TooLongPathIsNonFatal pins the regression the L* family
+// reintroduces: the descriptor-anchored F* xattr paths take an fd and have no
+// path-length limit, but copySymlinkXattrs addresses a link through its full textual
+// route (there is no *at xattr variant), so a tree the copier reaches
+// component-by-component through directory descriptors can carry a link whose route
+// exceeds PATH_MAX. Llistxattr on such a route returns ENAMETOOLONG even for a link
+// with no attributes, which would abort a cross-device move the F* paths copy fine.
+// The fix is to treat ENAMETOOLONG from the L* family as a logged, non-fatal skip
+// (errXattrPathTooLong) rather than a fatal "cannot move" — the #2919 invariant the
+// per-attribute refusal follows — so the move continues without the link's xattrs.
+// The path need not exist: the kernel rejects a path longer than PATH_MAX before it
+// resolves it, so the probe is portable and needs no fixture.
+func TestCopySymlinkXattrs_TooLongPathIsNonFatal(t *testing.T) {
+	// unix.PathMax is 4096 on Linux and 1024 on Darwin; a route longer than it
+	// makes Llistxattr fail with ENAMETOOLONG regardless of whether the link exists.
+	tooLong := strings.Repeat("a", unix.PathMax+1)
+	err := copySymlinkSourceXattrs(tooLong, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"a route longer than PATH_MAX must be a non-fatal errXattrPathTooLong, not a fatal \"cannot move\" error")
+
+	// copySymlinkXattrs surfaces the sentinel for copySymlinkEntry to skip the
+	// prune and route recheck on, rather than aborting the move.
+	support := &xattrDestination{}
+	err = copySymlinkXattrs(support, tooLong, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"copySymlinkXattrs must surface errXattrPathTooLong so the move continues rather than aborting")
 }
