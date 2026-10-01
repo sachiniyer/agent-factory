@@ -53,7 +53,7 @@ function coastFrames(s: TouchScroll, clock: Clock, frameMs = 16.7, maxFrames = 6
 
 test("a drag moves content at SCROLL_GAIN times the finger's travel", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(500);
   // Finger UP the screen scrolls toward the newest output: positive, x GAIN.
   assert.equal(drag(s, clock, [{ y: 490, t: 16 }, { y: 470, t: 32 }]), 30 * SCROLL_GAIN);
@@ -63,7 +63,7 @@ test("a drag moves content at SCROLL_GAIN times the finger's travel", () => {
 
 test("a full-height swipe scrolls at least 3x the viewport (#5020 property 1)", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   const heightPx = 700;
   const rowHeight = 17;
   const viewportRows = heightPx / rowHeight;
@@ -84,7 +84,7 @@ test("a full-height swipe scrolls at least 3x the viewport (#5020 property 1)", 
 
 test("release velocity is read off only the trailing 100ms of the drag", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(400);
   // A long slow approach (400px over 400ms = 1 px/ms, itself fling-worthy) ends in
   // a fast tail: 100px inside the last 80ms. The window must see ~1.25 px/ms, not
@@ -103,7 +103,7 @@ test("release velocity is read off only the trailing 100ms of the drag", () => {
 
 test("a quick flick travels many screenfuls before it stops (#5020 property 2)", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(400);
   // ~2 px/ms finger over the last 100ms — an ordinary brisk flick.
   const samples: { y: number; t: number }[] = [];
@@ -126,7 +126,7 @@ test("a quick flick travels many screenfuls before it stops (#5020 property 2)",
 
 test("the coast decays exponentially and halts under the stop threshold", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(300);
   const samples = [{ y: 300, t: 0 }];
   for (let i = 1; i <= 5; i++) {
@@ -150,7 +150,7 @@ test("the coast decays exponentially and halts under the stop threshold", () => 
 
 test("a drag that pauses before the lift leaves no momentum", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(600);
   drag(s, clock, [{ y: 500, t: 0 }, { y: 420, t: 16 }, { y: 350, t: 32 }]);
   // The finger rests 200ms — well past the velocity window — then lifts.
@@ -162,7 +162,7 @@ test("a drag that pauses before the lift leaves no momentum", () => {
 
 test("a slow drag still creeping at lift stays under the fling floor", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(500);
   // 0.3 px/ms, uniform and unhurried — under FLING_MIN_V.
   const v = FLING_MIN_V * 0.6;
@@ -178,7 +178,7 @@ test("a slow drag still creeping at lift stays under the fling floor", () => {
 
 test("a tap's wobble cannot fling", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(300);
   drag(s, clock, [{ y: 302, t: 30 }, { y: 304, t: 60 }, { y: 306, t: 90 }]);
   clock.set(95);
@@ -187,7 +187,7 @@ test("a tap's wobble cannot fling", () => {
 
 test("a new touch interrupts the coast immediately (tap-to-stop)", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(400);
   drag(s, clock, [{ y: 340, t: 0 }, { y: 280, t: 20 }, { y: 220, t: 40 }]);
   clock.set(45);
@@ -205,7 +205,7 @@ test("a new touch interrupts the coast immediately (tap-to-stop)", () => {
 
 test("a wild sample stream is clamped to the fling ceiling", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(5000);
   // 30 px/ms — far past anything a finger does; the ceiling must hold it.
   drag(s, clock, [{ y: 2000, t: 0 }, { y: 500, t: 50 }]);
@@ -219,7 +219,7 @@ test("a wild sample stream is clamped to the fling ceiling", () => {
 
 test("both fling directions keep their sign", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(100);
   drag(s, clock, [{ y: 200, t: 0 }, { y: 300, t: 40 }]);
   clock.set(45);
@@ -236,7 +236,7 @@ test("coast distance scales linearly with release velocity, clamped at the ceili
   const distances = new Map<number, number>();
   for (const v of [0.5, 1, 2, 4, 6, 10]) {
     const clock = fakeClock();
-    const s = new TouchScroll(clock.now);
+    const s = TouchScroll(clock.now);
     s.stop(); s.push(5000);
     const samples: { y: number; t: number }[] = [];
     for (let i = 1; i <= 20; i++) {
@@ -259,7 +259,7 @@ test("coast distance scales linearly with release velocity, clamped at the ceili
 
 test("a stalled frame emits a bounded slice, while the fling ages by real time", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(400);
   drag(s, clock, [{ y: 340, t: 0 }, { y: 280, t: 20 }, { y: 220, t: 40 }]);
   clock.set(45);
@@ -277,7 +277,7 @@ test("a stalled frame emits a bounded slice, while the fling ages by real time",
 
 test("stop() forgets the old stream, so a tap cannot seed the next gesture", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   s.stop(); s.push(300);
   drag(s, clock, [{ y: 302, t: 10 }, { y: 306, t: 20 }]);
   // The tap ends unclaimed — release() never runs — and a new finger lands.
@@ -288,7 +288,7 @@ test("stop() forgets the old stream, so a tap cannot seed the next gesture", () 
 
 test("a coast with no drag samples and a tick with no coast are inert", () => {
   const clock = fakeClock();
-  const s = new TouchScroll(clock.now);
+  const s = TouchScroll(clock.now);
   assert.equal(s.tick(), null);
   assert.equal(s.release(), 0);
   s.stop(); s.push(400);
