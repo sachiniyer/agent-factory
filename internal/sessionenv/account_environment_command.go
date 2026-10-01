@@ -496,63 +496,98 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 // from there follows the same steps to the same end.
 func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) bool {
 	var chain []*syntax.Word
+	var chainInOption []bool
 	answer := false
+	// strace parses options only up to its first non-option word (the traced
+	// command) or "--"; a -E/--env-shaped word past that point is the
+	// command's argument and cannot alter the traced environment. Track the
+	// option region across the scan so the strace-specific arms — and the
+	// generic --opt=DENIED arm, which is a wrapper-option check — apply only
+	// to strace's options, not to the traced command's argv. (The env and
+	// shell arms are not gated: a traced command that is itself env or a shell
+	// is still judged by them.) pending marks the argv word a value-taking
+	// strace option consumes as its value, so a value word (e.g. the file
+	// after -o) is not mistaken for the traced command. Non-strace wrappers
+	// never leave the region, preserving their existing scan.
+	inOption := true
+	pending := false
 	for len(words) > 0 {
-		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace}]; seen {
+		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace, inOption: inOption}]; seen {
 			answer = cached
 			break
 		}
 		chain = append(chain, words[0])
-		width, hides := wrapperTailWordHidesAccountAssignment(words, strace, names, memo)
+		chainInOption = append(chainInOption, inOption)
+		width, hides, boundary, pendingValue := wrapperTailWordHidesAccountAssignment(words, strace, inOption, names, memo)
 		if hides {
 			answer = true
 			break
 		}
+		switch {
+		case pending:
+			// This word is a value-taking strace option's value, not the
+			// traced command; step past it and keep parsing strace options.
+			pending = false
+		case strace && boundary:
+			inOption = false
+		case strace && pendingValue:
+			pending = true
+		}
 		words = words[width:]
 	}
-	for _, word := range chain {
-		memo.wrapperTails[wrapperTailKey{word: word, strace: strace}] = answer
+	for i, word := range chain {
+		memo.wrapperTails[wrapperTailKey{word: word, strace: strace, inOption: chainInOption[i]}] = answer
 	}
 	return answer
 }
 
 // wrapperTailWordHidesAccountAssignment judges the tail word at words[0] and
-// reports how many words it consumed.
-func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) (int, bool) {
+// reports how many words it consumed. boundary reports that this word ends
+// strace's option region (a literal non-option word — the traced command — or
+// "--"); pendingValue reports that this word is a strace value-taking option
+// whose value is the NEXT argv word (so that next word is a value, not the
+// command). Both are meaningful only for a strace wrapper still inside its
+// option region (strace && inOption); the caller uses them to stop applying
+// the strace-specific and generic wrapper-option arms to the traced command's
+// argv.
+func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, inOption bool, names map[string]struct{}, memo operandTailMemo) (int, bool, bool, bool) {
 	word := words[0]
 	if isAccountCommandName(word, "env") {
 		// A nested env only mutates the child it execs; requireCommand
 		// keeps an `env CODEX_HOME=/tmp` whose argv ends there — env's
-		// print mode, which overrides nothing — allowed.
-		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo)
+		// print mode, which overrides nothing — allowed. env is judged by
+		// this arm regardless of the strace option region (it is the traced
+		// command under strace too), so it leaves the region as the caller
+		// found it and any strace options env's argv re-enters are judged
+		// the same way the pre-boundary scan judged them.
+		return 1, envCallMutatesAccountEnvironment(words[1:], names, true, memo), false, false
 	}
 	literal, ok := literalShellWord(word)
 	if !ok {
-		if strace && straceAttachedEnvOptionHides(word, names) {
+		if strace && inOption && straceAttachedEnvOptionHides(word, names) {
 			// The attached -E NAME[=value] and --env=NAME[=value] forms
 			// whose value holds a shell expansion land here:
 			// literalShellWord fails on the ParamExp/CmdSubst, discarding
 			// the literal option marker and NAME that precede it. The
 			// separate-word `-E <word>` and the attached literal
 			// `-ENAME=` forms already fail closed; the non-literal
-			// attached form must fail closed the same way — the NAME sits
-			// in the word's literal prefix and names the variable strace
-			// sets/removes in the traced child, for any expansion of the
-			// value (including unset → "", which af reads as the ambient
-			// home). This is strace-only: -E means extended-regexp to
-			// grep and others (account_environment_wrapper_test.go:250),
-			// and --env= belongs to strace only when its caller set the
-			// strace flag from the outermost wrapper.
-			return 1, true
+			// attached form must fail closed the same way. This is
+			// strace-only: -E means extended-regexp to grep and others
+			// (account_environment_wrapper_test.go:250), and --env=
+			// belongs to strace only when its caller set the strace flag
+			// from the outermost wrapper.
+			return 1, true, false, false
 		}
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
 		// words after it as that invocation's argv. envScan admits a
 		// substituted xargs marker after a literal env's command slot, but
 		// this env is only a hypothesis, so a later marker is refused here as
-		// a later "$x" is.
+		// a later "$x" is. A non-literal word is left in the option region:
+		// its expansion can still be or complete a strace env option, so the
+		// attached check stays armed for the words that follow it.
 		return 1, memo.xargsItemFollows(words[1:]) ||
-			envCallMutatesAccountEnvironment(words[1:], names, true, memo)
+			envCallMutatesAccountEnvironment(words[1:], names, true, memo), false, false
 	}
 	if !strings.HasPrefix(literal, "-") {
 		// A shell in the wrapper's tail gets the same verdict a bare
@@ -560,79 +595,53 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		// execs the literal script the modeled path already refuses
 		// under `nice sh -c ...`. Only the trusted account-shell form
 		// proves out. A trailing shell name with no argv (echo sh,
-		// strace -p 1 sh) has nothing to judge and stays allowed.
+		// strace -p 1 sh) has nothing to judge and stays allowed. This
+		// literal non-option word is the traced command under strace,
+		// so it ends the option region for the words that follow it.
 		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
-			shellCommandIsUnproven(words)
+			shellCommandIsUnproven(words), strace && inOption, false
 	}
-	if strace {
+	// A literal option word. "--" ends strace's option region; any other
+	// option keeps parsing options. boundary reports that boundary so the
+	// caller stops applying the wrapper-option arms to the trailing argv.
+	boundary := strace && inOption && literal == "--"
+	pendingValue := false
+	if strace && inOption {
 		switch {
 		case literal == "-E" || literal == "--env":
 			// strace's env option takes var[=val] as a separate word and
 			// injects or REMOVES the variable in the traced child's
 			// environment — the same mutation the env arm refuses, in
 			// option spelling. It is strace-only because -E means
-			// extended-regexp to grep and friends.
+			// extended-regexp to grep and friends. The value word is
+			// consumed here, so it is not pending.
 			if len(words) < 2 {
-				return 1, true
+				return 1, true, boundary, false
 			}
 			value, ok := literalShellWord(words[1])
-			return 2, !ok || accountEnvironmentOperandDenied(value, names)
+			return 2, !ok || accountEnvironmentOperandDenied(value, names), boundary, false
 		case strings.HasPrefix(literal, "-E"):
-			return 1, accountEnvironmentOperandDenied(literal[2:], names)
+			return 1, accountEnvironmentOperandDenied(literal[2:], names), boundary, false
+		default:
+			pendingValue = straceOptionAwaitsValue(literal)
 		}
 	}
-	// An unrecognized wrapper may expose options that mutate its
-	// child's environment in option-value form — xargs's
-	// --process-slot-var=NAME sets NAME on every exec'd command, and
-	// strace's --env=var=val is analogous. A literal `--opt=DENIED` or
-	// `--opt=DENIED=value` is refused when its value names a denied
-	// variable or carries a denied assignment.
-	if _, value, ok := strings.Cut(literal, "="); ok {
-		return 1, accountEnvironmentOperandDenied(value, names)
+	// An unrecognized wrapper may expose options that mutate its child's
+	// environment in option-value form — xargs's --process-slot-var=NAME
+	// sets NAME on every exec'd command, and strace's --env=var=val is
+	// analogous. A literal `--opt=DENIED` or `--opt=DENIED=value` is refused
+	// when its value names a denied variable or carries a denied assignment.
+	// This is a wrapper-option check: it runs for a non-strace wrapper's
+	// options and for strace's options while the scan is still inside
+	// strace's option region. Past strace's traced command a --opt-shaped
+	// word is the command's argument, not a wrapper option, so a denied name
+	// it carries stays allowed there.
+	if !strace || inOption {
+		if _, value, ok := strings.Cut(literal, "="); ok {
+			return 1, accountEnvironmentOperandDenied(value, names), boundary, pendingValue
+		}
 	}
-	return 1, false
-}
-
-// straceAttachedEnvOptionHides reports whether a non-literal tail word carries
-// a strace -E/--env= attached env option that sets or removes a protected
-// variable. It is called only from wrapperTailWordHidesAccountAssignment's
-// `!ok` branch (so the word is already known non-literal) and only when the
-// strace flag is set, mirroring the strace-only gate of the literal branch.
-//
-// literalShellWord discards the word's literal prefix on the first non-literal
-// part, so an attached form whose value is a shell expansion — `-ECODEX_HOME=$V`,
-// `--env=CODEX_HOME=$V`, or the fully-dynamic `-E$V` — never reaches the
-// strace -E/--env handler above. Reading that prefix with literalShellWordPrefix
-// recovers the option marker and the literal NAME, and the verdict mirrors the
-// separate-word arm's `!ok || accountEnvironmentOperandDenied(value, names)`:
-// an operand that is fully non-provable (no literal prefix after the option
-// marker, e.g. `-E$V`) refuses because its expansion can name a protected
-// variable, and an operand whose literal NAME (the text up to the first `=`,
-// or the whole prefix when no `=` is present) is denied refuses because the
-// override occurs for any expansion of the value. An operand whose literal
-// NAME is provably not denied (e.g. `-EFOO=$V`) sets a harmless variable and
-// stays allowed, same as the attached literal `-EFOO=1` does above; the fall-
-// through then lets the rest of the tail be judged as the `!ok` branch
-// already does.
-func straceAttachedEnvOptionHides(word *syntax.Word, names map[string]struct{}) bool {
-	lit := literalShellWordPrefix(word)
-	var operand string
-	switch {
-	case strings.HasPrefix(lit, "--env="):
-		operand = lit[len("--env="):]
-	case strings.HasPrefix(lit, "-E"):
-		operand = lit[2:]
-	default:
-		return false
-	}
-	if operand == "" {
-		// The operand is entirely non-provable (e.g. `-E$V`, `--env=$V`):
-		// its expansion can name or assign a protected variable, so fail
-		// closed exactly as the separate-word arm does on a non-literal
-		// value word.
-		return true
-	}
-	return accountEnvironmentOperandDenied(operand, names)
+	return 1, false, boundary, pendingValue
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
