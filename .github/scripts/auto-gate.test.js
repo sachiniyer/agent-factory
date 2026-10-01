@@ -11492,6 +11492,31 @@ test("#5010: the reconcile window opens at the first POST, after the guard", asy
   assert.equal(outcome.reconciled, undefined, "nothing was adopted");
 });
 
+// Codex review on this fix: whole-second created_at cannot order two events
+// inside the same second, so the cutoff alone re-admits a run stamped before
+// the POST within it. Runs already listed before the first attempt are
+// excluded by id — a probe cannot be adopted as the POST's result.
+test("#5010: a run already listed before the dispatch is never adopted", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 798, name: "PR Validation", event: "workflow_dispatch",
+        // In-window on purpose: the timestamp alone would admit it, and the
+        // id exclusion is the point under test.
+        status: "completed", conclusion: "success",
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+    ] },
+  });
+  const control = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0, sleep: async () => {},
+  });
+  assert.equal(control?.id, 798, "the run is adoptable when the snapshot did not see it");
+  const found = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0,
+    excludeIds: new Set([798]), sleep: async () => {},
+  });
+  assert.equal(found, null, "the pre-dispatch listing already knew this run; the window cannot re-admit it");
+});
+
 // Codex review on this fix: a guard that exhausted ITS OWN retries throws a
 // retryable-looking read error; unwrapped, the write retry would rerun the
 // whole exhausted guard once per dispatch attempt. It is let out immediately,

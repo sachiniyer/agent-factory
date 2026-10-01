@@ -3636,6 +3636,13 @@ async function ensureValidationRun({
     );
     return { dispatched: false };
   }
+  // What the reconcile may adopt is defined twice over: the since window, and
+  // — because created_at is whole-second and cannot order two events inside
+  // it — the identity of every run already listed before the first POST. A
+  // probe dispatched seconds earlier predates the cutoff; one dispatched in
+  // the same second is caught by id instead. Either way it is not the work
+  // this POST was charged with and must not suppress the retry.
+  let preDispatchRunIds = new Set();
   const dispatched = await dispatchWorkflowWithRetry({
     label: `could not dispatch PR Validation on ${headRefName} for ${headSha}`,
     dispatch: () =>
@@ -3645,7 +3652,24 @@ async function ensureValidationRun({
         workflow_id: VALIDATION_WORKFLOW,
         ref: headRefName,
       }),
-    landed: (since) => validationRunVisible({ github, context, headSha, since, sleep }),
+    beforeDispatch: async () => {
+      const existing = await retryRead(
+        `could not list the PR Validation runs already on ${headSha}`,
+        () =>
+          github.rest.actions.listWorkflowRuns({
+            owner,
+            repo,
+            workflow_id: VALIDATION_WORKFLOW,
+            head_sha: headSha,
+            per_page: 10,
+          }),
+        null,
+        { sleep },
+      );
+      preDispatchRunIds = new Set((existing?.data?.workflow_runs || []).map((run) => run.id));
+    },
+    landed: (since) =>
+      validationRunVisible({ github, context, headSha, since, sleep, excludeIds: preDispatchRunIds }),
     // The ref is mutable: between a transient answer and its replay the branch
     // can point somewhere else, and a dispatch there would validate that commit.
     // canRecover re-reads the head before every attempt.
@@ -4001,12 +4025,14 @@ async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
 // explicit rate-limit response skips the reconcile on purpose: it rejected the
 // request before any work, so the write replays directly, honoring Retry-After.
 // A definitive refusal or an exhausted retry propagates — those stay loud.
-async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null, sleep }) {
-  // The cutoff the settle window adopts runs against starts at the first real
+async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null, sleep, beforeDispatch = null }) {
+  // The cutoff the settle window adopts runs against opens at the first real
   // attempt — after the guard, not before it: a run dispatched while the guard
   // was still re-reading predates the POST it would be blamed on and must not
   // be adopted. It is captured once so a replay's reconcile still sees a run
-  // an earlier attempt created.
+  // an earlier attempt created. beforeDispatch runs in the same place, once:
+  // the caller snapshots what already exists there, because whole-second
+  // created_at cannot order two events inside one second but a run id can.
   let firstAttemptAt = null;
   return retryTransient(
     label,
@@ -4029,7 +4055,17 @@ async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null
           return { cancelled: true };
         }
       }
-      firstAttemptAt ??= Date.now();
+      if (firstAttemptAt === null) {
+        try {
+          await beforeDispatch?.();
+        } catch (error) {
+          // The pre-dispatch snapshot is a precondition of the reconcile —
+          // a failed one cannot be told apart from a POST that committed, so
+          // it leaves marked as the read's outcome, like the guard's.
+          throw writeRetryGuardFailure(error);
+        }
+        firstAttemptAt = Date.now();
+      }
       try {
         await dispatch();
         return { dispatched: true };
@@ -4130,11 +4166,16 @@ async function gateFollowUpRun({ github, context, since, sleep }) {
 // run, which a pull_request filter would never see. The since window matters:
 // a pr.yml run that PREDATES the first attempt — a hand-dispatched probe, for
 // instance, which never runs the required Build/Lint — cannot be the work this
-// POST was charged with, so it must not suppress the retry.
-async function validationRunVisible({ github, context, headSha, since, sleep }) {
+// POST was charged with, so it must not suppress the retry. And because the
+// timestamp cannot order events inside one second, "predates" is proven by the
+// pre-dispatch listing's run ids, with the window as the second guard.
+async function validationRunVisible({ github, context, headSha, since, sleep, excludeIds = null }) {
   const { owner, repo } = context.repo;
   // The API reports created_at at whole-second precision; a millisecond cutoff
-  // would reject the run this POST created inside the same second.
+  // would reject the run this POST created inside the same second. The same
+  // rounding means the cutoff alone cannot exclude a run that predates the
+  // POST by less than a second — a probe dispatched just before it — so runs
+  // already listed before the first attempt are excluded by id instead.
   const cutoff = Math.floor((since ?? 0) / 1000) * 1000;
   return settledWorkflowRun({
     label: `could not confirm whether a PR Validation run exists for ${headSha}`,
@@ -4153,7 +4194,11 @@ async function validationRunVisible({ github, context, headSha, since, sleep }) 
       return (
         runs.find((run) => {
           const created = Date.parse(run?.created_at);
-          return Number.isFinite(created) && created >= cutoff;
+          return (
+            Number.isFinite(created) &&
+            created >= cutoff &&
+            !excludeIds?.has(run.id)
+          );
         }) || null
       );
     },
@@ -8746,6 +8791,7 @@ module.exports = {
     listParkedRuns,
     ensureValidationRun,
     dispatchWorkflowWithRetry,
+    validationRunVisible,
     VALIDATION_WORKFLOW,
     GATE_WORKFLOW,
     decisionSummaryBody,
