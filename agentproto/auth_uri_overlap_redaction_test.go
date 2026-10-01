@@ -1,6 +1,7 @@
 package agentproto
 
 import (
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -143,6 +144,41 @@ func TestRedactAccessTokenURLRedactsOverlapComponent(t *testing.T) {
 			raw:       "data:%access_token=" + secret + ";base64",
 			wantExact: "data:%access_token=REDACTED;base64",
 		},
+		// Host overlap rows (#4663 closed this leak for every other component
+		// but left the host on the literal-only backstop). url.Parse decodes
+		// the %HH overlap into u.Host (e.g. %ac → byte 0xAC, consuming the
+		// 'a' and 'c' of `access`), so the literal-needle backstop cannot see
+		// access_token=. The percent-tolerant scanner runs over the re-encoded
+		// host (url.URL.String re-escapes the decoded byte), which has no
+		// Raw* twin to preserve the input hex case the way EscapedPath does, so
+		// the overlap byte always re-encodes through the canonical uppercase
+		// %XX: %ac/%AC → "%AC", %Aa → "%AA". The port after the single ':'
+		// host/port separator is kept, mirroring the userinfo ':' terminator.
+		{
+			component: "host",
+			raw:       "http://%access_token=" + secret + ":8443/stream",
+			wantExact: "http://%ACcess_token=REDACTED:8443/stream",
+		},
+		{
+			component: "host-mixed-hex",
+			raw:       "http://%Aaccess_token=" + secret + ":8443/stream",
+			wantExact: "http://%AAccess_token=REDACTED:8443/stream",
+		},
+		{
+			component: "host-upper-overlap",
+			raw:       "http://%ACcess_token=" + secret + ":8443/stream",
+			wantExact: "http://%ACcess_token=REDACTED:8443/stream",
+		},
+		{
+			component: "host-port-kept",
+			raw:       "http://%access_token=" + secret + ":8443/path",
+			wantExact: "http://%ACcess_token=REDACTED:8443/path",
+		},
+		{
+			component: "host-no-port",
+			raw:       "http://%access_token=" + secret + "/path",
+			wantExact: "http://%ACcess_token=REDACTED/path",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.component, func(t *testing.T) {
@@ -209,6 +245,12 @@ func TestRedactAccessTokenURLOverlapCaseInsensitive(t *testing.T) {
 		{"path uppercase field", "http://h/p/%Access_Token=" + secret, "http://h/p/%Access_Token=REDACTED"},
 		{"fragment uppercase field", "http://h/p#%ACCESS_TOKEN=" + secret, "http://h/p#%ACCESS_TOKEN=REDACTED"},
 		{"opaque uppercase field", "data:%AcCeSs_ToKeN=" + secret, "data:%AcCeSs_ToKeN=REDACTED"},
+		// Host: the overlap byte re-encodes through the canonical uppercase %XX
+		// (host has no Raw* twin), so the canonical "%AC" prefix collapses to
+		// "%AC" and the trailing word keeps its input case.
+		{"host uppercase field", "http://%ACcess_token=" + secret + ":8443/", "http://%ACcess_token=REDACTED:8443/"},
+		{"host mixed-case field", "http://%Access_Token=" + secret + ":8443/", "http://%ACcess_Token=REDACTED:8443/"},
+		{"host full uppercase", "http://%ACCESS_TOKEN=" + secret + ":8443/", "http://%ACCESS_TOKEN=REDACTED:8443/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := RedactAccessTokenURL(tc.raw)
@@ -619,6 +661,188 @@ func TestRedactAccessTokenURLCoLocatedOverlapCaseInsensitive(t *testing.T) {
 			} else if reparsed.String() != got {
 				t.Errorf("round-trip url.Parse(%q).String() = %q; want %q",
 					got, reparsed.String(), got)
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLRedactsOverlapHost is the focused regression guard for
+// the host branch gap left by #4663: every other URL component was routed
+// through the percent-tolerant scanner (redactRawAccessTokenValue), but the
+// host kept only the literal-needle backstop (RedactAccessTokenText). A %HH
+// overlap in the authority (e.g. %ac → byte 0xAC, consuming the leading 'a' and
+// 'c' of `access`) collapses access_token= out of the DECODED u.Host that the
+// backstop scans, while url.URL.String re-escapes 0xAC back to %AC and emits a
+// literal access_token=<value> in the re-serialized URL — leaking the secret
+// into the dial-error chain (#4663 closed this for path/fragment/opaque/
+// userinfo; the host was the sole unprotected component).
+//
+// url.Parse tolerates the high-byte overlap (%ac → 0xAC) in the host (unlike
+// %61/%a1 which decode to letters and turn the host into a literal
+// access_token= that url.Parse then rejects over '='), so the overlap survives
+// the parse and reaches the redactor. The host has no Raw* twin (EscapedPath/
+// EscapedFragment preserve the input hex case via RawPath/RawFragment), so
+// String() always re-encodes the overlap's decoded byte through the canonical
+// uppercase %XX: %ac/%AC → "%AC", %Aa → "%AA". ":" is the host's only structural
+// separator (it precedes the port), so a redacted value ends at it — keeping
+// the port in the diagnostic, mirroring the userinfo ':' terminator. Each case
+// round-trips so a downstream emitter that re-parses the redacted URL sees the
+// same string (no normalisation drift from re-encoding the REDACTED bytes).
+//
+// The nested in-needle case (%255F → '%' + '5F' → '_' once the raw matcher's
+// reducing stack resolves it) is included to pin that the host branch inherits
+// the in-needle family too, not just the overlap-only shape; the single-level
+// %5F in-needle shape is rejected by url.Parse itself (pre-existing fail
+// closed) and is omitted from this table.
+func TestRedactAccessTokenURLRedactsOverlapHost(t *testing.T) {
+	const secret = "af-sentinel-overlap-host"
+	cases := []struct {
+		name      string
+		raw       string
+		wantExact string
+	}{
+		// Overlap hex variants; the re-encoded prefix always canonicalises to
+		// the uppercase %XX of the decoded byte.
+		{"overlap-lower-hex", "http://%access_token=" + secret + ":8443/stream", "http://%ACcess_token=REDACTED:8443/stream"},
+		{"overlap-mixed-hex", "http://%Aaccess_token=" + secret + ":8443/stream", "http://%AAccess_token=REDACTED:8443/stream"},
+		{"overlap-upper-hex", "http://%ACcess_token=" + secret + ":8443/stream", "http://%ACcess_token=REDACTED:8443/stream"},
+		// Port kept (the host's ':' separator is the value terminator).
+		{"overlap-port-kept", "http://%access_token=" + secret + ":8443/path", "http://%ACcess_token=REDACTED:8443/path"},
+		// No port: the value runs to the end of the host.
+		{"overlap-no-port", "http://%access_token=" + secret + "/path", "http://%ACcess_token=REDACTED/path"},
+		// Protocol-relative URL (empty scheme): the prefix is "//" not
+		// "<scheme>://", which the host extraction must handle without dropping
+		// the first host byte.
+		{"overlap-empty-scheme", "//%access_token=" + secret + ":8443/stream", "//%ACcess_token=REDACTED:8443/stream"},
+		// ws: the production dial scheme (parseDaemonURL → websocket.Dial).
+		{"overlap-ws-scheme", "ws://%access_token=" + secret + ":8443/stream", "ws://%ACcess_token=REDACTED:8443/stream"},
+		// Nested in-needle escape in the host (%255F → '_'). pins the host
+		// branch carries the in-needle family, not just the overlap shape.
+		{"overlap-nested-inneedle", "http://%access%255Ftoken=" + secret + ":8443/", "http://%ACcess%255Ftoken=REDACTED:8443/"},
+		// Literal control: the backstop already caught this; the fix must keep
+		// redacting it (and now preserves the port the backstop used to drop).
+		{"literal-with-port", "http://access_token=" + secret + ":8443/stream", "http://access_token=REDACTED:8443/stream"},
+		{"literal-no-port", "http://access_token=" + secret + "/stream", "http://access_token=REDACTED/stream"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, secret) {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; secret %q survived",
+					tc.raw, got, secret)
+			}
+			if !strings.Contains(got, accessTokenRedaction) {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; want redaction marker",
+					tc.raw, got)
+			}
+			if got != tc.wantExact {
+				t.Errorf("RedactAccessTokenURL(%q)\n  got  %q\n  want %q",
+					tc.raw, got, tc.wantExact)
+			}
+			if reparsed, err := url.Parse(got); err != nil {
+				t.Errorf("url.Parse(%q) error = %v", got, err)
+			} else if reparsed.String() != got {
+				t.Errorf("round-trip url.Parse(%q).String() = %q; want %q",
+					got, reparsed.String(), got)
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenURLKeepsOverlapHostFreeForm is the host sibling of
+// TestRedactAccessTokenURLKeepsOverlapFreeFormControls. A host carrying a %HH
+// overlap that does NOT spell access_token (e.g. %acookie=ok) must NOT gain a
+// redaction marker just because the raw scan runs over the re-encoded host.
+// Unlike the path/fragment/opaque free-form rows this test is NOT an
+// exact-equality guard: url.Parse + url.URL.String canonicalise the host's
+// %XX escape (host has no Raw* twin), so %acookie is re-emitted as %ACookie
+// regardless of redaction. The guarantee pinned here is the absence of a
+// REDACTED marker (no over-redaction) plus the benign value surviving, not
+// byte-for-byte fidelity.
+func TestRedactAccessTokenURLKeepsOverlapHostFreeForm(t *testing.T) {
+	cases := []struct {
+		name           string
+		raw            string
+		wantBenignPart string // an access_token-free substring that must survive
+	}{
+		{"benign overlap host with port", "http://%acookie=ok:8443/path", "ok:8443/path"},
+		{"benign overlap host no port", "http://%acookie=ok/path", "ok/path"},
+		{"plain host untouched", "http://box:8443/path", "box:8443/path"},
+		{"plain host no port untouched", "http://box/path", "box/path"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactAccessTokenURL(tc.raw)
+			if strings.Contains(got, accessTokenRedaction) {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; gained a REDACTED marker "+
+					"for an access_token-free host overlap",
+					tc.raw, got)
+			}
+			if !strings.Contains(got, tc.wantBenignPart) {
+				t.Errorf("RedactAccessTokenURL(%q) = %q; benign substring %q lost",
+					tc.raw, got, tc.wantBenignPart)
+			}
+		})
+	}
+}
+
+// TestRedactAccessTokenErrorRedactsOverlapHost exercises the production
+// reachability path the bug report identifies: --daemon-url /
+// AF_DAEMON_URL feeds parseDaemonURL, whose "ws://" + u.Host form becomes the
+// websocket dial URL; a dial failure produces a *url.Error whose .URL is
+// routed through RedactAccessTokenError → RedactAccessTokenURL. An overlap
+// access_token= in the host segment survives parseDaemonURL (it does no IDNA
+// normalisation and accepts '=' in the host) and reached the redactor intact;
+// before the fix only the query's access_token was redacted and the host
+// secret leaked as %ACcess_token=<TOKEN> in the error string. Each case co-
+// locates a query access_token so the asymmetry — same redactor call, query
+// redacted but host not — is pinned away.
+func TestRedactAccessTokenErrorRedactsOverlapHost(t *testing.T) {
+	const hostTok = "af-sentinel-error-host-overlap"
+	const queryTok = "af-sentinel-error-query-overlap"
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string // expected *url.Error.URL after redaction, embedded in err.Error()
+	}{
+		{
+			name: "literal host + query token",
+			raw:  "ws://access_token=" + hostTok + ":8443/v1/sessions/test/stream?access_token=" + queryTok,
+			want: "ws://access_token=REDACTED:8443/v1/sessions/test/stream?access_token=REDACTED",
+		},
+		{
+			name: "overlap host + query token",
+			raw:  "ws://%access_token=" + hostTok + ":8443/v1/sessions/test/stream?access_token=" + queryTok,
+			want: "ws://%ACcess_token=REDACTED:8443/v1/sessions/test/stream?access_token=REDACTED",
+		},
+		{
+			name: "uppercase overlap host + query token",
+			raw:  "ws://%ACcess_token=" + hostTok + ":8443/v1/sessions/test/stream?access_token=" + queryTok,
+			want: "ws://%ACcess_token=REDACTED:8443/v1/sessions/test/stream?access_token=REDACTED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dialErr := &url.Error{
+				Op:  "Get",
+				URL: tc.raw,
+				Err: errors.New("dial tcp: no such host"),
+			}
+			got := RedactAccessTokenError(dialErr, hostTok)
+			gotStr := got.Error()
+			if strings.Contains(gotStr, hostTok) {
+				t.Errorf("host token %q leaked into error: %s", hostTok, gotStr)
+			}
+			if strings.Contains(gotStr, queryTok) {
+				t.Errorf("query token %q leaked into error: %s", queryTok, gotStr)
+			}
+			if !strings.Contains(gotStr, tc.want) {
+				t.Errorf("error lost the redacted URL context: %s\nwant to contain %q",
+					gotStr, tc.want)
+			}
+			// The host secret must not survive in any obfuscated form the
+			// issuer serialises (e.g. %ACcess_token=<TOKEN>).
+			if strings.Contains(strings.ToUpper(gotStr), strings.ToUpper(hostTok)) {
+				t.Errorf("host token survived (case-insensitive): %s", gotStr)
 			}
 		})
 	}

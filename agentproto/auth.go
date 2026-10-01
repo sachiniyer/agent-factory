@@ -96,7 +96,64 @@ func redactAccessTokenComponents(u *url.URL) {
 	if rawRedacted, found := redactRawAccessTokenValue(u.Opaque, "/;?#"); found {
 		u.Opaque = rawRedacted
 	}
-	u.Host = RedactAccessTokenText(u.Host)
+	// Host mirrors the path/fragment/opaque/userinfo branches above. A valid
+	// %HH escape (e.g. %ac) can overlap the leading characters of an otherwise
+	// literal access_token<...> substring, and url.Parse decodes it into the
+	// authority: %ac becomes byte 0xAC, consuming the 'a' and 'c' of `access`
+	// and collapsing access_token= out of u.Host. u.Host therefore holds the
+	// DECODED view, on which RedactAccessTokenText's literal-needle backstop is
+	// blind to the overlap; url.URL.String re-escapes 0xAC back to %AC, so the
+	// re-emitted URL still carries a literal access_token=<value> in the host
+	// and the secret leaks into the dial-error chain (#4663 closed this for
+	// every other component but left the host on the literal backstop).
+	//
+	// net/url exposes no EscapedHost() accessor, so obtain the re-encoded host
+	// from a synthetic URL's String() — the same encoder the full URL runs —
+	// and run the percent-tolerant scanner over those bytes, exactly as
+	// EscapedPath/EscapedFragment/Userinfo.String feed the re-encoded form to
+	// their scans. ":" is the host's structural separator (it precedes the
+	// port), so a redacted value ends at it the same way a userinfo value ends
+	// at its single ":" separator — keeping the port in the diagnostic. A
+	// non-empty-Host guard is required: opaque URLs (e.g. data:…) have
+	// Host == "", and a synthetic URL with an empty authority serializes to
+	// "<scheme>:" or "//", neither of which carries a host to strip. Re-parse
+	// the redacted bytes through net/url so u.Host stores the parser-decoded
+	// form String re-escapes from, mirroring how the userinfo branch re-parses
+	// through url.Parse("http://" + rawRedacted + "@").
+	if u.Host != "" {
+		escapedHost := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+		// String emits "<scheme>://<host>" when Scheme is set and "//<host>"
+		// when it is not; trim exactly that prefix to isolate the escaped host.
+		// Prefix-based trimming is used over length slicing so an empty scheme
+		// (a protocol-relative URL like //host/path) does not drop the first
+		// host byte, and an unexpected shape fails open rather than corrupting.
+		hostPrefix := "//"
+		if u.Scheme != "" {
+			hostPrefix = u.Scheme + "://"
+		}
+		escapedHost = strings.TrimPrefix(escapedHost, hostPrefix)
+		if rawRedacted, found := redactRawAccessTokenValue(escapedHost, ":"); found {
+			reparseInput := "//" + rawRedacted
+			if u.Scheme != "" {
+				reparseInput = u.Scheme + "://" + rawRedacted
+			}
+			reparsed, err := url.Parse(reparseInput)
+			if err != nil || reparsed.Host == "" {
+				// A parse failure means the raw scan left bytes net/url can no
+				// longer parse as an authority. redactRawAccessTokenValue only
+				// substitutes a value span with the REDACTED marker — never an
+				// authority-reserved byte — so this branch is unreachable for
+				// inputs the original parse produced; fail closed regardless
+				// rather than emit a credential the overlap scan could have
+				// redacted incompletely.
+				u.Host = accessTokenRedaction
+			} else {
+				u.Host = reparsed.Host
+			}
+		} else {
+			u.Host = RedactAccessTokenText(u.Host)
+		}
+	}
 	if path, found := redactPercentEncodedAccessTokenText(u.Path, false); found {
 		// RawPath is honoured only while it still encodes Path, and a rewritten
 		// Path leaves it stale. Drop it so String re-escapes from the redacted
