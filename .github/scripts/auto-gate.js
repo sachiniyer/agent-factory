@@ -4194,11 +4194,22 @@ async function validationRunVisible({ github, context, headSha, since, sleep, ex
       return (
         runs.find((run) => {
           const created = Date.parse(run?.created_at);
-          return (
-            Number.isFinite(created) &&
-            created >= cutoff &&
-            !excludeIds?.has(run.id)
-          );
+          if (!Number.isFinite(created) || created < cutoff || excludeIds?.has(run.id)) {
+            return false;
+          }
+          // A run the listing can prove predates the window is already
+          // excluded by id; one that ESCAPED the pre-dispatch snapshot — the
+          // index lagging it — passes the timestamp check anyway, so the last
+          // discriminator is who dispatched it. The push's own pull_request
+          // run is adoptable whoever pushed; a workflow_dispatch run is the
+          // POST's work only when the automation asked for it. A probe fired
+          // by hand is a human's dispatch and carries no required checks even
+          // when it lands inside the window (#5010, Codex).
+          if (run.event !== "workflow_dispatch") {
+            return true;
+          }
+          const actor = run?.triggering_actor || run?.actor;
+          return actor?.type === "Bot" || String(actor?.login || "").endsWith("[bot]");
         }) || null
       );
     },

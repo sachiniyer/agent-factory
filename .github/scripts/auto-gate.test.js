@@ -11503,6 +11503,8 @@ test("#5010: a run already listed before the dispatch is never adopted", async (
         // In-window on purpose: the timestamp alone would admit it, and the
         // id exclusion is the point under test.
         status: "completed", conclusion: "success",
+        actor: { login: "github-actions[bot]", type: "Bot" },
+        triggering_actor: { login: "github-actions[bot]", type: "Bot" },
         created_at: new Date(Date.now() + 60_000).toISOString() },
     ] },
   });
@@ -11515,6 +11517,34 @@ test("#5010: a run already listed before the dispatch is never adopted", async (
     excludeIds: new Set([798]), sleep: async () => {},
   });
   assert.equal(found, null, "the pre-dispatch listing already knew this run; the window cannot re-admit it");
+});
+
+// Codex review on this fix: a probe can escape even that — dispatched in the
+// same second before the POST but absent from the snapshot because the index
+// lagged it, then surfacing mid-reconcile with a passing timestamp. The last
+// discriminator is who dispatched it: the push's own pull_request run is
+// adoptable whoever pushed, but a workflow_dispatch run is this POST's work
+// only when the automation asked for it.
+test("#5010: a hand-fired probe surfacing inside the window is not adopted", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 798, name: "PR Validation", event: "workflow_dispatch",
+        status: "completed", conclusion: "success",
+        actor: { login: "sachiniyer", type: "User" },
+        triggering_actor: { login: "sachiniyer", type: "User" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+      { id: 799, name: "PR Validation", event: "workflow_dispatch",
+        status: "in_progress", conclusion: null,
+        actor: { login: "github-actions[bot]", type: "Bot" },
+        triggering_actor: { login: "github-actions[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+    ] },
+  });
+  const found = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0, sleep: async () => {},
+  });
+  assert.equal(found?.id, 799,
+    "the automation's dispatch is adoptable; a human's workflow_dispatch probe is not");
 });
 
 // Codex review on this fix: a guard that exhausted ITS OWN retries throws a
@@ -16185,18 +16215,23 @@ function fakeGateGithub({
     landDispatchRun(workflowId, run) {
       // The reconcile window keys on created_at, so the fake stamps it the way
       // the API does — at landing, inside the window, and at WHOLE-SECOND
-      // precision, so a caller that forgets to floor its cutoff is caught.
+      // precision, so a caller that forgets to floor its cutoff is caught. The
+      // dispatch the fake accepted is the gate's own POST, so the actor is the
+      // automation — a human's dispatch (a probe) is set on the fixture.
       const landedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+      const actor = { login: "github-actions[bot]", type: "Bot" };
       if (workflowId === "auto-gate.yml") {
         github.gateWorkflowRuns.push({
           id: 50000 + github.gateWorkflowRuns.length,
           event: "workflow_dispatch",
           created_at: landedAt,
+          actor,
+          triggering_actor: actor,
           ...run,
         });
       } else if (run?.head_sha) {
         (runsByHeadSha[run.head_sha] = runsByHeadSha[run.head_sha] || [])
-          .push({ created_at: landedAt, ...run });
+          .push({ created_at: landedAt, actor, triggering_actor: actor, ...run });
       }
     },
     rest: {
