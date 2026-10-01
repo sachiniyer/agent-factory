@@ -12650,7 +12650,7 @@ function rebindTargetAfterAwait(inputs) {
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen || inputs.newestAppliedSelId === inputs.pinnedSelId && inputs.newestAppliedSeq > inputs.rebindSeq) {
+  if (inputs.currentGen !== inputs.pinnedGen || (inputs.newestAppliedSeqs.get(inputs.pinnedSelId) ?? 0) > inputs.rebindSeq) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {
@@ -18828,7 +18828,7 @@ function openTab(index) {
   focusTerminal();
 }
 var tabRebindSeq = 0;
-var newestAppliedRebind = null;
+var newestAppliedRebindBySession = /* @__PURE__ */ new Map();
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
   const seq = ++tabRebindSeq;
@@ -18864,11 +18864,10 @@ function guardedTabRebind(selId, run, resolve, verb) {
       pinnedSessionAlive,
       targetIdx,
       rebindSeq: seq,
-      newestAppliedSeq: newestAppliedRebind?.seq ?? 0,
-      newestAppliedSelId: newestAppliedRebind?.selId ?? null
+      newestAppliedSeqs: newestAppliedRebindBySession
     });
     if (outcome.kind === "rebind") {
-      newestAppliedRebind = { seq, selId };
+      newestAppliedRebindBySession.set(selId, seq);
       splitView.setFocusedTabAwaited(outcome.idx);
       if (verb === "create") {
         focusTerminal();

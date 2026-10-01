@@ -94,8 +94,7 @@ test("#5061 the losing ordering, replayed: the earlier gesture's landing does no
     pinnedSessionAlive: true,
     targetIdx: 1,
     rebindSeq: 2,
-    newestAppliedSeq: 1,
-    newestAppliedSelId: "sess-a",
+    newestAppliedSeqs: new Map([["sess-a", 1]]),
   });
   assert.deepEqual(outcome, { kind: "rebind", idx: 1 });
 });
@@ -112,8 +111,7 @@ test("#5061 a stale completion cannot clobber a NEWER gesture that already appli
     pinnedSessionAlive: true,
     targetIdx: 0,
     rebindSeq: 1,
-    newestAppliedSeq: 2,
-    newestAppliedSelId: "sess-a",
+    newestAppliedSeqs: new Map([["sess-a", 2]]),
   });
   assert.deepEqual(outcome, { kind: "refused", reason: "layout-moved" });
 });

@@ -300,8 +300,7 @@ function rebindInputs(over: Partial<TabRebindInputs> = {}): TabRebindInputs {
     pinnedSessionAlive: true,
     targetIdx: 3,
     rebindSeq: 1,
-    newestAppliedSeq: 0,
-    newestAppliedSelId: null,
+    newestAppliedSeqs: new Map(),
     ...over,
   };
 }
@@ -338,7 +337,7 @@ test("an OLDER awaited gesture's landing inside the window does not veto the new
   // bumped the generation and this read as layout-moved.
   assert.deepEqual(
     rebindTargetAfterAwait(
-      rebindInputs({ rebindSeq: 2, newestAppliedSeq: 1, newestAppliedSelId: "sess-a" }),
+      rebindInputs({ rebindSeq: 2, newestAppliedSeqs: new Map([["sess-a", 1]]) }),
     ),
     { kind: "rebind", idx: 3 },
   );
@@ -350,14 +349,14 @@ test("a stale completion cannot clobber a NEWER gesture that already applied (#5
   // Landing now would yank the pane off the newer intent's target.
   assert.deepEqual(
     rebindTargetAfterAwait(
-      rebindInputs({ rebindSeq: 1, newestAppliedSeq: 2, newestAppliedSelId: "sess-a" }),
+      rebindInputs({ rebindSeq: 1, newestAppliedSeqs: new Map([["sess-a", 2]]) }),
     ),
     { kind: "refused", reason: "layout-moved" },
   );
   // Equal is impossible (seqs are unique) — anything at-or-past us counts as newer.
   assert.deepEqual(
     rebindTargetAfterAwait(
-      rebindInputs({ rebindSeq: 1, newestAppliedSeq: 1, newestAppliedSelId: "sess-a" }),
+      rebindInputs({ rebindSeq: 1, newestAppliedSeqs: new Map([["sess-a", 1]]) }),
     ),
     { kind: "rebind", idx: 3 },
   );
@@ -366,10 +365,18 @@ test("a stale completion cannot clobber a NEWER gesture that already applied (#5
 test("a newer gesture's apply on ANOTHER session does not veto this one (#5061 Codex)", () => {
   // Close pending on A, user switches to B and creates there (seq 2 applies), then
   // returns to A before the close lands: B's apply writes B's retained tree — A's
-  // pane is untouched — so it must not veto A's keep-tab rebind.
+  // pane is untouched — so it must not veto A's keep-tab rebind. And an apply on B
+  // must not overwrite A's record either: a stale A completion after it would
+  // still see A/seq2 and refuse.
   assert.deepEqual(
     rebindTargetAfterAwait(
-      rebindInputs({ rebindSeq: 1, newestAppliedSeq: 2, newestAppliedSelId: "sess-b" }),
+      rebindInputs({ rebindSeq: 1, newestAppliedSeqs: new Map([["sess-a", 2], ["sess-b", 3]]) }),
+    ),
+    { kind: "refused", reason: "layout-moved" },
+  );
+  assert.deepEqual(
+    rebindTargetAfterAwait(
+      rebindInputs({ rebindSeq: 1, newestAppliedSeqs: new Map([["sess-b", 2]]) }),
     ),
     { kind: "rebind", idx: 3 },
   );
