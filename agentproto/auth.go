@@ -132,28 +132,48 @@ func redactAccessTokenComponents(u *url.URL) {
 			hostPrefix = u.Scheme + "://"
 		}
 		escapedHost = strings.TrimPrefix(escapedHost, hostPrefix)
-		// ":" terminates a value only in a bare/reg-name host, where the first
-		// ':' is the host/port separator. A bracketed IP-literal authority
-		// (RFC 3986 §3.2.2 "[ ... ]") uses ':' as an IPv6 field separator
-		// inside the brackets, not as a host/port separator, so ':' there
-		// would truncate an access_token value at the first IPv6 colon and
-		// leave the remainder of the bracketed literal in the re-emitted host
-		// (e.g. [%access_token=TOP:SECRET::1] → [%ACcess_token=REDACTED:
-		// SECRET::1]). Run the value to the closing ']' instead, which
-		// redacts the remainder of the bracketed host and keeps the ':port'
-		// that follows ']'. A bracketed authority a parser hands this branch
-		// cannot itself carry 'access_token=' — url.Parse validates the
-		// bracket as an IP-literal, which admits no '=' — so this is the
-		// defensive boundary for the overlap shape; the reg-name path keeps
-		// ':' so the port survives the redacted value.
-		hostTerminators := ":"
-		if strings.HasPrefix(escapedHost, "[") {
+		// The host has two colon families and ':' cannot be the value
+		// terminator for either:
+		//  1. A reg-name host can carry a colon INSIDE an access_token value
+		//     before its actual numeric port. url.Parse splits the authority
+		//     at the LAST colon whose suffix is a port, so
+		//     http://%access_token=TOP:SECRET:8443/ parses with hostname
+		//     %ACcess_token=TOP:SECRET and port 8443. Terminating the value
+		//     at the FIRST ':' truncates it at TOP and re-emits
+		//     %ACcess_token=REDACTED:SECRET:8443, leaking SECRET.
+		//  2. A bracketed IP-literal authority (RFC 3986 §3.2.2 "[ ... ]")
+		//     uses ':' as an IPv6 field separator inside the brackets, not as
+		//     a host/port separator, so ':' there truncates at the first
+		//     IPv6 colon and leaves the remainder of the bracketed literal.
+		//
+		// u.Port is the parser-proven port (a trailing ":<digits>" net/url
+		// already separated out), so strip it from the escaped host first
+		// and re-append it after the scan: the value then runs to the end of
+		// the host segment (consuming any ':' inside a reg-name value, e.g.
+		// TOP:SECRET) or to the closing ']' of a bracketed IP-literal, and the
+		// port survives the redacted value in both shapes. Re-encoding does
+		// not touch the ASCII ":<port>" suffix, so TrimSuffix removes exactly
+		// it. A bracketed authority a parser hands this branch cannot itself
+		// carry 'access_token=' — url.Parse validates the bracket as an
+		// IP-literal, which admits no '=' — so the ']' terminator is the
+		// defensive boundary for the overlap shape.
+		hostSegment := escapedHost
+		port := u.Port()
+		if port != "" {
+			hostSegment = strings.TrimSuffix(escapedHost, ":"+port)
+		}
+		hostTerminators := ""
+		if strings.HasPrefix(hostSegment, "[") {
 			hostTerminators = "]"
 		}
-		if rawRedacted, found := redactRawAccessTokenValue(escapedHost, hostTerminators); found {
-			reparseInput := "//" + rawRedacted
+		if rawRedacted, found := redactRawAccessTokenValue(hostSegment, hostTerminators); found {
+			redactedHost := rawRedacted
+			if port != "" {
+				redactedHost = rawRedacted + ":" + port
+			}
+			reparseInput := "//" + redactedHost
 			if u.Scheme != "" {
-				reparseInput = u.Scheme + "://" + rawRedacted
+				reparseInput = u.Scheme + "://" + redactedHost
 			}
 			reparsed, err := url.Parse(reparseInput)
 			if err != nil || reparsed.Host == "" {

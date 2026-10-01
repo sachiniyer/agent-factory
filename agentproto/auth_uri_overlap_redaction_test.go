@@ -723,6 +723,14 @@ func TestRedactAccessTokenURLRedactsOverlapHost(t *testing.T) {
 		// redacting it (and now preserves the port the backstop used to drop).
 		{"literal-with-port", "http://access_token=" + secret + ":8443/stream", "http://access_token=REDACTED:8443/stream"},
 		{"literal-no-port", "http://access_token=" + secret + "/stream", "http://access_token=REDACTED/stream"},
+		// Colon INSIDE the value: url.Parse splits the authority at the LAST
+		// colon whose suffix is a port, so ...=TOP:SECRET:8443 parses with
+		// hostname ...=TOP:SECRET and port 8443. A ':' value terminator would
+		// truncate at the first colon (TOP) and leak SECRET; the port is
+		// stripped first and re-appended, so the value runs through its inner
+		// ':' to the end of the host segment and the trailing :8443 survives.
+		{"overlap-colon-in-value", "http://%access_token=" + secret + ":SECRET:8443/stream", "http://%ACcess_token=REDACTED:8443/stream"},
+		{"literal-colon-in-value", "http://access_token=" + secret + ":SECRET:8443/stream", "http://access_token=REDACTED:8443/stream"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
