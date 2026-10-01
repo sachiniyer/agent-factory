@@ -2981,7 +2981,10 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
     await expect(host).toContainText("alt-scroll-200", { timeout: 20_000 });
     await p.keyboard.type("printf '\\033[?1049h\\033[?1000h\\033[?1006h\\033[H'");
     await p.keyboard.press("Enter");
-    await p.keyboard.type("cat > /dev/null");
+    // A real mouse-mode app runs the PTY raw: echoing the reports back onto the
+    // grid makes the DOM renderer recycle row nodes mid-gesture, which detaches
+    // the touch target and eats the rest of the stream (#5020).
+    await p.keyboard.type("stty -echo -icanon && cat > /dev/null");
     await p.keyboard.press("Enter");
     await expect(xterm).toHaveClass(/enable-mouse-events/);
     // Prove the state the bug lived in, not just the mode flag: the scrollback
@@ -3028,6 +3031,9 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
     await expect(mouseHint, "synthesized wheel reports must not flash the desktop escape hint").not.toHaveClass(
       /af-visible/,
     );
+    // A flick-ended drag keeps reporting while it coasts (#5020) — let that wind
+    // down so its wheel-ups can't bleed into the upward drag's purity window.
+    await settledReportCount(inputPayloads);
 
     // …and a finger travelling UP is wheel-down — button 65.
     inputPayloads.length = 0;
@@ -3042,6 +3048,10 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
       "the upward drag must report wheel-down only",
     ).toBe(true);
     await expect(mouseHint).not.toHaveClass(/af-visible/);
+    // The coast's reports outlive the lift (#5020); spend them before the
+    // encoding flips, where leftover wheel-downs would arrive as \x1b[Ma and
+    // pollute the default-encoding purity assertion below.
+    await settledReportCount(inputPayloads);
 
     // DEFAULT encoding next: SGR off but DECSET 1000 still on. The reports now
     // leave xterm on the BINARY channel — \x1b[M then three byte-coded fields —
@@ -3055,9 +3065,12 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
     inputPayloads.length = 0;
     await expect(async () => {
       await p.keyboard.press("Control+c");
-      await p.keyboard.type("printf '\\033[?1006l'; cat > /dev/null");
+      await p.keyboard.type("printf '\\033[?1006l'; stty -echo -icanon; cat > /dev/null");
       await p.keyboard.press("Enter");
-      await touchDrag(cdp, column, y + height * 0.3, y + height * 0.5);
+      // The probe holds its lift: a flicked drag's coast (#5020) would keep
+      // emitting reports while the NEXT retry types the toggle line, injecting
+      // them into the command it is trying to land.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.5, 8, 25, 0, 300);
       expect(
         defaultReports().length,
         "default-encoded wheel reports must reach the PTY byte-for-byte",
@@ -3067,6 +3080,9 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
         "the downward drag must report wheel-up (\\x1b[M`) in DEFAULT encoding",
       ).toBe(true);
     }).toPass({ timeout: 15_000 });
+    // Same coast drain as above: the probe drag's wheel-ups must be spent before
+    // the upward drag's window opens.
+    await settledReportCount(inputPayloads);
 
     inputPayloads.length = 0;
     await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
@@ -3079,6 +3095,9 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
       defaultReports().every((pl) => pl[3] === 0x61),
       "the upward drag must report wheel-down only (\\x1b[Ma)",
     ).toBe(true);
+    // And its own coast must be spent before the normal-buffer section asserts
+    // a clean inputPayloads after its clear.
+    await settledReportCount(inputPayloads);
 
     // Back on the normal buffer — mouse tracking STILL on — the same drag keeps
     // its #2682 meaning: it scrolls local history and reports nothing.
