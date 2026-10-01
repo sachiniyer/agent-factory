@@ -37,7 +37,25 @@ func wrapperOperandTailMutates(words []*syntax.Word, names map[string]struct{}, 
 
 func wrapperOperandTailMutatesUncached(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
-		return true
+		// A pinned ionice option token (e.g. `--class="$X"`, `-c2"$X"`) is one
+		// self-contained argv word whose fixed literal prefix can never resolve
+		// to env, a mutating builtin, or a shell — unwrapIonice's pinned branch
+		// proves that (see ionicePinnedOptionWord). A shadowed scanning wrapper
+		// that shifts its child tail onto such a word execs `--class=…` as the
+		// command name, so the suffix that begins there is inert as a head;
+		// preserve that pinned-token proof instead of failing closed on the
+		// non-literal word, so nesting under nohup/nice/timeout/setsid/stdbuf
+		// does not reject commands plain `ionice` accepts. A bare dynamic
+		// `-c"$X"` is not pinned, so it still fails closed here.
+		if !ionicePinnedOptionWord(words[0]) {
+			return true
+		}
+		// The pinned token is an unrecognized leaf head here: a shadowed wrapper
+		// that shifts onto it receives the rest as that leaf's argv, so scan the
+		// rest the way unrecognizedWrapperHidesAccountAssignment scans any
+		// unrecognized wrapper's tail, rather than judging the non-literal head
+		// itself.
+		return unrecognizedWrapperHidesAccountAssignment(words, names, memo)
 	}
 	tail, unsafe := unwrapAccountCommand(words, names, memo)
 	if unsafe {
@@ -607,6 +625,23 @@ func ioniceQuotedOptionBoundaryPinned(prefix string) bool {
 		return false
 	}
 	return prefix[1] == 'c' || prefix[1] == 'n'
+}
+
+// ionicePinnedOptionWord reports whether word is a pinned ionice option token —
+// a non-literal word whose fixed literal prefix pins its expansion to one argv
+// word that can never resolve to env, a mutating builtin, or a shell. It is the
+// self-contained token unwrapIonice's pinned branch proves (above):
+// `--class="$C"`/`--classdata="$C"` (the `=` pins the value inside the word, even
+// when empty) and `-c2"$C"`/`-n2"$C"` (literal value text after the flag proves
+// the attached value is nonempty). A bare dynamic `-c"$C"` is NOT pinned — the
+// empty reading leaves a separate `-c` that swallows the following word — so it
+// is excluded and stays failing closed in the child-tail scan.
+func ionicePinnedOptionWord(word *syntax.Word) bool {
+	prefix, quoted := literalPrefixBeforeSimpleQuotedParameter(word)
+	if !quoted {
+		return false
+	}
+	return ioniceQuotedOptionBoundaryPinned(prefix)
 }
 
 // ioniceClassValueLongOption reports whether option names one of ionice's two
