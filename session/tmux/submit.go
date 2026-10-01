@@ -101,9 +101,7 @@ type deliveryObservation struct {
 // payload is the whole normalized text and baselineText the normalized baseline
 // frame; the positional newest-render check reads them (#4884), and the #4200
 // staged-draft remedy reads baselineText to bind its evidence to this paste.
-// trailingNewlines counts the row breaks the payload ENDS with, which
-// normalization erases but a literal-rendering composer draws as blank rows
-// under the text (#4200). Baselines
+// Baselines
 // prefer the capture after the pre-submit clear (and conservatively
 // fall back to the pre-clear frame if that capture fails), so old prompt text
 // in scrollback cannot be mistaken for evidence from this paste. If neither
@@ -117,7 +115,6 @@ type deliveryProbe struct {
 	renderWitnessBaseline int
 	payload               string
 	baselineText          string
-	trailingNewlines      int
 	// pasteRunes and pasteLines are this payload's own size in the units the
 	// collapsed-paste chips declare ("[Pasted Content N chars]", "[Pasted text
 	// #k +N lines]"). The #4200 remedy's chip binding uses them to exclude a
@@ -742,11 +739,10 @@ func newDeliveryProbe(text string) deliveryProbe {
 	}
 
 	probe := deliveryProbe{
-		completion:       string(n[len(n)-completionLen:]),
-		payload:          string(n),
-		trailingNewlines: trailingNewlines(xansi.Strip(text)),
-		pasteRunes:       len([]rune(stripped)),
-		pasteLines:       strings.Count(stripped, "\n") + 1,
+		completion: string(n[len(n)-completionLen:]),
+		payload:    string(n),
+		pasteRunes: len([]rune(stripped)),
+		pasteLines: strings.Count(stripped, "\n") + 1,
 	}
 	if availablePrefix >= minDistinctiveFragment {
 		if availablePrefix > witnessRunes {
