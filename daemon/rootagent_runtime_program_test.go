@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os/exec"
 	"testing"
 	"time"
 
@@ -21,6 +22,9 @@ import (
 // fake backend cannot exercise this invariant because the recording lives at
 // the backend's launch boundary, which a fake bypasses.
 func TestEnsureRootAgentsRecreatedRootRecordsRuntimeProgram(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skipf("tmux is not installed: %v", err)
+	}
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
