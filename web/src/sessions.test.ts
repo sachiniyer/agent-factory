@@ -301,6 +301,7 @@ function rebindInputs(over: Partial<TabRebindInputs> = {}): TabRebindInputs {
     targetIdx: 3,
     rebindSeq: 1,
     newestAppliedSeq: 0,
+    newestAppliedSelId: null,
     ...over,
   };
 }
@@ -336,21 +337,40 @@ test("an OLDER awaited gesture's landing inside the window does not veto the new
   // smaller than ours, so the create still rebinds. Before #5061 the close's apply
   // bumped the generation and this read as layout-moved.
   assert.deepEqual(
-    rebindTargetAfterAwait(rebindInputs({ rebindSeq: 2, newestAppliedSeq: 1 })),
+    rebindTargetAfterAwait(
+      rebindInputs({ rebindSeq: 2, newestAppliedSeq: 1, newestAppliedSelId: "sess-a" }),
+    ),
     { kind: "rebind", idx: 3 },
   );
 });
 
 test("a stale completion cannot clobber a NEWER gesture that already applied (#5061)", () => {
   // Opposite ordering: our RPC outlived the newer gesture's whole round trip, so it
-  // applied first. Landing now would yank the pane off the newer intent's target.
+  // applied first — on the SAME session, so its landing is the intent to respect.
+  // Landing now would yank the pane off the newer intent's target.
   assert.deepEqual(
-    rebindTargetAfterAwait(rebindInputs({ rebindSeq: 1, newestAppliedSeq: 2 })),
+    rebindTargetAfterAwait(
+      rebindInputs({ rebindSeq: 1, newestAppliedSeq: 2, newestAppliedSelId: "sess-a" }),
+    ),
     { kind: "refused", reason: "layout-moved" },
   );
   // Equal is impossible (seqs are unique) — anything at-or-past us counts as newer.
   assert.deepEqual(
-    rebindTargetAfterAwait(rebindInputs({ rebindSeq: 1, newestAppliedSeq: 1 })),
+    rebindTargetAfterAwait(
+      rebindInputs({ rebindSeq: 1, newestAppliedSeq: 1, newestAppliedSelId: "sess-a" }),
+    ),
+    { kind: "rebind", idx: 3 },
+  );
+});
+
+test("a newer gesture's apply on ANOTHER session does not veto this one (#5061 Codex)", () => {
+  // Close pending on A, user switches to B and creates there (seq 2 applies), then
+  // returns to A before the close lands: B's apply writes B's retained tree — A's
+  // pane is untouched — so it must not veto A's keep-tab rebind.
+  assert.deepEqual(
+    rebindTargetAfterAwait(
+      rebindInputs({ rebindSeq: 1, newestAppliedSeq: 2, newestAppliedSelId: "sess-b" }),
+    ),
     { kind: "rebind", idx: 3 },
   );
 });

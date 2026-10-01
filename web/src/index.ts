@@ -1439,11 +1439,14 @@ function openTab(index: number): void {
 // generation alone cannot order overlapping awaited gestures: their applies land
 // through setFocusedTabAwaited, which moves no generation because a gesture's own
 // landing write is not newer user intent (#5061). tabRebindSeq is taken when the
-// RPC is issued; newestAppliedRebindSeq records the newest gesture whose rebind
+// RPC is issued; newestAppliedRebind records the newest gesture whose rebind
 // actually landed, so a completion arriving after a newer gesture's apply refuses
-// to clobber it while an older gesture's landing vetoes nothing newer.
+// to clobber it while an older gesture's landing vetoes nothing newer. The seq is
+// scoped per session: an apply writes the focused pane of the session it targeted,
+// and each session's layout tree is kept apart, so a newer gesture's landing on
+// ANOTHER session cannot clobber this one (#5061 Codex).
 let tabRebindSeq = 0;
-let newestAppliedRebindSeq = 0;
+let newestAppliedRebind: { seq: number; selId: string } | null = null;
 
 /** Runs a tab mutation whose post-await step re-points the FOCUSED pane, applying the
  *  two guards every such rebind needs so a new async gesture can't forget them
@@ -1522,13 +1525,14 @@ function guardedTabRebind(
         pinnedSessionAlive,
         targetIdx,
         rebindSeq: seq,
-        newestAppliedSeq: newestAppliedRebindSeq,
+        newestAppliedSeq: newestAppliedRebind?.seq ?? 0,
+        newestAppliedSelId: newestAppliedRebind?.selId ?? null,
       });
       if (outcome.kind === "rebind") {
         // Recorded before the apply: this gesture's landing is the newest intent on
         // record, and awaited applies land without counting as layout intent — the
         // ordering above is what keeps a stale completion from clobbering it.
-        newestAppliedRebindSeq = seq;
+        newestAppliedRebind = { seq, selId };
         splitView.setFocusedTabAwaited(outcome.idx);
         if (verb === "create") {
           focusTerminal();

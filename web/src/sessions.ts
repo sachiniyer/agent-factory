@@ -193,6 +193,13 @@ export interface TabRebindInputs {
    *  it — landing now would clobber the newer intent it already conceded to. An
    *  older gesture's landing carries a smaller seq and vetoes nothing. */
   newestAppliedSeq: number;
+  /** The session the newest applied gesture was aimed at — the veto only bites
+   *  when it is THIS gesture's session. A rebind applies to the focused pane of
+   *  the session on screen, and splitView keeps each session's tree apart, so a
+   *  newer gesture's landing on ANOTHER session can never clobber this one's
+   *  pane; counting it would refuse a same-session keep-tab rebind for an
+   *  unrelated apply (#5061 Codex). null means no awaited gesture has applied. */
+  newestAppliedSelId: string | null;
 }
 
 /** The tab ordinal a post-await pane rebind should land on, or the refusal that
@@ -211,10 +218,11 @@ export interface TabRebindInputs {
  *   - generation guard: a NEWER intent is already on record. Either the layout moved
  *     — `layoutGeneration` bumped by a focus move, a pane close, a drag-drop split,
  *     or a user tab rebind — or a newer awaited gesture already applied
- *     (`newestAppliedSeq` passed `rebindSeq`); the generation alone cannot see the
- *     second case because awaited applies deliberately move no generation (#5061),
- *     so the two order by issue sequence. Re-pointing from an intent formed before
- *     either yanks the pane back.
+ *     (`newestAppliedSeq` passed `rebindSeq`, for THIS session — an apply on another
+ *     session writes a different pane tree and clobbers nothing here); the
+ *     generation alone cannot see the second case because awaited applies
+ *     deliberately move no generation (#5061), so the two order by issue sequence.
+ *     Re-pointing from an intent formed before either yanks the pane back.
  *
  *  `targetIdx < 0` is the honest "the tab is gone" — the created/kept tab was closed
  *  out-of-band during the await — and the pane stays where syncSplit's identity remap
@@ -238,7 +246,10 @@ export function rebindTargetAfterAwait(inputs: TabRebindInputs): TabRebindOutcom
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen || inputs.newestAppliedSeq > inputs.rebindSeq) {
+  if (
+    inputs.currentGen !== inputs.pinnedGen ||
+    (inputs.newestAppliedSelId === inputs.pinnedSelId && inputs.newestAppliedSeq > inputs.rebindSeq)
+  ) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {

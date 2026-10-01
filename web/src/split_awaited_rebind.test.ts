@@ -95,6 +95,7 @@ test("#5061 the losing ordering, replayed: the earlier gesture's landing does no
     targetIdx: 1,
     rebindSeq: 2,
     newestAppliedSeq: 1,
+    newestAppliedSelId: "sess-a",
   });
   assert.deepEqual(outcome, { kind: "rebind", idx: 1 });
 });
@@ -112,6 +113,7 @@ test("#5061 a stale completion cannot clobber a NEWER gesture that already appli
     targetIdx: 0,
     rebindSeq: 1,
     newestAppliedSeq: 2,
+    newestAppliedSelId: "sess-a",
   });
   assert.deepEqual(outcome, { kind: "refused", reason: "layout-moved" });
 });
