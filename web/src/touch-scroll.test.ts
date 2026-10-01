@@ -313,3 +313,24 @@ test("a coast with no drag samples and a tick with no coast are inert", () => {
   clock.advance(20);
   assert.equal(s.release(), 0, "one sample has no velocity to measure");
 });
+
+test("coasting is true while momentum is live and false after stop or decay", () => {
+  const clock = fakeClock();
+  const s = TouchScroll(clock.now);
+  assert.equal(s.coasting, false, "no release yet means nothing is moving");
+  s.push(400);
+  drag(s, clock, [{ y: 340, t: 0 }, { y: 280, t: 20 }, { y: 220, t: 40 }]);
+  clock.set(45);
+  s.release();
+  assert.equal(s.coasting, true, "a nonzero release leaves momentum live");
+  s.stop();
+  assert.equal(s.coasting, false, "stop() kills momentum immediately");
+
+  s.push(400);
+  drag(s, clock, [{ y: 340, t: 100 }, { y: 280, t: 120 }, { y: 220, t: 140 }]);
+  clock.set(145);
+  s.release();
+  clock.advance(FLING_DECAY_MS * 10);
+  s.tick();
+  assert.equal(s.coasting, false, "long decay ends the coast on its own");
+});
