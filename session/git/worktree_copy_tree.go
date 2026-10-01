@@ -634,14 +634,22 @@ func copySymlinkEntry(
 	// copier otherwise never touches, and there is no Setxattrat/Getxattrat/*at variant
 	// in golang.org/x/sys/unix (v0.47.0) to match the UtimesNanoAt trick the mtime stamp
 	// above relies on; this is genuine work, not the three-line addition the file/dir
-	// case was. Not in knownCrossDeviceDivergence: that inventory is keyed by properties
-	// describeFidelity actually measures, and this one is unmeasurable on the CI runner
-	// the same way the darwin ACL gap is — user.* cannot be set on a symlink (the VFS
-	// rejects it with EPERM) and only security.* / trusted.* live on links in production,
-	// neither settable without SELinux or root. A row would be permanently
-	// MISSING-skipped, dead inventory the guard's two-directional design exists to
-	// prevent. Tracked in #2919 instead, mirroring the isACLXattr note, so the limit is
-	// written down where the follow-up will look.
+	// case was. Not (yet) in knownCrossDeviceDivergence: that inventory is keyed by
+	// properties describeFidelity actually measures, and describeFidelity reads no
+	// xattr off the symlink fixture today (it sets user.af_fidelity only on plain.txt
+	// and dir, and reads via the path-following Getxattr), so an xattr.symlink row
+	// would have no measured value to compare. This gap is measurable in CI, unlike
+	// the darwin-ACL note on isACLXattr, which additionally needs the acl(3) API the
+	// L* family cannot reach: on Linux user.* cannot be set on a symlink (the VFS
+	// rejects it with EPERM, and only security.* / trusted.* live on links in
+	// production, neither settable without SELinux or root), but on Darwin user.* is
+	// settable on a symlink via the L* family, golang.org/x/sys/unix's TestXattr at
+	// v0.47.0 expects Lsetxattr of user.test on a symlink to succeed there, and
+	// pr.yml's test-macos lane runs the full suite on macos-latest. The
+	// symlink-fixture probe and the row it would enable are the coverage half of the
+	// #2919 follow-up (deferred, not the permanently-MISSING dead inventory the
+	// guard's two-directional design rejects), written down here so the follow-up
+	// finds it alongside the isACLXattr note.
 	return created, nil
 }
 
