@@ -218,13 +218,28 @@ func TestManifestFormatsAndTypesMatchSchemas(t *testing.T) {
 	}
 }
 
+// manifestDeferredSources names the sources a key still admits as write and
+// read locations but that cannot WIN resolution — the admitted-without-
+// precedence state the Sources⊆Precedence lock below otherwise rejects.
+// branch_prefix's personal layer is the interim case (#4539): a project-scoped
+// value stays writable and keeps loading so existing configs remain valid, but
+// the daemon names branches from its frozen startup-global prefix, so the
+// layer is deliberately absent from precedence until the real feature lands.
+var manifestDeferredSources = map[string]SourceSet{
+	"branch_prefix": sourcePersonalOnly,
+}
+
 func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 	switch entry.Key {
 	case "post_worktree_commands", "remote_hooks":
 		return precedenceLegacyRepo
 	case "default_program", "program_overrides":
 		return precedenceGlobalRepoPersonal
-	case "branch_prefix", "on_archive_command", "root_agent", "default_accounts", "limit_account_candidates":
+	case "branch_prefix":
+		// Global-only precedence while Sources still admits the personal layer
+		// for storage — see manifestDeferredSources (#4539).
+		return precedenceGlobal
+	case "on_archive_command", "root_agent", "default_accounts", "limit_account_candidates":
 		return precedenceGlobalPersonal
 	default:
 		if entry.Sources == sourceGlobalOnly {
@@ -281,7 +296,7 @@ func TestManifestResolutionPoliciesAreComplete(t *testing.T) {
 			last = source
 		}
 		for source := SourceGlobal; source < configSourceCount; source++ {
-			if entry.Sources.Has(source) && !seen[source] {
+			if entry.Sources.Has(source) && !seen[source] && !manifestDeferredSources[entry.Key].Has(source) {
 				t.Errorf("%s: source %s is admitted but absent from precedence", entry.Key, source)
 			}
 		}

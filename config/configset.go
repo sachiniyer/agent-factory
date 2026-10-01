@@ -314,14 +314,17 @@ type SetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Path  string `json:"path"`
-	// RequiresRestart is always true: config.toml is read at startup, so a
-	// change applies to af and the daemon on their next start, exactly like a
-	// hand-edit.
+	// RequiresRestart is true for every ordinary write: config.toml is read at
+	// startup, so a change applies to af and the daemon on their next start,
+	// exactly like a hand-edit. The exception is a project-scoped branch_prefix
+	// (#4539): stored but never applied, so no restart can apply it and the
+	// field reports false rather than promising one.
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
-	// value. Today the only one is the tokenless-network-listener exposure
-	// (exposureWarning).
+	// value. Today they are the tokenless-network-listener exposure
+	// (exposureWarning) and, on a project-scoped write, the stored-but-ignored
+	// branch_prefix notice (#4539).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -580,6 +583,16 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	// to say "that account is not registered yet" at the moment it is typed.
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
+	}
+	// A project-scoped branch_prefix is written and kept — existing configs stay
+	// valid — but it is never applied (#4539); say so on the write itself. And
+	// because no restart can ever apply it (the daemon names branches from its
+	// frozen global prefix), the write bypasses the generic restart
+	// result/notice: printing "restart them to apply" for a value that can
+	// never take effect would contradict the warning.
+	if warn := projectBranchPrefixWriteWarning(key); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+		result.RequiresRestart = false
 	}
 	return result, nil
 }
