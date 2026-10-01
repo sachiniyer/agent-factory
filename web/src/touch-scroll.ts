@@ -23,8 +23,10 @@ export const TouchScroll = (now: () => number) => {
       if (!last) return 0;
       // Velocity comes from the trailing window measured against the LIFT time —
       // a pause before it dilutes w smoothly instead of clipping at the window.
+      // The anchor is the first sample PRECEDING the window, so sparse or
+      // coalesced delivery still leaves a measurable displacement at the edge.
       let i = s.length - 1;
-      for (; i > 0 && s[i - 1].t >= t - FLING_WINDOW_MS; --i);
+      for (; i > 0 && s[i].t >= t - FLING_WINDOW_MS; --i);
       const dt = t - s[i].t;
       const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
       if (Math.abs(w) < FLING_MIN_V) return 0;

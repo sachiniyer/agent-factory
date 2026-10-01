@@ -95,11 +95,12 @@ test("release velocity is read off only the trailing 100ms of the drag", () => {
     samples.push({ y: 400 - i * 10, t: 20 + i * 8 });
   }
   drag(s, clock, samples);
-  // Lift 10ms after the last move: the window edge lands on the t=28 sample, so
-  // dt spans 82ms of tail travel — the lift-time gap counts too.
+  // Lift 10ms after the last move: the anchor lands on the sample preceding the
+  // window (t=0), so the 100px of tail travel measures over 110ms — the lift-time
+  // gap counts, and the boundary sample keeps the estimate off a cliff.
   clock.set(110);
   const v0 = s.release();
-  const expected = (90 * FLING_VEL_GAIN) / 82; // 90px finger / 82ms, gained
+  const expected = (100 * FLING_VEL_GAIN) / 110; // 100px finger / 110ms, gained
   assert.ok(Math.abs(v0 - expected) < expected * 0.001, `release velocity ${v0} ≈ ${expected} px/ms content`);
 });
 

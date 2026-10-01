@@ -9381,7 +9381,7 @@ var TouchScroll = (now) => {
       v = 0;
       if (!last) return 0;
       let i = s.length - 1;
-      for (; i > 0 && s[i - 1].t >= t - FLING_WINDOW_MS; --i) ;
+      for (; i > 0 && s[i].t >= t - FLING_WINDOW_MS; --i) ;
       const dt = t - s[i].t;
       const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
       if (Math.abs(w) < FLING_MIN_V) return 0;
