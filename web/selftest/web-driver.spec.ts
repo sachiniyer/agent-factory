@@ -3223,6 +3223,22 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
     const xterm = host.locator(".xterm");
     const viewport = host.locator(".xterm-viewport");
     const scrollTop = (): Promise<number> => viewport.evaluate((el) => el.scrollTop);
+    // The coast's own ledger, mirrored onto the pane host by terminal.ts:
+    // `applied` counts every coast tick that emitted scroll px, and `stopped`
+    // freezes that count at the moment the coast last stopped. Proving a press
+    // stopped the coast needs THIS, not scrollTop — xterm flushes scrollLines to
+    // the DOM a painted frame after the buffer moved, so a press-time scrollTop
+    // read can sit a whole coast tick stale (the master sighting at run
+    // 36816835160 measured 68px — exactly one tick — with nothing applied after
+    // the stop).
+    const coastCounters = (): Promise<{ applied: number; stopped: number }> =>
+      host
+        .locator(".af-pane-host")
+        .first()
+        .evaluate((el) => ({
+          applied: Number(el.getAttribute("data-af-coast-applied") ?? 0),
+          stopped: Number(el.getAttribute("data-af-coast-stop-count") ?? 0),
+        }));
     // Deep scrollback: a clamped flick coasts hundreds of lines, and a coast cut
     // short by the top of history would read as less momentum than there is.
     await p.keyboard.type("for i in $(seq 1 1200); do printf 'fast-scroll-%s\\n' \"$i\"; done");
@@ -3389,16 +3405,35 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       await p.keyboard.press("Enter");
       await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
       await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const atLift = (await coastCounters()).applied;
       // On a hybrid device a mouse or pen press while the flick still coasts is
       // fresh scroll intent — the coast must die at pointerdown, not fight it.
+      // Asserted on the coast's own ledger, not on scrollTop drift: the DOM's
+      // scrollTop trails the buffer by a painted frame, so a DOM read at the
+      // press can sit a whole tick stale — comparing counts is immune to when
+      // either sample lands relative to the in-flight flush.
       await new Promise((resolve) => setTimeout(resolve, 120));
       await p.mouse.move(column, y + height * 0.55);
       await p.mouse.down();
-      const atPress = await scrollTop();
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      metrics.normalPointerStopDriftPx = Math.abs((await scrollTop()) - atPress);
+      // Two painted frames give every rAF queued at the press — the stopped
+      // coast's last-scheduled tick and xterm's pending scrollTop flush alike —
+      // their one legal run before the counts are read.
+      await p.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const afterPress = await coastCounters();
       await p.mouse.up();
-      expect(metrics.normalPointerStopDriftPx, "a mouse press mid-coast must stop momentum").toBe(0);
+      metrics.normalPointerStopMidCoastTicks = afterPress.stopped - atLift;
+      metrics.normalPointerStopPostStopApplied = afterPress.applied - afterPress.stopped;
+      expect(
+        metrics.normalPointerStopMidCoastTicks,
+        "the press must land while the coast is still applying ticks",
+      ).toBeGreaterThan(0);
+      expect(
+        metrics.normalPointerStopPostStopApplied,
+        "a mouse press mid-coast must stop momentum — no coast tick applies after it",
+      ).toBe(0);
     });
 
     // PART B — the alternate screen under an application that owns the wheel

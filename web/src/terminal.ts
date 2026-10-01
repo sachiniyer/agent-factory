@@ -241,6 +241,14 @@ export class AttachTerminal {
   private historyWheelRemainder = 0;
   private scrollRem = 0;
   private readonly fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  private coastApplied = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -331,7 +339,7 @@ export class AttachTerminal {
       return;
     }
     // A real wheel is a new scroll intent — the coast must not fight it.
-    this.fling.stop();
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (
       !terminalMouseOverrideHeld(event, this.mouseOverride) &&
@@ -349,7 +357,7 @@ export class AttachTerminal {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
     // Finger-down is tap-to-stop (#5020).
-    this.fling.stop();
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
     this.scrollRem = 0;
@@ -390,7 +398,7 @@ export class AttachTerminal {
    */
   private readonly onTouchCancel = (): void => {
     // The browser owns the gesture now; its samples must not seed a later one.
-    this.fling.stop();
+    this.stopCoast();
     this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
@@ -444,7 +452,7 @@ export class AttachTerminal {
       // A second finger arrived: hand the REST of this gesture to the browser rather
       // than scrolling by a pinch's motion or by the distance it covered untracked.
       // Unclaiming it also keeps its lift from starting a coast it never drove.
-      this.fling.stop();
+      this.stopCoast();
       this.scrollClaimed = false;
       return;
     }
@@ -493,7 +501,7 @@ export class AttachTerminal {
     this.lastPointerWasTouch = event.pointerType === "touch";
     // Any fresh pointer press is new scroll intent: a mouse/pen down on a hybrid
     // device, or a second finger, must not fight a touch flick still coasting.
-    this.fling.stop();
+    this.stopCoast();
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
@@ -608,7 +616,7 @@ export class AttachTerminal {
     this.term.loadAddon(this.fit);
     this.term.open(container);
     this.keybar = new TerminalKeybar(container,
-      (data) => (this.fling.stop(), this.term.input(data, true)),
+      (data) => (this.stopCoast(), this.term.input(data, true)),
       () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
@@ -653,7 +661,7 @@ export class AttachTerminal {
       // Phone soft-keyboard and IME input arrive as beforeinput on xterm's helper
       // textarea — keydown-less, so the key handler above never sees it. Synthetic
       // wheel reports are DOM WheelEvents and can never fire this (#5020).
-      textarea.addEventListener("beforeinput", () => this.fling.stop());
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
 
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
@@ -669,7 +677,7 @@ export class AttachTerminal {
     // does, and the momentum must die with the buffer it was emitted on rather
     // than keep scrolling the restored normal buffer. The event fires with the
     // switch itself, so the write queue's timing is not the question.
-    this.term.buffer.onBufferChange(() => this.fling.stop());
+    this.term.buffer.onBufferChange(() => this.stopCoast());
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
     // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the
@@ -683,7 +691,7 @@ export class AttachTerminal {
       // DOM keydown never sees, so it stops the same way at its own site. onData
       // cannot serve: it also fires for synthetic mouse reports (#5020).
       if (ev.type === "keydown") {
-        this.fling.stop();
+        this.stopCoast();
       }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
@@ -773,7 +781,7 @@ export class AttachTerminal {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
-    this.fling.stop();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -843,10 +851,21 @@ export class AttachTerminal {
     }
   }
 
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  private stopCoast(): void {
+    this.fling.stop();
+    this.container.dataset.afCoastStopCount = String(this.coastApplied);
+  }
+
   private readonly onCoastFrame = (): void => {
     const px = this.fling.tick();
     if (px === null) return;
     this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
     window.requestAnimationFrame(this.onCoastFrame);
   };
 
@@ -1310,7 +1329,7 @@ export class AttachTerminal {
         // and stopping an idle fling is free either way.
         const buf = this.term.buffer.active;
         if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
-          this.fling.stop();
+          this.stopCoast();
         }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);

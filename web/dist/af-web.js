@@ -9442,7 +9442,7 @@ var AttachTerminal = class {
     this.term.open(container);
     this.keybar = new TerminalKeybar(
       container,
-      (data) => (this.fling.stop(), this.term.input(data, true)),
+      (data) => (this.stopCoast(), this.term.input(data, true)),
       () => this.scheduleVisibleFit(),
       () => this.term.modes.applicationCursorKeysMode
     );
@@ -9470,15 +9470,15 @@ var AttachTerminal = class {
           this.cb.onFocusChange(false);
         }
       });
-      textarea.addEventListener("beforeinput", () => this.fling.stop());
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.onBinary((data) => this.sendBinary(data));
-    this.term.buffer.onBufferChange(() => this.fling.stop());
+    this.term.buffer.onBufferChange(() => this.stopCoast());
     this.term.attachCustomKeyEventHandler((ev) => {
       if (ev.type === "keydown") {
-        this.fling.stop();
+        this.stopCoast();
       }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
@@ -9556,6 +9556,14 @@ var AttachTerminal = class {
   historyWheelRemainder = 0;
   scrollRem = 0;
   fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  coastApplied = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -9639,7 +9647,7 @@ var AttachTerminal = class {
     if (!event.isTrusted) {
       return;
     }
-    this.fling.stop();
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
@@ -9648,7 +9656,7 @@ var AttachTerminal = class {
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
-    this.fling.stop();
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
     this.scrollRem = 0;
@@ -9680,7 +9688,7 @@ var AttachTerminal = class {
    * a takeover drops both the copy and the selection that promised it.
    */
   onTouchCancel = () => {
-    this.fling.stop();
+    this.stopCoast();
     this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
@@ -9719,7 +9727,7 @@ var AttachTerminal = class {
       return;
     }
     if (event.touches.length !== 1) {
-      this.fling.stop();
+      this.stopCoast();
       this.scrollClaimed = false;
       return;
     }
@@ -9749,7 +9757,7 @@ var AttachTerminal = class {
   };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
-    this.fling.stop();
+    this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
@@ -9823,7 +9831,7 @@ var AttachTerminal = class {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
-    this.fling.stop();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -9882,10 +9890,20 @@ var AttachTerminal = class {
       );
     }
   }
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  stopCoast() {
+    this.fling.stop();
+    this.container.dataset.afCoastStopCount = String(this.coastApplied);
+  }
   onCoastFrame = () => {
     const px = this.fling.tick();
     if (px === null) return;
     this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
     window.requestAnimationFrame(this.onCoastFrame);
   };
   /** Tracks the modifier strip on the document for exactly the life of one
@@ -10233,7 +10251,7 @@ var AttachTerminal = class {
       case 0 /* PTYOut */: {
         const buf = this.term.buffer.active;
         if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
-          this.fling.stop();
+          this.stopCoast();
         }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
