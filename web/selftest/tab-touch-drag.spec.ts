@@ -181,7 +181,14 @@ test("D: moving off the bar and back re-shows the indicator exactly over the bar
   await movePointer(page, on.x, on.y);
   await expect(page.locator(".af-tab-insert")).toBeVisible();
 
-  await releasePointer(page, on.x, on.y);
+  // Cancel rather than release at this deliberately different gap: a release here
+  // would persist a reorder of the shared probe-order session that later specs
+  // (web-driver.spec.ts, line 10969) rely on staying ["Agent", "alpha", "beta", "gamma"].
+  await page.locator(".af-tabbar").evaluate((bar, pointerId) => {
+    bar.dispatchEvent(new PointerEvent("pointercancel", {
+      bubbles: true, cancelable: true, pointerId, pointerType: "touch",
+    }));
+  }, POINTER_ID);
   await expect(page.locator(".af-tab-insert")).toBeHidden();
 });
 
