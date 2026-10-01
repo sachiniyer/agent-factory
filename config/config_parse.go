@@ -342,7 +342,7 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	// change. keys.ValidateOverrides below still hard-errors every other
 	// defect, and `af config set keys` (which calls keys.ValidateOverrides
 	// directly) still rejects writing a NEW dead binding.
-	overrides = discardDeadShiftRuneOverrides(overrides, prettyConfigPath)
+	overrides = discardDeadShiftRuneOverrides(config.Keys, overrides, prettyConfigPath)
 	if err := keys.ValidateOverrides(overrides); err != nil {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
 	}

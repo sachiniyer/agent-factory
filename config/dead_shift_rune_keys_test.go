@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -114,4 +115,68 @@ func TestDeadShiftRuneOverrideAllDeadKeepsUnknownActionVisible(t *testing.T) {
 		require.Contains(t, warnings.String(), "will never fire")
 		require.Equal(t, 1, strings.Count(warnings.String(), "will never fire"), "warn once per dead key per source")
 	})
+}
+
+// TestDeadShiftRuneOverrideEditableValueReflectsCleaned pins the Codex finding on
+// the warn-and-skip: dropping the dead binding only from the local overrides
+// would leave the raw [keys] table (config.Keys) pre-filling the config editor
+// (CurrentValue/ManifestWithValues) with the dead spec. An unchanged pane save
+// routes that value through SetGlobalConfigValue's structured keys validation
+// (keys.ValidateOverrides), which rejects the dead spec the loader just warned
+// and skipped — so an upgrade config that loaded could not be edited through the
+// built-in editor. The dead binding is dropped from the raw table too, so the
+// editor shows exactly what the loader applied and an unchanged save round-trips.
+func TestDeadShiftRuneOverrideEditableValueReflectsCleaned(t *testing.T) {
+	t.Run("list with one dead and one reachable binding", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		source := filepath.Join(t.TempDir(), "config.toml")
+		cfg, err := parseConfigTOML([]byte("[keys]\nquit = [\"shift+a\", \"Q\"]\nnew = \"alt+a\"\n"), source)
+		require.NoError(t, err, "a config with a dead shift+<rune> override alongside a reachable one must load")
+		require.Contains(t, warnings.String(), "will never fire", "the dead binding warns")
+
+		value, ok := CurrentValue(cfg, "keys")
+		require.True(t, ok, "CurrentValue must render the keys table")
+		require.NotContains(t, value, "shift+a", "the editable value must not pre-fill the dead spec the loader warned and skipped")
+		require.Contains(t, value, "Q", "the reachable binding must survive in the editable value")
+		require.Contains(t, value, "alt+a", "an unrelated reachable binding must survive in the editable value")
+
+		// The whole point of the fix: an unchanged pane save routes CurrentValue
+		// through SetGlobalConfigValue's structured keys validation
+		// (keys.ValidateOverrides), which would reject the dead spec. The cleaned
+		// value must round-trip.
+		writeTempConfig(t, "")
+		if _, err := SetGlobalConfigValue("keys", value); err != nil {
+			t.Fatalf("an unchanged save of the cleaned keys value must round-trip, got: %v", err)
+		}
+	})
+
+	t.Run("known action whose only binding is dead resolves to default in the editor", func(t *testing.T) {
+		_ = captureLog(t, &aflog.WarningLog)
+		source := filepath.Join(t.TempDir(), "config.toml")
+		cfg, err := parseConfigTOML([]byte("[keys]\nquit = [\"shift+a\"]\n"), source)
+		require.NoError(t, err, "a known action whose only binding is dead must load (warn-and-skip)")
+
+		value, ok := CurrentValue(cfg, "keys")
+		require.True(t, ok)
+		require.Equal(t, "{}", value, "the all-dead known action is dropped from the raw table; the editor shows no override, so quit resolves to its default")
+	})
+}
+
+// TestDeadShiftRuneWarningQuotesActionName pins the Codex finding on the
+// warning: a quoted TOML action name can carry a terminal control sequence
+// (ESC, \x1b), and the warning runs before keys.ValidateOverrides rejects the
+// unknown action. The raw action must be rendered with %q (not %s) so the
+// escape sequence is escaped in the message, not emitted verbatim through the
+// interactive writer (which af config validate mirrors to stderr) — validating
+// a malicious or corrupted config must not execute terminal escape sequences.
+func TestDeadShiftRuneWarningQuotesActionName(t *testing.T) {
+	warnings := captureLog(t, &aflog.WarningLog)
+	source := filepath.Join(t.TempDir(), "config.toml")
+	// A quoted TOML key decodes \u001b to an ESC byte in the action name.
+	_, err := parseConfigTOML([]byte("[keys]\n\"\\u001b[2J\" = \"shift+a\"\n"), source)
+	require.Error(t, err, "an unknown action with a dead binding must still be rejected")
+	require.Contains(t, err.Error(), "unknown action", "the unknown-action error must surface, not be hidden behind the dead-key warning")
+	require.Contains(t, warnings.String(), "will never fire", "the dead-key warning fires")
+	require.NotContains(t, warnings.String(), "\x1b[2J", "the raw ESC control sequence must not be emitted verbatim in the warning")
+	require.Contains(t, warnings.String(), `\x1b`, "the action name must be %q-quoted so the escape sequence is escaped, not executed")
 }

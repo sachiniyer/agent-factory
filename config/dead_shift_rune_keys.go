@@ -31,7 +31,18 @@ var deadShiftRuneWarned sync.Map
 // those — and writing a NEW dead binding via `af config set keys` still rejects,
 // because that path calls keys.ValidateOverrides directly. The hard error for
 // an existing dead binding is a separate, later change.
-func discardDeadShiftRuneOverrides(overrides map[string][]string, prettyConfigPath string) map[string][]string {
+//
+// raw is the on-disk [keys] table the editor (CurrentValue/ManifestWithValues)
+// serializes back to the config panes, and that an unchanged pane save routes
+// through SetGlobalConfigValue — whose structured keys validation calls
+// keys.ValidateOverrides and would reject the dead spec the loader just
+// warned and skipped. Dropping the dead bindings only from the local overrides
+// would leave the raw value pre-filling the editor with the dead spec, so an
+// upgrade config that loaded could not be saved unchanged. The dead bindings
+// are dropped from raw too, in the same shape normalizeKeyOverrides reads
+// (string for a single binding, []any for a list), so the editor shows exactly
+// what the loader applied and an unchanged save round-trips.
+func discardDeadShiftRuneOverrides(raw map[string]any, overrides map[string][]string, prettyConfigPath string) map[string][]string {
 	if len(overrides) == 0 {
 		return overrides
 	}
@@ -50,6 +61,7 @@ func discardDeadShiftRuneOverrides(overrides map[string][]string, prettyConfigPa
 			cleaned[action] = keyList
 		case len(kept) > 0:
 			cleaned[action] = kept
+			cleanRawKeysTableEntry(raw, action, kept)
 		default:
 			// Every binding was a dead shift+<rune> spec. Dropping them all
 			// would omit this action from cleaned, and a typo'd action such
@@ -62,13 +74,51 @@ func discardDeadShiftRuneOverrides(overrides map[string][]string, prettyConfigPa
 			// KNOWN action whose only bindings were dead warns, drops them
 			// all, and resolves to its default keys — the upgrade case
 			// (`quit = ["shift+a"]`) the warn-and-skip exists for — so it is
-			// left out of cleaned as before.
+			// left out of cleaned as before, and dropped from raw so the
+			// editor does not pre-fill the dead spec.
 			if !keys.IsRebindableAction(action) {
 				cleaned[action] = keyList
+			} else if raw != nil {
+				delete(raw, action)
 			}
 		}
 	}
 	return cleaned
+}
+
+// cleanRawKeysTableEntry rewrites the on-disk [keys] entry for action so it
+// holds only the reachable bindings the loader kept, in the shape
+// normalizeKeyOverrides reads (string for a single binding, []any for a list).
+// The dead shift+<rune> spec has already been dropped from overrides; this
+// mirrors that in raw so the editor (CurrentValue) shows the cleaned value and
+// an unchanged pane save (SetGlobalConfigValue → keys.ValidateOverrides) does
+// not reject the dead spec the load just warned and skipped.
+func cleanRawKeysTableEntry(raw map[string]any, action string, kept []string) {
+	if raw == nil {
+		return
+	}
+	switch raw[action].(type) {
+	case []any:
+		list := make([]any, 0, len(kept))
+		for _, k := range kept {
+			list = append(list, k)
+		}
+		raw[action] = list
+	default:
+		// A single-string entry with a dead binding never reaches the
+		// len(kept) > 0 branch (one binding is either dead or it isn't), so
+		// this only happens when a multi-element list collapsed to one; keep
+		// the compact string form the editor round-trips.
+		if len(kept) == 1 {
+			raw[action] = kept[0]
+		} else {
+			list := make([]any, 0, len(kept))
+			for _, k := range kept {
+				list = append(list, k)
+			}
+			raw[action] = list
+		}
+	}
 }
 
 // warnDeadShiftRuneBinding emits the once-per-source warning for one dead
@@ -81,7 +131,7 @@ func warnDeadShiftRuneBinding(prettyConfigPath, action, key string) {
 	if _, seen := deadShiftRuneWarned.LoadOrStore(source, struct{}{}); seen {
 		return
 	}
-	msg := fmt.Sprintf("config %s: keys.%s = %q will never fire — Bubble Tea has no Shift field for a plain rune (Shift+A is emitted as the rune \"A\", never a \"shift+\" spelling); ignoring this binding. Remove it from [keys] to silence this warning.", prettyConfigPath, action, key)
+	msg := fmt.Sprintf("config %s: keys.%q = %q will never fire — Bubble Tea has no Shift field for a plain rune (Shift+A is emitted as the rune \"A\", never a \"shift+\" spelling); ignoring this binding. Remove it from [keys] to silence this warning.", prettyConfigPath, action, key)
 	log.WarningLog.Print(msg)
 	writeInteractiveWarning(msg)
 }
