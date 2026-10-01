@@ -146,16 +146,7 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 		}
 		return nil, fmt.Errorf("failed to read personal project config %s: %w", prettyHomePath(path), err)
 	}
-	cfg, err := parseProjectConfig(data, path)
-	if err != nil {
-		return nil, err
-	}
-	// A stored per-project branch_prefix is inert until #4539 — say so once per
-	// file per process rather than on every daemon-driven reload.
-	if cfg.IsSet("branch_prefix") {
-		warnProjectBranchPrefixIgnored(path)
-	}
-	return cfg, nil
+	return parseProjectConfig(data, path)
 }
 
 // parseProjectConfig decodes and validates personal-project TOML bytes. It is

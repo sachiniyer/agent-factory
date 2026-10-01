@@ -31,14 +31,14 @@ func projectBranchPrefixWarning() string {
 }
 
 // globalBranchPrefixValue reports the effective global branch_prefix the
-// warning names, resolved exactly the way `af config get` resolves it — the
-// global file over the built-in default. Resolution (rather than a raw file
-// read) keeps the named value consistent with what inspection reports; a
-// resolution failure still falls back to the built-in rather than failing
+// warning names via a strictly read-only load — the same file `af config get`
+// resolves, falling back to the built-in when it cannot be read, so a warning
+// never mutates the AF home (no materialization, no migration) and never fails
 // with the file.
 func globalBranchPrefixValue() string {
-	if resolved, err := ResolveGlobalConfig(); err == nil && resolved != nil {
-		return resolved.BranchPrefix
+	loaded, err := LoadConfigReadOnly()
+	if err == nil && loaded.Config != nil {
+		return loaded.Config.BranchPrefix
 	}
 	return DefaultConfig().BranchPrefix
 }
@@ -51,15 +51,21 @@ func globalBranchPrefixValue() string {
 var projectBranchPrefixWarned sync.Map
 
 // warnProjectBranchPrefixIgnored announces that a personal project config
-// declares branch_prefix, a value stored but not applied (#4539). It fires at
-// most once per file per process and reaches both the log and, when a command
-// wired it, interactive stderr.
-func warnProjectBranchPrefixIgnored(path string) {
-	pretty := prettyHomePath(path)
-	if _, seen := projectBranchPrefixWarned.LoadOrStore(pretty, struct{}{}); seen {
+// declares branch_prefix, a value stored but not applied (#4539), naming the
+// effective prefix THIS resolution already computed — callers never re-load
+// the global file to say it, so even read-only inspection cannot mutate the
+// AF home. It fires at most once per file per process and reaches both the log
+// and, when a command wired it, interactive stderr.
+func warnProjectBranchPrefixIgnored(path, effectiveGlobalPrefix string) {
+	key := path
+	if key == "" {
+		key = "(unknown)"
+	}
+	if _, seen := projectBranchPrefixWarned.LoadOrStore(key, struct{}{}); seen {
 		return
 	}
-	msg := fmt.Sprintf("personal project config %s: %s", pretty, projectBranchPrefixWarning())
+	msg := fmt.Sprintf("personal project config %s: %s",
+		prettyHomePath(path), projectBranchPrefixWarningFor(effectiveGlobalPrefix))
 	log.WarningLog.Print(msg)
 	writeInteractiveWarning(msg)
 }
@@ -87,9 +93,12 @@ func projectBranchPrefixWriteWarning(key string) string {
 // annotateProjectBranchPrefix relabels a present personal-project candidate on
 // a resolved branch_prefix: it was excluded by precedence, but the generic
 // "disallowed" reads like the location is not supported at all — it is: the
-// value is accepted and stored, just not applied (#4539). No-op when no
-// personal layer participated (the global-only resolve). The reason names the
-// already-resolved effective prefix rather than re-reading the global file.
+// value is accepted and stored, just not applied (#4539). It also emits the
+// once-per-file load warning here — the resolve is where every consumer's
+// config load funnels, and res.BranchPrefix is already the effective prefix
+// THIS resolution computed, so the warning names it without touching the
+// global file again. No-op when no personal layer participated (the
+// global-only resolve).
 func annotateProjectBranchPrefix(res *ResolvedConfig) {
 	for i := range res.Resolution {
 		value := &res.Resolution[i]
@@ -101,6 +110,7 @@ func annotateProjectBranchPrefix(res *ResolvedConfig) {
 			if candidate.Layer == SourceProjectPersonal.String() && candidate.Present && !candidate.Allowed {
 				candidate.Result = "ignored"
 				candidate.Reason = "accepted and stored, but not applied: " + projectBranchPrefixWarningFor(res.BranchPrefix)
+				warnProjectBranchPrefixIgnored(candidate.Path, res.BranchPrefix)
 			}
 		}
 	}

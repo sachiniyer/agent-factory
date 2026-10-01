@@ -7,6 +7,8 @@ package config
 // quietly.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,19 +36,19 @@ func TestSetProjectConfigValueBranchPrefixWarnsButWrites(t *testing.T) {
 	assert.Equal(t, "feat/", cfg.BranchPrefix, "the stored value must survive — existing configs stay valid")
 }
 
-// TestLoadProjectConfigBranchPrefixWarnsOncePerFile pins the memoization the
-// daemon's reload cadence needs: repeated loads of the same file warn once,
-// and a second project's file warns independently.
-func TestLoadProjectConfigBranchPrefixWarnsOncePerFile(t *testing.T) {
-	home, _, project := registeredTestProject(t)
+// TestResolveConfigBranchPrefixWarnsOncePerFile pins the memoization the
+// daemon's reload cadence needs: every consumer's load funnels through
+// resolution, so repeated resolves of the same file warn once, and a second
+// project's file warns independently.
+func TestResolveConfigBranchPrefixWarnsOncePerFile(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
 	writeGlobalTOML(t, home, "branch_prefix = \"global/\"\n")
 	buf := captureLog(t, &aflog.WarningLog)
 
 	first := writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")
 	for i := 0; i < 3; i++ {
-		cfg, err := LoadProjectConfig(project.ID)
+		_, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
-		require.NotNil(t, cfg)
 	}
 	got := buf.String()
 	assert.Equal(t, 1, strings.Count(got, "branch_prefix is not supported per project yet"),
@@ -58,7 +60,7 @@ func TestLoadProjectConfigBranchPrefixWarnsOncePerFile(t *testing.T) {
 	project2, err := RegisterProject(repo2)
 	require.NoError(t, err)
 	writePersonalConfig(t, project2.ID, "branch_prefix = \"other/\"\n")
-	_, err = LoadProjectConfig(project2.ID)
+	_, err = ResolveConfig(repo2)
 	require.NoError(t, err)
 
 	got = buf.String()
@@ -66,12 +68,47 @@ func TestLoadProjectConfigBranchPrefixWarnsOncePerFile(t *testing.T) {
 		"a different personal config file must warn for itself, got:\n%s", got)
 }
 
+// TestLoadProjectConfigNoBranchPrefixStaysQuiet guards the negative: a personal
+// file without branch_prefix produces no warning on resolve.
 func TestLoadProjectConfigNoBranchPrefixStaysQuiet(t *testing.T) {
-	_, _, project := registeredTestProject(t)
+	_, repoRoot, project := registeredTestProject(t)
 	buf := captureLog(t, &aflog.WarningLog)
 
 	writePersonalConfig(t, project.ID, "default_program = \"claude\"\n")
-	_, err := LoadProjectConfig(project.ID)
+	_, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
 	assert.NotContains(t, buf.String(), "branch_prefix")
+}
+
+// TestInspectionResolveBranchPrefixDoesNotLoadGlobal pins the Codex-found
+// defect: the warning names the effective prefix the resolution ALREADY
+// computed, so a read-only inspection resolve must not consult the global
+// file at all — prove it by removing the global config before resolving.
+func TestInspectionResolveBranchPrefixDoesNotLoadGlobal(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "branch_prefix = \"file/\"\n")
+	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")
+
+	global := DefaultConfig()
+	global.BranchPrefix = "snapshot/"
+	repo, err := RepoFromPath(repoRoot)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(filepath.Join(home, TomlConfigFileName)))
+	resolved, err := ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	require.NoError(t, err)
+	assert.Equal(t, "snapshot/", resolved.BranchPrefix,
+		"the supplied snapshot's prefix wins, not the on-disk file's and not a reload")
+
+	value, ok := resolved.ResolvedValue("branch_prefix")
+	require.True(t, ok)
+	var personal *CandidateTrace
+	for i, c := range value.Candidates {
+		if c.Layer == SourceProjectPersonal.String() {
+			personal = &value.Candidates[i]
+		}
+	}
+	require.NotNil(t, personal)
+	assert.Contains(t, personal.Reason, "(snapshot/)",
+		"the ignored reason names the supplied global snapshot's value, not a fresh file read")
 }
