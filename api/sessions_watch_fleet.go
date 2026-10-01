@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -354,13 +355,37 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	// AccountAgent (both the incoming identity, since the park attributes the
 	// wall to the incoming agent), so this disjunct does not fire on it and it
 	// still falls through to `usage-limited`.
+	//
+	// The legacy exception: a same-account cross-agent handoff written before
+	// AccountSwapData.AccountAgent existed carries an empty AccountAgent
+	// (session/account_limit_data.go), so the agent disjunct above would not
+	// fire and the recoverable outgoing limit would fall through to
+	// `usage-limited`. The persisted incoming launch command
+	// (PendingAccountSwap.Program, the same plan.base the daemon resolves to
+	// the committed namespace via sessionenv.AgentForCommand in
+	// committedAccountSwap/selectAccountLocked) is a second durable incoming-
+	// agent source, so resolve it as a fallback when AccountAgent is empty.
+	// AgentForCommand returns "" unless the command is a single literal agent
+	// invocation, so this never fires on a record whose Program is itself empty
+	// (a still-older legacy record with no persisted incoming-agent source at
+	// all, which conservatively keeps today's `usage-limited` behavior) or
+	// whose Program is non-literal. The genuine park is still preserved: it
+	// carries LimitAgent == the Program-resolved incoming agent (the park
+	// attributes the wall to the incoming identity), so the mismatch is false.
+	swapAccountAgent := ""
+	if d.PendingAccountSwap != nil {
+		swapAccountAgent = d.PendingAccountSwap.AccountAgent
+		if swapAccountAgent == "" {
+			swapAccountAgent = sessionenv.AgentForCommand(d.PendingAccountSwap.Program)
+		}
+	}
 	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual &&
 		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone &&
 		(!d.PendingAccountSwap.ReplacementPanesStarted ||
 			d.LimitAccount != d.Account ||
 			(d.CurrentAgent != "" && d.LimitAgent != d.CurrentAgent) ||
-			(d.CurrentAgent == "" && d.PendingAccountSwap.AccountAgent != "" &&
-				d.LimitAgent != d.PendingAccountSwap.AccountAgent)) {
+			(d.CurrentAgent == "" && swapAccountAgent != "" &&
+				d.LimitAgent != swapAccountAgent)) {
 		return watchWorking, ""
 	}
 	// ANY operation in flight means the session is in motion, including one this
