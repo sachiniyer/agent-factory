@@ -3606,16 +3606,20 @@ async function ensureValidationRun({
         per_page: 1,
       }),
     );
-    if ((listed?.data?.workflow_runs || []).length > 0) {
+    const foundRun = (listed?.data?.workflow_runs || [])[0];
+    if (foundRun) {
       // Found, which is NOT the same as running. GitHub creates these a few
       // seconds after the push, so the approve pass before this wait routinely
       // ran too early and found nothing — and this poll then confirmed existence
       // and returned, leaving them parked. On #3811's `31720d97` they appeared 4
       // seconds late and sat for 33 minutes (#3814). So the approve pass runs
-      // again here, on what the wait actually found.
+      // again here, on what the wait actually found — and on the found run
+      // itself, since the repo-wide parked listing can still lag the scoped
+      // one that just surfaced it.
       if (!await canRecover()) return { cancelled: true };
       const { parked, approved, cancelled } = await approveParkedRuns({
         github, context, headSha, core, canRecover, sleep,
+        adoptedRun: foundRun,
       });
       if (cancelled) return { cancelled: true };
       return { dispatched: false, found: true, approved: parked.length === approved.length };
@@ -3672,6 +3676,7 @@ async function ensureValidationRun({
     }
     const { parked, approved, cancelled } = await approveParkedRuns({
       github, context, headSha, core, canRecover, sleep,
+      adoptedRun: dispatched.run,
     });
     if (cancelled) {
       return { cancelled: true };
@@ -3807,8 +3812,19 @@ async function approveParkedRuns({
   github, context, headSha, core,
   canRecover = async () => true,
   sleep = delay,
+  adoptedRun = null,
 }) {
-  const parked = await listParkedRuns({ github, context, headSha });
+  const listed = await listParkedRuns({ github, context, headSha });
+  // A run a reconcile just adopted can still sit in action_required while the
+  // repository-wide listing lags the workflow-specific one that found it —
+  // the same index gap this file's parked-list read-back exists for. Fold it
+  // in so "parked" can never come back empty-and-vacuously-approved while the
+  // adopted run is in fact waiting on this pass.
+  const parked =
+    adoptedRun?.conclusion === "action_required" &&
+    !listed.some((run) => run.id === adoptedRun.id)
+      ? [adoptedRun, ...listed]
+      : listed;
   const approved = [];
   for (const run of parked) {
     try {
@@ -3986,27 +4002,43 @@ async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
 // request before any work, so the write replays directly, honoring Retry-After.
 // A definitive refusal or an exhausted retry propagates — those stay loud.
 async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null, sleep }) {
-  const firstAttemptAt = Date.now();
+  // The cutoff the settle window adopts runs against starts at the first real
+  // attempt — after the guard, not before it: a run dispatched while the guard
+  // was still re-reading predates the POST it would be blamed on and must not
+  // be adopted. It is captured once so a replay's reconcile still sees a run
+  // an earlier attempt created.
+  let firstAttemptAt = null;
   return retryTransient(
     label,
     async () => {
       // Same shape as the approve retry (#5005): the settle window can outlive
       // the state the caller validated, so a dispatch aimed at a mutable branch
       // ref re-establishes its guard before EVERY attempt — a replay that skips
-      // it can validate a commit this lane never observed.
-      if (guard && !await guard()) {
-        return { cancelled: true };
+      // it can validate a commit this lane never observed. A guard that itself
+      // exhausted ITS retries carries a retryable-looking read error; wrapping
+      // it as the guard's outcome lets it out of the write's schedule instead
+      // of rerunning an already-exhausted read once per dispatch attempt.
+      if (guard) {
+        let passed;
+        try {
+          passed = await guard();
+        } catch (error) {
+          throw writeRetryGuardFailure(error);
+        }
+        if (!passed) {
+          return { cancelled: true };
+        }
       }
+      firstAttemptAt ??= Date.now();
       try {
         await dispatch();
         return { dispatched: true };
       } catch (error) {
-        if (
-          !isDefinitiveRateLimitResponse(error) &&
-          isRetryableGitHubError(error) &&
-          await landed(firstAttemptAt)
-        ) {
-          return { dispatched: true, reconciled: true };
+        if (!isDefinitiveRateLimitResponse(error) && isRetryableGitHubError(error)) {
+          const found = await landed(firstAttemptAt);
+          if (found) {
+            return { dispatched: true, reconciled: true, run: found };
+          }
         }
         throw error;
       }
@@ -8713,6 +8745,7 @@ module.exports = {
     approveParkedRuns,
     listParkedRuns,
     ensureValidationRun,
+    dispatchWorkflowWithRetry,
     VALIDATION_WORKFLOW,
     GATE_WORKFLOW,
     decisionSummaryBody,

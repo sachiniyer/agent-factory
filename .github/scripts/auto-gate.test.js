@@ -11426,6 +11426,99 @@ test("#5010: an adopted run that stays parked and unapprovable still fails loudl
     "the unapprovable adopted run still reaches the PR as a recovery failure");
 });
 
+// Codex review on this fix: the adopted run's approval cannot ride the same
+// repository-wide listing the poll uses — that index can still lag the
+// workflow-specific listing the reconcile just read (the note listParkedRuns'
+// own read-back exists for). The adopted run is approved by id, so a lagging
+// relist cannot report vacuous approval over a run that is in fact parked.
+test("#5010: an adopted run is approved even while the repo-wide index lags", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+    dispatchErrorLandsRun: {
+      "pr.yml": { id: 799, name: "PR Validation", head_sha: OTHER_SHA,
+        event: "pull_request", status: "completed", conclusion: "action_required" },
+    },
+    repoIndexHiddenRunIds: [799],
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the adopted run was approved by id, not rediscovered by a lagging relist");
+  assert.deepEqual(github.approvedRuns.map((call) => call.run_id), [799]);
+});
+
+// Codex review on this fix: the adoption cutoff is the first POST, not the
+// moment the helper was entered — a run dispatched while the guard was still
+// re-establishing the head predates the POST it would be adopted as.
+test("#5010: the reconcile window opens at the first POST, after the guard", async () => {
+  let probeCreatedAt = null;
+  let reconcileSince = null;
+  let dispatchCalls = 0;
+  const probe = { id: 799, name: "PR Validation", event: "workflow_dispatch",
+    status: "completed", conclusion: "success" };
+  const outcome = await autoGate.__test.dispatchWorkflowWithRetry({
+    label: "a dispatch whose guard spends real seconds",
+    guard: async () => {
+      // The guard spends a second-plus re-reading ONCE — the retry's re-check
+      // is fast — and a probe dispatched meanwhile is stamped before the POST
+      // its adoption would be blamed on.
+      if (!probeCreatedAt) {
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+        probeCreatedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+      }
+      return true;
+    },
+    dispatch: async () => {
+      dispatchCalls += 1;
+      if (dispatchCalls === 1) {
+        throw Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 });
+      }
+    },
+    landed: async (since) => {
+      reconcileSince ??= since;
+      // The predicate the real reconcile runs: adopt only runs the window saw.
+      return Date.parse(probeCreatedAt) >= Math.floor(since / 1000) * 1000 ? probe : null;
+    },
+    sleep: async () => {},
+  });
+  assert.ok(reconcileSince > Date.parse(probeCreatedAt),
+    "the cutoff is the first POST, not the moment the guard began");
+  assert.equal(dispatchCalls, 2, "a run that predates the POST cannot suppress the retry");
+  assert.equal(outcome.reconciled, undefined, "nothing was adopted");
+});
+
+// Codex review on this fix: a guard that exhausted ITS OWN retries throws a
+// retryable-looking read error; unwrapped, the write retry would rerun the
+// whole exhausted guard once per dispatch attempt. It is let out immediately,
+// marked as the guard's outcome.
+test("#5010: a guard that cannot answer exits once, not once per write attempt", async () => {
+  let guardCalls = 0;
+  let dispatchCalls = 0;
+  await assert.rejects(
+    () => autoGate.__test.dispatchWorkflowWithRetry({
+      label: "dispatch under a dead read",
+      guard: async () => {
+        guardCalls += 1;
+        const failure = new Error("503 from the guard's already-exhausted read");
+        failure.status = 503;
+        failure.autoGateReadFailure = true;
+        throw failure;
+      },
+      dispatch: async () => { dispatchCalls += 1; },
+      landed: async () => null,
+      sleep: async () => {},
+    }),
+    (error) => error?.autoGateGuardFailure === true,
+  );
+  assert.equal(guardCalls, 1, "the exhausted read did not rerun under the write's schedule");
+  assert.equal(dispatchCalls, 0, "the POST never fired");
+});
+
 // ---------------------------------------------------------------------------
 // The update-branch merge race (#4462). evaluate() resolves a PR open and
 // behind; a hand or queue merge then closes it in the seconds before the
@@ -15777,6 +15870,10 @@ function fakeGateGithub({
   // fake that has them from the first list cannot reproduce #3814 — the first
   // approve pass would catch them and the gap would be invisible.
   runsAppearAfterReads = 0,
+  // Run ids the repository-wide listing omits while the workflow-specific
+  // listing still returns them — the index lag approveParkedRuns' relist can
+  // hit right after a reconcile adopted the run (#5010).
+  repoIndexHiddenRunIds = [],
   // Commit graph for the content-head walk (#3815): parents per sha, and each
   // commit's own date.
   parentsByOid = {},
@@ -16053,6 +16150,7 @@ function fakeGateGithub({
     approveRunAttempts: 0,
     approvedRuns: [],
     approveListingLag: new Map(),
+    repoIndexHiddenRunIds: new Set(repoIndexHiddenRunIds),
     recoveryComments: [],
     headShaAfterUpdate: null,
     // Publish the run a workflow_dispatch created, where its listing finds it:
@@ -16112,6 +16210,12 @@ function fakeGateGithub({
             data: {
               total_count: runs.length,
               workflow_runs: runs
+                // The repository-wide index can lag the workflow-specific
+                // listing that just found a run — the note listParkedRuns'
+                // read-back exists for. A workflow_id query is the scoped
+                // listing and stays fresh; the unscoped one drops the lagging
+                // ids.
+                .filter((run) => options.workflow_id || !github.repoIndexHiddenRunIds.has(run.id))
                 .filter((run) => !options.event || run.event === options.event)
                 .map((run) => {
                   // A committed approve is truth now but parked on the listing
