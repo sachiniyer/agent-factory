@@ -431,8 +431,8 @@ require_token = true
 request — no rebind, no restart (a raw hand-edit still needs `af daemon restart`).
 Network peers must then present the token
 (401 without it); loopback peers stay exempt on a loopback bind unless you also
-set `network.require_loopback_token = true`. The web client picks the change up on its
-next load and shows its paste-token login. Get the credential with
+set `network.require_loopback_token = true`. The web client picks the change up
+and shows its paste-token login. Get the credential with
 `af token show`.
 
 Set it whenever `network.listen_addr` is anything but loopback, unless you genuinely
