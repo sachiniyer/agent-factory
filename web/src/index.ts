@@ -188,6 +188,16 @@ const store = new Store<AppState>({
 let token: string | null = null;
 let connectionGeneration = 0;
 let pendingRestoreResync = false;
+// A committed task toggle or limit retry whose reconciliation could not run because a
+// same-token reconnect's connect() was still in flight (between its initial listTasks /
+// Snapshot and the final app-state commit / startStream), or the connection was gone.
+// Fired in that window, the refresh/resync would race the replacement load —
+// connect()'s stale listTasks overwrites it, or startStream's stopStream invalidates it
+// — and the task.updated / session.updated event the replacement stream subscribed too
+// late to see is lost until the minute poll. connect() flushes these after startStream so
+// they run against the committed connection, mirroring pendingRestoreResync.
+let pendingReconnectTasksRefresh = false;
+let pendingReconnectResync = false;
 let stream: EventStream | null = null;
 const optimisticSessions = new OptimisticSessions();
 const pendingRestores = new PendingRestores(
@@ -461,6 +471,19 @@ async function connect(candidate: string): Promise<void> {
   startStream(candidate);
   if (pendingRestoreResync) {
     pendingRestoreResync = false;
+    requestResync();
+  }
+  // A committed toggle/retry whose reconciliation was queued while this connect() was
+  // in flight (or while the connection was gone): now that the connection has committed
+  // and the stream owns the events, run it against the current connection so the
+  // task.updated / session.updated event the replacement stream subscribed too late to
+  // see is reconciled rather than staying stale until the next poll.
+  if (pendingReconnectTasksRefresh) {
+    pendingReconnectTasksRefresh = false;
+    refreshTasks();
+  }
+  if (pendingReconnectResync) {
+    pendingReconnectResync = false;
     requestResync();
   }
 }
@@ -2081,14 +2104,22 @@ function toggleTask(task: TaskData): void {
       // gate as doOpenAccountLogin/applyConfigValueNow: a same-token reconnect still
       // bumps connectionGeneration twice, so the stale rejection's toast is dropped.
       // A committed UpdateTask still carried forward on the daemon, and refreshTasks is
-      // fenced by readToken() so it fetches for the CURRENT connection: a stale committed
-      // update whose task.updated event the replacement missed (between its initial
-      // ListTasks and its WebSocket subscribe) would otherwise stay visibly stale until
-      // the minute poll, so refresh on committed regardless of staleness; the gate drops
-      // only the stale toast, not the reconciliation.
+      // fenced by readToken() so it fetches for the CURRENT connection. On a live
+      // connection (stale === false, or the reconnect already committed) refresh now. But
+      // if a same-token reconnect's connect() is still in flight (between its initial
+      // listTasks and the final app-state commit / startStream) or the connection is
+      // gone, a refresh fired here would race the replacement load — connect()'s stale
+      // listTasks overwrites it, or startStream's stopStream invalidates it — and the
+      // task.updated event the replacement stream subscribed too late to see is lost until
+      // the minute poll. Queue it for connect() to flush once the connection has
+      // committed and the stream owns the events; the gate still drops the stale toast.
       const stale = requestGeneration !== connectionGeneration || token !== tok;
       if (isMutationCommittedError(e)) {
-        refreshTasks();
+        if (stale && (token === null || store.get().connecting)) {
+          pendingReconnectTasksRefresh = true;
+        } else {
+          refreshTasks();
+        }
       }
       if (stale) return;
       surfaceTabError(e);
@@ -2153,14 +2184,23 @@ function doRetryLimit(): void {
     // connection's Snapshot may have missed the session.updated event (between its
     // initial Snapshot and its WebSocket subscribe), so the limit-blocked projection
     // (◆ badge / Retry offer) could stay stale until another session event or
-    // reconnect. Re-Snapshot the current connection for the committed outcome —
-    // requestResync is fenced by readToken so it fetches for THIS connection — and
-    // drop only the stale banner, not the reconciliation, mirroring toggleTask's
-    // committed refreshTasks() on the same gap.
+    // reconnect. Re-Snapshot the current connection for the committed outcome. On a
+    // live connection (stale === false, or the reconnect already committed) requestResync
+    // now; but if a same-token reconnect's connect() is still in flight (or the
+    // connection is gone) the resync is not durable — its timer can fire while token is
+    // null, its result is overwritten by the replacement's earlier Snapshot, or
+    // startStream's stopStream clears it. Queue it for connect() to flush once the
+    // connection has committed and the stream owns the events, mirroring toggleTask's
+    // committed refreshTasks() on the same gap. The gate still drops only the stale
+    // banner, not the reconciliation.
     const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
       if (stale) {
-        requestResync();
+        if (token === null || store.get().connecting) {
+          pendingReconnectResync = true;
+        } else {
+          requestResync();
+        }
         return;
       }
       surfaceMutationError(e, "confirmed");

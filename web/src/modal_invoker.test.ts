@@ -234,7 +234,7 @@ test("reconnect retains a completed restore through its pre-response initial Sna
     resolveRoute() {}, clearLoginRoute() {}, startStream() {}, requestResync() {},
   };
   const code = ts.transpileModule(
-    `let token = null, connectionGeneration = 0, resolvingRoute = false, pendingRestoreResync = false;\n${connect.getText(ast)}`,
+    `let token = null, connectionGeneration = 0, resolvingRoute = false, pendingRestoreResync = false, pendingReconnectTasksRefresh = false, pendingReconnectResync = false;\n${connect.getText(ast)}`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
   ).outputText;
   runInNewContext(code, context);

@@ -63,6 +63,14 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
     doRetryLimit(): void;
     disconnect(): void;
     simulateConnect(candidate: string): void;
+    // Mimic the in-flight window of connect(): connecting flips true and the new token
+    // is installed, but connectionGeneration is NOT bumped yet (the disconnect already
+    // bumped it), so the stale gate still sees the request as stale. completeReconnect
+    // mimics the tail of connect(): the generation bumps, connecting clears, and the
+    // pending reconnect reconciliations flush (the real connect flushes them after
+    // startStream).
+    beginReconnect(candidate: string): void;
+    completeReconnect(): void;
   };
   resolveRPC(value: unknown): void;
   rejectRPC(err: unknown): void;
@@ -148,7 +156,16 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
     `
     let token = "token";
     let connectionGeneration = 0;
+    let pendingReconnectTasksRefresh = false;
+    let pendingReconnectResync = false;
     function simulateConnect(candidate) { token = candidate; connectionGeneration++; }
+    function beginReconnect(candidate) { store.set({ connecting: true }); token = candidate; }
+    function completeReconnect() {
+      connectionGeneration++;
+      store.set({ connecting: false });
+      if (pendingReconnectTasksRefresh) { pendingReconnectTasksRefresh = false; refreshTasks(); }
+      if (pendingReconnectResync) { pendingReconnectResync = false; requestResync(); }
+    }
     ${handlers}
     `,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
@@ -161,6 +178,8 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
     doRetryLimit(): void;
     disconnect(): void;
     simulateConnect(candidate: string): void;
+    beginReconnect(candidate: string): void;
+    completeReconnect(): void;
   };
 
   return {
@@ -170,6 +189,8 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
       doRetryLimit: app.doRetryLimit.bind(app),
       disconnect: app.disconnect.bind(app),
       simulateConnect: app.simulateConnect.bind(app),
+      beginReconnect: app.beginReconnect.bind(app),
+      completeReconnect: app.completeReconnect.bind(app),
     },
     resolveRPC,
     rejectRPC,
@@ -269,6 +290,110 @@ test("doRetryLimit: stale committed rejection after same-token reconnect re-Snap
     s.requestResyncCalls(),
     1,
     "the committed branch re-Snapshotted the current connection to reconcile the limit-blocked projection (gate drops only the banner)",
+  );
+});
+
+// === Committed reconciliation is deferred while a reconnect's connect() is in flight ===
+//
+// The above committed-stale tests land the rejection AFTER the reconnect committed
+// (simulateConnect bumps the generation synchronously), so the refresh/resync runs
+// immediately against the stable connection. The race the follow-up findings flag is
+// the in-flight window: the rejection lands WHILE connect() is still between its initial
+// listTasks/Snapshot and the final app-state commit / startStream. A refresh/resync
+// fired there is either overwritten by connect()'s stale load or invalidated by
+// stopStream(), and the task.updated / session.updated event the replacement stream
+// subscribes too late to see is lost until the minute poll. The fix queues the
+// reconciliation for connect() to flush once the connection has committed and the
+// stream owns the events.
+
+// toggleTask: a committed rejection landing while connect() is in flight (connecting,
+// new token installed, generation not yet bumped by connect) does NOT refresh
+// immediately — that refresh would race the replacement load. It is queued and flushed
+// once connect() commits (completeReconnect), so it runs against the stable connection.
+test("toggleTask: committed rejection during an in-flight reconnect defers the refresh until the reconnect commits", async () => {
+  const s = stage();
+  s.app.toggleTask(TASK); // captures tok="token", requestGeneration=0
+  s.app.disconnect(); // connectionGeneration -> 1, token -> null, connecting -> false
+  s.app.beginReconnect("token"); // connect() in flight: connecting -> true, token -> "token" (gen still 1)
+
+  s.rejectRPC(new CommittedError("toggle committed but ambiguous"));
+  await settle();
+
+  assert.equal(s.tabError(), null, "the stale committed rejection did not leak a tabError");
+  assert.equal(
+    s.refreshTasksCalls(),
+    0,
+    "the committed refresh was deferred — connect() has not committed yet, so the refresh is not overwritten/invalidated by the in-flight load",
+  );
+
+  s.app.completeReconnect(); // connectionGeneration -> 2, connecting -> false, flush the pending refresh
+
+  assert.equal(
+    s.refreshTasksCalls(),
+    1,
+    "the deferred committed refresh ran once the reconnect committed and the stream owns the events",
+  );
+});
+
+// doRetryLimit: a committed rejection landing while connect() is in flight does NOT
+// resync immediately — that resync is not durable (its timer could fire while token is
+// null, or its result is overwritten by the replacement's earlier Snapshot, or
+// stopStream clears it). It is queued and flushed once connect() commits, so the
+// session.updated the replacement stream missed is reconciled.
+test("doRetryLimit: committed rejection during an in-flight reconnect defers the resync until the reconnect commits", async () => {
+  const s = stage();
+  s.app.doRetryLimit(); // captures tok="token", requestGeneration=0
+  s.app.disconnect();
+  s.app.beginReconnect("token");
+
+  s.rejectRPC(new CommittedError("resume committed but ambiguous"));
+  await settle();
+
+  assert.equal(
+    s.mutationError(),
+    undefined,
+    "the stale committed rejection did not raise a persistent mutationError banner on the new connection",
+  );
+  assert.equal(
+    s.requestResyncCalls(),
+    0,
+    "the committed resync was deferred — connect() has not committed yet, so the resync is not lost to the in-flight load/stopStream",
+  );
+
+  s.app.completeReconnect();
+
+  assert.equal(
+    s.requestResyncCalls(),
+    1,
+    "the deferred committed resync ran once the reconnect committed and the stream owns the events",
+  );
+});
+
+// toggleTask: a committed rejection landing while STILL disconnected (token === null, no
+// reconnect in flight) also defers — refreshTasks() called with no token is a no-op, so
+// the committed change would be lost until the minute poll. The deferred refresh runs on
+// the next connect (completeReconnect flushes it), reconciling the missed task.updated.
+test("toggleTask: committed rejection while still disconnected defers the refresh until the next connect", async () => {
+  const s = stage();
+  s.app.toggleTask(TASK); // captures tok="token", requestGeneration=0
+  s.app.disconnect(); // connectionGeneration -> 1, token -> null, connecting -> false
+
+  s.rejectRPC(new CommittedError("toggle committed but ambiguous"));
+  await settle();
+
+  assert.equal(s.tabError(), null, "the stale committed rejection did not leak a tabError");
+  assert.equal(
+    s.refreshTasksCalls(),
+    0,
+    "the committed refresh was deferred — there is no connection to refresh against yet",
+  );
+
+  s.app.completeReconnect();
+
+  assert.equal(
+    s.refreshTasksCalls(),
+    1,
+    "the deferred committed refresh ran once a connection committed",
   );
 });
 
