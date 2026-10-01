@@ -18,6 +18,7 @@ import {
   resetIds,
   sameLayout,
   setRatio,
+  siblingSubtreeOf,
   singleLeaf,
   splitLeaf,
   validate,
@@ -131,6 +132,77 @@ test("closeLeaf: a nested split collapses correctly", () => {
   assert.ok(after);
   assert.equal(after ? leafCount(after) : 0, 2);
   assert.deepEqual(after ? tabs(after).slice().sort() : [], [0, 2]);
+});
+
+// --- siblingSubtreeOf: the sibling subtree closeLeaf substitutes ----------------
+//
+// closeLeaf collapses the closed leaf's parent split and substitutes the surviving
+// sibling, so the sibling is the pane/region that takes over the closed pane's
+// screen. siblingSubtreeOf returns that sibling so closePane can focus a leaf
+// within the pane that grew, rather than the leftmost leaf of the whole tree (an
+// unrelated root branch for a nested close). Reference-stable: the returned node
+// survives closeLeaf unchanged.
+
+test("siblingSubtreeOf: null for a single-leaf tree (no sibling exists)", () => {
+  resetIds();
+  const root = singleLeaf(0);
+  assert.equal(siblingSubtreeOf(root, root.id), null);
+});
+
+test("siblingSubtreeOf: a 2-pane split returns the other leaf", () => {
+  resetIds();
+  const root = singleLeaf(0);
+  const two = splitLeaf(root, root.id, "right", 1);
+  const [a, b] = leaves(two);
+  const sibOfA = siblingSubtreeOf(two, a.id);
+  const sibOfB = siblingSubtreeOf(two, b.id);
+  assert.ok(sibOfA);
+  assert.ok(sibOfB);
+  assert.equal(sibOfA.id, b.id, "closing a leaves the sibling b");
+  assert.equal(sibOfB.id, a.id, "closing b leaves the sibling a");
+});
+
+test("siblingSubtreeOf: a nested close returns the IMMEDIATE sibling, not a root branch", () => {
+  // split(row, A, split(col, B, C)): closing B or C must return the other of B/C
+  // (the sibling under the inner split), NOT the outer A.
+  resetIds();
+  const root = singleLeaf(0);
+  const two = splitLeaf(root, root.id, "right", 1);
+  const rightId = leaves(two)[1].id;
+  const three = splitLeaf(two, rightId, "bottom", 2);
+  const [a, b, c] = leaves(three);
+
+  const sibOfB = siblingSubtreeOf(three, b.id);
+  const sibOfC = siblingSubtreeOf(three, c.id);
+  assert.ok(sibOfB);
+  assert.ok(sibOfC);
+  assert.equal(sibOfB.id, c.id, "closing nested B returns sibling C, not root-branch A");
+  assert.equal(sibOfC.id, b.id, "closing nested C returns sibling B, not root-branch A");
+
+  // Closing the outer A returns the sibling SUBTREE (the inner split), not a leaf.
+  const outer = siblingSubtreeOf(three, a.id);
+  assert.ok(outer);
+  assert.equal(outer.kind, "split", "closing the root's left branch returns the inner split subtree");
+  assert.deepEqual(leaves(outer).map((l) => l.id), [b.id, c.id], "the subtree's leaves are B and C");
+  void a;
+});
+
+test("siblingSubtreeOf: the returned subtree survives closeLeaf unchanged (reference-stable)", () => {
+  // closeLeaf hands the sibling back as-is when it collapses the parent, so the
+  // node read on the pre-close tree is the same node present in the post-close tree.
+  resetIds();
+  const root = singleLeaf(0);
+  const two = splitLeaf(root, root.id, "right", 1);
+  const rightId = leaves(two)[1].id;
+  const three = splitLeaf(two, rightId, "bottom", 2);
+  const [, b] = leaves(three);
+  const siblingBefore = siblingSubtreeOf(three, b.id);
+  const after = closeLeaf(three, b.id);
+  assert.ok(siblingBefore);
+  assert.ok(after);
+  // The sibling node read before the close is the same node present in the
+  // post-close tree (reference equality).
+  assert.equal(findLeaf(after, siblingBefore.id), siblingBefore);
 });
 
 test("setRatio: sets a split's ratio, clamped to [0.1, 0.9]", () => {

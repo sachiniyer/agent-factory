@@ -9370,6 +9370,11 @@ var TouchScroll = (now) => {
     get active() {
       return samples.length !== 0;
     },
+    // Momentum live: set by a nonzero release(), cleared by decay or stop().
+    // Distinct from active, which tracks the held gesture (samples) instead.
+    get coasting() {
+      return v !== 0;
+    },
     push(y) {
       const last = samples.at(-1);
       samples.push({ y, t: now() });
@@ -9442,7 +9447,7 @@ var AttachTerminal = class {
     this.term.open(container);
     this.keybar = new TerminalKeybar(
       container,
-      (data) => (this.fling.stop(), this.term.input(data, true)),
+      (data) => (this.stopCoast(), this.term.input(data, true)),
       () => this.scheduleVisibleFit(),
       () => this.term.modes.applicationCursorKeysMode
     );
@@ -9470,15 +9475,15 @@ var AttachTerminal = class {
           this.cb.onFocusChange(false);
         }
       });
-      textarea.addEventListener("beforeinput", () => this.fling.stop());
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.onBinary((data) => this.sendBinary(data));
-    this.term.buffer.onBufferChange(() => this.fling.stop());
+    this.term.buffer.onBufferChange(() => this.stopCoast());
     this.term.attachCustomKeyEventHandler((ev) => {
       if (ev.type === "keydown") {
-        this.fling.stop();
+        this.stopCoast();
       }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
@@ -9556,6 +9561,16 @@ var AttachTerminal = class {
   historyWheelRemainder = 0;
   scrollRem = 0;
   fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  coastApplied = 0;
+  coastStopCount = 0;
+  coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -9639,7 +9654,7 @@ var AttachTerminal = class {
     if (!event.isTrusted) {
       return;
     }
-    this.fling.stop();
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
@@ -9648,7 +9663,7 @@ var AttachTerminal = class {
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
-    this.fling.stop();
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
     this.scrollRem = 0;
@@ -9680,7 +9695,7 @@ var AttachTerminal = class {
    * a takeover drops both the copy and the selection that promised it.
    */
   onTouchCancel = () => {
-    this.fling.stop();
+    this.stopCoast();
     this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
@@ -9719,7 +9734,7 @@ var AttachTerminal = class {
       return;
     }
     if (event.touches.length !== 1) {
-      this.fling.stop();
+      this.stopCoast();
       this.scrollClaimed = false;
       return;
     }
@@ -9749,7 +9764,7 @@ var AttachTerminal = class {
   };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
-    this.fling.stop();
+    this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
@@ -9823,7 +9838,7 @@ var AttachTerminal = class {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
-    this.fling.stop();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -9882,10 +9897,27 @@ var AttachTerminal = class {
       );
     }
   }
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  stopCoast() {
+    const live = this.fling.coasting;
+    this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
+  }
   onCoastFrame = () => {
     const px = this.fling.tick();
     if (px === null) return;
     this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
     window.requestAnimationFrame(this.onCoastFrame);
   };
   /** Tracks the modifier strip on the document for exactly the life of one
@@ -10233,7 +10265,7 @@ var AttachTerminal = class {
       case 0 /* PTYOut */: {
         const buf = this.term.buffer.active;
         if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
-          this.fling.stop();
+          this.stopCoast();
         }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
@@ -12618,7 +12650,7 @@ function rebindTargetAfterAwait(inputs) {
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen) {
+  if (inputs.currentGen !== inputs.pinnedGen || (inputs.newestAppliedSeqs.get(inputs.pinnedSelId) ?? 0) > inputs.rebindSeq) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {
@@ -12701,6 +12733,21 @@ function closeLeaf(root2, leafId) {
     return { ...node, a, b };
   };
   return remove(root2);
+}
+function siblingSubtreeOf(root2, leafId) {
+  if (root2.kind === "leaf") {
+    return null;
+  }
+  if (root2.a.kind === "leaf" && root2.a.id === leafId) {
+    return root2.b;
+  }
+  if (root2.b.kind === "leaf" && root2.b.id === leafId) {
+    return root2.a;
+  }
+  if (findLeaf(root2.a, leafId)) {
+    return siblingSubtreeOf(root2.a, leafId);
+  }
+  return siblingSubtreeOf(root2.b, leafId);
 }
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
@@ -13261,6 +13308,23 @@ var SplitView = class {
     this.tree = replaceTab(this.tree, this.focusedId, tab);
     this.commit();
   }
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab) {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -13370,6 +13434,13 @@ var SplitView = class {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -13383,6 +13454,13 @@ var SplitView = class {
    *  it the one place to count them (see layoutGeneration). */
   commit() {
     this.layoutGen++;
+    this.land();
+  }
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  land() {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
@@ -13393,16 +13471,26 @@ var SplitView = class {
     if (!this.tree) {
       return;
     }
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return;
     }
     this.tree = next;
-    if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
   // --- internal: reconcile tree → DOM + terminals ---------------------------
   teardown() {
@@ -18764,10 +18852,17 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
+var tabRebindSeq = 0;
+var newestAppliedRebindBySession = /* @__PURE__ */ new Map();
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
-  void run().then((snapshot) => {
+  const seq = ++tabRebindSeq;
+  void run().then(async (snapshot) => {
     if (snapshot === null) return;
+    const hold = globalThis.__afTabRebindHold?.(verb);
+    if (hold) {
+      await hold;
+    }
     const {
       sessions,
       authoritative,
@@ -18792,10 +18887,13 @@ function guardedTabRebind(selId, run, resolve, verb) {
       currentGen,
       currentSelId: store.get().selectedId,
       pinnedSessionAlive,
-      targetIdx
+      targetIdx,
+      rebindSeq: seq,
+      newestAppliedSeqs: newestAppliedRebindBySession
     });
     if (outcome.kind === "rebind") {
-      splitView.setFocusedTab(outcome.idx);
+      newestAppliedRebindBySession.set(selId, seq);
+      splitView.setFocusedTabAwaited(outcome.idx);
       if (verb === "create") {
         focusTerminal();
       }
