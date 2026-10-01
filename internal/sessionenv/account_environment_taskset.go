@@ -104,5 +104,15 @@ func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, me
 	if wrapperOperandTailMutates(words, names, memo) {
 		return nil, true
 	}
+	// The mask is judged above as a head; the real binary's child starts at
+	// words[1:]. A shadowed `./taskset` can shift past the mask (and, after
+	// -c, the cpu list) and exec any literal suffix of that child tail, so
+	// every suffix is judged. Because these words ARE the real child's argv,
+	// the child-tail scan drops the childless PID bound the selector and
+	// terminal branches keep — a command may take any number of operands, so
+	// the tail's length is not a mutation.
+	if shadowedChildTailMutates(words[1:], names, memo) {
+		return nil, true
+	}
 	return words[1:], false
 }
