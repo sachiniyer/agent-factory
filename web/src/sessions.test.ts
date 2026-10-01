@@ -289,7 +289,8 @@ test("an out-of-range active index yields no tab to follow", () => {
 // it.
 
 /** The guard's inputs with nothing moved — the case that should rebind — so each test
- *  below names only the one input it is about. */
+ *  below names only the one input it is about. rebindSeq/newestAppliedSeq default to
+ *  "the first and only awaited gesture": nothing has applied ahead of it. */
 function rebindInputs(over: Partial<TabRebindInputs> = {}): TabRebindInputs {
   return {
     pinnedGen: 5,
@@ -298,6 +299,8 @@ function rebindInputs(over: Partial<TabRebindInputs> = {}): TabRebindInputs {
     currentSelId: "sess-a",
     pinnedSessionAlive: true,
     targetIdx: 3,
+    rebindSeq: 1,
+    newestAppliedSeq: 0,
     ...over,
   };
 }
@@ -324,6 +327,32 @@ test("rebind BAILS when the layout generation moved — the user focused another
     kind: "refused",
     reason: "layout-moved",
   });
+});
+
+test("an OLDER awaited gesture's landing inside the window does not veto the newer (#5061)", () => {
+  // The CI flake's ordering: the close pinned first, the create pinned while the
+  // close was in flight, then the close's apply landed. That landing moves no
+  // generation now — a gesture's own write is not newer intent — and its seq is
+  // smaller than ours, so the create still rebinds. Before #5061 the close's apply
+  // bumped the generation and this read as layout-moved.
+  assert.deepEqual(
+    rebindTargetAfterAwait(rebindInputs({ rebindSeq: 2, newestAppliedSeq: 1 })),
+    { kind: "rebind", idx: 3 },
+  );
+});
+
+test("a stale completion cannot clobber a NEWER gesture that already applied (#5061)", () => {
+  // Opposite ordering: our RPC outlived the newer gesture's whole round trip, so it
+  // applied first. Landing now would yank the pane off the newer intent's target.
+  assert.deepEqual(
+    rebindTargetAfterAwait(rebindInputs({ rebindSeq: 1, newestAppliedSeq: 2 })),
+    { kind: "refused", reason: "layout-moved" },
+  );
+  // Equal is impossible (seqs are unique) — anything at-or-past us counts as newer.
+  assert.deepEqual(
+    rebindTargetAfterAwait(rebindInputs({ rebindSeq: 1, newestAppliedSeq: 1 })),
+    { kind: "rebind", idx: 3 },
+  );
 });
 
 test("rebind BAILS when the resolved target no longer exists (idx < 0)", () => {
@@ -451,9 +480,10 @@ test("#3663 every refusal has words, and they say what the gesture DID do", () =
 
 test("#3663 no notice claims more than its reason establishes (#3668 Codex)", () => {
   for (const verb of ["create", "close"] as TabRebindVerb[]) {
-    // layoutGeneration is bumped by a focus move, by re-pointing a pane at another
-    // tab, by closing a pane, by a drag-drop split, AND by a concurrent rebind of this
-    // same kind. Naming the focus case would be wrong for four of the five.
+    // layout-moved fires on a focus move, on re-pointing a pane at another tab, on
+    // closing a pane, on a drag-drop split, AND on a newer awaited gesture having
+    // applied while this one was in flight (#5061). Naming the focus case would be
+    // wrong for most of them.
     assert.doesNotMatch(tabRebindRefusalNotice("layout-moved", verb), /focus/i);
     // Nobody left anything: the session was killed under them.
     assert.doesNotMatch(tabRebindRefusalNotice("session-gone", verb), /you/i);

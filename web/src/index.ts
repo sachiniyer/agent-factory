@@ -1435,6 +1435,16 @@ function openTab(index: number): void {
   focusTerminal();
 }
 
+// Issue order among awaited tab rebinds — see rebindTargetAfterAwait. The layout
+// generation alone cannot order overlapping awaited gestures: their applies land
+// through setFocusedTabAwaited, which moves no generation because a gesture's own
+// landing write is not newer user intent (#5061). tabRebindSeq is taken when the
+// RPC is issued; newestAppliedRebindSeq records the newest gesture whose rebind
+// actually landed, so a completion arriving after a newer gesture's apply refuses
+// to clobber it while an older gesture's landing vetoes nothing newer.
+let tabRebindSeq = 0;
+let newestAppliedRebindSeq = 0;
+
 /** Runs a tab mutation whose post-await step re-points the FOCUSED pane, applying the
  *  two guards every such rebind needs so a new async gesture can't forget them
  *  (#2000). Both create and close await a round trip and then point the focused pane
@@ -1462,9 +1472,20 @@ function guardedTabRebind(
 ): void {
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
+  const seq = ++tabRebindSeq;
   void run()
-    .then((snapshot) => {
+    .then(async (snapshot) => {
       if (snapshot === null) return;
+      // A selftest seam: parks this gesture's whole post-await step until released,
+      // so web-driver.spec.ts can force the order two overlapping gestures land in
+      // rather than racing RPC round trips (#5061). Unset in production; a non-
+      // promise return means "no hold".
+      const hold = (globalThis as {
+        __afTabRebindHold?: (verb: TabRebindVerb) => Promise<void> | void;
+      }).__afTabRebindHold?.(verb);
+      if (hold) {
+        await hold;
+      }
       const {
         sessions, authoritative, generation,
         operationLockTimeoutMs, operationClockMs, daemonBootId,
@@ -1500,9 +1521,15 @@ function guardedTabRebind(
         currentSelId: store.get().selectedId,
         pinnedSessionAlive,
         targetIdx,
+        rebindSeq: seq,
+        newestAppliedSeq: newestAppliedRebindSeq,
       });
       if (outcome.kind === "rebind") {
-        splitView.setFocusedTab(outcome.idx);
+        // Recorded before the apply: this gesture's landing is the newest intent on
+        // record, and awaited applies land without counting as layout intent — the
+        // ordering above is what keeps a stale completion from clobbering it.
+        newestAppliedRebindSeq = seq;
+        splitView.setFocusedTabAwaited(outcome.idx);
         if (verb === "create") {
           focusTerminal();
         }
