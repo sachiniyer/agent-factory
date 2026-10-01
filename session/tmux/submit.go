@@ -58,6 +58,11 @@ var (
 const (
 	minDistinctiveFragment   = 8
 	deliveryBoundarySentinel = "__af_delivery_enter_sent_v1__"
+	// deliveryBoundaryGridSentinel separates the -J (joined) capture from the
+	// plain grid capture in one Enter boundary command. Both describe the same
+	// instant — tmux finishes a client's command list before servicing pane
+	// output — but row indexes are only comparable within one capture mode.
+	deliveryBoundaryGridSentinel = "__af_delivery_grid_v1__"
 )
 
 // deliveryOutcome keeps two different kinds of uncertainty separate. "The pane
@@ -357,7 +362,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// to service pane output, so the captured frame includes delivery-driven
 	// composer state but cannot swallow a response that completes before the next
 	// daemon poll.
-	boundary, boundaryOK, err := t.sendEnterAndCaptureBoundary()
+	boundary, boundaryGrid, boundaryOK, err := t.sendEnterAndCaptureBoundary()
 	if err != nil {
 		return PromptCouldNotConfirm, nil, err
 	}
@@ -372,11 +377,21 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 	// while the observation above already reads landed (#4200). The remedy looks
 	// once more after a short grace and sends ONE more Enter — never a re-paste —
 	// only when that Enter provably submits the same draft our first Enter was
-	// sent to submit; remedyStrandedSubmit states the property. Observed-absent
-	// is excluded: its partial draft must never be submitted, and the #3293
-	// redelivery owns it.
-	if observation.outcome != deliveryObservedAbsent {
-		observation = t.remedyStrandedSubmit(probe, observation, boundary, boundaryOK)
+	// sent to submit; remedyStrandedSubmit states the property.
+	var boundaryText string
+	var bound stagedEvidence
+	if boundaryOK {
+		boundaryText = normalizeDelivery(xansi.Strip(boundary))
+		bound = probe.boundEvidence(boundaryText, boundaryGrid)
+	}
+	// Observed-absent is excluded only when the boundary cannot bind the
+	// completed draft: the absent frame is pre-Enter evidence, and the boundary
+	// is the pane as of the submit — if the remainder drained into the gap, the
+	// bound draft the remedy reads IS the whole prompt, not the partial the
+	// stale classification describes (#4530 review). A still-partial boundary
+	// binds nothing and keeps the #3293 redelivery path.
+	if observation.outcome != deliveryObservedAbsent || bound.any() {
+		observation = t.remedyStrandedSubmit(probe, observation, bound, boundaryGrid, boundaryOK)
 	}
 
 	var proof *absenceProof
@@ -440,10 +455,15 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 		// caller that re-sends on not-delivered would otherwise re-open the same
 		// double submit one layer up.
 		if boundaryOK && probe.baselineCaptured {
-			boundaryText := normalizeDelivery(xansi.Strip(boundary))
 			proof = probe.absenceAt(boundaryText)
-			if proof != nil && strings.Count(boundaryText, probe.completion) >
-				strings.Count(normalizeDelivery(observation.pane), probe.completion) {
+			// bound evidence is the same veto generalized: the absent frame is
+			// pre-Enter, so anything this delivery visibly introduced by the
+			// Enter boundary — including a chip, which carries no literal tail —
+			// means the prompt was whole at the submit and must never authorize
+			// a redelivery (#4530 review).
+			if proof != nil && (bound.any() ||
+				strings.Count(boundaryText, probe.completion) >
+					strings.Count(normalizeDelivery(observation.pane), probe.completion)) {
 				proof = nil
 			}
 		}
@@ -457,55 +477,74 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, *a
 }
 
 // sendEnterAndCaptureBoundary submits whatever is pending and captures the pane
-// in the same tmux command queue. display-message emits a sentinel between the
-// two commands: if capture-pane fails after Enter was accepted, partial stdout
-// still proves the send succeeded and we preserve the existing best-effort
-// delivery contract without inventing a send failure. Only a complete capture
-// can seed the status monitor.
+// in the same tmux command queue — twice. The first capture keeps the status
+// monitor's `-e -J` convention (escaped, wrapped lines joined) for text
+// evidence; the second is a plain grid capture whose row indexes the staged
+// remedy compares against the post-grace grid capture — a row number means
+// nothing across capture modes (#4530 review). Both frames describe the same
+// instant: tmux runs a client's command list to completion before servicing
+// pane output again.
+//
+// display-message emits a sentinel before each capture: if a capture fails
+// after Enter was accepted, partial stdout still proves the send succeeded and
+// we preserve the existing best-effort delivery contract without inventing a
+// send failure. Only a complete capture can seed the status monitor.
 //
 // Bounded by tmuxCommandTimeout (#2099): it is the last step of a submit the
 // daemon drives while holding the per-session op lock, so an unbounded stall
 // here leaves the session unpromptable rather than merely dropping one Enter.
-func (t *TmuxSession) sendEnterAndCaptureBoundary() (string, bool, error) {
+func (t *TmuxSession) sendEnterAndCaptureBoundary() (joined, grid string, enterOK bool, err error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
 	target := exactTarget(t.sanitizedName)
 	out, err := t.outputTmuxBounded(ctx,
 		"send-keys", "-t", target, "Enter", ";",
 		"display-message", "-p", deliveryBoundarySentinel, ";",
-		"capture-pane", "-p", "-e", "-J", "-t", target,
+		"capture-pane", "-p", "-e", "-J", "-t", target, ";",
+		"display-message", "-p", deliveryBoundaryGridSentinel, ";",
+		"capture-pane", "-p", "-t", target,
 	)
-	boundary, enterSent := deliveryBoundaryOutput(out)
+	boundary, gridFrame, enterSent := deliveryBoundaryOutput(out)
 	if err != nil && !enterSent {
 		if ctx.Err() != nil {
-			return "", false, fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return "", "", false, fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return "", false, err
+		return "", "", false, err
 	}
 	if !enterSent {
 		// A successful command queue proves both commands completed. Keeping this
 		// fallback also lets executor-level tests return only capture-pane output;
 		// the sentinel is load-bearing only on the partial-output error path.
-		return string(out), true, nil
+		frame := string(out)
+		return frame, frame, true, nil
 	}
 	if err != nil {
 		log.WarningLog.Printf("submit: Enter reached session %q, but its delivery-boundary capture failed; the next successful pane capture will establish the baseline: %v",
 			t.sanitizedName, err)
-		return "", false, nil
+		return "", "", false, nil
 	}
-	return boundary, true, nil
+	return boundary, gridFrame, true, nil
 }
 
-func deliveryBoundaryOutput(out []byte) (string, bool) {
+// deliveryBoundaryOutput splits the Enter boundary output into its two
+// captures. Output that lacks the grid sentinel entirely — executor-level
+// tests answering a single frame — reads as both modes at once, which is the
+// same content a no-wrap pane produces.
+func deliveryBoundaryOutput(out []byte) (joined, grid string, enterSent bool) {
 	s := string(out)
 	if s == deliveryBoundarySentinel {
-		return "", true
+		return "", "", true
 	}
 	prefix := deliveryBoundarySentinel + "\n"
 	if !strings.HasPrefix(s, prefix) {
-		return "", false
+		return "", "", false
 	}
-	return strings.TrimPrefix(s, prefix), true
+	rest := strings.TrimPrefix(s, prefix)
+	gridMarker := deliveryBoundaryGridSentinel + "\n"
+	if i := strings.Index(rest, gridMarker); i >= 0 {
+		return rest[:i], rest[i+len(gridMarker):], true
+	}
+	return rest, rest, true
 }
 
 // clearComposerDraft best-effort removes any text stranded in the pane's

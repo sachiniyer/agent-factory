@@ -53,6 +53,19 @@ type stagedDraftPane struct {
 	afterSnapshot func(m *stagedDraftPane, n int)
 	// failSnapshotsAfter fails atomic snapshots beyond this count.
 	failSnapshotsAfter int
+	// paneWidth, when >0, wraps every logical row into paneWidth-wide physical
+	// rows in grid captures. The boundary's -J capture still emits logical
+	// rows, so a wrapped transcript line shifts every row index below it —
+	// the two capture modes disagree by construction (#4530 review).
+	paneWidth int
+	// height, when >0, caps the pane's visible rows: content that grows past
+	// the cap scrolls older transcript rows off the top — a history-less pane.
+	height int
+	// pollPartial makes the plain delivery-poll captures report a composer
+	// holding only the payload's prefix — the paste drained between the last
+	// poll and the Enter boundary, so the polls classify absent while the
+	// boundary binds the whole draft.
+	pollPartial bool
 }
 
 func (m *stagedDraftPane) glyphOr() string {
@@ -81,20 +94,56 @@ func (m *stagedDraftPane) rowsLocked() (rows []string, cursorRow int) {
 		}
 		rows = append(rows, line)
 	}
-	cursorRow = len(rows) - 1
 	if m.boxed {
 		rows = append(rows, "╰────────────────╯")
+	}
+	if m.height > 0 && len(rows) > m.height {
+		rows = rows[len(rows)-m.height:]
+	}
+	cursorRow = len(rows) - 1
+	if m.boxed {
+		// The cursor rests on the composer's last row, not the box's bottom edge.
+		cursorRow--
 	}
 	return rows, cursorRow
 }
 
+// gridRowsLocked wraps the logical rows into physical pane rows at paneWidth —
+// what `capture-pane` without -J returns when a line wraps.
+func (m *stagedDraftPane) gridRowsLocked() []string {
+	rows, _ := m.rowsLocked()
+	if m.paneWidth <= 0 {
+		return rows
+	}
+	var grid []string
+	for _, r := range rows {
+		rs := []rune(r)
+		if len(rs) == 0 {
+			grid = append(grid, r)
+			continue
+		}
+		for len(rs) > m.paneWidth {
+			grid = append(grid, string(rs[:m.paneWidth]))
+			rs = rs[m.paneWidth:]
+		}
+		grid = append(grid, string(rs))
+	}
+	return grid
+}
+
+// paneLocked is the physical-grid capture (capture-pane -p).
 func (m *stagedDraftPane) paneLocked() string {
+	return strings.Join(m.gridRowsLocked(), "\n") + "\n"
+}
+
+// joinedPaneLocked is the joined capture (capture-pane -p -J): logical rows.
+func (m *stagedDraftPane) joinedPaneLocked() string {
 	rows, _ := m.rowsLocked()
 	return strings.Join(rows, "\n") + "\n"
 }
 
 func (m *stagedDraftPane) cursorLineLocked() string {
-	_, row := m.rowsLocked()
+	row := len(m.gridRowsLocked()) - 1
 	flag := 1
 	if m.hiddenCursor {
 		flag = 0
@@ -161,13 +210,15 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 			if isDeliveryBoundaryCommand(c) {
 				m.enters++
 				frame := m.paneLocked()
+				joinedFrame := m.joinedPaneLocked()
 				if m.enters <= m.swallowedEnters {
 					m.composer = append(m.composer, "")
 				} else if len(m.composer) > 0 {
 					m.transcript = append(m.transcript, m.glyphOr()+" "+strings.TrimSpace(strings.Join(m.composer, " ")))
 					m.composer = nil
 				}
-				return []byte(deliveryBoundarySentinel + "\n" + frame), nil
+				return []byte(deliveryBoundarySentinel + "\n" + joinedFrame +
+					deliveryBoundaryGridSentinel + "\n" + frame), nil
 			}
 			if strings.Contains(joined, "display-message") && strings.Contains(joined, "capture-pane") {
 				m.snapshots++
@@ -182,6 +233,15 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 			}
 			if strings.Contains(joined, "display-message") {
 				return []byte(m.cursorLineLocked()), nil
+			}
+			if m.pollPartial && m.pastes > 0 {
+				// The delivery polls run while the paste is still draining:
+				// they see the composer holding only the payload's prefix.
+				n := []rune(normalizeDelivery(m.lastLoaded))
+				if len(n) > 40 {
+					n = n[:40]
+				}
+				return []byte(m.glyphOr() + " " + string(n) + "\n"), nil
 			}
 			return []byte(m.paneLocked()), nil
 		},
@@ -487,6 +547,86 @@ func TestRemedyWithUnobservableOutcomeReportsUnverified(t *testing.T) {
 	require.Equal(t, PromptSentUnverified, status)
 	require.Equal(t, 1, pastes)
 	require.Equal(t, 2, enters)
+}
+
+// TestWrappedTranscriptStillRemedies is the capture-mode P1: a transcript line
+// above the composer wraps in the physical grid, so the -J boundary and the
+// post-grace grid capture disagree on every row index below it. Row indexes
+// must come from the grid capture the boundary now carries alongside -J —
+// otherwise a genuinely still chip strand is rejected by a phantom "anchor
+// moved" and the remedy never fires.
+func TestWrappedTranscriptStillRemedies(t *testing.T) {
+	m := &stagedDraftPane{
+		swallowedEnters: 1,
+		render:          codexChipRender,
+		paneWidth:       20,
+		transcript:      []string{"a much longer transcript row that wraps"},
+	}
+	status, _, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, 2, enters, "a wrapped transcript row must not defeat the still-chip remedy")
+	require.Equal(t, PromptSentUnverified, status)
+}
+
+// TestScrolledOffIdenticalCopyStillBinds covers the history-less pane where an
+// older render of the same tail scrolls off the top exactly as this paste
+// lands: the completion count can never grow, so only positional binding —
+// the tail sitting in the live composer at the Enter boundary — keeps the
+// still-staged draft from being reported delivered. It is a literal strand, so
+// it still stands down: sent-unverified, no remedy Enter.
+func TestScrolledOffIdenticalCopyStillBinds(t *testing.T) {
+	completion := newDeliveryProbe(redeliverPrompt).completion
+	splitRender := func(payload string) []string {
+		rs := []rune(payload)
+		return []string{string(rs[:len(rs)/2]), string(rs[len(rs)/2:])}
+	}
+	m := &stagedDraftPane{
+		swallowedEnters: 1,
+		render:          splitRender,
+		// Three visible rows: the baseline shows the older identical tail,
+		// the paste pushes it off the top exactly as the new render lands,
+		// and the absorbed Enter's blank row must not scroll the glyph away.
+		height:     3,
+		transcript: []string{"older reply " + completion, "another older line"},
+	}
+	status, _, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, PromptSentUnverified, status,
+		"a still-staged draft must never be reported delivered just because its tail's count could not grow")
+	require.Equal(t, 1, enters)
+}
+
+// TestAbsentThenBoundaryBoundChipRemedies is the absent-poll recheck: the
+// delivery polls ran while the paste was still draining, so they saw only the
+// payload's prefix and classified absent. The draft drained into the gap and
+// the Enter boundary binds the completed chip — the remedy must run on the
+// bound boundary, not the stale classification, and the strand gets its one
+// Enter. The report stays sent-unverified: the remedied submit cannot claim
+// the absent observation's delivery either.
+func TestAbsentThenBoundaryBoundChipRemedies(t *testing.T) {
+	m := &stagedDraftPane{
+		swallowedEnters: 1,
+		render:          codexChipRender,
+		pollPartial:     true,
+	}
+	status, _, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, 2, enters, "a draft that positively binds at the Enter boundary must reach the remedy even after an absent poll")
+	require.Equal(t, PromptSentUnverified, status)
+}
+
+// TestAbsentThenBoundaryBoundChipNeverRedelivers is the same stale-absent
+// bound shape as above, but the chip binds positionally and the draft is a
+// literal tail strand that must stand down — the boundary's bound evidence
+// vetoes the redelivery proof so no second paste is ever authorized for a
+// draft the Enter boundary already saw whole.
+func TestAbsentBoundLiteralStandsDownWithoutRedelivery(t *testing.T) {
+	m := &stagedDraftPane{
+		swallowedEnters: 1,
+		render:          literalRender,
+		pollPartial:     true,
+	}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, PromptSentUnverified, status)
+	require.Equal(t, 1, pastes, "a bound-at-boundary draft must never be re-pasted")
+	require.Equal(t, 1, enters, "a literal strand stands down even when it was bound at the boundary")
 }
 
 // TestInputBetweenCheckAndRemedyReportsUnverified covers the check-then-act

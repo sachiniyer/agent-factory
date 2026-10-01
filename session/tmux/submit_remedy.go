@@ -46,8 +46,11 @@ func (e stagedEvidence) any() bool { return e.tail || e.chip }
 // instant our Enter was sent. The baseline is the post-clear frame (or the
 // pre-clear one when that capture failed), so a user draft the C-u could not
 // clear, an older transcript echo, or a chip from a previous message is already
-// counted there and cannot bind. The count must GROW, never merely be present.
-func (p deliveryProbe) boundEvidence(boundaryText string) stagedEvidence {
+// counted there and cannot bind. boundaryText is the -J (joined) capture for
+// text counts; boundaryGrid is the same instant in physical grid rows and is
+// where position is judged. The count must GROW or the evidence must sit in
+// the live composer, never merely be present on the pane.
+func (p deliveryProbe) boundEvidence(boundaryText, boundaryGrid string) stagedEvidence {
 	if !p.baselineCaptured || p.completion == "" {
 		return stagedEvidence{}
 	}
@@ -63,6 +66,34 @@ func (p deliveryProbe) boundEvidence(boundaryText string) stagedEvidence {
 	// paste as ours (#4530 review).
 	if strings.Count(boundaryText, pasteChipMarker)-strings.Count(p.baselineText, pasteChipMarker) == 1 {
 		if chip, ok := newestPasteChip(boundaryText); ok && p.chipMatchesPayload(chip) {
+			bound.chip = true
+			bound.chipText = chip
+		}
+	}
+	if bound.tail && bound.chip {
+		return bound
+	}
+	// Positional binding: on a history-less pane an older identical copy can
+	// scroll off the top exactly as this render lands, holding every count
+	// flat (#4884's shape, applied to binding — #4530 review). What count
+	// cannot prove, position still can: the live composer is the rows at and
+	// below the boundary's last composer-glyph row, and a scrolled-off echo
+	// sits above it, so evidence inside that region is this delivery's.
+	rows := paneGridRows(xansi.Strip(boundaryGrid))
+	anchor := lastComposerGlyphRow(rows)
+	if anchor < 0 {
+		return bound
+	}
+	region := normalizeDelivery(strings.Join(composerRegion(rows, anchor), ""))
+	if !bound.tail && strings.Contains(region, p.completion) {
+		bound.tail = true
+	}
+	// A chip binds positionally only when ITS count also grew: a same-sized
+	// chip that predates the paste (an uncleared user draft) must not alias
+	// as ours even when it sits in the composer.
+	if !bound.chip {
+		if chip, ok := newestPasteChip(region); ok && p.chipMatchesPayload(chip) &&
+			strings.Count(boundaryText, chip) > strings.Count(p.baselineText, chip) {
 			bound.chip = true
 			bound.chipText = chip
 		}
@@ -276,13 +307,13 @@ func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, bo
 }
 
 // stillChipComposer is the stillness+position proof for the one remediable
-// shape: the boundary's composer region held exactly one content row — the
-// bound chip on the composer glyph row — and the grace frame's composer region
-// is byte-identical, plus at most the one whitespace-only row an absorbed
-// Enter can append. Anything else stands down: a literal draft (tail-bound)
-// never reaches here, a second chip or user text adds a content row, a moved
-// anchor means a repainted composer, and a footer redrawn inside the region
-// changes the bytes. The visible cursor must rest where undisturbed input left
+// shape: the boundary's composer region held the bound chip and nothing else,
+// and the grace frame's composer region is byte-identical, plus at most the
+// one whitespace-only row an absorbed Enter can append. Anything else stands
+// down: a literal draft (tail-bound) never reaches here, a second chip or user
+// text changes the region's joined content, a moved anchor means a repainted
+// composer, and a footer redrawn inside the region changes the bytes. The
+// visible cursor must rest where undisturbed input left
 // it: on the chip row at its insert or content-end column, or on the absorbed
 // Enter's blank row at the insert column. A hidden cursor (Claude's ordinary
 // composer draws one) cannot prove that, so it withholds.
@@ -298,14 +329,16 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	}
 	bRegion := composerRegion(bRows, anchor)
 	gRegion := composerRegion(gRows, anchor)
-	// The boundary composer's one content row must be the bound chip itself.
-	// Strip exactly one leading prompt glyph, not one of each — the payload
-	// itself may open with '>'.
-	chipRow := normalizeDelivery(bRegion[0])
-	if r, size := utf8.DecodeRuneInString(chipRow); r == '❯' || r == '›' || r == '❭' || r == '>' {
-		chipRow = chipRow[size:]
+	// The boundary composer must hold the bound chip and nothing else. Compare
+	// the region's joined content: the chip itself can wrap across physical
+	// grid rows, and a row-count check would read its second half as foreign
+	// content. Strip exactly one leading prompt glyph, not one of each — the
+	// payload itself may open with '>'.
+	regionContent := normalizeDelivery(strings.Join(bRegion, ""))
+	if r, size := utf8.DecodeRuneInString(regionContent); r == '❯' || r == '›' || r == '❭' || r == '>' {
+		regionContent = regionContent[size:]
 	}
-	if chipRow != chipText || !singleContentRow(bRegion) {
+	if regionContent != chipText {
 		return false
 	}
 	// Stillness: every boundary region row must appear, in order, in the grace
@@ -337,18 +370,6 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	}
 	return cursor.Row == anchor &&
 		(cursor.Col == insert || cursor.Col == contentEndCol(gRows[anchor]))
-}
-
-// singleContentRow reports whether a region holds exactly one row that is not
-// whitespace-only — for the remediable shape, the chip row itself.
-func singleContentRow(region []string) bool {
-	content := 0
-	for _, row := range region {
-		if !blankComposerRow(row) && normalizeDelivery(row) != "" {
-			content++
-		}
-	}
-	return content == 1
 }
 
 // firstContentCol is the column of a row's first character that can be
@@ -418,15 +439,11 @@ func contentEndCol(row string) int {
 // changed while staged, a remedy whose outcome cannot be re-read, and every
 // non-chip staged shape all report sent-unverified. Only a draft that left the
 // composer keeps the observation it had before Enter.
-func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, boundary string, boundaryOK bool) deliveryObservation {
-	if !boundaryOK {
+func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deliveryObservation, bound stagedEvidence, boundaryGrid string, boundaryOK bool) deliveryObservation {
+	if !boundaryOK || !bound.any() {
 		return observation
 	}
-	stripped := xansi.Strip(boundary)
-	bound := probe.boundEvidence(normalizeDelivery(stripped))
-	if !bound.any() {
-		return observation
-	}
+	stripped := xansi.Strip(boundaryGrid)
 	boundaryAnchor := lastComposerGlyphRow(paneGridRows(stripped))
 
 	pasteDeliverySleep(strandedSubmitGrace)
@@ -452,7 +469,7 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 
 	log.WarningLog.Printf("submit: session %q still holds this prompt's bound chip staged in a byte-identical composer after Enter; "+
 		"the keystroke was absorbed, so sending one more Enter to submit the same draft (#4200)", t.sanitizedName)
-	remedyBoundary, remedyBoundaryOK, err := t.sendEnterAndCaptureBoundary()
+	remedyBoundary, _, remedyBoundaryOK, err := t.sendEnterAndCaptureBoundary()
 	if err != nil {
 		log.WarningLog.Printf("submit: remedy Enter for session %q did not reach tmux; reporting sent-unverified: %v", t.sanitizedName, err)
 		return unverified
@@ -473,5 +490,12 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 	if !ok || boundStillStaged(settled, probe, bound, boundaryAnchor) {
 		return unverified
 	}
-	return deliveryObservation{outcome: observation.outcome, pane: settled}
+	outcome := observation.outcome
+	if outcome == deliveryObservedAbsent {
+		// A bound draft that left the composer was whole at Enter and has now
+		// submitted: the absent classification was stale pre-Enter evidence, and
+		// returning it would hand the redelivery path a proven-false absence.
+		outcome = deliveryObservedUnverified
+	}
+	return deliveryObservation{outcome: outcome, pane: settled}
 }
