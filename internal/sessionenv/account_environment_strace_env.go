@@ -116,6 +116,63 @@ func straceAttachedEnvOperand(word *syntax.Word) (string, bool) {
 	}
 }
 
+// straceUnquotedOptionSplit reports whether word is a non-literal strace option
+// word (a value-taking option whose value holds a shell expansion) whose value
+// is an UNQUOTED expansion, so the expansion can word-split into a further
+// strace option the scan never sees as a separate argv word — e.g.
+// `strace -o$V` with V='out -ECODEX_HOME=/other' splits into `-oout` and
+// `-ECODEX_HOME=/other`, the second an environment option the first-word scan
+// misses. literalShellWordPrefix recovers the option marker; a bare "-" (the
+// traced command) and a non-option word are excluded so this only fires for an
+// option word. A QUOTED expansion stays one option value (no splitting) and
+// returns false, so the quoted form keeps the tail judgment.
+func straceUnquotedOptionSplit(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	prefix := literalShellWordPrefix(word)
+	if !strings.HasPrefix(prefix, "-") || prefix == "-" {
+		return false
+	}
+	return wordHasUnquotedExpansion(word)
+}
+
+// straceSeparateEnvOption reports whether literal is a strace -E/--env option
+// that takes its var[=val] operand as the NEXT argv word — the separate-word
+// form, as opposed to the attached -ENAME= or --env=NAME= form. It covers every
+// spelling the repository's strace model recognizes: the exact -E/--env, a
+// short-option cluster whose first value-taking flag is E at the cluster's end
+// (-fE … = -f -E …), and the long --env abbreviation with no attached =value
+// (--en …). The attached forms (-ENAME=, --env=NAME=) are recognized by the
+// attached handler and return false here; a cluster whose E is followed by more
+// flags has E's value attached in the cluster and is not a separate-word option.
+func straceSeparateEnvOption(literal string) bool {
+	switch {
+	case strings.HasPrefix(literal, "--"):
+		name, _, attached := strings.Cut(literal[2:], "=")
+		if attached || name == "" {
+			return false
+		}
+		resolved, requiresArg, known := resolveLongOption(name, straceLongOptions)
+		return known && requiresArg && resolved == "env"
+	case strings.HasPrefix(literal, "-") && len(literal) > 1:
+		flags := literal[1:]
+		for i := 0; i < len(flags); i++ {
+			if strings.IndexByte(straceShortValueFlags, flags[i]) < 0 {
+				continue
+			}
+			// The first value-taking flag consumes the rest of the
+			// cluster as its value when it is not the last character
+			// (attached, e.g. -fECODEX_HOME); only when it is E and sits
+			// at the cluster's end is the value the next argv word.
+			return flags[i] == 'E' && i+1 == len(flags)
+		}
+		return false
+	default:
+		return false
+	}
+}
+
 // straceOptionAwaitsValue reports whether a literal strace option word takes
 // its argument as the NEXT argv word (so that word is a value, not the traced
 // command). It mirrors straceInputRegion's value-flag handling: a short-option

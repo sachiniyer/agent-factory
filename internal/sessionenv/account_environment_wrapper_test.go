@@ -316,9 +316,41 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -o file -E CODEX_HOME=/other codex", true},
 		// Non-strace -E keeps its meaning: extended-regexp to grep.
 		{"grep -ECODEX_HOME=$V /etc/environment", false},
-		// A non-literal strace output option (-o) names a file, not a
-		// variable, so it falls through to the existing tail judgment.
-		{"strace -o$V codex", false},
+		// A bare "-" is a non-option argv element (strace's traced
+		// command, per straceInputRegion's own handling), so a
+		// -E/--env-shaped word after it is the traced program's
+		// argument, not a strace environment option, and stays allowed.
+		{`strace - -ECODEX_HOME=$V codex`, false},
+		{`strace - --env=CODEX_HOME=/other codex`, false},
+		{`strace - -E CODEX_HOME=/other codex`, false},
+		// The "-" boundary still lets a real env option before it refuse.
+		{"strace -E CODEX_HOME=/other - codex", true},
+		// A short-option cluster whose first value-taking flag is E at
+		// the cluster's end (-fE … = -f -E …) and a long --env
+		// abbreviation with no attached =value (--en …) take var[=val]
+		// as the NEXT argv word, so a denied or non-literal operand there
+		// overrides the traced child's protected variable the same way
+		// the exact -E/--env form does.
+		{"strace -fE CODEX_HOME=/other codex", true},
+		{"strace -fE CODEX_HOME codex", true},
+		{"strace -fE CODEX_$V=/other codex", true},
+		{"strace --en CODEX_HOME=/other codex", true},
+		{"strace --en CODEX_HOME codex", true},
+		{"strace -fE FOO=1 codex", false},
+		{"strace -fE FOO=$V codex", true},
+		// The separate-word form refuses any non-literal value word,
+		// matching the exact -E/--env form: `strace -fE FOO="$V"` is the
+		// same as `strace -E FOO="$V"`, not the attached `-EFOO="$V"`.
+		{`strace -fE FOO="$V" codex`, true},
+		// A non-literal strace option word whose value is an UNQUOTED
+		// expansion can word-split into a further strace option the scan
+		// never sees as a separate word (strace -o$V with
+		// V='out -ECODEX_HOME=/other' splits into -oout and
+		// -ECODEX_HOME=/other), so any such option fails closed. A QUOTED
+		// expansion stays one option value, so it keeps the tail judgment.
+		{"strace -o$V codex", true},
+		{"strace -p$V codex", true},
+		{`strace -o"$V" codex`, false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)

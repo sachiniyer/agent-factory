@@ -578,6 +578,13 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 			// from the outermost wrapper.
 			return 1, true, false, false
 		}
+		if strace && inOption && straceUnquotedOptionSplit(word) {
+			// A non-literal strace option word (e.g. -o$V) whose value
+			// is an UNQUOTED expansion can word-split into a further
+			// strace option the scan never sees as a separate argv word;
+			// fail closed (see straceUnquotedOptionSplit).
+			return 1, true, false, false
+		}
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
 		// words after it as that invocation's argv. envScan admits a
@@ -589,15 +596,15 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		return 1, memo.xargsItemFollows(words[1:]) ||
 			envCallMutatesAccountEnvironment(words[1:], names, true, memo), false, false
 	}
-	if !strings.HasPrefix(literal, "-") {
-		// A shell in the wrapper's tail gets the same verdict a bare
-		// shell command gets: `strace sh -c 'unset CODEX_HOME; codex'`
-		// execs the literal script the modeled path already refuses
-		// under `nice sh -c ...`. Only the trusted account-shell form
-		// proves out. A trailing shell name with no argv (echo sh,
-		// strace -p 1 sh) has nothing to judge and stays allowed. This
-		// literal non-option word is the traced command under strace,
-		// so it ends the option region for the words that follow it.
+	if !strings.HasPrefix(literal, "-") || literal == "-" {
+		// A shell in the wrapper's tail (`strace sh -c 'unset CODEX_HOME;
+		// codex'`) gets the same verdict a bare shell command gets: the
+		// modeled path refuses it under `nice sh -c ...` and only the
+		// trusted account-shell form proves out. This non-option word is
+		// the traced command under strace, ending the option region; a
+		// bare "-" is one too (per straceInputRegion), so the second word
+		// of `strace - -ECODEX_HOME=$V` is the traced program's argv, not a
+		// strace env option.
 		return 1, len(words) > 1 && knownShellName(filepath.Base(literal)) &&
 			shellCommandIsUnproven(words), strace && inOption, false
 	}
@@ -608,13 +615,13 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 	pendingValue := false
 	if strace && inOption {
 		switch {
-		case literal == "-E" || literal == "--env":
-			// strace's env option takes var[=val] as a separate word and
-			// injects or REMOVES the variable in the traced child's
-			// environment — the same mutation the env arm refuses, in
-			// option spelling. It is strace-only because -E means
-			// extended-regexp to grep and friends. The value word is
-			// consumed here, so it is not pending.
+		case straceSeparateEnvOption(literal):
+			// strace's env option (-E/--env, a cluster ending in E such
+			// as -fE, or the --en abbreviation) takes var[=val] as the
+			// NEXT argv word and injects or REMOVES the variable in the
+			// traced child's environment — the env arm's mutation in
+			// option spelling (strace-only: -E is extended-regexp to
+			// grep). The value word is consumed here, so it is not pending.
 			if len(words) < 2 {
 				return 1, true, boundary, false
 			}
