@@ -311,3 +311,23 @@ func TestCopySymlinkXattrs_TooLongPathIsNonFatal(t *testing.T) {
 	require.ErrorIs(t, err, errXattrPathTooLong,
 		"copySymlinkXattrs must surface errXattrPathTooLong so the move continues rather than aborting")
 }
+
+// TestCopySymlinkXattrs_HoldsNoneSkipsPathBasedOps pins the regression the
+// filesystem-wide latch introduced: when a file/dir copy already set
+// support.holdsNone (the destination filesystem holds no xattrs at all), a later
+// symlink whose route exceeds PATH_MAX must not reach the path-based prune and
+// route recheck, because copySymlinkEntry's recheck Lstats the same too-long path
+// and would abort a cross-device move the descriptor-anchored F* paths copy fine.
+// The holdsNone branch returns errXattrPathTooLong so the caller skips those
+// path-based operations, matching the path-too-long case: no L* call ran through
+// the path, so there is nothing to recheck, and the destination holds no xattrs so
+// prune has nothing to remove. The path need not exist: a holdsNone latch is the
+// only input that matters here, and a too-long path is the route that would abort
+// the recheck, so both are exercised together.
+func TestCopySymlinkXattrs_HoldsNoneSkipsPathBasedOps(t *testing.T) {
+	tooLong := strings.Repeat("a", unix.PathMax+1)
+	support := &xattrDestination{holdsNone: true}
+	err := copySymlinkXattrs(support, tooLong, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"a holdsNone latch must surface errXattrPathTooLong so copySymlinkEntry skips the path-based prune and route recheck, not nil that would run them on a too-long route")
+}

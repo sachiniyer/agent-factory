@@ -64,16 +64,22 @@ var errXattrValueTooLarge = errors.New("extended attribute value exceeds the cop
 // caller stops attempting the rest of the tree rather than re-learning it per file.
 var errXattrUnsupportedDestination = errors.New("destination filesystem does not support extended attributes")
 
-// errXattrPathTooLong marks a route the path-based L* xattr family cannot address
-// because the textual path exceeds the kernel's PATH_MAX. The descriptor-anchored
-// F* family the file and directory paths use has no such limit (it takes an fd),
-// but the symlink path has no *at variant in golang.org/x/sys/unix (v0.47.0), so a
-// tree the copier reaches component-by-component through directory descriptors can
-// carry a link whose route is too long for L* even though the walker itself copied
-// it. It is non-fatal — the #2919 invariant the file and directory paths follow is
-// "log the loss, do not abort the archive" — so the caller skips the link's xattr
-// copy, prune, and route recheck and continues, rather than aborting a cross-device
-// move of a tree the descriptor-anchored walker already copied.
+// errXattrPathTooLong tells copySymlinkEntry to skip the path-based prune and route
+// recheck for a link. Its original meaning is a route the path-based L* xattr family
+// cannot address because the textual path exceeds the kernel's PATH_MAX: the
+// descriptor-anchored F* family the file and directory paths use has no such limit
+// (it takes an fd), but the symlink path has no *at variant in golang.org/x/sys/unix
+// (v0.47.0), so a tree the copier reaches component-by-component through directory
+// descriptors can carry a link whose route is too long for L* even though the walker
+// itself copied it. The sentinel is also returned when the filesystem-wide latch
+// (holdsNone, set by a file/dir copy that proved the destination holds no xattrs at
+// all) is already set: no L* call ran through the path, so there is nothing for the
+// route recheck to verify and nothing for the prune to remove, and a link whose
+// route exceeds PATH_MAX would abort the recheck's Lstat even though the latch
+// already settled the question. It is non-fatal — the #2919 invariant the file and
+// directory paths follow is "log the loss, do not abort the archive" — so the caller
+// skips the link's xattr copy, prune, and route recheck and continues, rather than
+// aborting a cross-device move of a tree the descriptor-anchored walker copied.
 var errXattrPathTooLong = errors.New("symlink path too long for the L* xattr family")
 
 func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string, acl bool) error {
@@ -222,13 +228,28 @@ func copyXattrPhase(support *xattrDestination, sourceFD, destinationFD int, dest
 // attributes on files and directories fine — the kernel's symlink-xattr handler
 // is a separate code path — so latching holdsNone from a symlink would let an
 // early link in iteration order silently drop every later file's and directory's
-// attributes on a destination that CAN hold them. The symlink path therefore
+// attributes on a destination that can hold them. The symlink path therefore
 // never latches: a destination link that holds no attributes is logged and
 // scoped to that link, and the file and directory paths keep sole authority over
 // the filesystem-wide latch.
+//
+// When holdsNone was latched by a file/dir copy, this returns errXattrPathTooLong
+// rather than nil. copySymlinkEntry treats the sentinel as "no L* call ran; skip
+// the path-based prune and route recheck," which is correct for the latched case:
+// the destination holds no attributes so prune has nothing to remove, no L* call
+// read or wrote the path so there is nothing for the route recheck to verify, and a
+// link whose route exceeds PATH_MAX would abort the recheck's Lstat even though the
+// latch already settled the question. Returning nil would run those path-based
+// operations and, for a too-long route, abort a cross-device move the
+// descriptor-anchored F* paths copy fine.
 func copySymlinkXattrs(support *xattrDestination, sourcePath, destinationPath string) error {
 	if support.holdsNone {
-		return nil
+		// See the doc comment above: no L* call ran (the destination holds no
+		// xattrs at all), so the path-based prune and route recheck in
+		// copySymlinkEntry must be skipped. A too-long route would otherwise abort
+		// the move via the recheck's Lstat, the very thing errXattrPathTooLong
+		// exists to prevent.
+		return errXattrPathTooLong
 	}
 	err := copySymlinkSourceXattrs(sourcePath, destinationPath)
 	if errors.Is(err, errXattrUnsupportedDestination) {
