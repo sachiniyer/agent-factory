@@ -87,6 +87,21 @@ func (n branchNaming) collision(title string, claim git.BranchClaim) (string, bo
 	return git.ClaimCollision(title, git.TitleNaming{Prefix: n.prefix, GlobalPrefix: n.global, Local: n.local}, claim)
 }
 
+// titlesCollide reports whether the two titles alone collide under the prefix
+// their pair shares — the title half of naming.collision, without the
+// recorded-branch defense. The archived-name-reuse rename frees only the
+// TITLE, so a claim that collides solely because its recorded branch is
+// defended is not a rename candidate: renaming it would leave the create
+// deriving the same defended ref anyway (#4562 CI). Such claims are left for
+// the ordinary record-conflict refusal.
+func (n branchNaming) titlesCollide(title string, claim git.BranchClaim) bool {
+	prefix := n.prefix
+	if !n.local || !claim.Local {
+		prefix = n.global
+	}
+	return git.TitlesCollide(title, claim.Title, prefix)
+}
+
 // reservationClaim is what an in-flight create reserved under key: the branch it
 // derived when admitted, so a later create is judged against that and not against
 // a re-derivation under whatever prefix is current now. A reservation with no
@@ -548,4 +563,142 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 			errTitleCheckFatal, candidate, strings.Join(problems, "; "), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	return "", "", nil
+}
+
+// findArchivedOnlyCollisionLocked returns the ONE loaded archived instance whose
+// title collides with `title`, together with its manager-map key — but only when
+// it is the sole claim across reservations, loaded instances, and durable rows,
+// and only when no exclusive operation is already running against it (#2779).
+// A live/reserved collision returns nil so ordinary availability validation
+// reports it. Multiple claims return an error immediately: renaming an arbitrary
+// loaded winner would mutate user state and still leave the requested runtime
+// name unavailable.
+// Runs under m.mu.
+func (m *Manager) findArchivedOnlyCollisionLocked(naming branchNaming, repoID, repoPath, title string, namespace runtimeNameNamespace, diskData []session.InstanceData) (*session.Instance, string, error) {
+	for key := range m.reservedTitles {
+		rid, existing := splitDaemonInstanceKey(key)
+		if rid != repoID {
+			continue
+		}
+		claim := m.reservationClaimLocked(naming, key, existing)
+		if branch, ok := naming.collision(title, claim); ok && !m.recordedCollisionHeldByLiveLane(naming, repoPath, title, claim, branch, diskData) {
+			// A concurrent create is reserving a colliding name; let the
+			// availability check reject with errConcurrentCreate.
+			return nil, "", nil
+		}
+	}
+	if namespace == runtimeNamespaceLocalTmux {
+		nameKey := daemonInstanceKey(repoID, tmux.SanitizedNameForRepo(title, repoPath))
+		if _, reserved := m.reservedTmuxNames[nameKey]; reserved {
+			return nil, "", nil
+		}
+	}
+	var archived *session.Instance
+	var archivedKey string
+	for key, inst := range m.instances {
+		rid, _ := splitDaemonInstanceKey(key)
+		if rid != repoID || inst == nil {
+			continue
+		}
+		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && inst.Capabilities().Workspace == session.WorkspaceLocalWorktree
+		claim := inst.BranchClaim()
+		collisionNamespace, _ := m.titleCollisionNamespace(naming, repoPath, title, claim, bothUseLocalTmux, diskData)
+		if collisionNamespace == titleNamespaceNone {
+			continue
+		}
+		// A claim colliding only through its defended recorded branch is not a
+		// title this rename can free — renaming it would leave the create
+		// deriving the same ref the record still owns (#4562 CI). Leave it to
+		// the record-conflict refusal.
+		if collisionNamespace == titleNamespaceBranch && !naming.titlesCollide(title, claim) {
+			continue
+		}
+		if inst.GetLiveness() != session.LiveArchived {
+			// A live session still holds the name — do not rename around it.
+			return nil, "", nil
+		}
+		if archived != nil {
+			return nil, "", fmt.Errorf("cannot reuse session name %q: archived sessions %q and %q both claim its runtime namespace; rename or permanently delete one before retrying",
+				title, archived.Title, inst.Title)
+		}
+		archived = inst
+		archivedKey = key
+	}
+	if archived == nil {
+		// A disk-only claim will be rejected by the ordinary availability check.
+		// With no loaded archived row there is nothing this helper could mutate,
+		// so leave that path's established diagnostic in charge.
+		return nil, "", nil
+	}
+
+	// An exclusive lifecycle operation already owns this archived session, so it
+	// is not a free name to rename around (#2779). killsInFlight is that fence:
+	// restore, kill, archive and the root-kill path each claim it under m.mu
+	// before touching a session, and the reuse rename — which relocates a
+	// worktree, rewrites a durable record and re-keys the manager map — is every
+	// bit as exclusive, yet it was the one such mutation that never asked.
+	//
+	// What that cost: RestoreArchived claims the fence, takes the per-session op
+	// lock, and then RELEASES m.mu before moving the worktree — it has to, because
+	// the move is a bounded git subprocess and no manager-wide lock may be held
+	// across it. reserveCreate holds m.mu across the rename, but m.mu was never
+	// what the two contended on. Both ended up inside
+	// GitWorktree.relocateWorktreeTo on the SAME worktree object, which has no
+	// internal synchronization: one call reads the source path the other is
+	// rewriting, and their filesystem steps interleave. In the observed ordering
+	// the create won, the restoring session was renamed to "<title> (archived)"
+	// with its worktree moved out from under the restore, and the restore then
+	// failed against a source that no longer existed — the user's uncommitted work
+	// left in an archive directory nothing had asked to move.
+	//
+	// Reading the fence HERE is what makes the check sound rather than
+	// approximate. m.mu is the only thing ordering the two: reserveCreate holds it
+	// unbroken from this read through the rename, so a claim either lands before
+	// this read — and refuses the create — or cannot land until the rename has
+	// finished and re-keyed the row, where the claimant's own
+	// `m.instances[key] != instance` recheck catches it. There is no third
+	// interleaving.
+	//
+	// It lives in this shared helper rather than in renameArchivedForReuseLocked
+	// for the same reason #2415 moved the record-independent checks up: all three
+	// callers ask this function whether an archived row may be renamed, and the
+	// two that run BEFORE the rename are what turn this into a side-effect-free
+	// refusal instead of one discovered after the worktree had already moved.
+	//
+	// Refusing, rather than quietly returning "no collision": the ordinary
+	// availability error would say the title is taken without saying that
+	// something is actively doing something about it. Naming the in-flight
+	// operation is what makes "retry in a moment" the obvious next step.
+	if _, busy := m.killsInFlight[archivedKey]; busy {
+		return nil, "", fmt.Errorf("cannot reuse session name %q: an operation is already in progress for the archived session %q; retry once it finishes",
+			title, archived.Title)
+	}
+
+	// diskData contains the persisted copy of the loaded archived row as well as
+	// rows refreshLocked could not materialize. Consume exactly ONE matching copy
+	// of the loaded row; every other colliding non-Loading record is an independent
+	// namespace claim. Checking it before RenameArchived is load-bearing: the
+	// later availability check also sees disk-only rows, but by then the archive's
+	// worktree, title, manager key, and storage row have already been rewritten.
+	matchedPersistedCopy := false
+	for _, data := range diskData {
+		bothUseLocalTmux := namespace == runtimeNamespaceLocalTmux && data.UsesLocalTmux()
+		claim := data.BranchClaim()
+		collisionNamespace, _ := m.titleCollisionNamespace(naming, repoPath, title, claim, bothUseLocalTmux, diskData)
+		if collisionNamespace == titleNamespaceNone || data.Status == session.Loading {
+			continue
+		}
+		// Same discrimination as the loaded-instance scan above: a branch-only
+		// defense is a refusal, not a claim this rename frees.
+		if collisionNamespace == titleNamespaceBranch && !naming.titlesCollide(title, claim) {
+			continue
+		}
+		if !matchedPersistedCopy && data.Title == archived.Title && data.ID == archived.ID {
+			matchedPersistedCopy = true
+			continue
+		}
+		return nil, "", fmt.Errorf("cannot reuse session name %q: archived session %q and stored session %q both claim its runtime namespace; rename or permanently delete one before retrying",
+			title, archived.Title, data.Title)
+	}
+	return archived, archivedKey, nil
 }

@@ -273,7 +273,12 @@ func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, boo
 		prefix = n.GlobalPrefix
 	}
 	if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
-		if !claim.Relinquished &&
+		// A recorded branch is a host-local ref; only a host-local create can
+		// confiscate it. An off-box create deriving the same string builds it
+		// inside its own sandbox, where the host's ref is unreachable — that is
+		// not a collision, and refusing it would block an off-box session on a
+		// name nothing it does could claim (#4562 CI).
+		if !claim.Relinquished && claim.Local && n.Local &&
 			strings.EqualFold(claim.Branch, BranchForTitle(prefix, title)) {
 			return BranchForTitle(prefix, title), true
 		}
