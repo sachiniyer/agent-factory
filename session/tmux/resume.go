@@ -466,24 +466,9 @@ func claudeConversationSelectorArgs(args []string) []string {
 // prefixes like `ionice -c 3 claude` still match (#742), and a token counts
 // only when filepath.Base equals a SupportedPrograms entry verbatim — a path
 // like /opt/claude-wrapper/run never matches on substring.
-//
-// One shape is excluded from that scan: a GNU env wrapper whose option
-// parsing was terminated by a bare `-` or `--` names an option-looking token
-// as its command (`env - -u claude`, `env -- -C /x claude`). GNU env then
-// execs that option-looking token and passes everything after it only as its
-// argument, so a later agent-shaped word is not the running agent. Bare `-`
-// ending option parsing is the #5036 fix; without this guard the scan reaches
-// the argument and agent-specific flag/readiness behavior attaches to a
-// non-agent command, the regression Codex flagged on #5052.
 func DetectAgentFromCommand(command string) string {
 	tokens, _ := splitShellTokens(command)
-	idx, agent := findAgentToken(tokens)
-	if agent == "" {
-		return ""
-	}
-	if agentTokenIsEnvOptionCommandArg(tokens, idx) {
-		return ""
-	}
+	_, agent := findAgentToken(tokens)
 	return agent
 }
 
@@ -570,6 +555,19 @@ func findAgentToken(tokens []string) (int, string) {
 // findAgentTokenStrict is findAgentToken with the parser failure preserved for
 // callers that must explain why a command cannot be modeled. Detection-only
 // callers deliberately collapse that failure to "no agent" and fail closed.
+//
+// One shape is excluded from the scan: a GNU env wrapper whose option parsing
+// was terminated by a bare `-` or `--` names an option-looking token as its
+// command (`env - -u claude`, `env -- -C /x claude`). GNU env then execs that
+// option-looking token and passes everything after it only as its argument,
+// so a later agent-shaped word is not the running agent. Bare `-` ending
+// option parsing is the #5036 fix; without this guard every consumer of the
+// shared scan — resumeProgram's --continue injection, the conversation
+// selectors, and CommandEnvironmentFromCommand's receipt-routing Agent —
+// would attach to a non-agent command, the regression Codex flagged on #5052.
+// The guard mirrors the scan's walk so an env command that names a supported
+// agent (`env - claude`) still counts, and only an agent strictly past an
+// option-looking env command is rejected.
 func findAgentTokenStrict(tokens []string) (int, string, error) {
 	for i := 0; i < len(tokens); {
 		tok := tokens[i]
@@ -591,6 +589,9 @@ func findAgentTokenStrict(tokens []string) (int, string, error) {
 		base := strings.ToLower(filepath.Base(tok))
 		for _, supported := range SupportedPrograms {
 			if base == supported {
+				if agentTokenIsEnvOptionCommandArg(tokens, i) {
+					break
+				}
 				return i, supported, nil
 			}
 		}
