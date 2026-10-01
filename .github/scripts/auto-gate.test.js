@@ -9358,6 +9358,133 @@ test("scheduled reconciliation keeps a newer queued generation ahead of an older
   }), [], "a still-queued newer generation is not fresh terminal evidence");
 });
 
+test("#4975: a truncated reconciliation page is retried, not fatal", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const staleDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:00:52Z",
+  });
+  const github = scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: {
+      [HEAD_SHA]: [
+        staleDecision,
+        reconciliationRequiredCheck("Build", "2026-07-09T21:02:32Z"),
+        reconciliationRequiredCheck("Lint", "2026-07-09T21:02:33Z"),
+      ],
+    },
+  });
+  const realGraphql = github.graphql;
+  let calls = 0;
+  github.graphql = async (query, variables) => {
+    calls += 1;
+    if (calls === 1) {
+      throw new SyntaxError("Unterminated string in JSON at position 219220");
+    }
+    return realGraphql(query, variables);
+  };
+
+  const targets = await autoGate.resolveTargets({
+    github,
+    context,
+    core: fakeCore(),
+  });
+  assert.equal(calls, 2, "a body cut mid-payload is a transport defect: retry the page");
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }]);
+});
+
+test("#4975: the reconciliation page does not select check-run summary or text", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const github = scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [] },
+  });
+  const queries = [];
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    queries.push(query);
+    return realGraphql(query, variables);
+  };
+
+  await autoGate.resolveTargets({ github, context, core: fakeCore() });
+  assert.ok(queries.length > 0);
+  const fragment = /\.\.\. on CheckRun\s*\{([\s\S]*?)\}/.exec(queries[0])?.[1] || "";
+  assert.doesNotMatch(fragment, /\bsummary\b/,
+    "summary is up to 64 KiB per run; selecting it per-context is what made one truncated page cost the whole snapshot");
+  assert.doesNotMatch(fragment, /\btext\b/,
+    "text is up to 64 KiB per run; the snapshot reads it back per decision run instead");
+  assert.match(fragment, /\btitle\b/,
+    "title stays: the stale-aggregate WAITING scan reads it, and it is bounded small");
+});
+
+test("#4975: a blocked decision's output is read back over REST, once", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const checkRunGets = [];
+  const blockedDecision = reconciliationDecision({
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    evaluatedAt: "2026-07-09T21:00:52Z",
+  });
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          blockedDecision,
+          reconciliationRequiredCheck("Build", "2026-07-09T21:02:32Z"),
+          reconciliationRequiredCheck("Lint", "2026-07-09T21:02:33Z"),
+        ],
+      },
+      checkRunGets,
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }], "the blocked-source summary and required-check snapshot must arrive via the per-run read");
+  assert.deepEqual(checkRunGets, [blockedDecision.id],
+    "the decision run's output is fetched once, by id, not carried by every context on the page");
+});
+
+test("#4975: a passing head never pays for the per-run decision read", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const checkRunGets = [];
+  const passingDecision = {
+    ...reconciliationDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: "2026-07-09T21:00:52Z",
+    }),
+    conclusion: "success",
+  };
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          passingDecision,
+          reconciliationRequiredCheck("Build", "2026-07-09T21:02:32Z"),
+        ],
+      },
+      checkRunGets,
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, []);
+  assert.deepEqual(checkRunGets, [],
+    "a head whose newest decision succeeded has no blocked source to recover");
+});
+
+
 test("scheduled reconciliation keeps a queued rerun inside an existing suite ahead of the generation it replaces", async () => {
   const context = { ...fakeContext(), eventName: "schedule" };
   // A rerun inside an existing check suite inherits the suite's ORIGINAL
@@ -17512,6 +17639,7 @@ function scheduledReconciliationGithub({
   statusesByHead = {},
   statusReads = [],
   checkRunReads = [],
+  checkRunGets = [],
   inspectedHeads = [],
   graphqlReads = [],
   truncatedHeads = [],
@@ -17534,16 +17662,37 @@ function scheduledReconciliationGithub({
     }
     return { data: [...latestByName.values()] };
   };
+  // checkRunGets records every REST checks.get by run id. Since #4975 the
+  // decision run's summary/text no longer ride the GraphQL page; the snapshot
+  // reads them back per-run for the newest completed non-success decision.
+  const getCheckRun = async ({ check_run_id }) => {
+    checkRunGets.push(check_run_id);
+    for (const runs of Object.values(checksByHead)) {
+      const run = (runs || []).find((candidate) => candidate.id === check_run_id);
+      if (run) {
+        return { data: run };
+      }
+    }
+    const notFound = new Error(`Not Found`);
+    notFound.status = 404;
+    throw notFound;
+  };
   return {
     rest: {
       repos: { listCommitStatusesForRef },
-      checks: { listForRef },
+      checks: { listForRef, get: getCheckRun },
     },
     paginate: async (operation, options) => (await operation(options)).data,
     graphql: async (query, { after }) => {
       graphqlReads.push(after);
       const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
-      const requestsCheckRunPermalink = /\.\.\. on CheckRun\s*\{[\s\S]*?\bpermalink\b/.test(query);
+      // Field selection is scoped to the CheckRun fragment's own braces: an
+      // unbounded tail scan could pick `text`/`summary` up from a later
+      // fragment and answer fields the real API never saw requested.
+      const checkRunFragment = /\.\.\. on CheckRun\s*\{([\s\S]*?)\}/.exec(query)?.[1] || "";
+      const requestsCheckRunPermalink = /\bpermalink\b/.test(checkRunFragment);
+      const requestsCheckRunSummary = /\bsummary\b/.test(checkRunFragment);
+      const requestsCheckRunText = /\btext\b/.test(checkRunFragment);
       const requestsCheckSuiteCreatedAt = /\bcheckSuite\s*\{[^}]*\bcreatedAt\b/.test(query);
       const requestsStatusContexts = /\.\.\. on StatusContext\s*\{/.test(query);
       const start = after == null ? 0 : Number(after);
@@ -17589,8 +17738,12 @@ function scheduledReconciliationGithub({
                             ? `https://github.com/sachiniyer/agent-factory/runs/${run.id}`
                             : undefined,
                           title: run.output?.title,
-                          summary: run.output?.summary,
-                          text: run.output?.text,
+                          summary: requestsCheckRunSummary
+                            ? run.output?.summary
+                            : undefined,
+                          text: requestsCheckRunText
+                            ? run.output?.text
+                            : undefined,
                           // GraphQL's CheckRun exposes no createdAt; the suite
                           // carries it, and only when the query selects it.
                           // Mirroring the real shape here is what would have
