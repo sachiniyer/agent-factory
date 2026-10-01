@@ -208,6 +208,15 @@ type InstanceData struct {
 	// this evidence existed; callers must treat absence as unknown, never infer it
 	// from Program's requested label.
 	RuntimeProgram string `json:"runtime_program,omitempty"`
+	// RuntimePID and RuntimeStartID are the pane-root process identity captured
+	// at the same boundary that recorded RuntimeProgram (#5066): the pair
+	// proctree.SameIdentity treats as one process instance (PID plus the
+	// kernel's start stamp, which defeats pid reuse). On reattach a matching
+	// pair proves the pane is still the launch af made, so the claim survives a
+	// daemon restart; a mismatch or an unanswerable probe retires it. Zero on
+	// records predating the evidence.
+	RuntimePID     int    `json:"runtime_pid,omitempty"`
+	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
 	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the

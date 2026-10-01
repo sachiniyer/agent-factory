@@ -177,6 +177,27 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 	return row, nil
 }
 
+// PaneRootProcess resolves the pane root's process identity — the (PID,
+// StartID) pair proctree treats as one process instance — so a launch can
+// record what it started and a later reattach can prove whether the same
+// process still stands behind the reused session name (#5066). A held dead
+// pane, an unanswerable query, or an uninspectable pid each return an error:
+// "cannot prove" must never masquerade as an identity.
+func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
+	row, err := t.panePID()
+	if err != nil {
+		return proctree.Process{}, err
+	}
+	if row.dead {
+		return proctree.Process{}, fmt.Errorf("tmux session %s: pane root is a held dead pane", t.sanitizedName)
+	}
+	proc, err := proctree.Lookup(row.pid)
+	if err != nil {
+		return proctree.Process{}, fmt.Errorf("cannot inspect pane root pid %d: %w", row.pid, err)
+	}
+	return proc, nil
+}
+
 // ProbePaneExit reports whether the command in the session's pane has finished,
 // and, when it has, the exit status and death time tmux recorded. It is how a
 // process tab's completion is observed rather than inferred from absence

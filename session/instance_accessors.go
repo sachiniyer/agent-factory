@@ -781,16 +781,37 @@ func (i *Instance) CommitRuntimeProgramEvidence(evidence RuntimeProgramEvidence,
 // owns UpdatedAt and the durable checkpoint; touching here would count one
 // runtime replacement twice.
 func (i *Instance) setRuntimeProgram(program string) {
+	i.setRuntimeLaunch(program, nil)
+}
+
+// setRuntimeLaunch records a positively established launch: the resolved base
+// command plus, when the pane answers, the pane root's (pid, kernel start-time)
+// identity — the pair that lets a later reattach prove the process standing
+// behind the reused tmux name is still the launch af made (#5066). A pane query
+// that cannot answer records the command alone; the record then verifies
+// nothing on reattach and ages out exactly like a pre-evidence launch.
+func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession) {
 	if strings.TrimSpace(program) == "" {
 		return
 	}
+	pid := 0
+	var startID uint64
+	if ts != nil {
+		if pane, err := ts.PaneRootProcess(); err == nil {
+			pid, startID = pane.PID, pane.StartID
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setRuntimeProgramLocked(program)
+	i.setRuntimeEvidenceLocked(program, pid, startID)
 }
 
 func (i *Instance) setRuntimeProgramLocked(program string) {
-	if i.runtimeProgram == program {
+	i.setRuntimeEvidenceLocked(program, 0, 0)
+}
+
+func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uint64) {
+	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}
 	// Invalidate lock-free consumers before publishing the replacement value.
@@ -798,20 +819,42 @@ func (i *Instance) setRuntimeProgramLocked(program string) {
 	// cannot take i.mu to close this ordering edge.
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = program
+	i.runtimePID = pid
+	i.runtimeStartID = startID
 }
 
 // clearRuntimeProgramForUnverifiedReattach retires a persisted launch-command
-// claim when load can establish only that a tmux name exists, not that it still
-// names the process AF launched. It reports whether durable state changed so a
-// load caller can checkpoint the clear before publishing the restored row.
-func (i *Instance) clearRuntimeProgramForUnverifiedReattach() bool {
+// claim when the reattach cannot prove the pane is still the launch that
+// recorded it. The proof is the pane root's (pid, start-time) identity
+// captured at that launch: a surviving tmux name reporting the recorded pair
+// keeps the claim, while a different process, a pane that cannot be probed,
+// and a record carrying no identity are all unverified. It reports whether
+// durable state changed so a load caller can checkpoint the clear before
+// publishing the restored row.
+func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession) bool {
+	i.mu.RLock()
+	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
+	i.mu.RUnlock()
+	if pid > 0 && ts != nil {
+		if pane, err := ts.PaneRootProcess(); err == nil && pane.PID == pid && pane.StartID == startID {
+			// Provably the same launch: keep the claim.
+			return false
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.runtimeProgram == "" {
+	// Re-check under the write lock: a launch boundary that committed fresh
+	// evidence while the pane query ran must not lose it to this verdict.
+	if i.runtimeProgram != oldProgram || i.runtimePID != pid || i.runtimeStartID != startID {
+		return false
+	}
+	if i.runtimeProgram == "" && i.runtimePID == 0 {
 		return false
 	}
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = ""
+	i.runtimePID = 0
+	i.runtimeStartID = 0
 	return true
 }
 

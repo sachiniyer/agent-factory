@@ -72,4 +72,19 @@ func TestEnsureRootAgentsRecreatedRootRecordsRuntimeProgram(t *testing.T) {
 	require.Equal(t, healed.ID, persisted[0].ID)
 	require.Equal(t, rootProgram, persisted[0].RuntimeProgram,
 		"the persisted root row must carry the recreated runtime's resolved command")
+
+	// The issue's actual kill shot: the daemon that recorded the launch is
+	// restarted, the row is materialized again through LocalBackend.Start's
+	// reattach branch, and the pane root still carries the (pid, start-time)
+	// identity the launch captured. The claim must survive — before the fix it
+	// was retired unconditionally, which is what left a v1.0.298-recreated root
+	// with an empty runtime_program on the very next restart (#5066).
+	manager.persistInstance(repo.ID, healed)
+	restarted, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{Program: rootProgram}))
+	require.NoError(t, err)
+	require.NoError(t, restarted.RestoreInstances())
+	restored := findRootInstance(t, restarted, repoPath)
+	require.NotNil(t, restored, "the restarted daemon must materialize the root row")
+	require.Equal(t, rootProgram, restored.RuntimeProgram(),
+		"a restart reattach that proves the same pane process must keep the recorded command")
 }
