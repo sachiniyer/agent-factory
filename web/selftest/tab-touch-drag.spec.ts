@@ -156,7 +156,14 @@ test("B: over the bar the insertion indicator is shown", async ({ page, request 
   expect(on.hitInBar, "the on-bar point must hit-test to the bar").toBe(true);
   await movePointer(page, on.x, on.y);
   await expect(page.locator(".af-tab-insert")).toBeVisible();
-  await releasePointer(page, on.x, on.y);
+  // Cancel rather than release at this deliberately different gap: a release here
+  // would persist a reorder of the shared probe-order session that later specs
+  // (web-driver.spec.ts, line 9896) rely on staying ["Agent", "alpha", "beta", "gamma"].
+  await page.locator(".af-tabbar").evaluate((bar, pointerId) => {
+    bar.dispatchEvent(new PointerEvent("pointercancel", {
+      bubbles: true, cancelable: true, pointerId, pointerType: "touch",
+    }));
+  }, POINTER_ID);
   await expect(page.locator(".af-tab-insert")).toBeHidden();
 });
 
