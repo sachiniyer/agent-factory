@@ -95,8 +95,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1019608.000 | 1019608.000–1019608.000 | 0.000 | 1070588.400 |
-| gzip_bytes | 227456.000 | 227456.000–227456.000 | 0.000 | 238828.800 |
+| raw_bytes | 1019736.000 | 1019736.000–1019736.000 | 0.000 | 1070722.800 |
+| gzip_bytes | 227483.000 | 227483.000–227483.000 | 0.000 | 238857.150 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -124,24 +124,25 @@ reason to move a budget.
 
 ### Bundle refresh provenance (#5028)
 
-Measured on PR head `a3ff9bad9b` by the PR Validation "Performance and visual
-baselines" job (run `36818955890`), which reported raw_bytes 1,019,608 and
-gzip_bytes 227,456. Bundle bytes are deterministic — `make web-build`
-reproduces `web/dist` byte-for-byte, a property the Web job verifies on every
-push — so the recorded values were recomputed locally with the identical
-metric (`scripts/perf/report.mjs`: raw sum and per-file `gzipSync(level: 9)`
-over `web/dist/**.{js,css}`) and matched the job's measurement exactly. Only
-the two bundle entries were updated; every timing and layout-shift baseline is
-unchanged.
+Measured on PR head `60ac3a057c` by recomputing the identical metric locally
+(`scripts/perf/report.mjs`: raw sum and per-file `gzipSync(level: 9)` over
+`web/dist/**.{js,css}`) — raw_bytes 1,019,736, gzip_bytes 227,483 — and
+corroborated by Codex review recomputing the same metric against the reviewed
+tree. Bundle bytes are deterministic — `make web-build` reproduces `web/dist`
+byte-for-byte, a property the Web job verifies on every push — and the first
+intermediate refresh (1,019,608 / 227,456, before the `stopCoast` guard) also
+matched the "Performance and visual baselines" job's measurement on run
+`36818955890` exactly. Only the two bundle entries were updated; every timing
+and layout-shift baseline is unchanged.
 
-The reviewed PR adds 1,110 raw JavaScript bytes over master for the
+The reviewed PR adds 1,238 raw JavaScript bytes over master for the
 coast-applied/stop-count ledger the #5020 selftest asserts against; CSS is
 unchanged and the service worker changes only its generated cache stamp. The
 previous bundle baseline also predates 47,795 raw bytes merged to master since
 the #4018 refresh: master's 1,018,498-byte bundle passed the old 1,019,238.15
-budget with only 740 bytes of headroom, so even the 1,110-byte ledger could not
-fit under the old margin. This refresh records the reviewed instrumentation
-cost while preserving the 5% regression margin.
+budget with only 740 bytes of headroom, so the ledger could not fit under the
+old margin. This refresh records the reviewed instrumentation cost while
+preserving the 5% regression margin.
 
 ### Account handoff bundle refresh (#4018)
 
