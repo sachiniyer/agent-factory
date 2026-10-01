@@ -320,8 +320,9 @@ type SetResult struct {
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
-	// value. Today the only one is the tokenless-network-listener exposure
-	// (exposureWarning).
+	// value. Today they are the tokenless-network-listener exposure
+	// (exposureWarning) and, on a project-scoped write, the stored-but-ignored
+	// branch_prefix notice (#4539).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -579,6 +580,11 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	// default is the shape this key exists for, so it is the one that most needs
 	// to say "that account is not registered yet" at the moment it is typed.
 	if warn := defaultAccountWriteWarning(key, leaf, canonical); warn != "" {
+		result.Warnings = append(result.Warnings, warn)
+	}
+	// A project-scoped branch_prefix is written and kept — existing configs stay
+	// valid — but it is never applied (#4539); say so on the write itself.
+	if warn := projectBranchPrefixWriteWarning(key); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
 	return result, nil

@@ -106,6 +106,11 @@ type configEntry struct {
 	// a missing value (the compiled default applies) from an explicitly
 	// configured empty value.
 	configured bool
+
+	// note is presentation-only and stays out of the JSON payload: an inline
+	// qualifier appended to the rendered value, currently the "stored but not
+	// applied" marker for a personal-project branch_prefix (#4539).
+	note string
 }
 
 // globalConfigReadOrder preserves the historical `af config list` order. It is
@@ -196,13 +201,18 @@ func formatConfigValue(v any) string {
 // and "I configured the empty/off value". `config get` and JSON output keep
 // their existing script-facing representations.
 func formatConfigListValue(entry configEntry) string {
+	rendered := ""
 	if !isEmptyConfigValue(entry.Value) {
-		return formatConfigValue(entry.Value)
+		rendered = formatConfigValue(entry.Value)
+	} else if !entry.configured {
+		rendered = "(unset)"
+	} else {
+		rendered = formatConfigExplanationValue(entry.Value)
 	}
-	if !entry.configured {
-		return "(unset)"
+	if entry.note != "" {
+		rendered += " " + entry.note
 	}
-	return formatConfigExplanationValue(entry.Value)
+	return rendered
 }
 
 func isEmptyConfigValue(value any) bool {
@@ -225,6 +235,9 @@ func isEmptyConfigValue(value any) bool {
 
 func configEntryFromResolvedValue(value config.ResolvedValue) configEntry {
 	entry := configEntry{Key: value.Key, Value: value.Value}
+	if config.PersonalBranchPrefixIgnored(value) {
+		entry.note = "(project override ignored: not supported yet)"
+	}
 	if value.Winner != nil && value.Winner.Layer != config.SourceBuiltIn.String() {
 		entry.configured = true
 		return entry
@@ -363,11 +376,15 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				}
 				return writeConfigExplanations(cmd.OutOrStdout(), resolved, []config.ResolvedValue{value})
 			}
-			entry := configEntry{Key: value.Key, Value: value.Value}
+			entry := configEntryFromResolvedValue(value)
 			if configJSONFlag {
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entry))
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Value))
+			line := formatConfigValue(entry.Value)
+			if entry.note != "" {
+				line += " " + entry.note
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), line)
 			return nil
 		}
 
@@ -558,7 +575,10 @@ machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
 (default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
-is rejected with the location it actually belongs to. Clear an override with
+is rejected with the location it actually belongs to. One caveat: a
+per-project branch_prefix is accepted and stored but ignored for now — the
+global prefix applies to every project until #4539 lands the real feature.
+Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
@@ -609,6 +629,12 @@ owns.`, tmux.SupportedProgramsString()),
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "set %s = %s for project %s in %s\n",
 				res.Key, echoValue(res.Value), configSetProjectFlag, prettyPath(res.Path))
+			// Writer warnings (e.g. a stored-but-inert per-project branch_prefix,
+			// #4539) go to stderr like the global write path's, before the
+			// effect notice below.
+			for _, w := range res.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), w)
+			}
 			if res.RequiresRestart {
 				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
 					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
