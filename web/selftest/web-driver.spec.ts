@@ -4837,6 +4837,115 @@ test.describe("split panes (SESSION_A roster)", () => {
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   });
 
+  test("split panes (feat): a create pinned while an earlier close is still settling still rebinds the pane (#5061)", REAL_FIXTURE, async () => {
+    // The intermittent failure this blocks: an earlier tab mutation's post-await
+    // apply used to bump layoutGeneration like a USER intent write, so a
+    // createSessionTab pinned while it was still in flight read the landing as
+    // "the layout moved" and refused its own rebind — the bar grew past
+    // toHaveCount while the pane kept the old data-tab-id for the full 15s
+    // ("the pane must be bound to the new tab before anyone types into it"; the
+    // failing trace even rendered "Tab created · the layout changed meanwhile").
+    // Sightings: PR #4466 job 105416978093 and PR #5045 job 110276144061 — both
+    // Go-only changes that could not have moved this code.
+    //
+    // Here the losing order is scripted rather than raced: __afTabRebindHold
+    // (index.ts's test seam) parks each gesture's post-await step until released,
+    // so the earlier gesture's apply lands inside the later one's window on EVERY
+    // run. Before the fix this test times out on the final data-tab-id assertion.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+
+    const tabbar = page.locator(".af-tabbar");
+    const pane = page.locator(".af-term-host .af-pane").first();
+    // The agent tab's stable id, read while the pane is bound to it — the value the
+    // create's apply must move the pane OFF of.
+    const agentTabId = await pane.getAttribute("data-tab-id");
+
+    // Give A a closable tab to close slowly (below), bound to the pane.
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Arm the seam: every guarded tab mutation's post-await step now parks until
+    // its verb is released, so the apply order is scripted.
+    await page.evaluate(() => {
+      const parked = new Map<string, () => void>();
+      const w = window as unknown as {
+        __afTabRebindHold?: (verb: string) => Promise<void>;
+        __afTabRebindParked?: (verb: string) => boolean;
+        __afTabRebindRelease?: (verb: string) => void;
+      };
+      w.__afTabRebindHold = (verb) => new Promise<void>((resolve) => parked.set(verb, resolve));
+      w.__afTabRebindParked = (verb) => parked.has(verb);
+      w.__afTabRebindRelease = (verb) => parked.get(verb)?.();
+    });
+    const parked = (verb: string) =>
+      page.waitForFunction(
+        (v) => (window as unknown as { __afTabRebindParked?: (x: string) => boolean }).__afTabRebindParked?.(v),
+        verb,
+      );
+    const release = (verb: string) =>
+      page.evaluate(
+        (v) => (window as unknown as { __afTabRebindRelease?: (x: string) => void }).__afTabRebindRelease?.(v),
+        verb,
+      );
+    // A released hold's post-await step is synchronous once resumed, so one task
+    // turn guarantees it has run to completion before the next scripted step.
+    const flush = () => page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+
+    try {
+      // Close the shell tab and park its post-await apply. Its seq pin precedes the
+      // create's — that is what makes it the EARLIER gesture.
+      await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+      await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+      await parked("close");
+
+      // Issue the create while the close is parked — its pin is taken now, inside
+      // the earlier gesture's window: the ordering the flake hit.
+      await openSessionActions(page);
+      const newTab = tabbar.locator("..").locator(".af-tab-new");
+      if (await newTab.isVisible()) await newTab.click();
+      const menu = tabbar.locator("..").locator(".af-tab-menu");
+      await expect(menu).toBeVisible();
+      await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
+      await parked("create");
+
+      // Land the close first — exactly what used to veto the create's rebind.
+      await release("close");
+      await flush();
+      await expect(pane).toHaveAttribute("data-tab-id", agentTabId ?? "");
+
+      // Then let the create land: its pin was never newer-intent'd — the only write
+      // in its window was the earlier gesture's own landing, which is not intent.
+      await release("create");
+      await flush();
+
+      await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+      await expect(
+        pane,
+        "the pane must be bound to the new tab once its own gesture lands, regardless of an earlier gesture settling meanwhile",
+      ).not.toHaveAttribute("data-tab-id", agentTabId ?? "");
+      await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+    } finally {
+      // Never leave the seam or a parked gesture behind for the next test: the
+      // suite shares one page and one roster, and a hold left armed would park the
+      // afterEach's own close gestures mid-flight.
+      await page.evaluate(() => {
+        const w = window as unknown as {
+          __afTabRebindHold?: unknown;
+          __afTabRebindParked?: unknown;
+          __afTabRebindRelease?: (verb: string) => void;
+        };
+        delete w.__afTabRebindHold;
+        w.__afTabRebindRelease?.("close");
+        w.__afTabRebindRelease?.("create");
+        delete w.__afTabRebindParked;
+        delete w.__afTabRebindRelease;
+      });
+      await flush();
+    }
+  });
+
   test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
     // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
     // bar), no dragend can fire on the now-detached source — the global "dragging" state
