@@ -114,20 +114,19 @@ func (m *Manager) reservationClaimLocked(naming branchNaming, key, title string)
 }
 
 // reservedClaim is the claim an admitted create records for its reservation: the
-// branch the create derived at admission, so a later create is judged against
-// that and not against a re-derivation under whatever prefix is live then. An
-// off-box reservation pins it too — for one, naming.prefix IS the global prefix —
-// because this commit makes a saved branch_prefix change take effect without a
-// restart, and re-deriving an in-flight off-box reservation under a newer global
-// value can refuse a pair admission already cleared or clear one it refused
-// (#4562 review). An in-place create adopts whatever branch the target worktree
-// already has, so it records none and is judged by derivation, as it was before
-// claims existed.
+// branch the create derived at admission, so a later host-local create is judged
+// against that and not against a re-derivation under whatever prefix is live
+// then — a saved branch_prefix change takes effect without a restart, and
+// re-deriving an in-flight reservation under a newer value could refuse a pair
+// admission already cleared or clear one it refused. An in-place create adopts
+// whatever branch the target worktree already has, so it records none and is
+// judged by derivation, as it was before claims existed. The recorded branch is
+// read only between two host-local claims (git.ClaimCollision), so recording it
+// on an off-box reservation changes nothing about how that pair is judged.
 func reservedClaim(naming branchNaming, title string, inPlace bool) git.BranchClaim {
 	claim := git.BranchClaim{Title: title, Local: naming.local}
 	if !inPlace {
 		claim.Branch = naming.branchFor(title)
-		claim.Pinned = true
 	}
 	return claim
 }
@@ -188,18 +187,18 @@ func (m *Manager) titleCollisionNamespace(naming branchNaming, repoPath, title s
 // worktree currently has that branch checked out. Such a collision defers to
 // refuseLiveHeldBranchLocked, which names the lane and offers the handoff
 // command; reporting it here as a record conflict would mask the actionable
-// refusal (#4562 review). The TitlesCollide gate keeps every pair master
-// already flagged on the record-conflict path it had before claims recorded
-// branches: only the purely-new defense defers.
+// refusal (#4562 review). The TitlesCollide gate keeps every pair the title
+// rule already flagged on the record-conflict path it had before claims
+// recorded branches: only the purely-new defense defers.
+//
+// Reachable only between two host-local claims — the recorded-branch arm of
+// git.ClaimCollision never fires for a pair with an off-box side — so the
+// pair's prefix is the create's (project) one.
 func (m *Manager) recordedCollisionHeldByLiveLane(naming branchNaming, repoPath, title string, claim git.BranchClaim, branch string, diskData []session.InstanceData) bool {
 	if claim.Branch == "" || branch == "" {
 		return false
 	}
-	prefix := naming.prefix
-	if !naming.local || !claim.Local {
-		prefix = naming.global
-	}
-	if git.TitlesCollide(title, claim.Title, prefix) {
+	if git.TitlesCollide(title, claim.Title, naming.prefix) {
 		return false
 	}
 	for _, holder := range m.worktreeHeldBranchesLocked(repoPath, false)[branch] {

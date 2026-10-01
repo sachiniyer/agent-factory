@@ -379,9 +379,6 @@ func (d InstanceData) BranchClaim() git.BranchClaim {
 		Branch:       d.Branch,
 		Local:        d.UsesLocalTmux(),
 		Relinquished: d.RelinquishedBranch,
-		// A pending-create snapshot row's Branch is the admission-pinned name,
-		// not an observed ref (#4562 review).
-		Pinned: d.InFlightOp == OpCreating,
 	}
 }
 

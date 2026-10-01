@@ -77,14 +77,15 @@ func TestClaimCollision(t *testing.T) {
 			claim: BranchClaim{Title: "#x", Branch: "sandbox/x", Local: false},
 		},
 		{
-			name:  "an off-box reservation keeps the prefix it pinned, not the live global",
+			name:  "an off-box reservation is judged by title under the live global prefix",
 			title: "-x",
-			// The global prefix moved to "new-" after "#x" reserved "global/x";
-			// "-x" derives "new-x", which nothing holds. The reservation's
-			// pinned name is its whole answer — no sandbox ref exists yet to
-			// collide with (#4562 review).
-			naming: TitleNaming{Prefix: "new-", GlobalPrefix: "new-", Local: false},
-			claim:  BranchClaim{Title: "#x", Branch: "global/x", Local: false, Pinned: true},
+			// The global prefix moved to "new-" after "#x" reserved "global/x".
+			// Off-box pairs take the pre-#4539 rule verbatim — TitlesCollide
+			// under the live global — so the reservation's recorded branch is
+			// not consulted and the sanitized titles collide (#4562 review).
+			naming:     TitleNaming{Prefix: "new-", GlobalPrefix: "new-", Local: false},
+			claim:      BranchClaim{Title: "#x", Branch: "global/x", Local: false},
+			wantBranch: "new-x", want: true,
 		},
 		{
 			name:  "an off-box pair still collides where it did before per-project prefixes",

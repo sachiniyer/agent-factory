@@ -390,19 +390,6 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		rootRecreateContext: data.RootRecreateContext,
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
-	// A pending-create row can carry no backend discriminator: the daemon
-	// publishes its projection before the runtime exists, and older daemons
-	// publish none at all. It materializes below with the default local
-	// backend, but nothing about it is known-local — so BranchClaim must answer
-	// for it as off-box, judged under the global prefix as the daemon judges a
-	// genuinely off-box create (#4562 review). A row that carries a backend is
-	// classified by it, including "local" for a pending host-local create.
-	// data.InFlightOp, not the derived inFlightOp: a legacy disk row says
-	// Status Loading with the op scrubbed, and it must keep master's drop
-	// behavior rather than materialize as an inert claim (#551 ghost rows).
-	if data.InFlightOp == OpCreating && data.BackendType == "" {
-		instance.pendingLocalityUnknown = true
-	}
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot
 	// owe its own teardown — mirroring the serialize gate — so a marker that

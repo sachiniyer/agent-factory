@@ -99,14 +99,6 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// the completed Instance inherits below, so clients upsert rather than replacing
 	// one identity with another.
 	createdAt := time.Now()
-	// An unresolved kind stays unclassified rather than wearing the local
-	// default the admission fallback holds — the create is about to fail in
-	// NewInstance, and a local claim for a runtime nobody resolved would be
-	// wrong in both directions (#4562 review).
-	pendingBackendType := ""
-	if reservation.kindResolved {
-		pendingBackendType = reservation.kind.PersistedBackendType()
-	}
 	pending := session.InstanceData{
 		ID:            session.NewInstanceID(),
 		TaskID:        req.TaskID,
@@ -121,14 +113,6 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		Prompt:        req.Prompt,
 		Program:       req.Program,
 		Worktree:      session.GitWorktreeData{RepoPath: repo.IdentityPath()},
-		// The row's claim metadata is the reservation's own answer
-		// (#4562 review): which runtime it is — a client cannot judge a
-		// pending create's title claim without it, because materializing the
-		// row without a backend reads as host-local — and the branch the
-		// reservation pinned, so a prefix change while the create is in
-		// flight cannot make the same row collide under a different name.
-		BackendType: pendingBackendType,
-		Branch:      reservation.claim.Branch,
 	}
 	key := daemonInstanceKey(repo.ID, title)
 	// createSweepMu serializes this pendingCreates publication with the deferred
@@ -823,8 +807,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	if m.reservedTitleClaims == nil {
 		m.reservedTitleClaims = make(map[string]git.BranchClaim)
 	}
-	claim := reservedClaim(naming, title, req.InPlace)
-	m.reservedTitleClaims[key] = claim
+	m.reservedTitleClaims[key] = reservedClaim(naming, title, req.InPlace)
 	reservationCommitted = true
 	if nameNamespace == runtimeNamespaceLocalTmux && !req.InPlace {
 		if m.reservedArchiveTitles == nil {
@@ -863,7 +846,7 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, c
 	}
 
 	worktreeAdmissionHeld = false
-	return createReservation{repo: repo, title: title, release: release, renamedArchived: renamedArchived, naming: naming, kind: runtimeKind, kindResolved: kindResolved, claim: claim}, nil
+	return createReservation{repo: repo, title: title, release: release, renamedArchived: renamedArchived, naming: naming, kind: runtimeKind, kindResolved: kindResolved}, nil
 }
 
 // errTitleCheckFatal marks a title-availability failure that is NOT "this

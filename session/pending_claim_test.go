@@ -7,29 +7,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPendingCreateRowWithoutBackendClaimsOffBox (#4562 review): the daemon
-// publishes its pending-create projection before the runtime exists, and older
-// daemons publish it with no backend discriminator at all. Such a row
-// materializes with the default local backend, but nothing about it is
-// known-local — its title claim must answer off-box so admission judges it
-// under the global prefix, the way the daemon judges a genuinely off-box
-// create. A pending row that DOES carry a backend is classified by it.
-func TestPendingCreateRowWithoutBackendClaimsOffBox(t *testing.T) {
+// TestPendingCreateRowClaimsByItsBackendType covers the claim a pending-create
+// row reports: whatever backend_type the row carries classifies it, and a row
+// with none answers local — the materialized default — exactly as a settled
+// row without a discriminator does.
+func TestPendingCreateRowClaimsByItsBackendType(t *testing.T) {
 	worktree := GitWorktreeData{RepoPath: "/repo", WorktreePath: "/repo/wt", BranchName: "global/x"}
 	unclassified, err := FromInstanceData(InstanceData{
 		Title: "pending", Status: Loading, Liveness: LiveReady, InFlightOp: OpCreating,
 		Worktree: worktree,
 	})
 	require.NoError(t, err)
-	assert.False(t, unclassified.BranchClaim().Local,
-		"a pending create that cannot say where it runs is not a host-local claim")
-
-	typed, err := FromInstanceData(InstanceData{
-		Title: "pending", Status: Loading, Liveness: LiveReady, InFlightOp: OpCreating,
-		BackendType: "docker",
-	})
-	require.NoError(t, err)
-	assert.False(t, typed.BranchClaim().Local)
+	assert.True(t, unclassified.BranchClaim().Local,
+		"a pending row with no discriminator materializes the default local claim, as a settled row does")
 
 	pendingLocal, err := FromInstanceData(InstanceData{
 		Title: "pending", Status: Loading, Liveness: LiveReady, InFlightOp: OpCreating,

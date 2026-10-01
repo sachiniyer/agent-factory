@@ -41,24 +41,6 @@ func TestEverySupportedBackendDeclaresOffBox(t *testing.T) {
 	}
 }
 
-// TestEveryRegisteredRuntimeDeclaresPersistedType keeps persistedBackendType in
-// lockstep with the registry, the same obligation the declarations above carry
-// (#4562 review): a caller holding only the resolved kind — the daemon's
-// pending-create projection — reads backend_type from it, and a missing or
-// extra entry is drift.
-func TestEveryRegisteredRuntimeDeclaresPersistedType(t *testing.T) {
-	for kind := range runtimeRegistry {
-		assert.NotEmpty(t, kind.PersistedBackendType(),
-			"backend %q is registered as a runtime but has no persisted backend_type; "+
-				"add it to persistedBackendType so a pending-create row can carry the resolved backend", kind)
-	}
-	for kind := range persistedBackendType {
-		_, registered := runtimeRegistry[kind]
-		assert.True(t, registered,
-			"backend %q declares a persisted backend_type but has no registered runtime; the declaration is dead", kind)
-	}
-}
-
 // The property itself: local uses the worktree in place, every off-box runtime
 // clones from the durable store and therefore needs the origin URL.
 func TestProvisionsOffBoxMatchesRuntimeShape(t *testing.T) {

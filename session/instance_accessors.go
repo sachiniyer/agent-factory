@@ -320,18 +320,10 @@ func (i *Instance) GetBranch() string {
 func (i *Instance) BranchClaim() git.BranchClaim {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	local := i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree
-	// A pending-create row materialized without a backend discriminator got the
-	// default local backend, but is not known-local: answering local would let a
-	// project prefix rule a name the daemon admits under the global off-box rule
-	// (#4562 review).
-	if i.pendingLocalityUnknown {
-		local = false
-	}
 	return git.BranchClaim{
 		Title:  i.Title,
 		Branch: i.Branch,
-		Local:  local,
+		Local:  i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree,
 		// Only a row whose recorded branch the reuse rename deliberately left
 		// for the re-user stops defending it (#2127). An archived row that was
 		// never renamed — or whose rename declined to move the branch — still
@@ -339,9 +331,6 @@ func (i *Instance) BranchClaim() git.BranchClaim {
 		// let a later create adopt that branch and contaminate the archived
 		// history (#4562 review).
 		Relinquished: i.branchRelinquished,
-		// A pending create's Branch is the name admission pinned, not a ref
-		// already made; a settled row's is the observed one (#4562 review).
-		Pinned: i.inFlightOp == OpCreating,
 	}
 }
 

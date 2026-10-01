@@ -170,8 +170,10 @@ type Manager struct {
 	pendingCreates map[string]session.InstanceData
 	reservedTitles map[string]struct{}
 	// reservedTitleClaims holds, per reservedTitles key, the branch that in-flight
-	// create derived when it was admitted (#4539). A later create is judged against
-	// that branch rather than a re-derivation under the prefix current by then.
+	// create derived when it was admitted (#4539). A later host-local create is
+	// judged against that branch rather than a re-derivation under the prefix
+	// current by then; a pair with an off-box side takes the pre-#4539 title rule
+	// and never reads it.
 	reservedTitleClaims map[string]git.BranchClaim
 	// projectDeletes is a short-lived admission fence keyed by repo ID. A delete
 	// installs it under m.mu in the same decision that proves no create is already

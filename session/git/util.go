@@ -211,14 +211,6 @@ type BranchClaim struct {
 	// renamed — or whose rename declined to move the branch — still owns what
 	// it records, so Relinquished is NOT implied by Archived.
 	Relinquished bool
-	// Pinned marks a claim whose Branch was assigned at admission — an
-	// in-flight create's reservation or the pending row it materializes —
-	// rather than a ref observed to exist. The pinned name is the create's
-	// whole answer: the sandbox it eventually provisions may derive a branch
-	// under a config the host never saw, which admission cannot know. A
-	// SETTLED off-box row's recorded branch is the opposite — a real ref its
-	// sandbox already made — so it keeps the sanitizer floor below.
-	Pinned bool
 }
 
 // TitleNaming is how ONE create derives its branch: Prefix is the prefix its
@@ -235,61 +227,52 @@ type TitleNaming struct {
 // with claim, and the branch name the two share when that is the reason (empty
 // for a title-only collision).
 //
-// The default rule is TitlesCollide under the pair's prefix — n.Prefix between
-// two host-local sessions, n.GlobalPrefix when either side is off-box (Docker,
-// SSH, hook, sandbox: the branch is made inside the sandbox from that machine's
-// config, so the host cannot know it, and a host project's override therefore
-// never changes whether an off-box session can be created).
+// A pair that is not both host-local takes the pre-#4539 rule verbatim
+// (#4562 review): TitlesCollide under the global prefix — nothing more. An
+// off-box create's branch is made inside its sandbox from that machine's
+// config, and an off-box row's recorded branch is a ref in that sandbox, so
+// neither recorded- nor pinned-branch semantics apply to it and a host
+// project's override never changes whether an off-box session can be
+// created.
 //
-// A claim with a RECORDED branch is the correction: it defends that branch, not
-// a re-derivation of its title under the live prefix — a session created before
-// branch_prefix changed (it keeps the branch it was created with, #4539), an
-// off-box reservation pinned under the global value live at ITS admission
-// (#4562 review), an archived session renamed off a title whose branch was left
-// for the new session to adopt (#2127), or a lane checked out on a branch its
-// title never derived. While the claim still defends the recorded branch
-// (Relinquished unset), a title that derives THAT branch collides with it —
-// taking the ref would confiscate it from the record that still points at it,
-// and local setup's leftover-branch delete could destroy it outright. A claim
-// sets Relinquished only when the reuse rename deliberately left its recorded
-// branch for the re-user. A claim with no recorded branch yet is derived.
-// EqualFold, not ==: on a case-insensitive filesystem two loose refs that
-// differ only in case are one file.
-//
-// Which rule answers a recorded-branch mismatch depends on what the claim is.
-// A host-local record or an admission-PINNED name (a reservation, a pending
-// row) is judged by the recorded branch alone plus literal title equality:
-// re-deriving its title under the live prefix is an artifact, and a pinned
-// name says nothing about the ref its sandbox will actually make. A SETTLED
-// off-box record instead falls through to the TitlesCollide floor: its
-// recorded branch is a real ref its sandbox already pushed under a prefix the
-// host never saw (sandbox/), so a new title sanitizing to the claim's title
-// must still be refused — a same-configured sandbox would derive the same ref
-// (#4562 review). A Relinquished claim falls through too: its renamed title
-// stands in the namespace like any other.
+// Between two host-local sessions the question is judged under the create's
+// project prefix (n.Prefix), with one correction: a claim with a RECORDED
+// branch defends that branch, not a re-derivation of its title under the
+// live prefix — a session created before branch_prefix changed (it keeps
+// the branch it was created with, #4539), an in-flight create's reservation
+// pinned under the prefix live at ITS admission, an archived session renamed
+// off a title whose branch was left for the new session to adopt (#2127), or
+// a lane checked out on a branch its title never derived. While the claim
+// still defends the recorded branch (Relinquished unset), a title that
+// derives THAT branch collides with it — taking the ref would confiscate it
+// from the record that still points at it, and local setup's leftover-branch
+// delete could destroy it outright. The claim then answers its title by
+// literal equality alone: re-deriving it under the live prefix is an
+// artifact. A claim sets Relinquished only when the reuse rename
+// deliberately left its recorded branch for the re-user; a Relinquished
+// claim falls through to the TitlesCollide floor, and so does one with no
+// recorded branch. EqualFold, not ==: on a case-insensitive filesystem two
+// loose refs that differ only in case are one file.
 func ClaimCollision(title string, n TitleNaming, claim BranchClaim) (string, bool) {
-	prefix := n.Prefix
 	if !n.Local || !claim.Local {
-		prefix = n.GlobalPrefix
-	}
-	if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(prefix, claim.Title)) {
-		// A recorded branch is a host-local ref; only a host-local create can
-		// confiscate it. An off-box create deriving the same string builds it
-		// inside its own sandbox, where the host's ref is unreachable — that is
-		// not a collision, and refusing it would block an off-box session on a
-		// name nothing it does could claim (#4562 CI).
-		if !claim.Relinquished && claim.Local && n.Local &&
-			strings.EqualFold(claim.Branch, BranchForTitle(prefix, title)) {
-			return BranchForTitle(prefix, title), true
+		if !TitlesCollide(title, claim.Title, n.GlobalPrefix) {
+			return "", false
 		}
-		if !claim.Relinquished && (claim.Local || claim.Pinned) {
+		return sharedBranch(title, claim.Title, n.GlobalPrefix), true
+	}
+	if claim.Branch != "" && !strings.EqualFold(claim.Branch, BranchForTitle(n.Prefix, claim.Title)) {
+		if !claim.Relinquished &&
+			strings.EqualFold(claim.Branch, BranchForTitle(n.Prefix, title)) {
+			return BranchForTitle(n.Prefix, title), true
+		}
+		if !claim.Relinquished {
 			return "", strings.EqualFold(title, claim.Title)
 		}
 	}
-	if !TitlesCollide(title, claim.Title, prefix) {
+	if !TitlesCollide(title, claim.Title, n.Prefix) {
 		return "", false
 	}
-	return sharedBranch(title, claim.Title, prefix), true
+	return sharedBranch(title, claim.Title, n.Prefix), true
 }
 
 // sharedBranch is the branch two colliding titles both derive under prefix, or

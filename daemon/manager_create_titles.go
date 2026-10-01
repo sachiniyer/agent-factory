@@ -52,22 +52,16 @@ type createReservation struct {
 	// create passes this same value to NewInstance and never reads it again.
 	naming branchNaming
 	// kind is the runtime the create resolved before admission — local, docker,
-	// ssh, sandbox, or hook. The pending-create projection reports it so a
-	// client can classify the row while the backend does not exist yet, and
-	// the create hands it to NewInstance so the backend and the naming
-	// snapshot come from ONE resolution (#4562 review): when the request left
-	// the backend to the repo's `backend` key, re-resolving at NewInstance
-	// could read a config saved in between and provision a different runtime
-	// than the one admission named branches for.
+	// ssh, sandbox, or hook. The create hands it to NewInstance so the backend
+	// and the naming snapshot come from ONE resolution (#4562 review): when
+	// the request left the backend to the repo's `backend` key, re-resolving
+	// at NewInstance could read a config saved in between and provision a
+	// different runtime than the one admission named branches for.
 	kind session.BackendKind
 	// kindResolved reports whether that resolution succeeded. When it did not
 	// (an unusable backend value), NewInstance must still see the raw request
 	// so its canonical error reports the bad value.
 	kindResolved bool
-	// claim is the claim this create's title reservation recorded, so
-	// projections of it — the pending-create row — carry the same branch the
-	// reservation was judged on rather than a re-derivation.
-	claim git.BranchClaim
 }
 
 // reserveCreate keeps the established unit-test seam free of a long-lived
@@ -195,19 +189,18 @@ func (m *Manager) refuseNonReusableTitleConflictLocked(naming branchNaming, repo
 }
 
 // refuseLiveHeldBranchLocked is the narrow #4092 create admission guard. A
-// normal create derives its branch from the title; --here must instead use
-// the target worktree's observed branch and path. Only a positively identified
-// live lane refuses, and AF never renames, detaches, resets, or moves either
-// worktree on this path.
-//
-// Off-box creates are guarded too (#4562 review): a sandbox never runs git
-// worktree add on the host, but its derived branch lands in the repo's shared
-// ref namespace — pushing it would land on the branch a live lane has checked
-// out right now. --here stays local-only: a sandbox has no host worktree.
+// normal local create derives its branch from the title; --here must instead
+// use the target worktree's observed branch and path. Only a positively
+// identified live lane refuses, and AF never renames, detaches, resets, or
+// moves either worktree on this path. Off-box namespaces take master's path:
+// the guard does not apply to them (#4562 review).
 func (m *Manager) refuseLiveHeldBranchLocked(naming branchNaming, repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
+	if namespace != runtimeNamespaceLocalTmux {
+		return nil
+	}
 	var branch string
 	var holders []string
-	if namespace == runtimeNamespaceLocalTmux && inPlace {
+	if inPlace {
 		var err error
 		branch, holders, err = inPlaceBranchHolders(repoPath, workspace)
 		if err != nil {
@@ -221,9 +214,6 @@ func (m *Manager) refuseLiveHeldBranchLocked(naming branchNaming, repoPath, work
 		lane := m.liveLaneHoldingWorktreeLocked(holder, diskData)
 		if lane == "" {
 			continue
-		}
-		if namespace != runtimeNamespaceLocalTmux {
-			return liveHeldSandboxBranchRefusal(title, branch, lane, holder)
 		}
 		if inPlace {
 			if branch == "" {
@@ -323,12 +313,6 @@ func liveHeldBranchRefusal(title, branch, lane, holder string) error {
 		title, branch, lane, config.ShellQuotePath(holder), handoff)
 }
 
-func liveHeldSandboxBranchRefusal(title, branch, lane, holder string) error {
-	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
-	return fmt.Errorf("cannot create session %q: branch %q is already checked out by live lane %q at %s — an off-box session would derive the same ref, and pushing it from the sandbox would land on the branch that lane is working on. Continue in that workspace with `%s`, or choose a different session title; af did not rename, detach, reset, or move any worktree",
-		title, branch, lane, config.ShellQuotePath(holder), handoff)
-}
-
 func liveHeldInPlaceBranchRefusal(title, branch, workspace, lane, holder string) error {
 	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
 	return fmt.Errorf("cannot create session %q in place at %s: its current branch %q is already checked out by live lane %q at %s. Refusing to activate two live worktrees on one branch because a sibling branch move can turn the idle lane's unchanged index into a staged revert. Continue in the existing lane with `%s`, or check out a different branch in the target worktree yourself; af did not rename, detach, reset, or move either worktree",
@@ -386,26 +370,20 @@ func (m *Manager) worktreeAdmissionLockForRepo(repoID string) *sync.Mutex {
 // directory, and branch all say the same thing, which is what a later restore
 // presents to the user.
 //
-// title is the title the new create asked for. The archived branch is in the way
-// only when it IS the branch that create derives: after branch_prefix changes, an
-// archived session still holds the branch it was created with, the new create
-// derives a different one, and nothing needs to move (#4539).
+// title is the title the new create asked for. For a host-local create the
+// archived branch is in the way only when it IS the branch that create derives:
+// after branch_prefix changes, an archived session still holds the branch it
+// was created with, the new create derives a different one, and nothing needs
+// to move (#4539). An off-box create skips that check and follows the pre-#4539
+// sequence exactly — its workspace is provisioned inside the sandbox, so the
+// question of which host branch its title would have derived never applies
+// (#4562 review).
 func (m *Manager) reclaimArchivedBranchLocked(naming branchNaming, repoPath string, archived *session.Instance, title, newTitle string) (string, bool) {
-	// Reclaim exists to free the branch an incoming host-local create's
-	// `git worktree add` would take. An off-box create (Docker, SSH, hook,
-	// sandbox) provisions its workspace inside the sandbox and adds no host
-	// worktree, so an archived branch that merely equals its derived
-	// <global>/<title> name is not in its way and must not be moved (#4562
-	// review). The title rename itself still runs — that frees the NAME, which
-	// a create on any backend reuses.
-	if !naming.local {
-		return "", false
-	}
 	current, ok := archived.ArchivedBranchForReclaim()
 	if !ok {
 		return "", false
 	}
-	if !strings.EqualFold(current, naming.branchFor(title)) {
+	if naming.local && !strings.EqualFold(current, naming.branchFor(title)) {
 		return "", false
 	}
 	candidate := naming.branchFor(newTitle)

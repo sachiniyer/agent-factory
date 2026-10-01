@@ -67,14 +67,6 @@ type Instance struct {
 	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
-	// pendingLocalityUnknown marks a row that was materialized from a
-	// pending-create projection carrying no backend discriminator — a daemon
-	// publishes that row before the backend exists, and older daemons publish
-	// none at all. It materializes with the inert local backend, but nothing
-	// about it is known-local: its title claim must answer as off-box, so
-	// admission judges it under the global prefix the way the daemon judges a
-	// genuinely off-box create (#4562 review). Set once by FromInstanceData.
-	pendingLocalityUnknown bool
 	// branchRelinquished marks a row whose recorded branch was deliberately
 	// left for a re-user to adopt: the archived-name-reuse rename freed its
 	// title and, finding the branch held by nothing, declined to move it

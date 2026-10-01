@@ -666,9 +666,9 @@ func (i *Instance) ArchivedCandidateBranchIsFree(candidate string) bool {
 // branch behind for the title's re-user to adopt (#2127). The caller — the
 // reuse-rename path — is the only place that can answer it: an empty newBranch
 // is the yield ONLY when nothing held the branch, while every other empty is a
-// decline (off-box create, published or external branch, not blocking, someone
-// else's hold) after which the row still owns what it records. A moved branch
-// likewise stays owned under its new name. The value persists as
+// decline (published or external branch, not blocking, someone else's hold)
+// after which the row still owns what it records. A moved branch likewise
+// stays owned under its new name. The value persists as
 // InstanceData.RelinquishedBranch so the defense survives a restart (#4562
 // review).
 func (i *Instance) RenameArchived(newTitle, dest, newBranch string, relinquishBranch bool) error {
