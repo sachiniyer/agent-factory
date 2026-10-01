@@ -806,6 +806,23 @@ func (w scalarWrite) apply(locked lockedTarget, prettyPath string) (*SetResult, 
 	if err != nil {
 		return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
 	}
+	// resulting is the config this write produces, and CurrentValue reads it
+	// below to echo the post-write refresh form for a structured key. For
+	// root_agent that render is presence-aware — it consults the on-disk shape
+	// so an absent [root_agent] table shows {} rather than the zero-struct
+	// {"enabled":false} — but parseConfigTOML keeps no source (it is a
+	// values-only parse, not a loader), so attach the post-edit bytes' shape
+	// here. This makes resulting match what LoadConfig will return for these
+	// bytes — the property the comment above already claims for the field
+	// values; the shape is the half CurrentValue additionally needs. Only
+	// structured writes reach CurrentValue below, so the attach is gated to
+	// them; metadataForSource cannot fail on the bytes parseConfigTOML just
+	// accepted.
+	if w.structured {
+		if err := attachConfigSource(resulting, []byte(updated), locked.link, FormatTOML); err != nil {
+			return nil, ConfigDigest{}, fmt.Errorf("internal error: edited config would not load (no changes written): %w", err)
+		}
+	}
 	// Second gate, and the one the parse cannot give: the edit must have landed
 	// on the right line. A surgical edit that hit a decoy inside somebody's
 	// multiline value produces valid TOML that MEANS something else (#3662), so
