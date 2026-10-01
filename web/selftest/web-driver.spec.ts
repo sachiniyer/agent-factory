@@ -866,6 +866,25 @@ async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
+/** One decoded SGR (1006) mouse report inside the PTY input the page sent. */
+interface SgrReport {
+  button: number;
+  release: boolean;
+}
+
+/**
+ * Every SGR mouse report in the captured OpInput stream, in order.
+ *
+ * Wheel reports arrive as `\x1b[<64;col;rowM` (up) and `\x1b[<65;col;rowM`
+ * (down); a click is a press/release pair `\x1b[<0;col;rowM` then `...m`. The
+ * button field is read raw rather than masked, so a direction leak (the wrong
+ * button) is as visible as a missing report.
+ */
+function sgrReportButtons(payloads: number[][]): SgrReport[] {
+  const text = payloads.map((bytes) => String.fromCharCode(...bytes)).join("");
+  return [...text.matchAll(/\x1b\[<(\d+);\d+;\d+([Mm])/g)].map((m) => ({ button: Number(m[1]), release: m[2] === "m" }));
+}
+
 /** Points the task modal's schedule picker (#2057) at the "every N minutes" preset.
  *  The task form no longer has a bare cron text box: a schedule TYPE plus its
  *  contextual inputs generate the expression, so a test that wants an
@@ -2824,6 +2843,191 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
     // The shell holding mouse mode dies with its tab, so nothing has to unwind the
     // mode itself — and the mouse-report bytes the tap left on its command line go
     // with it rather than into a later `type()`.
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+});
+
+test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel input", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The same really-touch-emulated phone context as #2682 — the property under
+  // test is a gesture the browser itself routes, so only trusted touch input can
+  // prove it. This is the codex-cli 0.159 failure: a full-screen app on the
+  // alternate buffer WITH mouse tracking, where a drag used to scroll a local
+  // scrollback that does not exist and reached the application never.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  const inputPayloads: number[][] = [];
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open"), "opening a session must close the drawer over it").toHaveCount(0);
+    await resetToAgentTab(p);
+
+    await createTerminalTab(p);
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const mouseHint = host.locator(".af-mouse-capture-hint");
+
+    // Fill the NORMAL buffer's scrollback first — the drag's other half still
+    // scrolls it — then switch to the alternate screen under SGR mouse reporting,
+    // the minimal stand-in for a full-screen mouse app. `cat` swallows the
+    // reports the shell would otherwise echo back onto its own command line, so
+    // the escape sequence typed to leave the screen later still parses.
+    await p.keyboard.type("for i in $(seq 1 200); do printf 'alt-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("alt-scroll-200", { timeout: 20_000 });
+    await p.keyboard.type("printf '\\033[?1049h\\033[?1000h\\033[?1006h\\033[H'");
+    await p.keyboard.press("Enter");
+    await p.keyboard.type("cat > /dev/null");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    // Prove the state the bug lived in, not just the mode flag: the scrollback
+    // is gone from view and the viewport has nothing local left to scroll.
+    await expect(host).not.toContainText("alt-scroll-200");
+    expect(
+      await viewport.evaluate((el) => el.scrollHeight <= el.clientHeight + 1),
+      "the alternate buffer exposes no local scrollback for a drag to move",
+    ).toBe(true);
+
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+
+    // A TAP still belongs to the application — the reason mouse mode exists, and
+    // the gesture whose compatibility click the drag must never be mistaken for.
+    inputPayloads.length = 0;
+    await touchTap(cdp, column, y + height * 0.5);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && !r.release), {
+        message: "a tap must still report a button press to the mouse-aware application",
+      })
+      .toBe(true);
+    expect(
+      sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release),
+      "a tap must report the button's release as well",
+    ).toBe(true);
+
+    // A finger travelling DOWN the screen pulls older content into view — what a
+    // desktop wheel-up does here. One report per line of travel, button 64.
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).length, {
+        message: "a claimed drag must reach a wheel-owning application on the alternate screen",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      sgrReportButtons(inputPayloads).every((r) => r.button === 64),
+      "the downward drag must report wheel-up only — no click, no wrong direction",
+    ).toBe(true);
+    await expect(mouseHint, "synthesized wheel reports must not flash the desktop escape hint").not.toHaveClass(
+      /af-visible/,
+    );
+
+    // …and a finger travelling UP is wheel-down — button 65.
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).length, {
+        message: "the upward drag must report wheel-down",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      sgrReportButtons(inputPayloads).every((r) => r.button === 65),
+      "the upward drag must report wheel-down only",
+    ).toBe(true);
+    await expect(mouseHint).not.toHaveClass(/af-visible/);
+
+    // DEFAULT encoding next: SGR off but DECSET 1000 still on. The reports now
+    // leave xterm on the BINARY channel — \x1b[M then three byte-coded fields —
+    // which reached the PTY never until the review fix this regression pins.
+    // The toggle line is typed at a shell that may have flushed pending input
+    // around the Ctrl+C, so probe drags retry it until a binary report lands;
+    // when the line lands, SGR is off and `cat` is swallowing again together.
+    const defaultReports = () =>
+      inputPayloads.filter((pl) => pl[0] === 0x1b && pl[1] === 0x5b && pl[2] === 0x4d);
+    await p.keyboard.press("Control+c");
+    inputPayloads.length = 0;
+    await expect(async () => {
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("printf '\\033[?1006l'; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      await touchDrag(cdp, column, y + height * 0.3, y + height * 0.5);
+      expect(
+        defaultReports().length,
+        "default-encoded wheel reports must reach the PTY byte-for-byte",
+      ).toBeGreaterThanOrEqual(3);
+      expect(
+        defaultReports().every((pl) => pl[3] === 0x60),
+        "the downward drag must report wheel-up (\\x1b[M`) in DEFAULT encoding",
+      ).toBe(true);
+    }).toPass({ timeout: 15_000 });
+
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => defaultReports().length, {
+        message: "the upward drag must report wheel-down in DEFAULT encoding too",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      defaultReports().every((pl) => pl[3] === 0x61),
+      "the upward drag must report wheel-down only (\\x1b[Ma)",
+    ).toBe(true);
+
+    // Back on the normal buffer — mouse tracking STILL on — the same drag keeps
+    // its #2682 meaning: it scrolls local history and reports nothing.
+    //
+    // Killing `cat` is the one place the typed setup can be lost: bash flushes
+    // pending input as it resumes after SIGINT, so the printf is retried until
+    // the normal buffer is actually back — "alt-scroll-200" reappearing is the
+    // honest signal, since it only renders while the normal buffer is active.
+    await p.keyboard.press("Control+c");
+    await expect(async () => {
+      await p.keyboard.type("printf '\\033[?1049l'");
+      await p.keyboard.press("Enter");
+      await expect(host).toContainText("alt-scroll-200", { timeout: 3_000 });
+    }).toPass({ timeout: 15_000 });
+    const normalBottom = await viewport.evaluate((el) => el.scrollTop);
+    expect(normalBottom, "returning to the normal buffer must expose its scrollback again").toBeGreaterThan(0);
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), {
+        message: "the same drag on the normal buffer must still scroll history",
+      })
+      .toBeLessThan(normalBottom);
+    expect(inputPayloads, "history scrolling must not leak reports to the application").toHaveLength(0);
+  } finally {
     try {
       await resetToAgentTab(p);
     } finally {

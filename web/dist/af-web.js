@@ -9424,6 +9424,7 @@ var AttachTerminal = class {
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    this.term.onBinary((data) => this.sendBinary(data));
     this.term.attachCustomKeyEventHandler((ev) => {
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
@@ -9584,20 +9585,15 @@ var AttachTerminal = class {
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
   onWheel = (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
-  // touch listeners return early while mouse events are active — and nothing takes
-  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
-  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
-  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
-  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
-  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
-  // the application — which is why only the move is ever cancelled, never the
-  // touchstart that a tap's compatibility mouse events depend on.
+  // Touch scroll ownership (#2681/#2682/#4982) — the module note above the class.
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
@@ -9685,7 +9681,11 @@ var AttachTerminal = class {
     const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
     this.touchScrollRemainder = plan.remainder;
     if (plan.lines !== 0) {
-      this.term.scrollLines(plan.lines);
+      if (this.term.buffer.active.type === "alternate" && this.applicationOwnsWheel()) {
+        this.reportTouchWheel(plan.lines, event.touches[0].clientX, event.touches[0].clientY);
+      } else {
+        this.term.scrollLines(plan.lines);
+      }
     }
     event.preventDefault();
   };
@@ -9713,23 +9713,7 @@ var AttachTerminal = class {
       this.showMouseCaptureHint(this.pointerHint);
     }
   };
-  // The inversion itself (#2787). It runs in the CAPTURE phase on the pane host, so
-  // it lands before both of xterm's mousedown listeners — they sit on xterm's own
-  // element, a descendant — and therefore before either reads the modifier.
-  //
-  // mousedown ONLY. mouseup carries xterm's alt-click-moves-cursor gesture, which
-  // reads the same altKey: a synthetic Option there would fire cursor-movement
-  // sequences into the PTY on every plain click. It is also unnecessary — xterm only
-  // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
-  // inversion already diverts, and the selection drag that replaces it is driven by
-  // document listeners that read no modifier at all.
-  //
-  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
-  // the click back behind a modifier — a trade a touch device cannot take, because it
-  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
-  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
-  // gestures already separate without one, the drag scrolling history (#2682) and the
-  // tap staying the click.
+  // Click/selection modifier inversion (#2787) — the module note above the class.
   onMouseDownCapture = (event) => {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       event.preventDefault();
@@ -9747,17 +9731,7 @@ var AttachTerminal = class {
       this.beginHandedOffDrag();
     }
   };
-  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
-  // listeners and encodes each event's OWN modifiers into the report, so stripping
-  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
-  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
-  // is af's escape hatch, not input the user aimed at the application, so it must
-  // not arrive as a modified-click binding.
-  //
-  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
-  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
-  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
-  // cursor-movement sequences into the PTY on every plain click.
+  // Strips the escape modifier from a handed-off drag (#2787) — module note above.
   onHandedOffDragModifier = (event) => {
     if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
       invertTerminalMouseOverride(event, this.mouseOverride);
@@ -9826,6 +9800,26 @@ var AttachTerminal = class {
   applicationOwnsWheel() {
     const mode = this.term.modes.mouseTrackingMode;
     return mode !== "none" && mode !== "x10";
+  }
+  // Delivers a claimed drag as one WheelEvent per line; see the module note.
+  reportTouchWheel(lines, x, y) {
+    const element = this.term.element;
+    if (!element) {
+      return;
+    }
+    const deltaY = Math.sign(lines);
+    for (let i = Math.abs(lines); i > 0; i -= 1) {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY
+        })
+      );
+    }
   }
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
@@ -10427,6 +10421,23 @@ var AttachTerminal = class {
       return;
     }
     this.noteQueuedInput(text);
+  }
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  sendBinary(data) {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+    }
   }
   /** Hands the PTY everything typed while the socket was down, in order, then
    *  empties the queue. Called from onopen, so it covers the first connect and
