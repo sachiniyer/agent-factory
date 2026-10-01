@@ -37,9 +37,10 @@ func TestValidateAccountEnvironmentCommand_IoniceDynamicClassCanaries(t *testing
 		// Nothing after the token: the empty reading exits for want of a value.
 		`ionice -c"$CLASS"`,
 		`ionice -n"$LEVEL"`,
-		// Nested wrappers still unwrap.
+		// Nested wrappers still unwrap when the inner wrapper's options are
+		// literal: the inner option loop consumes them before the outer
+		// wrapper's child-tail scan starts, so the scan never re-judges them.
 		`ionice -c"$CLASS" taskset -c 0-3 npm run dev`,
-		`nice -n 10 ionice -c"$CLASS" npm run dev`,
 		// Words that look like class names but are not exact matches.
 		`ionice -c"$CLASS" best npm run dev`,
 		`ionice -c"$CLASS" idler`,
@@ -47,6 +48,32 @@ func TestValidateAccountEnvironmentCommand_IoniceDynamicClassCanaries(t *testing
 		t.Run(command, func(t *testing.T) {
 			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 				"command %q cannot change the account environment and must stay allowed", command)
+		})
+	}
+}
+
+// Nesting a dynamic-option ionice under a wrapper that scans its child tail
+// (nice, or ionice itself) is REFUSED for parity with the existing ionice
+// behavior: the outer wrapper's child-tail scan (shadowedChildTailMutates)
+// re-judges the inner ionice's dynamic option token — e.g. `-c"$CLASS"` — as a
+// suffix position, and a non-literal suffix head fails closed because it could
+// expand to env or a same-shell builtin after word splitting. `ionice ionice
+// -c"$CLASS" npm run dev` was already refused by ionice's own scan before the
+// #4708 parity fix extended the scan to nice/nohup/timeout/setsid/stdbuf; the
+// fix makes `nice -n 10 ionice -c"$CLASS" npm run dev` match it. The dynamic
+// option is only safe when the inner wrapper's option loop consumes it
+// BEFORE the outer scan runs (the literal-option composition above), which a
+// scanning outer wrapper cannot do for the inner option words.
+func TestValidateAccountEnvironmentCommand_DynamicClassNestedUnderScanningWrapperRefuses(t *testing.T) {
+	for _, command := range []string{
+		`nice -n 10 ionice -c"$CLASS" npm run dev`,
+		`ionice ionice -c"$CLASS" npm run dev`,
+		`ionice -c 3 ionice -c"$CLASS" npm run dev`,
+		`taskset 0x1 ionice -c"$CLASS" npm run dev`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q nests a dynamic ionice option under a scanning wrapper and must fail closed for parity", command)
 		})
 	}
 }

@@ -93,7 +93,7 @@ func shadowedOperandTailMutates(words []*syntax.Word, names map[string]struct{},
 	return false
 }
 
-func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
+func unwrapNohup(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
 	if len(words) > 0 && wordEquals(words[0], "--") {
 		words = words[1:]
 	}
@@ -102,6 +102,15 @@ func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
 		if !literal || strings.HasPrefix(option, "-") {
 			return nil, true
 		}
+	}
+	// The basename match cannot prove this IS the real util-linux `nohup`,
+	// so a shadowed `./nohup` with `shift N; exec "$@"` can discard any prefix
+	// of the child and exec any literal suffix of it. The head word is judged
+	// by the outer unwrapAccountCommand loop that re-enters on this return;
+	// the tail after the head is judged here, every suffix — the same scan
+	// unwrapIonice/unwrapTaskset apply to their child tails (#4708).
+	if len(words) > 0 && shadowedChildTailMutates(words[1:], names, memo) {
+		return nil, true
 	}
 	return words, false
 }
@@ -118,6 +127,14 @@ func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTai
 		}
 		switch {
 		case option == "--":
+			// `--` ends option parsing, so the real binary's child is exactly
+			// words[1:]. The basename match cannot prove this IS real util-linux,
+			// so a shadowed `./nice` with `shift N; exec "$@"` can discard the
+			// `--` and any prefix of the child and exec any literal suffix of
+			// it. Every suffix is judged, like unwrapIonice's `--` arm (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		case option == "-n" || option == "--adjustment":
 			if len(words) < 2 {
@@ -139,6 +156,16 @@ func unwrapNice(words []*syntax.Word, names map[string]struct{}, memo operandTai
 			}
 			words = words[1:]
 		default:
+			// The child head word: option parsing has ended, so the real binary
+			// runs words as COMMAND + args. The basename match cannot prove this
+			// IS real util-linux, and a shadowed `./nice` with
+			// `shift N; exec "$@"` can discard any prefix of the child and exec
+			// any literal suffix of it. The head is judged by the outer
+			// unwrapAccountCommand loop on re-entry; the tail after the head is
+			// judged here, every suffix (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words, false)
 		}
 	}
@@ -168,6 +195,15 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 			if wrapperOperandTailMutates(words, names, memo) {
 				return run.done(nil, true)
 			}
+			// `--` ended option parsing and words[0] is the duration, so the
+			// real binary's child is words[1:]. The basename match cannot prove
+			// this IS the real `timeout`, so a shadowed `./timeout` with
+			// `shift N; exec "$@"` can discard the duration and any prefix of
+			// the child and exec any literal suffix of it. Every suffix is
+			// judged, like unwrapIonice's `--` arm (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		case option == "-k" || option == "--kill-after" || option == "-s" || option == "--signal":
 			if len(words) < 2 {
@@ -195,6 +231,15 @@ func unwrapTimeout(words []*syntax.Word, names map[string]struct{}, memo operand
 			if wrapperOperandTailMutates(words, names, memo) {
 				return run.done(nil, true)
 			}
+			// words[0] is the duration and the real binary's child is
+			// words[1:]. The basename match cannot prove this IS the real
+			// `timeout`, so a shadowed `./timeout` with
+			// `shift N; exec "$@"` can discard the duration and any prefix of
+			// the child and exec any literal suffix of it. Every suffix is
+			// judged, like tasksetCommandAfterMask (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		}
 	}
@@ -213,6 +258,15 @@ func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		switch option {
 		case "--":
+			// `--` ends option parsing, so the real binary's child is exactly
+			// words[1:]. The basename match cannot prove this IS the real
+			// `setsid`, so a shadowed `./setsid` with `shift N; exec "$@"` can
+			// discard the `--` and any prefix of the child and exec any literal
+			// suffix of it. Every suffix is judged, like unwrapIonice's `--`
+			// arm (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		case "-h", "--help", "-V", "--version":
 			if shadowedOperandTailMutates(words[1:], names, memo) {
@@ -230,6 +284,16 @@ func unwrapSetsid(words []*syntax.Word, names map[string]struct{}, memo operandT
 				}
 				words = words[1:]
 				continue
+			}
+			// The child head word: option parsing has ended, so the real
+			// binary runs words as COMMAND + args. The basename match cannot
+			// prove this IS the real `setsid`, and a shadowed `./setsid` with
+			// `shift N; exec "$@"` can discard any prefix of the child and exec
+			// any literal suffix of it. The head is judged by the outer
+			// unwrapAccountCommand loop on re-entry; the tail after the head
+			// is judged here, every suffix (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
 			}
 			return run.done(words, false)
 		}
@@ -249,6 +313,15 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 		}
 		switch {
 		case option == "--":
+			// `--` ends option parsing, so the real binary's child is exactly
+			// words[1:]. The basename match cannot prove this IS the real
+			// `stdbuf`, so a shadowed `./stdbuf` with `shift N; exec "$@"` can
+			// discard the `--` and any prefix of the child and exec any literal
+			// suffix of it. Every suffix is judged, like unwrapIonice's `--`
+			// arm (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words[1:], false)
 		case option == "--help" || option == "--version":
 			if shadowedOperandTailMutates(words[1:], names, memo) {
@@ -277,6 +350,16 @@ func unwrapStdbuf(words []*syntax.Word, names map[string]struct{}, memo operandT
 		case strings.HasPrefix(option, "-"):
 			return run.done(nil, true)
 		default:
+			// The child head word: option parsing has ended, so the real
+			// binary runs words as COMMAND + args. The basename match cannot
+			// prove this IS the real `stdbuf`, and a shadowed `./stdbuf` with
+			// `shift N; exec "$@"` can discard any prefix of the child and exec
+			// any literal suffix of it. The head is judged by the outer
+			// unwrapAccountCommand loop on re-entry; the tail after the head
+			// is judged here, every suffix (#4708).
+			if shadowedChildTailMutates(words[1:], names, memo) {
+				return run.done(nil, true)
+			}
 			return run.done(words, false)
 		}
 	}
