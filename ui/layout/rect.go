@@ -46,7 +46,7 @@ func (r Rect) Intersects(o Rect) bool {
 // CutLeft splits the rect into a left band of w columns and the remainder.
 // w is clamped to [0, r.W], so the two parts always tile r exactly.
 func (r Rect) CutLeft(w int) (left, rem Rect) {
-	w = clampInt(w, 0, r.W)
+	w = ClampInt(w, 0, r.W)
 	left = Rect{X: r.X, Y: r.Y, W: w, H: r.H}
 	rem = Rect{X: r.X + w, Y: r.Y, W: r.W - w, H: r.H}
 	return left, rem
@@ -55,7 +55,7 @@ func (r Rect) CutLeft(w int) (left, rem Rect) {
 // CutTop splits the rect into a top band of h rows and the remainder. h is
 // clamped to [0, r.H], so the two parts always tile r exactly.
 func (r Rect) CutTop(h int) (top, rem Rect) {
-	h = clampInt(h, 0, r.H)
+	h = ClampInt(h, 0, r.H)
 	top = Rect{X: r.X, Y: r.Y, W: r.W, H: h}
 	rem = Rect{X: r.X, Y: r.Y + h, W: r.W, H: r.H - h}
 	return top, rem
@@ -64,13 +64,14 @@ func (r Rect) CutTop(h int) (top, rem Rect) {
 // CutBottom splits the rect into the remainder and a bottom band of h rows.
 // h is clamped to [0, r.H], so the two parts always tile r exactly.
 func (r Rect) CutBottom(h int) (rem, bottom Rect) {
-	h = clampInt(h, 0, r.H)
+	h = ClampInt(h, 0, r.H)
 	rem = Rect{X: r.X, Y: r.Y, W: r.W, H: r.H - h}
 	bottom = Rect{X: r.X, Y: r.Y + r.H - h, W: r.W, H: h}
 	return rem, bottom
 }
 
-func clampInt(v, lo, hi int) int {
+// ClampInt returns v clamped to the inclusive range [lo, hi].
+func ClampInt(v, lo, hi int) int {
 	if v < lo {
 		return lo
 	}

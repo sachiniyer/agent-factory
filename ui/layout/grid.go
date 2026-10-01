@@ -229,7 +229,7 @@ func (g Grid) Solve(width, height int) Layout {
 	// status bar (#1090): the rail hosts the tree plus — outside minimal
 	// mode — the bottom-aligned automations section under a horizontal rule
 	// (#1087), and the workspace is purely content panes.
-	treeWidth := clampInt(width*25/100, TreeMinWidth, TreeMaxWidth)
+	treeWidth := ClampInt(width*25/100, TreeMinWidth, TreeMaxWidth)
 	rail, workspace := rem.CutLeft(treeWidth)
 
 	if !minimal {
