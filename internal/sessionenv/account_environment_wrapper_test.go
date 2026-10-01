@@ -427,6 +427,15 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{`strace -E \CODEX_HOME=/other codex`, true},
 		{`strace -E\CODEX_HOME codex`, true},
 		{`strace -E"CODEX\HOME"=/other codex`, false},
+		// The same unquoted-backslash hazard applies when the operand's
+		// value is a QUOTED shell expansion: strace -E\CODEX_HOME="$V" codex
+		// literalizes the operand to \CODEX_HOME= (not denied) while the
+		// shell removes the backslash and strace receives -ECODEX_HOME=<V>,
+		// overriding the protected variable. wordHasUnquotedExpansion is
+		// false for the quoted $V, so the dynamic branch must reject the
+		// unquoted backslash before trusting the literal name.
+		{`strace -E\CODEX_HOME="$V" codex`, true},
+		{`strace --env=\CODEX_HOME="$V" codex`, true},
 		// The traced command can itself be strace: its argv is a fresh
 		// strace invocation whose -E/--env options apply to the ultimately
 		// traced child (strace strace -E CODEX_HOME=/other codex), so the
@@ -442,6 +451,17 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace strace -E FOO=1 codex", false},
 		{`strace strace -EFOO="$V" codex`, false},
 		{`strace strace -o "-ECODEX_HOME=$V" codex`, false},
+		// The traced command can be a modeled wrapper whose own options
+		// mutate the child environment: xargs's --process-slot-var=NAME
+		// sets NAME on every exec'd command. Past strace's traced-command
+		// boundary the generic --opt=DENIED arm is gated, so the scan must
+		// delegate to unwrapXargs to analyze xargs's options — matching the
+		// verdict bare xargs produces. A non-denied NAME and a command
+		// with no env mutation stay allowed.
+		{"strace xargs --process-slot-var=CODEX_HOME codex", true},
+		{"strace xargs --process-slot-var CODEX_HOME codex", true},
+		{"strace xargs --process-slot-var=PORT codex", false},
+		{"strace xargs echo hi", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -517,6 +537,18 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// shell-stable: strace receives the dequoted name.
 		`strace -E\CODEX_HOME=/other codex`,
 		`strace -E \CODEX_HOME=/other codex`,
+		// An unquoted backslash escape in the -E operand with a QUOTED
+		// dynamic value: the shell removes the backslash so strace receives
+		// the dequoted denied name, but wordHasUnquotedExpansion is false
+		// for the quoted value, so the backslash must be checked before
+		// trusting the literal name.
+		`strace -E\CODEX_HOME="$V" codex`,
+		`strace --env=\CODEX_HOME="$V" codex`,
+		// The traced command can be a modeled wrapper (xargs) whose own
+		// options mutate the child environment; the scan delegates to
+		// unwrapXargs past strace's command boundary.
+		"strace xargs --process-slot-var=CODEX_HOME codex",
+		"strace xargs --process-slot-var CODEX_HOME codex",
 		// The traced command is itself strace; its -E/--env applies to the
 		// ultimately traced child.
 		"strace strace -E CODEX_HOME=/other codex",
@@ -554,6 +586,14 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		"strace strace echo -E CODEX_HOME=/other codex",
 		`strace strace -EFOO="$V" codex`,
 		`strace strace -o "-ECODEX_HOME=$V" codex`,
+		// A backslash inside quotes is literal (not an escape), so the
+		// operand name is shell-stable and, with a non-denied NAME, stays
+		// allowed even when the value is a quoted dynamic expansion.
+		`strace -E"CODEX\HOME"="$V" codex`,
+		// A traced xargs with a non-denied --process-slot-var and a
+		// command with no env mutation stays allowed.
+		"strace xargs --process-slot-var=PORT codex",
+		"strace xargs echo hi",
 		// grep's -E is extended-regexp and stays accepted.
 		"grep -ECODEX_HOME=$V /etc/environment",
 	} {

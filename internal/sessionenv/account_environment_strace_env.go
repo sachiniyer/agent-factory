@@ -58,6 +58,16 @@ func straceAttachedEnvOptionHides(word *syntax.Word, names map[string]struct{}) 
 	// A '=' in the literal operand separates a fully literal NAME from the
 	// value; the non-literal part sits in the value, after the separator.
 	if strings.IndexByte(operand, '=') >= 0 {
+		// An unquoted backslash escape stays in a syntax.Lit, so the raw
+		// literal operand name is not shell-stable: strace -E\CODEX_HOME="$V"
+		// literalizes the operand to \CODEX_HOME= (not denied) while the
+		// shell removes the backslash and strace receives -ECODEX_HOME=<V>,
+		// overriding the protected variable. Fail closed before trusting the
+		// name; a backslash inside quotes is literal and excluded by
+		// wordHasUnquotedBackslash.
+		if wordHasUnquotedBackslash(word) {
+			return true
+		}
 		if accountEnvironmentOperandDenied(operand, names) {
 			return true
 		}
@@ -561,6 +571,23 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// strace.
 		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "strace") {
 			return 1, false, false, false
+		}
+		// The traced command can itself be a modeled wrapper whose own
+		// options mutate the child environment — xargs's
+		// --process-slot-var=NAME sets NAME on every exec'd command, and
+		// the generic --opt=DENIED arm below is gated to strace's option
+		// region (a word past the boundary is the traced command's
+		// argument, not a wrapper option). Without this delegation
+		// strace xargs --process-slot-var=CODEX_HOME codex crossed the
+		// boundary at xargs and the scan skipped the =DENIED check, so the
+		// traced xargs set the protected variable unchecked. unwrapXargs
+		// applies the same option analysis the modeled peel path does
+		// (including its own --opt=DENIED refusal); a safe xargs whose
+		// command is env is still caught by the env arm above, and a safe
+		// xargs whose tail is a regular command stays allowed.
+		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "xargs") {
+			_, unsafe := unwrapXargs(words[1:], names, memo)
+			return 1, unsafe, strace && inOption, false
 		}
 		// A shell in the wrapper's tail (`strace sh -c 'unset CODEX_HOME;
 		// codex'`) gets the same verdict a bare shell command gets: the
