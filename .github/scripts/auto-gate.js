@@ -3632,25 +3632,53 @@ async function ensureValidationRun({
     );
     return { dispatched: false };
   }
-  try {
-    await github.rest.actions.createWorkflowDispatch({
-      owner,
-      repo,
-      workflow_id: VALIDATION_WORKFLOW,
-      ref: headRefName,
-    });
-    core.notice(
-      `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
-    );
-    return { dispatched: true };
-  } catch (error) {
-    // Not fatal: nothing merges either way, and the next evaluation reports the
-    // checks as unreported rather than pretending they passed.
-    core.warning(
-      `Could not dispatch PR Validation on ${headRefName} for ${headSha}: ${formatError(error)}`,
-    );
+  const dispatched = await dispatchWorkflowWithRetry({
+    label: `could not dispatch PR Validation on ${headRefName} for ${headSha}`,
+    dispatch: () =>
+      github.rest.actions.createWorkflowDispatch({
+        owner,
+        repo,
+        workflow_id: VALIDATION_WORKFLOW,
+        ref: headRefName,
+      }),
+    landed: () => validationRunVisible({ github, context, headSha, sleep }),
+    sleep,
+  }).then(
+    (outcome) => outcome,
+    (error) => {
+      // Not fatal: nothing merges either way, and the next evaluation reports
+      // the checks as unreported rather than pretending they passed.
+      core.warning(
+        `Could not dispatch PR Validation on ${headRefName} for ${headSha}: ${formatError(error)}`,
+      );
+      return null;
+    },
+  );
+  if (!dispatched) {
     return { dispatched: false };
   }
+  if (dispatched.reconciled) {
+    // The adopted run is a FOUND run, not only a dispatched one: give it the
+    // same parked-run approval the poll gives any run it lists.
+    if (!await canRecover()) {
+      return { cancelled: true };
+    }
+    const { parked, approved, cancelled } = await approveParkedRuns({
+      github, context, headSha, core, canRecover, sleep,
+    });
+    if (cancelled) {
+      return { cancelled: true };
+    }
+    core.notice(
+      `The PR Validation dispatch for ${headSha} was answered ambiguously, but a run is ` +
+        "already listed — adopted it instead of dispatching again.",
+    );
+    return { dispatched: true, found: true, approved: parked.length === approved.length };
+  }
+  core.notice(
+    `No PR Validation pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
+  );
+  return { dispatched: true };
 }
 
 // The same gap for a head the gate did not create (#4581). #4430's b63f9752 was
@@ -3941,6 +3969,138 @@ async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
   }
 }
 
+// A workflow_dispatch POST is a write GitHub can answer ambiguously: a 5xx or
+// a transport cut proves nothing about whether the run was created — the same
+// shape #4763 gave check creates and #5004 gave parked-run approvals. The
+// answer to an ambiguous failure is therefore neither a blind replay (the run
+// may already exist) nor an immediate failure. It is a settle-window read-back
+// first — `landed` — and a bounded retry only while nothing is visible. An
+// explicit rate-limit response skips the reconcile on purpose: it rejected the
+// request before any work, so the write replays directly, honoring Retry-After.
+// A definitive refusal or an exhausted retry propagates — those stay loud.
+async function dispatchWorkflowWithRetry({ label, dispatch, landed, sleep }) {
+  const firstAttemptAt = Date.now();
+  return retryTransient(
+    label,
+    async () => {
+      try {
+        await dispatch();
+        return { dispatched: true };
+      } catch (error) {
+        if (
+          !isDefinitiveRateLimitResponse(error) &&
+          isRetryableGitHubError(error) &&
+          await landed(firstAttemptAt)
+        ) {
+          return { dispatched: true, reconciled: true };
+        }
+        throw error;
+      }
+    },
+    { failureName: "AutoGateWriteError", readFailure: false, sleep },
+  );
+}
+
+// The settle-window read-back behind `landed` — runLeftParkedList's shape for a
+// different question. `find` lists the run the ambiguous POST may have created;
+// a not-found answer consumes a settle slot rather than ending the window,
+// because a listing can lag the commit it is asked about. A window that ends on
+// "not there" resolves null, so the caller may retry the write; a listing that
+// cannot be read at all escapes as a guard failure — what exhausted is the
+// read-back, and no replay of a possibly-committed write should rest on it.
+async function settledWorkflowRun({ label, find, sleep }) {
+  try {
+    return await retryTransient(
+      label,
+      async () => {
+        const found = await find();
+        if (found) {
+          return found;
+        }
+        const notYet = new Error("the dispatched run is not visible yet");
+        notYet.status = 503;
+        notYet.autoGateRunNotVisible = true;
+        throw notYet;
+      },
+      {
+        failureName: "AutoGateReadError",
+        readFailure: true,
+        delays: CHECK_CREATE_SETTLE_DELAYS_MS,
+        sleep,
+      },
+    );
+  } catch (error) {
+    if (error.cause?.autoGateRunNotVisible === true) {
+      return null;
+    }
+    throw writeRetryGuardFailure(error);
+  }
+}
+
+// Whether the post-update follow-up dispatch already produced its run. The runs
+// API cannot filter on workflow_dispatch inputs, so the window is the identity:
+// an auto-gate.yml dispatch run created at-or-after the first POST is the one
+// to adopt. A foreign dispatch inside the same seconds-wide window is
+// indistinguishable — and safe to adopt anyway, because what the follow-up
+// chases, the successor head's own events re-evaluate regardless (#5064). This
+// run is excluded: it can itself be a workflow_dispatch inside the cutoff's
+// whole-second rounding, and it is certainly not its own follow-up.
+async function gateFollowUpRun({ github, context, since, sleep }) {
+  const { owner, repo } = context.repo;
+  const cutoff = Math.floor(since / 1000) * 1000;
+  const created = new Date(cutoff).toISOString().replace(/\.\d{3}Z$/, "Z");
+  return settledWorkflowRun({
+    label: "could not confirm whether the Auto Gate follow-up run exists",
+    find: async () => {
+      const listed = await github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: GATE_WORKFLOW,
+        event: "workflow_dispatch",
+        created: `>=${created}`,
+        per_page: 10,
+      });
+      const runs = listed?.data?.workflow_runs;
+      if (!Array.isArray(runs)) {
+        throw new Error("the workflow-run listing had no runs array");
+      }
+      return (
+        runs.find(
+          (run) => run?.id !== context.runId && !(Date.parse(run?.created_at) < cutoff),
+        ) || null
+      );
+    },
+    sleep,
+  });
+}
+
+// Any PR Validation run on the head settles the ambiguous dispatch — however it
+// arrived: this POST, the push's own pull_request run, or a hand dispatch. The
+// existence check repeats the poll above, so no event filter: the run this
+// dispatch creates is a workflow_dispatch run, which a pull_request filter
+// would never see.
+async function validationRunVisible({ github, context, headSha, sleep }) {
+  const { owner, repo } = context.repo;
+  return settledWorkflowRun({
+    label: `could not confirm whether a PR Validation run exists for ${headSha}`,
+    find: async () => {
+      const listed = await github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: VALIDATION_WORKFLOW,
+        head_sha: headSha,
+        per_page: 1,
+      });
+      const runs = listed?.data?.workflow_runs;
+      if (!Array.isArray(runs)) {
+        throw new Error("the workflow-run listing had no runs array");
+      }
+      return runs[0] || null;
+    },
+    sleep,
+  });
+}
+
 // A PR the gate does not own can end while a transaction on it is in flight
 // (#4462): the evaluation resolved it open, and a hand or queue merge — or a
 // plain close — lands before the follow-up write executes. `merged` and
@@ -4146,19 +4306,38 @@ async function merge({
     // resolver carries the initiating SHA as an exclusion: it waits until a
     // different head is visible before publishing any target. A single read of
     // "current" can be stale in the successor just as it was in this run.
-    // Single-shot: a dispatch accepted before a transport error must not be
-    // replayed. If scheduling fails, report a concrete recovery command.
+    // Retried, not single-shot (#5010): a lone transient answer — 5xx, a
+    // transport cut, a rate limit — used to take the run red and print a
+    // recovery comment over a scheduling call that needed one more attempt.
+    // The helper reconciles a run the ambiguous POST may already have created
+    // instead of replaying blind; a definitive refusal or an exhausted retry
+    // still fails the run with a concrete recovery command.
     const recoveryCommand = gateRecoveryCommand({
       context, ref: gate.baseRefName, prNumber, previousHeadSha: gate.headSha,
     });
     try {
-      await github.rest.actions.createWorkflowDispatch({
-        owner,
-        repo,
-        workflow_id: GATE_WORKFLOW,
-        ref: gate.baseRefName,
-        inputs: { pr_number: String(prNumber), previous_head_sha: gate.headSha },
+      const scheduledRun = await dispatchWorkflowWithRetry({
+        label: `could not schedule the Auto Gate follow-up for PR #${prNumber}`,
+        dispatch: () =>
+          github.rest.actions.createWorkflowDispatch({
+            owner,
+            repo,
+            workflow_id: GATE_WORKFLOW,
+            ref: gate.baseRefName,
+            inputs: {
+              pr_number: String(prNumber),
+              previous_head_sha: gate.headSha,
+            },
+          }),
+        landed: (since) => gateFollowUpRun({ github, context, since, sleep }),
+        sleep,
       });
+      if (scheduledRun.reconciled) {
+        core.notice(
+          `The follow-up dispatch for PR #${prNumber} was answered ambiguously, but its run is ` +
+            "already listed — adopted it instead of dispatching again.",
+        );
+      }
     } catch (error) {
       const failure = new Error(
         `Auto Gate infrastructure failure for PR #${prNumber}: update was accepted but follow-up scheduling failed: ` +
@@ -5704,12 +5883,21 @@ async function resolveTargets({
 // return the PR once that head is still current — or null once the PR is no
 // longer eligible, which is a successful no-op.
 //
-// Nothing else is guaranteed to revisit that head: its runs can sit parked until
-// this lane or a human approves them. And this lane runs under
-// workflow_dispatch, whose payload names no head its caller could turn red. So
-// every failure here — a retry-exhausted read, a refused one, or recovery that
-// could not be confirmed — leaves through the ONE catch below, which puts the
-// rerun command on the PR as well as in the error.
+// Nothing else is guaranteed to revisit a head this lane OBSERVED but could
+// not confirm: its runs can sit parked until this lane or a human approves
+// them. And this lane runs under workflow_dispatch, whose payload names no
+// head its caller could turn red. So every genuine failure here — a
+// retry-exhausted read, a refused one, a successor seen but never settled —
+// leaves through the ONE catch below, which puts the rerun command on the PR
+// as well as in the error.
+//
+// The exception is a poll that never observed a successor at all (#5064): the
+// update's push has simply not landed yet, every read still showed the
+// initiating SHA, and once the push does land its own events — its check_suite,
+// its synchronize through auto-gate-head.yml, PR Validation's terminal
+// workflow_run — evaluate the real head. That exit returns null like
+// ineligibility, with a notice, rather than reddening a dispatch that merely
+// outran the push.
 async function recoverSuccessorHead({
   github, context, core, number, previousHead, headPollAttempts, headPollDelayMs, sleep,
 }) {
@@ -5754,6 +5942,20 @@ async function recoverSuccessorHead({
         await sleep(headPollDelayMs);
         pr = await getPullRequest({ github, context, number });
       }
+    }
+    // Poll exhausted. The two shapes split on whether this lane ever observed a
+    // successor — see the comment above the function.
+    if (!observedHead) {
+      // Not-yet-arrived, not failed (#5064): the initiating head was visible on
+      // every read, so nothing this lane touched was dropped. The successor's
+      // own events re-evaluate it the moment its push lands — the red run the
+      // issue documents self-healed exactly that way. Returning null publishes
+      // no target and no failure comment; the notice is the audit trail.
+      core.notice(
+        `PR #${number} still exposes initiating head ${previousHead} after ${headPollAttempts} reads; ` +
+          "no successor was observed — the successor push's own events re-evaluate it when it lands.",
+      );
+      return null;
     }
     throw new Error(
       `PR #${number} still exposes initiating head ${previousHead} or has not settled; no stale target was published`,
