@@ -504,6 +504,86 @@ func TestRootAgentUserKilledTombstoneIsNotCompared(t *testing.T) {
 	require.Contains(t, check.Detail, "no enabled live root sessions to compare")
 }
 
+// TestRootAgentAdoptedRuntimeProgramIsInfoNotIncomplete is the #5066
+// regression: a live root this daemon ADOPTED carries no recorded runtime
+// command by design — adoption and name-only reattach never write
+// runtime_program — so the check reports it as an INFO observation, not a WARN
+// that prescribes killing a working agent, and the run must not end
+// INCOMPLETE. Doctor's contract is "unknown, not comparable": visible in the
+// output, absent from the unresolved count and the incomplete list.
+func TestRootAgentAdoptedRuntimeProgramIsInfoNotIncomplete(t *testing.T) {
+	opts := testOptions(t, false)
+	repoPath := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	body := "schema_version = 1\n[root_agents]\n\"" + repoPath + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	opts.sessionInventory = func() ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			Title: session.RootSessionTitle, Program: "codex",
+			// RuntimeProgram deliberately empty: the running root was adopted,
+			// or launched before runtime commands were recorded.
+			Liveness: session.LiveReady,
+			Path:     repoPath, Worktree: session.GitWorktreeData{RepoPath: repoPath, WorktreePath: repoPath},
+		}}, nil
+	}
+
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	rows := findCheckRows(report, "root agent program")
+	require.Len(t, rows, 2, "expected the INFO observation plus the sweep verdict")
+	require.Equal(t, StatusInfo, rows[0].Status,
+		"an adopted root without a recorded command is a note, not a warning")
+	require.False(t, rows[0].Problem)
+	require.Empty(t, rows[0].Remediation,
+		"nothing the user runs fills the field — only the root's next real launch does")
+	require.Contains(t, rows[0].Detail, "adopted")
+	require.Contains(t, rows[0].Detail, "next launch")
+	require.Equal(t, StatusPass, rows[1].Status,
+		"the completed sweep still reports its verdict")
+	require.NotContains(t, report.Incomplete, "root agent program",
+		"an adopted root whose command was never recorded is unknown, not uninspectable")
+	require.Zero(t, report.UnresolvedCount())
+}
+
+// TestRootAgentProgramMixesRecordedAndAdoptedRoots pins the combined report: a
+// comparable root still gets its match verdict while the adopted one is listed
+// as an INFO observation, and the PASS detail names the unrecorded count.
+func TestRootAgentProgramMixesRecordedAndAdoptedRoots(t *testing.T) {
+	opts := testOptions(t, false)
+	recordedRepo := filepath.Join(t.TempDir(), "recorded")
+	adoptedRepo := filepath.Join(t.TempDir(), "adopted")
+	for _, repoPath := range []string{recordedRepo, adoptedRepo} {
+		require.NoError(t, exec.Command("git", "init", repoPath).Run())
+	}
+	body := "schema_version = 1\n[root_agents]\n\"" + recordedRepo + "\" = { program = \"codex\" }\n\"" +
+		adoptedRepo + "\" = { program = \"codex\" }\n"
+	require.NoError(t, os.WriteFile(filepath.Join(opts.ConfigDir, config.TomlConfigFileName), []byte(body), 0o600))
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	opts.sessionInventory = func() ([]session.InstanceData, error) {
+		return []session.InstanceData{
+			{Title: session.RootSessionTitle, Program: "codex", RuntimeProgram: "codex",
+				Liveness: session.LiveReady,
+				Path:     recordedRepo, Worktree: session.GitWorktreeData{RepoPath: recordedRepo, WorktreePath: recordedRepo}},
+			{Title: session.RootSessionTitle, Program: "codex",
+				Liveness: session.LiveReady,
+				Path:     adoptedRepo, Worktree: session.GitWorktreeData{RepoPath: adoptedRepo, WorktreePath: adoptedRepo}},
+		}, nil
+	}
+
+	report := runRootAgentProgramCheck(t, opts, cfg)
+	rows := findCheckRows(report, "root agent program")
+	require.Len(t, rows, 2)
+	require.Equal(t, StatusInfo, rows[0].Status)
+	require.Contains(t, rows[0].Detail, adoptedRepo)
+	require.Equal(t, StatusPass, rows[1].Status)
+	require.Contains(t, rows[1].Detail, "1 live root session(s) match the configured command")
+	require.Contains(t, rows[1].Detail, "1 adopted live root(s) have no recorded runtime command")
+	require.NotContains(t, report.Incomplete, "root agent program")
+	require.Zero(t, report.UnresolvedCount())
+}
+
 func TestRootAgentDisabledProfileWithLiveSessionWarns(t *testing.T) {
 	opts := testOptions(t, false)
 	repoPath := filepath.Join(t.TempDir(), "repo")

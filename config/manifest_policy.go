@@ -77,7 +77,10 @@ const (
 	sourcePersonalOnly SourceSet = SourceSet(1) << SourceProjectPersonal
 	// sourceGlobalPersonal admits a key globally and as a per-project personal
 	// override, with no checked-in in-repo layer (a pure preference key such as
-	// branch_prefix that a repository has no business dictating).
+	// on_archive_command that a repository has no business dictating). Note the
+	// admission is about where the key may be WRITTEN: branch_prefix keeps this
+	// source set so a stored personal value stays valid, while its precedence
+	// is precedenceGlobal — the personal layer cannot win until #4539.
 	sourceGlobalPersonal SourceSet = sourceGlobalOnly | sourcePersonalOnly
 	// sourceGlobalRepoPersonal admits a key globally, in-repo (shared), and as a
 	// per-project personal override — the full preference chain for keys such as

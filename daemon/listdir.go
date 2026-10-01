@@ -144,10 +144,9 @@ func listDirectory(requested string) (ListDirectoryResponse, error) {
 		raw = home
 	}
 
-	expanded := config.ExpandTilde(raw)
-	if !filepath.IsAbs(expanded) {
-		return ListDirectoryResponse{}, fmt.Errorf(
-			"directory path %q must be absolute (or start with ~/): the daemon resolves it on its own filesystem and has no access to your working directory", requested)
+	expanded, err := config.ResolveDaemonHostPath(raw)
+	if err != nil {
+		return ListDirectoryResponse{}, fmt.Errorf("directory %w", err)
 	}
 
 	// pathutil.ResolveForCompare, not hand-rolled cleaning: it resolves the

@@ -238,6 +238,9 @@ func (m *home) View() string {
 		viewParts = append(viewParts, banner)
 	}
 	m.menu.SetStatusText(m.dragStatusText())
+	hint, hideHint := m.noticeDetailsHint()
+	m.errBox.SetDetailsHint(hint)
+	m.errBox.HideDetailsHint(hideHint)
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := layout.JoinVertical(viewParts...)
 
@@ -266,7 +269,8 @@ func (m *home) View() string {
 		}
 		return placeOverlay(m.projectPickerOverlay.Render(), mainView)
 	} else if m.state == stateSelectProgram || m.state == stateSelectHandoffAgent ||
-		m.state == stateSelectBackend || m.state == stateSelectAccount {
+		m.state == stateSelectBackend || m.state == stateSelectAccount ||
+		m.state == stateSelectHandoffResolve {
 		if m.selectionOverlay == nil {
 			log.ErrorLog.Printf("selection overlay is nil")
 		}
@@ -281,10 +285,10 @@ func (m *home) View() string {
 		fg := m.selectionOverlay.Render()
 		m.selectionOverlay.RegisterZones(m.zones, overlayOrigin(fg, mainView))
 		return placeOverlay(fg, mainView)
-	} else if m.state == statePromptInput || m.state == stateJumpTab {
-		// Both states drive the same promptOverlay — the naming form's initial-prompt
-		// field and the jump-to-tab prompt (#3021). They differ in who owns the answer,
-		// not in how a single line of text is drawn.
+	} else if m.state == statePromptInput || m.state == stateJumpTab || m.state == stateRenameTab {
+		// These states drive the same promptOverlay — the naming form's initial-prompt
+		// field, the jump-to-tab prompt (#3021), and the rename-tab prompt. They differ
+		// in who owns the answer, not in how a single line of text is drawn.
 		if m.promptOverlay == nil {
 			log.ErrorLog.Printf("prompt overlay is nil")
 			return mainView

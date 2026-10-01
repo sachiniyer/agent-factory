@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -520,4 +521,35 @@ func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
 	supervisor.Stop()
 	assert.Equal(t, task.ArmingUnknown, supervisor.armingFor(watch),
 		"a daemon on its way out has observed nothing about steady state")
+}
+
+// TestWithLiveArming_StampsNextRunFar (#4843): the JSON flag is computed from
+// the armed entry's own next fire, on the same path that reports it.
+func TestWithLiveArming_StampsNextRunFar(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	// A dated cron whose next fire is always between ~0 and ~12 months out;
+	// pick the date two months back so the next fire is ~10 months away.
+	past := time.Now().AddDate(0, -2, 0)
+	far := enabledCronTask("aaaa4843", "")
+	far.CronExpr = fmt.Sprintf("0 7 %d %d *", past.Day(), int(past.Month()))
+	require.NoError(t, task.AddTask(far))
+	near := enabledCronTask("bbbb4843", "")
+	require.NoError(t, task.AddTask(near))
+
+	srv := &controlServer{scheduler: newTaskScheduler()}
+	require.NoError(t, srv.scheduler.Reload())
+	srv.scheduler.Start()
+	t.Cleanup(srv.scheduler.Stop)
+
+	var resp ListTasksResponse
+	require.NoError(t, srv.ListTasks(ListTasksRequest{}, &resp))
+	require.Len(t, resp.Tasks, 2)
+	byID := map[string]task.Task{}
+	for _, tsk := range resp.Tasks {
+		byID[tsk.ID] = tsk
+	}
+	require.NotNil(t, byID["aaaa4843"].NextRunAt)
+	assert.True(t, byID["aaaa4843"].NextRunFar, "a dated cron ~10 months out is flagged")
+	require.NotNil(t, byID["bbbb4843"].NextRunAt)
+	assert.False(t, byID["bbbb4843"].NextRunFar, "a daily task is not")
 }

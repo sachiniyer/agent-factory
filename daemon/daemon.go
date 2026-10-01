@@ -4,18 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
@@ -442,19 +438,51 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // to its projection without re-reading disk. Recomputed on every refresh, so a
 // row that starts loading again stops being a ghost — the same self-healing
 // projection discipline as the rest of the count.
-func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, error) {
+//
+// The fifth return, reread, names every repo whose instances.json this call
+// read AND parsed INTO a fully loadable row set. It is the only evidence that
+// clears a repo from the skip set (retainStillSkipped): a repo the loader
+// could not read, that is absent from disk, or that parses-but-yields-any-
+// unloadable-row (retracted below) is not in it, so neither an omission, a
+// zero-rows file, nor a partial loss is a repair (#4783, #4812, #4876).
+func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
 	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, err
+		return existing, nil, nil, nil, err
 	}
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, unreadable, missing, err := loadAllRepoInstancesForRefresh()
 	if err != nil {
-		return existing, nil, err
+		return existing, nil, nil, nil, err
 	}
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
+	// skipped collects repos whose instances.json failed to read or parse, so the
+	// Snapshot RPC can carry the drop to clients instead of silently serving a
+	// partial list (#603 closed over the wire). Collected on every refresh, but
+	// only the startup call (existing==nil) genuinely drops rows — the polling
+	// path re-hydrates a corrupted repo's prior in-memory rows, so its sessions
+	// stay in the snapshot and the caller (restoreInstances vs refreshLocked)
+	// decides whether the set is authoritative for the snapshot: seed at
+	// startup, then trim repaired repos on poll without ever adding a
+	// mid-life-corrupted one (see retainStillSkipped).
+	var skipped []SkippedRepo
+	// An unreadable repo is skipped exactly like a corrupt one, with its own
+	// reason so the refusal can say "could not be read" rather than "corrupted"
+	// (#4783). Its rows, like a corrupt repo's, are re-hydrated from existing on
+	// the poll by the absent-repo pass below, since the loader left it out of
+	// allInstances.
+	unreadableRepos := make(map[string]bool, len(unreadable))
+	for _, skip := range unreadable {
+		log.WarningLog.Printf("daemon skipping repo %s: unreadable instances.json: %s", skip.RepoID, skip)
+		skipped = append(skipped, SkippedRepo{RepoID: skip.RepoID, Reason: skippedRepoReasonForReadError(skip.Err)})
+		unreadableRepos[skip.RepoID] = true
+	}
+	reread := make(map[string]bool, len(allInstances))
 	for repoID, raw := range allInstances {
 		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+			// A missing file loads as "[]" too, but nothing was read, so it
+			// clears nothing (#4783).
+			reread[repoID] = !missing[repoID]
 			continue
 		}
 
@@ -477,6 +505,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			// the ghost count cannot close, and it is bounded by the same corruption
 			// that already costs the repo its whole session list.
 			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", repoID, err)
+			skipped = append(skipped, SkippedRepo{RepoID: repoID, Reason: SkippedRepoReasonCorruptedInstancesJSON})
 			if existing != nil {
 				keyPrefix := repoID + "\x00"
 				for key, inst := range existing {
@@ -487,7 +516,13 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			}
 			continue
 		}
-
+		reread[repoID] = true
+		// Retractable below: a parses-but-any-row-unloadable file is not a
+		// repair, or list/get/whoami silently serve a partial list as the
+		// complete answer the skip set exists to prevent — a partial loss is
+		// the same lie as a total one (#4812, #4876, the "read AND parsed" trim
+		// left open here).
+		materialized, failedRows := 0, 0
 		for _, item := range data {
 			key := daemonInstanceKey(repoID, item.Title)
 			if item.ID == "" && !isLegacyTransientGhost(item) {
@@ -520,6 +555,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 
 			instance, err := fromInstanceDataForRefresh(item)
 			if err != nil {
+				failedRows++
 				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
 				// A marked row that cannot materialize still owes its teardown
 				// (#4162) — the obligation is durable but nothing in memory can
@@ -556,7 +592,13 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				continue
 			}
 			next[key] = instance
+			materialized++
 		}
+		// Parsed but not fully loadable is NOT a repair: retract the "repaired"
+		// signal so the repo stays skipped, and on poll record a rows-failed
+		// skip entry whose reason rewrites the stale one (#4812, #4876). The
+		// partial-loss and self-healing rationale lives in the helper.
+		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, existing != nil, skipped)
 	}
 
 	// Preserve in-memory instances whose repo directory vanished from disk
@@ -575,7 +617,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if _, ok := allInstances[repoID]; ok {
 				continue
 			}
-			if !warnedRepos[repoID] {
+			if !warnedRepos[repoID] && !unreadableRepos[repoID] {
 				log.WarningLog.Printf("daemon preserving in-memory instances for missing repo directory: %s", repoID)
 				warnedRepos[repoID] = true
 			}
@@ -583,28 +625,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		}
 	}
 
-	return next, ghostTaskRuns, nil
-}
-
-// refreshLocked rebuilds the manager's instance map from disk under m.mu. A
-// marked on_complete row that re-materializes here re-arms its owed teardown,
-// the same as at restore (#4162).
-func (m *Manager) refreshLocked() error {
-	refreshed, ghosts, err := refreshDaemonInstances(m.instances)
-	if err != nil {
-		return err
-	}
-	owed := persistLoadRuntimeReplacements(refreshed)
-	m.attachCredentialsToAll(refreshed)
-	m.instances = refreshed
-	// Replaced wholesale, never merged: the ghost set is a projection of what is on
-	// disk RIGHT NOW (#1892). A row that starts loading again must stop being a
-	// ghost, or its slot would be held twice — once by the ghost and once by the
-	// instance it became.
-	m.ghostTaskRuns = ghosts
-	m.registerLoadRuntimeSettlementsLocked(owed)
-	m.armOwedTaskLifecyclesLocked()
-	return nil
+	return next, ghostTaskRuns, skipped, reread, nil
 }
 
 func daemonInstanceKey(repoID, title string) string {
@@ -635,337 +656,4 @@ func daemonInstances(instanceMap map[string]*session.Instance) []*session.Instan
 		instances = append(instances, instanceMap[key])
 	}
 	return instances
-}
-
-// launchDaemonProcessFn is the spawn entry point EnsureDaemon uses.
-// Package-level so tests can record or suppress real daemon spawns and prove
-// a bound-but-warming daemon is treated as running, never respawned (#829).
-var launchDaemonProcessFn = launchDaemonProcess
-
-func launchDaemonProcess() error {
-	// Find the agent-factory binary.
-	execPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	return launchDaemonProcessAt(execPath)
-}
-
-func launchDaemonProcessAt(execPath string) error {
-	pid, err := startDaemonChild(execPath)
-	if err != nil {
-		return err
-	}
-
-	log.InfoLog.Printf("started daemon child process with PID: %d", pid)
-
-	// The child writes its own PID file from RunDaemon (#504).
-	return nil
-}
-
-// startDaemonChild starts execPath --daemon (plus any extraArgs) detached from
-// the parent and returns its PID. Split from launchDaemonProcess so tests can
-// spawn a short-lived stub instead of re-executing the real binary with --daemon.
-// extraArgs carries the upgrade-candidate probation flag (#2212 R2); ordinary
-// spawns pass none.
-func startDaemonChild(execPath string, extraArgs ...string) (int, error) {
-	cmd := exec.Command(execPath, append([]string{"--daemon"}, extraArgs...)...)
-
-	// Detach the process from the parent
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	// Set process group to prevent signals from propagating
-	cmd.SysProcAttr = getSysProcAttr()
-
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("failed to start child process: %w", err)
-	}
-
-	// Setsid detaches the child's session but the kernel still parents it
-	// here, so it must be reaped or each exited daemon lingers as a zombie
-	// for the life of the TUI — one per upgrade/respawn cycle (#816). Same
-	// pattern as session/tmux/pty.go.
-	go func() {
-		_ = cmd.Wait()
-	}()
-
-	return cmd.Process.Pid, nil
-}
-
-// daemonPIDFilePath returns the path to the daemon PID file, or "" if the
-// config dir cannot be resolved.
-func daemonPIDFilePath() (string, error) {
-	dir, err := config.GetConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "daemon.pid"), nil
-}
-
-// writeDaemonPIDFile atomically writes the current process's PID to the daemon
-// PID file with mode 0600. Used by RunDaemon so callers (StopDaemon, the
-// SIGTERM fallback in RequestShutdown) can locate and signal this daemon.
-//
-// It REFUSES a symlinked path (#3672). The PID file is af's own liveness
-// bookkeeping at a path af chose, written on start and deleted on teardown, so
-// a link there is neither af's to write through nor af's to replace — the same
-// answer the bearer token and the autostart unit take.
-func writeDaemonPIDFile() error {
-	path, err := daemonPIDFilePath()
-	if err != nil {
-		return err
-	}
-	return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
-}
-
-// removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
-// already harmless (a stale file is fine — readers verify cmdline) and
-// permission errors only occur in pathological setups. Logs at warning level
-// rather than failing the daemon teardown.
-//
-// It refuses a symlinked path because the write above refuses one: af cannot
-// have written this file through a link, so unlinking one on teardown would
-// delete an arrangement af never touched (#3672).
-func removeDaemonPIDFile() {
-	path, err := daemonPIDFilePath()
-	if err != nil {
-		return
-	}
-	if err := config.RemoveFileRefusingLink(path); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
-	}
-}
-
-// stopDaemonGrace bounds how long StopDaemon waits for a SIGTERM'd daemon to
-// exit before escalating to SIGKILL. stopDaemonPoll is the polling cadence.
-// Package vars rather than constants so tests can shorten them. Production
-// defaults mirror sigtermFallbackGrace / sigtermFallbackPoll — the same
-// timings already used by signalAndWait on the upgrade fallback path.
-var (
-	stopDaemonGrace = sigtermFallbackGrace
-	stopDaemonPoll  = sigtermFallbackPoll
-)
-
-// StopDaemon attempts to stop a running daemon process if it exists. The bool
-// return reports whether a live agent-factory daemon was actually signaled: it
-// is false (with a nil error) when there was nothing to stop — no PID file, an
-// invalid/stale PID, a dead process, or a PID that doesn't look like an
-// agent-factory daemon. Callers that surface a user-facing "stopped" message
-// must gate on it (#937): a daemon predating the PID file (pre-1.0.69) leaves
-// no daemon.pid, so a true success line here would be a lie. It verifies the
-// PID actually belongs to an agent-factory daemon before signaling it, so a
-// stale or reused PID in the PID file can't take down an unrelated process.
-//
-// Shutdown is graceful by default: SIGTERM gives the daemon's signal handler a
-// chance to run SaveInstances() and clean up the PID file (see RunDaemon). We
-// only escalate to SIGKILL if the daemon does not exit within stopDaemonGrace,
-// matching the SIGTERM-first pattern in signalAndWait (#571).
-func StopDaemon() (bool, error) {
-	return stopDaemonUntil(time.Time{})
-}
-
-// stopDaemonUntil applies an optional caller deadline to the graceful-exit
-// poll. When that earlier deadline expires after SIGTERM, it returns without
-// escalating to SIGKILL; a deadline-bounded EnsureDaemon caller will stop the
-// launch path rather than start a replacement while the old process may still
-// be releasing its singleton lock.
-func stopDaemonUntil(deadline time.Time) (bool, error) {
-	if admissionDeadlineExpired(deadline) {
-		return false, daemonAdmissionDeadlineError()
-	}
-	pidDir, err := config.GetConfigDir()
-	if err != nil {
-		return false, fmt.Errorf("failed to get config directory: %w", err)
-	}
-
-	pidFile := filepath.Join(pidDir, "daemon.pid")
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to read PID file: %w", err)
-	}
-
-	var pid int
-	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
-		return false, fmt.Errorf("invalid PID file format: %w", err)
-	}
-
-	// Defensively refuse to kill our own process or obviously invalid PIDs.
-	if pid <= 1 || pid == os.Getpid() {
-		log.InfoLog.Printf("daemon PID file contained invalid PID %d; removing stale file", pid)
-		_ = os.Remove(pidFile)
-		return false, nil
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		// On unix, FindProcess never returns an error, but handle it defensively anyway.
-		log.InfoLog.Printf("daemon process (PID: %d) not found; removing stale PID file", pid)
-		_ = os.Remove(pidFile)
-		return false, nil
-	}
-
-	// Check the process exists at all. Signal 0 is a no-op that just validates permissions/existence.
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		log.InfoLog.Printf("daemon process (PID: %d) is not running (%v); removing stale PID file", pid, err)
-		_ = os.Remove(pidFile)
-		return false, nil
-	}
-
-	// Verify the process is actually an agent-factory daemon before signaling it. If we can't verify,
-	// err on the side of caution and treat the PID file as stale rather than signaling a random process.
-	if !isAgentFactoryDaemon(pid) {
-		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon; removing stale PID file", pid)
-		_ = os.Remove(pidFile)
-		return false, nil
-	}
-
-	// Send SIGTERM so the daemon's signal handler can SaveInstances() before
-	// exit (#571). A race where the daemon exits between the signal-0 probe
-	// above and this call is benign: errIsProcessGone covers both ESRCH and
-	// the os.ErrProcessDone surface.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		if errIsProcessGone(err) {
-			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-			cleanupDaemonRuntimeFiles(pidFile, deadline)
-			return true, nil
-		}
-		return false, fmt.Errorf("failed to signal daemon process: %w", err)
-	}
-
-	// Poll for graceful exit.
-	gracefulDeadline := admissionBoundedDeadline(deadline, stopDaemonGrace)
-	exited := false
-	for time.Now().Before(gracefulDeadline) {
-		if !pidLooksAlive(pid) {
-			exited = true
-			break
-		}
-		if !waitUntilAdmissionDeadline(gracefulDeadline, stopDaemonPoll) {
-			break
-		}
-	}
-
-	if exited {
-		log.InfoLog.Printf("daemon process (PID: %d) exited gracefully after SIGTERM", pid)
-	} else if admissionDeadlineExpired(deadline) {
-		return true, daemonAdmissionDeadlineError()
-	} else {
-		log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
-		if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
-			return false, fmt.Errorf("failed to stop daemon process: %w", err)
-		}
-	}
-
-	cleanupDaemonRuntimeFiles(pidFile, deadline)
-	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
-	return true, nil
-}
-
-// isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon:
-// its argv must carry the --daemon flag as a discrete argument AND its executable must be an
-// agent-factory binary ("af" or "agent-factory"). It reads the process argv with argument
-// boundaries preserved (see daemonArgs); if no readable argv is available, returns false so
-// callers treat the PID as unverified.
-//
-// Both checks are required so that a stale PID file whose PID has been reused by an unrelated
-// process carrying a "--daemon" token (e.g. "sleep --daemon af-test") is not mistaken for our
-// daemon and signaled by StopDaemon/locateDaemonPID. This mirrors the host-wide pgrep scan in
-// sigterm_fallback.go, which also requires both argsHaveDaemonFlag and argsAreDaemonBinary;
-// the two PID-validation paths must agree (#1004).
-//
-// Detection operates on real argv elements (not a space-joined string), so a binary installed
-// under a path containing spaces — e.g. "/home/John Smith/.local/bin/af" — is classified
-// correctly instead of having its path shredded across argv boundaries (#1214). We still require
-// an exact "--daemon" token (or the "--daemon=..." form), so flags like --daemonize never match.
-func isAgentFactoryDaemon(pid int) bool {
-	args := daemonArgs(pid)
-	if len(args) == 0 {
-		return false
-	}
-	return argsHaveDaemonFlag(args) && argsAreDaemonBinary(args)
-}
-
-// argsHaveDaemonFlag reports whether argv contains "--daemon" as a discrete argument (either bare
-// or in the "--daemon=value" form). It deliberately rejects substring matches like "--daemonize"
-// or "--daemon-mode". Because it scans real argv elements, spaces inside another argument (such as
-// a spaced binary path in argv[0]) can never fabricate or hide a "--daemon" token (#1214).
-func argsHaveDaemonFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--daemon" {
-			return true
-		}
-		value, ok := strings.CutPrefix(a, "--daemon=")
-		if !ok {
-			continue
-		}
-		// `--daemon=false` is a client saying, explicitly, that it is NOT a
-		// daemon. Matching the prefix and calling it one made every such client
-		// a daemon to every caller here: doctor counted it as a duplicate, the
-		// host scan offered it for a kill, and the #1004 pid guard would have
-		// accepted it as ours. The flag's VALUE is the answer; its name is only
-		// where the answer lives.
-		//
-		// Only an explicitly FALSE value flips the answer. An unparseable one
-		// ("--daemon=foo") keeps the long-standing "the form is present, so treat
-		// it as a daemon flag" reading that TestArgsHaveDaemonFlag has pinned
-		// since #342: that case is about recognizing the `--daemon=` FORM (as
-		// against `--daemonize`), and its value is a placeholder, not a boolean.
-		// It is also unobservable in practice — cobra rejects a non-boolean here,
-		// so no such process is ever live to classify — and narrowing a seam that
-		// gates signals on a hypothetical is not worth the blast radius.
-		enabled, err := strconv.ParseBool(value)
-		if err != nil {
-			return true
-		}
-		return enabled
-	}
-	return false
-}
-
-// argsAreDaemonBinary reports whether argv[0] is an agent-factory daemon binary: installed as "af"
-// or built from source (`go build .`) as "agent-factory". The host-wide pgrep scan in
-// sigterm_fallback.go matches any process carrying a "--daemon" token, so this restores the
-// binary-name specificity that the old "af --daemon" substring pattern provided — while still
-// catching source-built `agent-factory --daemon` daemons that the old pattern missed (#937).
-//
-// argv[0] is a single argv element, so filepath.Base sees the whole executable path even when it
-// contains spaces (e.g. "/home/John Smith/.local/bin/af" → base "af"). The previous
-// implementation space-joined the argv and re-split on whitespace, which turned that same path
-// into base "John" and made every spaced-install daemon undetectable (#1214).
-func argsAreDaemonBinary(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	switch filepath.Base(args[0]) {
-	case "af", "agent-factory":
-		return true
-	default:
-		return false
-	}
-}
-
-// daemonArgs returns the argv of pid with argument BOUNDARIES preserved, or nil when no argv is
-// readable (a foreign user's process, a zombie, a kernel thread).
-//
-// The boundaries are the whole contract. This classifies a process by its binary name
-// (argsAreDaemonBinary), so an install path containing a space must arrive as ONE element:
-// "/Users/John Smith/.local/bin/af" has base "af", while the same path re-split on whitespace has
-// base "John" and no longer looks like a daemon at all (#1214).
-//
-// It used to prefer /proc and fall back to `ps -p <pid> -o args=`, whose output is already
-// space-joined — so the fallback could not recover the boundaries it needed and the code said so
-// in a comment: spaced-install detection was "only fully reliable where /proc exists". That
-// caveat was a live bug wearing a disclaimer, and it was worst exactly where it was untested:
-// spaces in paths are ordinary on macOS (/Users/First Last, /Volumes/Macintosh HD, ~/Library/
-// Application Support) and rare on Linux. proctree.Argv now reads real argv on both platforms
-// (/proc/<pid>/cmdline on Linux, KERN_PROCARGS2 on darwin), so there is no lossy path left to
-// fall back to and the caveat is retired (#1942).
-func daemonArgs(pid int) []string {
-	return proctree.Argv(pid)
 }

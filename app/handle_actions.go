@@ -21,7 +21,9 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyHelp:
 		return m.showHelpScreen(helpTypeGeneral{}, nil)
 	case keys.KeyErrorDetails:
-		return m.showErrorDetails()
+		// Reaching here means openNoticeDetails declined the key: the bar
+		// advertises no details key in this state, so none may open them.
+		return m, nil
 
 	// Tree navigation. Each moves the sidebar cursor and re-homes the focus
 	// ring on the tree (focusTreeForNav) so the ring-reading attach verb `o`
@@ -96,13 +98,13 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	case keys.KeyShiftUp:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
-			pane.ScrollUp()
+			pane.ScrollHalfPageUp()
 		}
 		return m, m.selectionChanged()
 	case keys.KeyShiftDown:
 		m.syncPaneScrollOwners()
 		if pane, _ := m.focusedContentPane(); pane != nil {
-			pane.ScrollDown()
+			pane.ScrollHalfPageDown()
 		}
 		return m, m.selectionChanged()
 
@@ -121,8 +123,16 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 		return m.showNewTabPicker()
 	case keys.KeyCloseTab:
 		return m.handleCloseTab()
+	case keys.KeyRenameTab:
+		return m.showRenameTabPrompt()
 	case keys.KeyJumpTabPrompt: // unbounded jump; see handle_jump_tab.go (#3021)
 		return m.showJumpTabPrompt()
+	// </> permute the roster through the daemon's ReorderTab (#1813) — the same
+	// path the web's drag reorder and `af sessions tab-reorder` take.
+	case keys.KeyMoveTabLeft:
+		return m.handleMoveTab(-1)
+	case keys.KeyMoveTabRight:
+		return m.handleMoveTab(1)
 
 	// Instance actions
 	case keys.KeyKill:
@@ -190,75 +200,31 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 		return nil
 	}
 
-	// Assess what killing this session would destroy. Two independent losses,
-	// each with its own copy: a dirty worktree (uncommitted changes, #815) and
-	// local-only commits (committed-but-unmerged-and-unpushed work, #2022). The
-	// second is unrecoverable — kill force-deletes the branch with `git branch
-	// -D` — so it escalates the confirmation to the critical-content guarantee
-	// (#1973) AND a distinct confirm key, exactly as the reserved-root kill
-	// (#1238) does. A session can be both dirty and carry unmerged commits, so
-	// the warnings accumulate rather than replace one another. Both checks skip
-	// for backends without a local worktree (e.g. remote hook sessions).
+	// Kill force-removes the worktree and may force-delete the branch, so the
+	// confirmation names what that destroys (killLossAssessment). The git reads
+	// behind it take tens of ms and up to ~30s when git is wedged, so they never
+	// run here, on the event loop (#4848): the dialog opens at once with a static
+	// pending note and its confirm withheld, and killLossCheckedMsg completes it.
+	// Both checks skip for backends without a local worktree (e.g. remote hook
+	// sessions), which get their final dialog straight away.
+	reserved := session.IsReservedTitle(selectedTitle)
 	var cleanupImpact *session.WorktreeCleanupImpact
-	var warnings []string
-	severeLine := ""
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
-		// Both loss checks run under the SAME worktree-path gate so they cover the
-		// same session states. GetWorktreeCleanupImpact is intentionally not
+		// GetWorktreeCleanupImpact is an in-memory snapshot, intentionally not
 		// gated on started (unlike GetGitWorktree), so a session that HAS a
-		// worktree but was never started — e.g. a restore-failed session — still gets
-		// the unmerged-work warning the old GetGitWorktree gate skipped for it
-		// (#2029). The cleanup-impact snapshot is the authority for ownership:
-		// external worktrees survive kill, and a reused user branch survives even
-		// when its linked worktree does not.
+		// worktree but was never started — e.g. a restore-failed session — still
+		// gets the unmerged-work warning (#2029). It is the authority for
+		// ownership: external worktrees survive kill, and a reused user branch
+		// survives even when its linked worktree does not.
 		impact, hasWorktree := selected.GetWorktreeCleanupImpact()
 		if hasWorktree {
 			cleanupImpact = &impact
 		}
 		if hasWorktree && impact.RemoveWorktree && impact.Path != "" {
-			wt := impact.Path
-			if w := killConfirmationWarning(wt); w != "" {
-				warnings = append(warnings, w)
-			}
-			if line, severe := unmergedCommitWarning(wt, impact.Branch, impact.BaseCommitSHA, impact.DeleteBranch); line != "" {
-				if severe {
-					severeLine = line
-				} else {
-					// Fail-closed (unverifiable): warn, but do not force the extra
-					// keystroke — we have not established that work is being lost.
-					warnings = append(warnings, line)
-				}
-			}
+			return m, m.openPendingKillConfirm(selectedTitle, reserved, cleanupImpact, killAction)
 		}
 	}
-
-	reserved := session.IsReservedTitle(selectedTitle)
-
-	if severeLine != "" {
-		// The severe consequence and any dirty-worktree warning are the critical
-		// content the user is consenting to; they must render in full or the
-		// overlay refuses the confirm (#1973). Only the recovery hint — genuine
-		// elaboration — goes in the clippable detail.
-		critical := killConfirmMessage(selectedTitle, joinWarnings(append([]string{severeLine}, warnings...)), reserved, cleanupImpact)
-		archiveKey := keys.GlobalKeyBindings[keys.KeyArchive].Help().Key
-		detail := fmt.Sprintf("Archive (%s) preserves the worktree and its refs — kill removes the worktree for good.", archiveKey)
-		cmd := m.confirmActionWithDetail(critical, detail, killAction)
-		if m.confirmationOverlay != nil {
-			m.confirmationOverlay.SetConfirmKey(unmergedKillConfirmKey)
-		}
-		return m, cmd
-	}
-
-	message := killConfirmMessage(selectedTitle, joinWarnings(warnings), reserved, cleanupImpact)
-	cmd := m.confirmAction(message, killAction)
-	if reserved && m.confirmationOverlay != nil {
-		// Break the muscle-memory D+y reflex on the daemon-managed singleton
-		// (#1238): a distinct confirm key means a reflexive 'y' — the ordinary
-		// kill confirmation — is ignored, so the user has to read the warning
-		// and press the named key before root is torn down.
-		m.confirmationOverlay.SetConfirmKey(rootKillConfirmKey)
-	}
-	return m, cmd
+	return m, m.openKillConfirm(selectedTitle, reserved, cleanupImpact, killLossAssessment{}, killAction)
 }
 
 // killInstanceCmd returns a tea.Cmd that performs the actual session teardown
@@ -305,6 +271,15 @@ func (m *home) handleInstanceKilled(msg instanceKilledMsg) (tea.Model, tea.Cmd) 
 		// plain message there.
 		if errors.Is(msg.err, errDaemonUnresponsive) && !isRemoteTarget() {
 			return m, m.offerDaemonRestart(msg.target.title)
+		}
+		// The daemon may have torn the session down with only the reply lost
+		// (#4824). The fence still reverts above — holding it would strand the
+		// row if the kill never ran — but the row is not "retained" as far as
+		// anyone knows: the next snapshot removes it if the kill landed. Say so,
+		// rather than invite a second kill of a session that may be gone.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("killing session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		return m, m.showRecovery("Cannot kill session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to kill session '%s': %w", msg.target.title, msg.err))
 	}
@@ -368,7 +343,23 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		if inst == nil {
 			return nil
 		}
-		_ = inst.Transition(session.BeginArchive())
+		// BeginArchive is non-total (s.op == OpNone && s.liveness != LiveArchived),
+		// so a background snapshot settling the row to LiveArchived while this
+		// overlay is open refuses here. The row is already where the user asked it
+		// to go — the row's own press-time gate (lifecycleAction != Archive ⇒
+		// no-op) reaches the same answer for an Archived row — so a refused
+		// transition on LiveArchived is a silent no-op: suppress the redundant
+		// archive RPC the daemon would reject with ErrAlreadyArchived (the
+		// contradictory "Cannot archive session … already archived" recovery
+		// modal). The busy-op refusal (OpRestoring/OpKilling/OpRespawning from
+		// another client) still falls through and lets the daemon authoritatively
+		// refuse with its "busy; try again" modal — that feedback is accurate, not
+		// contradictory, so its UX is preserved unchanged.
+		if err := inst.Transition(session.BeginArchive()); err != nil {
+			if inst.GetLiveness() == session.LiveArchived {
+				return nil
+			}
+		}
 		return startArchiveMsg{target: target}
 	})
 }
@@ -453,10 +444,17 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 	inst := m.resolveSessionActionTarget(msg.target)
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
-		// Archive failed: clear the optimistic op so the row reverts to its
-		// underlying daemon liveness rather than stranding as archiving.
+		// Archive failed or may have: clear the optimistic op so the row reverts
+		// to its underlying daemon liveness rather than stranding as archiving.
+		// The next snapshot then shows it Archived if the daemon did archive it.
 		if inst != nil && inst.GetInFlightOp() == session.OpArchiving {
 			_ = inst.Transition(session.ClearOp())
+		}
+		// An archive whose reply was lost is not "retained" (#4824): the
+		// snapshot decides, and the user checks before archiving again.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("archiving session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		return m, m.showRecovery("Cannot archive session", "The session is retained. "+msg.err.Error(), "Press any key to return to the session.", fmt.Errorf("failed to archive session '%s': %w", msg.target.title, msg.err))
 	}
@@ -497,11 +495,33 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	if selected.IsTearingDown() {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
-	if !selected.LimitReached() && !selected.CanRetryPendingManualAccountSwapDelivery() &&
-		!selected.CanRetryPendingHandoffMissionDelivery() {
+	canRetry := selected.CanRetryPendingManualAccountSwapDelivery() ||
+		selected.CanRetryPendingHandoffMissionDelivery()
+	canConfirm := selected.CanConfirmPendingHandoffDelivery() ||
+		selected.CanConfirmPendingManualAccountSwapDelivery()
+	if !selected.LimitReached() && !canRetry && !canConfirm {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}
 	target := captureSessionActionTarget(selected, m.repoID)
+	// A confirmable pending delivery gives `c` two real verbs — resend the
+	// mission, or attest it already landed and retire it (#4429). The picker
+	// makes that the operator's explicit choice; without it a confirmable row
+	// would have `c` silently mean resend and the no-resend exit would exist
+	// on the CLI and web but not here.
+	if canConfirm {
+		// The picker's first row is whichever resume `c` would run. On a row that
+		// is only usage-limited that is the plain limit resume, which un-stalls
+		// the agent and does not resend the pending mission, so it must not be
+		// labelled as a resend.
+		resend := handoffResolveNoResend
+		switch {
+		case canRetry:
+			resend = handoffResolveResendMission
+		case selected.LimitReached():
+			resend = handoffResolveResumeLimit
+		}
+		return m.openHandoffResolvePicker(selected, target, resend)
+	}
 	return m, m.resumeFromLimitCmd(target)
 }
 
@@ -530,6 +550,14 @@ func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
+		// The resume re-delivers the pending prompt, so one that may have landed
+		// is not reported as a failure to retry (#4824): a second `c` could
+		// deliver the prompt twice. The limit badge stays until the snapshot
+		// clears it.
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("resuming session '%s'", msg.target.title), "the session's pane", msg.err))
+		}
 		return m, m.handleError(fmt.Errorf("failed to resume session '%s': %w", msg.target.title, msg.err))
 	}
 	if inst := m.resolveSessionActionTarget(msg.target); inst != nil {
@@ -561,8 +589,15 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 	inst := m.resolveSessionActionTarget(msg.target)
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
 	if msg.err != nil && !committedWarning {
+		// Clearing the overlay is right for an unknown outcome too: it leaves
+		// liveness alone, so a restore that did land still reaches the
+		// reconcile's Archived→live rebuild on the next snapshot (#1203).
 		if inst != nil && inst.GetInFlightOp() == session.OpRestoring {
 			_ = inst.Transition(session.ClearOp())
+		}
+		if mutationOutcomeUnknown(msg.err) {
+			return m, m.handleError(mutationOutcomeError(
+				fmt.Sprintf("restoring session '%s'", msg.target.title), "the sidebar", msg.err))
 		}
 		return m, m.handleError(fmt.Errorf("failed to restore session '%s': %w", msg.target.title, msg.err))
 	}

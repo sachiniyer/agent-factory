@@ -87,6 +87,34 @@ func TestCopyTree_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 	})
 }
 
+// copyFile is the path-based test entrypoint for the regular-file copier. It
+// opens the parent directories itself and routes into copyRegularFileAtWithIdentity
+// so the three TestCopyFile_* regressions below exercise the live primitive
+// directly. The production tree walker never calls this: it opens each parent
+// once and walks descriptor pairs via copyDirectoryLevel, which is why this
+// lives here in the test file rather than next to the primitive it tests.
+func copyFile(src, dst string) error {
+	sourceParent, _, err := openDirectoryPath(filepath.Dir(src), "source parent")
+	if err != nil {
+		return err
+	}
+	defer sourceParent.Close()
+	destinationParent, _, err := openDirectoryPathFollowingLinks(filepath.Dir(dst), "destination parent")
+	if err != nil {
+		return err
+	}
+	defer destinationParent.Close()
+	return copyRegularFileAt(sourceParent, destinationParent, filepath.Base(src), src, dst)
+}
+
+// copyRegularFileAt is a test-only thin wrapper over copyRegularFileAtWithIdentity
+// used by copyFile. The production walker calls copyRegularFileAtWithIdentity
+// directly via copyDirectoryLevel; this helper has no production callers.
+func copyRegularFileAt(source, destination *os.File, name, sourcePath, destinationPath string) error {
+	_, err := copyRegularFileAtWithIdentity(source, destination, name, sourcePath, destinationPath, nil, &xattrDestination{}, nil)
+	return err
+}
+
 // TestCopyFile_RejectsNamedPipeRaceWithoutBlocking closes the Lstat/open race in
 // #2689's first fix. A worktree process can replace a path after copyTree sees a
 // regular file but before copyFile opens it; copyFile must validate the object it

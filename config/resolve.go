@@ -38,7 +38,8 @@ type ResolvedConfig struct {
 	// file; the global-only fields (e.g. AutoUpdate, DaemonPollInterval,
 	// BranchPrefix, DetachKeys — the manifest's full sourceGlobalOnly set)
 	// always come from the global config because LoadInRepoConfig rejects them
-	// per-repo.
+	// per-repo. BranchPrefix additionally ignores the personal-project layer
+	// until #4539: a stored per-project value is kept but never wins.
 	Config
 
 	// PostWorktreeCommands are the effective post-worktree hooks: the
@@ -512,6 +513,11 @@ func materializeResolution(global *Config, projectRoot string, entries []Manifes
 		value.resolved.Value = clonedInterface(value.value)
 		res.Resolution = append(res.Resolution, value.resolved)
 	}
+	// A stored personal branch_prefix resolves as precedence-disallowed; relabel
+	// it as the accepted-but-unapplied state it actually is (#4539) so explain
+	// output and the get/list marker describe it honestly. No-op on the
+	// global-only resolve, which carries no personal document.
+	annotateProjectBranchPrefix(res)
 	refreshResolutionValues(res)
 	return res, nil
 }

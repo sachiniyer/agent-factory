@@ -59,9 +59,14 @@ paragraph because it's why `af` doesn't corrupt itself:
 
 ## Lifecycle
 
-The daemon starts **on demand**: whenever you run `af` and there is work to host
-(an enabled task or a root agent), `af` makes sure a daemon is running.
-That means for interactive use you usually don't have to think about it at all.
+The daemon starts **on demand** on the default local target: a bare `af`
+launch starts it — the launch kicks a background ensure when an enabled task
+exists so cron schedules are evaluated promptly, and the TUI ensures it on
+its first control call. `af` commands that need a live daemon ensure one when
+they execute, while read-only listings like `af sessions list` deliberately
+do not spawn one — they fall back to disk. With `--daemon-url`/`AF_DAEMON_URL`,
+`af` commands instead dial the remote daemon, which must already be running.
+For interactive use you usually don't have to think about it at all.
 
 To keep tasks and sessions running across logouts and reboots, install the
 daemon's autostart unit once:
@@ -86,5 +91,9 @@ unavailable manager or older daemon is reported as unknown rather than guessed.
 The daemon listens on two local Unix sockets under `$AGENT_FACTORY_HOME`
 (default `~/.agent-factory`): an internal control socket the TUI and CLI use, and
 the HTTP/JSON socket (`daemon-http.sock`) for the public API. Both are
-owner-only (`0600`) and local — never a TCP port, never the network. See the
+owner-only (`0600`). It also binds TCP listeners: the web listener on
+`network.listen_addr` (default `127.0.0.1:8443`) serves the bundled web client
+and the same HTTP API — set the key to `""` to turn it off — and, when
+`network.preview_listen_addr` is set (empty by default), a per-tab preview
+listener that hosts web-tab previews only. See the
 [HTTP API guide](http-api.md) for the transport and auth details.

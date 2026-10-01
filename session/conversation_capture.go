@@ -109,6 +109,14 @@ func BeginConversationCaptureAtCodexHome(home string) ConversationCaptureSnapsho
 	return beginConversationCaptureAtCodexHomeAndWorkingDir(home, "")
 }
 
+// BeginConversationCaptureAtCodexHomeAndWorkingDir snapshots an exact Codex
+// store and binds later discovery to one launch directory. Account-scoped
+// runtimes share a provider store, so the directory correlation keeps another
+// session's concurrently created rollout from making this capture ambiguous.
+func BeginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) ConversationCaptureSnapshot {
+	return beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir)
+}
+
 func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) ConversationCaptureSnapshot {
 	if workingDir != "" {
 		workingDir = pathutil.ResolveForCompare(workingDir)

@@ -231,20 +231,23 @@ func TestRefreshTasksLiveProjectsOutOfBandChange(t *testing.T) {
 	require.Len(t, h.store.GetTasks(), 1, "a failed refresh must not wipe the projected tasks")
 }
 
-// TestRefreshTasksSkipsPaneWhileCreating pins that a background refresh updates
-// the rail but never clobbers the overlay pane while the user is mid-create, so
-// an in-flight task form (or unsaved deletions) survive a concurrent poll.
-func TestRefreshTasksSkipsPaneWhileCreating(t *testing.T) {
+// TestRefreshTasksKeepsCreateFormWhileListUpdates pins that a background
+// refresh never clobbers an in-flight create form, and that it no longer has
+// to leave the list under the form stale to guarantee that (#4487).
+func TestRefreshTasksKeepsCreateFormWhileListUpdates(t *testing.T) {
 	h := newTestHome(t)
 	sp := h.automations.TaskPane()
 	sp.EnterCreateMode(t.TempDir())
 	require.True(t, sp.IsCreating(), "precondition: pane is mid-create")
+	require.True(t, sp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("typed name")}))
 
 	fresh := []task.Task{{ID: "t1", Name: "hello", CronExpr: "0 0 * * *", Prompt: "echo hi", Enabled: true}}
 	h.refreshTasks(fresh, nil)
 
 	require.Len(t, h.store.GetTasks(), 1, "the rail must still live-project while the pane edits")
-	require.Empty(t, sp.GetTasks(), "the tasks overlay must not be clobbered mid-create")
+	require.Len(t, sp.GetTasks(), 1, "the list under the form must live-project too")
+	require.True(t, sp.IsCreating(), "a refresh must not close the create form")
+	require.Equal(t, "typed name", sp.ConsumePendingCreate().Name, "a refresh must not touch the form's text")
 }
 
 var errRefreshFailed = errTest("refresh failed")

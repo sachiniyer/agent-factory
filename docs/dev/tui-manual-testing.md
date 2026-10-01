@@ -432,7 +432,7 @@ project first, with af's own verbs rather than by hand — the point is that the
 documented gesture produces it:
 
 ```bash
-af projects register <repo>                          # once
+af projects add <repo>                               # once
 af config set default_accounts.claude <name> --project <repo>
 af_boot; af_ensure_nav; af_focus_tree
 af_send n; af_wait_for 'submit name'

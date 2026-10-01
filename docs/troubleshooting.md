@@ -44,6 +44,12 @@ issues remain; exit status 1 with `unresolved == 0` means checks did not finish.
 `summary.incomplete` names those checks and can be non-empty in either exit-1
 case. It is omitted when empty. Advisory warnings alone still allow exit 0.
 
+Rows can also carry `INFO`: a deliberate unknown — something visible but not
+comparable, like a `root` session the daemon adopted rather than launched and
+whose resolved runtime command therefore was never recorded. An `INFO` row is
+neither a problem nor an unfinished check; it appears in the report and the
+`summary.info` count, and never contributes to the exit code.
+
 Two flags are worth knowing:
 
 - **`--verbose`** shows per-process findings instead of collapsed summaries.
@@ -78,8 +84,12 @@ CLI exposes — and says `not reported` where a provider exposes no quota API,
 which is `af` declining to guess rather than a ceiling of zero.
 
 **An account handoff says mission delivery could not be confirmed.** Inspect the
-replacement pane because the mission may already have landed. If it did not,
-choose **Retry** in the TUI, **Retry handoff** in the web pane header, or run
+replacement pane because the mission may already have landed. If it did, retire
+the mission without resending it — **Mark delivered** in the TUI's `c` picker,
+**Mark delivered** in the web pane header, or
+`af sessions retry-limit <title> --delivered`; resending would double-deliver a
+mission that already landed. If it did not, resend it — **Try send** in the TUI
+`c` picker, **Retry handoff** in the web pane header, or run
 `af sessions retry-limit <title>`. af never retries this ambiguous submission on
 its own, and later prompts do not change that decision.
 

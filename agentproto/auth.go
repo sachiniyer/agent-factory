@@ -80,53 +80,168 @@ func redactAccessTokenComponents(u *url.URL) {
 	} else if redacted, found := redactPercentEncodedAccessTokenText(u.Opaque, false); found {
 		// Source mapping keeps every non-sensitive escape in its original form.
 		u.Opaque = redacted
-	} else if rawRedacted, found := redactRawAccessTokenValue(u.Opaque, "/;?#"); found {
-		// Opaque carries no Raw* twin: url.URL.String prints it verbatim, so the
-		// redacted raw is the field's new serialization, no unescape needed.
+	}
+	// Mirror the Path/Fragment branches below: scan u.Opaque (the bytes
+	// url.URL.String will print — Opaque carries no Raw* twin, so this is the
+	// decoded-pass output verbatim, not an Escaped* re-encoding) for an
+	// access_token= overlap the decoded view cannot see, exactly as documented
+	// there. Run unconditionally rather than gating on the decoded sweep
+	// missing: a co-located opaque component can carry both a %HH-overlapped
+	// access_token=<secret> and a later literal access_token=<value>, where
+	// the single-anchor decoded sweep anchors at the trailing literal and a
+	// gate would short-circuit this raw scan for the whole component. The
+	// decoded pass's redacted span is the literal REDACTED marker, which
+	// contains no access_token= needle, so idempotency (not a code-path gate)
+	// keeps this from reprocessing a span the decoded sweep already redacted.
+	if rawRedacted, found := redactRawAccessTokenValue(u.Opaque, "/;?#"); found {
 		u.Opaque = rawRedacted
 	}
-	u.Host = RedactAccessTokenText(u.Host)
+	// Host mirrors the path/fragment/opaque/userinfo branches above. A valid
+	// %HH escape (e.g. %ac) can overlap the leading characters of an otherwise
+	// literal access_token<...> substring, and url.Parse decodes it into the
+	// authority: %ac becomes byte 0xAC, consuming the 'a' and 'c' of `access`
+	// and collapsing access_token= out of u.Host. u.Host therefore holds the
+	// DECODED view, on which RedactAccessTokenText's literal-needle backstop is
+	// blind to the overlap; url.URL.String re-escapes 0xAC back to %AC, so the
+	// re-emitted URL still carries a literal access_token=<value> in the host
+	// and the secret leaks into the dial-error chain (#4663 closed this for
+	// every other component but left the host on the literal backstop).
+	//
+	// net/url exposes no EscapedHost() accessor, so obtain the re-encoded host
+	// from a synthetic URL's String() — the same encoder the full URL runs —
+	// and run the percent-tolerant scanner over those bytes, exactly as
+	// EscapedPath/EscapedFragment/Userinfo.String feed the re-encoded form to
+	// their scans. ":" is the host's structural separator (it precedes the
+	// port), so a redacted value ends at it the same way a userinfo value ends
+	// at its single ":" separator — keeping the port in the diagnostic. A
+	// non-empty-Host guard is required: opaque URLs (e.g. data:…) have
+	// Host == "", and a synthetic URL with an empty authority serializes to
+	// "<scheme>:" or "//", neither of which carries a host to strip. Re-parse
+	// the redacted bytes through net/url so u.Host stores the parser-decoded
+	// form String re-escapes from, mirroring how the userinfo branch re-parses
+	// through url.Parse("http://" + rawRedacted + "@").
+	if u.Host != "" {
+		escapedHost := (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+		// String emits "<scheme>://<host>" when Scheme is set and "//<host>"
+		// when it is not; trim exactly that prefix to isolate the escaped host.
+		// Prefix-based trimming is used over length slicing so an empty scheme
+		// (a protocol-relative URL like //host/path) does not drop the first
+		// host byte, and an unexpected shape fails open rather than corrupting.
+		hostPrefix := "//"
+		if u.Scheme != "" {
+			hostPrefix = u.Scheme + "://"
+		}
+		escapedHost = strings.TrimPrefix(escapedHost, hostPrefix)
+		// The host has two colon families and ':' cannot be the value
+		// terminator for either:
+		//  1. A reg-name host can carry a colon INSIDE an access_token value
+		//     before its actual numeric port. url.Parse splits the authority
+		//     at the LAST colon whose suffix is a port, so
+		//     http://%access_token=TOP:SECRET:8443/ parses with hostname
+		//     %ACcess_token=TOP:SECRET and port 8443. Terminating the value
+		//     at the FIRST ':' truncates it at TOP and re-emits
+		//     %ACcess_token=REDACTED:SECRET:8443, leaking SECRET.
+		//  2. A bracketed IP-literal authority (RFC 3986 §3.2.2 "[ ... ]")
+		//     uses ':' as an IPv6 field separator inside the brackets, not as
+		//     a host/port separator, so ':' there truncates at the first
+		//     IPv6 colon and leaves the remainder of the bracketed literal.
+		//
+		// u.Port is the parser-proven port (a trailing ":<digits>" net/url
+		// already separated out), so strip it from the escaped host first
+		// and re-append it after the scan: the value then runs to the end of
+		// the host segment (consuming any ':' inside a reg-name value, e.g.
+		// TOP:SECRET) or to the closing ']' of a bracketed IP-literal, and the
+		// port survives the redacted value in both shapes. Re-encoding does
+		// not touch the ASCII ":<port>" suffix, so TrimSuffix removes exactly
+		// it. A bracketed authority a parser hands this branch cannot itself
+		// carry 'access_token=' — url.Parse validates the bracket as an
+		// IP-literal, which admits no '=' — so the ']' terminator is the
+		// defensive boundary for the overlap shape.
+		hostSegment := escapedHost
+		port := u.Port()
+		if port != "" {
+			hostSegment = strings.TrimSuffix(escapedHost, ":"+port)
+		}
+		hostTerminators := ""
+		if strings.HasPrefix(hostSegment, "[") {
+			hostTerminators = "]"
+		}
+		if rawRedacted, found := redactRawAccessTokenValue(hostSegment, hostTerminators); found {
+			redactedHost := rawRedacted
+			if port != "" {
+				redactedHost = rawRedacted + ":" + port
+			}
+			reparseInput := "//" + redactedHost
+			if u.Scheme != "" {
+				reparseInput = u.Scheme + "://" + redactedHost
+			}
+			reparsed, err := url.Parse(reparseInput)
+			if err != nil || reparsed.Host == "" {
+				// A parse failure means the raw scan left bytes net/url can no
+				// longer parse as an authority. redactRawAccessTokenValue only
+				// substitutes a value span with the REDACTED marker — never an
+				// authority-reserved byte — so this branch is unreachable for
+				// inputs the original parse produced; fail closed regardless
+				// rather than emit a credential the overlap scan could have
+				// redacted incompletely.
+				u.Host = accessTokenRedaction
+			} else {
+				u.Host = reparsed.Host
+			}
+		} else {
+			u.Host = RedactAccessTokenText(u.Host)
+		}
+	}
 	if path, found := redactPercentEncodedAccessTokenText(u.Path, false); found {
 		// RawPath is honoured only while it still encodes Path, and a rewritten
 		// Path leaves it stale. Drop it so String re-escapes from the redacted
 		// value rather than reprinting the credential it was holding.
 		u.Path, u.RawPath = path, ""
-	} else {
-		// The decoded sweep did not fire — most likely because a valid %HH
-		// escape (e.g. %ac) overlapped the leading characters of an otherwise
-		// literal access_token<...> substring, collapsing access_token= out of
-		// the decoded u.Path while the bytes String() will emit still carry a
-		// literal access_token=<value>. Scan those bytes for the overlap the
-		// decoded view cannot see.
-		//
-		// EscapedPath is the authoritative view of what String() will print:
-		// when url.Parse found the raw path was already a canonical encoding
-		// of Path it drops RawPath (sets it to "") and EscapedPath re-encodes
-		// from Path; when RawPath is set EscapedPath honours it. Either way the
-		// redacted scan sees the bytes the unredacted URL would carry. After a
-		// redaction, set both RawPath (the new verbatim form) and Path (its
-		// unescape) so EscapedPath's validity check keeps honouring RawPath.
-		if rawRedacted, found := redactRawAccessTokenValue(u.EscapedPath(), "/;?#"); found {
-			u.RawPath = rawRedacted
-			if unescaped, err := url.PathUnescape(rawRedacted); err == nil {
-				u.Path = unescaped
-			}
+	}
+	// Scan the bytes String() will print for an access_token= overlap the
+	// decoded view cannot see. A valid %HH escape (e.g. %ac) can overlap the
+	// leading characters of an otherwise literal access_token<...> substring,
+	// collapsing access_token= out of the decoded u.Path while the raw bytes
+	// String() will emit still carry a literal access_token=<value>. Run
+	// unconditionally on the decoded-pass output rather than gating on the
+	// decoded sweep missing: a co-located component can carry both such an
+	// overlap and a later literal access_token=, where the single-anchor
+	// decoded sweep anchors at the trailing literal and a gate would
+	// short-circuit this raw scan for the whole component. The decoded pass's
+	// redacted span is the literal REDACTED marker, which contains no
+	// access_token= needle, so idempotency keeps this from reprocessing a span
+	// the decoded sweep already redacted.
+	//
+	// EscapedPath is the authoritative view of what String() will print:
+	// when url.Parse found the raw path was already a canonical encoding
+	// of Path it drops RawPath (sets it to "") and EscapedPath re-encodes
+	// from Path; when RawPath is set EscapedPath honours it. Either way it
+	// sees the decoded pass's rewritten bytes (if any) plus any overlap the
+	// decoded scan did not reach. After a redaction, set both RawPath (the
+	// new verbatim form) and Path (its unescape) so EscapedPath's validity
+	// check keeps honouring RawPath.
+	if rawRedacted, found := redactRawAccessTokenValue(u.EscapedPath(), "/;?#"); found {
+		u.RawPath = rawRedacted
+		if unescaped, err := url.PathUnescape(rawRedacted); err == nil {
+			u.Path = unescaped
 		}
 	}
 	if fragment, found := redactPercentEncodedAccessTokenText(u.Fragment, false); found {
 		u.Fragment, u.RawFragment = fragment, ""
-	} else {
-		// Mirrors the Path branch above. EscapedFragment is the authoritative
-		// view of what String() will print: url.Parse clears RawFragment when
-		// the raw was already canonical, in which case EscapedFragment re-
-		// encodes from Fragment; otherwise it honours RawFragment. PathUnescape
-		// matches the encodeFragment unescape: + survives as + in either mode,
-		// and only %HH escapes are folded.
-		if rawRedacted, found := redactRawAccessTokenValue(u.EscapedFragment(), "/;?#"); found {
-			u.RawFragment = rawRedacted
-			if unescaped, err := url.PathUnescape(rawRedacted); err == nil {
-				u.Fragment = unescaped
-			}
+	}
+	// Mirrors the Path branch above. The raw access_token= overlap scan runs
+	// unconditionally on the decoded-pass output (idempotent via the REDACTED
+	// marker, which contains no access_token= needle), not gated on the
+	// decoded sweep missing. EscapedFragment is the authoritative view of
+	// what String() will print: url.Parse clears RawFragment when the raw
+	// was already canonical, in which case EscapedFragment re-encodes from
+	// Fragment; otherwise it honours RawFragment. PathUnescape matches the
+	// encodeFragment unescape: + survives as + in either mode, and only
+	// %HH escapes are folded.
+	if rawRedacted, found := redactRawAccessTokenValue(u.EscapedFragment(), "/;?#"); found {
+		u.RawFragment = rawRedacted
+		if unescaped, err := url.PathUnescape(rawRedacted); err == nil {
+			u.Fragment = unescaped
 		}
 	}
 	if u.User != nil {
@@ -141,13 +256,57 @@ func redactAccessTokenUserinfo(user *url.Userinfo) *url.Userinfo {
 	name, _ := redactPercentEncodedAccessTokenText(user.Username(), false)
 	password, hasPassword := user.Password()
 	redactedPassword, _ := redactPercentEncodedAccessTokenText(password, false)
-	if name == user.Username() && redactedPassword == password {
-		return user
+	var result *url.Userinfo
+	switch {
+	case name == user.Username() && redactedPassword == password:
+		result = user
+	case !hasPassword:
+		result = url.User(name)
+	default:
+		result = url.UserPassword(name, redactedPassword)
 	}
-	if !hasPassword {
-		return url.User(name)
+	// Mirror the Path/Fragment branches above: scan Userinfo.String (the
+	// bytes url.URL.String will print for the userinfo — it calls ui.String()
+	// directly, mirroring EscapedPath/EscapedFragment) for an access_token=
+	// overlap the decoded view cannot see. A valid %HH escape (e.g. %ac)
+	// can overlap the leading characters of an otherwise literal
+	// access_token<...> substring, collapsing access_token= out of the
+	// decoded Username()/Password() view while the serialized bytes still
+	// carry a literal access_token=<value>. Run unconditionally on the
+	// decoded-pass output (idempotent via the REDACTED marker, which
+	// contains no access_token= needle, rather than gated on the decoded
+	// sweep missing): userinfo is part of this function's component-wide
+	// redaction contract — the same leak that motivated the
+	// opaque/path/fragment branches above applies to userinfo too, even
+	// though no current in-repo production caller happens to route an
+	// overlapping userinfo through it.
+	//
+	// Userinfo.String joins the name and password with a single ":" (and
+	// escapes any literal ":" in either field as %3A), so ":" is the only
+	// value terminator in the serialized form: an access_token= span in
+	// the name ends at the ":" separator (or at the end of the string when
+	// there is no password), and one in the password — the trailing field —
+	// runs to the end of the string. Re-parse the redacted bytes through
+	// net/url so the result stores the parser-decoded name/password that
+	// Userinfo.String re-encodes back via encodeUserinfo, the same way
+	// url.User and url.UserPassword above store the decoded forms they
+	// were constructed with.
+	serialized := result.String()
+	rawRedacted, found := redactRawAccessTokenValue(serialized, ":")
+	if !found {
+		return result
 	}
-	return url.UserPassword(name, redactedPassword)
+	reparsed, err := url.Parse("http://" + rawRedacted + "@")
+	if err != nil || reparsed.User == nil {
+		// A parse failure means the raw scan left bytes net/url can no
+		// longer parse as userinfo. redactRawAccessTokenValue only
+		// substitutes a value span with the REDACTED marker — never a
+		// userinfo-grammar-reserved byte — so this branch is unreachable
+		// for inputs the original parse produced; fail closed regardless
+		// rather than emit a credential the decoded pass could not see.
+		return url.User(accessTokenRedaction)
+	}
+	return reparsed.User
 }
 
 // RedactAccessTokenError strips an access_token from a failed request while

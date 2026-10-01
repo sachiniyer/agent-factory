@@ -610,7 +610,16 @@ func (s *controlServer) RestoreArchived(req RestoreArchivedRequest, resp *Restor
 	// Publish the identity the manager actually resolved, not the request's
 	// potentially stale title/repo pair. This is the same one-shot resolution the
 	// restore body used, so the event cannot name a same-title sibling.
-	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	// Publish only when the restore actually completed. A committed-but-unfinished
+	// restore (err recorded above, a mutationCommittedError) did NOT restore the
+	// session — its own marker tells the caller "the session is NOT restored; retry
+	// the restore" — so session.restored, which means the synchronous restore call
+	// completed, must not fire. Unlike killSession there is no late worker that owns
+	// this event, so an abandoned committed-but-unfinished restore yields zero
+	// restored events — correct, because the operation did not complete.
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	}
 	return nil
 }
 
@@ -635,7 +644,18 @@ func (s *controlServer) RestoreSession(req RestoreSessionRequest, resp *RestoreS
 	}
 	resp.OK = true
 	resp.WorktreePath = worktreePath
-	s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	// Publish only when the restore actually completed. A committed-but-unfinished
+	// restore (err recorded above, a mutationCommittedError) did NOT restore the
+	// session — its own marker tells the caller "the session is NOT restored; retry
+	// the restore" — so session.restored, which means the synchronous restore call
+	// completed, must not fire. Unlike killSession there is no late worker that owns
+	// this event, so an abandoned committed-but-unfinished restore yields zero
+	// restored events — correct, because the operation did not complete. The auto
+	// Lost-restore loop's EndRecoverFence publishes session.updated with the true Lost
+	// liveness (restore.go) as the runtime-status substitute.
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionRestored, restored)
+	}
 	return nil
 }
 
@@ -694,9 +714,9 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 // registry in-process, so one process owns the store and — for a web or remote
 // client — the path is resolved on the daemon's filesystem, not the caller's.
 //
-// config.RegisterProject does the work (expand ~, resolve the git root,
-// validate, persist, idempotent) under its own file lock, so this handler adds
-// only the admission gate and the projects-changed publish. It does NOT take a
+// config.RegisterProject does the work (resolve the git root, validate,
+// persist, idempotent) under its own file lock, so this handler adds only the
+// admission gate, the absolute-path boundary, and the projects-changed publish. It does NOT take a
 // manager lock: the registry is independent of the session roster, and
 // RegisterProject's own lock already serializes concurrent registrations.
 //
@@ -709,7 +729,51 @@ func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *Regist
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	project, err := config.RegisterProject(req.Path)
+	// Enforce RegisterProjectRequest's contract here, before the registry is
+	// touched (#4821): config.RegisterProject would resolve a relative path
+	// against THIS process's cwd. The normalized value is the one registered, so
+	// what was checked is exactly what is stored.
+	path, err := config.ResolveDaemonHostPath(req.Path)
+	if err != nil {
+		return fmt.Errorf("project %w", err)
+	}
+	project, err := config.RegisterProject(path)
+	if err != nil {
+		return err
+	}
+	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
+	resp.OK = true
+	resp.Project = project
+	return nil
+}
+
+// RebindProject moves a registered project's stable identity to a replacement
+// checkout (`af projects rebind`) — the repair when the checkout a registration
+// names was moved or recloned elsewhere. The daemon is the single writer (#960),
+// the same reason RegisterProject routes here: the CLI, TUI, and web all call
+// this rather than writing the registry in-process, and for a web or remote
+// client the path is resolved on the daemon's filesystem, not the caller's.
+//
+// config.RebindProject does the work under its own file lock — resolving the
+// replacement path's binding, refusing a root another project owns, and carrying
+// or minting the checkout marker — so this handler adds only the admission gate
+// and the projects-changed publish a client showing a projects view re-fetches
+// on (the rebound row's root changes; without the event a web switcher would
+// keep naming the dead path until the next manual refresh).
+func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProjectResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	// Enforce RebindProjectRequest's contract here, before the registry moves:
+	// config.RebindProject would resolve a relative path against THIS process's
+	// cwd — an unrelated checkout for an ad-hoc daemon, / under systemd — and
+	// silently repoint the stable id there. The same boundary RegisterProject
+	// applies (#4821); the checked value is the one passed on.
+	path, err := config.ResolveDaemonHostPath(req.Path)
+	if err != nil {
+		return fmt.Errorf("rebind %w", err)
+	}
+	project, err := config.RebindProject(req.ID, path)
 	if err != nil {
 		return err
 	}

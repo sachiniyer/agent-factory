@@ -102,6 +102,15 @@ type Instance struct {
 	// so a session has exactly one run. Work a user starts in that session
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
+	// taskRunIdleEdgeHeld records that the agent's idle edge arrived while a
+	// handoff mission was still owed, so the run was kept open rather than ended
+	// (#4429). The edge is spent once it is held — the pane stays Ready, and every
+	// later idle poll is Ready → Ready — so without this the run would never end
+	// after the operator resolves the mission without making the agent work again
+	// (Mark delivered). With it, the first idle observation after the obligation
+	// clears ends the run, as the held edge would have. Meaningful only while
+	// taskRunActive; persisted with it, because the edge is not re-derivable.
+	taskRunIdleEdgeHeld bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -109,16 +118,31 @@ type Instance struct {
 	// owedOnComplete is the in-memory form of InstanceData.PendingOnComplete
 	// (#4162): set when the daemon files the obligation, cleared when a decision
 	// discharges it. owedOnCompleteNotify is the daemon-installed persist
-	// callback a delivery fires after clearing it — adoption evidence must
-	// become durable immediately or a restart resurrects a teardown the user
-	// already vetoed. owedDrainActive claims the obligation's lifecycle worker,
-	// so a refresh that re-arms the marker mid-wait cannot launch a second
-	// teardown beside the one already parked on the hook channel. All guarded
-	// by mu; the claim is in-memory only, which is correct — a new daemon
-	// generation has no workers in flight.
+	// callback a delivery fires after clearing it, and it returns any persist
+	// error so NoteAdoptionDelivery can propagate it and refuse the PTY write
+	// rather than proceed on top of a discharge that did not land — adoption
+	// evidence must become durable immediately or a restart resurrects a teardown
+	// the user already vetoed. owedDrainActive claims the obligation's lifecycle
+	// worker, so a refresh that re-arms the marker mid-wait cannot launch a
+	// second teardown beside the one already parked on the hook channel. All
+	// guarded by mu; the claim is in-memory only, which is correct — a new
+	// daemon generation has no workers in flight.
+	//
+	// discharge is the in-flight durable discharge of owedOnComplete the first
+	// concurrent NoteAdoptionDelivery caller installs under mu before it
+	// releases mu for the notify to run. A second caller arriving while the
+	// notify is in flight finds owedOnComplete already nil (the first cleared
+	// it) and discharge set; it waits on the discharge's future so its PTY
+	// write is gated on the same durable clear, instead of bypassing the
+	// in-flight clear to a PTY write the durable marker would survive. The
+	// discharging caller clears this field under mu right before it returns,
+	// closing the future once the notify's persist result is known. See
+	// adoption_fence.go for the full contract; in-memory only because every
+	// delivery installs a fresh one.
 	owedOnComplete       *PendingOnCompleteData
-	owedOnCompleteNotify func(*Instance)
+	owedOnCompleteNotify func(*Instance) error
 	owedDrainActive      bool
+	discharge            *adoptionDischarge
 	// limitResetAt is the parsed usage-limit reset time (#1146), display-only in
 	// PR2: set alongside liveness == LiveLimitReached when the pane shows a limit
 	// banner carrying a parseable reset time (zero when it carried none). Read
@@ -172,6 +196,14 @@ type Instance struct {
 	// system-prompt arguments. Unlike Program (the requested agent label), this is
 	// durable evidence about the process being adopted after a daemon restart.
 	runtimeProgram string
+	// runtimePID and runtimeStartID pin runtimeProgram to the concrete pane-root
+	// process af launched: a surviving tmux NAME cannot prove it still names that
+	// process, but the name's pane root carrying the recorded (pid, kernel
+	// start-time) pair can — that is what lets a daemon restart's reattach keep
+	// the launch claim instead of retiring it (#5066). Zero on records written
+	// before this evidence existed and everywhere runtimeProgram is cleared.
+	runtimePID     int
+	runtimeStartID uint64
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.
@@ -181,6 +213,14 @@ type Instance struct {
 	// spend the wrong quota while still displaying the account it was created
 	// with.
 	Account string `json:"account,omitempty"`
+	// accountAgent is the agent namespace Account was selected in. It must be
+	// durable rather than re-derived at refresh time: a program_overrides edit
+	// after the pin can resolve the recorded Program to a different agent's
+	// command, and re-deriving from that new command would silently reinterpret
+	// the same label in another agent's registry (#4430 review). Empty only when
+	// Account is ambient or the record predates the field — those selections
+	// could only have used the Program enum's namespace.
+	accountAgent string
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.

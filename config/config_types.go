@@ -118,6 +118,26 @@ func ResolveUserPath(path string) (string, error) {
 	return filepath.Abs(ExpandTilde(path))
 }
 
+// ResolveDaemonHostPath is the RPC-boundary counterpart of ResolveUserPath: it
+// normalizes a path a remote caller sent the daemon — surrounding whitespace
+// trimmed, a leading "~" expanded against the daemon host's home — and refuses
+// anything that is still not absolute. The daemon has no access to the caller's
+// working directory, so resolving a relative path would silently land on the
+// daemon's own cwd: an unrelated checkout for an ad-hoc daemon, / under systemd
+// (#4821).
+//
+// The returned string is the value that was checked, and callers must pass THAT
+// on rather than the raw input. Checking a trimmed copy while storing the raw
+// one re-opens the hole this closes: " /repo" passes the check and then
+// resolves against the cwd as the relative name " /repo" (#4789 round 7).
+func ResolveDaemonHostPath(path string) (string, error) {
+	normalized := ExpandTilde(strings.TrimSpace(path))
+	if !filepath.IsAbs(normalized) {
+		return "", fmt.Errorf("path %q must be absolute (or start with ~/): the daemon resolves it on its own filesystem and has no access to your working directory", path)
+	}
+	return normalized, nil
+}
+
 // GetConfigDir returns the path to the application's configuration directory.
 // If AGENT_FACTORY_HOME is set, it is used as the config directory.
 // Otherwise, defaults to ~/.agent-factory.

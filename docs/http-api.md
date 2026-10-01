@@ -44,8 +44,8 @@ $AGENT_FACTORY_HOME/daemon-http.sock
 So on a default install the socket is `~/.agent-factory/daemon-http.sock`. `af
 api` prints the resolved path for your environment.
 
-The socket is created when the daemon starts (on demand whenever `af` runs and
-there is work to host, or via an autostart unit — see
+The socket is created when the daemon starts (on demand — a bare `af` launch
+starts it, or via an autostart unit — see
 [tasks.md](tasks.md#daemon-lifecycle)). If the socket does not exist, the daemon
 is not running.
 
@@ -213,11 +213,17 @@ not list. They fall into three groups:
 
 - **Internal JSON-envelope RPCs**, same shape as the cataloged ones but deliberately
   unadvertised as public API: `POST /v1/Preview` (the TUI's render path),
-  `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination).
+  `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination),
+  and `POST /v1/HandoffSessionV2` (the version-bound account-aware handoff
+  transport).
 - **Non-RPC surfaces**, which speak something other than the envelope: the WebSocket
   planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
-  `GET /v1/events`; the config-assistant trio on `/v1/config-assistant`;
-  `GET /v1/preview-auth`; and the web-tab reverse proxy under `/v1/webtab/`.
+  `GET /v1/events`; the config-assistant trio on `/v1/config-assistant` and the
+  account-login stream `GET /v1/account-login/stream` (bare-session PTY WebSockets
+  that serve no Instance); `GET /v1/auth-info`, the tokenless probe that reports
+  whether this peer must present a token (see
+  [remote daemon access](remote-http-auth.md)); `GET /v1/preview-auth`; and the
+  web-tab reverse proxy under `/v1/webtab/`.
 - **The profiling endpoint**, `GET /v1/debug/pprof/{profile}`, when it is switched
   on. It is **off by default**, is served on **this socket only** and never on
   `network.listen_addr`, and returns the ordinary 404 unknown-route envelope while
@@ -239,7 +245,7 @@ returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
 web/vscode tab that owns no PTY; it normally tracks the name but diverges
 after a rename, so read it from the response rather than re-deriving it);
-`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `ListTasks` returns
+`CloseTab` returns `{ "name": "<resolved-tab-name>" }`; `RenameTab` returns `{ "name": "<resolved-tab-name>" }`; `ReorderTab` returns `{ "name": "<resolved-tab-name>", "index": <int> }`; `ListTasks` returns
 `{ "tasks": [<task>…] }`; `UpdateTask` returns `{ "ok": true, "task": <task> }`
 (the merged record); the rest return `{ "ok": true }`. The `task` field of
 `AddTask` is a full task object — the CLI/TUI build and validate it, and the
