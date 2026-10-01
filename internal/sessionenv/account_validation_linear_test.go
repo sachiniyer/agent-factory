@@ -78,7 +78,6 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 		{"xargs env xargs env … x", func(n int) string { return strings.Repeat("xargs env ", n) + "x" }, false},
 		{"xargs -I{} echo env -u env … x", func(n int) string { return "xargs -I{} echo env" + strings.Repeat(" -u env", n) + " x" }, false},
 		{"xargs -I{} echo env … env x", func(n int) string { return "xargs -I{} echo" + strings.Repeat(" env", n) + " x" }, false},
-		{"taskset -c 1 taskset -c 1 … x", func(n int) string { return strings.Repeat("taskset -c 1 ", n) + "x" }, false},
 		// #4977: replace-mode xargs copies an argv only when a marker is
 		// substituted (Codex on #4979: every layer of `xargs -i xargs -i …`
 		// copied its suffix, 11s at 2,000), and distinct markers past
@@ -103,6 +102,10 @@ func TestAccountValidationWorkIsLinearInWordCount(t *testing.T) {
 			}
 			return b.String() + "echo"
 		}, true},
+		// The child-tail suffix walk (#4708) refuses a wrapper whose shadowable
+		// child tail holds more than shadowedChildJudgementLimit verdict words, so
+		// this nesting fails closed past the budget instead of staying admitted.
+		{"taskset -c 1 taskset -c 1 … x", func(n int) string { return strings.Repeat("taskset -c 1 ", n) + "x" }, true},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {

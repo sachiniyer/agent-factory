@@ -8589,6 +8589,7 @@ function ctrlModifiedEmission(text) {
   }
   if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
   if (code === 56) return "\x7F";
+  if (text === "/") return "";
   return void 0;
 }
 function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {
@@ -9002,6 +9003,9 @@ function hasPrintable(data) {
   }
   return false;
 }
+function isEditingControl(data) {
+  return /[\x7f\x04\x15\b\x17\x01\x05\t\x02\x06\x10\x0e\v\f\x19\x14\x12\x1f\x16\x0f\x18\x11\x13\x1d\0\x07\x1a\x1c\x1e]/.test(data);
+}
 var MidLineHold = class {
   /**
    * @param renewIntervalMs how often to re-send the pause while the line stays
@@ -9022,6 +9026,17 @@ var MidLineHold = class {
   lastInputMs = 0;
   lastPauseMs = 0;
   queuedEndsLine = false;
+  /**
+   * Set when the idle bound released a hold whose draft is still in the PTY, and
+   * cleared by every client-observable genuine commit/abandon (the lastCommit
+   * branch, a flushed queued commit) and by teardown (release). While it is true,
+   * a plain editing control byte re-acquires the lease instead of returning
+   * "none" — matching the ESC branch's post-idle re-acquisition. The daemon
+   * delivering into the pane is not observable here, so the flag can stay stale
+   * after a daemon-side clear/submit; that is the same bounded spurious-hold
+   * staleness the ESC branch already accepts.
+   */
+  releasedByIdleBound = false;
   /** True while the user is considered to have a partially typed line. */
   get holding() {
     return this.uncommitted;
@@ -9058,6 +9073,7 @@ var MidLineHold = class {
     this.lastInputMs = nowMs;
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
+      this.releasedByIdleBound = false;
       const tail = data.slice(lastCommit + 1);
       if (!startsADraft(tail)) {
         this.uncommitted = false;
@@ -9066,6 +9082,9 @@ var MidLineHold = class {
       return this.beginOrRenew(nowMs);
     }
     if (!this.uncommitted && !startsADraft(data)) {
+      if (this.releasedByIdleBound && isEditingControl(data)) {
+        return this.beginOrRenew(nowMs);
+      }
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -9084,6 +9103,7 @@ var MidLineHold = class {
     }
     if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
       this.uncommitted = false;
+      this.releasedByIdleBound = true;
       return "none";
     }
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
@@ -9131,6 +9151,7 @@ var MidLineHold = class {
     if (this.queuedEndsLine) {
       this.uncommitted = false;
       this.queuedEndsLine = false;
+      this.releasedByIdleBound = false;
     }
   }
   /** Drops the hold for a teardown that makes the question moot — the pane
@@ -9139,6 +9160,7 @@ var MidLineHold = class {
    *  may not be the only holder of. */
   release() {
     this.uncommitted = false;
+    this.releasedByIdleBound = false;
   }
   beginOrRenew(nowMs) {
     if (!this.uncommitted) {
@@ -19371,6 +19393,7 @@ function stopStream() {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  accountsRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
