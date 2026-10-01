@@ -2,6 +2,7 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -60,16 +61,18 @@ func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 }
 
 // The startup-unknown and orphaned-fence shapes are the ones this verb exists
-// for: the daemon has probed the pane, so the confirm lifts both. The row then
-// reads working (#5023) — the attestation says the delivered mission is in the
-// agent's scrollback, so even a limit-parked liveness does not carry over; the
-// monitor's next probe re-parks a wall the pane still shows.
+// for: the daemon has probed the pane, so the confirm lifts both. A row parked
+// at its usage-limit wall keeps LiveLimitReached (#5023): it is already
+// not-idle to fleet watch, and ResumeLimitedSessions only owns rows still
+// carrying it — flattening it to LiveRunning would strand the session while an
+// attached client's paused poll never re-detects the wall.
 func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	inst := confirmableManualSwap(PromptSentUnverified)
 	inst.startupStateUnknown = true
 	inst.started = false
 	inst.inFlightOp = OpRespawning
 	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
 	require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
 
 	require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
@@ -77,8 +80,11 @@ func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	require.False(t, inst.StartupStateUnknown(), "the probe-backed confirm resolves the unknown flag")
 	require.True(t, inst.Started(), "and restores the started bit the flag lowered")
 	require.Equal(t, OpNone, inst.GetInFlightOp(), "the orphaned respawn fence is dropped")
-	require.Equal(t, LiveRunning, inst.GetLiveness(),
-		"a confirmed delivery is a working session (#5023), not the liveness the wedge happened to hold")
+	require.Equal(t, LiveLimitReached, inst.GetLiveness(),
+		"a confirmed delivery on a limit-blocked row keeps the wall — ResumeLimitedSessions owns it")
+	if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
+		t.Fatal("the limit reset time must survive the confirm or the resume pass loses its schedule")
+	}
 	require.Nil(t, inst.accountSwapLaunch)
 	require.NoError(t, inst.TabSpawnBlocked())
 }

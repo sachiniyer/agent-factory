@@ -649,12 +649,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			//
 			// A held edge is recorded rather than dropped. A resend makes the
 			// agent work, and Mark delivered now likewise leaves the ROW working
-			// — the confirm publishes LiveRunning (#5023) — so the next idle
-			// observation lands as a real edge into Ready and ends the run
-			// itself. The held marker still closes the gap for an obligation
-			// retired while the row was already recorded Ready — records written
-			// before #5023 carry exactly that — whose later polls would
-			// otherwise see only Ready → Ready and hold the run open forever.
+			// — the confirm publishes LiveRunning, or keeps a LiveLimitReached
+			// wall (#5023) — so the next idle observation lands as a real edge
+			// into Ready and ends the run itself. The held marker still closes
+			// the gap for an obligation retired while the row was already
+			// recorded Ready — records written before #5023 carry exactly that —
+			// whose later polls would otherwise see only Ready → Ready and hold
+			// the run open forever.
 			//
 			// ANY idle observation while the mission is owed holds, not only a
 			// transition into Ready. A row that reloads already Ready — every row

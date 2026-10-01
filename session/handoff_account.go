@@ -276,6 +276,13 @@ func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
 // on. The row therefore settles on LiveRunning, the same state a successfully
 // delivered prompt leaves, and only the status monitor's own idle observation
 // — real pane evidence — moves it back.
+//
+// A row parked at its usage-limit wall is the one exception: LiveLimitReached
+// is already the honest state (the delivered mission cannot run until quota
+// resets), it already publishes not-idle to fleet watch, and
+// ResumeLimitedSessions only owns rows that still carry it — flattening it to
+// LiveRunning would strand a session whose poll is paused by an attach, since
+// nothing would re-detect the wall to re-park it.
 func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -315,8 +322,11 @@ func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) erro
 	i.accountSwapLaunch = nil
 	// The confirmed mission is work the incoming agent already has (#5023):
 	// publish working — the same liveness a delivered prompt produces — and
-	// leave the settle back to Ready to the monitor's own pane evidence.
-	_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+	// leave the settle back to Ready to the monitor's own pane evidence. A
+	// limit-blocked row keeps its wall so the resume pass can still own it.
+	if i.liveness != LiveLimitReached {
+		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+	}
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil

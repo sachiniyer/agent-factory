@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPendingHandoffMissionReconstructsDurableFence(t *testing.T) {
 	data := InstanceData{
@@ -344,6 +347,66 @@ func TestConfirmPendingHandoffDeliveryMarksWorking(t *testing.T) {
 	}
 	if got := inst.GetLiveness(); got != LiveReady {
 		t.Fatalf("liveness after the monitor's idle observation = %v, want Ready", got)
+	}
+}
+
+// #5023: the LiveRunning edge has one carve-out — a confirmed mission on a row
+// parked at its usage-limit wall keeps LiveLimitReached. The wall is already
+// not-idle to fleet watch, the delivered mission cannot run until quota
+// resets, and ResumeLimitedSessions scans only rows still carrying it: a
+// flattened LiveRunning would strand the session while an attached client's
+// paused poll never re-detects the wall. Both confirmable shapes — the fence
+// still raised, and the fence already settled — preserve it.
+func TestConfirmPendingHandoffDeliveryPreservesLimitReached(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fenced bool
+	}{
+		{name: "under the replacement fence", fenced: true},
+		{name: "on an unfenced ambiguous settle", fenced: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var inst *Instance
+			if tc.fenced {
+				inst = stageWedge(t, PromptSentUnverified, false)
+			} else {
+				var err error
+				inst, err = NewInstance(InstanceOptions{Title: "limited-handoff", Path: t.TempDir(), Program: "claude"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				inst.SetBackend(NewFakeBackend())
+				inst.SetStartedForTest(true)
+				inst.SetStatusForTest(Running)
+				mission := "continue the inherited work"
+				inst.SetPendingHandoffMission(mission)
+				if err := inst.RecordPendingHandoffMissionDelivery(mission, PromptSentUnverified); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resetAt := time.Now().Add(time.Hour)
+			inst.liveness = LiveLimitReached
+			inst.limitResetAt = resetAt
+			if !inst.CanConfirmPendingHandoffDelivery() {
+				t.Fatal("a limit-blocked row with an ambiguous mission must admit the confirm")
+			}
+
+			if err := inst.ConfirmPendingHandoffDelivery("continue the inherited work"); err != nil {
+				t.Fatalf("ConfirmPendingHandoffDelivery: %v", err)
+			}
+			if got := inst.GetLiveness(); got != LiveLimitReached {
+				t.Fatalf("liveness after confirm = %v, want LimitReached — the resume pass owns this row", got)
+			}
+			if got := inst.GetInFlightOp(); got != OpNone {
+				t.Fatalf("op after confirm = %v, want OpNone", got)
+			}
+			if got := inst.PendingHandoffMission(); got != "" {
+				t.Fatalf("mission after confirm = %q, want retired", got)
+			}
+			if reset, ok := inst.LimitResetAt(); !ok || !reset.Equal(resetAt) {
+				t.Fatal("the confirm must keep the reset schedule ResumeLimitedSessions fires on")
+			}
+		})
 	}
 }
 
