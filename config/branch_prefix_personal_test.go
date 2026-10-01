@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,6 +80,58 @@ func TestLoadProjectConfigNoBranchPrefixStaysQuiet(t *testing.T) {
 	_, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
 	assert.NotContains(t, buf.String(), "branch_prefix")
+}
+
+// TestLoadProjectConfigBranchPrefixLoadsGlobalLazily pins #5026: the
+// once-per-file memo must answer BEFORE the global prefix resolves, so a
+// repeat load re-reads nothing and a race of first loads resolves the value
+// exactly once. An eager resolver at the call site fails both counts — every
+// repeat and every racer pays a file read plus TOML parse.
+func TestLoadProjectConfigBranchPrefixLoadsGlobalLazily(t *testing.T) {
+	home, _, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "branch_prefix = \"global/\"\n")
+	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")
+	buf := captureLog(t, &aflog.WarningLog)
+
+	var loads atomic.Int32
+	prev := globalBranchPrefixForLoadWarning
+	globalBranchPrefixForLoadWarning = func() string {
+		loads.Add(1)
+		return prev()
+	}
+	t.Cleanup(func() { globalBranchPrefixForLoadWarning = prev })
+
+	// A race of first loads shares one memo entry: exactly one LoadOrStore
+	// wins, and only the winner pays for the read-only global load.
+	const racers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := LoadProjectConfig(project.ID)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(1), loads.Load(),
+		"concurrent first loads must resolve the global prefix exactly once")
+	assert.Equal(t, 1, strings.Count(buf.String(), "branch_prefix is not supported per project yet"),
+		"the warning itself still emits exactly once, got:\n%s", buf.String())
+
+	// Once the file has warned, repeat loads consult the memo and return
+	// before the resolver runs — zero further global loads.
+	for i := 0; i < 5; i++ {
+		_, err := LoadProjectConfig(project.ID)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(1), loads.Load(),
+		"repeat loads of an already-warned file must perform zero global loads")
 }
 
 // TestInspectionResolveBranchPrefixDoesNotLoadGlobal pins the Codex-found
