@@ -11082,6 +11082,39 @@ test("#5064: a successor observed but never settled still fails loudly", async (
   assert.match(github.recoveryComments[0].body, new RegExp(`head: ${OTHER_SHA}`));
 });
 
+// Codex review on this fix: the quiet exit asserts every poll still showed
+// the initiating SHA — a read that answers an open, unmerged PR with no
+// resolvable head never established that (a head ref deleted out from under
+// the update, for instance). One spoiled read is an unknown, and an unknown
+// stays loud.
+test("#5064: a poll that cannot resolve the head fails loudly, not quietly", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+  let reads = 0;
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (variables?.number === 1465) {
+      reads += 1;
+      // The ref answers something that is not a SHA at all — normalizeHeadSha
+      // cannot resolve it, so this poll confirms nothing.
+      overrides[1465].headRefOid = reads === 2 ? "not-a-head-sha" : HEAD_SHA;
+    }
+    return graphql(query, variables);
+  };
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      headPollAttempts: 3, sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, /without a resolvable head/);
+      assert.match(error.message, /gh workflow run auto-gate.yml/);
+      return true;
+    },
+  );
+  assert.equal(github.recoveryComments.length, 1,
+    "an unconfirmable head is a recovery failure on the PR, not a quiet exit");
+});
+
 // Same quiet exit through the real workflow body: #5064's run must end the way
 // the issue describes the self-heal — green, uncommented, targets empty — so
 // drive the step, not only the function.

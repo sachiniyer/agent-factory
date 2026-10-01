@@ -6029,6 +6029,11 @@ async function recoverSuccessorHead({
 }) {
   const eligible = (current) => current.state === "OPEN" && !current.merged && current.baseRefName === "master";
   let observedHead = null;
+  // The quiet exit below asserts every read still showed the initiating SHA —
+  // a read that could not resolve a head at all (an eligible PR answering with
+  // a blank or unparseable headRefOid) never established that, so it spoils
+  // the claim rather than counting toward it (Codex on #5064).
+  let headUnconfirmed = false;
   try {
     let pr = await getPullRequest({ github, context, number });
     // Head visibility and run visibility are separate transitions. Reuse the
@@ -6041,6 +6046,9 @@ async function recoverSuccessorHead({
         return null;
       }
       const observed = normalizeHeadSha(pr.headRefOid);
+      if (!observed) {
+        headUnconfirmed = true;
+      }
       if (observed && observed !== previousHead) {
         observedHead = observed;
         const validation = await ensureValidationRun({
@@ -6076,6 +6084,15 @@ async function recoverSuccessorHead({
     }
     // Poll exhausted. The two shapes split on whether this lane ever observed a
     // successor — see the comment above the function.
+    if (!observedHead && headUnconfirmed) {
+      // A read answered without a head is not the not-yet-arrived case: no
+      // successor push may exist to wake the PR, and the initiating SHA was
+      // never actually re-confirmed. That is an unknown, so it is loud.
+      throw new Error(
+        `PR #${number} answered a recovery poll without a resolvable head; ` +
+          "the successor's arrival is unconfirmed",
+      );
+    }
     if (!observedHead) {
       // Not-yet-arrived, not failed (#5064): the initiating head was visible on
       // every read, so nothing this lane touched was dropped. The successor's
