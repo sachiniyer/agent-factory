@@ -9382,7 +9382,7 @@ var TouchScroll = (now) => {
       if (!last) return 0;
       let i = s.length - 1;
       for (; i > 0 && s[i - 1].t >= t - FLING_WINDOW_MS; --i) ;
-      const dt = last.t - s[i].t;
+      const dt = t - s[i].t;
       const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
       if (Math.abs(w) < FLING_MIN_V) return 0;
       v = Math.max(-FLING_MAX_V, Math.min(FLING_MAX_V, w)) * FLING_VEL_GAIN;
@@ -9724,9 +9724,6 @@ var AttachTerminal = class {
     }
     const y = touch.clientY;
     const px = this.fling.push(y);
-    if (!this.applicationOwnsMouse()) {
-      return;
-    }
     if (!this.scrollClaimed) {
       if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         return;
@@ -9737,6 +9734,7 @@ var AttachTerminal = class {
     this.touchOriginY = y;
     this.applyTouchScrollPx(px);
     event.preventDefault();
+    event.stopPropagation();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
    *  Edit → Copy, right-click → Copy, assistive tech. The decision is in

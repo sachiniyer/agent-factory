@@ -451,11 +451,6 @@ export class AttachTerminal {
     const y = touch.clientY;
     // Sample every move, claimed or not: the estimator needs the approach in the slop.
     const px = this.fling.push(y);
-    if (!this.applicationOwnsMouse()) {
-      // xterm's own touch scrolling is live here; tracking the position anyway keeps
-      // a mode change mid-drag from scrolling by everything travelled before it.
-      return;
-    }
     if (!this.scrollClaimed) {
       if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         // Still within a tap's wobble. Leaving the event ALONE is the point: claiming
@@ -474,8 +469,11 @@ export class AttachTerminal {
     // Claim the pan. Left to the browser it chains out to the document, which toggles
     // the URL bar, resizes .af-app and refits the terminal mid-gesture (#2493) — and
     // an uncancelled drag can still synthesize the compatibility mouse events the
-    // application would read as a drag it never got the button press for.
+    // application would read as a drag it never got the button press for. The stop
+    // also hides the move from xterm's own touch listener, whose 1:1 native scroll
+    // would double ours whenever no application owns the mouse.
     event.preventDefault();
+    event.stopPropagation();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
    *  Edit → Copy, right-click → Copy, assistive tech. The decision is in

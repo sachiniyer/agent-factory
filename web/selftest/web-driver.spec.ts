@@ -836,7 +836,12 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number,
  * fast samples: a real finger accelerates into the lift, and a lone stalled send
  * before touchEnd would otherwise empty the ~100ms estimator window. `tailShare`
  * (default: the tail's even share) gives the tail a bigger slice of the travel —
- * the whip at the end of a hard flick.
+ * the whip at the end of a hard flick. Whipped tails (tailStepMs 0) pipeline their
+ * sends into ~one flight; `tailStepMs > 0` still QUEUES sends rather than awaiting
+ * them, so the tail lands at a real wall-clock cadence instead of one CDP
+ * round-trip per move, and the lift rides in the final move's flight — an awaited
+ * round-trip between last move and touchEnd would register as a stationary hold
+ * and dilute the measured velocity.
  */
 async function touchDragTimed(
   cdp: CDPSession,
@@ -853,25 +858,39 @@ async function touchDragTimed(
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: fromY }] });
   const span = toY - fromY;
   const share = tailShare ?? tail / (steps + tail);
+  const piped: Promise<unknown>[] = [];
   for (let step = 1; step <= steps + tail; step++) {
     const pos =
       step <= steps
         ? fromY + (span * (1 - share) * step) / steps
         : fromY + span * (1 - share) + (span * share * (step - steps)) / tail;
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: pos }] });
+    const sent = cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: pos }] });
     if (step <= steps) {
+      await sent;
       await new Promise((resolve) => setTimeout(resolve, stepMs));
+    } else if (tailShare !== undefined && tailStepMs === 0) {
+      piped.push(sent); // the whip: everything in one flight, lands inside ~1 RTT
     } else if (tailStepMs > 0) {
-      // Big tail moves must still be PACED: on the report-emitting path a burst of
-      // back-to-back sends lands while the renderer is busy with wheel-report echo
-      // and Chromium coalesces the rest of the gesture away.
-      await new Promise((resolve) => setTimeout(resolve, tailStepMs));
+      // A paced tail queues instead of awaiting: sends go out at wall-clock
+      // cadence, so arrival spacing holds on a slow runner instead of stretching
+      // to one round-trip per move.
+      piped.push(sent);
+      if (step < steps + tail) {
+        await new Promise((resolve) => setTimeout(resolve, tailStepMs));
+      }
+    } else {
+      await sent;
     }
   }
   if (holdBeforeEndMs > 0) {
+    await Promise.all(piped);
     await new Promise((resolve) => setTimeout(resolve, holdBeforeEndMs));
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return;
   }
+  // The lift queues behind the last move in the same flight — see the note above.
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await Promise.all(piped);
 }
 
 /**
@@ -3258,7 +3277,7 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       // An accelerating flick — a real finger gathers then whips: a slow first
       // half, then a fast tail covering most of the travel, so the release
       // window reads whip speed and not send round-trip time.
-      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
       const atRelease = await scrollTop();
       const settled = await settledScrollTop(viewport);
       metrics.normalFlickDragLines = (beforeFlick - atRelease) / rowHeight;
@@ -3310,9 +3329,9 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       const beforeFlick = await scrollTop();
       await armTouchProbe();
       // A whip over most of the screen: four small paced moves claim the gesture
-      // at deliberate speed, then four back-to-back ~119px moves whip the release
-      // window to ~4 px/ms — the review's >=10-viewport requirement.
-      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 35, 4, 0, 0.85);
+      // at deliberate speed, then five pipelined ~104px moves whip the release
+      // window to ~4+ px/ms — the review's >=10-viewport requirement.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
       await readTouchProbe("normalHardFlick");
       const atRelease = await scrollTop();
       const settled = await settledScrollTop(viewport);
@@ -3329,7 +3348,7 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
     await step("normal tap-to-stop", async () => {
       await p.keyboard.press("Enter");
       await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
-      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
       // The press lands mid-coast: from touchstart the view must hold still for as
       // long as the finger stays down.
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -3405,7 +3424,7 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
     await step("alternate flick", async () => {
       reports.length = 0;
       const t0 = Date.now();
-      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
       const releaseAt = Date.now();
       await settledReportCount(reports);
       metrics.altFlickTotalLines = wheels(t0).length;
@@ -3426,7 +3445,7 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       const t0 = Date.now();
       await armTouchProbe();
       // Same whip as the normal path — downward into history = wheel-up reports.
-      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 35, 4, 0, 0.85);
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
       await readTouchProbe("altHardFlick");
       const releaseAt = Date.now();
       await settledReportCount(reports);
@@ -3442,7 +3461,7 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
 
     await step("alternate tap-to-stop", async () => {
       reports.length = 0;
-      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
       await new Promise((resolve) => setTimeout(resolve, 150));
       await touchPressAndHold(cdp, column, y + height * 0.5, 200);
       const held = wheels().length;

@@ -21,11 +21,11 @@ export const TouchScroll = (now: () => number) => {
       const s = samples.splice(0), last = s.at(-1);
       v = 0;
       if (!last) return 0;
-      // Velocity comes from the trailing window measured AT LIFT — a pause before
-      // it ages the tail out and the whole-gesture span dilutes w to a no-fling.
+      // Velocity comes from the trailing window measured against the LIFT time —
+      // a pause before it dilutes w smoothly instead of clipping at the window.
       let i = s.length - 1;
       for (; i > 0 && s[i - 1].t >= t - FLING_WINDOW_MS; --i);
-      const dt = last.t - s[i].t;
+      const dt = t - s[i].t;
       const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
       if (Math.abs(w) < FLING_MIN_V) return 0;
       v = Math.max(-FLING_MAX_V, Math.min(FLING_MAX_V, w)) * FLING_VEL_GAIN;

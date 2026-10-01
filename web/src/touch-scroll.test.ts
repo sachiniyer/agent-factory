@@ -87,17 +87,19 @@ test("release velocity is read off only the trailing 100ms of the drag", () => {
   const s = TouchScroll(clock.now);
   s.stop(); s.push(400);
   // A long slow approach (400px over 400ms = 1 px/ms, itself fling-worthy) ends in
-  // a fast tail: 100px inside the last 80ms. The window must see ~1.25 px/ms, not
-  // the gesture's average — an early-motion average is exactly what the window
+  // a fast tail: 100px inside the last 80ms. The window must see ~the tail's rate,
+  // not the gesture's average — an early-motion average is exactly what the window
   // exists to discard.
   const samples = [{ y: 400, t: 0 }];
   for (let i = 1; i <= 10; i++) {
     samples.push({ y: 400 - i * 10, t: 20 + i * 8 });
   }
   drag(s, clock, samples);
-  clock.set(120);
+  // Lift 10ms after the last move: the window edge lands on the t=28 sample, so
+  // dt spans 82ms of tail travel — the lift-time gap counts too.
+  clock.set(110);
   const v0 = s.release();
-  const expected = (10 * FLING_VEL_GAIN * 10) / 80; // 100px finger / 80ms, gained
+  const expected = (90 * FLING_VEL_GAIN) / 82; // 90px finger / 82ms, gained
   assert.ok(Math.abs(v0 - expected) < expected * 0.001, `release velocity ${v0} ≈ ${expected} px/ms content`);
 });
 
@@ -146,6 +148,21 @@ test("the coast decays exponentially and halts under the stop threshold", () => 
     assert.ok(Math.abs(frames[i] / frames[i - 1] - ratio) < 1e-9, `frame ${i} must decay by exp(-dt/τ)`);
   }
   assert.equal(s.tick(), null);
+});
+
+test("holding still before the lift bleeds the release velocity away", () => {
+  // The same brisk tail, two endings: lifted mid-motion versus after a 60ms
+  // stationary hold. The window includes the pause, so the held lift dilutes.
+  const build = (gapMs: number) => {
+    const clock = fakeClock();
+    const s = TouchScroll(clock.now);
+    s.stop(); s.push(400);
+    drag(s, clock, [{ y: 300, t: 0 }, { y: 250, t: 20 }, { y: 200, t: 40 }]);
+    clock.set(40 + gapMs);
+    return s.release();
+  };
+  const hot = build(0), held = build(60);
+  assert.ok(hot > 0 && held > 0 && held < hot, `a 60ms hold must dilute ${hot} below it, got ${held}`);
 });
 
 test("a drag that pauses before the lift leaves no momentum", () => {
