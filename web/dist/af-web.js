@@ -9564,6 +9564,7 @@ var AttachTerminal = class {
   // coast tick stale — the master sighting measured 68px, exactly one tick that
   // was applied BEFORE the stop landed (#5020).
   coastApplied = 0;
+  coastStopCount = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -9897,7 +9898,9 @@ var AttachTerminal = class {
    *  velocity and returns null: nothing applies past the recorded count. */
   stopCoast() {
     this.fling.stop();
-    this.container.dataset.afCoastStopCount = String(this.coastApplied);
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
   }
   onCoastFrame = () => {
     const px = this.fling.tick();

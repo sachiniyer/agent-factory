@@ -249,6 +249,7 @@ export class AttachTerminal {
   // coast tick stale — the master sighting measured 68px, exactly one tick that
   // was applied BEFORE the stop landed (#5020).
   private coastApplied = 0;
+  private coastStopCount = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -858,7 +859,13 @@ export class AttachTerminal {
    *  velocity and returns null: nothing applies past the recorded count. */
   private stopCoast(): void {
     this.fling.stop();
-    this.container.dataset.afCoastStopCount = String(this.coastApplied);
+    // onMessage calls this for every PTY frame on a followed tail, so the
+    // attribute write happens only when a coast actually applied since the
+    // last recorded stop — an unchanged dataset write still costs a DOM
+    // mutation per output frame.
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
   }
 
   private readonly onCoastFrame = (): void => {
