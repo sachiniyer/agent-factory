@@ -32,6 +32,8 @@ func TestCommandEnvironmentFromCommand(t *testing.T) {
 		{name: "chdir separate", command: "env -C /tmp codex", key: "CODEX_HOME", wantDir: "/tmp"},
 		{name: "chdir attached", command: "env -Crelative codex", key: "CODEX_HOME", wantDir: filepath.Join(workDir, "relative")},
 		{name: "nested env cwd", command: "env -C /tmp env -C child CODEX_HOME=rel codex", key: "CODEX_HOME", want: CommandEnvOverride{Value: "rel", Present: true, Set: true, Literal: true}, wantDir: "/tmp/child"},
+		{name: "dash terminates options before chdir", command: "env - -C /evilpath codex", key: "CODEX_HOME", want: CommandEnvOverride{Present: true, Literal: true}, unknownDir: true},
+		{name: "dash terminates options refuses phantom chdir assignment", command: "env - -C /evilpath CODEX_HOME=mystore codex", key: "CODEX_HOME", wantErr: "after a command wrapper"},
 		{name: "codex chdir separate", command: "codex -C /tmp", key: "CODEX_HOME", unknownDir: true},
 		{name: "codex chdir attached", command: "codex -C/tmp", key: "CODEX_HOME", unknownDir: true},
 		{name: "codex long chdir separate", command: "codex --cd /tmp", key: "CODEX_HOME", unknownDir: true},
@@ -80,4 +82,17 @@ func TestCodexHomeFromCommandUsesEffectiveCwd(t *testing.T) {
 	got, err := CodexHomeFromCommand("env -C /tmp CODEX_HOME=relative codex", launchDir)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(string(filepath.Separator), "tmp", "relative"), got)
+}
+
+func TestCodexHomeFromCommandModelsDashClearThenAssignment(t *testing.T) {
+	launchDir := filepath.Join(string(filepath.Separator), "launch")
+	got, err := CodexHomeFromCommand("env - CODEX_HOME=mystore codex", launchDir)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(launchDir, "mystore"), got)
+}
+
+func TestCodexHomeFromCommandRefusesPhantomChdirAfterDash(t *testing.T) {
+	launchDir := filepath.Join(string(filepath.Separator), "launch")
+	_, err := CodexHomeFromCommand("env - -C /evilpath CODEX_HOME=mystore codex", launchDir)
+	require.ErrorContains(t, err, "after a command wrapper")
 }

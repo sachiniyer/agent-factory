@@ -113,7 +113,9 @@ func Advance(arg string, operand func() (string, bool), state State, policy Poli
 		switch {
 		case arg == "--":
 			return Step{Width: 1, Next: State{assignments: state.assignments}}, nil
-		case arg == "-" || arg == "-i" || arg == "--ignore-environment":
+		case arg == "-":
+			return Step{Width: 1, Next: State{assignments: state.assignments}, Clear: true}, nil
+		case arg == "-i" || arg == "--ignore-environment":
 			return Step{Width: 1, Next: state, Clear: true}, nil
 		case arg == "--help" || arg == "--version":
 			return Step{}, unsupported(arg, "option exits env without running a command")
