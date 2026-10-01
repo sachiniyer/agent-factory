@@ -126,7 +126,7 @@ reason to move a budget.
 
 Measured on PR head `a3ff9bad9b` by the PR Validation "Performance and visual
 baselines" job (run `36818955890`), which reported raw_bytes 1,019,608 and
-gzip_bytes 227,456. Bundle bytes are deterministic — `make -C web build`
+gzip_bytes 227,456. Bundle bytes are deterministic — `make web-build`
 reproduces `web/dist` byte-for-byte, a property the Web job verifies on every
 push — so the recorded values were recomputed locally with the identical
 metric (`scripts/perf/report.mjs`: raw sum and per-file `gzipSync(level: 9)`
