@@ -81,8 +81,9 @@ they never establish that a frame completed.
 The original P1 recording was measured on 2026-09-05; its layout-shift and TUI
 entries remain unchanged. The three web latency baselines were tightened on
 2026-09-06 for #3914 using the six after samples detailed below. Bundle baselines
-were refreshed on 2026-09-07 for #4050, on 2026-09-09 for #4018, and on
-2026-10-01 for #5028, each using three identical deterministic samples. Measurements use Linux amd64, Node/Chromium from the
+were refreshed on 2026-09-07 for #4050, on 2026-09-09 for #4018, on
+2026-10-01 for #5028, and on 2026-10-01 for #5057 (gzip only), each using
+three identical deterministic samples. Measurements use Linux amd64, Node/Chromium from the
 pinned Playwright 1.56.1 Noble image, Go 1.25.0 and a 4GiB container memory limit.
 The original warm end-to-end run took about three minutes.
 
@@ -96,7 +97,7 @@ under the `perf-baselines` artifact.
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1020133.000 | 1020133.000–1020133.000 | 0.000 | 1071139.650 |
-| gzip_bytes | 227625.000 | 227625.000–227625.000 | 0.000 | 239006.250 |
+| gzip_bytes | 227657.000 | 227657.000–227657.000 | 0.000 | 239039.850 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -121,6 +122,21 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Bundle refresh provenance (#5057)
+
+PR #5057 adds `clearLoginDraft` (a one-line `ui.ts` helper plus a single gated
+call site in `disconnect`) so an auth-driven return to the login view does not
+pre-fill the paste form with a credential the daemon just rejected. The
+committed web bundle grew 32 gzip bytes over the post-#5028 tree (gzip_bytes
+227,625 → 227,657), so the gzip baseline was re-recorded to that measured mean
+using the same convention every entry follows (baseline = recorded mean,
+margin = baseline × 0.05). Bundle bytes are deterministic — `make web-build`
+reproduces `web/dist` byte-for-byte, which the Web job verifies on every push —
+and the gzip sum recomputes identically across three samples, so the recorded
+mean equals the per-file `gzipSync(level: 9)` sum over `web/dist/**.{js,css}`
+(`scripts/perf/report.mjs`). raw_bytes stayed well under its budget, so its
+baseline is unchanged; every timing and layout-shift baseline is unchanged too.
 
 ### Bundle refresh provenance (#5028)
 
