@@ -380,11 +380,12 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			if configJSONFlag {
 				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(entry))
 			}
-			line := formatConfigValue(entry.Value)
+			// Scalar get stays script-friendly: the raw value owns stdout and the
+			// advisory lands on stderr, where the user still sees the mark.
 			if entry.note != "" {
-				line += " " + entry.note
+				fmt.Fprintln(cmd.ErrOrStderr(), entry.Key+" "+entry.note)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), line)
+			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Value))
 			return nil
 		}
 

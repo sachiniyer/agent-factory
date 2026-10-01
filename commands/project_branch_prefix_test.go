@@ -46,7 +46,9 @@ func TestConfigSetProjectBranchPrefixWarnsOnStderr(t *testing.T) {
 // TestConfigGetListRepoBranchPrefixMarksIgnoredOverride pins the inspection
 // contract: with a stored personal value, --repo reads still resolve the
 // GLOBAL prefix as effective and mark it "(project override ignored: not
-// supported yet)" rather than silently showing the stored one.
+// supported yet)" rather than silently showing the stored one. `config get`
+// keeps its script-friendly bare stdout — the mark goes to stderr — while
+// `config list` renders it inline in the human table.
 func TestConfigGetListRepoBranchPrefixMarksIgnoredOverride(t *testing.T) {
 	_, repo := setupConfigExplainCommandTest(t, "schema_version = 1\nbranch_prefix = \"global/\"\n")
 	t.Setenv("AF_DAEMON_URL", "")
@@ -60,10 +62,15 @@ func TestConfigGetListRepoBranchPrefixMarksIgnoredOverride(t *testing.T) {
 	t.Cleanup(func() {
 		configGetRepoFlag, configGetProjectFlag, configGetExplainFlag, configJSONFlag = oldRepo, oldProject, oldExplain, oldJSON
 	})
-	got, err := runConfigGetForTest(t, "branch_prefix")
-	require.NoError(t, err)
-	assert.Equal(t, "global/ (project override ignored: not supported yet)\n", got,
-		"the effective value is the global prefix, marked — not the stored project value")
+	cmd := &cobra.Command{}
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	require.NoError(t, configGetCmd.RunE(cmd, []string{"branch_prefix"}))
+	assert.Equal(t, "global/\n", stdout.String(),
+		"scalar get keeps the effective global value bare on stdout")
+	assert.Contains(t, stderr.String(), "(project override ignored: not supported yet)",
+		"the mark still reaches the user on stderr")
 
 	oldLRepo, oldLProject, oldLExplain, oldLJSON := configListRepoFlag, configListProjectFlag, configListExplainFlag, configJSONFlag
 	configListRepoFlag, configListProjectFlag, configListExplainFlag, configJSONFlag = repo, "", false, false

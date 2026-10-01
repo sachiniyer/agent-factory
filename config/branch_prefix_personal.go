@@ -52,10 +52,9 @@ var projectBranchPrefixWarned sync.Map
 
 // warnProjectBranchPrefixIgnored announces that a personal project config
 // declares branch_prefix, a value stored but not applied (#4539), naming the
-// effective prefix THIS resolution already computed — callers never re-load
-// the global file to say it, so even read-only inspection cannot mutate the
-// AF home. It fires at most once per file per process and reaches both the log
-// and, when a command wired it, interactive stderr.
+// global prefix the caller passes in. It fires at most once per file per
+// process and reaches both the log and, when a command wired it, interactive
+// stderr.
 func warnProjectBranchPrefixIgnored(path, effectiveGlobalPrefix string) {
 	key := path
 	if key == "" {
@@ -93,12 +92,9 @@ func projectBranchPrefixWriteWarning(key string) string {
 // annotateProjectBranchPrefix relabels a present personal-project candidate on
 // a resolved branch_prefix: it was excluded by precedence, but the generic
 // "disallowed" reads like the location is not supported at all — it is: the
-// value is accepted and stored, just not applied (#4539). It also emits the
-// once-per-file load warning here — the resolve is where every consumer's
-// config load funnels, and res.BranchPrefix is already the effective prefix
-// THIS resolution computed, so the warning names it without touching the
-// global file again. No-op when no personal layer participated (the
-// global-only resolve).
+// value is accepted and stored, just not applied (#4539). The Reason names the
+// already-resolved effective prefix rather than re-reading the global file.
+// No-op when no personal layer participated (the global-only resolve).
 func annotateProjectBranchPrefix(res *ResolvedConfig) {
 	for i := range res.Resolution {
 		value := &res.Resolution[i]
@@ -110,7 +106,6 @@ func annotateProjectBranchPrefix(res *ResolvedConfig) {
 			if candidate.Layer == SourceProjectPersonal.String() && candidate.Present && !candidate.Allowed {
 				candidate.Result = "ignored"
 				candidate.Reason = "accepted and stored, but not applied: " + projectBranchPrefixWarningFor(res.BranchPrefix)
-				warnProjectBranchPrefixIgnored(candidate.Path, res.BranchPrefix)
 			}
 		}
 	}

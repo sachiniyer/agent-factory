@@ -111,4 +111,7 @@ func TestInspectionResolveBranchPrefixDoesNotLoadGlobal(t *testing.T) {
 	require.NotNil(t, personal)
 	assert.Contains(t, personal.Reason, "(snapshot/)",
 		"the ignored reason names the supplied global snapshot's value, not a fresh file read")
+	_, err = os.Stat(filepath.Join(home, TomlConfigFileName))
+	require.True(t, os.IsNotExist(err),
+		"a read-only inspection must not materialize the global config file")
 }

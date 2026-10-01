@@ -146,7 +146,19 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 		}
 		return nil, fmt.Errorf("failed to read personal project config %s: %w", prettyHomePath(path), err)
 	}
-	return parseProjectConfig(data, path)
+	cfg, err := parseProjectConfig(data, path)
+	if err != nil {
+		return nil, err
+	}
+	// A stored per-project branch_prefix is inert until #4539 — say so once per
+	// file per process rather than on every daemon-driven reload. Not every
+	// consumer resolves (the daemon's root-agent snapshot reads this file
+	// directly), so the warning lives at the load itself; the global value it
+	// names comes from a strictly read-only load, never a materializing one.
+	if cfg.IsSet("branch_prefix") {
+		warnProjectBranchPrefixIgnored(path, globalBranchPrefixValue())
+	}
+	return cfg, nil
 }
 
 // parseProjectConfig decodes and validates personal-project TOML bytes. It is
