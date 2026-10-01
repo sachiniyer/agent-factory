@@ -50,12 +50,20 @@ func globalBranchPrefixValue() string {
 // removedPRKeysWarned uses).
 var projectBranchPrefixWarned sync.Map
 
+// globalBranchPrefixForLoadWarning resolves the global prefix the load
+// warning names — the seam tests inject at to count loads. It is a func rather
+// than a string so the once-per-file memo below can reserve its key BEFORE the
+// value resolves (#5026): a repeat load then performs no global load at all,
+// and a race of first loads pays for exactly one.
+var globalBranchPrefixForLoadWarning = globalBranchPrefixValue
+
 // warnProjectBranchPrefixIgnored announces that a personal project config
 // declares branch_prefix, a value stored but not applied (#4539), naming the
-// global prefix the caller passes in. It fires at most once per file per
-// process and reaches both the log and, when a command wired it, interactive
-// stderr.
-func warnProjectBranchPrefixIgnored(path, effectiveGlobalPrefix string) {
+// global prefix the caller's resolver returns. It fires at most once per file
+// per process — the memo is consulted before the resolver runs, so a repeated
+// load never pays for the global lookup — and reaches both the log and, when a
+// command wired it, interactive stderr.
+func warnProjectBranchPrefixIgnored(path string, effectiveGlobalPrefix func() string) {
 	key := path
 	if key == "" {
 		key = "(unknown)"
@@ -64,7 +72,7 @@ func warnProjectBranchPrefixIgnored(path, effectiveGlobalPrefix string) {
 		return
 	}
 	msg := fmt.Sprintf("personal project config %s: %s",
-		prettyHomePath(path), projectBranchPrefixWarningFor(effectiveGlobalPrefix))
+		prettyHomePath(path), projectBranchPrefixWarningFor(effectiveGlobalPrefix()))
 	log.WarningLog.Print(msg)
 	writeInteractiveWarning(msg)
 }

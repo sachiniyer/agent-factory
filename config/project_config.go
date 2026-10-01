@@ -155,8 +155,10 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 	// consumer resolves (the daemon's root-agent snapshot reads this file
 	// directly), so the warning lives at the load itself; the global value it
 	// names comes from a strictly read-only load, never a materializing one.
+	// The resolver is passed lazily so the once-per-file memo answers before a
+	// repeated load re-reads the global config (#5026).
 	if cfg.IsSet("branch_prefix") {
-		warnProjectBranchPrefixIgnored(path, globalBranchPrefixValue())
+		warnProjectBranchPrefixIgnored(path, globalBranchPrefixForLoadWarning)
 	}
 	return cfg, nil
 }
