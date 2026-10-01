@@ -3641,7 +3641,7 @@ async function ensureValidationRun({
         workflow_id: VALIDATION_WORKFLOW,
         ref: headRefName,
       }),
-    landed: () => validationRunVisible({ github, context, headSha, sleep }),
+    landed: (since) => validationRunVisible({ github, context, headSha, since, sleep }),
     // The ref is mutable: between a transient answer and its replay the branch
     // can point somewhere else, and a dispatch there would validate that commit.
     // canRecover re-reads the head before every attempt.
@@ -4055,8 +4055,10 @@ async function settledWorkflowRun({ label, find, sleep }) {
 // API cannot filter on workflow_dispatch inputs, so the window is the identity:
 // an auto-gate.yml dispatch run created at-or-after the first POST is the one
 // to adopt. A foreign dispatch inside the same seconds-wide window is
-// indistinguishable — and safe to adopt anyway, because what the follow-up
-// chases, the successor head's own events re-evaluate regardless (#5064). This
+// indistinguishable — and safe to adopt anyway, on two layers of backstop: the
+// recovery concurrency group dedupes same-(PR, initiating-head) dispatches into
+// one evaluation, and what the follow-up chases is re-evaluated by the
+// successor's own events and the stale-WAITING sweep regardless (#5064). This
 // run is excluded: it can itself be a workflow_dispatch inside the cutoff's
 // whole-second rounding, and it is certainly not its own follow-up.
 async function gateFollowUpRun({ github, context, since, sleep }) {
@@ -4079,22 +4081,27 @@ async function gateFollowUpRun({ github, context, since, sleep }) {
         throw new Error("the workflow-run listing had no runs array");
       }
       return (
-        runs.find(
-          (run) => run?.id !== context.runId && !(Date.parse(run?.created_at) < cutoff),
-        ) || null
+        runs.find((run) => {
+          const created = Date.parse(run?.created_at);
+          return run?.id !== context.runId && Number.isFinite(created) && created >= cutoff;
+        }) || null
       );
     },
     sleep,
   });
 }
 
-// Any PR Validation run on the head settles the ambiguous dispatch — however it
-// arrived: this POST, the push's own pull_request run, or a hand dispatch. The
-// existence check repeats the poll above, so no event filter: the run this
-// dispatch creates is a workflow_dispatch run, which a pull_request filter
-// would never see.
-async function validationRunVisible({ github, context, headSha, sleep }) {
+// Any PR Validation run created at-or-after the first POST settles the
+// ambiguous dispatch — however it arrived: this POST, or the push's own
+// pull_request run landing late. The existence check repeats the poll above,
+// so no event filter: the run this dispatch creates is a workflow_dispatch
+// run, which a pull_request filter would never see. The since window matters:
+// a pr.yml run that PREDATES the first attempt — a hand-dispatched probe, for
+// instance, which never runs the required Build/Lint — cannot be the work this
+// POST was charged with, so it must not suppress the retry.
+async function validationRunVisible({ github, context, headSha, since, sleep }) {
   const { owner, repo } = context.repo;
+  const cutoff = since ?? 0;
   return settledWorkflowRun({
     label: `could not confirm whether a PR Validation run exists for ${headSha}`,
     find: async () => {
@@ -4103,13 +4110,18 @@ async function validationRunVisible({ github, context, headSha, sleep }) {
         repo,
         workflow_id: VALIDATION_WORKFLOW,
         head_sha: headSha,
-        per_page: 1,
+        per_page: 10,
       });
       const runs = listed?.data?.workflow_runs;
       if (!Array.isArray(runs)) {
         throw new Error("the workflow-run listing had no runs array");
       }
-      return runs[0] || null;
+      return (
+        runs.find((run) => {
+          const created = Date.parse(run?.created_at);
+          return Number.isFinite(created) && created >= cutoff;
+        }) || null
+      );
     },
     sleep,
   });
@@ -5939,7 +5951,12 @@ async function recoverSuccessorHead({
             return eligible(pr) && normalizeHeadSha(pr.headRefOid) === observed;
           },
         });
-        if (!validation.cancelled && !validation.dispatched && (!validation.found || !validation.approved)) {
+        // The split is found-vs-not, not dispatched-vs-not: a run that EXISTS
+        // but stayed unapprovable fails the same way whether this lane
+        // dispatched it or adopted it — a reconciled dispatch reports
+        // found+approved state too, and a parked successor must never be
+        // published as recovered with no runnable validation on it.
+        if (!validation.cancelled && (validation.found ? !validation.approved : !validation.dispatched)) {
           throw new Error(validation.found
             ? `not every parked run on ${observed} could be approved`
             : `no PR Validation run appeared on ${observed} and none could be dispatched`);

@@ -11376,6 +11376,56 @@ test("#5010: a validation dispatch retry re-checks the live head before replayin
     "the re-established guard refused the replay; the stale head's branch was never dispatched");
 });
 
+// Codex review on this fix: a pr.yml run that predates the dispatch — a
+// hand-fired probe, which never runs the required checks — is not the work the
+// ambiguous POST was charged with, so it must not suppress the retry. The
+// reconcile only adopts runs created inside the window.
+test("#5010: a validation run that predates the dispatch does not suppress the retry", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 798, name: "PR Validation", event: "workflow_dispatch",
+        status: "completed", conclusion: "success", created_at: "2020-01-01T00:00:00Z" },
+    ] },
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["pr.yml"], 2,
+    "the pre-existing run answered nothing about this POST, so the dispatch retried");
+  assert.equal(github.dispatchedWorkflows.length, 1);
+});
+
+// And the flip side of adoption (Codex): a landed run that stays parked and
+// unapprovable is found+unapproved, which must still fail recovery loudly —
+// published as a target with no runnable validation would be silent loss.
+test("#5010: an adopted run that stays parked and unapprovable still fails loudly", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+    dispatchErrorLandsRun: {
+      // The run the reconcile finds is the push's own pull_request run landing
+      // late inside the window — and it is parked.
+      "pr.yml": { id: 799, name: "PR Validation", head_sha: OTHER_SHA,
+        event: "pull_request", status: "completed", conclusion: "action_required" },
+    },
+    approveRunError: new Error("approval refused"),
+  });
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /not every parked run on .* could be approved/,
+  );
+  assert.equal(github.approveRunAttempts, 1, "a definitive approve refusal is not retried");
+  assert.equal(github.recoveryComments.length, 1,
+    "the unapprovable adopted run still reaches the PR as a recovery failure");
+});
+
 // ---------------------------------------------------------------------------
 // The update-branch merge race (#4462). evaluate() resolves a PR open and
 // behind; a hand or queue merge then closes it in the seconds before the
@@ -16018,7 +16068,10 @@ function fakeGateGithub({
           ...run,
         });
       } else if (run?.head_sha) {
-        (runsByHeadSha[run.head_sha] = runsByHeadSha[run.head_sha] || []).push(run);
+        // The reconcile window keys on created_at, so the fake stamps it the
+        // way the API does — at landing, inside the window.
+        (runsByHeadSha[run.head_sha] = runsByHeadSha[run.head_sha] || [])
+          .push({ created_at: new Date().toISOString(), ...run });
       }
     },
     rest: {
