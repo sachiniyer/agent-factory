@@ -69,7 +69,11 @@ options:
 			case "replace":
 				substituting = true
 				replaceCancelled, replaceMarker = false, "{}"
-				if attached {
+				// An explicitly empty --replace= marker is treated like a bare
+				// --replace and defaults to {}: an empty marker would make every
+				// strings.Contains/HasPrefix scan in the xargs-input walk report
+				// every word as carrying substituted input (#4980).
+				if attached && value != "" {
 					marker, replaceMarker = value, value
 				}
 				words = words[1:]
@@ -150,11 +154,19 @@ options:
 					switch flags[idx] {
 					case 'I':
 						substituting = true
-						replaceCancelled, replaceMarker = false, arg
+						replaceCancelled, replaceMarker = false, "{}"
 						if argLiteral {
-							marker = arg
+							if arg != "" {
+								marker, replaceMarker = arg, arg
+							}
+							// An explicitly empty -I "" marker is treated like a
+							// bare -i/--replace and defaults to {}: an empty
+							// marker would make every strings.Contains/HasPrefix
+							// scan in the xargs-input walk report every word as
+							// carrying substituted input (#4980).
 						} else {
 							markerKnown = false
+							replaceMarker = arg
 						}
 					case 'L':
 						replaceCancelled = true
