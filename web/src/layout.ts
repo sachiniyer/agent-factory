@@ -368,12 +368,18 @@ export function tabsRebound(
  *
  *  Surviving tabs follow their identity. A leaf whose identity is gone (its tab was
  *  really closed) keeps its ordinal and lets reconcile rebuild it against whatever
- *  now occupies that slot — the same degradation as a plain tab-count shrink. The one
- *  conflict is a dead leaf sitting on an ordinal a survivor has just claimed: the
- *  survivor wins (it is the pane that actually holds that tab) and the dead leaf is
- *  closed, since the tab it was showing no longer exists. That priority matters —
- *  validate() also drops duplicates, but it keeps the FIRST leaf in visual order,
- *  which would just as easily evict the survivor and keep the pane whose tab died.
+ *  now occupies that slot — the same degradation as a plain tab-count shrink — UNLESS
+ *  a pure shrink left that ordinal with no slot at all (the closed tab was the
+ *  highest-ordinal one and nothing was created to take its place). In that case the
+ *  dead leaf is closed here: validate() would otherwise clamp it down onto the
+ *  survivor's ordinal and, keeping the FIRST leaf in visual order, evict that
+ *  survivor — handing the pane's live terminal to the tab that just died. The one
+ *  other conflict is a dead leaf sitting on an ordinal a survivor has just claimed:
+ *  the survivor wins (it is the pane that actually holds that tab) and the dead leaf
+ *  is closed, since the tab it was showing no longer exists. Both priorities matter
+ *  for the same reason — validate() also drops duplicates, but it keeps the FIRST
+ *  leaf in visual order, which would just as easily evict the survivor and keep the
+ *  pane whose tab died.
  *
  *  Node references are preserved when nothing moves, so the common no-op resync does
  *  not churn a rebuild. */
@@ -406,6 +412,19 @@ export function remapByIdentity(root: LayoutNode, prevIds: string[], ids: string
   // Drop a dead-identity leaf that now collides with a survivor's claim.
   for (const leaf of leaves(cur)) {
     if (!moved.has(leaf.id) && claimed.has(leaf.tab)) {
+      cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
+  // Drop a dead-identity leaf whose ordinal no longer has a slot after a pure
+  // shrink (the closed tab was the highest-ordinal one, nothing replaced it). On a
+  // multi-pane tree this is the case validate() would otherwise clamp down onto the
+  // survivor's ordinal and — keeping the FIRST leaf in visual order — evict that
+  // survivor, rebinding its live terminal to the tab that just died. `ids.length` is
+  // the new tabCount; a leaf not in `moved` at `tab >= ids.length` is one whose tab is
+  // gone AND whose slot is gone. `closeLeaf` returns null for the last pane, so `?? cur`
+  // leaves a sole dead leaf in place to degrade as before (validate clamps it to max).
+  for (const leaf of leaves(cur)) {
+    if (!moved.has(leaf.id) && leaf.tab >= ids.length) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
     }
   }

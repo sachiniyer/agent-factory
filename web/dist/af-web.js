@@ -12827,6 +12827,11 @@ function remapByIdentity(root2, prevIds, ids) {
       cur = closeLeaf(cur, leaf.id) ?? cur;
     }
   }
+  for (const leaf of leaves(cur)) {
+    if (!moved.has(leaf.id) && leaf.tab >= ids.length) {
+      cur = closeLeaf(cur, leaf.id) ?? cur;
+    }
+  }
   return cur;
 }
 function resolveDragTab(drag, tabRealIds, tabIds, tabCount) {
