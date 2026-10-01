@@ -2967,6 +2967,43 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
     ).toBe(true);
     await expect(mouseHint).not.toHaveClass(/af-visible/);
 
+    // DEFAULT encoding next: SGR off but DECSET 1000 still on. The reports now
+    // leave xterm on the BINARY channel — \x1b[M then three byte-coded fields —
+    // which reached the PTY never until the review fix this regression pins.
+    // The toggle line is typed at a shell that may have flushed pending input
+    // around the Ctrl+C, so probe drags retry it until a binary report lands;
+    // when the line lands, SGR is off and `cat` is swallowing again together.
+    const defaultReports = () =>
+      inputPayloads.filter((pl) => pl[0] === 0x1b && pl[1] === 0x5b && pl[2] === 0x4d);
+    await p.keyboard.press("Control+c");
+    inputPayloads.length = 0;
+    await expect(async () => {
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("printf '\\033[?1006l'; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      await touchDrag(cdp, column, y + height * 0.3, y + height * 0.5);
+      expect(
+        defaultReports().length,
+        "default-encoded wheel reports must reach the PTY byte-for-byte",
+      ).toBeGreaterThanOrEqual(3);
+      expect(
+        defaultReports().every((pl) => pl[3] === 0x60),
+        "the downward drag must report wheel-up (\\x1b[M`) in DEFAULT encoding",
+      ).toBe(true);
+    }).toPass({ timeout: 15_000 });
+
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => defaultReports().length, {
+        message: "the upward drag must report wheel-down in DEFAULT encoding too",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      defaultReports().every((pl) => pl[3] === 0x61),
+      "the upward drag must report wheel-down only (\\x1b[Ma)",
+    ).toBe(true);
+
     // Back on the normal buffer — mouse tracking STILL on — the same drag keeps
     // its #2682 meaning: it scrolls local history and reports nothing.
     //

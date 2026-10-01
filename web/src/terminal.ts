@@ -652,6 +652,9 @@ export class AttachTerminal {
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    // Mouse reports in xterm's DEFAULT encoding (wheel/click without SGR 1006)
+    // leave on the binary channel — a byte string, one char per byte.
+    this.term.onBinary((data) => this.sendBinary(data));
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
     // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the
@@ -1571,6 +1574,24 @@ export class AttachTerminal {
       return;
     }
     this.noteQueuedInput(text);
+  }
+
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  private sendBinary(data: string): void {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected — typing was not delivered");
+    }
   }
 
   /** Hands the PTY everything typed while the socket was down, in order, then

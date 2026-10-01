@@ -9424,6 +9424,7 @@ var AttachTerminal = class {
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    this.term.onBinary((data) => this.sendBinary(data));
     this.term.attachCustomKeyEventHandler((ev) => {
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
@@ -10420,6 +10421,23 @@ var AttachTerminal = class {
       return;
     }
     this.noteQueuedInput(text);
+  }
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  sendBinary(data) {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+    }
   }
   /** Hands the PTY everything typed while the socket was down, in order, then
    *  empties the queue. Called from onopen, so it covers the first connect and
