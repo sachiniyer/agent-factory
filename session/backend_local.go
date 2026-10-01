@@ -260,7 +260,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		if restoreResult == tmux.RestoreRespawned {
 			if strings.TrimSpace(runtimeProgram) != "" {
-				i.setRuntimeProgram(runtimeProgram)
+				i.setRuntimeLaunch(runtimeProgram, tmuxSession)
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves
@@ -273,9 +273,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate
-			// the session under the same sanitized name. Keep the live pane, but retire
-			// its persisted launch-command claim and checkpoint that loss of evidence.
-			if i.clearRuntimeProgramForUnverifiedReattach() {
+			// the session under the same sanitized name. The pane root's (pid,
+			// start-time) identity is the proof — a match keeps the recorded launch
+			// command across the restart, and only a mismatch or an unanswerable
+			// probe retires the claim.
+			if i.clearRuntimeProgramForUnverifiedReattach(tmuxSession) {
 				i.markLoadRuntimeReplaced()
 			}
 		}
@@ -350,7 +352,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			return setupErr
 		}
-		i.setRuntimeProgram(runtimeProgram)
+		i.setRuntimeLaunch(runtimeProgram, tmuxSession)
 	}
 
 	// Rebuild the tab roster a reaped record handed this create, if any (#2628).
@@ -514,7 +516,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}
-	i.setRuntimeProgram(plan.baseProgram)
+	i.setRuntimeLaunch(plan.baseProgram, ts)
 
 	resetAgentBrokerCaptures(i)
 	return nil

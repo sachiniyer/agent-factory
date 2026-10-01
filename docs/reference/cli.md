@@ -1308,6 +1308,12 @@ that the run is unhealthy. A CI step or health probe should fail on the command
 exit code: 1 means unresolved actionable issues remain or a check did not finish
 looking. Advisory warnings alone do not fail the run.
 
+Rows can also carry INFO: a deliberate unknown — something visible but not
+comparable, like a root session the daemon adopted rather than launched, whose
+resolved runtime command therefore was never recorded. An INFO row is neither a
+problem nor an unfinished check; it appears in the report and in summary.info
+in --json output, and never contributes to the exit code.
+
 A check that stops early — for example, the temp-home sweep hits a candidate
 budget on a machine with a very large temp dir — now exits 1 even if it found
 no unhealthy condition. The summary line ends with "INCOMPLETE" naming the
