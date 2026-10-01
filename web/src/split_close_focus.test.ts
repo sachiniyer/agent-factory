@@ -34,6 +34,8 @@ type SplitViewInternals = {
   panes: Map<string, { term: { focus: () => void; blur: () => void } | null }>;
   tree: unknown;
   focusedId: string | null;
+  termHoldsFocus: boolean;
+  cb: SplitCallbacks;
 };
 
 function noopCallbacks(): SplitCallbacks {
@@ -203,4 +205,20 @@ test("closeFocusedPane: closing the only pane is a no-op (the last pane can't be
   closeFocusedPane(view);
   assert.equal(in_.focusedId, t.id, "the single pane stays focused");
   assert.equal(tf.count(), 0, "nothing is focused because the close was a no-op");
+});
+
+test("closeFocusedPane: closing the focused terminal onto a web-pane sibling reports rail mode", async () => {
+  const { view, in_, A, B, C, tfA } = await stageThreePanes("B");
+  in_.panes.set(C, { term: null });
+  in_.termHoldsFocus = true;
+  let lastFocus: boolean | null = null;
+  in_.cb.onFocusChange = (f) => { lastFocus = f; };
+
+  closeFocusedPane(view);
+
+  assert.equal(in_.focusedId, C, "focus moves to the sibling subtree's first leaf C");
+  assert.equal(lastFocus, false, "rail mode is reported through onFocusChange(false)");
+  assert.equal(in_.termHoldsFocus, false, "termHoldsFocus is cleared to match the body-focused DOM");
+  assert.equal(tfA.count(), 0, "the unrelated A terminal is never focused");
+  void A; void B;
 });

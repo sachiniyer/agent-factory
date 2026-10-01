@@ -13414,12 +13414,20 @@ var SplitView = class {
       return;
     }
     this.tree = next;
-    if (this.focusedId === leafId) {
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
       const fallback = leaves(this.tree)[0]?.id ?? null;
       this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
   // --- internal: reconcile tree → DOM + terminals ---------------------------
   teardown() {

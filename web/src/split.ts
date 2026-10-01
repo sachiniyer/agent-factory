@@ -744,12 +744,20 @@ export class SplitView {
     // nested close in a non-leftmost branch that is an unrelated pane, and
     // reconcile()'s validity guard (it only re-routes an INVALID focusedId) never
     // corrected it — so refocus() handed the keyboard to the wrong terminal.
-    if (this.focusedId === leafId) {
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
       const fallback = leaves(this.tree)[0]?.id ?? null;
       this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
 
   // --- internal: reconcile tree → DOM + terminals ---------------------------
