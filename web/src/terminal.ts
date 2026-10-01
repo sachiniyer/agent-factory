@@ -491,6 +491,9 @@ export class AttachTerminal {
     // lifts — so this is what tells onMouseDownCapture below whether the click it is
     // about to rewrite came from a finger.
     this.lastPointerWasTouch = event.pointerType === "touch";
+    // Any fresh pointer press is new scroll intent: a mouse/pen down on a hybrid
+    // device, or a second finger, must not fight a touch flick still coasting.
+    this.fling.stop();
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
@@ -661,6 +664,12 @@ export class AttachTerminal {
     // Mouse reports in xterm's DEFAULT encoding (wheel/click without SGR 1006)
     // leave on the binary channel — a byte string, one char per byte.
     this.term.onBinary((data) => this.sendBinary(data));
+    // An app can leave the alternate screen mid-coast — possibly ANSWERING our
+    // own wheel reports: the ?1049l parses inside a write() frame whenever it
+    // does, and the momentum must die with the buffer it was emitted on rather
+    // than keep scrolling the restored normal buffer. The event fires with the
+    // switch itself, so the write queue's timing is not the question.
+    this.term.buffer.onBufferChange(() => this.fling.stop());
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
     // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the

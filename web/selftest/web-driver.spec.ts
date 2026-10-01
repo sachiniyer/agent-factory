@@ -3385,6 +3385,22 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       metrics.normalTapReports = reports.length;
     });
 
+    await step("normal pointerdown mid-coast", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      // On a hybrid device a mouse or pen press while the flick still coasts is
+      // fresh scroll intent — the coast must die at pointerdown, not fight it.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await p.mouse.move(column, y + height * 0.55);
+      await p.mouse.down();
+      const atPress = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      metrics.normalPointerStopDriftPx = Math.abs((await scrollTop()) - atPress);
+      await p.mouse.up();
+      expect(metrics.normalPointerStopDriftPx, "a mouse press mid-coast must stop momentum").toBe(0);
+    });
+
     // PART B — the alternate screen under an application that owns the wheel
     // (#4982): the same gestures must become wheel reports, with the same gain and
     // the same momentum, coalesced at most one batch per frame.
@@ -3483,6 +3499,32 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
         )
         .toBe(true);
       metrics.altTapReports = reports.length;
+    });
+
+    await step("alternate app exit mid-coast", async () => {
+      // The app can leave the alternate screen mid-coast — e.g. in response to
+      // one of our own reports: its ?1049l rides an ordinary PTY frame, and the
+      // buffer the gesture was emitting wheel events into is suddenly gone. The
+      // momentum must die with it, not pour into the restored normal buffer.
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("(sleep 1.2; printf '\\033[?1049l') & stty -echo -icanon; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await expect(host, "the timed rmcup lands mid-coast and restores the seeded screen").toContainText(
+        "fast-scroll-",
+        { timeout: 6_000 },
+      );
+      metrics.altExitMidCoastReports = wheels(t0).length;
+      // The restored buffer re-renders once as the shell prompt returns; after
+      // that only a still-running coast could move the view — history-ward, the
+      // direction this flick drove. A drop means momentum outlived its buffer.
+      const afterSwitch = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const later = await scrollTop();
+      metrics.altExitMidCoastDriftPx = afterSwitch - later;
+      expect(metrics.altExitMidCoastDriftPx, "momentum must die with the alternate buffer").toBeLessThanOrEqual(0);
     });
   } finally {
     await testInfo.attach("scroll-metrics", {

@@ -9475,6 +9475,7 @@ var AttachTerminal = class {
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.onBinary((data) => this.sendBinary(data));
+    this.term.buffer.onBufferChange(() => this.fling.stop());
     this.term.attachCustomKeyEventHandler((ev) => {
       if (ev.type === "keydown") {
         this.fling.stop();
@@ -9748,6 +9749,7 @@ var AttachTerminal = class {
   };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
+    this.fling.stop();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
