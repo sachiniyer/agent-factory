@@ -81,6 +81,12 @@ const HOLD_LABEL_EVENT_WINDOW = 100;
 // only — if this spelling is ever wrong the summary names `github-actions` as
 // the applier and the decision is unchanged.
 const GATE_LABEL_ACTOR = "github-actions";
+// The triggering_actor a workflow_dispatch raised with the job's GITHUB_TOKEN
+// carries — github-actions[bot]. Ambiguous-dispatch reconciliation adopts a
+// dispatched run only under this identity: any OTHER actor — a hand-fired
+// probe, or a foreign GitHub App's dispatch — cannot be the run this POST was
+// charged with (Codex on #5010).
+const GATE_DISPATCH_ACTOR = "github-actions[bot]";
 // Who may lift a hold on a pull request THEY OPENED (#4576).
 //
 // The issue asks for ALLOWED_AUTHORS, and that alone does not close the case the
@@ -4212,14 +4218,15 @@ async function validationRunVisible({ github, context, headSha, since, sleep, ex
           // index lagging it — passes the timestamp check anyway, so the last
           // discriminator is who dispatched it. The push's own pull_request
           // run is adoptable whoever pushed; a workflow_dispatch run is the
-          // POST's work only when the automation asked for it. A probe fired
-          // by hand is a human's dispatch and carries no required checks even
-          // when it lands inside the window (#5010, Codex).
+          // POST's work only when the gate's own token raised it. Matching any
+          // bot would still adopt a foreign app's dispatch — a probe raised by
+          // other automation, which carries no required checks — so the match
+          // is the dispatcher identity itself, not the bot class (#5010, Codex).
           if (run.event !== "workflow_dispatch") {
             return true;
           }
           const actor = run?.triggering_actor || run?.actor;
-          return actor?.type === "Bot" || String(actor?.login || "").endsWith("[bot]");
+          return String(actor?.login || "") === GATE_DISPATCH_ACTOR;
         }) || null
       );
     },

@@ -11580,6 +11580,32 @@ test("#5010: a hand-fired probe surfacing inside the window is not adopted", asy
     "the automation's dispatch is adoptable; a human's workflow_dispatch probe is not");
 });
 
+// Codex review on this fix: the bot class is still too wide — another GitHub
+// App's automation raising a probe inside the window is a bot too, and its
+// run carries no required checks. Adoption matches the gate's own dispatcher
+// identity, the login the job's GITHUB_TOKEN dispatches under.
+test("#5010: another bot's dispatch is not adopted as the gate's run", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 800, name: "PR Validation", event: "workflow_dispatch",
+        status: "completed", conclusion: "success",
+        actor: { login: "some-other-app[bot]", type: "Bot" },
+        triggering_actor: { login: "some-other-app[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+      { id: 799, name: "PR Validation", event: "workflow_dispatch",
+        status: "in_progress", conclusion: null,
+        actor: { login: "github-actions[bot]", type: "Bot" },
+        triggering_actor: { login: "github-actions[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+    ] },
+  });
+  const found = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0, sleep: async () => {},
+  });
+  assert.equal(found?.id, 799,
+    "a foreign app's workflow_dispatch is not the run this POST raised");
+});
+
 // Codex review on this fix: the snapshot's own retries can spend seconds —
 // long enough for the mutable ref the dispatch targets to move after the
 // guard passed. The POST is preceded by a live-head recheck, so a head that
