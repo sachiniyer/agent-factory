@@ -201,6 +201,21 @@ func (i *Instance) CanConfirmPendingHandoffDelivery() bool {
 // was waiting for), and the mission plus its verdict clear together so no
 // later reader reconstructs the fence. Refusing not-delivered keeps automatic
 // recovery's ownership unambiguous.
+//
+// The attestation also decides the row's liveness (#5023): a mission the
+// incoming agent already received means the agent HAS work, so the confirmed
+// row reads LiveRunning — the same state a delivered prompt produces — until
+// the status monitor observes a genuinely idle pane. A fenced row gets that
+// from CommitHandoff already; the explicit edge below is what an unfenced
+// ambiguous row — the could-not-confirm settle — needs to not publish as a
+// settled idle session.
+//
+// A row parked at its usage-limit wall keeps LiveLimitReached instead — the
+// parked state is still honest (the mission cannot run until quota resets),
+// still not-idle to fleet watch, and is the marker ResumeLimitedSessions scans
+// for. The fenced arm parks through ParkHandoff, the same edge a live handoff
+// that hit the wall takes, so the fence drops without CommitHandoff publishing
+// LiveRunning and discarding the reset bookkeeping.
 func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -222,12 +237,29 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	lv, op, resetAt := i.lifecycleStateLocked()
 	i.resolveStartupStateLocked()
 	if i.inFlightOp == OpReplacing {
-		if err := i.transitionLocked(CommitHandoff()); err != nil {
+		ev := CommitHandoff()
+		if i.liveness == LiveLimitReached {
+			// The incoming agent is parked at its usage-limit wall: settle the
+			// fence the way a handoff that hit the wall live does, so the row
+			// stays inside ResumeLimitedSessions' scan. CommitHandoff would
+			// publish LiveRunning and drop the reset bookkeeping outright.
+			ev = ParkHandoff(resetAt)
+		}
+		if err := i.transitionLocked(ev); err != nil {
 			return err
 		}
 	}
 	i.pendingHandoffMission = ""
 	i.handoffDeliveryStatus = ""
+	// A confirmed mission is work the incoming agent already has (#5023) —
+	// publish working (a no-op on the CommitHandoff arm, which already landed
+	// there) and leave the settle back to Ready to the monitor's pane
+	// evidence. A limit-blocked row keeps its wall: the parked row still reads
+	// not-idle to fleet watch, and a paused poll cannot re-park a row this
+	// edge would have falsely marked running.
+	if i.liveness != LiveLimitReached {
+		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+	}
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil
