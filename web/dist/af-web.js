@@ -12650,7 +12650,7 @@ function rebindTargetAfterAwait(inputs) {
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen) {
+  if (inputs.currentGen !== inputs.pinnedGen || (inputs.newestAppliedSeqs.get(inputs.pinnedSelId) ?? 0) > inputs.rebindSeq) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {
@@ -12733,6 +12733,21 @@ function closeLeaf(root2, leafId) {
     return { ...node, a, b };
   };
   return remove(root2);
+}
+function siblingSubtreeOf(root2, leafId) {
+  if (root2.kind === "leaf") {
+    return null;
+  }
+  if (root2.a.kind === "leaf" && root2.a.id === leafId) {
+    return root2.b;
+  }
+  if (root2.b.kind === "leaf" && root2.b.id === leafId) {
+    return root2.a;
+  }
+  if (findLeaf(root2.a, leafId)) {
+    return siblingSubtreeOf(root2.a, leafId);
+  }
+  return siblingSubtreeOf(root2.b, leafId);
 }
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
@@ -13293,6 +13308,23 @@ var SplitView = class {
     this.tree = replaceTab(this.tree, this.focusedId, tab);
     this.commit();
   }
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab) {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -13402,6 +13434,13 @@ var SplitView = class {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -13415,6 +13454,13 @@ var SplitView = class {
    *  it the one place to count them (see layoutGeneration). */
   commit() {
     this.layoutGen++;
+    this.land();
+  }
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  land() {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
@@ -13425,16 +13471,26 @@ var SplitView = class {
     if (!this.tree) {
       return;
     }
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return;
     }
     this.tree = next;
-    if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
   // --- internal: reconcile tree → DOM + terminals ---------------------------
   teardown() {
@@ -18800,10 +18856,17 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
+var tabRebindSeq = 0;
+var newestAppliedRebindBySession = /* @__PURE__ */ new Map();
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
-  void run().then((snapshot) => {
+  const seq = ++tabRebindSeq;
+  void run().then(async (snapshot) => {
     if (snapshot === null) return;
+    const hold = globalThis.__afTabRebindHold?.(verb);
+    if (hold) {
+      await hold;
+    }
     const {
       sessions,
       authoritative,
@@ -18828,10 +18891,13 @@ function guardedTabRebind(selId, run, resolve, verb) {
       currentGen,
       currentSelId: store.get().selectedId,
       pinnedSessionAlive,
-      targetIdx
+      targetIdx,
+      rebindSeq: seq,
+      newestAppliedSeqs: newestAppliedRebindBySession
     });
     if (outcome.kind === "rebind") {
-      splitView.setFocusedTab(outcome.idx);
+      newestAppliedRebindBySession.set(selId, seq);
+      splitView.setFocusedTabAwaited(outcome.idx);
       if (verb === "create") {
         focusTerminal();
       }

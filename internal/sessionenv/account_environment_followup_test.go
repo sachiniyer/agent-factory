@@ -808,3 +808,96 @@ func TestValidateAccountEnvironmentCommand_ChildTailScanStaysLinear(t *testing.T
 			"command buries a direct account-mutating builtin past a long child tail")
 	}
 }
+
+// taskset's child-launching value/all-tasks options accept unambiguous
+// getopt_long abbreviations on util-linux (2.39.3): `--all` resolves to
+// `--all-tasks` and `--cpu` to `--cpu-list`, and both exec the masked child.
+// The value/all-tasks arm `option == "-a" || option == "--all-tasks" ||
+// option == "-c" || option == "--cpu-list"` (account_environment_taskset.go)
+// used exact equality, so `--all` and `--cpu` fell through to
+// `case strings.HasPrefix(option, "-")` and were refused before the child
+// tail was ever judged — even a provably-safe child. This is the
+// consistency gap introduced by d6be5f26, which added abbreviation handling
+// to taskset's process-only (`tasksetProcessOnlyOption`) and terminal
+// (`utilLinuxTerminalOption`) arms plus ionice's class-value arm
+// (`ioniceClassValueLongOption`) but left this arm exact-only. The fix adds
+// `tasksetChildLaunchingLongAbbrev`, which closes that gap the same way its
+// siblings already do. Verified against the installed util-linux 2.39.3
+// binary before this test was written: `taskset --all 0x1 /bin/echo X` and
+// `taskset --cpu 0-3 /bin/echo X` both exec the child (exit 0).
+func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingLongAbbreviationsAdmitted(t *testing.T) {
+	for _, command := range []string{
+		// The abbreviations the bug refused; each consumes the option word,
+		// the mask/list operand falls to tasksetCommandAfterMask, and the
+		// clean child is judged non-mutating.
+		"taskset --all 0x1 codex",
+		"taskset --cpu 0-3 codex",
+		// Every unambiguous prefix resolves the same way as the spelled-out
+		// form, so the deeper prefixes must also be admitted.
+		"taskset --al 0x1 codex",
+		"taskset --all- 0x1 codex",
+		"taskset --all-t 0x1 codex",
+		"taskset --cp 0-3 codex",
+		"taskset --cpu- 0-3 codex",
+		"taskset --cpu-l 0-3 codex",
+		// A multi-word benign child is fine: the every-suffix child-tail walk
+		// finds no identity mutation.
+		"taskset --cpu 0-3 npm run dev",
+		"taskset --all 0x1 npm run dev",
+		// A PATH-shadowed or repo-local taskset is basename-indistinguishable
+		// and lands on the same child-launching branch.
+		"./taskset --cpu 0-3 codex",
+		"/usr/bin/taskset --all 0x1 codex",
+		// Controls: the spelled-out and short forms the exact-equality arm
+		// already admitted must not regress.
+		"taskset -a 0x1 codex",
+		"taskset --all-tasks 0x1 codex",
+		"taskset -c 0-3 codex",
+		"taskset --cpu-list 0-3 codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q is a safe child-launching taskset spelling and must be allowed", command)
+	}
+}
+
+// Recognizing the --all/--cpu abbreviations must not open an under-refusal:
+// once the option word is consumed, the mask/list operand falls to
+// tasksetCommandAfterMask, whose wrapperOperandTailMutates and
+// shadowedChildTailMutates walks judge every child slice — exactly the path
+// the spelled-out forms already take. So a mutating child tail behind an
+// abbreviation is now refused via the child-tail walk rather than the old
+// fail-closed option arm; the refusal outcome is unchanged. Measured on the
+// real util-linux 2.39.3 binary: `taskset --cpu 0-3 env CODEX_HOME=/other
+// codex` execs the child (env sets CODEX_HOME then fails on codex, exit 127),
+// so the mutation the validator must block is the child tail, not the option.
+func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingLongAbbreviationsRefuseMutatingTail(t *testing.T) {
+	for _, command := range []string{
+		// A direct identity-variable assignment in the child tail behind the
+		// abbreviation must be refused via the child-tail walk.
+		"taskset --cpu 0-3 env CODEX_HOME=/other codex",
+		"taskset --all 0x1 env CODEX_HOME=/other codex",
+		"./taskset --cpu 0-3 env CODEX_HOME=/other codex",
+		// A deeper abbreviation prefix hits the same path.
+		"taskset --cp 0-3 env CODEX_HOME=/other codex",
+		"taskset --al 0x1 env CODEX_HOME=/other codex",
+		// A buried xargs identity mutation behind an opaque leaf (echo): the
+		// every-suffix child-tail walk must catch it at a non-zero offset,
+		// mirroring the spelled-out control in
+		// TestValidateAccountEnvironmentCommand_IoniceTasksetOptionValueBranchesInspectBuriedXargs.
+		"taskset --cpu 0-3 echo xargs --process-slot-var CODEX_HOME codex",
+		"taskset --all 0x1 echo xargs --process-slot-var CODEX_HOME codex",
+		// A direct account-mutating builtin in the child tail is refused.
+		"taskset --cpu 0-3 unset CODEX_HOME",
+		// Controls: the spelled-out and short forms must still refuse the
+		// same mutations (no regression in the exact-equality path).
+		"taskset -c 0-3 env CODEX_HOME=/other codex",
+		"taskset --cpu-list 0-3 env CODEX_HOME=/other codex",
+		"taskset -a 0x1 env CODEX_HOME=/other codex",
+		"taskset --all-tasks 0x1 env CODEX_HOME=/other codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q buries an identity mutation behind a taskset child-launching abbreviation", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}
