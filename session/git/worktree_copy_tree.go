@@ -610,6 +610,38 @@ func copySymlinkEntry(
 	if err != nil || !destinationIdentity.same(stampedIdentity) {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while its timestamp was applied", destinationPath)
 	}
+	// A symlink's extended attributes are the one filesystem property this copy does
+	// NOT reproduce. Files and directories run copyNonACLXattrs / pruneDestinationXattrs
+	// / copyACLXattrs (see copyRegularFileAtWithIdentity and applyCopiedDirectoryMode);
+	// this function runs none of them, so a source link's security.selinux label,
+	// security.capability, and trusted.* attributes are dropped on the cross-device
+	// path. That asymmetry is introduced by #2919, not predating it: before the xattr
+	// layer every node class dropped silently, and #2919 made the file and directory
+	// paths LOG each refused attribute and continue — leaving the symlink's silence as
+	// a deviation from the invariant rather than the baseline ("only while the loss is
+	// LOGGED rather than silent, which is the actual complaint in #2919"). The reason
+	// no call sits here is structural: the xattr layer in worktree_copy_xattr.go is
+	// descriptor-anchored — copySourceXattrs uses the F* syscalls so no path is
+	// re-derived and the name-swap race this copier exists to avoid stays avoided — and
+	// a symlink yields no descriptor those calls can target. plain O_NOFOLLOW on a link
+	// returns ELOOP, and O_PATH|O_NOFOLLOW, the only fd a symlink gives, makes
+	// Flistxattr/Fgetxattr return EBADF (they do not operate through an O_PATH fd, even
+	// on a regular file). On a no-relabel host that leaves the file/dir LOG of a refused
+	// security.selinux with no symlink analogue, so the loss is silent — exactly the
+	// outcome the policy was written to forbid. Closing it needs the path-based L*
+	// family (Llistxattr/Lgetxattr/Lsetxattr/Lremovexattr), which takes a full path
+	// rather than a descriptor plus a name — so a reproduction re-derives a path this
+	// copier otherwise never touches, and there is no Setxattrat/Getxattrat/*at variant
+	// in golang.org/x/sys/unix (v0.47.0) to match the UtimesNanoAt trick the mtime stamp
+	// above relies on; this is genuine work, not the three-line addition the file/dir
+	// case was. Not in knownCrossDeviceDivergence: that inventory is keyed by properties
+	// describeFidelity actually measures, and this one is unmeasurable on the CI runner
+	// the same way the darwin ACL gap is — user.* cannot be set on a symlink (the VFS
+	// rejects it with EPERM) and only security.* / trusted.* live on links in production,
+	// neither settable without SELinux or root. A row would be permanently
+	// MISSING-skipped, dead inventory the guard's two-directional design exists to
+	// prevent. Tracked in #2919 instead, mirroring the isACLXattr note, so the limit is
+	// written down where the follow-up will look.
 	return created, nil
 }
 
