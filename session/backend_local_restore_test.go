@@ -149,6 +149,71 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	require.Equal(t, 2, channel.starts, "the attached subscriber must resume on the incoming pane without reconnecting")
 }
 
+// TestLocalBackendSwapAgentRecordsRuntimeProgram is the #5066 pin for the
+// handoff path: SwapAgent launches a replacement agent process, so it must
+// record the plan's resolved base command — the same durable evidence a fresh
+// create writes. Without it an in-place handoff would leave runtime_program
+// empty even though the current process provably came from this daemon.
+func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	geminiBin := filepath.Join(t.TempDir(), "gemini")
+	require.NoError(t, os.WriteFile(geminiBin, []byte("#!/bin/sh\n"), 0o755))
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramGemini: geminiBin}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	ptyFactory := &recordingPtyFactory{t: t}
+	killed := false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			switch {
+			case strings.Contains(joined, "kill-session"):
+				killed = true
+				return nil
+			case strings.Contains(joined, "has-session"):
+				if killed && len(ptyFactory.cmds) == 0 {
+					return errors.New("session absent after close")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return nil, errors.New("pane pid unavailable")
+			}
+			return nil, nil
+		},
+	}
+
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-records", "handoff-records-branch", "", false, false)
+	require.NoError(t, err)
+	ts := tmux.NewTmuxSessionWithDeps("handoff-records", tmux.ProgramClaude, ptyFactory, cmdExec)
+	backend := &LocalBackend{}
+	inst := &Instance{
+		ID:          "handoff-records-id",
+		Title:       "handoff-records",
+		Path:        repoRoot,
+		Program:     tmux.ProgramClaude,
+		backend:     backend,
+		Tabs:        []*Tab{newAgentTab(ts)},
+		gitWorktree: gw,
+		started:     true,
+		liveness:    LiveRunning,
+	}
+
+	plan, err := backend.PrepareAgentSwap(inst, tmux.ProgramGemini)
+	require.NoError(t, err)
+	require.Equal(t, geminiBin, plan.baseProgram,
+		"precondition: the plan's base is the override-resolved command")
+	require.NoError(t, backend.SwapAgent(inst, plan))
+	require.NotEmpty(t, ptyFactory.cmds, "the swap must actually spawn a replacement pane")
+	require.Equal(t, geminiBin, inst.RuntimeProgram(),
+		"the replacement launch must record the resolved command it ran")
+}
+
 // recordingPtyFactory is a tmux.PtyFactory that records each exec.Cmd passed
 // to Start, lets the caller inspect the new-session vs attach-session sequence
 // emitted by Restore's lazy-respawn path. It returns a real (writable) temp
