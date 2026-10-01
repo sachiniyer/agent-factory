@@ -341,6 +341,22 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 	// calls wrote through the diverted route. Only a first-call ENAMETOOLONG (no
 	// prior L* call on the destination) is the length-limit case errXattrPathTooLong
 	// exists for, so the nonfatal path is taken there and only there.
+	// sourceProbed tracks whether a source Lgetxattr has already succeeded,
+	// proving the source route was within PATH_MAX at that point — the
+	// destination-side twin of destinationProbed. A link with multiple attributes
+	// is read one Lgetxattr at a time, and a concurrent writer that diverts
+	// sourcePath (an ancestor replaced with a symlink whose expansion exceeds
+	// PATH_MAX) after an earlier Lgetxattr/Lsetxattr pair succeeded can make a
+	// later Lgetxattr return ENAMETOOLONG. Returning errXattrPathTooLong for that
+	// late failure would make copySymlinkEntry skip the route recheck, so a writer
+	// that restores the source route before the descriptor-anchored re-identity
+	// could publish xattr values the earlier L* calls read through the diverted
+	// route. The route recheck cannot run on a too-long path (its Lstat would
+	// also fail), so a late source ENAMETOOLONG refuses rather than skip it. Only
+	// the first Lgetxattr (no prior source L* call succeeded) keeps the non-fatal
+	// errXattrPathTooLong, matching the destination-side first-call path: that is
+	// the genuine length-limit case the sentinel exists for.
+	var sourceProbed bool
 	var destinationProbed bool
 	for _, name := range names {
 		value, err := readSymlinkXattrValue(sourcePath, name)
@@ -360,6 +376,24 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 				continue
 			}
 			if errors.Is(err, unix.ENAMETOOLONG) {
+				if sourceProbed {
+					// A prior Lgetxattr proved the source route was within
+					// PATH_MAX, so a later ENAMETOOLONG means the route was
+					// diverted mid-copy (an ancestor was replaced with a symlink
+					// whose expansion exceeds PATH_MAX), not that it was always
+					// too long. The route recheck cannot run on a too-long path
+					// (its Lstat would also fail), so refuse rather than skip it
+					// and risk publishing attributes the earlier L* calls read
+					// through the diverted route.
+					return fmt.Errorf(
+						"cannot move worktree across filesystems: source symlink %s route exceeded PATH_MAX after an earlier L* call succeeded (possible path diversion): %w",
+						sourcePath, err,
+					)
+				}
+				// The first L* call on the source is the Lgetxattr above; the
+				// source route was too long from the start (no prior L* call proved
+				// it addressable), so this is not a diversion but a length limit.
+				// See errXattrPathTooLong.
 				return errXattrPathTooLong
 			}
 			return fmt.Errorf(
@@ -367,6 +401,7 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 				name, destinationPath, err,
 			)
 		}
+		sourceProbed = true
 		if err := unix.Lsetxattr(destinationPath, name, value, 0); err != nil {
 			switch {
 			case errors.Is(err, unix.ENAMETOOLONG):
