@@ -577,6 +577,24 @@ export class SplitView {
     this.commit();
   }
 
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab: number): void {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
+
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -697,6 +715,13 @@ export class SplitView {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -712,6 +737,14 @@ export class SplitView {
    *  it the one place to count them (see layoutGeneration). */
   private commit(): void {
     this.layoutGen++;
+    this.land();
+  }
+
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  private land(): void {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
