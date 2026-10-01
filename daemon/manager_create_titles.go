@@ -195,17 +195,19 @@ func (m *Manager) refuseNonReusableTitleConflictLocked(naming branchNaming, repo
 }
 
 // refuseLiveHeldBranchLocked is the narrow #4092 create admission guard. A
-// normal local create derives its branch from the title; --here must instead use
+// normal create derives its branch from the title; --here must instead use
 // the target worktree's observed branch and path. Only a positively identified
 // live lane refuses, and AF never renames, detaches, resets, or moves either
 // worktree on this path.
+//
+// Off-box creates are guarded too (#4562 review): a sandbox never runs git
+// worktree add on the host, but its derived branch lands in the repo's shared
+// ref namespace — pushing it would land on the branch a live lane has checked
+// out right now. --here stays local-only: a sandbox has no host worktree.
 func (m *Manager) refuseLiveHeldBranchLocked(naming branchNaming, repoPath, workspace, title string, namespace runtimeNameNamespace, inPlace bool, diskData []session.InstanceData) error {
-	if namespace != runtimeNamespaceLocalTmux {
-		return nil
-	}
 	var branch string
 	var holders []string
-	if inPlace {
+	if namespace == runtimeNamespaceLocalTmux && inPlace {
 		var err error
 		branch, holders, err = inPlaceBranchHolders(repoPath, workspace)
 		if err != nil {
@@ -219,6 +221,9 @@ func (m *Manager) refuseLiveHeldBranchLocked(naming branchNaming, repoPath, work
 		lane := m.liveLaneHoldingWorktreeLocked(holder, diskData)
 		if lane == "" {
 			continue
+		}
+		if namespace != runtimeNamespaceLocalTmux {
+			return liveHeldSandboxBranchRefusal(title, branch, lane, holder)
 		}
 		if inPlace {
 			if branch == "" {
@@ -315,6 +320,12 @@ func (m *Manager) liveLaneHoldingWorktreeLocked(holder string, diskData []sessio
 func liveHeldBranchRefusal(title, branch, lane, holder string) error {
 	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
 	return fmt.Errorf("cannot create session %q: branch %q is already checked out by live lane %q at %s. Refusing to bind two live worktrees to one branch because a sibling branch move can turn the idle lane's unchanged index into a staged revert. Continue in that workspace with `%s`, or choose a different session title; af did not rename, detach, reset, or move either worktree",
+		title, branch, lane, config.ShellQuotePath(holder), handoff)
+}
+
+func liveHeldSandboxBranchRefusal(title, branch, lane, holder string) error {
+	handoff := shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--to", "<agent>"}, lane)
+	return fmt.Errorf("cannot create session %q: branch %q is already checked out by live lane %q at %s — an off-box session would derive the same ref, and pushing it from the sandbox would land on the branch that lane is working on. Continue in that workspace with `%s`, or choose a different session title; af did not rename, detach, reset, or move any worktree",
 		title, branch, lane, config.ShellQuotePath(holder), handoff)
 }
 

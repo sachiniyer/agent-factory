@@ -64,6 +64,63 @@ func TestReserveCreateRefusesBranchHeldByNamedLiveLane(t *testing.T) {
 	assert.Contains(t, err.Error(), "af sessions handoff --to '<agent>' -- -live-holder")
 }
 
+// TestOffBoxCreateRefusesBranchHeldByLiveLane: a sandboxed create deriving a
+// branch a live lane has checked out is refused (#4562 review). The container
+// never runs `git worktree add` on the host, but its derived ref lands in the
+// repo's shared branch namespace — a push from the sandbox would land on the
+// branch that lane is working on.
+func TestOffBoxCreateRefusesBranchHeldByLiveLane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	branch := manager.branchForTitle("incoming-offbox")
+	holderPath := filepath.Join(t.TempDir(), "holder")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, holderPath).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	live := registerCreateAdmissionLane(t, manager, repoID, repoPath, holderPath, "-live-holder-offbox", branch)
+	require.NoError(t, appendInstanceData(repoID, live.ToInstanceData()))
+
+	res, err := manager.reserveCreateWithWorktreeAdmission(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "incoming-offbox",
+		Program:  "claude",
+		Backend:  string(session.BackendDocker),
+	}, manager.Config(), false)
+	if err == nil && res.release != nil {
+		res.release()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), branch)
+	assert.Contains(t, err.Error(), live.Title)
+}
+
+// TestOffBoxCreateIgnoresBranchHeldByArchivedLane: the same derived branch
+// held only by an ARCHIVED lane's worktree does not refuse an off-box create —
+// an archived row owns no live remote writes, so the sandbox may derive it.
+func TestOffBoxCreateIgnoresBranchHeldByArchivedLane(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	branch := manager.branchForTitle("incoming-archived")
+	holderPath := filepath.Join(t.TempDir(), "holder")
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add", "-b", branch, holderPath).CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	// The worktree holds the branch on disk, but the only af record pointing at
+	// it is archived — liveLaneHoldingWorktreeLocked skips it by design.
+	require.NoError(t, appendInstanceData(repoID, session.InstanceData{
+		ID: "archived-holder", Title: "-archived-holder", Path: repoPath,
+		Branch: branch, Status: session.Archived, Liveness: session.LiveArchived,
+		Worktree: session.GitWorktreeData{RepoPath: repoPath, WorktreePath: holderPath, BranchName: branch},
+	}))
+
+	res, err := manager.reserveCreateWithWorktreeAdmission(CreateSessionRequest{
+		RepoPath: repoPath,
+		Title:    "incoming-archived",
+		Program:  "claude",
+		Backend:  string(session.BackendDocker),
+	}, manager.Config(), false)
+	require.NoError(t, err)
+	defer res.release()
+}
+
 func TestReserveCreateInPlaceUsesActualBranch(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	actualBranch := "shared-in-place"
