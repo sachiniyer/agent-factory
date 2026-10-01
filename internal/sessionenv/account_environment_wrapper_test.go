@@ -498,6 +498,41 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -- strace echo -E CODEX_HOME=/other codex", false},
 		{"strace -- xargs --process-slot-var=CODEX_HOME codex", true},
 		{"strace -- systemd-run --setenv=CODEX_HOME=/other codex", true},
+		// The traced command can be a modeled peelAccountWrapper passthrough
+		// wrapper (nice, nohup, timeout, setsid, stdbuf, ionice, taskset)
+		// that runs a child whose environment its own options do not set but
+		// the child's command might: strace nice strace -E CODEX_HOME=/other
+		// codex runs an inner strace via nice whose -E overrides the
+		// protected variable while the scan treated nice's tail as inert.
+		// The scan delegates the wrapper's whole tail to the same command
+		// analysis a bare invocation gets, so a denied inner -E/--env, a
+		// nested env, or a shell refuse; a leaf child and a non-denied inner
+		// -E stay allowed. "--" keeps the region open for the same wrappers.
+		{"strace nice strace -E CODEX_HOME=/other codex", true},
+		{"strace nice strace --env=CODEX_HOME=/other codex", true},
+		{"strace nice strace -ECODEX_HOME=/other codex", true},
+		{"strace nohup strace -E CODEX_HOME=/other codex", true},
+		{"strace timeout 5 strace -E CODEX_HOME=/other codex", true},
+		{"strace setsid strace -E CODEX_HOME=/other codex", true},
+		{"strace stdbuf -o0 strace -E CODEX_HOME=/other codex", true},
+		{"strace ionice -c 2 strace -E CODEX_HOME=/other codex", true},
+		{"strace taskset 1 strace -E CODEX_HOME=/other codex", true},
+		{"strace nice nice strace -E CODEX_HOME=/other codex", true},
+		{"strace nice -n 5 strace -E CODEX_HOME=/other codex", true},
+		{"strace nice strace env CODEX_HOME=/other codex", true},
+		{"strace -- nice strace -E CODEX_HOME=/other codex", true},
+		{"strace -- nice echo -E CODEX_HOME=/other codex", false},
+		{"strace nice echo -E CODEX_HOME=/other codex", false},
+		{"strace nice echo hi", false},
+		{"strace nice codex", false},
+		{"strace nohup codex", false},
+		{"strace timeout 5 codex", false},
+		{"strace nice -n 5 npm run dev", false},
+		{"strace nice -n 5 strace -E FOO=1 codex", false},
+		{"strace nice strace echo -E CODEX_HOME=/other codex", false},
+		{"strace nice strace -E FOO=1 codex", false},
+		{"strace nice env CODEX_HOME codex", false},
+		{"strace nice env PORT=3000 codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -600,6 +635,18 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		"strace -- strace -E CODEX_HOME=/other codex",
 		"strace -- xargs --process-slot-var=CODEX_HOME codex",
 		"strace -- systemd-run --setenv=CODEX_HOME=/other codex",
+		// The traced command can be a modeled peelAccountWrapper passthrough
+		// wrapper (nice/nohup/timeout/…) that runs a child whose -E/--env
+		// overrides the protected variable; the scan delegates the wrapper's
+		// whole tail to the bare command analysis, re-entering for an inner
+		// strace, and "--" keeps the region open for the same wrappers.
+		"strace nice strace -E CODEX_HOME=/other codex",
+		"strace nohup strace -E CODEX_HOME=/other codex",
+		"strace timeout 5 strace -E CODEX_HOME=/other codex",
+		"strace nice -n 5 strace -E CODEX_HOME=/other codex",
+		"strace nice nice strace -E CODEX_HOME=/other codex",
+		"strace nice strace env CODEX_HOME=/other codex",
+		"strace -- nice strace -E CODEX_HOME=/other codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "command %q sets a protected variable via a strace -E/--env expansion and must be refused", command)
@@ -648,6 +695,21 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		"strace systemd-run --setenv=PORT=3000 codex",
 		"strace systemd-run echo hi",
 		"strace -- strace echo -E CODEX_HOME=/other codex",
+		// A traced passthrough wrapper (nice/nohup/timeout/…) that runs a
+		// harmless child stays allowed: the delegation re-enters the scan for
+		// an inner strace but a leaf child or a non-denied inner -E does
+		// not mutate the protected variable.
+		"strace nice echo hi",
+		"strace nice codex",
+		"strace nice -n 5 npm run dev",
+		"strace nohup codex",
+		"strace timeout 5 codex",
+		"strace nice -n 5 strace -E FOO=1 codex",
+		"strace nice strace -E FOO=1 codex",
+		"strace nice strace echo -E CODEX_HOME=/other codex",
+		"strace nice env CODEX_HOME codex",
+		"strace nice env PORT=3000 codex",
+		"strace -- nice echo -E CODEX_HOME=/other codex",
 		// grep's -E is extended-regexp and stays accepted.
 		"grep -ECODEX_HOME=$V /etc/environment",
 	} {

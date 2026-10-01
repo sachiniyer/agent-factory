@@ -246,15 +246,36 @@ func straceOptionAwaitsValue(literal string) bool {
 
 // straceTracedWrapper reports whether word is a wrapper whose own options the
 // tail scan analyzes when the wrapper is strace's traced command: strace itself
-// (re-enters the option region), xargs (delegated to unwrapXargs), and
-// systemd-run (delegated to the non-strace wrapper scan). Each is gated to
-// strace's option region, so a "--" terminator that precedes one must not end
-// the region — the next word is still the traced command, and ending the region
-// there would skip the wrapper's env-mutating options.
+// (re-enters the option region), xargs (delegated to unwrapXargs), systemd-run
+// (delegated to the non-strace wrapper scan), and the modeled peelAccountWrapper
+// passthrough wrappers (delegated to the bare command analysis). Each is gated
+// to strace's option region, so a "--" terminator that precedes one must not
+// end the region — the next word is still the traced command, and ending the
+// region there would skip the wrapper's env-mutating options.
 func straceTracedWrapper(word *syntax.Word) bool {
 	return isAccountCommandName(word, "strace") ||
 		isAccountCommandName(word, "xargs") ||
-		isAccountCommandName(word, "systemd-run")
+		isAccountCommandName(word, "systemd-run") ||
+		straceTracedPassthroughWrapper(word)
+}
+
+// straceTracedPassthroughWrapper reports whether word is a modeled
+// peelAccountWrapper passthrough wrapper (nice, nohup, timeout, setsid, stdbuf,
+// ionice, taskset) that strace can trace and whose own options set no
+// environment variable but whose child command might. strace traces the
+// wrapper, and the wrapper runs its child, so a -E/--env option the child
+// applies (strace nice strace -E CODEX_HOME=/other codex: nice runs the inner
+// strace, whose -E overrides the protected variable) is judged by delegating
+// the wrapper's whole tail to the same command analysis a bare invocation
+// gets; a leaf child (strace nice echo hello) sets nothing and stays allowed.
+func straceTracedPassthroughWrapper(word *syntax.Word) bool {
+	return isAccountCommandName(word, "nice") ||
+		isAccountCommandName(word, "nohup") ||
+		isAccountCommandName(word, "timeout") ||
+		isAccountCommandName(word, "setsid") ||
+		isAccountCommandName(word, "stdbuf") ||
+		isAccountCommandName(word, "ionice") ||
+		isAccountCommandName(word, "taskset")
 }
 
 // straceOptionWordHides judges a literal strace option word (still inside
@@ -729,6 +750,23 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 		// env-setting wrapper's options are inspected.
 		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "systemd-run") {
 			return 1, wrapperTailHidesAccountAssignment(words[1:], false, names, memo), strace && inOption, false
+		}
+		// The traced command can be a modeled peelAccountWrapper passthrough
+		// wrapper (nice, nohup, timeout, setsid, stdbuf, ionice, taskset)
+		// that runs a child whose environment its own options do not set
+		// but the child's command might: strace nice strace -E
+		// CODEX_HOME=/other codex runs an inner strace via nice whose -E
+		// overrides the protected variable while the scan treated nice's
+		// tail as the traced command's inert arguments. Delegate the
+		// wrapper's whole tail to the same command analysis a bare
+		// invocation gets — wrapperOperandTailMutates peels the wrapper's
+		// options (unwrapAccountCommand) and judges the child
+		// (unwrappedAccountCommandMutates), re-entering the strace scan for
+		// an inner strace, the env arm for env, and the shell arm for a
+		// shell — so a denied inner -E refuses while a leaf child
+		// (strace nice echo hello) stays allowed.
+		if strace && inOption && !pending && literal != "-" && straceTracedPassthroughWrapper(word) {
+			return 1, wrapperOperandTailMutates(words, names, memo), strace && inOption, false
 		}
 		// A shell in the wrapper's tail (`strace sh -c 'unset CODEX_HOME;
 		// codex'`) gets the same verdict a bare shell command gets: the
