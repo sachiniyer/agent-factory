@@ -462,6 +462,42 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace xargs --process-slot-var CODEX_HOME codex", true},
 		{"strace xargs --process-slot-var=PORT codex", false},
 		{"strace xargs echo hi", false},
+		// A backslash escape in an attached -E operand's VALUE names the
+		// harmless value's variable, not a protected one: the shell removes
+		// the backslash and strace receives -EFOO=$V (FOO is non-protected),
+		// so it stays allowed. A backslash in the NAME (before the first '=')
+		// still fails closed: strace -E\CODEX_HOME=/other literalizes the
+		// name to \CODEX_HOME while strace receives CODEX_HOME.
+		{`strace -EFOO=\$V codex`, false},
+		{`strace -E\CODEX_HOME=/other codex`, true},
+		{`strace -ECODEX_HOME=\$V codex`, true},
+		// A $@ or ${name[@]} nested in a parameter expansion's alternative
+		// (strace -EFOO="${V:+$@}" codex) is still under the outer double
+		// quote, so it splits into a further -E option the scan never sees as
+		// a separate word and fails closed. A scalar alternative
+		// (${V:+x}) stays one word and stays allowed.
+		{`strace -EFOO="${V:+$@}" codex`, true},
+		{`strace -EFOO="${V:+x}" codex`, false},
+		{`strace -EFOO="${V:-"$@"}" codex`, true},
+		// The traced command can be an unmodeled wrapper that runs a child
+		// and sets its environment through its own options: systemd-run's
+		// --setenv=NAME[=VALUE] sets NAME on the transient service's child.
+		// Delegate its tail to the non-strace wrapper scan so a denied
+		// --setenv= overrides while a non-denied NAME and a leaf command
+		// stay allowed.
+		{"strace systemd-run --setenv=CODEX_HOME=/other codex", true},
+		{"strace systemd-run --setenv=CODEX_HOME codex", true},
+		{"strace systemd-run --setenv=PORT=3000 codex", false},
+		{"strace systemd-run echo hi", false},
+		// strace's "--" only ends its OWN option parsing; the next word is
+		// still the traced command. When that command is a wrapper the scan
+		// analyzes (strace re-enters, xargs/systemd-run delegate), the
+		// region must stay open past "--" so its env-mutating options are
+		// inspected; a leaf command after "--" still ends the region.
+		{"strace -- strace -E CODEX_HOME=/other codex", true},
+		{"strace -- strace echo -E CODEX_HOME=/other codex", false},
+		{"strace -- xargs --process-slot-var=CODEX_HOME codex", true},
+		{"strace -- systemd-run --setenv=CODEX_HOME=/other codex", true},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -555,6 +591,15 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		"strace strace -ECODEX_HOME=/other codex",
 		"xargs strace strace -E CODEX_HOME=/other codex",
 		"xargs strace -ECODEX_HOME=$V codex",
+		// A $@ nested in a parameter-expansion alternative still splits
+		// under the outer double quote and can inject a further -E option.
+		`strace -EFOO="${V:+$@}" codex`,
+		// The traced command can be an unmodeled env-setting wrapper
+		// (systemd-run --setenv=NAME) and re-enter after strace's "--".
+		"strace systemd-run --setenv=CODEX_HOME=/other codex",
+		"strace -- strace -E CODEX_HOME=/other codex",
+		"strace -- xargs --process-slot-var=CODEX_HOME codex",
+		"strace -- systemd-run --setenv=CODEX_HOME=/other codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "command %q sets a protected variable via a strace -E/--env expansion and must be refused", command)
@@ -594,6 +639,15 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// command with no env mutation stays allowed.
 		"strace xargs --process-slot-var=PORT codex",
 		"strace xargs echo hi",
+		// A backslash in an attached -E operand's VALUE names the harmless
+		// value's variable (FOO), not a protected one; a scalar alternative
+		// (${V:+x}) stays one word; a non-denied systemd-run --setenv and a
+		// leaf traced command after "--" stay allowed.
+		`strace -EFOO=\$V codex`,
+		`strace -EFOO="${V:+x}" codex`,
+		"strace systemd-run --setenv=PORT=3000 codex",
+		"strace systemd-run echo hi",
+		"strace -- strace echo -E CODEX_HOME=/other codex",
 		// grep's -E is extended-regexp and stays accepted.
 		"grep -ECODEX_HOME=$V /etc/environment",
 	} {

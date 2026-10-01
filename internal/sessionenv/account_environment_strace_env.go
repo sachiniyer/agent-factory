@@ -244,6 +244,19 @@ func straceOptionAwaitsValue(literal string) bool {
 	}
 }
 
+// straceTracedWrapper reports whether word is a wrapper whose own options the
+// tail scan analyzes when the wrapper is strace's traced command: strace itself
+// (re-enters the option region), xargs (delegated to unwrapXargs), and
+// systemd-run (delegated to the non-strace wrapper scan). Each is gated to
+// strace's option region, so a "--" terminator that precedes one must not end
+// the region — the next word is still the traced command, and ending the region
+// there would skip the wrapper's env-mutating options.
+func straceTracedWrapper(word *syntax.Word) bool {
+	return isAccountCommandName(word, "strace") ||
+		isAccountCommandName(word, "xargs") ||
+		isAccountCommandName(word, "systemd-run")
+}
+
 // straceOptionWordHides judges a literal strace option word (still inside
 // strace's option region) and reports how many words it consumes, whether it
 // hides an account assignment, and the pendingValue the caller should carry
@@ -283,7 +296,17 @@ func straceOptionWordHides(literal string, words []*syntax.Word, names map[strin
 		return 2, !ok || wordHasUnquotedBackslash(words[1]) ||
 			accountEnvironmentOperandDenied(value, names), false, true
 	case strings.HasPrefix(literal, "-E"):
-		return 1, wordHasUnquotedBackslash(words[0]) ||
+		// An unquoted backslash escape stays in a syntax.Lit, so the raw
+		// literal operand is not shell-stable: strace -E\CODEX_HOME=/other
+		// literalizes the operand to \CODEX_HOME (not denied) while the
+		// shell removes the backslash and strace receives
+		// -ECODEX_HOME=/other. Fail closed when such an escape sits in the
+		// NAME — the text before the first '=' — since only the NAME can
+		// name a protected variable. A backslash in the VALUE (strace
+		// -EFOO=\$V codex, which the shell passes as -EFOO=$V) names the
+		// harmless FOO and must not block; a backslash inside quotes is
+		// literal and excluded by wordHasUnquotedBackslashBeforeEq.
+		return 1, wordHasUnquotedBackslashBeforeEq(words[0]) ||
 			accountEnvironmentOperandDenied(literal[2:], names), false, true
 	default:
 		pendingValue = straceOptionAwaitsValue(literal)
@@ -354,26 +377,129 @@ func wordHasUnquotedBackslash(word *syntax.Word) bool {
 	return false
 }
 
+// wordHasUnquotedBackslashBeforeEq reports whether word contains an unquoted
+// backslash escape (in a syntax.Lit part) that falls BEFORE the first '=' in
+// the word's literal text. The shell removes an unquoted backslash, so a '\' in
+// the NAME — the text before the first '=' — makes the literalShellWord NAME
+// shell-unstable (strace -E\CODEX_HOME=/other literalizes the name to
+// \CODEX_HOME while strace receives CODEX_HOME); a '\' AFTER the first '=' is
+// in the VALUE and is shell-stable for a settled NAME (strace -EFOO=\$V codex
+// passes -EFOO=$V, whose FOO name is harmless), so it must not block. The first
+// '=' is tracked across parts, since the separator may sit in a quoted segment
+// (strace -EFOO"="=\$V). A backslash inside an SglQuoted or DblQuoted part is
+// literal and shell-stable, so only a top-level Lit is checked.
+func wordHasUnquotedBackslashBeforeEq(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			for _, r := range p.Value {
+				if r == '=' {
+					return false
+				}
+				if r == '\\' {
+					return true
+				}
+			}
+		case *syntax.SglQuoted:
+			if strings.ContainsRune(p.Value, '=') {
+				return false
+			}
+		case *syntax.DblQuoted:
+			if dblQuotedContainsRune(p, '=') {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// dblQuotedContainsRune reports whether a DblQuoted part's literal text contains
+// target. A DblQuoted that reaches this check carries only literal sub-parts
+// (an expansion would have made the enclosing word non-literal), so its text
+// is the concatenation of its syntax.Lit sub-parts.
+func dblQuotedContainsRune(quoted *syntax.DblQuoted, target rune) bool {
+	for _, part := range quoted.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsRune(lit.Value, target) {
+			return true
+		}
+	}
+	return false
+}
+
 // dblQuotedExpandsToManyWords reports whether a DblQuoted part expands to more
 // than one argv word. A double-quoted "$@" (or ${@}) expands to one word per
 // positional parameter, and a double-quoted "${name[@]}" expands to one word
 // per array element; both can word-split an option value into a further strace
 // option. "$*" and "${name[*]}" join into one word and are excluded, as are
 // length/width forms (${#@}) which collapse to a single word.
+//
+// A $@ or ${name[@]} nested inside a parameter expansion's alternative
+// (${V:+$@}) or search/replace (${V/x/$@}) still splits under the outer double
+// quote — the alternative's word is reached under the same quoting context — so
+// the check recurses into those sub-words and any nested double quote.
 func dblQuotedExpandsToManyWords(quoted *syntax.DblQuoted) bool {
 	for _, part := range quoted.Parts {
-		exp, ok := part.(*syntax.ParamExp)
-		if !ok || exp.Param == nil {
-			continue
-		}
-		// "$@" / "${@}": the special @ parameter expands to one word per
-		// positional parameter. ${#@} (length) collapses to one word.
-		if exp.Param.Value == "@" && exp.Index == nil && !exp.Length && !exp.Width {
+		if wordPartExpandsToManyWords(part) {
 			return true
 		}
-		// "${name[@]}": an array indexed by @ expands to one word per
-		// element. ${name[*]} joins into one word and is excluded.
-		if w, ok := exp.Index.(*syntax.Word); ok && w.Lit() == "@" {
+	}
+	return false
+}
+
+// wordPartExpandsToManyWords reports whether a WordPart inside a double-quoted
+// context can expand to more than one argv word. See dblQuotedExpandsToManyWords
+// for the direct splitting forms and the recursion into nested alternatives.
+func wordPartExpandsToManyWords(part syntax.WordPart) bool {
+	switch p := part.(type) {
+	case *syntax.ParamExp:
+		return paramExpExpandsToManyWords(p)
+	case *syntax.DblQuoted:
+		return dblQuotedExpandsToManyWords(p)
+	}
+	return false
+}
+
+// paramExpExpandsToManyWords reports whether a ParamExp, reached under a
+// double-quoted context, expands to more than one argv word. The direct forms
+// are "$@"/"${@}" and "${name[@]}"; a nested $@/${name[@]} in the alternative
+// (${V:+$@}) or replacement (${V/x/$@}) splits the same way, so recurse into
+// those sub-words. Length/width forms (${#@}) collapse to one word and are
+// excluded from the direct $@ check.
+func paramExpExpandsToManyWords(exp *syntax.ParamExp) bool {
+	if exp == nil || exp.Param == nil {
+		return false
+	}
+	// "$@" / "${@}": one word per positional parameter. ${#@} (length) collapses.
+	if exp.Param.Value == "@" && exp.Index == nil && !exp.Length && !exp.Width {
+		return true
+	}
+	// "${name[@]}": one word per array element. ${name[*]} joins into one word.
+	if w, ok := exp.Index.(*syntax.Word); ok && w.Lit() == "@" {
+		return true
+	}
+	// A nested $@/${name[@]} in the alternative (${V:+$@}, ${V:-"$@"}) or
+	// search/replace (${V/x/$@}) is still under the outer double quote.
+	if exp.Exp != nil && wordExpandsToManyWords(exp.Exp.Word) {
+		return true
+	}
+	if exp.Repl != nil && (wordExpandsToManyWords(exp.Repl.Orig) || wordExpandsToManyWords(exp.Repl.With)) {
+		return true
+	}
+	return false
+}
+
+// wordExpandsToManyWords reports whether a Word reached under a double-quoted
+// context carries a part that expands to more than one argv word. It recurses
+// into a nested DblQuoted, whose contents stay quoted and still split on $@.
+func wordExpandsToManyWords(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		if wordPartExpandsToManyWords(part) {
 			return true
 		}
 	}
@@ -589,6 +715,21 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 			_, unsafe := unwrapXargs(words[1:], names, memo)
 			return 1, unsafe, strace && inOption, false
 		}
+		// The traced command can be an unmodeled wrapper that runs a child
+		// and sets its environment through its OWN options — systemd-run's
+		// --setenv=NAME[=VALUE] sets NAME on the transient service's child
+		// (it documents `-E --setenv=NAME[=VALUE]` and runs the supplied
+		// COMMAND). systemd-run is not a modeled peel wrapper, so unlike
+		// xargs there is no unwrap helper; delegate its tail to the
+		// non-strace wrapper scan, which applies the same generic
+		// --opt=DENIED check a bare `systemd-run --setenv=CODEX_HOME=/other
+		// codex` gets. A leaf command (echo, grep, …) is NOT delegated, so a
+		// -E/--env-shaped argument of the traced command
+		// (strace echo -ECODEX_HOME=$V codex) stays allowed — only a real
+		// env-setting wrapper's options are inspected.
+		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "systemd-run") {
+			return 1, wrapperTailHidesAccountAssignment(words[1:], false, names, memo), strace && inOption, false
+		}
 		// A shell in the wrapper's tail (`strace sh -c 'unset CODEX_HOME;
 		// codex'`) gets the same verdict a bare shell command gets: the
 		// modeled path refuses it under `nice sh -c ...` and only the
@@ -603,7 +744,17 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 	// A literal option word. "--" ends strace's option region; any other
 	// option keeps parsing options. boundary reports that boundary so the
 	// caller stops applying the wrapper-option arms to the trailing argv.
-	boundary := strace && inOption && literal == "--"
+	// "--" only ends strace's OWN option parsing: the NEXT word is still the
+	// traced command, and when that command is itself a wrapper whose options
+	// the scan analyzes (strace re-enters, xargs/systemd-run delegate), ending
+	// the region at "--" would leave the wrapper's env-mutating options
+	// uninspected (strace -- strace -E CODEX_HOME=/other codex,
+	// strace -- xargs --process-slot-var=CODEX_HOME codex). Keep the region
+	// open past "--" in that case so the wrapper's own arms fire on the next
+	// word; a leaf command after "--" (strace -- echo -ECODEX_HOME=$V codex)
+	// still ends the region and keeps its arguments allowed.
+	boundary := strace && inOption && literal == "--" &&
+		!(len(words) >= 2 && straceTracedWrapper(words[1]))
 	pendingValue := false
 	if strace && inOption {
 		consumed, hides, pv, done := straceOptionWordHides(literal, words, names)
