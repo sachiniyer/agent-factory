@@ -193,10 +193,12 @@ func lastComposerGlyphRow(rows []string) int {
 }
 
 // isComposerGlyphRow reports whether a normalized row opens with a composer
-// prompt glyph — Claude's ❯, Codex's ›, or the plain > some composers draw.
+// prompt glyph — Claude's ❯, Codex's ›, Devin's ❭ (task/runner.go), or the
+// plain > some composers draw.
 func isComposerGlyphRow(norm string) bool {
 	return strings.HasPrefix(norm, claudeComposerGlyph) ||
-		strings.HasPrefix(norm, "›") || strings.HasPrefix(norm, ">")
+		strings.HasPrefix(norm, "›") || strings.HasPrefix(norm, "❭") ||
+		strings.HasPrefix(norm, ">")
 }
 
 // bareComposerGlyphRow reports whether a row is an empty composer prompt — the
@@ -204,7 +206,7 @@ func isComposerGlyphRow(norm string) bool {
 // ">quote" row is not bare: it carries content.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
-	return norm == "›" || norm == claudeComposerGlyph
+	return norm == "›" || norm == claudeComposerGlyph || norm == "❭"
 }
 
 // blankComposerRow is a row holding nothing but whitespace and the vertical
@@ -300,7 +302,7 @@ func stillChipComposer(boundary, pane string, cursor paneCursorState, chipText s
 	// Strip exactly one leading prompt glyph, not one of each — the payload
 	// itself may open with '>'.
 	chipRow := normalizeDelivery(bRegion[0])
-	if r, size := utf8.DecodeRuneInString(chipRow); r == '❯' || r == '›' || r == '>' {
+	if r, size := utf8.DecodeRuneInString(chipRow); r == '❯' || r == '›' || r == '❭' || r == '>' {
 		chipRow = chipRow[size:]
 	}
 	if chipRow != chipText || !singleContentRow(bRegion) {
