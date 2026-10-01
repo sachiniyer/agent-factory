@@ -3038,10 +3038,14 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
         message: "a tap must still report a button press to the mouse-aware application",
       })
       .toBe(true);
-    expect(
-      sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release),
-      "a tap must report the button's release as well",
-    ).toBe(true);
+    // The release is a second report of its own — a mousedown frame can land here
+    // while the mouseup frame is still in flight (the #4217 sighting), so it is
+    // polled the same way rather than read off the array the press filled.
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release), {
+        message: "a tap must report the button's release as well",
+      })
+      .toBe(true);
 
     // A finger travelling DOWN the screen pulls older content into view — what a
     // desktop wheel-up does here. One report per line of travel, button 64.
