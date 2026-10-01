@@ -44,6 +44,7 @@ import {
   sameLayout,
   sameTabs,
   setRatio,
+  siblingSubtreeOf,
   singleLeaf,
   type SplitNode,
   splitLeaf,
@@ -576,6 +577,24 @@ export class SplitView {
     this.commit();
   }
 
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab: number): void {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
+
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -696,6 +715,13 @@ export class SplitView {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -711,6 +737,14 @@ export class SplitView {
    *  it the one place to count them (see layoutGeneration). */
   private commit(): void {
     this.layoutGen++;
+    this.land();
+  }
+
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  private land(): void {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
@@ -722,17 +756,41 @@ export class SplitView {
     if (!this.tree) {
       return;
     }
+    // The sibling subtree that closeLeaf will substitute into the freed space — read
+    // on the tree BEFORE the close, since closeLeaf preserves the sibling's reference
+    // as it collapses the parent. null only for a single-leaf tree, which closeLeaf
+    // rejects as the un-closable last pane. Computed here so the focus re-point below
+    // names the pane that GREW into the closed pane's region rather than the leftmost
+    // leaf of the WHOLE tree — which, for a nested close inside a non-leftmost branch,
+    // lives in an unrelated root branch and would intercept the keystrokes.
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return; // the last pane can't be closed
     }
     this.tree = next;
-    // Re-point focus if the closed pane held it.
-    if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    // Re-point focus if the closed pane held it: to the first leaf of the sibling
+    // subtree that expanded to fill the closed pane's space. Falls back to the new
+    // tree's first leaf only when no sibling exists (a single-leaf tree, which
+    // closeLeaf already rejected above, so the fallback is defensive). The previous
+    // leaves(this.tree)[0] formula picked the leftmost leaf of the whole tree; for a
+    // nested close in a non-leftmost branch that is an unrelated pane, and
+    // reconcile()'s validity guard (it only re-routes an INVALID focusedId) never
+    // corrected it — so refocus() handed the keyboard to the wrong terminal.
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
 
   // --- internal: reconcile tree → DOM + terminals ---------------------------
