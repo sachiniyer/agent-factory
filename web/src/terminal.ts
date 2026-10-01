@@ -64,12 +64,12 @@ import {
   type TerminalWordRange,
   textFromCells,
   TOUCH_LONG_PRESS_MS,
-  touchHistoryScrollPlan,
   touchPressStillHeld,
   touchScrollClaimsGesture,
   wordRangeAtColumn,
   wrappedCellPosition,
 } from "./terminal-mouse.js";
+import { TouchScroll } from "./touch-scroll.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { terminalSurface } from "./components.js";
 import { currentXtermTheme } from "./theme.js";
@@ -244,6 +244,8 @@ export class AttachTerminal {
   // second finger arrived and the browser owns the pinch.
   private touchScrollY: number | null = null;
   private touchScrollRemainder = 0;
+  private readonly fling = new TouchScroll(holdClockMs);
+  private coastFrame: number | null = null;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -333,6 +335,8 @@ export class AttachTerminal {
       // The touch→wheel bridge's synthetics are not a user scroll (#4982).
       return;
     }
+    // A real wheel is a new scroll intent — the coast must not fight it.
+    this.fling.stop();
     this.handleUserScroll("wheel");
     if (
       !terminalMouseOverrideHeld(event, this.mouseOverride) &&
@@ -342,7 +346,7 @@ export class AttachTerminal {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Touch scroll ownership (#2681/#2682/#4982) — the module note above the class.
+  // Touch scroll ownership — the module note above the class.
   private readonly onTouchStart = (event: TouchEvent): void => {
     // Eligibility is settled once, at the start of the gesture. A touch whose target
     // is the viewport itself is a scrollbar drag the browser already handles — the
@@ -350,11 +354,16 @@ export class AttachTerminal {
     // BACKWARDS, since a thumb follows the finger while the content opposes it.
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
+    // Finger-down is tap-to-stop (#5020).
+    this.fling.stop();
     this.touchScrollY = press?.clientY ?? null;
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
+    if (press) {
+      this.fling.push(press.clientY);
+    }
     // Through the shared discard, so a press the timer already staged loses its
     // SELECTION too. A second finger arriving on a held press lands here, and a
     // pinch that left the highlight behind would be claiming a copy that never
@@ -368,7 +377,7 @@ export class AttachTerminal {
       this.startTouchLongPress();
     }
   };
-  private readonly onTouchEnd = (): void => {
+  private readonly onTouchEnd = (event: TouchEvent): void => {
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
@@ -376,6 +385,14 @@ export class AttachTerminal {
     // with a compatibility click instead have already copied there. Whichever runs
     // first consumes the pending text, so the copy happens exactly once.
     this.flushTouchCopy();
+    // Only claimed drags coast; one rAF outstanding at a time.
+    if (this.touchScrollClaimed && this.fling.release() !== 0 && this.coastFrame === null) {
+      // Coast reports ride at the cell the finger lifted from — apps hit-test it.
+      const lift = event.changedTouches[0];
+      this.touchOriginX = lift.clientX;
+      this.touchOriginY = lift.clientY;
+      this.coastFrame = window.requestAnimationFrame(this.onCoastFrame);
+    }
   };
   /**
    * The browser taking the gesture away — and the ONLY signal it gives when it does.
@@ -437,12 +454,15 @@ export class AttachTerminal {
     if (event.touches.length !== 1) {
       // A second finger arrived: hand the REST of this gesture to the browser rather
       // than scrolling by a pinch's motion or by the distance it covered untracked.
+      // Unclaiming it also keeps its lift from starting a coast it never drove.
       this.touchScrollY = null;
+      this.touchScrollClaimed = false;
       return;
     }
-    const last = this.touchScrollY;
     const y = event.touches[0].clientY;
     this.touchScrollY = y;
+    // Sample every move, claimed or not: the estimator needs the approach in the slop.
+    const px = this.fling.push(y);
     if (!this.applicationOwnsMouse()) {
       // xterm's own touch scrolling is live here; tracking the position anyway keeps
       // a mode change mid-drag from scrolling by everything travelled before it.
@@ -458,16 +478,7 @@ export class AttachTerminal {
       }
       this.touchScrollClaimed = true;
     }
-    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
-    this.touchScrollRemainder = plan.remainder;
-    if (plan.lines !== 0) {
-      if (this.term.buffer.active.type === "alternate" && this.applicationOwnsWheel()) {
-        // No scrollback to move — the drag becomes wheel reports (#4982).
-        this.reportTouchWheel(plan.lines, event.touches[0].clientX, event.touches[0].clientY);
-      } else {
-        this.term.scrollLines(plan.lines);
-      }
-    }
+    this.applyTouchScrollPx(px, event.touches[0].clientX, y);
     // Claim the pan. Left to the browser it chains out to the document, which toggles
     // the URL bar, resizes .af-app and refits the terminal mid-gesture (#2493) — and
     // an uncancelled drag can still synthesize the compatibility mouse events the
@@ -603,7 +614,11 @@ export class AttachTerminal {
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
-    this.keybar = new TerminalKeybar(container, data => this.term.input(data, true),
+    this.keybar = new TerminalKeybar(container, data => {
+      // The on-screen key bar is a key press a DOM keydown never sees (#5020).
+      this.fling.stop();
+      this.term.input(data, true);
+    },
       () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
@@ -664,6 +679,10 @@ export class AttachTerminal {
     // never an interrupt — #2787), and Ctrl+V defers to native paste. False
     // suppresses xterm's own handling.
     this.term.attachCustomKeyEventHandler((ev) => {
+      // A key press interrupts a coast; onData also fires for mouse reports (#5020).
+      if (ev.type === "keydown") {
+        this.fling.stop();
+      }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
@@ -752,6 +771,7 @@ export class AttachTerminal {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
+    this.fling.stop();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -805,6 +825,38 @@ export class AttachTerminal {
       );
     }
   }
+
+  // px -> rows: scrollLines, or app-owned wheel reports (drags + coasts).
+  private applyTouchScrollPx(px: number, x: number, y: number): void {
+    const plan = historyWheelPlan(
+      { deltaMode: 0, deltaY: px },
+      this.term.rows,
+      this.rowHeight(),
+      this.touchScrollRemainder,
+    );
+    this.touchScrollRemainder = plan.remainder;
+    if (plan.lines !== 0) {
+      if (this.term.buffer.active.type === "alternate" && this.applicationOwnsWheel()) {
+        this.reportTouchWheel(plan.lines, x, y);
+      } else {
+        this.term.scrollLines(plan.lines);
+      }
+    }
+  }
+
+  private readonly onCoastFrame = (): void => {
+    this.coastFrame = null;
+    const px = this.fling.tick();
+    if (px === null) {
+      return;
+    }
+    if (this.term.buffer.active.type === "alternate" && !this.applicationOwnsWheel()) {
+      this.fling.stop();
+      return;
+    }
+    this.applyTouchScrollPx(px, this.touchOriginX, this.touchOriginY);
+    this.coastFrame = window.requestAnimationFrame(this.onCoastFrame);
+  };
 
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
@@ -1261,6 +1313,14 @@ export class AttachTerminal {
         this.seeded = true;
         break;
       case Op.PTYOut:
+        // Followed-tail output interrupts the coast; alt repaints are exempt.
+        if (
+          this.coastFrame !== null &&
+          this.term.buffer.active.type === "normal" &&
+          this.term.buffer.active.viewportY >= this.term.buffer.active.baseY
+        ) {
+          this.fling.stop();
+        }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
         break;

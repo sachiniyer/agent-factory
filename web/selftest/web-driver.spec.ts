@@ -829,6 +829,52 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number,
 }
 
 /**
+ * touchDrag at a measured cadence (#5020): `steps` moves paced `stepMs` apart on
+ * the wall clock, so the gesture's release velocity — and therefore its momentum —
+ * is a parameter of the test rather than an accident of CDP round-trip time. The
+ * final `tail` moves go back-to-back so the velocity window always ends on fresh,
+ * fast samples: a real finger accelerates into the lift, and a lone stalled send
+ * before touchEnd would otherwise empty the ~100ms estimator window. `tailShare`
+ * (default: the tail's even share) gives the tail a bigger slice of the travel —
+ * the whip at the end of a hard flick.
+ */
+async function touchDragTimed(
+  cdp: CDPSession,
+  x: number,
+  fromY: number,
+  toY: number,
+  steps: number,
+  stepMs: number,
+  tail = 2,
+  holdBeforeEndMs = 0,
+  tailShare?: number,
+  tailStepMs = 0,
+): Promise<void> {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: fromY }] });
+  const span = toY - fromY;
+  const share = tailShare ?? tail / (steps + tail);
+  for (let step = 1; step <= steps + tail; step++) {
+    const pos =
+      step <= steps
+        ? fromY + (span * (1 - share) * step) / steps
+        : fromY + span * (1 - share) + (span * share * (step - steps)) / tail;
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: pos }] });
+    if (step <= steps) {
+      await new Promise((resolve) => setTimeout(resolve, stepMs));
+    } else if (tailStepMs > 0) {
+      // Big tail moves must still be PACED: on the report-emitting path a burst of
+      // back-to-back sends lands while the renderer is busy with wheel-report echo
+      // and Chromium coalesces the rest of the gesture away.
+      await new Promise((resolve) => setTimeout(resolve, tailStepMs));
+    }
+  }
+  if (holdBeforeEndMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, holdBeforeEndMs));
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+/**
  * Taps once at a point — the gesture that must keep reaching a mouse-aware
  * application even when the drag above no longer does.
  *
@@ -864,6 +910,36 @@ async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step }] });
   }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+/** Polls a scroll offset until two samples `quietMs` apart are equal — i.e. a
+ *  momentum coast has run out — then returns the settled value (#5020). */
+async function settledScrollTop(viewport: Locator, quietMs = 300, timeoutMs = 12_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = await viewport.evaluate((el) => el.scrollTop);
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, quietMs));
+    const next = await viewport.evaluate((el) => el.scrollTop);
+    if (next === prev) {
+      return next;
+    }
+    prev = next;
+  }
+  return prev;
+}
+
+/** The same settle, for the wheel-report stream on the alternate-screen path. */
+async function settledReportCount(reports: readonly unknown[], quietMs = 300, timeoutMs = 12_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = reports.length;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, quietMs));
+    if (reports.length === prev) {
+      return prev;
+    }
+    prev = reports.length;
+  }
+  return prev;
 }
 
 /** One decoded SGR (1006) mouse report inside the PTY input the page sent. */
@@ -3034,6 +3110,349 @@ test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel 
       await ctx.close();
     }
   }
+});
+
+test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momentum", REAL_FIXTURE, async ({
+  browser,
+}, testInfo) => {
+  // The same really-touch context as #2682/#4982: every gesture below is a trusted
+  // touch Chromium routes itself — the only routing that proves anything about a
+  // phone. What this test adds is MEASUREMENT: lines moved per drag and per flick,
+  // on both scroll paths, so the PR can compare them against the same run on
+  // master instead of asserting the feel is faster.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  // Timestamped SGR reports — the momentum split on the wheel path is "arrived
+  // after the lift".
+  const reports: { button: number; release: boolean; t: number }[] = [];
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op !== Op.Input) {
+        return;
+      }
+      const t = Date.now();
+      const text = String.fromCharCode(...frame.data);
+      for (const m of text.matchAll(/\x1b\[<(\d+);\d+;\d+([Mm])/g)) {
+        reports.push({ button: Number(m[1]), release: m[2] === "m", t });
+      }
+    });
+  });
+
+  const metrics: Record<string, number> = {};
+  const failures: string[] = [];
+  // A measured step records its numbers into the artifact FIRST and only then
+  // asserts — and its failure lands in the artifact too rather than ending the
+  // test, so the same spec run against a pre-#5020 build yields the before-column
+  // the PR body needs.
+  const step = async (name: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (err) {
+      failures.push(`${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
+  };
+  const wheels = (since = 0): { button: number; release: boolean; t: number }[] =>
+    reports.filter((r) => (r.button === 64 || r.button === 65) && r.t >= since);
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open")).toHaveCount(0);
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const scrollTop = (): Promise<number> => viewport.evaluate((el) => el.scrollTop);
+    // Deep scrollback: a clamped flick coasts hundreds of lines, and a coast cut
+    // short by the top of history would read as less momentum than there is.
+    await p.keyboard.type("for i in $(seq 1 1200); do printf 'fast-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("fast-scroll-1200", { timeout: 20_000 });
+
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+    const rowHeight = await host
+      .locator(".xterm-rows > div")
+      .first()
+      .evaluate((el) => el.getBoundingClientRect().height);
+    metrics.screenHeightPx = height;
+    metrics.rowHeightPx = rowHeight;
+    metrics.viewportRows = height / rowHeight;
+
+    // PART A — the normal buffer UNDER application mouse reporting, where af owns
+    // the drag (#2682). cat swallows the reports the gestures send to the PTY, so
+    // click bytes never land on a command line the next Enter would run.
+    await p.keyboard.type("printf '\\033[?1000h\\033[?1006h'");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    await p.keyboard.type("cat > /dev/null");
+    await p.keyboard.press("Enter");
+    const bottom = await scrollTop();
+    expect(bottom, "1200 lines of output must leave real scrollback above the view").toBeGreaterThan(0);
+
+    await step("normal drag", async () => {
+      // Half a screen at ~0.3 px/ms: a deliberate scroll, too slow to fling. The
+      // finger travels DOWN — into history, like #2682's drag — and it is the gain
+      // that's being measured: 1:1 would move half a viewport of history.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 20, 45, 0);
+      const parked = await scrollTop();
+      metrics.normalDragLines = (bottom - parked) / rowHeight;
+      metrics.normalDragGain = metrics.normalDragLines / ((height * 0.5) / rowHeight);
+      // …and a drag this slow must stop DEAD at the lift: any later movement is
+      // momentum a careful finger never earned.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await scrollTop(), "a slow drag must not acquire momentum").toBe(parked);
+      expect(metrics.normalDragGain, "touch scrolling must move ≥ ~3x the finger's travel").toBeGreaterThanOrEqual(2.8);
+    });
+
+    await step("normal flick", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop, { message: "typing must return the viewport to the newest output" }).toBeGreaterThan(
+        bottom - rowHeight,
+      );
+      const beforeFlick = await scrollTop();
+      // An accelerating flick — a real finger gathers then whips: a slow first
+      // half, then a fast tail covering most of the travel, so the release
+      // window reads whip speed and not send round-trip time.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      const atRelease = await scrollTop();
+      const settled = await settledScrollTop(viewport);
+      metrics.normalFlickDragLines = (beforeFlick - atRelease) / rowHeight;
+      metrics.normalFlickCoastLines = (atRelease - settled) / rowHeight;
+      metrics.normalFlickTotalLines = (beforeFlick - settled) / rowHeight;
+      expect(
+        metrics.normalFlickCoastLines,
+        "a quick flick must KEEP scrolling after the lift — through at least a viewport",
+      ).toBeGreaterThanOrEqual(metrics.viewportRows);
+      expect(
+        metrics.normalFlickCoastLines,
+        "a GENTLE flick stays gentle — a few viewports, not the whole buffer",
+      ).toBeLessThanOrEqual(6 * metrics.viewportRows);
+      expect(
+        metrics.normalFlickTotalLines,
+        "a quick flick across long history must travel several screenfuls in all",
+      ).toBeGreaterThanOrEqual(3 * metrics.viewportRows);
+    });
+
+    // Page-side touch counters: a browser-stolen pan shows up as touchcancel with
+    // the move stream cut short, which the metrics alone cannot distinguish from
+    // a gesture that arrived but produced no scroll.
+    const armTouchProbe = (): Promise<void> =>
+      p.evaluate(() => {
+        const w = window as unknown as {
+          __touchProbe?: { moves: number; cancels: number; ends: number };
+          __touchProbeArmed?: boolean;
+        };
+        w.__touchProbe = { moves: 0, cancels: 0, ends: 0 };
+        if (w.__touchProbeArmed) return;
+        w.__touchProbeArmed = true;
+        const probe = () => w.__touchProbe!;
+        document.addEventListener("touchmove", () => (probe().moves += 1), { capture: true, passive: true });
+        document.addEventListener("touchcancel", () => (probe().cancels += 1), { capture: true, passive: true });
+        document.addEventListener("touchend", () => (probe().ends += 1), { capture: true, passive: true });
+      });
+    const readTouchProbe = async (prefix: string): Promise<void> => {
+      const probe = await p.evaluate(
+        () => (window as unknown as { __touchProbe?: { moves: number; cancels: number; ends: number } }).__touchProbe,
+      );
+      metrics[`${prefix}MovesSeen`] = probe?.moves ?? -1;
+      metrics[`${prefix}CancelsSeen`] = probe?.cancels ?? -1;
+      metrics[`${prefix}EndsSeen`] = probe?.ends ?? -1;
+    };
+
+    await step("normal hard flick", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      const beforeFlick = await scrollTop();
+      await armTouchProbe();
+      // A whip over most of the screen: four small paced moves claim the gesture
+      // at deliberate speed, then four back-to-back ~119px moves whip the release
+      // window to ~4 px/ms — the review's >=10-viewport requirement.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 35, 4, 0, 0.85);
+      await readTouchProbe("normalHardFlick");
+      const atRelease = await scrollTop();
+      const settled = await settledScrollTop(viewport);
+      metrics.normalHardFlickDragLines = (beforeFlick - atRelease) / rowHeight;
+      metrics.normalHardFlickCoastLines = (atRelease - settled) / rowHeight;
+      metrics.normalHardFlickTotalLines = (beforeFlick - settled) / rowHeight;
+      expect(
+        metrics.normalHardFlickTotalLines,
+        "a hard flick must travel >= 10 viewports — momentum scales with release velocity",
+      ).toBeGreaterThanOrEqual(10 * metrics.viewportRows);
+      expect(metrics.normalHardFlickCoastLines).toBeGreaterThan(metrics.normalFlickCoastLines);
+    });
+
+    await step("normal tap-to-stop", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      // The press lands mid-coast: from touchstart the view must hold still for as
+      // long as the finger stays down.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await touchPressAndHold(cdp, column, y + height * 0.5, 200);
+      const held = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const heldLater = await scrollTop();
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      metrics.normalTapToStopDriftPx = Math.abs(heldLater - held);
+      expect(heldLater, "a finger landing on a coasting view must stop it").toBe(held);
+    });
+
+    await step("normal pause-then-lift", async () => {
+      // A real drag that then RESTS — finger down, motionless — must not fling:
+      // the lift is sampled after 300ms of stillness, so no recent velocity exists.
+      await touchDragTimed(cdp, column, y + height * 0.35, y + height * 0.6, 6, 14, 0, 300);
+      const atLift = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const settled = await scrollTop();
+      metrics.normalPausedLiftDriftPx = Math.abs(atLift - settled);
+      expect(settled, "a drag that paused before the lift must not coast").toBe(atLift);
+    });
+
+    await step("normal tap", async () => {
+      reports.length = 0;
+      await touchTap(cdp, column, y + height * 0.5);
+      await expect
+        .poll(
+          () =>
+            reports.some((r) => r.button === 0 && !r.release) && reports.some((r) => r.button === 0 && r.release),
+          { message: "a tap must still report a click to the mouse-aware application" },
+        )
+        .toBe(true);
+      metrics.normalTapReports = reports.length;
+    });
+
+    // PART B — the alternate screen under an application that owns the wheel
+    // (#4982): the same gestures must become wheel reports, with the same gain and
+    // the same momentum, coalesced at most one batch per frame.
+    await p.keyboard.press("Control+c");
+    await expect(async () => {
+      await p.keyboard.type("printf '\\033[?1049h\\033[H'");
+      await p.keyboard.press("Enter");
+      await expect(host, "entering the alternate screen must clear the seeded history").not.toContainText(
+        "fast-scroll-1200",
+        { timeout: 3_000 },
+      );
+    }).toPass({ timeout: 15_000 });
+    // No echo, byte-at-a-time reads: a real mouse-mode application puts the PTY
+    // in raw mode. Left on, each wheel report echoes back as output and xterm's
+    // DOM renderer recycles row nodes — the touch sequence's capture target dies
+    // mid-gesture and the browser drops the rest of the stream without even a
+    // touchcancel (probe: a few moves, zero ends).
+    await p.keyboard.type("stty -echo -icanon && cat > /dev/null");
+    await p.keyboard.press("Enter");
+    await expect
+      .poll(async () => viewport.evaluate((el) => el.scrollHeight <= el.clientHeight + 1), {
+        message: "the alternate buffer must be the unscrollable one",
+      })
+      .toBe(true);
+
+    await step("alternate drag", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 20, 45, 0);
+      await settledReportCount(reports);
+      metrics.altDragLines = wheels(t0).length;
+      metrics.altDragGain = metrics.altDragLines / ((height * 0.5) / rowHeight);
+      expect(wheels(t0).every((r) => r.button === 64), "a drag toward history must report wheel-up").toBe(true);
+      expect(metrics.altDragGain, "the wheel path must carry the same ≥ ~3x gain").toBeGreaterThanOrEqual(2.8);
+    });
+
+    await step("alternate flick", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      const releaseAt = Date.now();
+      await settledReportCount(reports);
+      metrics.altFlickTotalLines = wheels(t0).length;
+      metrics.altFlickCoastLines = wheels(releaseAt + 40).length;
+      expect(
+        metrics.altFlickCoastLines,
+        "the lift must not end the gesture — wheel reports must keep arriving",
+      ).toBeGreaterThanOrEqual(metrics.viewportRows);
+      expect(metrics.altFlickCoastLines, "a gentle flick stays gentle on the wheel path too").toBeLessThanOrEqual(
+        6 * metrics.viewportRows,
+      );
+      expect(metrics.altFlickTotalLines).toBeGreaterThanOrEqual(3 * metrics.viewportRows);
+      expect(wheels(t0).every((r) => r.button === 64)).toBe(true);
+    });
+
+    await step("alternate hard flick", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await armTouchProbe();
+      // Same whip as the normal path — downward into history = wheel-up reports.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 35, 4, 0, 0.85);
+      await readTouchProbe("altHardFlick");
+      const releaseAt = Date.now();
+      await settledReportCount(reports);
+      metrics.altHardFlickTotalLines = wheels(t0).length;
+      metrics.altHardFlickCoastLines = wheels(releaseAt + 40).length;
+      expect(
+        metrics.altHardFlickTotalLines,
+        "the wheel path must carry the same scaled momentum — >= 10 viewports of reports",
+      ).toBeGreaterThanOrEqual(10 * metrics.viewportRows);
+      expect(metrics.altHardFlickCoastLines).toBeGreaterThan(metrics.altFlickCoastLines);
+      expect(wheels(t0).every((r) => r.button === 64)).toBe(true);
+    });
+
+    await step("alternate tap-to-stop", async () => {
+      reports.length = 0;
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await touchPressAndHold(cdp, column, y + height * 0.5, 200);
+      const held = wheels().length;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const heldLater = wheels().length;
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      metrics.altTapToStopReportsDuringHold = heldLater - held;
+      expect(heldLater, "a finger landing mid-coast must stop the report stream").toBe(held);
+    });
+
+    await step("alternate tap", async () => {
+      reports.length = 0;
+      await touchTap(cdp, column, y + height * 0.5);
+      await expect
+        .poll(
+          () =>
+            reports.some((r) => r.button === 0 && !r.release) && reports.some((r) => r.button === 0 && r.release),
+          { message: "a tap on the alternate screen must still click through" },
+        )
+        .toBe(true);
+      metrics.altTapReports = reports.length;
+    });
+  } finally {
+    await testInfo.attach("scroll-metrics", {
+      body: JSON.stringify({ metrics, failures }, null, 2),
+      contentType: "application/json",
+    });
+    console.log(`#5020 metrics: ${JSON.stringify(metrics)}`);
+    if (failures.length > 0) {
+      console.log(`#5020 step failures: ${failures.join(" | ")}`);
+    }
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+  expect(failures, "every measured step above must hold").toEqual([]);
 });
 
 test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTURE, async ({ browser }) => {

@@ -9292,9 +9292,6 @@ var TOUCH_SCROLL_SLOP_PX = 8;
 function touchScrollClaimsGesture(originY, y) {
   return Math.abs(y - originY) >= TOUCH_SCROLL_SLOP_PX;
 }
-function touchHistoryScrollPlan(lastY, y, rows, rowHeight, remainder) {
-  return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
-}
 var TOUCH_LONG_PRESS_MS = 500;
 function touchPressStillHeld(originX, originY, x, y) {
   return Math.abs(x - originX) < TOUCH_SCROLL_SLOP_PX && Math.abs(y - originY) < TOUCH_SCROLL_SLOP_PX;
@@ -9356,6 +9353,67 @@ function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
 }
 
+// src/touch-scroll.ts
+var SCROLL_GAIN = 3;
+var FLING_WINDOW_MS = 100;
+var FLING_MIN_V = 0.5;
+var FLING_MAX_V = 6;
+var FLING_VEL_GAIN = 4.5;
+var FLING_DECAY_MS = 650;
+var FLING_STOP_V = 0.04;
+var FLING_MAX_DT = 50;
+var TouchScroll = class {
+  constructor(now) {
+    this.now = now;
+  }
+  samples = [];
+  v = 0;
+  lastTick = 0;
+  push(y) {
+    const last = this.samples[this.samples.length - 1];
+    this.samples.push({ y, t: this.now() });
+    return last ? (last.y - y) * SCROLL_GAIN : 0;
+  }
+  release() {
+    const t = this.now();
+    const s = this.samples;
+    this.samples = [];
+    this.v = 0;
+    const last = s[s.length - 1];
+    if (!last) {
+      return 0;
+    }
+    let i = s.length - 1;
+    for (; i > 0 && s[i - 1].t >= t - FLING_WINDOW_MS; --i) ;
+    const dt = last.t - s[i].t;
+    const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
+    if (Math.abs(w) < FLING_MIN_V) {
+      return 0;
+    }
+    this.v = Math.max(-FLING_MAX_V, Math.min(FLING_MAX_V, w)) * FLING_VEL_GAIN;
+    this.lastTick = t;
+    return this.v;
+  }
+  tick() {
+    if (this.v === 0) {
+      return null;
+    }
+    const t = this.now();
+    const dt = t - this.lastTick;
+    this.lastTick = t;
+    const px = this.v * Math.min(dt, FLING_MAX_DT);
+    this.v *= Math.exp(-dt / FLING_DECAY_MS);
+    if (Math.abs(this.v) < FLING_STOP_V) {
+      this.v = 0;
+    }
+    return px;
+  }
+  stop() {
+    this.v = 0;
+    this.samples = [];
+  }
+};
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -9393,7 +9451,10 @@ var AttachTerminal = class {
     this.term.open(container);
     this.keybar = new TerminalKeybar(
       container,
-      (data) => this.term.input(data, true),
+      (data) => {
+        this.fling.stop();
+        this.term.input(data, true);
+      },
       () => this.scheduleVisibleFit(),
       () => this.term.modes.applicationCursorKeysMode
     );
@@ -9426,6 +9487,9 @@ var AttachTerminal = class {
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
     this.term.onBinary((data) => this.sendBinary(data));
     this.term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === "keydown") {
+        this.fling.stop();
+      }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
@@ -9505,6 +9569,8 @@ var AttachTerminal = class {
   // second finger arrived and the browser owns the pinch.
   touchScrollY = null;
   touchScrollRemainder = 0;
+  fling = new TouchScroll(holdClockMs);
+  coastFrame = null;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -9588,20 +9654,25 @@ var AttachTerminal = class {
     if (!event.isTrusted) {
       return;
     }
+    this.fling.stop();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Touch scroll ownership (#2681/#2682/#4982) — the module note above the class.
+  // Touch scroll ownership — the module note above the class.
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
+    this.fling.stop();
     this.touchScrollY = press?.clientY ?? null;
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
     this.touchScrollRemainder = 0;
     this.touchScrollClaimed = false;
+    if (press) {
+      this.fling.push(press.clientY);
+    }
     this.cancelTouchLongPress();
     this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
@@ -9611,11 +9682,17 @@ var AttachTerminal = class {
       this.startTouchLongPress();
     }
   };
-  onTouchEnd = () => {
+  onTouchEnd = (event) => {
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     this.flushTouchCopy();
+    if (this.touchScrollClaimed && this.fling.release() !== 0 && this.coastFrame === null) {
+      const lift = event.changedTouches[0];
+      this.touchOriginX = lift.clientX;
+      this.touchOriginY = lift.clientY;
+      this.coastFrame = window.requestAnimationFrame(this.onCoastFrame);
+    }
   };
   /**
    * The browser taking the gesture away — and the ONLY signal it gives when it does.
@@ -9664,11 +9741,12 @@ var AttachTerminal = class {
     }
     if (event.touches.length !== 1) {
       this.touchScrollY = null;
+      this.touchScrollClaimed = false;
       return;
     }
-    const last = this.touchScrollY;
     const y = event.touches[0].clientY;
     this.touchScrollY = y;
+    const px = this.fling.push(y);
     if (!this.applicationOwnsMouse()) {
       return;
     }
@@ -9678,15 +9756,7 @@ var AttachTerminal = class {
       }
       this.touchScrollClaimed = true;
     }
-    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
-    this.touchScrollRemainder = plan.remainder;
-    if (plan.lines !== 0) {
-      if (this.term.buffer.active.type === "alternate" && this.applicationOwnsWheel()) {
-        this.reportTouchWheel(plan.lines, event.touches[0].clientX, event.touches[0].clientY);
-      } else {
-        this.term.scrollLines(plan.lines);
-      }
-    }
+    this.applyTouchScrollPx(px, event.touches[0].clientX, y);
     event.preventDefault();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
@@ -9774,6 +9844,7 @@ var AttachTerminal = class {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
+    this.fling.stop();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -9821,6 +9892,36 @@ var AttachTerminal = class {
       );
     }
   }
+  // px -> rows: scrollLines, or app-owned wheel reports (drags + coasts).
+  applyTouchScrollPx(px, x, y) {
+    const plan = historyWheelPlan(
+      { deltaMode: 0, deltaY: px },
+      this.term.rows,
+      this.rowHeight(),
+      this.touchScrollRemainder
+    );
+    this.touchScrollRemainder = plan.remainder;
+    if (plan.lines !== 0) {
+      if (this.term.buffer.active.type === "alternate" && this.applicationOwnsWheel()) {
+        this.reportTouchWheel(plan.lines, x, y);
+      } else {
+        this.term.scrollLines(plan.lines);
+      }
+    }
+  }
+  onCoastFrame = () => {
+    this.coastFrame = null;
+    const px = this.fling.tick();
+    if (px === null) {
+      return;
+    }
+    if (this.term.buffer.active.type === "alternate" && !this.applicationOwnsWheel()) {
+      this.fling.stop();
+      return;
+    }
+    this.applyTouchScrollPx(px, this.touchOriginX, this.touchOriginY);
+    this.coastFrame = window.requestAnimationFrame(this.onCoastFrame);
+  };
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
    *  can leave this pane mid-drag, so the pane host is not a wide enough net. */
@@ -10164,6 +10265,9 @@ var AttachTerminal = class {
         this.seeded = true;
         break;
       case 0 /* PTYOut */:
+        if (this.coastFrame !== null && this.term.buffer.active.type === "normal" && this.term.buffer.active.viewportY >= this.term.buffer.active.baseY) {
+          this.fling.stop();
+        }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
         break;
