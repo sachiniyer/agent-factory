@@ -127,6 +127,7 @@ type wrapperTailKey struct {
 	word     *syntax.Word
 	strace   bool
 	inOption bool
+	pending  bool
 }
 
 // envArgvWord literalizes one env operand the way env itself parses it: a

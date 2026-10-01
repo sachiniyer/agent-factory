@@ -497,6 +497,7 @@ func unrecognizedWrapperHidesAccountAssignment(words []*syntax.Word, names map[s
 func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names map[string]struct{}, memo operandTailMemo) bool {
 	var chain []*syntax.Word
 	var chainInOption []bool
+	var chainPending []bool
 	answer := false
 	// strace parses options only up to its first non-option word (the traced
 	// command) or "--"; a -E/--env-shaped word past that point is the
@@ -512,13 +513,14 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 	inOption := true
 	pending := false
 	for len(words) > 0 {
-		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace, inOption: inOption}]; seen {
+		if cached, seen := memo.wrapperTails[wrapperTailKey{word: words[0], strace: strace, inOption: inOption, pending: pending}]; seen {
 			answer = cached
 			break
 		}
 		chain = append(chain, words[0])
 		chainInOption = append(chainInOption, inOption)
-		width, hides, boundary, pendingValue := wrapperTailWordHidesAccountAssignment(words, strace, inOption, names, memo)
+		chainPending = append(chainPending, pending)
+		width, hides, boundary, pendingValue := wrapperTailWordHidesAccountAssignment(words, strace, inOption, pending, names, memo)
 		if hides {
 			answer = true
 			break
@@ -536,7 +538,7 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 		words = words[width:]
 	}
 	for i, word := range chain {
-		memo.wrapperTails[wrapperTailKey{word: word, strace: strace, inOption: chainInOption[i]}] = answer
+		memo.wrapperTails[wrapperTailKey{word: word, strace: strace, inOption: chainInOption[i], pending: chainPending[i]}] = answer
 	}
 	return answer
 }
@@ -550,7 +552,7 @@ func wrapperTailHidesAccountAssignment(words []*syntax.Word, strace bool, names 
 // option region (strace && inOption); the caller uses them to stop applying
 // the strace-specific and generic wrapper-option arms to the traced command's
 // argv.
-func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, inOption bool, names map[string]struct{}, memo operandTailMemo) (int, bool, bool, bool) {
+func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, inOption, pending bool, names map[string]struct{}, memo operandTailMemo) (int, bool, bool, bool) {
 	word := words[0]
 	if isAccountCommandName(word, "env") {
 		// A nested env only mutates the child it execs; requireCommand
@@ -564,26 +566,54 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 	}
 	literal, ok := literalShellWord(word)
 	if !ok {
-		if strace && inOption && straceAttachedEnvOptionHides(word, names) {
-			// The attached -E NAME[=value] and --env=NAME[=value] forms
-			// whose value holds a shell expansion land here:
-			// literalShellWord fails on the ParamExp/CmdSubst, discarding
-			// the literal option marker and NAME that precede it. The
-			// separate-word `-E <word>` and the attached literal
-			// `-ENAME=` forms already fail closed; the non-literal
-			// attached form must fail closed the same way. This is
-			// strace-only: -E means extended-regexp to grep and others
-			// (account_environment_wrapper_test.go:250), and --env=
-			// belongs to strace only when its caller set the strace flag
-			// from the outermost wrapper.
-			return 1, true, false, false
-		}
-		if strace && inOption && straceUnquotedOptionSplit(word) {
-			// A non-literal strace option word (e.g. -o$V) whose value
-			// is an UNQUOTED expansion can word-split into a further
-			// strace option the scan never sees as a separate argv word;
-			// fail closed (see straceUnquotedOptionSplit).
-			return 1, true, false, false
+		// A pending word is the value a value-taking strace option (e.g. -o)
+		// consumes as its next argv word, not a strace option itself: its
+		// expansion is the option's value (a filename), so it cannot be a
+		// -E/--env option and must not be judged by the attached-option or
+		// split checks (strace -o "-ECODEX_HOME=$V" codex: the quoted word is
+		// -o's output-file value, not a strace env option). Its unquoted form
+		// is already caught when the option is recognized (strace -o $V), so a
+		// pending value only reaches here as a quoted/literal value.
+		if strace && inOption && !pending {
+			if straceAttachedEnvOptionHides(word, names) {
+				// The attached -E NAME[=value] and --env=NAME[=value] forms
+				// whose value holds a shell expansion land here:
+				// literalShellWord fails on the ParamExp/CmdSubst, discarding
+				// the literal option marker and NAME that precede it. The
+				// separate-word `-E <word>` and the attached literal
+				// `-ENAME=` forms already fail closed; the non-literal
+				// attached form must fail closed the same way. This is
+				// strace-only: -E means extended-regexp to grep and others
+				// (account_environment_wrapper_test.go:250), and --env=
+				// belongs to strace only when its caller set the strace flag
+				// from the outermost wrapper.
+				return 1, true, false, false
+			}
+			if straceUnquotedOptionSplit(word) {
+				// A non-literal strace option word (e.g. -o$V) whose value
+				// is an UNQUOTED expansion can word-split into a further
+				// strace option the scan never sees as a separate argv word;
+				// fail closed (see straceUnquotedOptionSplit).
+				return 1, true, false, false
+			}
+			if literalShellWordPrefix(word) == "" {
+				// A fully non-literal word in strace's option region — no
+				// literal prefix at all (e.g. strace "$V" codex or
+				// strace $V codex) — can expand to any argv word, including a
+				// -E/--env option that overrides the protected variable
+				// (V=-ECODEX_HOME=/other). straceAttachedEnvOptionHides and
+				// straceUnquotedOptionSplit both require a "-"-bearing
+				// literal prefix, so such a word reached this default and was
+				// accepted; fail closed the way the partial-prefix forms do.
+				// A substituted xargs marker is excluded: it is a synthetic
+				// stand-in for an input line the dedicated straceInputRegion
+				// path already judges (a marker only in -E's value with no
+				// traced command runs no child), so this arm must not
+				// second-guess it.
+				if !isXargsItemWord(word) {
+					return 1, true, false, false
+				}
+			}
 		}
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
@@ -597,6 +627,19 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 			envCallMutatesAccountEnvironment(words[1:], names, true, memo), false, false
 	}
 	if !strings.HasPrefix(literal, "-") || literal == "-" {
+		// The traced command can itself be strace: `strace strace -E
+		// CODEX_HOME=/other codex` runs an inner strace whose -E applies to
+		// codex before the outer strace execs it, overriding the protected
+		// variable while the scan treated the inner strace's argv as the
+		// traced command's inert arguments. Re-enter the option region for
+		// the inner strace instead of ending it, so the inner -E/--env is
+		// judged by the same arms. A bare "-" is the traced-command
+		// boundary (per straceInputRegion), not a re-entry, and a pending
+		// value (strace -o strace ...) is the option's value, not a traced
+		// strace.
+		if strace && inOption && !pending && literal != "-" && isAccountCommandName(word, "strace") {
+			return 1, false, false, false
+		}
 		// A shell in the wrapper's tail (`strace sh -c 'unset CODEX_HOME;
 		// codex'`) gets the same verdict a bare shell command gets: the
 		// modeled path refuses it under `nice sh -c ...` and only the

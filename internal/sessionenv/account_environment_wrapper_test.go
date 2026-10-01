@@ -165,9 +165,6 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		// only its own process's environment and execs nothing, so the tail
 		// assignment overrides no running agent.
 		"strace env CODEX_HOME=/other",
-		// A dynamic tail word could expand to `env`, but with no command word
-		// after the assignment the result is still print mode.
-		"strace $W CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -395,6 +392,56 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		// "$*" joins into one word even when quoted, so a QUOTED "$*"
 		// value stays one option value and stays allowed (control).
 		{`strace -EFOO="$*" codex`, false},
+		// A fully non-literal word in strace's option region (no literal
+		// prefix at all) can expand to a -E/--env option that overrides the
+		// protected variable (strace "$V" codex / strace $V codex with
+		// V=-ECODEX_HOME=/other), so it fails closed the way the
+		// partial-prefix forms (-"$V", --"$V", -f"$V") already do.
+		{`strace "$V" codex`, true},
+		{"strace $V codex", true},
+		// A dynamic option-region word with no literal prefix can also be a
+		// -E option even when the words after it spell no env command: with
+		// $W=-ECODEX_HOME=/other, strace $W CODEX_HOME=/other applies -E and
+		// traces the bare assignment token, so it fails closed (the earlier
+		// print-mode reading missed the option spelling).
+		{"strace $W CODEX_HOME=/other", true},
+		// A pending value a value-taking strace option consumes as its
+		// next argv word is that option's value (a filename), not a strace
+		// option itself: a quoted -E-shaped word after -o stays allowed,
+		// matching the literal -o value, instead of being read as an
+		// attached -E option (strace -o "-ECODEX_HOME=$V" codex).
+		{`strace -o "-ECODEX_HOME=$V" codex`, false},
+		{`strace -o "-EFOO=$V" codex`, false},
+		{`strace -o "-EFOO=1" codex`, false},
+		// The unquoted pending value is already caught when -o is
+		// recognized, so a -E option after -o's value still refuses.
+		{"strace -o strace -E CODEX_HOME=/other codex", true},
+		// An unquoted backslash escape stays in a syntax.Lit, so the raw
+		// operand name is not shell-stable: strace -E\CODEX_HOME=/other
+		// codex literalizes the operand to \CODEX_HOME=/other (not denied)
+		// while the shell removes the backslash and strace receives
+		// -ECODEX_HOME=/other. Fail closed for an unquoted escape in the
+		// operand word, attached or separate; a backslash inside quotes is
+		// literal and stays allowed (control).
+		{`strace -E\CODEX_HOME=/other codex`, true},
+		{`strace -E \CODEX_HOME=/other codex`, true},
+		{`strace -E\CODEX_HOME codex`, true},
+		{`strace -E"CODEX\HOME"=/other codex`, false},
+		// The traced command can itself be strace: its argv is a fresh
+		// strace invocation whose -E/--env options apply to the ultimately
+		// traced child (strace strace -E CODEX_HOME=/other codex), so the
+		// scan re-enters the option region instead of treating the inner
+		// strace's argv as the traced command's inert arguments. A -E-shaped
+		// word past the inner traced command is its argument and stays
+		// allowed; a harmless inner -E (attached, quoted) stays allowed.
+		{"strace strace -E CODEX_HOME=/other codex", true},
+		{"strace strace --env=CODEX_HOME=/other codex", true},
+		{"strace strace -ECODEX_HOME=/other codex", true},
+		{"strace strace strace -E CODEX_HOME=/other codex", true},
+		{"strace strace echo -E CODEX_HOME=/other codex", false},
+		{"strace strace -E FOO=1 codex", false},
+		{`strace strace -EFOO="$V" codex`, false},
+		{`strace strace -o "-ECODEX_HOME=$V" codex`, false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -461,6 +508,20 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// sees as a separate word.
 		`strace -EFOO="$@" codex`,
 		`strace -o "$@" codex`,
+		// A fully non-literal word in strace's option region (no literal
+		// prefix) can expand to a -E/--env option and override the
+		// protected variable.
+		`strace "$V" codex`,
+		"strace $V codex",
+		// An unquoted backslash escape in the -E operand is not
+		// shell-stable: strace receives the dequoted name.
+		`strace -E\CODEX_HOME=/other codex`,
+		`strace -E \CODEX_HOME=/other codex`,
+		// The traced command is itself strace; its -E/--env applies to the
+		// ultimately traced child.
+		"strace strace -E CODEX_HOME=/other codex",
+		"strace strace -ECODEX_HOME=/other codex",
+		"xargs strace strace -E CODEX_HOME=/other codex",
 		"xargs strace -ECODEX_HOME=$V codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
@@ -481,6 +542,18 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// expansion stays one option value, so it sets no protected
 		// variable and stays allowed.
 		`strace -o "$V" codex`,
+		// A -E-shaped word a value-taking option consumes as its value
+		// (a filename) is not a strace option and stays allowed.
+		`strace -o "-ECODEX_HOME=$V" codex`,
+		// A backslash inside quotes is literal (not an escape), so the
+		// operand name is shell-stable and, being non-denied, stays allowed.
+		`strace -E"CODEX\HOME"=/other codex`,
+		// The nested strace re-entry does not over-refuse: a -E-shaped
+		// word past the inner traced command is its argument, and a
+		// harmless inner -E (attached, quoted) stays allowed.
+		"strace strace echo -E CODEX_HOME=/other codex",
+		`strace strace -EFOO="$V" codex`,
+		`strace strace -o "-ECODEX_HOME=$V" codex`,
 		// grep's -E is extended-regexp and stays accepted.
 		"grep -ECODEX_HOME=$V /etc/environment",
 	} {

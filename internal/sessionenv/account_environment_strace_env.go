@@ -262,9 +262,18 @@ func straceOptionWordHides(literal string, words []*syntax.Word, names map[strin
 			return 1, true, false, true
 		}
 		value, ok := literalShellWord(words[1])
-		return 2, !ok || accountEnvironmentOperandDenied(value, names), false, true
+		// An unquoted backslash escape stays in a syntax.Lit, so the
+		// raw literalShellWord value is not shell-stable: strace -E
+		// \CODEX_HOME=/other codex literalizes the operand to
+		// \CODEX_HOME=/other (not denied) while the shell removes the
+		// backslash and strace receives -ECODEX_HOME=/other. Fail closed
+		// when the operand word has such an escape before comparing the
+		// name; a backslash inside quotes is literal and excluded.
+		return 2, !ok || wordHasUnquotedBackslash(words[1]) ||
+			accountEnvironmentOperandDenied(value, names), false, true
 	case strings.HasPrefix(literal, "-E"):
-		return 1, accountEnvironmentOperandDenied(literal[2:], names), false, true
+		return 1, wordHasUnquotedBackslash(words[0]) ||
+			accountEnvironmentOperandDenied(literal[2:], names), false, true
 	default:
 		pendingValue = straceOptionAwaitsValue(literal)
 		// A value-taking strace option whose operand is the NEXT argv word
@@ -305,6 +314,29 @@ func wordHasUnquotedExpansion(word *syntax.Word) bool {
 			}
 			continue
 		default:
+			return true
+		}
+	}
+	return false
+}
+
+// wordHasUnquotedBackslash reports whether word contains an unquoted backslash
+// escape in a syntax.Lit part. literalShellWord keeps such a backslash in the
+// Lit value (mvdan.cc/sh preserves the raw source text), but the shell removes a
+// single backslash before the next character during expansion, so the
+// literalShellWord value is not the argv value strace receives — e.g.
+// `strace -E\CODEX_HOME=/other` literalizes the operand to
+// `\CODEX_HOME=/other` (not denied) while strace receives
+// `-ECODEX_HOME=/other` (denied). A backslash inside a DblQuoted or SglQuoted
+// part is literal and stays, so only a top-level Lit is checked. The caller fails
+// closed when this returns true, since the shell-stable operand name cannot be
+// read from the literal and may name a protected variable.
+func wordHasUnquotedBackslash(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsRune(lit.Value, '\\') {
 			return true
 		}
 	}
