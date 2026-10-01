@@ -11347,6 +11347,35 @@ test("#5010: a validation dispatch the 500 already created is adopted as the fou
   assert.deepEqual(github.dispatchedWorkflows, []);
 });
 
+// Codex review on this fix: the validation dispatch targets a mutable branch
+// ref, and the retry's settle window can outlive the head it validated — a
+// replay that skipped the guard would start PR Validation on a commit this
+// lane never saw. The guard is re-established before every attempt, so a PR
+// that ends mid-window cancels the retry entirely.
+test("#5010: a validation dispatch retry re-checks the live head before replaying", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+  });
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    // Once the first POST has failed and its settle window is being spent, the
+    // PR closes — the replay's guard read is the one that must see it.
+    if (variables?.number === 1465 && github.workflowDispatchAttemptsByWorkflow["pr.yml"] >= 1) {
+      overrides[1465].state = "CLOSED";
+    }
+    return graphql(query, variables);
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.deepEqual(targets, [], "the closed PR's recovery cancelled cleanly");
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["pr.yml"], 1,
+    "the re-established guard refused the replay; the stale head's branch was never dispatched");
+});
+
 // ---------------------------------------------------------------------------
 // The update-branch merge race (#4462). evaluate() resolves a PR open and
 // behind; a hand or queue merge then closes it in the seconds before the

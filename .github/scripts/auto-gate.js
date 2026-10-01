@@ -3642,6 +3642,10 @@ async function ensureValidationRun({
         ref: headRefName,
       }),
     landed: () => validationRunVisible({ github, context, headSha, sleep }),
+    // The ref is mutable: between a transient answer and its replay the branch
+    // can point somewhere else, and a dispatch there would validate that commit.
+    // canRecover re-reads the head before every attempt.
+    guard: canRecover,
     sleep,
   }).then(
     (outcome) => outcome,
@@ -3656,6 +3660,9 @@ async function ensureValidationRun({
   );
   if (!dispatched) {
     return { dispatched: false };
+  }
+  if (dispatched.cancelled) {
+    return { cancelled: true };
   }
   if (dispatched.reconciled) {
     // The adopted run is a FOUND run, not only a dispatched one: give it the
@@ -3978,11 +3985,18 @@ async function runLeftParkedList({ github, context, headSha, runId, sleep }) {
 // explicit rate-limit response skips the reconcile on purpose: it rejected the
 // request before any work, so the write replays directly, honoring Retry-After.
 // A definitive refusal or an exhausted retry propagates — those stay loud.
-async function dispatchWorkflowWithRetry({ label, dispatch, landed, sleep }) {
+async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null, sleep }) {
   const firstAttemptAt = Date.now();
   return retryTransient(
     label,
     async () => {
+      // Same shape as the approve retry (#5005): the settle window can outlive
+      // the state the caller validated, so a dispatch aimed at a mutable branch
+      // ref re-establishes its guard before EVERY attempt — a replay that skips
+      // it can validate a commit this lane never observed.
+      if (guard && !await guard()) {
+        return { cancelled: true };
+      }
       try {
         await dispatch();
         return { dispatched: true };
@@ -5949,8 +5963,12 @@ async function recoverSuccessorHead({
       // Not-yet-arrived, not failed (#5064): the initiating head was visible on
       // every read, so nothing this lane touched was dropped. The successor's
       // own events re-evaluate it the moment its push lands — the red run the
-      // issue documents self-healed exactly that way. Returning null publishes
-      // no target and no failure comment; the notice is the audit trail.
+      // issue documents self-healed exactly that way. And if the push NEVER
+      // lands, the initiating head is left holding the WAITING aggregate the
+      // refusing lane wrote, which the scheduled reconciliation pass
+      // re-evaluates once it goes stale — a slower but still guaranteed wakeup.
+      // Returning null publishes no target and no failure comment; the notice
+      // is the audit trail.
       core.notice(
         `PR #${number} still exposes initiating head ${previousHead} after ${headPollAttempts} reads; ` +
           "no successor was observed — the successor push's own events re-evaluate it when it lands.",
