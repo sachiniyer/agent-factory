@@ -19652,7 +19652,8 @@ function onKeydown(e) {
   }
   const target = e.target;
   const inTerminal = target ? termHost.contains(target) : false;
-  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
+  const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
+  if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
   const selected = selectedSessionData();

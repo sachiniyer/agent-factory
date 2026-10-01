@@ -2931,14 +2931,17 @@ function onKeydown(e: KeyboardEvent): void {
   if (state.phase !== "app") {
     return;
   }
-  // Let native controls handle their own keys, EXCEPT the terminal (whose textarea
-  // lives in termHost and is driven by the nav state machine) and Escape (which must
-  // still close a modal even from a focused field). Without this a focused + New /
+  // Let native controls handle their own keys, EXCEPT the terminal (whose xterm helper
+  // textarea lives in termHost and is driven by the nav state machine) and Escape (which
+  // must still close a modal even from a focused field). Without this a focused + New /
   // Disconnect / pane-action button would have its Enter hijacked as an attach, and
-  // modal typing would move the rail.
+  // modal typing would move the rail. The split view's per-pane close <button> is also a
+  // native control inside termHost; only the xterm <textarea> must stay on the nav state
+  // machine, so the gate keys on the textarea tag rather than on "anything in termHost".
   const target = e.target as HTMLElement | null;
   const inTerminal = target ? termHost.contains(target) : false;
-  if (!inTerminal && e.key !== "Escape" && isNativeControl(target)) {
+  const isTerminalTextarea = inTerminal && target?.tagName === "TEXTAREA";
+  if (!isTerminalTextarea && e.key !== "Escape" && isNativeControl(target)) {
     return;
   }
   // The mode is "terminal" only when a session is selected (so a pane exists to own

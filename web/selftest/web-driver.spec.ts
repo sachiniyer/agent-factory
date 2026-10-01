@@ -5659,6 +5659,111 @@ test("split panes (#1817 follow-up): Alt+j onto a WEB pane returns the keyboard 
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
 });
 
+test("split panes (#1737 a11y): Enter on the keyboard-focused pane-close × closes the pane (Space parity)", REAL_FIXTURE, async () => {
+  // The bug: onKeydown's native-control exemption used `!inTerminal`, so the per-pane close
+  // <button> (rendered INSIDE termHost by SplitView, unlike af-term-head's buttons which are
+  // a SIBLING of termHost) was NOT exempted. Enter on the focused × flowed to decideKey,
+  // which in rail mode with a selection returned {kind:"attach"}, so onKeydown preventDefault'd
+  // the button's native Enter→click and focusTerminal()'d instead — the pane stayed open while
+  // Space still activated it. The fix keys the exemption on the xterm <textarea> tag, not on
+  // "anything in termHost", so every native control EXCEPT the xterm textarea keeps its keys.
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  // Give A a second tab, so there is a distinct tab to drag into a split (dragging the only
+  // tab onto itself just moves it — no split).
+  const tabbar = page.locator(".af-tabbar");
+  await createTerminalTab(page);
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+  // The × is inside termHost (the bug's root cause): prove the containment the guard saw, so
+  // this test stays readable as "the exemption must cover a button inside termHost too".
+  const inTermHost = await page.evaluate(() => {
+    const btn = document.querySelector(".af-pane-close");
+    return btn ? document.querySelector(".af-term-host")!.contains(btn) : false;
+  });
+  expect(inTermHost, "the pane-close button lives inside .af-term-host").toBe(true);
+
+  // Detach to the rail so state.focus is "rail" — the exact mode that resolves Enter→attach,
+  // i.e. the path that used to hijack the ×'s Enter before the fix.
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+
+  // Keyboard-focus the × of one pane (NOT a click). Tabbing from outside termHost lands on it
+  // because paneChrome's head precedes .af-pane-host in DOM order (split.ts:979).
+  const pane = page.locator(".af-term-host .af-pane").first();
+  const closeBtn = pane.locator(".af-pane-close");
+  await closeBtn.focus();
+  await expect(closeBtn).toBeFocused();
+
+  // G1/G5: Enter must activate the button (native button activation) and close the pane —
+  // exactly as Space already did. The pane count drops 2 → 1…
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  // …and the underlying tab is NOT closed (closing a pane is NOT closing a tab).
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Restore A to a single tab for the flows that follow.
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
+test("split panes (#1737 a11y): Space still closes the focused ×; Escape does NOT close the pane", REAL_FIXTURE, async () => {
+  await row(page, SESSION_A).click();
+  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+  await resetToAgentTab(page);
+  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+
+  const tabbar = page.locator(".af-tabbar");
+  await createTerminalTab(page);
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await page.keyboard.press("Control+]");
+  await expect(page.locator(".af-app.af-kb-rail")).toBeVisible();
+
+  // G5 (no regression): Space still closes the focused × (decideKey returns {kind:"none"} for
+  // Space, so onKeydown never preventDefaults, and the button's native Space→click fires).
+  const pane = page.locator(".af-term-host .af-pane").first();
+  await pane.locator(".af-pane-close").focus();
+  await expect(pane.locator(".af-pane-close")).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
+
+  // Re-split for the Escape assertion. The two original tabs (Agent + Terminal) are still
+  // present — closing a pane does NOT close a tab — so re-drag the Agent tab into a split
+  // without creating a third tab.
+  await dragTabToPane(page, "Agent", "right");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  await page.keyboard.press("Control+]");
+
+  // G6: Escape on the focused × must NOT close the pane. decideKey returns {kind:"none"} for
+  // Escape in rail mode (no modal, not terminal mode), so onKeydown does not preventDefault;
+  // a <button>'s native Escape is a no-op. The pane count stays at 2.
+  const pane2 = page.locator(".af-term-host .af-pane").first();
+  await pane2.locator(".af-pane-close").focus();
+  await expect(pane2.locator(".af-pane-close")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
+
+  // Cleanup: collapse back to a single tab for the flows that follow.
+  await pane2.locator(".af-pane-close").click();
+  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+  await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+});
+
 test("split panes (fix): a pane iframe is inert ONLY while dragging — normal interaction is untouched", REAL_FIXTURE, async () => {
   // The fix must not cost the web tab its interactivity: the frame is inert for the drag
   // and immediately usable again afterwards. Both states are asserted on the live frame.
