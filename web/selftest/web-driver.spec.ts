@@ -829,6 +829,71 @@ async function touchDrag(cdp: CDPSession, x: number, fromY: number, toY: number,
 }
 
 /**
+ * touchDrag at a measured cadence (#5020): `steps` moves paced `stepMs` apart on
+ * the wall clock, so the gesture's release velocity — and therefore its momentum —
+ * is a parameter of the test rather than an accident of CDP round-trip time. The
+ * final `tail` moves go back-to-back so the velocity window always ends on fresh,
+ * fast samples: a real finger accelerates into the lift, and a lone stalled send
+ * before touchEnd would otherwise empty the ~100ms estimator window. `tailShare`
+ * (default: the tail's even share) gives the tail a bigger slice of the travel —
+ * the whip at the end of a hard flick. Whipped tails (tailStepMs 0) pipeline their
+ * sends into ~one flight; `tailStepMs > 0` still QUEUES sends rather than awaiting
+ * them, so the tail lands at a real wall-clock cadence instead of one CDP
+ * round-trip per move, and the lift rides in the final move's flight — an awaited
+ * round-trip between last move and touchEnd would register as a stationary hold
+ * and dilute the measured velocity.
+ */
+async function touchDragTimed(
+  cdp: CDPSession,
+  x: number,
+  fromY: number,
+  toY: number,
+  steps: number,
+  stepMs: number,
+  tail = 2,
+  holdBeforeEndMs = 0,
+  tailShare?: number,
+  tailStepMs = 0,
+): Promise<void> {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: fromY }] });
+  const span = toY - fromY;
+  const share = tailShare ?? tail / (steps + tail);
+  const piped: Promise<unknown>[] = [];
+  for (let step = 1; step <= steps + tail; step++) {
+    const pos =
+      step <= steps
+        ? fromY + (span * (1 - share) * step) / steps
+        : fromY + span * (1 - share) + (span * share * (step - steps)) / tail;
+    const sent = cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: pos }] });
+    if (step <= steps) {
+      await sent;
+      await new Promise((resolve) => setTimeout(resolve, stepMs));
+    } else if (tailShare !== undefined && tailStepMs === 0) {
+      piped.push(sent); // the whip: everything in one flight, lands inside ~1 RTT
+    } else if (tailStepMs > 0) {
+      // A paced tail queues instead of awaiting: sends go out at wall-clock
+      // cadence, so arrival spacing holds on a slow runner instead of stretching
+      // to one round-trip per move.
+      piped.push(sent);
+      if (step < steps + tail) {
+        await new Promise((resolve) => setTimeout(resolve, tailStepMs));
+      }
+    } else {
+      await sent;
+    }
+  }
+  if (holdBeforeEndMs > 0) {
+    await Promise.all(piped);
+    await new Promise((resolve) => setTimeout(resolve, holdBeforeEndMs));
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    return;
+  }
+  // The lift queues behind the last move in the same flight — see the note above.
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await Promise.all(piped);
+}
+
+/**
  * Taps once at a point — the gesture that must keep reaching a mouse-aware
  * application even when the drag above no longer does.
  *
@@ -864,6 +929,64 @@ async function touchTap(cdp: CDPSession, x: number, y: number): Promise<void> {
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + step }] });
   }
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+/** Polls a scroll offset until it has been still for `quietMs` wall time — i.e. a
+ *  momentum coast has run out — then returns the settled value (#5020). One equal
+ *  sample is NOT enough: near the decay floor a coast emits a whole row only every
+ *  ~400ms, so a single quiet interval can fall mid-coast. */
+async function settledScrollTop(viewport: Locator, quietMs = 600, timeoutMs = 15_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = await viewport.evaluate((el) => el.scrollTop);
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const next = await viewport.evaluate((el) => el.scrollTop);
+    if (next !== prev) {
+      prev = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= quietMs) {
+      return next;
+    }
+  }
+  return prev;
+}
+
+/** The same settle, for the wheel-report stream on the alternate-screen path. */
+async function settledReportCount(reports: readonly unknown[], quietMs = 600, timeoutMs = 15_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = reports.length;
+  let quietSince = Date.now();
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const next = reports.length;
+    if (next !== prev) {
+      prev = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= quietMs) {
+      return next;
+    }
+  }
+  return prev;
+}
+
+/** One decoded SGR (1006) mouse report inside the PTY input the page sent. */
+interface SgrReport {
+  button: number;
+  release: boolean;
+}
+
+/**
+ * Every SGR mouse report in the captured OpInput stream, in order.
+ *
+ * Wheel reports arrive as `\x1b[<64;col;rowM` (up) and `\x1b[<65;col;rowM`
+ * (down); a click is a press/release pair `\x1b[<0;col;rowM` then `...m`. The
+ * button field is read raw rather than masked, so a direction leak (the wrong
+ * button) is as visible as a missing report.
+ */
+function sgrReportButtons(payloads: number[][]): SgrReport[] {
+  const text = payloads.map((bytes) => String.fromCharCode(...bytes)).join("");
+  return [...text.matchAll(/\x1b\[<(\d+);\d+;\d+([Mm])/g)].map((m) => ({ button: Number(m[1]), release: m[2] === "m" }));
 }
 
 /** Points the task modal's schedule picker (#2057) at the "every N minutes" preset.
@@ -2307,6 +2430,117 @@ test("#3024: a partially typed line takes the daemon's delivery-hold lease", REA
   }
 });
 
+test("#3025: a queued editing key after queued Enter keeps the delivery-hold lease across reconnect", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The live-path #3024 test above proves the browser takes the lease on a half-typed
+  // agent line and stops renewing once it is committed. This one pins the queued path
+  // that #3024 deliberately does not reach: input typed against a DOWN stream is
+  // queued (noteQueued), whose commit tracking `noteQueued` owns separately from the
+  // live `noteInput` path.
+  //
+  // The bug: a queued Enter stamped `queuedEndsLine=true`, and a subsequent queued
+  // editing key (history recall via arrow-up ESC[A) skipped the `queuedEndsLine`
+  // update because it is ESC-prefixed. The stale true survived into `noteFlushed`,
+  // which released the hold over a line the flush had just populated with the recalled
+  // draft. The renew timer then stopped, the daemon's pause lease lapsed, and the
+  // next automated delivery could paste+Enter into the same PTY (#1586/#1638).
+  //
+  // Observed through the PauseStatusPoll RPC, exactly as #3024: a hold that survives
+  // the flush keeps renewing the lease; one that was false-released stops. The live
+  // path treats ESC[A as a draft-starting edit, so the queued path must agree and the
+  // renewals must continue past the reconnect.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  let forwardStream = false;
+
+  try {
+    await p.routeWebSocket(
+      (url) => url.pathname.includes("/stream"),
+      (ws) => {
+        if (forwardStream) {
+          ws.connectToServer();
+          return;
+        }
+        // Refuse this attempt. onclose → scheduleReconnect, so the agent terminal
+        // stays "reconnecting" and every keystroke takes the queued path.
+        ws.close();
+      },
+    );
+
+    let pauses = 0;
+    await p.route("**/v1/PauseStatusPoll", async (route) => {
+      pauses += 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ data: {} }) });
+    });
+
+    await openTokenless(p);
+    await row(p, SESSION_B).click();
+    await resetToAgentTab(p);
+
+    const main = p.locator(".af-main");
+    const host = p.locator(".af-term-host .af-pane").first();
+    // Deterministic precondition, and the whole point of this test: the agent stream
+    // is NOT open before a single key is typed. A duration would only make this
+    // likely; the status seam makes it certain, so every keystroke takes the queued
+    // path the bug lives in rather than the live one #3024 covers.
+    await expect(main, "the stream must be down before typing, or the queued path is untested").toHaveAttribute(
+      "data-term-status",
+      "reconnecting",
+      { timeout: 30_000 },
+    );
+
+    await host.click();
+    pauses = 0;
+    // The exact failing sequence: a draft, a queued Enter, then a queued history-recall
+    // (arrow-up). All three are queued while the stream is down, so none reaches the
+    // PTY until the flush on reconnect.
+    await p.keyboard.type("ls");
+    await p.keyboard.press("Enter");
+    await p.keyboard.press("ArrowUp");
+
+    // Let one through and the flush lands — this is where the bug fired. onopen calls
+    // onStatus("open") BEFORE flushPendingInput, so once the attribute reads "open"
+    // the flush has run and the hold's post-flush state is settled.
+    forwardStream = true;
+    await expect(main, "the stream must come back so the queued input can be flushed").toHaveAttribute(
+      "data-term-status",
+      "open",
+      { timeout: 45_000 },
+    );
+
+    // The renew timer fires every 500ms and tick re-pauses every ~1s. Over this
+    // window a hold that survived the flush adds several renewals; one that was
+    // false-released (the bug) stops the timer during the flush and adds none. The
+    // +2 floor absorbs a single residual renewal in flight at the flush boundary.
+    await p.waitForTimeout(500);
+    const pausesAtOpen = pauses;
+    await expect
+      .poll(() => pauses, {
+        message: "the hold must survive the flush of [Enter, arrow-up]: renewals keep the daemon lease alive",
+        timeout: 10_000,
+      })
+      .toBeGreaterThanOrEqual(pausesAtOpen + 2);
+
+    // Liveness: a REAL Enter on the now-open stream commits the recalled line and
+    // must stop the renewals, so the lease lapses and a held delivery can land —
+    // the fix bounds the hold, it does not pin it. Same contract as #3024 above.
+    const afterSurvived = pauses;
+    await p.keyboard.press("Enter");
+    await p.waitForTimeout(2_000);
+    expect(pauses, "a real Enter on the open stream must stop renewing the lease").toBe(afterSurvived);
+  } finally {
+    forwardStream = true;
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+    await row(page, SESSION_A).click();
+    await expect(row(page, SESSION_A)).toHaveClass(/af-row-selected/);
+  }
+});
+
 test("#2787: Cmd+C copies the terminal selection to the system clipboard", REAL_FIXTURE, async ({ browser }) => {
   // The defect this pins is invisible to a unit test, which is how it shipped: the
   // old unit test asserted only that our handler declined Cmd+C, under a NAME that
@@ -2719,6 +2953,645 @@ test("#2682 mobile: one finger scrolls the terminal, and keeps doing so under ap
       await ctx.close();
     }
   }
+});
+
+test("#4982 mobile: a touch drag on an alternate-screen mouse app reports wheel input", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The same really-touch-emulated phone context as #2682 — the property under
+  // test is a gesture the browser itself routes, so only trusted touch input can
+  // prove it. This is the codex-cli 0.159 failure: a full-screen app on the
+  // alternate buffer WITH mouse tracking, where a drag used to scroll a local
+  // scrollback that does not exist and reached the application never.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  const inputPayloads: number[][] = [];
+
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op === Op.Input) {
+        inputPayloads.push(Array.from(frame.data));
+      }
+    });
+  });
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open"), "opening a session must close the drawer over it").toHaveCount(0);
+    await resetToAgentTab(p);
+
+    await createTerminalTab(p);
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const mouseHint = host.locator(".af-mouse-capture-hint");
+
+    // Fill the NORMAL buffer's scrollback first — the drag's other half still
+    // scrolls it — then switch to the alternate screen under SGR mouse reporting,
+    // the minimal stand-in for a full-screen mouse app. `cat` swallows the
+    // reports the shell would otherwise echo back onto its own command line, so
+    // the escape sequence typed to leave the screen later still parses.
+    await p.keyboard.type("for i in $(seq 1 200); do printf 'alt-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("alt-scroll-200", { timeout: 20_000 });
+    await p.keyboard.type("printf '\\033[?1049h\\033[?1000h\\033[?1006h\\033[H'");
+    await p.keyboard.press("Enter");
+    // A real mouse-mode app runs the PTY raw: echoing the reports back onto the
+    // grid makes the DOM renderer recycle row nodes mid-gesture, which detaches
+    // the touch target and eats the rest of the stream (#5020).
+    await p.keyboard.type("stty -echo -icanon && cat > /dev/null");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    // Prove the state the bug lived in, not just the mode flag: the scrollback
+    // is gone from view and the viewport has nothing local left to scroll.
+    await expect(host).not.toContainText("alt-scroll-200");
+    expect(
+      await viewport.evaluate((el) => el.scrollHeight <= el.clientHeight + 1),
+      "the alternate buffer exposes no local scrollback for a drag to move",
+    ).toBe(true);
+
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+
+    // A TAP still belongs to the application — the reason mouse mode exists, and
+    // the gesture whose compatibility click the drag must never be mistaken for.
+    inputPayloads.length = 0;
+    await touchTap(cdp, column, y + height * 0.5);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && !r.release), {
+        message: "a tap must still report a button press to the mouse-aware application",
+      })
+      .toBe(true);
+    // The release is a second report of its own — a mousedown frame can land here
+    // while the mouseup frame is still in flight (the #4217 sighting), so it is
+    // polled the same way rather than read off the array the press filled.
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).some((r) => r.button === 0 && r.release), {
+        message: "a tap must report the button's release as well",
+      })
+      .toBe(true);
+
+    // A finger travelling DOWN the screen pulls older content into view — what a
+    // desktop wheel-up does here. One report per line of travel, button 64.
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).length, {
+        message: "a claimed drag must reach a wheel-owning application on the alternate screen",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      sgrReportButtons(inputPayloads).every((r) => r.button === 64),
+      "the downward drag must report wheel-up only — no click, no wrong direction",
+    ).toBe(true);
+    await expect(mouseHint, "synthesized wheel reports must not flash the desktop escape hint").not.toHaveClass(
+      /af-visible/,
+    );
+    // A flick-ended drag keeps reporting while it coasts (#5020) — let that wind
+    // down so its wheel-ups can't bleed into the upward drag's purity window.
+    await settledReportCount(inputPayloads);
+
+    // …and a finger travelling UP is wheel-down — button 65.
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => sgrReportButtons(inputPayloads).length, {
+        message: "the upward drag must report wheel-down",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      sgrReportButtons(inputPayloads).every((r) => r.button === 65),
+      "the upward drag must report wheel-down only",
+    ).toBe(true);
+    await expect(mouseHint).not.toHaveClass(/af-visible/);
+    // The coast's reports outlive the lift (#5020); spend them before the
+    // encoding flips, where leftover wheel-downs would arrive as \x1b[Ma and
+    // pollute the default-encoding purity assertion below.
+    await settledReportCount(inputPayloads);
+
+    // DEFAULT encoding next: SGR off but DECSET 1000 still on. The reports now
+    // leave xterm on the BINARY channel — \x1b[M then three byte-coded fields —
+    // which reached the PTY never until the review fix this regression pins.
+    // The toggle line is typed at a shell that may have flushed pending input
+    // around the Ctrl+C, so probe drags retry it until a binary report lands;
+    // when the line lands, SGR is off and `cat` is swallowing again together.
+    const defaultReports = () =>
+      inputPayloads.filter((pl) => pl[0] === 0x1b && pl[1] === 0x5b && pl[2] === 0x4d);
+    await p.keyboard.press("Control+c");
+    inputPayloads.length = 0;
+    await expect(async () => {
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("printf '\\033[?1006l'; stty -echo -icanon; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      // The probe holds its lift: a flicked drag's coast (#5020) would keep
+      // emitting reports while the NEXT retry types the toggle line, injecting
+      // them into the command it is trying to land.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.5, 8, 25, 0, 300);
+      expect(
+        defaultReports().length,
+        "default-encoded wheel reports must reach the PTY byte-for-byte",
+      ).toBeGreaterThanOrEqual(3);
+      expect(
+        defaultReports().every((pl) => pl[3] === 0x60),
+        "the downward drag must report wheel-up (\\x1b[M`) in DEFAULT encoding",
+      ).toBe(true);
+    }).toPass({ timeout: 15_000 });
+    // Same coast drain as above: the probe drag's wheel-ups must be spent before
+    // the upward drag's window opens.
+    await settledReportCount(inputPayloads);
+
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.8, y + height * 0.3);
+    await expect
+      .poll(() => defaultReports().length, {
+        message: "the upward drag must report wheel-down in DEFAULT encoding too",
+      })
+      .toBeGreaterThanOrEqual(4);
+    expect(
+      defaultReports().every((pl) => pl[3] === 0x61),
+      "the upward drag must report wheel-down only (\\x1b[Ma)",
+    ).toBe(true);
+    // And its own coast must be spent before the normal-buffer section asserts
+    // a clean inputPayloads after its clear.
+    await settledReportCount(inputPayloads);
+
+    // Back on the normal buffer — mouse tracking STILL on — the same drag keeps
+    // its #2682 meaning: it scrolls local history and reports nothing.
+    //
+    // Killing `cat` is the one place the typed setup can be lost: bash flushes
+    // pending input as it resumes after SIGINT, so the printf is retried until
+    // the normal buffer is actually back — "alt-scroll-200" reappearing is the
+    // honest signal, since it only renders while the normal buffer is active.
+    await p.keyboard.press("Control+c");
+    await expect(async () => {
+      await p.keyboard.type("printf '\\033[?1049l'");
+      await p.keyboard.press("Enter");
+      await expect(host).toContainText("alt-scroll-200", { timeout: 3_000 });
+    }).toPass({ timeout: 15_000 });
+    const normalBottom = await viewport.evaluate((el) => el.scrollTop);
+    expect(normalBottom, "returning to the normal buffer must expose its scrollback again").toBeGreaterThan(0);
+    inputPayloads.length = 0;
+    await touchDrag(cdp, column, y + height * 0.3, y + height * 0.8);
+    await expect
+      .poll(() => viewport.evaluate((el) => el.scrollTop), {
+        message: "the same drag on the normal buffer must still scroll history",
+      })
+      .toBeLessThan(normalBottom);
+    expect(inputPayloads, "history scrolling must not leak reports to the application").toHaveLength(0);
+  } finally {
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+});
+
+test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momentum", REAL_FIXTURE, async ({
+  browser,
+}, testInfo) => {
+  // The same really-touch context as #2682/#4982: every gesture below is a trusted
+  // touch Chromium routes itself — the only routing that proves anything about a
+  // phone. What this test adds is MEASUREMENT: lines moved per drag and per flick,
+  // on both scroll paths, so the PR can compare them against the same run on
+  // master instead of asserting the feel is faster.
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+  });
+  const p = await ctx.newPage();
+  const cdp = await ctx.newCDPSession(p);
+  // Timestamped SGR reports — the momentum split on the wheel path is "arrived
+  // after the lift".
+  const reports: { button: number; release: boolean; t: number }[] = [];
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/v1/sessions/") || !ws.url().includes("/stream")) {
+      return;
+    }
+    ws.on("framesent", ({ payload }) => {
+      const raw = typeof payload === "string" ? new TextEncoder().encode(payload) : new Uint8Array(payload);
+      const frame = decode(raw);
+      if (frame.op !== Op.Input) {
+        return;
+      }
+      const t = Date.now();
+      const text = String.fromCharCode(...frame.data);
+      for (const m of text.matchAll(/\x1b\[<(\d+);\d+;\d+([Mm])/g)) {
+        reports.push({ button: Number(m[1]), release: m[2] === "m", t });
+      }
+    });
+  });
+
+  const metrics: Record<string, number> = {};
+  const failures: string[] = [];
+  // A measured step records its numbers into the artifact FIRST and only then
+  // asserts — and its failure lands in the artifact too rather than ending the
+  // test, so the same spec run against a pre-#5020 build yields the before-column
+  // the PR body needs.
+  const step = async (name: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+    } catch (err) {
+      failures.push(`${name}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+    }
+  };
+  const wheels = (since = 0): { button: number; release: boolean; t: number }[] =>
+    reports.filter((r) => (r.button === 64 || r.button === 65) && r.t >= since);
+
+  try {
+    await openTokenless(p);
+    await p.locator(".af-nav-toggle").click();
+    await row(p, SESSION_B).click();
+    await expect(p.locator(".af-app.af-nav-open")).toHaveCount(0);
+    await resetToAgentTab(p);
+    await createTerminalTab(p);
+    const host = await typeableShellTab(p);
+    const xterm = host.locator(".xterm");
+    const viewport = host.locator(".xterm-viewport");
+    const scrollTop = (): Promise<number> => viewport.evaluate((el) => el.scrollTop);
+    // The coast's own ledger, mirrored onto the pane host by terminal.ts:
+    // `applied` counts every coast tick that emitted scroll px, and `stopped`
+    // freezes that count at the moment the coast last stopped. Proving a press
+    // stopped the coast needs THIS, not scrollTop — xterm flushes scrollLines to
+    // the DOM a painted frame after the buffer moved, so a press-time scrollTop
+    // read can sit a whole coast tick stale (the master sighting at run
+    // 36816835160 measured 68px — exactly one tick — with nothing applied after
+    // the stop).
+    const coastCounters = (): Promise<{ applied: number; stopped: number; liveStops: number }> =>
+      host
+        .locator(".af-pane-host")
+        .first()
+        .evaluate((el) => ({
+          applied: Number(el.getAttribute("data-af-coast-applied") ?? 0),
+          stopped: Number(el.getAttribute("data-af-coast-stop-count") ?? 0),
+          liveStops: Number(el.getAttribute("data-af-coast-live-stops") ?? 0),
+        }));
+    // Deep scrollback: a clamped flick coasts hundreds of lines, and a coast cut
+    // short by the top of history would read as less momentum than there is.
+    await p.keyboard.type("for i in $(seq 1 1200); do printf 'fast-scroll-%s\\n' \"$i\"; done");
+    await p.keyboard.press("Enter");
+    await expect(host).toContainText("fast-scroll-1200", { timeout: 20_000 });
+
+    const screen = host.locator(".xterm-screen");
+    const screenBox = await screen.boundingBox();
+    expect(screenBox, "the terminal screen must have geometry to drag on").toBeTruthy();
+    const { x, y, width, height } = screenBox as ElementBox;
+    const column = x + width / 2;
+    const rowHeight = await host
+      .locator(".xterm-rows > div")
+      .first()
+      .evaluate((el) => el.getBoundingClientRect().height);
+    metrics.screenHeightPx = height;
+    metrics.rowHeightPx = rowHeight;
+    metrics.viewportRows = height / rowHeight;
+
+    // PART A — the normal buffer UNDER application mouse reporting, where af owns
+    // the drag (#2682). cat swallows the reports the gestures send to the PTY, so
+    // click bytes never land on a command line the next Enter would run.
+    await p.keyboard.type("printf '\\033[?1000h\\033[?1006h'");
+    await p.keyboard.press("Enter");
+    await expect(xterm).toHaveClass(/enable-mouse-events/);
+    await p.keyboard.type("cat > /dev/null");
+    await p.keyboard.press("Enter");
+    const bottom = await scrollTop();
+    expect(bottom, "1200 lines of output must leave real scrollback above the view").toBeGreaterThan(0);
+
+    await step("normal drag", async () => {
+      // Half a screen at ~0.3 px/ms: a deliberate scroll, too slow to fling. The
+      // finger travels DOWN — into history, like #2682's drag — and it is the gain
+      // that's being measured: 1:1 would move half a viewport of history.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 20, 45, 0);
+      const parked = await scrollTop();
+      metrics.normalDragLines = (bottom - parked) / rowHeight;
+      metrics.normalDragGain = metrics.normalDragLines / ((height * 0.5) / rowHeight);
+      // …and a drag this slow must stop DEAD at the lift: any later movement is
+      // momentum a careful finger never earned.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await scrollTop(), "a slow drag must not acquire momentum").toBe(parked);
+      expect(metrics.normalDragGain, "touch scrolling must move ≥ ~3x the finger's travel").toBeGreaterThanOrEqual(2.8);
+    });
+
+    await step("normal flick", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop, { message: "typing must return the viewport to the newest output" }).toBeGreaterThan(
+        bottom - rowHeight,
+      );
+      const beforeFlick = await scrollTop();
+      // An accelerating flick — a real finger gathers then whips: a slow first
+      // half, then a fast tail covering most of the travel, so the release
+      // window reads whip speed and not send round-trip time.
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const atRelease = await scrollTop();
+      const settled = await settledScrollTop(viewport);
+      metrics.normalFlickDragLines = (beforeFlick - atRelease) / rowHeight;
+      metrics.normalFlickCoastLines = (atRelease - settled) / rowHeight;
+      metrics.normalFlickTotalLines = (beforeFlick - settled) / rowHeight;
+      expect(
+        metrics.normalFlickCoastLines,
+        "a quick flick must KEEP scrolling after the lift — through at least a viewport",
+      ).toBeGreaterThanOrEqual(metrics.viewportRows);
+      expect(
+        metrics.normalFlickCoastLines,
+        "a GENTLE flick stays gentle — a few viewports, not the whole buffer",
+      ).toBeLessThanOrEqual(6 * metrics.viewportRows);
+      expect(
+        metrics.normalFlickTotalLines,
+        "a quick flick across long history must travel several screenfuls in all",
+      ).toBeGreaterThanOrEqual(3 * metrics.viewportRows);
+    });
+
+    // Page-side touch counters: a browser-stolen pan shows up as touchcancel with
+    // the move stream cut short, which the metrics alone cannot distinguish from
+    // a gesture that arrived but produced no scroll.
+    const armTouchProbe = (): Promise<void> =>
+      p.evaluate(() => {
+        const w = window as unknown as {
+          __touchProbe?: { moves: number; cancels: number; ends: number };
+          __touchProbeArmed?: boolean;
+        };
+        w.__touchProbe = { moves: 0, cancels: 0, ends: 0 };
+        if (w.__touchProbeArmed) return;
+        w.__touchProbeArmed = true;
+        const probe = () => w.__touchProbe!;
+        document.addEventListener("touchmove", () => (probe().moves += 1), { capture: true, passive: true });
+        document.addEventListener("touchcancel", () => (probe().cancels += 1), { capture: true, passive: true });
+        document.addEventListener("touchend", () => (probe().ends += 1), { capture: true, passive: true });
+      });
+    const readTouchProbe = async (prefix: string): Promise<void> => {
+      const probe = await p.evaluate(
+        () => (window as unknown as { __touchProbe?: { moves: number; cancels: number; ends: number } }).__touchProbe,
+      );
+      metrics[`${prefix}MovesSeen`] = probe?.moves ?? -1;
+      metrics[`${prefix}CancelsSeen`] = probe?.cancels ?? -1;
+      metrics[`${prefix}EndsSeen`] = probe?.ends ?? -1;
+    };
+
+    await step("normal hard flick", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      const beforeFlick = await scrollTop();
+      await armTouchProbe();
+      // A whip over most of the screen: four small paced moves claim the gesture
+      // at deliberate speed, then five pipelined ~104px moves whip the release
+      // window to ~4+ px/ms — the review's >=10-viewport requirement.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await readTouchProbe("normalHardFlick");
+      const atRelease = await scrollTop();
+      const settled = await settledScrollTop(viewport);
+      metrics.normalHardFlickDragLines = (beforeFlick - atRelease) / rowHeight;
+      metrics.normalHardFlickCoastLines = (atRelease - settled) / rowHeight;
+      metrics.normalHardFlickTotalLines = (beforeFlick - settled) / rowHeight;
+      expect(
+        metrics.normalHardFlickTotalLines,
+        "a hard flick must travel >= 10 viewports — momentum scales with release velocity",
+      ).toBeGreaterThanOrEqual(10 * metrics.viewportRows);
+      expect(metrics.normalHardFlickCoastLines).toBeGreaterThan(metrics.normalFlickCoastLines);
+    });
+
+    await step("normal tap-to-stop", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      // The press lands mid-coast: from touchstart the view must hold still for as
+      // long as the finger stays down.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await touchPressAndHold(cdp, column, y + height * 0.5, 200);
+      const held = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const heldLater = await scrollTop();
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      metrics.normalTapToStopDriftPx = Math.abs(heldLater - held);
+      expect(heldLater, "a finger landing on a coasting view must stop it").toBe(held);
+    });
+
+    await step("normal pause-then-lift", async () => {
+      // A real drag that then RESTS — finger down, motionless — must not fling:
+      // the lift is sampled after 300ms of stillness, so no recent velocity exists.
+      await touchDragTimed(cdp, column, y + height * 0.35, y + height * 0.6, 6, 14, 0, 300);
+      const atLift = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const settled = await scrollTop();
+      metrics.normalPausedLiftDriftPx = Math.abs(atLift - settled);
+      expect(settled, "a drag that paused before the lift must not coast").toBe(atLift);
+    });
+
+    await step("normal tap", async () => {
+      reports.length = 0;
+      await touchTap(cdp, column, y + height * 0.5);
+      await expect
+        .poll(
+          () =>
+            reports.some((r) => r.button === 0 && !r.release) && reports.some((r) => r.button === 0 && r.release),
+          { message: "a tap must still report a click to the mouse-aware application" },
+        )
+        .toBe(true);
+      metrics.normalTapReports = reports.length;
+    });
+
+    await step("normal pointerdown mid-coast", async () => {
+      await p.keyboard.press("Enter");
+      await expect.poll(scrollTop).toBeGreaterThan(bottom - rowHeight);
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const atLift = (await coastCounters()).applied;
+      // On a hybrid device a mouse or pen press while the flick still coasts is
+      // fresh scroll intent — the coast must die at pointerdown, not fight it.
+      // Asserted on the coast's own ledger, not on scrollTop drift: the DOM's
+      // scrollTop trails the buffer by a painted frame, so a DOM read at the
+      // press can sit a whole tick stale — comparing counts is immune to when
+      // either sample lands relative to the in-flight flush.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      await p.mouse.move(column, y + height * 0.55);
+      // Sampled immediately before the press: a stop that lands while momentum
+      // is live bumps data-af-coast-live-stops, which is the proof this press
+      // interrupted a running coast rather than arriving after natural decay —
+      // ticks accumulated earlier could pass the count check either way.
+      const prePress = await coastCounters();
+      await p.mouse.down();
+      // Two painted frames give every rAF queued at the press — the stopped
+      // coast's last-scheduled tick and xterm's pending scrollTop flush alike —
+      // their one legal run before the counts are read.
+      await p.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const afterPress = await coastCounters();
+      await p.mouse.up();
+      metrics.normalPointerStopMidCoastTicks = afterPress.stopped - atLift;
+      metrics.normalPointerStopPostStopApplied = afterPress.applied - afterPress.stopped;
+      metrics.normalPointerStopLiveStops = afterPress.liveStops - prePress.liveStops;
+      expect(
+        metrics.normalPointerStopMidCoastTicks,
+        "the press must land while the coast is still applying ticks",
+      ).toBeGreaterThan(0);
+      expect(
+        metrics.normalPointerStopLiveStops,
+        "the press must be the stop that landed while momentum was still live",
+      ).toBe(1);
+      expect(
+        metrics.normalPointerStopPostStopApplied,
+        "a mouse press mid-coast must stop momentum — no coast tick applies after it",
+      ).toBe(0);
+    });
+
+    // PART B — the alternate screen under an application that owns the wheel
+    // (#4982): the same gestures must become wheel reports, with the same gain and
+    // the same momentum, coalesced at most one batch per frame.
+    await p.keyboard.press("Control+c");
+    await expect(async () => {
+      await p.keyboard.type("printf '\\033[?1049h\\033[H'");
+      await p.keyboard.press("Enter");
+      await expect(host, "entering the alternate screen must clear the seeded history").not.toContainText(
+        "fast-scroll-1200",
+        { timeout: 3_000 },
+      );
+    }).toPass({ timeout: 15_000 });
+    // No echo, byte-at-a-time reads: a real mouse-mode application puts the PTY
+    // in raw mode. Left on, each wheel report echoes back as output and xterm's
+    // DOM renderer recycles row nodes — the touch sequence's capture target dies
+    // mid-gesture and the browser drops the rest of the stream without even a
+    // touchcancel (probe: a few moves, zero ends).
+    await p.keyboard.type("stty -echo -icanon && cat > /dev/null");
+    await p.keyboard.press("Enter");
+    await expect
+      .poll(async () => viewport.evaluate((el) => el.scrollHeight <= el.clientHeight + 1), {
+        message: "the alternate buffer must be the unscrollable one",
+      })
+      .toBe(true);
+
+    await step("alternate drag", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 20, 45, 0);
+      await settledReportCount(reports);
+      metrics.altDragLines = wheels(t0).length;
+      metrics.altDragGain = metrics.altDragLines / ((height * 0.5) / rowHeight);
+      expect(wheels(t0).every((r) => r.button === 64), "a drag toward history must report wheel-up").toBe(true);
+      expect(metrics.altDragGain, "the wheel path must carry the same ≥ ~3x gain").toBeGreaterThanOrEqual(2.8);
+    });
+
+    await step("alternate flick", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      const releaseAt = Date.now();
+      await settledReportCount(reports);
+      metrics.altFlickTotalLines = wheels(t0).length;
+      metrics.altFlickCoastLines = wheels(releaseAt + 40).length;
+      expect(
+        metrics.altFlickCoastLines,
+        "the lift must not end the gesture — wheel reports must keep arriving",
+      ).toBeGreaterThanOrEqual(metrics.viewportRows);
+      expect(metrics.altFlickCoastLines, "a gentle flick stays gentle on the wheel path too").toBeLessThanOrEqual(
+        6 * metrics.viewportRows,
+      );
+      expect(metrics.altFlickTotalLines).toBeGreaterThanOrEqual(3 * metrics.viewportRows);
+      expect(wheels(t0).every((r) => r.button === 64)).toBe(true);
+    });
+
+    await step("alternate hard flick", async () => {
+      reports.length = 0;
+      const t0 = Date.now();
+      await armTouchProbe();
+      // Same whip as the normal path — downward into history = wheel-up reports.
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await readTouchProbe("altHardFlick");
+      const releaseAt = Date.now();
+      await settledReportCount(reports);
+      metrics.altHardFlickTotalLines = wheels(t0).length;
+      metrics.altHardFlickCoastLines = wheels(releaseAt + 40).length;
+      expect(
+        metrics.altHardFlickTotalLines,
+        "the wheel path must carry the same scaled momentum — >= 10 viewports of reports",
+      ).toBeGreaterThanOrEqual(10 * metrics.viewportRows);
+      expect(metrics.altHardFlickCoastLines).toBeGreaterThan(metrics.altFlickCoastLines);
+      expect(wheels(t0).every((r) => r.button === 64)).toBe(true);
+    });
+
+    await step("alternate tap-to-stop", async () => {
+      reports.length = 0;
+      await touchDragTimed(cdp, column, y + height * 0.3, y + height * 0.8, 4, 25, 5, 0, 0.6, 50);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await touchPressAndHold(cdp, column, y + height * 0.5, 200);
+      const held = wheels().length;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const heldLater = wheels().length;
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      metrics.altTapToStopReportsDuringHold = heldLater - held;
+      expect(heldLater, "a finger landing mid-coast must stop the report stream").toBe(held);
+    });
+
+    await step("alternate tap", async () => {
+      reports.length = 0;
+      await touchTap(cdp, column, y + height * 0.5);
+      await expect
+        .poll(
+          () =>
+            reports.some((r) => r.button === 0 && !r.release) && reports.some((r) => r.button === 0 && r.release),
+          { message: "a tap on the alternate screen must still click through" },
+        )
+        .toBe(true);
+      metrics.altTapReports = reports.length;
+    });
+
+    await step("alternate app exit mid-coast", async () => {
+      // The app can leave the alternate screen mid-coast — e.g. in response to
+      // one of our own reports: its ?1049l rides an ordinary PTY frame, and the
+      // buffer the gesture was emitting wheel events into is suddenly gone. The
+      // momentum must die with it, not pour into the restored normal buffer.
+      await p.keyboard.press("Control+c");
+      await p.keyboard.type("(sleep 1.2; printf '\\033[?1049l') & stty -echo -icanon; cat > /dev/null");
+      await p.keyboard.press("Enter");
+      reports.length = 0;
+      const t0 = Date.now();
+      await touchDragTimed(cdp, column, y + height * 0.2, y + height * 0.95, 4, 30, 5, 0, 0.9);
+      await expect(host, "the timed rmcup lands mid-coast and restores the seeded screen").toContainText(
+        "fast-scroll-",
+        { timeout: 6_000 },
+      );
+      metrics.altExitMidCoastReports = wheels(t0).length;
+      // The restored buffer re-renders once as the shell prompt returns; after
+      // that only a still-running coast could move the view — history-ward, the
+      // direction this flick drove. A drop means momentum outlived its buffer.
+      const afterSwitch = await scrollTop();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const later = await scrollTop();
+      metrics.altExitMidCoastDriftPx = afterSwitch - later;
+      expect(metrics.altExitMidCoastDriftPx, "momentum must die with the alternate buffer").toBeLessThanOrEqual(0);
+    });
+  } finally {
+    await testInfo.attach("scroll-metrics", {
+      body: JSON.stringify({ metrics, failures }, null, 2),
+      contentType: "application/json",
+    });
+    console.log(`#5020 metrics: ${JSON.stringify(metrics)}`);
+    if (failures.length > 0) {
+      console.log(`#5020 step failures: ${failures.join(" | ")}`);
+    }
+    try {
+      await resetToAgentTab(p);
+    } finally {
+      await ctx.close();
+    }
+  }
+  expect(failures, "every measured step above must hold").toEqual([]);
 });
 
 test("#2849 mobile: a long press copies the token under the finger", REAL_FIXTURE, async ({ browser }) => {
@@ -3964,6 +4837,115 @@ test.describe("split panes (SESSION_A roster)", () => {
     await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
   });
 
+  test("split panes (feat): a create pinned while an earlier close is still settling still rebinds the pane (#5061)", REAL_FIXTURE, async () => {
+    // The intermittent failure this blocks: an earlier tab mutation's post-await
+    // apply used to bump layoutGeneration like a USER intent write, so a
+    // createSessionTab pinned while it was still in flight read the landing as
+    // "the layout moved" and refused its own rebind — the bar grew past
+    // toHaveCount while the pane kept the old data-tab-id for the full 15s
+    // ("the pane must be bound to the new tab before anyone types into it"; the
+    // failing trace even rendered "Tab created · the layout changed meanwhile").
+    // Sightings: PR #4466 job 105416978093 and PR #5045 job 110276144061 — both
+    // Go-only changes that could not have moved this code.
+    //
+    // Here the losing order is scripted rather than raced: __afTabRebindHold
+    // (index.ts's test seam) parks each gesture's post-await step until released,
+    // so the earlier gesture's apply lands inside the later one's window on EVERY
+    // run. Before the fix this test times out on the final data-tab-id assertion.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+
+    const tabbar = page.locator(".af-tabbar");
+    const pane = page.locator(".af-term-host .af-pane").first();
+    // The agent tab's stable id, read while the pane is bound to it — the value the
+    // create's apply must move the pane OFF of.
+    const agentTabId = await pane.getAttribute("data-tab-id");
+
+    // Give A a closable tab to close slowly (below), bound to the pane.
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Arm the seam: every guarded tab mutation's post-await step now parks until
+    // its verb is released, so the apply order is scripted.
+    await page.evaluate(() => {
+      const parked = new Map<string, () => void>();
+      const w = window as unknown as {
+        __afTabRebindHold?: (verb: string) => Promise<void>;
+        __afTabRebindParked?: (verb: string) => boolean;
+        __afTabRebindRelease?: (verb: string) => void;
+      };
+      w.__afTabRebindHold = (verb) => new Promise<void>((resolve) => parked.set(verb, resolve));
+      w.__afTabRebindParked = (verb) => parked.has(verb);
+      w.__afTabRebindRelease = (verb) => parked.get(verb)?.();
+    });
+    const parked = (verb: string) =>
+      page.waitForFunction(
+        (v) => (window as unknown as { __afTabRebindParked?: (x: string) => boolean }).__afTabRebindParked?.(v),
+        verb,
+      );
+    const release = (verb: string) =>
+      page.evaluate(
+        (v) => (window as unknown as { __afTabRebindRelease?: (x: string) => void }).__afTabRebindRelease?.(v),
+        verb,
+      );
+    // A released hold's post-await step is synchronous once resumed, so one task
+    // turn guarantees it has run to completion before the next scripted step.
+    const flush = () => page.evaluate(() => new Promise((r) => setTimeout(r, 0)));
+
+    try {
+      // Close the shell tab and park its post-await apply. Its seq pin precedes the
+      // create's — that is what makes it the EARLIER gesture.
+      await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+      await page.getByRole("button", { name: "Delete tab", exact: true }).click();
+      await parked("close");
+
+      // Issue the create while the close is parked — its pin is taken now, inside
+      // the earlier gesture's window: the ordering the flake hit.
+      await openSessionActions(page);
+      const newTab = tabbar.locator("..").locator(".af-tab-new");
+      if (await newTab.isVisible()) await newTab.click();
+      const menu = tabbar.locator("..").locator(".af-tab-menu");
+      await expect(menu).toBeVisible();
+      await menu.locator(".af-tab-menu-item", { hasText: /^Terminal$/ }).click();
+      await parked("create");
+
+      // Land the close first — exactly what used to veto the create's rebind.
+      await release("close");
+      await flush();
+      await expect(pane).toHaveAttribute("data-tab-id", agentTabId ?? "");
+
+      // Then let the create land: its pin was never newer-intent'd — the only write
+      // in its window was the earlier gesture's own landing, which is not intent.
+      await release("create");
+      await flush();
+
+      await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+      await expect(
+        pane,
+        "the pane must be bound to the new tab once its own gesture lands, regardless of an earlier gesture settling meanwhile",
+      ).not.toHaveAttribute("data-tab-id", agentTabId ?? "");
+      await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Terminal");
+    } finally {
+      // Never leave the seam or a parked gesture behind for the next test: the
+      // suite shares one page and one roster, and a hold left armed would park the
+      // afterEach's own close gestures mid-flight.
+      await page.evaluate(() => {
+        const w = window as unknown as {
+          __afTabRebindHold?: unknown;
+          __afTabRebindParked?: unknown;
+          __afTabRebindRelease?: (verb: string) => void;
+        };
+        delete w.__afTabRebindHold;
+        w.__afTabRebindRelease?.("close");
+        w.__afTabRebindRelease?.("create");
+        delete w.__afTabRebindParked;
+        delete w.__afTabRebindRelease;
+      });
+      await flush();
+    }
+  });
+
   test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
     // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
     // bar), no dragend can fire on the now-detached source — the global "dragging" state
@@ -4397,6 +5379,97 @@ test("web tab (#1856): a per-tab preview origin loads absolute-path assets and s
       "one tab's preview must not be readable from another tab's origin",
     ).toBe("blocked");
   } finally {
+    setPreview("");
+    await page.reload();
+  }
+});
+
+test("per-tab preview origin (#1856): ↻ recovers from a STICKY reachability success when the browser path to the preview port drops", REAL_FIXTURE, async () => {
+  // Bug: `previewOriginReachable` cached a successful probe in the module-scope
+  // `previewReachable` map for the whole SPA lifetime (only a failure evicted). If a
+  // per-tab origin became browser-UNREACHABLE later (same port, daemon still bound,
+  // but the browser-to-port path broken — e.g. the preview-port ssh forward dropped
+  // while the main forward stayed up) it kept returning the stale `true`, so the
+  // iframe was navigated to the dead origin with no fallback. ↻/Retry nulls the
+  // per-mount origin memo but did NOT clear the reachability cache — until the fix
+  // threaded `fresh` into `previewOriginReachable` so an explicit re-probe bypasses
+  // the cache the same way it bypasses `previewSrcOnce`.
+  //
+  // The "browser path broken while daemon bound" condition is reproduced at the
+  // browser boundary exactly where the bug lives: Playwright route interception
+  // aborts navigations to the per-tab origin's port (the probe frame AND the pane
+  // frame). The daemon keeps vending the same origin (its listener stays bound), so
+  // `previewOriginReachable` is the only signal that can notice.
+  //
+  // Ordering note: this reuses probe-web's "preview" tab, which the #1810 test
+  // below closes. This test must stay BEFORE it, exactly as the #1856 test above
+  // stays before it.
+  const afBin = process.env.AF_BIN;
+  const previewPort = process.env.AF_WEB_PREVIEW_PORT;
+  test.skip(!afBin || !previewPort, "AF_BIN/AF_WEB_PREVIEW_PORT are set only by web-selftest-entry.sh");
+  const { execFileSync } = await import("node:child_process");
+  const setPreview = (value: string): void => {
+    execFileSync(afBin as string, ["config", "set", "preview_listen_addr", value], { stdio: "pipe" });
+  };
+
+  // The probe frame hostname the daemon answers from on the preview port.
+  const PREVIEW_PROBE_HOST = "afprobe.localhost";
+  const originRe = new RegExp(`^http://af[a-z2-7]{32}\\.localhost:${previewPort}`);
+
+  setPreview(`127.0.0.1:${previewPort}`);
+  let previewOrigin = "";
+  try {
+    // Now that preview_listen_addr is bound, the live config has changed; reload so
+    // the SPA re-reads /v1/preview-auth and the per-tab origin path is eligible.
+    await page.reload();
+
+    await row(page, SESSION_WEB).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible({ timeout: 15_000 });
+    const tabbar = page.locator(".af-tabbar");
+    const previewTab = tabbar.locator(".af-tab", { hasText: "preview" });
+    await expect(previewTab).toHaveCount(1, { timeout: 15_000 });
+    await previewTab.click();
+    const frame = page.locator(".af-term-host .af-pane-host iframe.af-webframe").first();
+
+    // PHASE 1 — prime the reachability cache with a SUCCESS. The probe frame hits
+    // the real preview listener (NOT intercepted yet), the daemon answers, and the
+    // pane moves onto the per-tab origin. This is the cached-true state.
+    await expect(frame).toHaveAttribute("src", originRe, { timeout: 15_000 });
+    previewOrigin = new URL((await frame.getAttribute("src")) ?? "").origin;
+    expect(previewOrigin, "the pane landed on the per-tab preview origin").toMatch(originRe);
+    // Wait until the frame has actually loaded against the live listener, so the
+    // later fallback assertion is a real transition rather than the initial load.
+    await expect.poll(async () => {
+      const f = page.frames().find((x) => x.url().startsWith(previewOrigin));
+      return f !== undefined && f.url() !== "about:blank";
+    }, { timeout: 15_000 }).toBe(true);
+
+    // PHASE 2 — drop the browser's path to the preview port, modeling the ssh
+    // forward being removed while the daemon stays bound. Block EVERY navigation
+    // to the preview port (the probe frame's afprobe.localhost:<port> AND the pane's
+    // af<label>.localhost:<port>). The daemon's own listener stays up and keeps
+    // vending the same brand: exactly the surviving trigger in the report.
+    await page.route(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`, (route) => route.abort("connectionrefused"));
+    await page.route(`${previewOrigin}/**`, (route) => route.abort("connectionrefused"));
+
+    // PHASE 3 — click ↻ / Retry. BEFORE the fix `previewOriginReachable` returned
+    // the cached `true` WITHOUT re-probing and the frame was set to the dead origin
+    // (no fallback, no recovery). AFTER the fix the `fresh` flag deletes the cached
+    // entry; the re-probe's frame is aborted (connectionrefused) → times out →
+    // `false` → `resolvePreviewSrc` returns "" → the pane falls back to the
+    // same-origin mirror, which is served from the main control port (still up).
+    const reload = page.locator(".af-term-host .af-pane-host").locator("button.af-webpane-reload").first();
+    await expect(reload).toBeVisible({ timeout: 15_000 });
+    await reload.click();
+
+    // The mirror fallback: the frame's src is the same-origin /v1/webtab/ mirror,
+    // NOT the dead per-tab origin.
+    await expect.poll(async () => (await frame.getAttribute("src")) ?? "", { timeout: 15_000 }).toMatch(/\/v1\/webtab\//);
+    const afterSrc = (await frame.getAttribute("src")) ?? "";
+    expect(afterSrc, "↻ must not re-navigate to the dead per-tab origin").not.toMatch(originRe);
+  } finally {
+    await page.unroute(`http://${PREVIEW_PROBE_HOST}:${previewPort}/**`).catch(() => {});
+    await page.unroute(`${previewOrigin}/**`).catch(() => {});
     setPreview("");
     await page.reload();
   }

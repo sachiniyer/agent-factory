@@ -201,6 +201,21 @@ func (i *Instance) CanConfirmPendingHandoffDelivery() bool {
 // was waiting for), and the mission plus its verdict clear together so no
 // later reader reconstructs the fence. Refusing not-delivered keeps automatic
 // recovery's ownership unambiguous.
+//
+// The attestation also decides the row's liveness (#5023): a mission the
+// incoming agent already received means the agent HAS work, so the confirmed
+// row reads LiveRunning — the same state a delivered prompt produces — until
+// the status monitor observes a genuinely idle pane. A fenced row gets that
+// from CommitHandoff already; the explicit edge below is what an unfenced
+// ambiguous row — the could-not-confirm settle — needs to not publish as a
+// settled idle session.
+//
+// A row parked at its usage-limit wall keeps LiveLimitReached instead — the
+// parked state is still honest (the mission cannot run until quota resets),
+// still not-idle to fleet watch, and is the marker ResumeLimitedSessions scans
+// for. The fenced arm parks through ParkHandoff, the same edge a live handoff
+// that hit the wall takes, so the fence drops without CommitHandoff publishing
+// LiveRunning and discarding the reset bookkeeping.
 func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -222,12 +237,29 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	lv, op, resetAt := i.lifecycleStateLocked()
 	i.resolveStartupStateLocked()
 	if i.inFlightOp == OpReplacing {
-		if err := i.transitionLocked(CommitHandoff()); err != nil {
+		ev := CommitHandoff()
+		if i.liveness == LiveLimitReached {
+			// The incoming agent is parked at its usage-limit wall: settle the
+			// fence the way a handoff that hit the wall live does, so the row
+			// stays inside ResumeLimitedSessions' scan. CommitHandoff would
+			// publish LiveRunning and drop the reset bookkeeping outright.
+			ev = ParkHandoff(resetAt)
+		}
+		if err := i.transitionLocked(ev); err != nil {
 			return err
 		}
 	}
 	i.pendingHandoffMission = ""
 	i.handoffDeliveryStatus = ""
+	// A confirmed mission is work the incoming agent already has (#5023) —
+	// publish working (a no-op on the CommitHandoff arm, which already landed
+	// there) and leave the settle back to Ready to the monitor's pane
+	// evidence. A limit-blocked row keeps its wall: the parked row still reads
+	// not-idle to fleet watch, and a paused poll cannot re-park a row this
+	// edge would have falsely marked running.
+	if i.liveness != LiveLimitReached {
+		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+	}
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil
@@ -749,16 +781,37 @@ func (i *Instance) CommitRuntimeProgramEvidence(evidence RuntimeProgramEvidence,
 // owns UpdatedAt and the durable checkpoint; touching here would count one
 // runtime replacement twice.
 func (i *Instance) setRuntimeProgram(program string) {
+	i.setRuntimeLaunch(program, nil)
+}
+
+// setRuntimeLaunch records a positively established launch: the resolved base
+// command plus, when the pane answers, the pane root's (pid, kernel start-time)
+// identity — the pair that lets a later reattach prove the process standing
+// behind the reused tmux name is still the launch af made (#5066). A pane query
+// that cannot answer records the command alone; the record then verifies
+// nothing on reattach and ages out exactly like a pre-evidence launch.
+func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession) {
 	if strings.TrimSpace(program) == "" {
 		return
 	}
+	pid := 0
+	var startID uint64
+	if ts != nil {
+		if pane, err := ts.PaneRootProcess(); err == nil {
+			pid, startID = pane.PID, pane.StartID
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setRuntimeProgramLocked(program)
+	i.setRuntimeEvidenceLocked(program, pid, startID)
 }
 
 func (i *Instance) setRuntimeProgramLocked(program string) {
-	if i.runtimeProgram == program {
+	i.setRuntimeEvidenceLocked(program, 0, 0)
+}
+
+func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uint64) {
+	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}
 	// Invalidate lock-free consumers before publishing the replacement value.
@@ -766,20 +819,42 @@ func (i *Instance) setRuntimeProgramLocked(program string) {
 	// cannot take i.mu to close this ordering edge.
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = program
+	i.runtimePID = pid
+	i.runtimeStartID = startID
 }
 
 // clearRuntimeProgramForUnverifiedReattach retires a persisted launch-command
-// claim when load can establish only that a tmux name exists, not that it still
-// names the process AF launched. It reports whether durable state changed so a
-// load caller can checkpoint the clear before publishing the restored row.
-func (i *Instance) clearRuntimeProgramForUnverifiedReattach() bool {
+// claim when the reattach cannot prove the pane is still the launch that
+// recorded it. The proof is the pane root's (pid, start-time) identity
+// captured at that launch: a surviving tmux name reporting the recorded pair
+// keeps the claim, while a different process, a pane that cannot be probed,
+// and a record carrying no identity are all unverified. It reports whether
+// durable state changed so a load caller can checkpoint the clear before
+// publishing the restored row.
+func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession) bool {
+	i.mu.RLock()
+	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
+	i.mu.RUnlock()
+	if pid > 0 && ts != nil {
+		if same, err := ts.PaneRootProcessMatches(pid, startID); err == nil && same {
+			// Provably the same launch: keep the claim.
+			return false
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.runtimeProgram == "" {
+	// Re-check under the write lock: a launch boundary that committed fresh
+	// evidence while the pane query ran must not lose it to this verdict.
+	if i.runtimeProgram != oldProgram || i.runtimePID != pid || i.runtimeStartID != startID {
+		return false
+	}
+	if i.runtimeProgram == "" && i.runtimePID == 0 {
 		return false
 	}
 	i.runtimeEvidenceGeneration.Add(1)
 	i.runtimeProgram = ""
+	i.runtimePID = 0
+	i.runtimeStartID = 0
 	return true
 }
 

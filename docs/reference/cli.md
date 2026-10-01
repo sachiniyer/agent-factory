@@ -916,7 +916,10 @@ machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
 (default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
-is rejected with the location it actually belongs to. Clear an override with
+is rejected with the location it actually belongs to. One caveat: a
+per-project branch_prefix is accepted and stored but ignored for now — the
+global prefix applies to every project until #4539 lands the real feature.
+Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
@@ -1304,6 +1307,12 @@ guidance, but they are not actionable: "inspect it and decide" is not a finding
 that the run is unhealthy. A CI step or health probe should fail on the command
 exit code: 1 means unresolved actionable issues remain or a check did not finish
 looking. Advisory warnings alone do not fail the run.
+
+Rows can also carry INFO: a deliberate unknown — something visible but not
+comparable, like a root session the daemon adopted rather than launched, whose
+resolved runtime command therefore was never recorded. An INFO row is neither a
+problem nor an unfinished check; it appears in the report and in summary.info
+in --json output, and never contributes to the exit code.
 
 A check that stops early — for example, the temp-home sweep hits a candidate
 budget on a machine with a very large temp dir — now exits 1 even if it found
@@ -1704,7 +1713,7 @@ af sessions archive [title] [flags]
 
 Attach to a session's terminal
 
-Attach to a running session's tmux terminal. Detach with the configured detach key (default: Ctrl-w).
+Attach to a running session's tmux terminal. Detach with the configured detach key (default: ctrl+w).
 
 ```
 af sessions attach <title>

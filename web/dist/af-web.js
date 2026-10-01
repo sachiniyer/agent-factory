@@ -8589,6 +8589,7 @@ function ctrlModifiedEmission(text) {
   }
   if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
   if (code === 56) return "\x7F";
+  if (text === "/") return "";
   return void 0;
 }
 function xtermAltControlAlias(text, physical, stickyCtrl, stickyAlt) {
@@ -9002,6 +9003,9 @@ function hasPrintable(data) {
   }
   return false;
 }
+function isEditingControl(data) {
+  return /[\x7f\x04\x15\b\x17\x01\x05\t\x02\x06\x10\x0e\v\f\x19\x14\x12\x1f\x16\x0f\x18\x11\x13\x1d\0\x07\x1a\x1c\x1e]/.test(data);
+}
 var MidLineHold = class {
   /**
    * @param renewIntervalMs how often to re-send the pause while the line stays
@@ -9022,6 +9026,17 @@ var MidLineHold = class {
   lastInputMs = 0;
   lastPauseMs = 0;
   queuedEndsLine = false;
+  /**
+   * Set when the idle bound released a hold whose draft is still in the PTY, and
+   * cleared by every client-observable genuine commit/abandon (the lastCommit
+   * branch, a flushed queued commit) and by teardown (release). While it is true,
+   * a plain editing control byte re-acquires the lease instead of returning
+   * "none" — matching the ESC branch's post-idle re-acquisition. The daemon
+   * delivering into the pane is not observable here, so the flag can stay stale
+   * after a daemon-side clear/submit; that is the same bounded spurious-hold
+   * staleness the ESC branch already accepts.
+   */
+  releasedByIdleBound = false;
   /** True while the user is considered to have a partially typed line. */
   get holding() {
     return this.uncommitted;
@@ -9058,6 +9073,7 @@ var MidLineHold = class {
     this.lastInputMs = nowMs;
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
+      this.releasedByIdleBound = false;
       const tail = data.slice(lastCommit + 1);
       if (!startsADraft(tail)) {
         this.uncommitted = false;
@@ -9066,6 +9082,9 @@ var MidLineHold = class {
       return this.beginOrRenew(nowMs);
     }
     if (!this.uncommitted && !startsADraft(data)) {
+      if (this.releasedByIdleBound && isEditingControl(data)) {
+        return this.beginOrRenew(nowMs);
+      }
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -9084,6 +9103,7 @@ var MidLineHold = class {
     }
     if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
       this.uncommitted = false;
+      this.releasedByIdleBound = true;
       return "none";
     }
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
@@ -9110,6 +9130,8 @@ var MidLineHold = class {
       const payload = data.startsWith(PASTE_START) ? "" : data;
       const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
       this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    } else {
+      this.queuedEndsLine = false;
     }
     return this.beginOrRenew(nowMs);
   }
@@ -9129,6 +9151,7 @@ var MidLineHold = class {
     if (this.queuedEndsLine) {
       this.uncommitted = false;
       this.queuedEndsLine = false;
+      this.releasedByIdleBound = false;
     }
   }
   /** Drops the hold for a teardown that makes the question moot — the pane
@@ -9137,6 +9160,7 @@ var MidLineHold = class {
    *  may not be the only holder of. */
   release() {
     this.uncommitted = false;
+    this.releasedByIdleBound = false;
   }
   beginOrRenew(nowMs) {
     if (!this.uncommitted) {
@@ -9268,9 +9292,6 @@ var TOUCH_SCROLL_SLOP_PX = 8;
 function touchScrollClaimsGesture(originY, y) {
   return Math.abs(y - originY) >= TOUCH_SCROLL_SLOP_PX;
 }
-function touchHistoryScrollPlan(lastY, y, rows, rowHeight, remainder) {
-  return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
-}
 var TOUCH_LONG_PRESS_MS = 500;
 function touchPressStillHeld(originX, originY, x, y) {
   return Math.abs(x - originX) < TOUCH_SCROLL_SLOP_PX && Math.abs(y - originY) < TOUCH_SCROLL_SLOP_PX;
@@ -9332,6 +9353,63 @@ function textFromCells(cells, range) {
   return cells.slice(range.start, range.start + range.length).join("");
 }
 
+// src/touch-scroll.ts
+var SCROLL_GAIN = 3;
+var FLING_WINDOW_MS = 100;
+var FLING_MIN_V = 0.5;
+var FLING_MAX_V = 6;
+var FLING_VEL_GAIN = 4.5;
+var FLING_DECAY_MS = 650;
+var FLING_STOP_V = 0.04;
+var FLING_MAX_DT = 50;
+var TouchScroll = (now) => {
+  let samples = [];
+  let v = 0;
+  let lastTick = 0;
+  return {
+    get active() {
+      return samples.length !== 0;
+    },
+    // Momentum live: set by a nonzero release(), cleared by decay or stop().
+    // Distinct from active, which tracks the held gesture (samples) instead.
+    get coasting() {
+      return v !== 0;
+    },
+    push(y) {
+      const last = samples.at(-1);
+      samples.push({ y, t: now() });
+      return last ? (last.y - y) * SCROLL_GAIN : 0;
+    },
+    release() {
+      const t = now();
+      const s = samples.splice(0), last = s.at(-1);
+      v = 0;
+      if (!last) return 0;
+      let i = s.length - 1;
+      for (; i > 0 && s[i].t >= t - FLING_WINDOW_MS; --i) ;
+      const dt = t - s[i].t;
+      const w = dt > 0 ? (s[i].y - last.y) / dt : 0;
+      if (Math.abs(w) < FLING_MIN_V) return 0;
+      v = Math.max(-FLING_MAX_V, Math.min(FLING_MAX_V, w)) * FLING_VEL_GAIN;
+      lastTick = t;
+      return v;
+    },
+    tick() {
+      if (v === 0) return null;
+      const t = now(), dt = t - lastTick;
+      lastTick = t;
+      const px = v * Math.min(dt, FLING_MAX_DT);
+      v *= Math.exp(-dt / FLING_DECAY_MS);
+      if (Math.abs(v) < FLING_STOP_V) v = 0;
+      return px;
+    },
+    stop() {
+      v = 0;
+      samples = [];
+    }
+  };
+};
+
 // src/terminal.ts
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -9369,7 +9447,7 @@ var AttachTerminal = class {
     this.term.open(container);
     this.keybar = new TerminalKeybar(
       container,
-      (data) => this.term.input(data, true),
+      (data) => (this.stopCoast(), this.term.input(data, true)),
       () => this.scheduleVisibleFit(),
       () => this.term.modes.applicationCursorKeysMode
     );
@@ -9397,10 +9475,16 @@ var AttachTerminal = class {
           this.cb.onFocusChange(false);
         }
       });
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    this.term.onBinary((data) => this.sendBinary(data));
+    this.term.buffer.onBufferChange(() => this.stopCoast());
     this.term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === "keydown") {
+        this.stopCoast();
+      }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
@@ -9475,18 +9559,25 @@ var AttachTerminal = class {
   mouseOverrideKeyHeld = false;
   handedOffDrag = false;
   historyWheelRemainder = 0;
-  // The screen position the current one-finger drag last scrolled from, plus its
-  // sub-row carry. Null whenever no gesture is af's to scroll: none is down, or a
-  // second finger arrived and the browser owns the pinch.
-  touchScrollY = null;
-  touchScrollRemainder = 0;
+  scrollRem = 0;
+  fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  coastApplied = 0;
+  coastStopCount = 0;
+  coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
   // point the finger went down on, by the same threshold.
   touchOriginX = 0;
   touchOriginY = 0;
-  touchScrollClaimed = false;
+  scrollClaimed = false;
   // The pending long press, and whether it has already acted on this gesture — a copy
   // has to swallow the compatibility click the same touch would otherwise fire.
   touchLongPressTimer = null;
@@ -9560,28 +9651,24 @@ var AttachTerminal = class {
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
   onWheel = (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
-  // touch listeners return early while mouse events are active — and nothing takes
-  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
-  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
-  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
-  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
-  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
-  // the application — which is why only the move is ever cancelled, never the
-  // touchstart that a tap's compatibility mouse events depend on.
   onTouchStart = (event) => {
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
-    this.touchScrollY = press?.clientY ?? null;
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
-    this.touchScrollRemainder = 0;
-    this.touchScrollClaimed = false;
+    this.scrollRem = 0;
+    this.scrollClaimed = false;
+    if (press) this.fling.push(press.clientY);
     this.cancelTouchLongPress();
     this.discardPendingTouchCopy();
     this.disposeTouchPressMarker();
@@ -9596,6 +9683,7 @@ var AttachTerminal = class {
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
     this.flushTouchCopy();
+    if (this.scrollClaimed && this.fling.release()) window.requestAnimationFrame(this.onCoastFrame);
   };
   /**
    * The browser taking the gesture away — and the ONLY signal it gives when it does.
@@ -9607,6 +9695,8 @@ var AttachTerminal = class {
    * a takeover drops both the copy and the selection that promised it.
    */
   onTouchCancel = () => {
+    this.stopCoast();
+    this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
@@ -9634,36 +9724,33 @@ var AttachTerminal = class {
   };
   onTouchMove = (event) => {
     this.handleUserScroll("touch");
-    const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
+    const touch = event.touches[0];
+    const moved = event.touches.length !== 1 || !touchPressStillHeld(this.touchOriginX, this.touchOriginY, touch?.clientX, touch?.clientY);
     if (moved) {
       this.cancelTouchLongPress();
       this.discardPendingTouchCopy();
     }
-    if (this.touchScrollY === null) {
+    if (!this.fling.active) {
       return;
     }
     if (event.touches.length !== 1) {
-      this.touchScrollY = null;
+      this.stopCoast();
+      this.scrollClaimed = false;
       return;
     }
-    const last = this.touchScrollY;
-    const y = event.touches[0].clientY;
-    this.touchScrollY = y;
-    if (!this.applicationOwnsMouse()) {
-      return;
-    }
-    if (!this.touchScrollClaimed) {
+    const y = touch.clientY;
+    const px = this.fling.push(y);
+    if (!this.scrollClaimed) {
       if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         return;
       }
-      this.touchScrollClaimed = true;
+      this.scrollClaimed = true;
     }
-    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
-    this.touchScrollRemainder = plan.remainder;
-    if (plan.lines !== 0) {
-      this.term.scrollLines(plan.lines);
-    }
+    this.touchOriginX = touch.clientX;
+    this.touchOriginY = y;
+    this.applyTouchScrollPx(px);
     event.preventDefault();
+    event.stopPropagation();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
    *  Edit → Copy, right-click → Copy, assistive tech. The decision is in
@@ -9677,6 +9764,7 @@ var AttachTerminal = class {
   };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
+    this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
       this.handleUserScroll("scrollbar");
@@ -9689,23 +9777,7 @@ var AttachTerminal = class {
       this.showMouseCaptureHint(this.pointerHint);
     }
   };
-  // The inversion itself (#2787). It runs in the CAPTURE phase on the pane host, so
-  // it lands before both of xterm's mousedown listeners — they sit on xterm's own
-  // element, a descendant — and therefore before either reads the modifier.
-  //
-  // mousedown ONLY. mouseup carries xterm's alt-click-moves-cursor gesture, which
-  // reads the same altKey: a synthetic Option there would fire cursor-movement
-  // sequences into the PTY on every plain click. It is also unnecessary — xterm only
-  // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
-  // inversion already diverts, and the selection drag that replaces it is driven by
-  // document listeners that read no modifier at all.
-  //
-  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
-  // the click back behind a modifier — a trade a touch device cannot take, because it
-  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
-  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
-  // gestures already separate without one, the drag scrolling history (#2682) and the
-  // tap staying the click.
+  // Click/selection modifier inversion (#2787) — the module note above the class.
   onMouseDownCapture = (event) => {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       event.preventDefault();
@@ -9723,17 +9795,7 @@ var AttachTerminal = class {
       this.beginHandedOffDrag();
     }
   };
-  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
-  // listeners and encodes each event's OWN modifiers into the report, so stripping
-  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
-  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
-  // is af's escape hatch, not input the user aimed at the application, so it must
-  // not arrive as a modified-click binding.
-  //
-  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
-  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
-  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
-  // cursor-movement sequences into the PTY on every plain click.
+  // Strips the escape modifier from a handed-off drag (#2787) — module note above.
   onHandedOffDragModifier = (event) => {
     if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
       invertTerminalMouseOverride(event, this.mouseOverride);
@@ -9776,6 +9838,7 @@ var AttachTerminal = class {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -9803,6 +9866,60 @@ var AttachTerminal = class {
     const mode = this.term.modes.mouseTrackingMode;
     return mode !== "none" && mode !== "x10";
   }
+  applyTouchScrollPx(px) {
+    const plan = historyWheelPlan(
+      { deltaMode: 0, deltaY: px },
+      this.term.rows,
+      this.rowHeight(),
+      this.scrollRem
+    );
+    this.scrollRem = plan.remainder;
+    if (plan.lines === 0) return;
+    if (this.term.buffer.active.type !== "alternate" || !this.applicationOwnsWheel()) {
+      this.term.scrollLines(plan.lines);
+      return;
+    }
+    const element = this.term.element;
+    if (!element) {
+      return;
+    }
+    const deltaY = Math.sign(plan.lines);
+    for (let i = Math.abs(plan.lines); i > 0; i -= 1) {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: this.touchOriginX,
+          clientY: this.touchOriginY,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY
+        })
+      );
+    }
+  }
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  stopCoast() {
+    const live = this.fling.coasting;
+    this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
+  }
+  onCoastFrame = () => {
+    const px = this.fling.tick();
+    if (px === null) return;
+    this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
+    window.requestAnimationFrame(this.onCoastFrame);
+  };
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
    *  can leave this pane mid-drag, so the pane host is not a wide enough net. */
@@ -10145,10 +10262,15 @@ var AttachTerminal = class {
         this.cursor = frame.seq;
         this.seeded = true;
         break;
-      case 0 /* PTYOut */:
+      case 0 /* PTYOut */: {
+        const buf = this.term.buffer.active;
+        if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
+          this.stopCoast();
+        }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
         break;
+      }
       case 3 /* Repaint */:
         this.term.write(frame.data);
         break;
@@ -10403,6 +10525,23 @@ var AttachTerminal = class {
       return;
     }
     this.noteQueuedInput(text);
+  }
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  sendBinary(data) {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected \u2014 typing was not delivered");
+    }
   }
   /** Hands the PTY everything typed while the socket was down, in order, then
    *  empties the queue. Called from onopen, so it covers the first connect and
@@ -10758,6 +10897,7 @@ function openConfigAssistant(opts) {
 // src/events.ts
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
+var AUTH_FAILURE_THRESHOLD = 3;
 function wsScheme2() {
   return window.location.protocol === "https:" ? "wss:" : "ws:";
 }
@@ -10771,6 +10911,10 @@ var EventStream = class {
   everOpened = false;
   retry = 0;
   reconnectTimer = null;
+  // Streak of attempts closed before onopen, and the streak length at which
+  // onAuthFailure next fires (see AUTH_FAILURE_THRESHOLD).
+  consecutiveCloseBeforeOpen = 0;
+  nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
   /** Opens the socket and begins delivering events. Idempotent-ish: call once. */
   start() {
     this.stopped = false;
@@ -10799,13 +10943,17 @@ var EventStream = class {
     try {
       ws = new WebSocket(url);
     } catch {
-      this.scheduleReconnect();
+      this.handleClose(false);
       return;
     }
     this.ws = ws;
+    let opened = false;
     ws.onopen = () => {
+      opened = true;
       this.retry = 0;
       this.everOpened = true;
+      this.consecutiveCloseBeforeOpen = 0;
+      this.nextAuthEscalationAt = AUTH_FAILURE_THRESHOLD;
       this.cb.onStatus("open");
       this.cb.onResync();
     };
@@ -10823,13 +10971,21 @@ var EventStream = class {
         this.cb.onEvent(ev);
       }
     };
-    ws.onclose = () => this.scheduleReconnect();
+    ws.onclose = () => this.handleClose(opened);
     ws.onerror = () => {
       try {
         ws.close();
       } catch {
       }
     };
+  }
+  /** Single funnel for every socket end; only a close-before-open extends
+   *  the streak. */
+  handleClose(opened) {
+    if (!opened) {
+      this.consecutiveCloseBeforeOpen += 1;
+    }
+    this.scheduleReconnect();
   }
   scheduleReconnect() {
     if (this.stopped || this.reconnectTimer !== null) {
@@ -10845,6 +11001,10 @@ var EventStream = class {
         this.open();
       }
     }, delay2);
+    if (this.consecutiveCloseBeforeOpen >= this.nextAuthEscalationAt) {
+      this.nextAuthEscalationAt = this.consecutiveCloseBeforeOpen + AUTH_FAILURE_THRESHOLD;
+      this.cb.onAuthFailure();
+    }
   }
 };
 
@@ -12490,7 +12650,7 @@ function rebindTargetAfterAwait(inputs) {
   if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (inputs.currentGen !== inputs.pinnedGen) {
+  if (inputs.currentGen !== inputs.pinnedGen || (inputs.newestAppliedSeqs.get(inputs.pinnedSelId) ?? 0) > inputs.rebindSeq) {
     return { kind: "refused", reason: "layout-moved" };
   }
   if (inputs.targetIdx < 0) {
@@ -12573,6 +12733,21 @@ function closeLeaf(root2, leafId) {
     return { ...node, a, b };
   };
   return remove(root2);
+}
+function siblingSubtreeOf(root2, leafId) {
+  if (root2.kind === "leaf") {
+    return null;
+  }
+  if (root2.a.kind === "leaf" && root2.a.id === leafId) {
+    return root2.b;
+  }
+  if (root2.b.kind === "leaf" && root2.b.id === leafId) {
+    return root2.a;
+  }
+  if (findLeaf(root2.a, leafId)) {
+    return siblingSubtreeOf(root2.a, leafId);
+  }
+  return siblingSubtreeOf(root2.b, leafId);
 }
 function dedupeExcept(root2, tab, keepId) {
   const dupes = leaves(root2).filter((l) => l.tab === tab && l.id !== keepId);
@@ -12881,16 +13056,20 @@ function previewProbeMs() {
   return typeof override === "number" ? override : 2500;
 }
 var previewReachable = /* @__PURE__ */ new Map();
-function previewOriginReachable(origin) {
+function previewOriginReachable(origin, fresh = false) {
   let port;
   try {
     port = new URL(origin).port;
   } catch {
     return Promise.resolve(false);
   }
-  const cached = previewReachable.get(port);
-  if (cached !== void 0) {
-    return cached;
+  if (fresh) {
+    previewReachable.delete(port);
+  } else {
+    const cached = previewReachable.get(port);
+    if (cached !== void 0) {
+      return cached;
+    }
   }
   const probe = new Promise((resolve) => {
     const frame = document.createElement("iframe");
@@ -12907,7 +13086,7 @@ function previewOriginReachable(origin) {
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
-      if (!ok) {
+      if (!ok && previewReachable.get(port) === probe) {
         previewReachable.delete(port);
       }
       resolve(ok);
@@ -13129,6 +13308,23 @@ var SplitView = class {
     this.tree = replaceTab(this.tree, this.focusedId, tab);
     this.commit();
   }
+  /** setFocusedTab for the post-await apply of an awaited tab mutation
+   *  (index.ts guardedTabRebind). The landing is identical — retain, reconcile,
+   *  report — but it does NOT count toward layoutGeneration: that counter answers
+   *  "did the user move the layout during my await?", and a gesture's own write
+   *  landing is not the user moving anything. Counting it made every awaited
+   *  mutation veto the next gesture pinned while it was in flight — a create
+   *  issued while an earlier close was still settling refused its own rebind and
+   *  left the pane on the old tab (#5061). The caller instead sequences
+   *  overlapping awaited gestures by issue order, so a stale apply still refuses
+   *  to clobber a NEWER one that already landed (rebindTargetAfterAwait). */
+  setFocusedTabAwaited(tab) {
+    if (!this.tree || !this.focusedId) {
+      return;
+    }
+    this.tree = replaceTab(this.tree, this.focusedId, tab);
+    this.land();
+  }
   /** Gives the keyboard to the focused pane's terminal (attach), returning whether
    *  a terminal actually took it. False means there was nothing to focus: a web or
    *  VS Code tab renders an iframe and carries no term (mountWebPane leaves
@@ -13238,6 +13434,13 @@ var SplitView = class {
    *  wins — while the roster event that races the same close still passes the
    *  guard, because it bumps nothing.
    *
+   *  Deliberately NOT bumped either by an awaited mutation's own apply
+   *  (setFocusedTabAwaited): that landing IS the gesture's write, not newer intent
+   *  formed during its await. Counting it made every awaited rebind veto the next
+   *  one pinned while it was in flight — the close-then-create flake of #5061.
+   *  Overlapping awaited gestures order among themselves on the caller's issue
+   *  sequence instead (rebindTargetAfterAwait's rebindSeq/newestAppliedSeq).
+   *
    *  Pane focus counts because the guarded write (setFocusedTab) targets the
    *  FOCUSED pane: an index computed against the pane that issued the close is
    *  meaningless once a different pane holds focus, and applying it there would
@@ -13251,6 +13454,13 @@ var SplitView = class {
    *  it the one place to count them (see layoutGeneration). */
   commit() {
     this.layoutGen++;
+    this.land();
+  }
+  /** The landing write half of commit() — retain, reconcile, report — shared with
+   *  setFocusedTabAwaited, whose landings must not count toward the generation:
+   *  they are a gesture's own awaited write completing, not the user moving the
+   *  layout (#5061). */
+  land() {
     if (this.sessionId && this.tree) {
       this.retain(this.sessionId, this.tree, this.tabIds);
     }
@@ -13261,16 +13471,26 @@ var SplitView = class {
     if (!this.tree) {
       return;
     }
+    const siblingSubtree = siblingSubtreeOf(this.tree, leafId);
     const next = closeLeaf(this.tree, leafId);
     if (next === null) {
       return;
     }
     this.tree = next;
-    if (this.focusedId === leafId) {
-      this.focusedId = leaves(this.tree)[0]?.id ?? null;
+    const heldFocus = this.focusedId === leafId;
+    if (heldFocus) {
+      const fallback = leaves(this.tree)[0]?.id ?? null;
+      this.focusedId = (siblingSubtree ? leaves(siblingSubtree)[0]?.id : null) ?? fallback;
     }
     this.commit();
     this.refocus();
+    if (heldFocus && this.termHoldsFocus) {
+      const focused = this.focusedId ? this.panes.get(this.focusedId) : null;
+      if (!focused?.term) {
+        this.cb.onFocusChange(false);
+        this.termHoldsFocus = false;
+      }
+    }
   }
   // --- internal: reconcile tree → DOM + terminals ---------------------------
   teardown() {
@@ -13605,7 +13825,7 @@ var SplitView = class {
           if (origin === "") {
             return "";
           }
-          return await previewOriginReachable(origin) ? previewOriginSrc(origin, target) : "";
+          return await previewOriginReachable(origin, fresh) ? previewOriginSrc(origin, target) : "";
         }) : Promise.resolve("");
       }
       return previewSrcOnce;
@@ -13635,6 +13855,9 @@ var SplitView = class {
       if (previewSrc !== "") {
         open.href = previewSrc;
         fbLink.href = previewSrc;
+      } else {
+        open.href = openHref;
+        fbLink.href = openHref;
       }
       showFrame();
       const next = bust && webProxied ? cacheBustedWebSrc(base, nextReloadNonce()) : base;
@@ -13768,17 +13991,21 @@ var SplitView = class {
    */
   applyTabDrop(pane, drag, clientX, clientY) {
     if (!this.tree) {
-      return;
+      return false;
     }
     const tab = resolveDragTab(drag, this.tabRealIds, this.tabIds, this.tabCount);
     if (tab === null) {
-      return;
+      return false;
     }
     const zone = this.zoneAt(pane.container, clientX, clientY);
-    const onItsOwnPane = zone !== "center" && findLeaf(this.tree, pane.leafId)?.tab === tab;
+    const shown = findLeaf(this.tree, pane.leafId)?.tab;
+    if (zone === "center" && shown === tab && this.focusedId === pane.leafId) {
+      return false;
+    }
+    const onItsOwnPane = zone !== "center" && shown === tab;
     const opened = onItsOwnPane ? companionTab(this.tree, pane.leafId, tab, this.tabCount, this.preferredTabs()) : tab;
     if (opened === null) {
-      return;
+      return false;
     }
     this.tree = zone === "center" ? replaceTab(this.tree, pane.leafId, tab) : splitLeaf(this.tree, pane.leafId, zone, opened);
     const landed = leaves(this.tree).find((l) => l.tab === opened);
@@ -13787,6 +14014,7 @@ var SplitView = class {
     }
     this.commit();
     this.refocus();
+    return true;
   }
   /** The pane whose box contains a viewport point, or null. Used by the touch path,
    *  which has no browser hit-testing to route a drop for it. */
@@ -13820,17 +14048,18 @@ var SplitView = class {
       this.hideZone(pane);
     }
   }
-  /** Lands a touch-dragged tab at a viewport point. Returns whether a pane took it —
-   *  false means the release was not over any pane, so the caller can treat it as a
-   *  bar drop (reorder) instead. */
+  /** Lands a touch-dragged tab at a viewport point. `landed` reports whether a
+   *  pane took it — false means the release was not over any pane, so the caller
+   *  can treat it as a bar drop (reorder) instead. `changed` reports whether the
+   *  layout actually committed; a landed drop can still be rejected inside
+   *  applyTabDrop, and the caller keys any user-visible side effects off that. */
   dropTabAt(clientX, clientY, drag) {
     const pane = this.paneAtPoint(clientX, clientY);
     if (!pane) {
-      return false;
+      return { landed: false, changed: false };
     }
     this.hideZone(pane);
-    this.applyTabDrop(pane, drag, clientX, clientY);
-    return true;
+    return { landed: true, changed: this.applyTabDrop(pane, drag, clientX, clientY) };
   }
   /** The drop zone for a pointer position over a pane: an edge (outer band) or the
    *  center. */
@@ -15761,6 +15990,9 @@ function connectingView() {
   ));
 }
 function noAuthLoginView(state, actions2) {
+  if (state.loginCondition === "expired") {
+    return expiredTokenlessView(state, actions2);
+  }
   const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
@@ -15777,6 +16009,50 @@ function noAuthLoginView(state, actions2) {
       "p",
       { class: "af-subtitle" },
       "No token needed."
+    ),
+    form
+  ];
+  if (state.loginError) {
+    children.push(h("p", { class: "af-error", role: "alert" }, state.loginError));
+  }
+  return scopeRecovery(h("main", { class: "af-login af-recovery af-recovery-login" }, ...children));
+}
+function expiredTokenlessView(state, actions2) {
+  const input = h("input", {
+    type: "password",
+    id: "af-token",
+    placeholder: "Paste your daemon token",
+    autocomplete: "off",
+    disabled: state.connecting
+  });
+  input.setAttribute("aria-label", "Daemon bearer token");
+  const button = h(
+    "button",
+    { type: "submit", class: "af-primary", disabled: state.connecting },
+    state.connecting ? "Connecting\u2026" : "Connect"
+  );
+  const form = h(
+    "form",
+    { class: "af-login-form" },
+    h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
+    input,
+    button
+  );
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const token2 = input.value.trim();
+    if (token2 !== "") {
+      actions2.connect(token2);
+    }
+  });
+  const children = [
+    h("h1", { class: "af-recovery-title af-recovery-failed" }, "Login expired"),
+    h(
+      "p",
+      { class: "af-subtitle" },
+      "Paste the daemon token from ",
+      h("code", {}, "af token show"),
+      " on the host."
     ),
     form
   ];
@@ -16742,8 +17018,11 @@ var AppShell = class {
   /** A touch pane drop is a user-owned tab transition, but only if a pane accepts it. */
   dropTabOnPaneAt(clientX, clientY, drag) {
     if (!this.actions.paneDropHintAt(clientX, clientY)) return false;
-    this.dismissCarriedActions();
-    return this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    const drop = this.actions.dropTabOnPaneAt(clientX, clientY, drag);
+    if (drop.changed) {
+      this.dismissCarriedActions();
+    }
+    return drop.landed;
   }
   /** Keyboard twin of the New tab button, including its per-kind availability. */
   openNewTabPicker(shortcutReturn) {
@@ -17884,8 +18163,10 @@ async function connect(candidate) {
     if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
       clearToken();
+      store.set({ phase: "login", connecting: false, authRequired: true, loginError: describeError(e), loginCondition: "expired" });
+      return;
     }
-    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: shouldForgetToken(e) ? "expired" : e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
+    store.set({ phase: "login", connecting: false, loginError: describeError(e), loginCondition: e instanceof ApiError && e.status === 0 ? "unavailable" : void 0 });
     return;
   }
   if (!attempt.isCurrent()) return;
@@ -18194,6 +18475,7 @@ function doOpenConfigAssistant() {
   }));
 }
 function newSession() {
+  const invoker = captureModalInvoker();
   const projects = pickerProjects(store.get().sessions, store.get().tasks, projectRoots(store.get().registeredProjects));
   openModal(
     newSessionModal(projects, store.get().selectedProject, {
@@ -18249,8 +18531,10 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) openModal(m);
-          else surfaceMutationError(e);
+          if (!modal && token === tok) {
+            openModal(m, true, invoker);
+            m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
+          } else surfaceMutationError(e);
         });
       },
       onCancel: closeModal
@@ -18577,10 +18861,17 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
+var tabRebindSeq = 0;
+var newestAppliedRebindBySession = /* @__PURE__ */ new Map();
 function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
-  void run().then((snapshot) => {
+  const seq = ++tabRebindSeq;
+  void run().then(async (snapshot) => {
     if (snapshot === null) return;
+    const hold = globalThis.__afTabRebindHold?.(verb);
+    if (hold) {
+      await hold;
+    }
     const {
       sessions,
       authoritative,
@@ -18605,10 +18896,13 @@ function guardedTabRebind(selId, run, resolve, verb) {
       currentGen,
       currentSelId: store.get().selectedId,
       pinnedSessionAlive,
-      targetIdx
+      targetIdx,
+      rebindSeq: seq,
+      newestAppliedSeqs: newestAppliedRebindBySession
     });
     if (outcome.kind === "rebind") {
-      splitView.setFocusedTab(outcome.idx);
+      newestAppliedRebindBySession.set(selId, seq);
+      splitView.setFocusedTabAwaited(outcome.idx);
       if (verb === "create") {
         focusTerminal();
       }
@@ -19277,7 +19571,17 @@ function startStream(tok) {
     onResync: () => {
       requestResync();
     },
-    onStatus: (s) => store.set({ live: s })
+    onStatus: (s) => store.set({ live: s }),
+    // The WS upgrade keeps closing before open (see events.ts). Probe with an
+    // authenticated resync: its 401 trips shouldForgetToken → disconnect().
+    // Not /v1/auth-info, which says whether a token is required, not whether
+    // this one is valid. `=== null`: "" is the tokenless credential (#1696).
+    onAuthFailure: () => {
+      if (token === null) {
+        return;
+      }
+      requestResync();
+    }
   });
   stream.start();
 }
@@ -19286,6 +19590,7 @@ function stopStream() {
   tasksRefetcher.invalidate();
   projectsRefetcher.invalidate();
   configRefetcher.invalidate();
+  accountsRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

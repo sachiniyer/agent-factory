@@ -10642,8 +10642,9 @@ test("#4461: an exhausted read on an event that names its head warns and hands t
 
 // The resolver's own refusals already carried the command, but only into a red
 // run on master; they reach the PR through the same exit as the reads above.
+// "Head never moved" is absent on purpose: that is the not-yet-arrived shape
+// #5064 quiets — it is a guaranteed re-evaluation, not an unconfirmed recovery.
 const UNCONFIRMED_RECOVERIES = {
-  "the head never moves past the initiating SHA": () => fakeGateGithub(),
   "PR Validation cannot be dispatched": () => fakeGateGithub({ headSha: OTHER_SHA,
     workflowDispatchErrorsByWorkflow: { "pr.yml": new Error("dispatch refused") } }),
   "a parked run cannot be approved": () => fakeGateGithub({ headSha: OTHER_SHA, approveRunError: new Error("approval refused"),
@@ -10673,6 +10674,301 @@ for (const [name, fixture] of Object.entries(UNCONFIRMED_RECOVERIES)) {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// #5004 — a transient failure approving a parked run. The bare
+// approveWorkflowRun was the one write in successor-head recovery with no
+// retry: a single 500 ("Unexpected end of JSON input", run 36667620661)
+// reddened a master run for a miss the next dispatch approved without
+// incident. The approve now shares the gate's write retry policy, and a failed
+// POST is never believed on its own word — the parked list is re-read, so a
+// run no longer parked (the POST committed anyway, or a concurrent approver
+// won) is already the goal state, not a failure.
+// ---------------------------------------------------------------------------
+
+function parkedRecoveryRuns(head = OTHER_SHA) {
+  return { [head]: [{ id: 701, name: "PR Validation", event: "pull_request",
+    status: "completed", conclusion: "action_required" }] };
+}
+
+test("#5004: a transient approve failure is retried and recovery succeeds", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2, "the transient answer was retried under the write policy");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+test("#5004: an approve that committed despite its failure is never replayed", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the read-back found the run out of the parked list, so the ambiguous write was not replayed");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+test("#5004: a persistent transient approve failure fails recovery with the same refusal", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const core = fakeCore();
+  const delays = [];
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      sleep: async (ms) => delays.push(ms),
+    }),
+    (error) => {
+      assert.match(error.message, new RegExp(`not every parked run on ${OTHER_SHA} could be approved`));
+      assert.match(error.message, RECOVERY_RERUN);
+      return true;
+    },
+  );
+  assert.equal(github.approveRunAttempts, 3, "retried to the write policy's bound, then reported");
+  assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*after 3 attempts: Unexpected end of JSON input/);
+  // The whole schedule — each failed attempt's settle window, then the write
+  // retry's own backoff — runs on the injected sleep. Without the seam the
+  // suite burns the production 1s/2s/4s settle and RETRY_DELAYS_MS per attempt
+  // (Codex on #5005): ~22s here alone.
+  assert.deepEqual(delays, [1000, 2000, 4000, 250, 1000, 2000, 4000, 1000, 1000, 2000, 4000]);
+});
+
+// A definitive refusal is decided by the parked list, not by the error's
+// wording: GitHub still reporting the run parked makes it the refusal it
+// always was — reported once, never replayed. The "not pending approval" case
+// is the flip side of the same read-back: the run already left action_required,
+// so the approval this lane owed is done and refusing again would fail a
+// recovery whose goal state already holds.
+test("#5004: a definitive refusal on a run still parked is reported once, not retried", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Resource not accessible by integration"), { status: 403 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const core = fakeCore();
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /not every parked run on .* could be approved/,
+  );
+  assert.equal(github.approveRunAttempts, 1, "a definitive refusal is not retried");
+  assert.match(core.warnings.join("\n"), /Could not approve workflow run 701.*Resource not accessible/);
+});
+
+// Codex review on this fix: the run listing can still report a run parked for
+// a while after the approve committed, and a read-back answered from that lag
+// would replay the POST — which GitHub then refuses 422 for a write that
+// already landed, failing a recovery whose goal state held. The read-back is
+// therefore polled to convergence on the ambiguous-create settle window rather
+// than read once.
+test("#5004: a listing still reporting parked cannot turn a committed approve into a replayed refusal", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true, approveListingLagReads: 2,
+    approveRunErrors: [
+      Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+      Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
+    ],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the settled read-back saw the committed approve; the POST was never replayed into its 422");
+});
+
+// Codex on #5005: an explicit rate-limit answer rejected the POST outright —
+// nothing committed, so the write retry can simply honor Retry-After. Running
+// it through the read-back first would let a rate-limited LISTING bury the
+// refusal behind an unretryable guard failure.
+test("#5004: a definitive rate-limit refusal reaches the write retry, not the read-back", async () => {
+  const rateLimited = () => Object.assign(new Error("API rate limit exceeded for installation"), {
+    status: 403,
+    response: { headers: { "retry-after": "1", "x-ratelimit-remaining": "0" } },
+  });
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunErrors: [rateLimited()],
+    runsByHeadSha: parkedRecoveryRuns() });
+  // The listing is throttled too, once it has served the two reads the approve
+  // pass needs: the run-exists check and the parked list itself. A read-back
+  // on this run could only turn that throttle into a guard failure.
+  let listCalls = 0;
+  const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    listCalls += 1;
+    if (listCalls > 2) throw rateLimited();
+    return listRuns(options);
+  };
+  const delays = [];
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async (ms) => delays.push(ms),
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2, "the write retry honored Retry-After and replayed");
+  assert.equal(listCalls, 2, "a definitive refusal never consulted the throttled listing");
+  assert.deepEqual(delays, [1000], "the retry waited out the advertised Retry-After");
+});
+
+// Codex on #5005: the read-back can spend the whole settle window, and a PR
+// that closed or moved meanwhile must not get a stale head's run approved by
+// the replay — the recovery guard is re-established before every attempt, as
+// the other retried writes do.
+test("#5004: a PR that ends during the settle window is never approved on a stale head", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides,
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    // Reads 1-4 answer open: the resolver's initial read, ensureValidationRun's
+    // two canRecover checks, and the first approval attempt's own guard. Read 5
+    // is the replay's re-check, after the failed approve spent its settle
+    // window — the PR has closed by then.
+    if (github.graphqlReadsByNumber[1465] >= 4) overrides[1465] = { state: "CLOSED" };
+    return graphql(query, variables);
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.deepEqual(targets, [], "the closed PR's recovery cancelled cleanly");
+  assert.equal(github.approveRunAttempts, 1,
+    "the re-established guard refused the replay; the stale head's run was never approved");
+});
+
+// Codex on #5005: when the POST's outcome is unknown AND the read-back stays
+// unreadable for the whole settle window, that exhaustion is a guard failure —
+// the recovery failed on a READ, and reporting it as a run GitHub kept parked
+// ("not every parked run could be approved") misreports the outcome and drops
+// the classification. It must propagate, marked as the read failure it is.
+test("#5004: a read-back that never answers propagates its own failure", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    approveRunError: Object.assign(new Error("Unexpected end of JSON input"), { status: 500 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  // The listings the pass needs read fine; every run read-back inside the
+  // settle window is unavailable, so convergence can never be proven.
+  github.rest.actions.getWorkflowRun = async () => {
+    throw Object.assign(new Error("run read unavailable"), { status: 500 });
+  };
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, /could not confirm whether run 701 left the parked list/);
+      assert.doesNotMatch(error.message, /not every parked run .* could be approved/);
+      assert.equal(error.autoGateReadFailure, true,
+        "an exhausted read-back is a READ failure, not a deterministic approve failure");
+      return true;
+    },
+  );
+  assert.equal(github.approveRunAttempts, 1, "the first ambiguous failure's unreadable read-back ends it");
+});
+
+// Codex on #5005: the same eventually-consistent listing lags the OTHER way —
+// a run that only just appeared (the normal recovery shape) can be missing
+// from the repo-wide list while still parked, and "absent" is not proof the
+// approve committed. The read-back asks the run itself.
+test("#5004: a listing that omits the just-created run cannot pass its read-back", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    // The approve failed without committing: the run is still parked, but a
+    // lagging listing no longer reports it at all.
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: parkedRecoveryRuns() });
+  let listCalls = 0;
+  const listRuns = github.rest.actions.listWorkflowRunsForRepo;
+  github.rest.actions.listWorkflowRunsForRepo = async (options) => {
+    listCalls += 1;
+    const listed = await listRuns(options);
+    if (listCalls > 2) {
+      return { data: { total_count: 0, workflow_runs: [] } };
+    }
+    return listed;
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 2,
+    "the run's own read still showed parked, so the failed POST was replayed");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
+
+// Codex on #5005: the post-update merge pass retried an approve with no
+// live-head check at all — a PR closed during the settle window still got its
+// stale head's run approved by the replay. The same guard recovery uses now
+// covers this lane.
+test("#5004: the post-update approve pass re-checks the live head before replaying", async () => {
+  const NEW_HEAD = "d0bece4610c37b7d397100132ce03126ad556bfe";
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: NEW_HEAD,
+    // liveBefore, the post-update re-read, and attempt 1's guard all answer
+    // open at NEW_HEAD; the replay's re-check finds the PR closed.
+    pullGetSnapshots: [{}, {}, {}, { state: "closed" }],
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: { [NEW_HEAD]: [{ id: 101, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /Refusing to merge/,
+  );
+  assert.equal(github.approveRunAttempts, 1,
+    "the live-head guard refused the replay after the PR closed mid-settle");
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+// Same guard on the evaluate pass: the parked run belongs to the head the
+// evaluation read, and a head that moved meanwhile must not get its old
+// commit's run approved.
+test("#5004: the evaluate approve pass re-checks the live head before replaying", async () => {
+  const github = fakeGateGithub({
+    // The guard's first read already sees the head moved on — the pass cancels
+    // before the first POST, so no settle window is spent at all.
+    pullGetSnapshots: [{ head: { sha: OTHER_SHA } }],
+    approveRunErrors: [Object.assign(new Error("Unexpected end of JSON input"), { status: 500 })],
+    runsByHeadSha: { [HEAD_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  await autoGate.evaluate({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465, setOutputs: false });
+  assert.equal(github.approveRunAttempts, 0, "the moved head's parked run was never approved");
+  assert.deepEqual(github.approvedRuns, []);
+});
+
+// Codex on #5005: the guard's REST read must ride the same read-retry policy
+// as every other GitHub read — a single transient failure aborted the whole
+// approve pass and misclassified the infrastructure error as a guard refusal.
+test("#5004: a transient live-head guard read is retried, not fatal", async () => {
+  const github = fakeGateGithub({
+    pullGetErrors: [Object.assign(new Error("PR read unavailable"), { status: 500 })],
+    runsByHeadSha: { [HEAD_SHA]: [{ id: 701, name: "PR Validation", event: "pull_request",
+      status: "completed", conclusion: "action_required" }] },
+  });
+  const result = await autoGate.evaluate({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465,
+    setOutputs: false, sleep: async () => {} });
+  assert.doesNotMatch(result.reasons.join("\n"), /evaluation error|PR read unavailable/);
+  assert.equal(github.approveRunAttempts, 1, "the retried guard let the approve POST fire");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+  assert.ok(github.pullGetReads >= 2, "the transient guard read was retried");
+});
+
+test("#5004: a 'not pending approval' refusal on a run no longer parked is already success", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA, approveRunErrorUnparks: true,
+    approveRunError: Object.assign(new Error("Workflow run 701 is not waiting for approval"), { status: 422 }),
+    runsByHeadSha: parkedRecoveryRuns() });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1, "the refusal was never replayed — the read-back answered it");
+  assert.deepEqual(github.approvedRuns.map((run) => run.run_id), [701]);
+});
 
 for (const [name, state] of Object.entries({ closed: { state: "CLOSED" }, merged: { merged: true }, retargeted: { baseRefName: "other" } })) {
   for (const duringPoll of [false, true]) {
@@ -10732,17 +11028,104 @@ test("#4210: an already-visible successor head resolves without waiting", async 
   assert.equal(targets[0].headSha, OTHER_SHA);
 });
 
-test("#4210: a permanently stale successor fails with recovery instructions, never a stale target", async () => {
+// #5064: the same shape used to throw through the recovery catch. But a poll
+// whose every read still shows the initiating SHA never observed a successor —
+// nothing was missed, the push simply had not landed yet, and when it lands its
+// own events (its check_suite, its synchronize through auto-gate-head.yml, PR
+// Validation's terminal workflow_run) re-evaluate it. The exit is quiet: no
+// target, no failure comment, no red run — a notice is the audit trail.
+test("#5064: a successor that never appeared ends quietly, not red", async () => {
   const github = fakeGateGithub();
-  await assert.rejects(() => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+  const core = fakeCore();
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
     headPollAttempts: 3, sleep: async () => {},
-  }), (error) => {
-    assert.match(error.message, /still exposes initiating head/);
-    assert.match(error.message, /gh workflow run auto-gate.yml/);
-    assert.match(error.message, new RegExp(`previous_head_sha=${HEAD_SHA}`));
-    return true;
   });
-  assert.equal(github.graphqlReadsByNumber[1465], 3);
+  assert.deepEqual(targets, [], "no stale target is published either way");
+  assert.equal(github.graphqlReadsByNumber[1465], 3, "the poll still ran its bound");
+  assert.match(core.notices.join("\n"), /no successor was observed/);
+  assert.equal(github.recoveryComments.length, 0,
+    "a not-yet-arrived push is not a failure comment on the PR");
+});
+
+// The boundary the quiet exit must not cross: a successor the lane DID observe
+// but could never confirm settled is the head nothing else revisits — its runs
+// can sit parked until someone approves them. That stays loud, comment and all.
+test("#5064: a successor observed but never settled still fails loudly", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+  // Exactly one read shows the successor; every other read reports the
+  // initiating head — a push that arrived, was seen, and was churned again
+  // before recovery could confirm it.
+  let reads = 0;
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (variables?.number === 1465) {
+      reads += 1;
+      overrides[1465].headRefOid = reads === 2 ? OTHER_SHA : HEAD_SHA;
+    }
+    return graphql(query, variables);
+  };
+  const core = fakeCore();
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core, prNumber: 1465,
+      headPollAttempts: 3, sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, /still exposes initiating head|has not settled/);
+      assert.match(error.message, /gh workflow run auto-gate.yml/);
+      assert.match(error.message, new RegExp(`previous_head_sha=${HEAD_SHA}`));
+      return true;
+    },
+  );
+  assert.equal(github.recoveryComments.length, 1,
+    "an observed successor the poll could not confirm still reaches the PR");
+  assert.match(github.recoveryComments[0].body, new RegExp(`head: ${OTHER_SHA}`));
+});
+
+// Codex review on this fix: the quiet exit asserts every poll still showed
+// the initiating SHA — a read that answers an open, unmerged PR with no
+// resolvable head never established that (a head ref deleted out from under
+// the update, for instance). One spoiled read is an unknown, and an unknown
+// stays loud.
+test("#5064: a poll that cannot resolve the head fails loudly, not quietly", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ pullRequestsByNumber: overrides });
+  let reads = 0;
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (variables?.number === 1465) {
+      reads += 1;
+      // The ref answers something that is not a SHA at all — normalizeHeadSha
+      // cannot resolve it, so this poll confirms nothing.
+      overrides[1465].headRefOid = reads === 2 ? "not-a-head-sha" : HEAD_SHA;
+    }
+    return graphql(query, variables);
+  };
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      headPollAttempts: 3, sleep: async () => {},
+    }),
+    (error) => {
+      assert.match(error.message, /without a resolvable head/);
+      assert.match(error.message, /gh workflow run auto-gate.yml/);
+      return true;
+    },
+  );
+  assert.equal(github.recoveryComments.length, 1,
+    "an unconfirmable head is a recovery failure on the PR, not a quiet exit");
+});
+
+// Same quiet exit through the real workflow body: #5064's run must end the way
+// the issue describes the self-heal — green, uncommented, targets empty — so
+// drive the step, not only the function.
+test("#5064: the workflow body ends green on a successor that never appeared", async () => {
+  const github = fakeGateGithub();
+  const { outputs, failures, thrown } = await runFailingRecoveryResolver(github);
+  assert.equal(thrown, null, "the not-yet-arrived push is not an error the step rethrows");
+  assert.deepEqual(failures, [], "nor a setFailed — the run stays green");
+  assert.deepEqual(JSON.parse(outputs.targets), []);
+  assert.deepEqual(JSON.parse(outputs.aggregate_heads), []);
+  assert.equal(github.recoveryComments.length, 0);
 });
 
 test("#4210: malformed initiating SHAs cannot disable the successor wait", async () => {
@@ -10855,8 +11238,424 @@ test("#4209: a failed follow-up dispatch names the manual recovery instead of cl
     assert.match(error.message, /gh workflow run auto-gate.yml --repo sachiniyer\/agent-factory --ref master -f pr_number=1465/);
     return true;
   });
-  assert.equal(github.workflowDispatchAttempts, 1, "an ambiguous dispatch write is not retried");
+  assert.equal(github.workflowDispatchAttempts, 1, "a definitive dispatch refusal is not retried");
   assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+// ---------------------------------------------------------------------------
+// #5010 — a transient failure scheduling the post-update follow-up. The bare
+// createWorkflowDispatch was the one write in the accepted-update path with no
+// retry: a single 500 ("Failed to run workflow dispatch") reddened a master run
+// and printed a recovery comment for a call that needed one more attempt. The
+// dispatch now rides the write retry policy, and an ambiguous answer reconciles
+// before replaying: a run the failed POST already created is adopted instead of
+// duplicated, because the POST is not idempotent.
+// ---------------------------------------------------------------------------
+
+test("#5010: a transient 500 scheduling the follow-up is retried until it lands", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
+    workflowDispatchErrorsByWorkflow: {
+      "auto-gate.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+  });
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465, sleep: async () => {} }),
+    (error) => {
+      assert.match(error.message, /^Refusing to merge PR #1465; head is behind/);
+      assert.match(error.message, /Auto Gate follow-up scheduled/);
+      assert.doesNotMatch(error.message, /follow-up scheduling failed|infrastructure failure/);
+      return true;
+    },
+  );
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["auto-gate.yml"], 2,
+    "the transient answer was retried under the write policy, then landed");
+  assert.equal(github.dispatchedWorkflows.length, 1);
+  assert.deepEqual(github.dispatchedWorkflows[0].inputs,
+    { pr_number: "1465", previous_head_sha: HEAD_SHA });
+  assert.equal(github.recoveryComments.length, 0,
+    "a recovered transient failure is not a failure comment on the PR");
+});
+
+test("#5010: a run the ambiguous 500 already created is adopted, not duplicated", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
+    workflowDispatchErrorsByWorkflow: {
+      "auto-gate.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+    // The POST committed and only its answer was lost: the run is already
+    // listed when the reconcile reads back.
+    dispatchErrorLandsRun: { "auto-gate.yml": { id: 4242, event: "workflow_dispatch" } },
+  });
+  const core = fakeCore();
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core, prNumber: 1465, sleep: async () => {} }),
+    /Refusing to merge PR #1465; head is behind[\s\S]*Auto Gate follow-up scheduled/,
+  );
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["auto-gate.yml"], 1,
+    "the landed run was adopted; the non-idempotent POST was never replayed");
+  assert.deepEqual(github.dispatchedWorkflows, []);
+  assert.match(core.notices.join("\n"), /adopted it instead of dispatching again/);
+  assert.equal(github.recoveryComments.length, 0);
+});
+
+test("#5010: a persistently transient dispatch failure still fails loudly with its command", async () => {
+  const err = () => Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 });
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
+    workflowDispatchErrorsByWorkflow: { "auto-gate.yml": [err(), err(), err()] },
+  });
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465, sleep: async () => {} }),
+    (error) => {
+      assert.match(error.message, /update was accepted but follow-up scheduling failed/);
+      assert.match(error.message, RECOVERY_RERUN);
+      assert.equal(error.autoGateRecoveryFailure, true,
+        "the exhausted retry is still the classified recovery failure the caller publishes");
+      return true;
+    },
+  );
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["auto-gate.yml"], 3,
+    "retried to the write policy's bound, then reported");
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+// The same distinction the approve retry drew in #5005: an explicit rate-limit
+// answer rejected the POST outright — nothing committed — so the write retries
+// directly, honoring Retry-After, and never spends the settle window asking a
+// throttled listing whether a run exists.
+test("#5010: a definitive rate-limit refusal replays without the reconcile", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
+    workflowDispatchErrorsByWorkflow: {
+      "auto-gate.yml": [Object.assign(new Error("API rate limit exceeded for installation"), {
+        status: 403,
+        response: { headers: { "retry-after": "1", "x-ratelimit-remaining": "0" } },
+      })],
+    },
+  });
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465, sleep: async () => {} }),
+    /Auto Gate follow-up scheduled/,
+  );
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["auto-gate.yml"], 2,
+    "the refused write replayed — an explicit refusal committed nothing");
+  assert.equal(github.runListReads.filter((read) => read.workflow_id === "auto-gate.yml").length, 0,
+    "a definitive rate-limit refusal never consulted the follow-up listing");
+});
+
+// End-to-end through the aggregate step: the transient answer is absorbed
+// before processAggregateHead ever sees an autoGateRecoveryFailure — the run
+// stays green and the PR gets no comment. The settle window is real here, so
+// this is the one #5010 case that pays the production delays.
+test("#5010: a transient 500 leaves the aggregate step green and the PR uncommented", async () => {
+  const github = fakeGateGithub({ behindBy: 1, headAfterUpdate: OTHER_SHA, runsByHeadSha: queuedRecoveryRuns(),
+    workflowDispatchErrorsByWorkflow: {
+      "auto-gate.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+  });
+  const { error, notices } = await runApplyGateStep({ github });
+  assert.equal(error, null, "the retried dispatch ended as an ordinary wait, not a red run");
+  assert.match(notices.join("\n"), /Auto Gate follow-up scheduled/);
+  assert.equal(github.recoveryComments.length, 0);
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["auto-gate.yml"], 2);
+});
+
+// And the same reconcile inside recovery itself: an ambiguous PR Validation
+// dispatch whose POST already created its run adopts it — found, approval-
+// eligible — rather than reporting "none could be dispatched" (#5010 shares
+// the helper).
+test("#5010: a validation dispatch the 500 already created is adopted as the found run", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+    dispatchErrorLandsRun: {
+      "pr.yml": { id: 799, name: "PR Validation", head_sha: OTHER_SHA,
+        event: "workflow_dispatch", status: "in_progress", conclusion: null },
+    },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["pr.yml"], 1,
+    "the landed validation run was adopted; the POST was never replayed");
+  assert.deepEqual(github.dispatchedWorkflows, []);
+});
+
+// Codex review on this fix: the validation dispatch targets a mutable branch
+// ref, and the retry's settle window can outlive the head it validated — a
+// replay that skipped the guard would start PR Validation on a commit this
+// lane never saw. The guard is re-established before every attempt, so a PR
+// that ends mid-window cancels the retry entirely.
+test("#5010: a validation dispatch retry re-checks the live head before replaying", async () => {
+  const overrides = { 1465: {} };
+  const github = fakeGateGithub({ headSha: OTHER_SHA, pullRequestsByNumber: overrides,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+  });
+  const graphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    // Once the first POST has failed and its settle window is being spent, the
+    // PR closes — the replay's guard read is the one that must see it.
+    if (variables?.number === 1465 && github.workflowDispatchAttemptsByWorkflow["pr.yml"] >= 1) {
+      overrides[1465].state = "CLOSED";
+    }
+    return graphql(query, variables);
+  };
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.deepEqual(targets, [], "the closed PR's recovery cancelled cleanly");
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["pr.yml"], 1,
+    "the re-established guard refused the replay; the stale head's branch was never dispatched");
+});
+
+// Codex review on this fix: a pr.yml run that predates the dispatch — a
+// hand-fired probe, which never runs the required checks — is not the work the
+// ambiguous POST was charged with, so it must not suppress the retry. The
+// reconcile only adopts runs created inside the window.
+test("#5010: a validation run that predates the dispatch does not suppress the retry", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 798, name: "PR Validation", event: "workflow_dispatch",
+        status: "completed", conclusion: "success", created_at: "2020-01-01T00:00:00Z" },
+    ] },
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.workflowDispatchAttemptsByWorkflow["pr.yml"], 2,
+    "the pre-existing run answered nothing about this POST, so the dispatch retried");
+  assert.equal(github.dispatchedWorkflows.length, 1);
+});
+
+// And the flip side of adoption (Codex): a landed run that stays parked and
+// unapprovable is found+unapproved, which must still fail recovery loudly —
+// published as a target with no runnable validation would be silent loss.
+test("#5010: an adopted run that stays parked and unapprovable still fails loudly", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+    dispatchErrorLandsRun: {
+      // The run the reconcile finds is the push's own pull_request run landing
+      // late inside the window — and it is parked.
+      "pr.yml": { id: 799, name: "PR Validation", head_sha: OTHER_SHA,
+        event: "pull_request", status: "completed", conclusion: "action_required" },
+    },
+    approveRunError: new Error("approval refused"),
+  });
+  await assert.rejects(
+    () => autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+      sleep: async () => {},
+    }),
+    /not every parked run on .* could be approved/,
+  );
+  assert.equal(github.approveRunAttempts, 1, "a definitive approve refusal is not retried");
+  assert.equal(github.recoveryComments.length, 1,
+    "the unapprovable adopted run still reaches the PR as a recovery failure");
+});
+
+// Codex review on this fix: the adopted run's approval cannot ride the same
+// repository-wide listing the poll uses — that index can still lag the
+// workflow-specific listing the reconcile just read (the note listParkedRuns'
+// own read-back exists for). The adopted run is approved by id, so a lagging
+// relist cannot report vacuous approval over a run that is in fact parked.
+test("#5010: an adopted run is approved even while the repo-wide index lags", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    workflowDispatchErrorsByWorkflow: {
+      "pr.yml": [Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 })],
+    },
+    dispatchErrorLandsRun: {
+      "pr.yml": { id: 799, name: "PR Validation", head_sha: OTHER_SHA,
+        event: "pull_request", status: "completed", conclusion: "action_required" },
+    },
+    repoIndexHiddenRunIds: [799],
+  });
+  const targets = await autoGate.resolveTargets({ github, context: recoveryContext(), core: fakeCore(), prNumber: 1465,
+    sleep: async () => {},
+  });
+  assert.equal(targets[0].headSha, OTHER_SHA);
+  assert.equal(github.approveRunAttempts, 1,
+    "the adopted run was approved by id, not rediscovered by a lagging relist");
+  assert.deepEqual(github.approvedRuns.map((call) => call.run_id), [799]);
+});
+
+// Codex review on this fix: the adoption cutoff is the first POST, not the
+// moment the helper was entered — a run dispatched while the guard was still
+// re-establishing the head predates the POST it would be adopted as.
+test("#5010: the reconcile window opens at the first POST, after the guard", async () => {
+  let probeCreatedAt = null;
+  let reconcileSince = null;
+  let dispatchCalls = 0;
+  const probe = { id: 799, name: "PR Validation", event: "workflow_dispatch",
+    status: "completed", conclusion: "success" };
+  const outcome = await autoGate.__test.dispatchWorkflowWithRetry({
+    label: "a dispatch whose guard spends real seconds",
+    guard: async () => {
+      // The guard spends a second-plus re-reading ONCE — the retry's re-check
+      // is fast — and a probe dispatched meanwhile is stamped before the POST
+      // its adoption would be blamed on.
+      if (!probeCreatedAt) {
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+        probeCreatedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+      }
+      return true;
+    },
+    dispatch: async () => {
+      dispatchCalls += 1;
+      if (dispatchCalls === 1) {
+        throw Object.assign(new Error("500 Failed to run workflow dispatch"), { status: 500 });
+      }
+    },
+    landed: async (since) => {
+      reconcileSince ??= since;
+      // The predicate the real reconcile runs: adopt only runs the window saw.
+      return Date.parse(probeCreatedAt) >= Math.floor(since / 1000) * 1000 ? probe : null;
+    },
+    sleep: async () => {},
+  });
+  assert.ok(reconcileSince > Date.parse(probeCreatedAt),
+    "the cutoff is the first POST, not the moment the guard began");
+  assert.equal(dispatchCalls, 2, "a run that predates the POST cannot suppress the retry");
+  assert.equal(outcome.reconciled, undefined, "nothing was adopted");
+});
+
+// Codex review on this fix: whole-second created_at cannot order two events
+// inside the same second, so the cutoff alone re-admits a run stamped before
+// the POST within it. Runs already listed before the first attempt are
+// excluded by id — a probe cannot be adopted as the POST's result.
+test("#5010: a run already listed before the dispatch is never adopted", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 798, name: "PR Validation", event: "workflow_dispatch",
+        // In-window on purpose: the timestamp alone would admit it, and the
+        // id exclusion is the point under test.
+        status: "completed", conclusion: "success",
+        actor: { login: "github-actions[bot]", type: "Bot" },
+        triggering_actor: { login: "github-actions[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+    ] },
+  });
+  const control = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0, sleep: async () => {},
+  });
+  assert.equal(control?.id, 798, "the run is adoptable when the snapshot did not see it");
+  const found = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0,
+    excludeIds: new Set([798]), sleep: async () => {},
+  });
+  assert.equal(found, null, "the pre-dispatch listing already knew this run; the window cannot re-admit it");
+});
+
+// Codex review on this fix: a probe can escape even that — dispatched in the
+// same second before the POST but absent from the snapshot because the index
+// lagged it, then surfacing mid-reconcile with a passing timestamp. The last
+// discriminator is who dispatched it: the push's own pull_request run is
+// adoptable whoever pushed, but a workflow_dispatch run is this POST's work
+// only when the automation asked for it.
+test("#5010: a hand-fired probe surfacing inside the window is not adopted", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 798, name: "PR Validation", event: "workflow_dispatch",
+        status: "completed", conclusion: "success",
+        actor: { login: "sachiniyer", type: "User" },
+        triggering_actor: { login: "sachiniyer", type: "User" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+      { id: 799, name: "PR Validation", event: "workflow_dispatch",
+        status: "in_progress", conclusion: null,
+        actor: { login: "github-actions[bot]", type: "Bot" },
+        triggering_actor: { login: "github-actions[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+    ] },
+  });
+  const found = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0, sleep: async () => {},
+  });
+  assert.equal(found?.id, 799,
+    "the automation's dispatch is adoptable; a human's workflow_dispatch probe is not");
+});
+
+// Codex review on this fix: the bot class is still too wide — another GitHub
+// App's automation raising a probe inside the window is a bot too, and its
+// run carries no required checks. Adoption matches the gate's own dispatcher
+// identity, the login the job's GITHUB_TOKEN dispatches under.
+test("#5010: another bot's dispatch is not adopted as the gate's run", async () => {
+  const github = fakeGateGithub({ headSha: OTHER_SHA,
+    runsByHeadSha: { [OTHER_SHA]: [
+      { id: 800, name: "PR Validation", event: "workflow_dispatch",
+        status: "completed", conclusion: "success",
+        actor: { login: "some-other-app[bot]", type: "Bot" },
+        triggering_actor: { login: "some-other-app[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+      { id: 799, name: "PR Validation", event: "workflow_dispatch",
+        status: "in_progress", conclusion: null,
+        actor: { login: "github-actions[bot]", type: "Bot" },
+        triggering_actor: { login: "github-actions[bot]", type: "Bot" },
+        created_at: new Date(Date.now() + 60_000).toISOString() },
+    ] },
+  });
+  const found = await autoGate.__test.validationRunVisible({
+    github, context: recoveryContext(), headSha: OTHER_SHA, since: 0, sleep: async () => {},
+  });
+  assert.equal(found?.id, 799,
+    "a foreign app's workflow_dispatch is not the run this POST raised");
+});
+
+// Codex review on this fix: the snapshot's own retries can spend seconds —
+// long enough for the mutable ref the dispatch targets to move after the
+// guard passed. The POST is preceded by a live-head recheck, so a head that
+// dies inside the snapshot cancels instead of validating a commit this lane
+// never saw.
+test("#5010: a head that moves during the pre-dispatch snapshot cancels the POST", async () => {
+  let live = true;
+  let guardCalls = 0;
+  let dispatchCalls = 0;
+  const outcome = await autoGate.__test.dispatchWorkflowWithRetry({
+    label: "a dispatch whose snapshot outlives its head",
+    guard: async () => {
+      guardCalls += 1;
+      return live;
+    },
+    beforeDispatch: async () => { live = false; },
+    dispatch: async () => { dispatchCalls += 1; },
+    landed: async () => null,
+    sleep: async () => {},
+  });
+  assert.equal(outcome.cancelled, true);
+  assert.equal(dispatchCalls, 0, "the POST never fired on a dead head");
+  assert.equal(guardCalls, 2, "the guard re-ran after the snapshot, immediately before the POST");
+});
+
+// Codex review on this fix: a guard that exhausted ITS OWN retries throws a
+// retryable-looking read error; unwrapped, the write retry would rerun the
+// whole exhausted guard once per dispatch attempt. It is let out immediately,
+// marked as the guard's outcome.
+test("#5010: a guard that cannot answer exits once, not once per write attempt", async () => {
+  let guardCalls = 0;
+  let dispatchCalls = 0;
+  await assert.rejects(
+    () => autoGate.__test.dispatchWorkflowWithRetry({
+      label: "dispatch under a dead read",
+      guard: async () => {
+        guardCalls += 1;
+        const failure = new Error("503 from the guard's already-exhausted read");
+        failure.status = 503;
+        failure.autoGateReadFailure = true;
+        throw failure;
+      },
+      dispatch: async () => { dispatchCalls += 1; },
+      landed: async () => null,
+      sleep: async () => {},
+    }),
+    (error) => error?.autoGateGuardFailure === true,
+  );
+  assert.equal(guardCalls, 1, "the exhausted read did not rerun under the write's schedule");
+  assert.equal(dispatchCalls, 0, "the POST never fired");
 });
 
 // ---------------------------------------------------------------------------
@@ -15193,10 +15992,27 @@ function fakeGateGithub({
   runsByHeadSha = {},
   headAfterUpdate = null,
   approveRunError = null,
+  // Per-attempt approve failures, consulted before approveRunError — entry N is
+  // thrown on POST N, so a transient answer can be followed by a success
+  // (#5004).
+  approveRunErrors = [],
+  // A failed approve after which the run is no longer parked: the POST either
+  // committed and only its answer was lost, or a concurrent approver beat this
+  // lane — the gate cannot tell those apart and does not need to.
+  approveRunErrorUnparks = false,
+  // The run listing can LAG a committed approve: the POST already took the run
+  // out of action_required, yet the next reads still report it parked. This is
+  // the count of listing reads that see the stale state before the truth
+  // surfaces (#5004 — the reason a single read-back cannot be trusted).
+  approveListingLagReads = 0,
   // GitHub creates the runs for a pushed head a few seconds AFTER the push, so a
   // fake that has them from the first list cannot reproduce #3814 — the first
   // approve pass would catch them and the gap would be invisible.
   runsAppearAfterReads = 0,
+  // Run ids the repository-wide listing omits while the workflow-specific
+  // listing still returns them — the index lag approveParkedRuns' relist can
+  // hit right after a reconcile adopted the run (#5010).
+  repoIndexHiddenRunIds = [],
   // Commit graph for the content-head walk (#3815): parents per sha, and each
   // commit's own date.
   parentsByOid = {},
@@ -15279,7 +16095,15 @@ function fakeGateGithub({
   checkCreateErrors = [],
   checkUpdateErrors = [],
   workflowDispatchError = null,
+  // Per-workflow dispatch failures. A bare Error fails every POST to that
+  // workflow; an array is indexed by attempt, so entry N fails only POST N —
+  // a transient answer followed by a success (#5010).
   workflowDispatchErrorsByWorkflow = {},
+  // workflow_id -> run the dispatch landed even though its POST threw: the
+  // committed-but-unanswered ambiguity the reconcile exists for (#5010). The
+  // run lands where its listing finds it — gateWorkflowRuns for auto-gate.yml,
+  // runsByHeadSha[run.head_sha] for pr.yml.
+  dispatchErrorLandsRun = {},
   nativeAutoMergeDisableError = null,
   autoMergeStateError = null,
   autoMergeStateHeadByNumber = {},
@@ -15455,13 +16279,61 @@ function fakeGateGithub({
     graphqlReadsByNumber: {},
     updatedChecks: [],
     workflowDispatchAttempts: 0,
+    // Per-workflow POST count, so a fixture can script attempt N to fail and a
+    // later attempt to land (#5010).
+    workflowDispatchAttemptsByWorkflow: {},
+    // Runs a dispatch into auto-gate.yml created — what a reconcile of the
+    // ambiguous POST reads back (#5010). A successful POST lands one too.
+    gateWorkflowRuns: [],
     runListReads: [],
+    approveRunAttempts: 0,
     approvedRuns: [],
+    approveListingLag: new Map(),
+    repoIndexHiddenRunIds: new Set(repoIndexHiddenRunIds),
     recoveryComments: [],
     headShaAfterUpdate: null,
+    // Publish the run a workflow_dispatch created, where its listing finds it:
+    // gateWorkflowRuns for auto-gate.yml, runsByHeadSha for anything carrying a
+    // head_sha. A null run publishes the default auto-gate dispatch shape —
+    // every successful POST to that workflow is a run GitHub lists (#5010).
+    landDispatchRun(workflowId, run) {
+      // The reconcile window keys on created_at, so the fake stamps it the way
+      // the API does — at landing, inside the window, and at WHOLE-SECOND
+      // precision, so a caller that forgets to floor its cutoff is caught. The
+      // dispatch the fake accepted is the gate's own POST, so the actor is the
+      // automation — a human's dispatch (a probe) is set on the fixture.
+      const landedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+      const actor = { login: "github-actions[bot]", type: "Bot" };
+      if (workflowId === "auto-gate.yml") {
+        github.gateWorkflowRuns.push({
+          id: 50000 + github.gateWorkflowRuns.length,
+          event: "workflow_dispatch",
+          created_at: landedAt,
+          actor,
+          triggering_actor: actor,
+          ...run,
+        });
+      } else if (run?.head_sha) {
+        (runsByHeadSha[run.head_sha] = runsByHeadSha[run.head_sha] || [])
+          .push({ created_at: landedAt, actor, triggering_actor: actor, ...run });
+      }
+    },
     rest: {
       actions: {
         listWorkflowRuns: async (options) => {
+          if (options.workflow_id === "auto-gate.yml") {
+            // The follow-up reconcile's read-back (#5010): the runs dispatches
+            // into this workflow created, filtered the way the API filters.
+            github.runListReads.push(options);
+            const cutoff = String(options.created || "").replace(/^>=/, "");
+            const listedRuns = github.gateWorkflowRuns.filter((run) =>
+              (!options.event || run.event === options.event) &&
+              (!cutoff || !(Date.parse(run.created_at) < Date.parse(cutoff))));
+            return {
+              data: { total_count: listedRuns.length,
+                workflow_runs: listedRuns.slice(0, options.per_page ?? listedRuns.length) },
+            };
+          }
           assert.equal(options.workflow_id, "pr.yml");
           const listed = await github.rest.actions.listWorkflowRunsForRepo(options);
           const runs = listed.data.workflow_runs.filter((run) => run.name === "PR Validation");
@@ -15481,38 +16353,88 @@ function fakeGateGithub({
           return {
             data: {
               total_count: runs.length,
-              workflow_runs: runs.filter(
-                (run) => !options.event || run.event === options.event,
-              ),
+              workflow_runs: runs
+                // The repository-wide index can lag the workflow-specific
+                // listing that just found a run — the note listParkedRuns'
+                // read-back exists for. A workflow_id query is the scoped
+                // listing and stays fresh; the unscoped one drops the lagging
+                // ids.
+                .filter((run) => options.workflow_id || !github.repoIndexHiddenRunIds.has(run.id))
+                .filter((run) => !options.event || run.event === options.event)
+                .map((run) => {
+                  // A committed approve is truth now but parked on the listing
+                  // until its lag reads are spent.
+                  const lag = github.approveListingLag.get(run.id);
+                  if (lag > 0) {
+                    github.approveListingLag.set(run.id, lag - 1);
+                    return { ...run, conclusion: "action_required", status: "completed" };
+                  }
+                  return run;
+                }),
             },
           };
         },
-        approveWorkflowRun: async (options) => {
-          if (approveRunError) {
-            throw approveRunError;
+        getWorkflowRun: async (options) => {
+          for (const runs of Object.values(runsByHeadSha)) {
+            const run = runs.find((candidate) => candidate.id === options.run_id);
+            if (run) {
+              // The single-run read lags a committed approve the same way the
+              // repo-wide listing does; the counter is shared with it.
+              const lag = github.approveListingLag.get(run.id);
+              if (lag > 0) {
+                github.approveListingLag.set(run.id, lag - 1);
+                return { data: { ...run, conclusion: "action_required", status: "completed" } };
+              }
+              return { data: { ...run } };
+            }
           }
-          github.approvedRuns.push(options);
+          throw Object.assign(new Error(`Workflow run ${options.run_id} not found`), { status: 404 });
+        },
+        approveWorkflowRun: async (options) => {
+          github.approveRunAttempts += 1;
+          const attemptError = approveRunErrors[github.approveRunAttempts - 1] || approveRunError;
           // Approving a run takes it OUT of action_required — a later pass finds
           // it running, not parked. A fake that leaves the conclusion alone makes
           // a second approve pass look like a double-approval bug when the real
-          // API would simply find nothing to do.
-          for (const runs of Object.values(runsByHeadSha)) {
-            for (const run of runs) {
-              if (run.id === options.run_id && run.conclusion === "action_required") {
-                run.conclusion = null;
-                run.status = "in_progress";
+          // API would simply find nothing to do. approveRunErrorUnparks models
+          // the same transition for a call that still FAILED: a 500 proves
+          // nothing about whether the POST committed (#5004).
+          if (!attemptError || approveRunErrorUnparks) {
+            github.approvedRuns.push(options);
+            for (const runs of Object.values(runsByHeadSha)) {
+              for (const run of runs) {
+                if (run.id === options.run_id && run.conclusion === "action_required") {
+                  run.conclusion = null;
+                  run.status = "in_progress";
+                  github.approveListingLag.set(run.id, approveListingLagReads);
+                }
               }
             }
+          }
+          if (attemptError) {
+            throw attemptError;
           }
         },
         createWorkflowDispatch: async (options) => {
           github.workflowDispatchAttempts += 1;
-          const perWorkflowError = workflowDispatchErrorsByWorkflow[options.workflow_id];
-          if (workflowDispatchError || perWorkflowError) {
-            throw workflowDispatchError || perWorkflowError;
+          const attempt = (github.workflowDispatchAttemptsByWorkflow[options.workflow_id] =
+            (github.workflowDispatchAttemptsByWorkflow[options.workflow_id] || 0) + 1);
+          const configured = workflowDispatchErrorsByWorkflow[options.workflow_id];
+          const attemptError = workflowDispatchError ||
+            (Array.isArray(configured) ? configured[attempt - 1] : configured);
+          if (attemptError) {
+            // A failed POST can still have created its run — the committed-
+            // but-unanswered ambiguity (#5010). It lands where the reconcile's
+            // listing finds it, stamped now so it falls inside the window.
+            const landed = dispatchErrorLandsRun[options.workflow_id];
+            if (landed) {
+              github.landDispatchRun(options.workflow_id, { ...landed });
+            }
+            throw attemptError;
           }
           github.operations.push(`dispatch:${options.workflow_id}`);
           github.dispatchedWorkflows.push(options);
+          github.landDispatchRun(options.workflow_id, null);
         },
       },
       checks: {

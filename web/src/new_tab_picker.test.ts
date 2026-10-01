@@ -162,24 +162,32 @@ for (const [previous, next, dismiss] of compositionCases) {
   });
 }
 
-for (const paneAcceptsDrop of [true, false]) {
-  test(`a touch pane drop dismisses carried actions only when accepted=${paneAcceptsDrop}`, () => {
-    const calls: string[] = [];
-    const drag = { id: "web", index: 1, tabs: ["agent", "web"] };
-    const shell = {
-      actions: {
-        paneDropHintAt: () => { calls.push("pane"); return paneAcceptsDrop; },
-        dropTabOnPaneAt: () => { calls.push("drop"); return true; },
-      },
-      dismissCarriedActions: () => calls.push("dismiss"),
-    } as unknown as AppShell;
-    const dropTabOnPaneAt = (AppShell.prototype as unknown as {
-      dropTabOnPaneAt(this: AppShell, x: number, y: number, payload: typeof drag): boolean;
-    }).dropTabOnPaneAt;
+// The dismissal gate is the drop's mutation result, not its geometry (#4434):
+// a release over a pane that the layout rejects must leave a user-opened
+// disclosure standing, while still consuming the gesture.
+for (const paneUnderPoint of [true, false]) {
+  for (const dropChanged of [true, false]) {
+    test(`a touch pane drop dismisses carried actions only when committed: pane=${paneUnderPoint}, changed=${dropChanged}`, () => {
+      const calls: string[] = [];
+      const drag = { id: "web", index: 1, tabs: ["agent", "web"] };
+      const shell = {
+        actions: {
+          paneDropHintAt: () => { calls.push("pane"); return paneUnderPoint; },
+          dropTabOnPaneAt: () => { calls.push("drop"); return { landed: paneUnderPoint, changed: dropChanged }; },
+        },
+        dismissCarriedActions: () => calls.push("dismiss"),
+      } as unknown as AppShell;
+      const dropTabOnPaneAt = (AppShell.prototype as unknown as {
+        dropTabOnPaneAt(this: AppShell, x: number, y: number, payload: typeof drag): boolean;
+      }).dropTabOnPaneAt;
 
-    assert.equal(dropTabOnPaneAt.call(shell, 20, 30, drag), paneAcceptsDrop);
-    assert.deepEqual(calls, paneAcceptsDrop ? ["pane", "dismiss", "drop"] : ["pane"]);
-  });
+      assert.equal(dropTabOnPaneAt.call(shell, 20, 30, drag), paneUnderPoint);
+      const expected = !paneUnderPoint ? ["pane"]
+        : dropChanged ? ["pane", "drop", "dismiss"]
+        : ["pane", "drop"];
+      assert.deepEqual(calls, expected);
+    });
+  }
 }
 
 for (const userOpened of [false, true]) {

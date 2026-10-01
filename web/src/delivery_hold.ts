@@ -165,6 +165,142 @@ function hasPrintable(data: string): boolean {
   return false;
 }
 
+/** Plain (non-ESC) editing controls that may leave text behind in the PTY — the
+ *  same "context-dependent editing controls, not abandonments" the ABANDON
+ *  comment names: Backspace (\x7f), Ctrl-D (\x04), Ctrl-U (\x15). On a readline-
+ *  style composer each edits the draft rather than discarding it, so they are
+ *  how the user comes back to a draft the idle bound left sitting in the PTY.
+ *
+ *  Ctrl+Backspace is included as its BS form (\x08): xterm encodes that chord as
+ *  BS while Backspace alone is DEL (web/src/terminal-keybar.ts:20-21). BS is
+ *  the same kind of in-place edit, so the post-idle resume must recognise it too
+ *  or returning to a stranded draft with Ctrl+Backspace would take no lease.
+ *
+ *  Ctrl-W (\x17, delete the preceding word) is the same in-place edit class as
+ *  Ctrl-U, and Ctrl-A (\x01) / Ctrl-E (\x05) move within the line the draft still
+ *  occupies. The terminal's general Ctrl+letter mapping emits all three
+ *  (web/src/terminal-keybar.ts), and each leaves the draft sitting in the PTY
+ *  just as Backspace and Ctrl-U do, so the post-idle resume must re-take the
+ *  lease for them too — or the draft-loss window this fix closes would reopen
+ *  for an ordinary word-delete or cursor move. Failing toward holding covers
+ *  the movement pair just as it covers the edits.
+ *
+ *  Tab (\t, shell completion over the partial line) and the remaining readline
+ *  cursor moves Ctrl-B (\x02) and Ctrl-F (\x06) are the same resume class. The
+ *  keybar emits Tab verbatim (SPECIAL_BYTES, web/src/terminal-keybar.ts) and
+ *  Ctrl-B/Ctrl-F through the general Ctrl+letter map (upperCode & 31, same
+ *  function). None starts a draft under startsADraft (all three are below
+ *  0x20), so without this entry the post-idle resume would return "none" for
+ *  them and leave the stranded draft unprotected — the same window fixed above
+ *  for the other editing controls.
+ *
+ *  Ctrl-P (\x10) and Ctrl-N (\x0e) are readline's previous/next-history recall —
+ *  the same draft-resuming operation as the arrow sequences the ESC branch
+ *  already covers. The keybar emits both through the general Ctrl+letter map
+ *  (upperCode & 31, web/src/terminal-keybar.ts), and neither starts a draft
+ *  under startsADraft (both are below 0x20), so without this entry the post-idle
+ *  resume would return "none" and leave the recalled/stranded line without a
+ *  renewed lease — the same window fixed above for the other editing controls.
+ *
+ *  Ctrl-K (\x0b, kill to end of line) is the same in-place edit class as Ctrl-U:
+ *  it removes text from the cursor forward, so a prefix can remain in the PTY.
+ *  The keybar emits it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  remaining-prefix draft unprotected — the same window fixed for the other
+ *  editing controls.
+ *
+ *  Ctrl-L (\x0c, readline clear-screen/redraw) preserves the current input
+ *  buffer; the redrawn prompt re-shows the still-present draft. The keybar emits
+ *  it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  redrawn draft unprotected — the same window fixed for the other editing
+ *  controls.
+ *
+ *  Ctrl-Y (\x19, readline yank) pastes previously killed text directly into the
+ *  still-present line, so it is the same in-place edit class as Ctrl-K and Ctrl-W.
+ *  The keybar emits it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  yank-extended draft unprotected — the same window fixed for the other editing
+ *  controls.
+ *
+ *  Ctrl-T (\x14, transpose characters) reorders text within the still-present
+ *  line while preserving the buffer, so it is the same in-place edit class.
+ *  Ctrl-R (\x12) is readline's reverse-incremental-history search, which can
+ *  recall a history line into the still-present draft. Ctrl-_ (\x1f) is
+ *  readline's undo, which can restore previously edited text into that line. The
+ *  keybar emits all three through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects each (all are below
+ *  0x20), so without these entries the post-idle resume would return "none" and
+ *  leave the transposed/recalled/restored draft unprotected — the same window
+ *  fixed for the other editing controls.
+ *
+ *  Ctrl-V (\x16, readline quoted-insert) does not edit the line itself: it
+ *  enters the quoted-insert state with the idle-released draft still in place,
+ *  then inserts the next key literally into the still-present line. The keybar
+ *  emits it through the general Ctrl+letter map (upperCode & 31,
+ *  web/src/terminal-keybar.ts), and startsADraft rejects it (it is below 0x20),
+ *  so without this entry the post-idle resume would return "none" and leave the
+ *  still-present draft unprotected while readline waits for the quoted
+ *  character — the same window fixed for the other editing controls.
+ *
+ *  Ctrl-O (\x0f, readline operate-and-get-next) accepts the current line and
+ *  then loads the next history entry for editing, so a recalled line ends up in
+ *  the PTY the same way Ctrl-P/Ctrl-N recall one. The keybar emits it through
+ *  the general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts), and
+ *  startsADraft rejects it (it is below 0x20), so without this entry the
+ *  post-idle resume would return "none" and leave the recalled history line
+ *  unprotected — the same window fixed for the other editing controls.
+ *
+ *  Ctrl-X (\x18) is a readline command prefix for key sequences such as
+ *  Ctrl-X Ctrl-E; it leaves the existing line in the PTY while waiting for the
+ *  next key. The keybar emits it through the general Ctrl+letter map
+ *  (upperCode & 31, web/src/terminal-keybar.ts), and startsADraft rejects it
+ *  (it is below 0x20), so without this entry the post-idle resume would return
+ *  "none" and leave the still-present draft unprotected during that command
+ *  sequence — the same window fixed for the other editing controls.
+ *
+ *  Ctrl-Q (\x11, readline quoted-insert) and Ctrl-S (\x13, forward history
+ *  search) each preserve the still-present line; a raw terminal may also
+ *  consume them as XON/XOFF flow control before readline sees them, which
+ *  still leaves the draft in place. Ctrl-] (\x1d) is readline's character
+ *  search and Ctrl-@ (\x00) sets the mark. The keybar emits all four through
+ *  the general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts)
+ *  — Ctrl-@ and Ctrl+Space both fold to \x00 there — and startsADraft rejects
+ *  each (all are below 0x20), so without these entries the post-idle resume
+ *  would return "none" and leave the still-present line unprotected during
+ *  those operations — the same window fixed for the other editing controls.
+ *
+ *  Ctrl-G (\x07) is readline's abort: when an editing command such as
+ *  reverse-history search is active, it aborts that command and leaves the
+ *  still-present line restored in the PTY. The keybar emits it through the
+ *  general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts), and
+ *  startsADraft rejects it (it is below 0x20), so without this entry the
+ *  post-idle resume would return "none" and leave the restored draft
+ *  unprotected — the same window fixed for the other editing controls.
+ *
+ *  Ctrl-Z (\x1a, VSUSP) and Ctrl-\ (\x1c, VQUIT) are the termios signal
+ *  characters the keybar emits explicitly (SIGNAL_BYTES,
+ *  web/src/terminal-keybar.ts), and Ctrl-^ (\x1e) the keybar emits through its
+ *  general Ctrl+letter map (upperCode & 31, web/src/terminal-keybar.ts). At an
+ *  interactive shell prompt the signals and the unbound control leave the
+ *  current readline buffer intact, and startsADraft rejects each (all are below
+ *  0x20), so without these entries the post-idle resume would return "none"
+ *  and leave the still-present draft unprotected despite the renewed user
+ *  activity — the same window fixed for the other editing controls.
+ *
+ *  Used only on the post-idle-resume path below, which mirrors the ESC branch:
+ *  after the idle bound released a still-present draft, these keys re-acquire
+ *  the lease just as arrows/Delete/Home/End do. Failing toward holding here is
+ *  the safe direction the file's polarity states — a spurious re-acquire is
+ *  bounded and re-fires, a missing one lets a delivery splice into (or C-u
+ *  clear) the live draft. */
+function isEditingControl(data: string): boolean {
+  return /[\x7f\x04\x15\b\x17\x01\x05\t\x02\x06\x10\x0e\v\f\x19\x14\x12\x1f\x16\x0f\x18\x11\x13\x1d\0\x07\x1a\x1c\x1e]/.test(data);
+}
+
 /**
  * Tracks whether the user has an uncommitted line, and says when to take or
  * extend the daemon's pause lease.
@@ -179,6 +315,17 @@ export class MidLineHold {
   private lastInputMs = 0;
   private lastPauseMs = 0;
   private queuedEndsLine = false;
+  /**
+   * Set when the idle bound released a hold whose draft is still in the PTY, and
+   * cleared by every client-observable genuine commit/abandon (the lastCommit
+   * branch, a flushed queued commit) and by teardown (release). While it is true,
+   * a plain editing control byte re-acquires the lease instead of returning
+   * "none" — matching the ESC branch's post-idle re-acquisition. The daemon
+   * delivering into the pane is not observable here, so the flag can stay stale
+   * after a daemon-side clear/submit; that is the same bounded spurious-hold
+   * staleness the ESC branch already accepts.
+   */
+  private releasedByIdleBound = false;
 
   /**
    * @param renewIntervalMs how often to re-send the pause while the line stays
@@ -245,6 +392,10 @@ export class MidLineHold {
 
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
+      // A genuine commit/abandon reached the PTY: whatever draft the idle bound
+      // left behind is gone, so a later plain editing control byte must not
+      // re-acquire over a prompt whose line was already submitted or discarded.
+      this.releasedByIdleBound = false;
       const tail = data.slice(lastCommit + 1);
       if (!startsADraft(tail)) {
         // Ended on the commit: nothing of the user's is left unsent.
@@ -256,6 +407,13 @@ export class MidLineHold {
     }
 
     if (!this.uncommitted && !startsADraft(data)) {
+      if (this.releasedByIdleBound && isEditingControl(data)) {
+        // A plain editing control byte resuming a draft the idle bound left in
+        // the PTY — the same resume the ESC branch re-acquires for arrows,
+        // Delete and Home/End. Re-acquire rather than leaving the live text
+        // unprotected for the rest of the session.
+        return this.beginOrRenew(nowMs);
+      }
       return "none";
     }
     return this.beginOrRenew(nowMs);
@@ -275,6 +433,10 @@ export class MidLineHold {
     }
     if (nowMs - this.lastInputMs >= this.idleReleaseMs) {
       this.uncommitted = false;
+      // The draft is STILL in the PTY; only the hold lapsed. Remember that so a
+      // plain editing control byte resuming it re-acquires, the way the ESC
+      // branch re-acquires for arrows/Delete.
+      this.releasedByIdleBound = true;
       return "none";
     }
     if (nowMs - this.lastPauseMs >= this.renewIntervalMs) {
@@ -309,6 +471,15 @@ export class MidLineHold {
       const payload = data.startsWith(PASTE_START) ? "" : data;
       const lastCommit = Math.max(payload.lastIndexOf(COMMIT), payload.lastIndexOf(ABANDON));
       this.queuedEndsLine = lastCommit >= 0 && !startsADraft(payload.slice(lastCommit + 1));
+    } else {
+      // A non-report, non-paste ESC sequence is an editing key (arrows, Delete,
+      // Home/End, history recall). On the live path noteInput routes exactly these
+      // into beginOrRenew as draft-starting edits, so a queued run cannot be the
+      // queued commitment that ends the line. Leaving a prior queued Enter's
+      // queuedEndsLine=true standing here would let noteFlushed release the hold
+      // over a line the flush has just populated with a recalled/edited draft, so
+      // reset it and let the hold survive the flush — matching noteInput (#3025).
+      this.queuedEndsLine = false;
     }
     return this.beginOrRenew(nowMs);
   }
@@ -327,8 +498,12 @@ export class MidLineHold {
   noteFlushed(nowMs: number): void {
     this.lastInputMs = nowMs;
     if (this.queuedEndsLine) {
+      // The queued Enter reached the PTY and committed the line, so there is no
+      // stranded draft left to resume — clear the post-idle flag too, or a stray
+      // editing control byte would re-acquire over an already-submitted prompt.
       this.uncommitted = false;
       this.queuedEndsLine = false;
+      this.releasedByIdleBound = false;
     }
   }
 
@@ -338,6 +513,9 @@ export class MidLineHold {
    *  may not be the only holder of. */
   release(): void {
     this.uncommitted = false;
+    // The pane/session is gone, so the draft the idle bound left behind is moot
+    // — a later editing control byte must not re-acquire over nothing.
+    this.releasedByIdleBound = false;
   }
 
   private beginOrRenew(nowMs: number): HoldAction {
