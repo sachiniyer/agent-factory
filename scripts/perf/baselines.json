@@ -10,14 +10,14 @@
     "margin": 51006.65
   },
   "gzip_bytes": {
-    "baseline": 227625,
+    "baseline": 227071,
     "samples": [
-      227625,
-      227625,
-      227625
+      227071,
+      227071,
+      227071
     ],
     "stddev": 0,
-    "margin": 11381.25
+    "margin": 11353.55
   },
   "first_terminal_ms": {
     "baseline": 2870.4166666666665,
