@@ -335,20 +335,30 @@ func TestLocalBackendStartUnverifiedReattachClearsRuntimeProgram(t *testing.T) {
 		"the loader must checkpoint the retired runtime command before publishing the restored row")
 }
 
-// paneReportingExec wraps nameKeyedExec so the pane-identity probe —
-// `display-message` for paneRowFormat, which leads with #{pane_pid} — answers
-// with a REAL pid the test controls. Every other query keeps the stub answers.
-// That combination is exactly what a live tmux reports for a pane root that
-// survived a daemon restart (#5066).
-func paneReportingExec(t *testing.T, alive map[string]bool, panePID int) cmd_test.MockCmdExec {
+// paneReportingExec wraps nameKeyedExec so the pane-identity probes answer
+// with REAL pids the test controls: `display-message` (the active pane's
+// identity at launch) reports activePanePID, and `list-panes -s` (the
+// session-wide scan at reattach) reports one row per pid in allPanes. Every
+// other query keeps the stub answers. That combination is exactly what a live
+// tmux reports for pane roots that survived a daemon restart (#5066).
+func paneReportingExec(t *testing.T, alive map[string]bool, activePanePID int, allPanes ...int) cmd_test.MockCmdExec {
 	t.Helper()
 	inner := nameKeyedExec(alive)
+	var rows strings.Builder
+	for _, pid := range allPanes {
+		fmt.Fprintf(&rows, "%d|0|\n", pid)
+	}
 	return cmd_test.MockCmdExec{
 		RunFunc: inner.RunFunc,
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			if strings.Contains(cmd.String(), "display-message") &&
-				strings.Contains(cmd.String(), "#{pane_pid}|#{pane_dead}") {
-				return []byte(fmt.Sprintf("%d|0|", panePID)), nil
+			if !strings.Contains(cmd.String(), "#{pane_pid}|#{pane_dead}") {
+				return inner.Output(cmd)
+			}
+			if strings.Contains(cmd.String(), "list-panes") {
+				return []byte(rows.String()), nil
+			}
+			if strings.Contains(cmd.String(), "display-message") {
+				return []byte(fmt.Sprintf("%d|0|", activePanePID)), nil
 			}
 			return inner.Output(cmd)
 		},
@@ -383,7 +393,7 @@ func TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram(t *testing.T) {
 	require.NoError(t, err)
 
 	pane := spawnPaneLookalike(t)
-	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, pane.PID)
+	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, pane.PID, pane.PID)
 	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
 	)
@@ -408,6 +418,44 @@ func TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram(t *testing.T) {
 		"a verified reattach is not a runtime replacement and must not be checkpointed as one")
 }
 
+// TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram_SplitPane is the
+// #5066 review case: the user split the agent session's window and moved
+// focus, so tmux's active pane is an unrelated one while the launched agent
+// still runs in its own pane. A reattach keyed on the ACTIVE pane would read
+// the split's shell and retire good evidence; matching the recorded identity
+// against every pane of the session keeps it.
+func TestLocalBackendStartVerifiedReattachKeepsRuntimeProgram_SplitPane(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	const tmuxName = "af_verified_reattach_split"
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, repoRoot, tmuxName, "main", "", true, false)
+	require.NoError(t, err)
+
+	pane := spawnPaneLookalike(t)
+	const splitPanePID = 424242 // the user's post-split shell; never inspected
+	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, splitPanePID, splitPanePID, pane.PID)
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
+	)
+	inst := &Instance{
+		Title:          "verified-reattach-split",
+		Path:           repoRoot,
+		Program:        "claude",
+		runtimeProgram: "/opt/claude-resolved --flag",
+		runtimePID:     pane.PID,
+		runtimeStartID: pane.StartID,
+		backend:        &LocalBackend{},
+		liveness:       LiveReady,
+		gitWorktree:    gw,
+		Tabs:           []*Tab{newAgentTab(ts)},
+	}
+
+	require.NoError(t, inst.Start(false))
+	assert.Equal(t, "/opt/claude-resolved --flag", inst.RuntimeProgram(),
+		"a reattach must keep the claim when the recorded launch survives on a NON-active pane")
+	assert.Equal(t, pane.PID, inst.runtimePID)
+}
+
 // TestLocalBackendStartReattachedReplacementClearsRuntimeProgram covers the
 // same restart with the pane root REPLACED under the surviving name: the
 // recorded (pid, start-time) pair no longer matches, so the stale claim is
@@ -421,7 +469,7 @@ func TestLocalBackendStartReattachedReplacementClearsRuntimeProgram(t *testing.T
 
 	recorded := spawnPaneLookalike(t)
 	replacement := spawnPaneLookalike(t)
-	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, replacement.PID)
+	cmdExec := paneReportingExec(t, map[string]bool{tmuxName: true}, replacement.PID, replacement.PID)
 	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		tmuxName, "claude", persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec,
 	)

@@ -836,7 +836,7 @@ func (i *Instance) clearRuntimeProgramForUnverifiedReattach(ts *tmux.TmuxSession
 	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
 	i.mu.RUnlock()
 	if pid > 0 && ts != nil {
-		if pane, err := ts.PaneRootProcess(); err == nil && pane.PID == pid && pane.StartID == startID {
+		if same, err := ts.PaneRootProcessMatches(pid, startID); err == nil && same {
 			// Provably the same launch: keep the claim.
 			return false
 		}
