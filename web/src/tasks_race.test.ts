@@ -67,6 +67,7 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
   resolveRPC(value: unknown): void;
   rejectRPC(err: unknown): void;
   refreshTasksCalls(): number;
+  requestResyncCalls(): number;
   storeSets: Record<string, unknown>[];
   tabError(): unknown;
   mutationError(): unknown;
@@ -87,6 +88,10 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
   });
 
   let refreshTasksCount = 0;
+  // requestResync re-Snapshots the current connection's session list (the
+  // limit-blocked projection the doRetryLimit committed branch reconciles on a
+  // stale reconnect). Stubbed to a counter, mirroring refreshTasks.
+  let requestResyncCount = 0;
   // The shared store recorder: disconnect clears tabError/mutationError; a stale leak
   // would re-write one of them after the reconnect. Initial authRequired feeds
   // disconnect's default param `authRequired = store.get().authRequired`.
@@ -115,6 +120,9 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
     // committed-branch refreshTasks() both increment it.
     refreshTasks: () => {
       refreshTasksCount += 1;
+    },
+    requestResync: () => {
+      requestResyncCount += 1;
     },
     isMutationCommittedError: (e: unknown): boolean => e instanceof CommittedError,
     // The two commit surfaces are stubbed to record the SAME store.set shape the real
@@ -166,6 +174,7 @@ function stage(opts: { withSelectedSession?: boolean } = {}): {
     resolveRPC,
     rejectRPC,
     refreshTasksCalls: () => refreshTasksCount,
+    requestResyncCalls: () => requestResyncCount,
     storeSets,
     tabError: () => storeState.tabError,
     mutationError: () => storeState.mutationError,
@@ -237,8 +246,12 @@ test("toggleTask: stale committed rejection after same-token reconnect still ref
 
 // doRetryLimit: the load-bearing case. A committed stale rejection raises a mutationError
 // banner that persists across navigation (only dismissNotice/disconnect/connect clear it);
-// the gate must drop it before surfaceMutationError runs.
-test("doRetryLimit: stale committed rejection after same-token reconnect is dropped (no mutation banner leak)", async () => {
+// the gate must drop it before surfaceMutationError runs — but a committed ResumeFromLimit
+// still carried on the daemon, and the new connection may have missed its session.updated
+// event, so the committed branch re-Snapshots the current connection (requestResync) to
+// reconcile the limit-blocked projection rather than parking the stale banner. Mirrors
+// toggleTask's committed refreshTasks() on the same gap.
+test("doRetryLimit: stale committed rejection after same-token reconnect re-Snapshots and drops the banner (no mutationError leak)", async () => {
   const s = stage();
   s.app.doRetryLimit(); // captures tok="token", requestGeneration=0
   s.app.disconnect();
@@ -251,6 +264,11 @@ test("doRetryLimit: stale committed rejection after same-token reconnect is drop
     s.mutationError(),
     undefined,
     "the stale committed rejection did not raise a persistent mutationError banner on the new connection",
+  );
+  assert.equal(
+    s.requestResyncCalls(),
+    1,
+    "the committed branch re-Snapshotted the current connection to reconcile the limit-blocked projection (gate drops only the banner)",
   );
 });
 
@@ -266,6 +284,7 @@ test("doRetryLimit: stale non-committed rejection after same-token reconnect is 
   await settle();
 
   assert.equal(s.tabError(), null, "the stale non-committed rejection did not leak a tabError");
+  assert.equal(s.requestResyncCalls(), 0, "the stale non-committed branch does not reconcile (only the committed branch re-Snapshots)");
 });
 
 // A stale rejection landing while STILL disconnected (before any reconnect) is also
@@ -338,6 +357,7 @@ test("doRetryLimit: same-connection committed rejection still raises a mutationE
   );
   assert.deepEqual(s.mutationError(), { kind: "confirmed", detail: "resume committed but ambiguous" });
   assert.equal(s.tabError(), null, "the committed path routes to the banner, not the toast");
+  assert.equal(s.requestResyncCalls(), 0, "a live committed rejection surfaces the banner; the session event reconciles the projection");
 });
 
 // doRetryLimit: a same-connection non-committed rejection still surfaces a tabError.

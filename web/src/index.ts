@@ -2148,11 +2148,25 @@ function doRetryLimit(): void {
     // park a "Review the result before acting" notice from the dead connection on
     // the new one. Same generation+token gate as toggleTask/doOpenAccountLogin;
     // a same-token reconnect still bumps connectionGeneration twice.
-    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    //
+    // A committed ResumeFromLimit carried forward on the daemon, but the new
+    // connection's Snapshot may have missed the session.updated event (between its
+    // initial Snapshot and its WebSocket subscribe), so the limit-blocked projection
+    // (◆ badge / Retry offer) could stay stale until another session event or
+    // reconnect. Re-Snapshot the current connection for the committed outcome —
+    // requestResync is fenced by readToken so it fetches for THIS connection — and
+    // drop only the stale banner, not the reconciliation, mirroring toggleTask's
+    // committed refreshTasks() on the same gap.
+    const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
+      if (stale) {
+        requestResync();
+        return;
+      }
       surfaceMutationError(e, "confirmed");
       return;
     }
+    if (stale) return;
     surfaceTabError(e);
   });
 }

@@ -18769,11 +18769,16 @@ function doRetryLimit() {
   }
   const requestGeneration = connectionGeneration;
   void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
-    if (requestGeneration !== connectionGeneration || token !== tok) return;
+    const stale = requestGeneration !== connectionGeneration || token !== tok;
     if (isMutationCommittedError(e)) {
+      if (stale) {
+        requestResync();
+        return;
+      }
       surfaceMutationError(e, "confirmed");
       return;
     }
+    if (stale) return;
     surfaceTabError(e);
   });
 }
