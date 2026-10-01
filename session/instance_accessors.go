@@ -236,10 +236,6 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	}
 	i.pendingHandoffMission = ""
 	i.handoffDeliveryStatus = ""
-	// A confirmed mission is work the incoming agent already has (#5023) —
-	// publish working (a no-op on the CommitHandoff arm, which already landed
-	// there) and leave the settle back to Ready to the monitor's pane evidence.
-	_ = i.transitionLocked(ObserveLiveness(LiveRunning))
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil

@@ -313,10 +313,6 @@ func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) erro
 	// would keep new tabs refused until the daemon restarted.
 	i.pendingAccountSwap = nil
 	i.accountSwapLaunch = nil
-	// The confirmed mission is work the incoming agent already has (#5023):
-	// publish working — the same liveness a delivered prompt produces — and
-	// leave the settle back to Ready to the monitor's own pane evidence.
-	_ = i.transitionLocked(ObserveLiveness(LiveRunning))
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil
