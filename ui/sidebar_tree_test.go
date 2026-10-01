@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/store"
+	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
 // newTreeSidebar builds a sidebar over a fresh projection with n instances
@@ -348,6 +349,90 @@ func TestSidebarTreeCollapseDownLandsOnNextInstance(t *testing.T) {
 	assert.True(t, sel.IsTab, "the next Down dives into the selected instance's tabs")
 	assert.Equal(t, 1, sel.ItemIndex, "still on the next instance")
 	assert.Equal(t, 0, sel.TabIndex, "lands on its first tab")
+}
+
+// TestSidebarTreeCollapseDownSkipsRootSeparator pins the P1 inline Codex
+// finding (review 5385343335): when the reserved root agent is the explicitly
+// folded (h/←) row and a non-root instance follows it, rebuildVisibleItems
+// inserts an IsRootSep hairline (ItemIndex == -1, a SectionInstances item that
+// is neither a header nor a tab) immediately below the root. moveCursorToNext
+// InstanceRow must skip that decorative row — the pre-fix predicate accepted
+// it, set the cursor to its ItemIndex == -1 row, and reported success; at the
+// app boundary that resolved to no instance, and a second Down then targeted the
+// root's hidden tab and re-expanded the fold (#4770 regression). Down off the
+// folded root must land on the next real instance row instead.
+func TestSidebarTreeCollapseDownSkipsRootSeparator(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	dir := t.TempDir()
+	for _, title := range []string{"root", "alpha"} {
+		inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: dir, Program: "test"})
+		require.NoError(t, err)
+		addAgentShellTabs(inst)
+		addTestInstance(s, inst)
+	}
+	s.SetSize(40, 24)
+
+	// The reserved root sorts first (LessInstanceOrder), so it is index 0; a
+	// root+non-root pair is exactly the shape that emits the IsRootSep row.
+	require.True(t, session.IsReservedTitle(s.proj.GetInstances()[0].Title), "root is index 0")
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s), "root auto-expanded")
+
+	// h/← folds the root in place; the cursor stays on its row and the tab
+	// children disappear. The IsRootSep hairline is still emitted below it.
+	s.CollapseSection()
+	require.Equal(t, "root", s.treeCollapsed)
+	require.Equal(t, 0, tabRowCount(s))
+	require.False(t, s.GetSelection().IsTab, "cursor on the folded root row")
+
+	// Down must NOT land on the IsRootSep row (ItemIndex -1): it moves past it
+	// to the next real instance row, selecting alpha. The root stays folded
+	// (#4770) and the override clears once the selection moves on.
+	s.Down()
+	sel := s.GetSelection()
+	assert.NotEqual(t, -1, sel.ItemIndex, "Down must not land on the IsRootSep hairline")
+	assert.False(t, sel.IsTab, "cursor lands on the next instance row")
+	assert.Equal(t, "alpha", s.GetSelectedInstance().Title, "Down selects the next real instance")
+	assert.False(t, s.instanceExpanded(s.proj.GetInstances()[0]),
+		"the folded root does not re-expand")
+	assert.Equal(t, "", s.treeCollapsed, "the override clears once the selection moves on")
+}
+
+// TestSidebarTreeCollapseDownSkipsInFlightInstance pins the P2 inline Codex
+// finding (review 5385343335): when the next live instance after a folded one
+// is mid-op (in-flight, non-expandable), normal vertical nav (liveTabStops)
+// excludes its row, so a Down off a folded predecessor must not retarget
+// selection onto the transient title either. moveCursorToNextInstanceRow now
+// skips non-expandable instance rows and advances to the next expandable
+// instance (or, if there is none, reports no move so the reveal-Archived
+// fallback takes over). Here instance 1 is in-flight, so Down off folded
+// instance 0 skips it and lands on instance 2.
+func TestSidebarTreeCollapseDownSkipsInFlightInstance(t *testing.T) {
+	s := newTreeSidebar(t, 3) // t-00, t-01, t-02
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s), "instance 0 auto-expanded")
+
+	// Make the next instance (t-01) non-expandable with an in-flight op — the
+	// same transient shape liveTabStops skips during normal j/k navigation.
+	middle := s.proj.GetInstances()[1]
+	middle.SetInFlightOpForTest(session.OpKilling)
+	require.False(t, tree.Expandable(middle), "precondition: t-01 is non-expandable")
+
+	// h/← folds instance 0 in place.
+	s.CollapseSection()
+	require.Equal(t, "t-00", s.treeCollapsed)
+	require.False(t, s.GetSelection().IsTab, "cursor on the folded instance row")
+
+	// Down must skip the in-flight t-01 row and land on the next expandable
+	// instance (t-02), not retarget selection onto the transient session.
+	s.Down()
+	sel := s.GetSelection()
+	assert.Equal(t, 2, sel.ItemIndex, "Down skips the in-flight instance and lands on t-02")
+	assert.False(t, sel.IsTab, "cursor lands on the next expandable instance row")
+	assert.Equal(t, "t-02", s.GetSelectedInstance().Title, "Down selects the next expandable instance")
+	assert.False(t, s.instanceExpanded(s.proj.GetInstances()[0]),
+		"the folded instance stays collapsed")
+	assert.Equal(t, "", s.treeCollapsed, "the override clears once the selection moves on")
 }
 
 // TestSidebarTreeTabCursorDrivesActiveTab pins the selection tab dimension:

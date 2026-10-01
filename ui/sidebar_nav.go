@@ -718,13 +718,28 @@ func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
 // already rests on the last instance row (there is nothing below it to move
 // to within the section). Used by Down off an explicitly folded instance to
 // move past it instead of diving into its hidden tabs.
+//
+// The row predicate mirrors the one normal vertical nav (liveTabStops) uses
+// to decide what is a stop: the IsRootSep hairline (#2513) is a display-only
+// SectionInstances item that is neither a header nor a tab — it must be
+// excluded so the cursor never lands on its ItemIndex == -1 row, and in-flight
+// (non-expandable) instance rows are skipped so a folded-Down does not
+// retarget selection onto a transient session that normal j/k navigation
+// never stops on. When no next expandable instance row is visible, this
+// returns false so the caller's reveal-Archived fallback (or a no-op) takes
+// over instead of trapping the cursor on a non-target row.
 func (s *Sidebar) moveCursorToNextInstanceRow() bool {
+	instances := s.proj.GetInstances()
 	for j := s.selectedIdx + 1; j < len(s.visibleItems); j++ {
 		item := s.visibleItems[j]
-		if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab {
-			s.selectedIdx = j
-			return true
+		if item.Kind != SectionInstances || item.IsHeader || item.IsTab || item.IsRootSep {
+			continue
 		}
+		if item.ItemIndex >= 0 && item.ItemIndex < len(instances) && !tree.Expandable(instances[item.ItemIndex]) {
+			continue
+		}
+		s.selectedIdx = j
+		return true
 	}
 	return false
 }
