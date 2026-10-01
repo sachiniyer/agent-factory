@@ -253,6 +253,43 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		// An option word whose value is a denied NAME= assignment mutates the
 		// child's environment even when the option is not strace's.
 		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
+		// Attached -E NAME[=value] and --env=NAME[=value] forms whose value
+		// is a shell expansion: literalShellWord fails on the ParamExp, so
+		// the strace -E/--env handler above was previously unreachable for
+		// these. The literal NAME sits in the word's Lit prefix and names
+		// the variable strace sets (or, when `$V` is unset, sets to "" —
+		// which af's resolvers read as the ambient home), so the override
+		// occurs for any expansion. The attached non-literal form must
+		// fail closed the same way the separate-word form already does.
+		{"strace -ECODEX_HOME=$V codex", true},
+		{"strace --env=CODEX_HOME=$V codex", true},
+		{`strace -ECODEX_HOME="$V" codex`, true},
+		{"strace -EOPENAI_API_KEY=$V codex", true},
+		{"strace -EBASH_ENV=$V codex", true},
+		// Fully-dynamic value: the whole operand after -E is a shell
+		// expansion that can name or assign a protected variable.
+		{"strace -E$V codex", true},
+		// A literal NAME prefix with a non-provable suffix and no `=` can
+		// still resolve (e.g. `$V` unset) to a bare denied removal.
+		{"strace -ECODEX_HOME$V codex", true},
+		// Reachable through xargs: unwrapXargs peels to the inner strace
+		// invocation, whose attached non-literal option must still refuse.
+		{"xargs strace -ECODEX_HOME=$V codex", true},
+		{"xargs strace -E$V codex", true},
+		// Controls: a non-denied NAME with a dynamic value sets a harmless
+		// variable (the value cannot re-name the variable), so the
+		// attached non-literal form stays accepted exactly as the attached
+		// literal `-EFOO=1` does.
+		{"strace -EFOO=$V codex", false},
+		// The separate-word `-E <value>` form evaluates the value as one
+		// word; a non-literal value is unprovable, so it still refuses —
+		// pinning that this fix does not loosen the stricter separate form.
+		{"strace -E FOO=$V codex", true},
+		// Non-strace -E keeps its meaning: extended-regexp to grep.
+		{"grep -ECODEX_HOME=$V /etc/environment", false},
+		// A non-literal strace output option (-o) names a file, not a
+		// variable, so it falls through to the existing tail judgment.
+		{"strace -o$V codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -275,6 +312,38 @@ func TestApplyAccountEnvironment_RefusesUnmodeledWrapperHiddenAssignment(t *test
 		_, err := ApplyAccountEnvironment(nil, command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
 		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+	}
+}
+
+// The attached strace -E NAME[=value] and --env=NAME[=value] forms whose value
+// is a shell expansion pass the production gate only by way of the predicate
+// the previous test pins. Confirm the end-to-end guard refuses representative
+// shapes (and the xargs-fronted variant that peels to the same inner strace
+// invocation), whereas a non-denied NAME with a dynamic value stays accepted.
+func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *testing.T) {
+	account := scopedProcessTabAccount()
+	for _, command := range []string{
+		"strace -ECODEX_HOME=$V codex",
+		"strace --env=CODEX_HOME=$V codex",
+		"strace -E$V codex",
+		"strace -EBASH_ENV=$V codex",
+		"xargs strace -ECODEX_HOME=$V codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "command %q sets a protected variable via a strace -E/--env expansion and must be refused", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+	for _, command := range []string{
+		// A non-denied NAME with a dynamic value sets a harmless
+		// variable; the attached non-literal form stays accepted.
+		"strace -EFOO=$V codex",
+		"strace --env=FOO=$V codex",
+		// grep's -E is extended-regexp and stays accepted.
+		"grep -ECODEX_HOME=$V /etc/environment",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, account),
+			"command %q sets no protected variable and must stay allowed", command)
 	}
 }
 

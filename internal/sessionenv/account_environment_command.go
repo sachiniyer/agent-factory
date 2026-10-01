@@ -528,6 +528,23 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 	}
 	literal, ok := literalShellWord(word)
 	if !ok {
+		if strace && straceAttachedEnvOptionHides(word, names) {
+			// The attached -E NAME[=value] and --env=NAME[=value] forms
+			// whose value holds a shell expansion land here:
+			// literalShellWord fails on the ParamExp/CmdSubst, discarding
+			// the literal option marker and NAME that precede it. The
+			// separate-word `-E <word>` and the attached literal
+			// `-ENAME=` forms already fail closed; the non-literal
+			// attached form must fail closed the same way — the NAME sits
+			// in the word's literal prefix and names the variable strace
+			// sets/removes in the traced child, for any expansion of the
+			// value (including unset → "", which af reads as the ambient
+			// home). This is strace-only: -E means extended-regexp to
+			// grep and others (account_environment_wrapper_test.go:250),
+			// and --env= belongs to strace only when its caller set the
+			// strace flag from the outermost wrapper.
+			return 1, true
+		}
 		// An unprovable tail word can itself expand to `env` (or to a
 		// multiword `env NAME=value` after word splitting); judge the
 		// words after it as that invocation's argv. envScan admits a
@@ -574,6 +591,48 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, na
 		return 1, accountEnvironmentOperandDenied(value, names)
 	}
 	return 1, false
+}
+
+// straceAttachedEnvOptionHides reports whether a non-literal tail word carries
+// a strace -E/--env= attached env option that sets or removes a protected
+// variable. It is called only from wrapperTailWordHidesAccountAssignment's
+// `!ok` branch (so the word is already known non-literal) and only when the
+// strace flag is set, mirroring the strace-only gate of the literal branch.
+//
+// literalShellWord discards the word's literal prefix on the first non-literal
+// part, so an attached form whose value is a shell expansion — `-ECODEX_HOME=$V`,
+// `--env=CODEX_HOME=$V`, or the fully-dynamic `-E$V` — never reaches the
+// strace -E/--env handler above. Reading that prefix with literalShellWordPrefix
+// recovers the option marker and the literal NAME, and the verdict mirrors the
+// separate-word arm's `!ok || accountEnvironmentOperandDenied(value, names)`:
+// an operand that is fully non-provable (no literal prefix after the option
+// marker, e.g. `-E$V`) refuses because its expansion can name a protected
+// variable, and an operand whose literal NAME (the text up to the first `=`,
+// or the whole prefix when no `=` is present) is denied refuses because the
+// override occurs for any expansion of the value. An operand whose literal
+// NAME is provably not denied (e.g. `-EFOO=$V`) sets a harmless variable and
+// stays allowed, same as the attached literal `-EFOO=1` does above; the fall-
+// through then lets the rest of the tail be judged as the `!ok` branch
+// already does.
+func straceAttachedEnvOptionHides(word *syntax.Word, names map[string]struct{}) bool {
+	lit := literalShellWordPrefix(word)
+	var operand string
+	switch {
+	case strings.HasPrefix(lit, "--env="):
+		operand = lit[len("--env="):]
+	case strings.HasPrefix(lit, "-E"):
+		operand = lit[2:]
+	default:
+		return false
+	}
+	if operand == "" {
+		// The operand is entirely non-provable (e.g. `-E$V`, `--env=$V`):
+		// its expansion can name or assign a protected variable, so fail
+		// closed exactly as the separate-word arm does on a non-literal
+		// value word.
+		return true
+	}
+	return accountEnvironmentOperandDenied(operand, names)
 }
 
 func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
