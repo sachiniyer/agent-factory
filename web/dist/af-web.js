@@ -9370,6 +9370,11 @@ var TouchScroll = (now) => {
     get active() {
       return samples.length !== 0;
     },
+    // Momentum live: set by a nonzero release(), cleared by decay or stop().
+    // Distinct from active, which tracks the held gesture (samples) instead.
+    get coasting() {
+      return v !== 0;
+    },
     push(y) {
       const last = samples.at(-1);
       samples.push({ y, t: now() });
@@ -9565,6 +9570,7 @@ var AttachTerminal = class {
   // was applied BEFORE the stop landed (#5020).
   coastApplied = 0;
   coastStopCount = 0;
+  coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -9897,7 +9903,12 @@ var AttachTerminal = class {
    *  frame the coast already queued still fires, but tick() reads the cleared
    *  velocity and returns null: nothing applies past the recorded count. */
   stopCoast() {
+    const live = this.fling.coasting;
     this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
     if (this.coastStopCount === this.coastApplied) return;
     this.coastStopCount = this.coastApplied;
     this.container.dataset.afCoastStopCount = String(this.coastStopCount);

@@ -3231,13 +3231,14 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
     // read can sit a whole coast tick stale (the master sighting at run
     // 36816835160 measured 68px — exactly one tick — with nothing applied after
     // the stop).
-    const coastCounters = (): Promise<{ applied: number; stopped: number }> =>
+    const coastCounters = (): Promise<{ applied: number; stopped: number; liveStops: number }> =>
       host
         .locator(".af-pane-host")
         .first()
         .evaluate((el) => ({
           applied: Number(el.getAttribute("data-af-coast-applied") ?? 0),
           stopped: Number(el.getAttribute("data-af-coast-stop-count") ?? 0),
+          liveStops: Number(el.getAttribute("data-af-coast-live-stops") ?? 0),
         }));
     // Deep scrollback: a clamped flick coasts hundreds of lines, and a coast cut
     // short by the top of history would read as less momentum than there is.
@@ -3414,6 +3415,11 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       // either sample lands relative to the in-flight flush.
       await new Promise((resolve) => setTimeout(resolve, 120));
       await p.mouse.move(column, y + height * 0.55);
+      // Sampled immediately before the press: a stop that lands while momentum
+      // is live bumps data-af-coast-live-stops, which is the proof this press
+      // interrupted a running coast rather than arriving after natural decay —
+      // ticks accumulated earlier could pass the count check either way.
+      const prePress = await coastCounters();
       await p.mouse.down();
       // Two painted frames give every rAF queued at the press — the stopped
       // coast's last-scheduled tick and xterm's pending scrollTop flush alike —
@@ -3426,10 +3432,15 @@ test("#5020 mobile: a touch drag scrolls with gain and a flick coasts with momen
       await p.mouse.up();
       metrics.normalPointerStopMidCoastTicks = afterPress.stopped - atLift;
       metrics.normalPointerStopPostStopApplied = afterPress.applied - afterPress.stopped;
+      metrics.normalPointerStopLiveStops = afterPress.liveStops - prePress.liveStops;
       expect(
         metrics.normalPointerStopMidCoastTicks,
         "the press must land while the coast is still applying ticks",
       ).toBeGreaterThan(0);
+      expect(
+        metrics.normalPointerStopLiveStops,
+        "the press must be the stop that landed while momentum was still live",
+      ).toBe(1);
       expect(
         metrics.normalPointerStopPostStopApplied,
         "a mouse press mid-coast must stop momentum — no coast tick applies after it",

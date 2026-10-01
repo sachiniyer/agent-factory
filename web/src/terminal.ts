@@ -250,6 +250,7 @@ export class AttachTerminal {
   // was applied BEFORE the stop landed (#5020).
   private coastApplied = 0;
   private coastStopCount = 0;
+  private coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
@@ -858,7 +859,15 @@ export class AttachTerminal {
    *  frame the coast already queued still fires, but tick() reads the cleared
    *  velocity and returns null: nothing applies past the recorded count. */
   private stopCoast(): void {
+    // Read before stop() clears it: whether momentum was still live when THIS
+    // stop landed, so a press arriving after natural decay is not mistaken for
+    // one that interrupted a coast.
+    const live = this.fling.coasting;
     this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
     // onMessage calls this for every PTY frame on a followed tail, so the
     // attribute write happens only when a coast actually applied since the
     // last recorded stop — an unchanged dataset write still costs a DOM
