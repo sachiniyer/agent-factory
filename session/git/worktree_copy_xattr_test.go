@@ -331,3 +331,38 @@ func TestCopySymlinkXattrs_HoldsNoneSkipsPathBasedOps(t *testing.T) {
 	require.ErrorIs(t, err, errXattrPathTooLong,
 		"a holdsNone latch must surface errXattrPathTooLong so copySymlinkEntry skips the path-based prune and route recheck, not nil that would run them on a too-long route")
 }
+
+// TestCopySymlinkXattrs_DestinationOnlyTooLongRouteIsNonFatal pins the regression
+// the source-side too-long test does not cover: a source route shorter than
+// PATH_MAX whose link carries no attributes makes listSymlinkXattrNames return
+// empty, so the copy loop makes no L* call on the destination. A destination
+// route that exceeds PATH_MAX is therefore never probed by an Lsetxattr, and
+// copySymlinkSourceXattrs returned nil — leaving copySymlinkEntry to Lstat the
+// too-long destination in assertPathResolvesToVerifiedLeaf and abort a
+// cross-device move the descriptor-anchored F* paths copy fine. The destination
+// route is a valid cross-device case when the roots have different lengths, so
+// the empty-names path surfaces errXattrPathTooLong for the destination too, and
+// the caller skips the path-based prune and route recheck the same way the
+// source-side and holdsNone paths do.
+func TestCopySymlinkXattrs_DestinationOnlyTooLongRouteIsNonFatal(t *testing.T) {
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "link")
+	require.NoError(t, os.Symlink("target", source))
+	// The test pins the empty-names path, so a source link that the filesystem
+	// labels with xattrs (e.g. security.selinux on an enforcing box) cannot
+	// exercise it and is skipped rather than reported as a pass on a false
+	// premise.
+	names, err := listSymlinkXattrNames(source)
+	require.NoError(t, err)
+	if len(names) != 0 {
+		t.Skipf("filesystem adds xattrs to a freshly created symlink (%v); the empty-names path this test pins cannot be exercised here", names)
+	}
+	tooLong := strings.Repeat("a", unix.PathMax+1)
+	err = copySymlinkSourceXattrs(source, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"a destination route longer than PATH_MAX with a source link that has no xattrs must surface errXattrPathTooLong, not nil that would let copySymlinkEntry Lstat the too-long route")
+	support := &xattrDestination{}
+	err = copySymlinkXattrs(support, source, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"copySymlinkXattrs must surface errXattrPathTooLong so the move continues rather than aborting")
+}

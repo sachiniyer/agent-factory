@@ -282,7 +282,7 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 	names, err := listSymlinkXattrNames(sourcePath)
 	if err != nil {
 		if isXattrUnsupported(err) {
-			return nil // the source filesystem has no xattrs; nothing to carry
+			return nil // the SOURCE filesystem has no xattrs; nothing to carry
 		}
 		if errors.Is(err, unix.ENAMETOOLONG) {
 			// The L* family has no *at form, so the link's path is the full textual
@@ -299,6 +299,21 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 			"cannot move worktree across filesystems: failed to list extended attributes for destination symlink %s: %w",
 			destinationPath, err,
 		)
+	}
+	// When the source link has no attributes, the loop below makes no L* call on
+	// the destination, so a destination route exceeding PATH_MAX is never detected
+	// by an Lsetxattr ENAMETOOLONG the way a source with attributes would surface
+	// it. copySymlinkEntry's path-based prune and route recheck would then Lstat
+	// the same too-long destination and abort a cross-device move the
+	// descriptor-anchored F* paths copy fine — the exact abort errXattrPathTooLong
+	// exists to prevent. A source route shorter than PATH_MAX but a destination
+	// that is not is a valid cross-device copy when the roots have different
+	// lengths, so probe the destination with the same L* family here to surface
+	// the sentinel, matching the source-side and holdsNone paths.
+	if len(names) == 0 {
+		if _, err := unix.Llistxattr(destinationPath, nil); err != nil && errors.Is(err, unix.ENAMETOOLONG) {
+			return errXattrPathTooLong
+		}
 	}
 	for _, name := range names {
 		value, err := readSymlinkXattrValue(sourcePath, name)
