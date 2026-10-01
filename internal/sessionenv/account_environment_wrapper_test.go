@@ -368,6 +368,33 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		// option value, so it keeps the tail judgment.
 		{"strace -o $V codex", true},
 		{`strace -o "$V" codex`, false},
+		// An incomplete option prefix followed by a QUOTED expansion can
+		// complete the option spelling into -E/--env and name or assign a
+		// protected variable: strace --"$V" codex with
+		// V=env=CODEX_HOME=/other becomes the single argv word
+		// --env=CODEX_HOME=/other, and strace -f"$V" codex with
+		// V=ECODEX_HOME=/other becomes -fECODEX_HOME=/other (strace reads
+		// -f -E CODEX_HOME=/other). The quoted form stays one word but
+		// still completes the option, so it fails closed, unlike a
+		// value-taking non-E option (strace -o"$V") whose quoted value
+		// stays one option value.
+		{`strace --"$V" codex`, true},
+		{`strace -f"$V" codex`, true},
+		// A QUOTED multi-value expansion does not stay one argv word:
+		// "$@" and "${name[@]}" expand to one word per positional or
+		// array element and can split an attached or pending option value
+		// into a further strace option (strace -EFOO="$@" codex with
+		// set -- x -ECODEX_HOME=/other -> -EFOO=x, -ECODEX_HOME=/other;
+		// strace -o "$@" codex the same way), so they fail closed like the
+		// unquoted form. A QUOTED scalar value stays one word (control
+		// above: strace -EFOO="$V" / strace -o "$V").
+		{`strace -EFOO="$@" codex`, true},
+		{`strace --env=FOO="$@" codex`, true},
+		{`strace -o "$@" codex`, true},
+		{`strace -o"$@" codex`, true},
+		// "$*" joins into one word even when quoted, so a QUOTED "$*"
+		// value stays one option value and stays allowed (control).
+		{`strace -EFOO="$*" codex`, false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -425,6 +452,15 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// expansion refuses: the value can word-split into a further
 		// strace env option.
 		"strace -o $V codex",
+		// An incomplete option prefix a QUOTED expansion can complete into
+		// -E/--env refuses (--"$V" -> --env=..., -f"$V" -> -fE...).
+		`strace --"$V" codex`,
+		`strace -f"$V" codex`,
+		// A QUOTED multi-value expansion ("$@") splits into one word per
+		// positional and can inject a further -E option the scan never
+		// sees as a separate word.
+		`strace -EFOO="$@" codex`,
+		`strace -o "$@" codex`,
 		"xargs strace -ECODEX_HOME=$V codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)

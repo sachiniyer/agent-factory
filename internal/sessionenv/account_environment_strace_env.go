@@ -89,7 +89,16 @@ func straceAttachedEnvOperand(word *syntax.Word) (string, bool) {
 	case strings.HasPrefix(lit, "--"):
 		name, val, attached := strings.Cut(lit[2:], "=")
 		if name == "" {
-			return "", false
+			// An empty long option name (the literal prefix is "--")
+			// followed by an expansion can complete into
+			// --env=NAME[=value] (e.g. strace --"$V" codex with
+			// V=env=CODEX_HOME=/other becomes the single argv word
+			// --env=CODEX_HOME=/other), which the strace env-option
+			// guard must catch. Fail closed with an empty operand.
+			// This runs only on non-literal words, so a "--" prefix is
+			// always "--" plus an expansion, never the literal "--"
+			// terminator.
+			return "", true
 		}
 		resolved, _, known := resolveLongOption(name, straceLongOptions)
 		if !known || resolved != "env" {
@@ -121,7 +130,15 @@ func straceAttachedEnvOperand(word *syntax.Word) (string, bool) {
 			}
 			return flags[i+1:], true
 		}
-		return "", false
+		// No value-taking flag appears in the literal cluster, so the
+		// expansion that ends the literal prefix can complete the cluster
+		// with a value-taking E (e.g. strace -f"$V" codex with
+		// V=ECODEX_HOME=/other becomes the single argv word
+		// -fECODEX_HOME=/other, which strace reads as -f -E
+		// CODEX_HOME=/other). Fail closed with an empty operand; this
+		// runs only on non-literal words, so such a cluster is always
+		// followed by an expansion.
+		return "", true
 	default:
 		return "", false
 	}
@@ -269,16 +286,51 @@ func straceOptionWordHides(literal string, words []*syntax.Word, names map[strin
 // that is subject to word splitting — a bare (unquoted) ParamExp, CmdSubst,
 // ArithmExp, ProcSubst, &c. A non-literal expansion inside a DblQuoted or
 // SglQuoted part stays one argv word (no splitting), so only the bare
-// expansions let a value split into a further strace option.
+// expansions let a value split into a further strace option. The exception is a
+// double-quoted multi-value parameter expansion: "$@" and "${name[@]}" expand
+// to one word per positional or array element even when quoted, so they can
+// split an attached or pending option value into a further strace option the
+// scan never sees as a separate argv word.
 func wordHasUnquotedExpansion(word *syntax.Word) bool {
 	if word == nil {
 		return false
 	}
 	for _, part := range word.Parts {
-		switch part.(type) {
-		case *syntax.Lit, *syntax.DblQuoted, *syntax.SglQuoted:
+		switch p := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+			continue
+		case *syntax.DblQuoted:
+			if dblQuotedExpandsToManyWords(p) {
+				return true
+			}
 			continue
 		default:
+			return true
+		}
+	}
+	return false
+}
+
+// dblQuotedExpandsToManyWords reports whether a DblQuoted part expands to more
+// than one argv word. A double-quoted "$@" (or ${@}) expands to one word per
+// positional parameter, and a double-quoted "${name[@]}" expands to one word
+// per array element; both can word-split an option value into a further strace
+// option. "$*" and "${name[*]}" join into one word and are excluded, as are
+// length/width forms (${#@}) which collapse to a single word.
+func dblQuotedExpandsToManyWords(quoted *syntax.DblQuoted) bool {
+	for _, part := range quoted.Parts {
+		exp, ok := part.(*syntax.ParamExp)
+		if !ok || exp.Param == nil {
+			continue
+		}
+		// "$@" / "${@}": the special @ parameter expands to one word per
+		// positional parameter. ${#@} (length) collapses to one word.
+		if exp.Param.Value == "@" && exp.Index == nil && !exp.Length && !exp.Width {
+			return true
+		}
+		// "${name[@]}": an array indexed by @ expands to one word per
+		// element. ${name[*]} joins into one word and is excluded.
+		if w, ok := exp.Index.(*syntax.Word); ok && w.Lit() == "@" {
 			return true
 		}
 	}
