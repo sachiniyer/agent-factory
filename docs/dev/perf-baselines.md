@@ -95,8 +95,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 970703.000 | 970703.000–970703.000 | 0.000 | 1019238.150 |
-| gzip_bytes | 216250.000 | 216250.000–216250.000 | 0.000 | 227062.500 |
+| raw_bytes | 1019015.000 | 1019015.000–1019015.000 | 0.000 | 1069965.750 |
+| gzip_bytes | 227112.000 | 227112.000–227112.000 | 0.000 | 238467.600 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -121,6 +121,22 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Guarded-rebind bundle refresh (#4888)
+
+Bundle bytes are deterministic — the metric is the per-file gzip-9 sum of the
+committed `web/dist`, computed by `scripts/perf/report.mjs`. The two rows above
+were measured with that identical algorithm on PR head `24ed4e845f` rather than
+a container recording: a container cannot change committed bytes, so the three
+samples are the same measured value. All timing and layout-shift entries pass
+their existing budgets and remain unchanged.
+
+The refresh was required on two counts. The reviewed PR adds the
+`expected_checkout_id` half of the pair precondition to the rebind modal
+(+474 gzip bytes over the merge-base bundle of 226,638, which itself had only
+424 bytes of headroom left). And master's committed bundle had already grown
+past the stale budget — 228,508 gzip bytes against the 227,062.5 ceiling — so
+any web-touching PR would have tripped `gzip_bytes` until the baseline moved.
 
 ### Account handoff bundle refresh (#4018)
 
