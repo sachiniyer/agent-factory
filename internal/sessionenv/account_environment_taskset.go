@@ -52,7 +52,8 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			}
 			return run.done(words[1:], false)
 		case option == "-a" || option == "--all-tasks" ||
-			option == "-c" || option == "--cpu-list":
+			option == "-c" || option == "--cpu-list" ||
+			tasksetChildLaunchingLongAbbrev(option):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
 			return run.done(nil, true)
@@ -83,6 +84,25 @@ func tasksetProcessOnlyOption(option string) bool {
 		}
 	}
 	return false
+}
+
+// tasksetChildLaunchingLongAbbrev recognizes the unambiguous getopt_long
+// abbreviations of --all-tasks and --cpu-list, which both launch a masked
+// child on util-linux (measured on 2.39.3: `taskset --all 0x1 /bin/echo X`
+// and `taskset --cpu 0-3 /bin/echo X` both exec the child). The exact-equality
+// arm already handles the spelled-out forms; this closes the abbreviation
+// gap so the child tail is judged by tasksetCommandAfterMask rather than
+// fail-closed at the option arm. The `len > 2` / `--` guard confines the check
+// to long options, and --all-tasks / --cpu-list have no other --a* / --c*
+// long-option neighbors in taskset (--help / --version are handled earlier by
+// utilLinuxTerminalOption; --pid by tasksetProcessOnlyOption), so every
+// matched prefix is unambiguous. This mirrors the existing
+// strings.HasPrefix("--pid", option) idiom used throughout this file family.
+func tasksetChildLaunchingLongAbbrev(option string) bool {
+	if len(option) <= 2 || !strings.HasPrefix(option, "--") {
+		return false
+	}
+	return strings.HasPrefix("--all-tasks", option) || strings.HasPrefix("--cpu-list", option)
 }
 
 func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {
