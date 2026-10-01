@@ -235,3 +235,50 @@ func TestDestinationRejectsAllXattrs_OnlyWhenTheListingSaysSo(t *testing.T) {
 	require.False(t, isXattrUnsupported(unix.EIO),
 		"a real I/O failure must not be mistaken for an attribute-less filesystem")
 }
+
+// readSymlinkAttr is readAttr's link-following-averse twin: Getxattr follows a
+// symlink to its target, so a probe of the link's OWN attribute has to use Lgetxattr
+// or it reads the target's attributes (or errors on a missing target) instead.
+func readSymlinkAttr(t *testing.T, path, name string) []byte {
+	t.Helper()
+	size, err := unix.Lgetxattr(path, name, nil)
+	require.NoError(t, err, "attribute %q must exist on symlink %s", name, path)
+	if size == 0 {
+		return nil
+	}
+	value := make([]byte, size)
+	n, err := unix.Lgetxattr(path, name, value)
+	require.NoError(t, err)
+	return value[:n]
+}
+
+// TestCopyTree_ReproducesSymlinkXattrs pins the one node class the F*-anchored
+// copySourceXattrs could not reach. A symlink yields no usable descriptor (O_NOFOLLOW
+// returns ELOOP, and O_PATH|O_NOFOLLOW makes Flistxattr/Fgetxattr return EBADF), so
+// before the path-based L* family reproduced them a link's attributes were dropped
+// silently on the cross-device copy — the exact #2919 invariant the file and
+// directory paths log-and-continue on. This test forces that path and checks the
+// attribute arrives.
+//
+// user.* is the only namespace a test can set without privilege. On Linux the VFS
+// rejects setting ANY attribute on a symlink with EPERM (only security.* / trusted.*
+// live on links in production, and neither is settable without SELinux or root), so
+// this probe skips there; on Darwin Lsetxattr of user.* on a symlink succeeds, which
+// is the platform the comment in copySymlinkEntry names as the one where this gap is
+// measurable in CI. Skipping is the skip message, not a silent pass: a host that
+// cannot set a link attribute cannot exercise the divergence either way.
+func TestCopyTree_ReproducesSymlinkXattrs(t *testing.T) {
+	source, destination := xattrFixture(t)
+	link := filepath.Join(source, "link")
+	require.NoError(t, os.Symlink("target", link))
+	if err := unix.Lsetxattr(link, "user.af_symlink", []byte("linkval"), 0); err != nil {
+		t.Skipf("filesystem does not support setting extended attributes on a symlink (%v); "+
+			"the symlink-xattr divergence is only measurable on a host where Lsetxattr on a link succeeds (e.g. macOS)", err)
+	}
+
+	require.NoError(t, moveDirCrossDevice(source, destination, "move"))
+
+	copied := filepath.Join(destination, "link")
+	require.Equal(t, []byte("linkval"), readSymlinkAttr(t, copied, "user.af_symlink"),
+		"a symlink's extended attributes must be reproduced on the cross-device copy, not dropped silently")
+}

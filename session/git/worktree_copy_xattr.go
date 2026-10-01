@@ -183,6 +183,169 @@ func copyXattrPhase(support *xattrDestination, sourceFD, destinationFD int, dest
 	return err
 }
 
+// copySymlinkXattrs is the symlink analogue of copyNonACLXattrs/copyACLXattrs. A
+// symlink yields no descriptor the F* xattr syscalls can target — O_NOFOLLOW on a
+// link returns ELOOP, and the only fd a symlink gives is O_PATH|O_NOFOLLOW, which
+// makes Flistxattr/Fgetxattr return EBADF — so the descriptor-anchored
+// copySourceXattrs cannot reach a link's own attributes. The path-based L* family
+// (Llistxattr/Lgetxattr/Lsetxattr) does not follow the link, so it addresses the
+// link itself; there is no *at xattr variant in golang.org/x/sys/unix (v0.47.0) to
+// match the UtimesNanoAt trick the mtime stamp relies on, so the path is the only
+// handle.
+//
+// The per-attribute failure policy mirrors copySourceXattrs exactly: a destination
+// that holds no attributes at all latches and stops the rest of the copy; a refused
+// namespace (EPERM/EACCES — on Linux user.* cannot be set on a symlink and only
+// security.* / trusted.* live on links in production, neither settable without
+// SELinux or root) is LOGGED and skipped rather than failing the archive, which is
+// the #2919 invariant the silent drop violated; anything else fails the copy. ACLs
+// are not split out: system.posix_acl_* does not apply to symlinks, so the file/dir
+// ordering around the mode has no analogue here.
+func copySymlinkXattrs(support *xattrDestination, sourcePath, destinationPath string) error {
+	if support.holdsNone {
+		return nil
+	}
+	err := copySymlinkSourceXattrs(sourcePath, destinationPath)
+	if errors.Is(err, errXattrUnsupportedDestination) {
+		support.holdsNone = true
+		return nil
+	}
+	return err
+}
+
+// copySymlinkSourceXattrs is the path-based twin of copySourceXattrs, reading the
+// source link's own attributes with Lgetxattr and writing them to the destination
+// link with Lsetxattr. Neither call follows the link.
+func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
+	names, err := listSymlinkXattrNames(sourcePath)
+	if err != nil {
+		if isXattrUnsupported(err) {
+			return nil // the source filesystem has no xattrs; nothing to carry
+		}
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to list extended attributes for destination symlink %s: %w",
+			destinationPath, err,
+		)
+	}
+	for _, name := range names {
+		value, err := readSymlinkXattrValue(sourcePath, name)
+		if err != nil {
+			if isXattrVanished(err) {
+				log.WarningLog.Printf(
+					"archive: extended attribute %q vanished from symlink %s while it was being copied",
+					name, destinationPath,
+				)
+				continue
+			}
+			if errors.Is(err, errXattrValueTooLarge) {
+				log.WarningLog.Printf(
+					"archive: extended attribute %q on symlink %s is too large to copy (%d byte limit); not reproduced",
+					name, destinationPath, maxXattrValueBytes,
+				)
+				continue
+			}
+			return fmt.Errorf(
+				"cannot move worktree across filesystems: failed to read extended attribute %q from symlink %s: %w",
+				name, destinationPath, err,
+			)
+		}
+		if err := unix.Lsetxattr(destinationPath, name, value, 0); err != nil {
+			switch {
+			case isXattrUnsupported(err):
+				if !destinationSymlinkRejectsAllXattrs(destinationPath) {
+					log.WarningLog.Printf(
+						"archive: extended attribute %q not reproduced on symlink %s (this destination does not implement that namespace): %v",
+						name, destinationPath, err,
+					)
+					continue
+				}
+				log.WarningLog.Printf(
+					"archive: symlink %s cannot hold extended attributes on this filesystem; none were copied",
+					destinationPath,
+				)
+				return errXattrUnsupportedDestination
+			case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
+				log.WarningLog.Printf(
+					"archive: extended attribute %q not reproduced on symlink %s (needs privilege): %v",
+					name, destinationPath, err,
+				)
+			default:
+				return fmt.Errorf(
+					"cannot move worktree across filesystems: failed to set extended attribute %q on destination symlink %s: %w",
+					name, destinationPath, err,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// listSymlinkXattrNames is the path-based twin of listXattrNames: Llistxattr does not
+// follow the link, so it lists the link's own attributes rather than the target's.
+func listSymlinkXattrNames(path string) ([]string, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		size, err := unix.Llistxattr(path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		buffer := make([]byte, size)
+		read, err := unix.Llistxattr(path, buffer)
+		if err != nil {
+			if errors.Is(err, unix.ERANGE) {
+				continue
+			}
+			return nil, err
+		}
+		names := make([]string, 0, 4)
+		for _, name := range bytes.Split(buffer[:read], []byte{0}) {
+			if len(name) > 0 {
+				names = append(names, string(name))
+			}
+		}
+		return names, nil
+	}
+	return nil, fmt.Errorf("extended attribute list kept growing while it was read")
+}
+
+// readSymlinkXattrValue is the path-based twin of readXattrValue: Lgetxattr does not
+// follow the link, so it reads the link's own attribute rather than the target's.
+func readSymlinkXattrValue(path, name string) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		size, err := unix.Lgetxattr(path, name, nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		if size > maxXattrValueBytes {
+			return nil, errXattrValueTooLarge
+		}
+		value := make([]byte, size)
+		read, err := unix.Lgetxattr(path, name, value)
+		if err != nil {
+			if errors.Is(err, unix.ERANGE) {
+				continue
+			}
+			return nil, err
+		}
+		return value[:read], nil
+	}
+	return nil, fmt.Errorf("extended attribute %q kept growing while it was read", name)
+}
+
+// destinationSymlinkRejectsAllXattrs is the path-based twin of
+// destinationRejectsAllXattrs: Llistxattr on the freshly created link reports whether
+// the destination filesystem holds attributes at all, so a single refused namespace
+// is not mistaken for a filesystem that has none.
+func destinationSymlinkRejectsAllXattrs(path string) bool {
+	_, err := unix.Llistxattr(path, nil)
+	return isXattrUnsupported(err)
+}
+
 // pruneDestinationXattrs removes attributes the destination has and the source does
 // not.
 //

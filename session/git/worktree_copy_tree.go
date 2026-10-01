@@ -360,7 +360,7 @@ func copyDirectoryLevel(
 		case unix.S_IFDIR:
 			entry, err = copyDirectoryEntry(source, destination, name, childSourcePath, childDestinationPath, inspected)
 		case unix.S_IFLNK:
-			entry, err = copySymlinkEntry(source, destination, name, childSourcePath, childDestinationPath, inspected)
+			entry, err = copySymlinkEntry(source, destination, name, childSourcePath, childDestinationPath, inspected, xattrs)
 		case unix.S_IFREG:
 			// Every successfully copied regular inode is recorded, not just the
 			// ones observed with nlink > 1. A live worktree process can hard-link
@@ -549,6 +549,7 @@ func copySymlinkEntry(
 	source, destination *os.File,
 	name, sourcePath, destinationPath string,
 	inspected pathIdentity,
+	support *xattrDestination,
 ) (copiedEntry, error) {
 	link, err := readLinkAt(source, name, sourcePath)
 	if err != nil {
@@ -582,6 +583,23 @@ func copySymlinkEntry(
 	if err != nil || !destinationIdentity.same(confirmedIdentity) || destinationLink != link {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while it was copied", destinationPath)
 	}
+	// A symlink's extended attributes are the one node class the F*-anchored
+	// xattr helpers (copyNonACLXattrs / copyACLXattrs, which take the file/dir
+	// descriptors the walk already holds) cannot reach: a symlink yields no
+	// descriptor those calls can target (O_NOFOLLOW returns ELOOP, and an
+	// O_PATH|O_NOFOLLOW fd makes Flistxattr/Fgetxattr return EBADF). The
+	// path-based L* family is the only API that addresses the link itself, so
+	// copySymlinkXattrs reproduces a source link's security.selinux label,
+	// security.capability, and trusted.* / user.* attributes through it, with the
+	// same per-attribute failure policy the file and directory paths use (#2919):
+	// a refused namespace is LOGGED and the copy continues rather than dropping the
+	// attribute silently. This goes before the mtime stamp for the same reason the
+	// file path applies its attributes before preserveSourceModTime — writing one
+	// does not move the mtime, but keeping the stamp last is what the copy's
+	// race bookkeeping already assumes.
+	if err := copySymlinkXattrs(support, sourcePath, destinationPath); err != nil {
+		return created, err
+	}
 	// The link's OWN mtime. AT_SYMLINK_NOFOLLOW means this addresses the link
 	// rather than following it to its target.
 	//
@@ -610,46 +628,6 @@ func copySymlinkEntry(
 	if err != nil || !destinationIdentity.same(stampedIdentity) {
 		return created, fmt.Errorf("cannot move worktree across filesystems: destination symlink %s changed while its timestamp was applied", destinationPath)
 	}
-	// A symlink's extended attributes are the one filesystem property this copy does
-	// NOT reproduce. Files and directories run copyNonACLXattrs / pruneDestinationXattrs
-	// / copyACLXattrs (see copyRegularFileAtWithIdentity and applyCopiedDirectoryMode);
-	// this function runs none of them, so a source link's security.selinux label,
-	// security.capability, and trusted.* attributes are dropped on the cross-device
-	// path. That asymmetry is introduced by #2919, not predating it: before the xattr
-	// layer every node class dropped silently, and #2919 made the file and directory
-	// paths LOG each refused attribute and continue — leaving the symlink's silence as
-	// a deviation from the invariant rather than the baseline ("only while the loss is
-	// LOGGED rather than silent, which is the actual complaint in #2919"). The reason
-	// no call sits here is structural: the xattr layer in worktree_copy_xattr.go is
-	// descriptor-anchored — copySourceXattrs uses the F* syscalls so no path is
-	// re-derived and the name-swap race this copier exists to avoid stays avoided — and
-	// a symlink yields no descriptor those calls can target. plain O_NOFOLLOW on a link
-	// returns ELOOP, and O_PATH|O_NOFOLLOW, the only fd a symlink gives, makes
-	// Flistxattr/Fgetxattr return EBADF (they do not operate through an O_PATH fd, even
-	// on a regular file). On a no-relabel host that leaves the file/dir LOG of a refused
-	// security.selinux with no symlink analogue, so the loss is silent — exactly the
-	// outcome the policy was written to forbid. Closing it needs the path-based L*
-	// family (Llistxattr/Lgetxattr/Lsetxattr/Lremovexattr), which takes a full path
-	// rather than a descriptor plus a name — so a reproduction re-derives a path this
-	// copier otherwise never touches, and there is no Setxattrat/Getxattrat/*at variant
-	// in golang.org/x/sys/unix (v0.47.0) to match the UtimesNanoAt trick the mtime stamp
-	// above relies on; this is genuine work, not the three-line addition the file/dir
-	// case was. Not (yet) in knownCrossDeviceDivergence: that inventory is keyed by
-	// properties describeFidelity actually measures, and describeFidelity reads no
-	// xattr off the symlink fixture today (it sets user.af_fidelity only on plain.txt
-	// and dir, and reads via the path-following Getxattr), so an xattr.symlink row
-	// would have no measured value to compare. This gap is measurable in CI, unlike
-	// the darwin-ACL note on isACLXattr, which additionally needs the acl(3) API the
-	// L* family cannot reach: on Linux user.* cannot be set on a symlink (the VFS
-	// rejects it with EPERM, and only security.* / trusted.* live on links in
-	// production, neither settable without SELinux or root), but on Darwin user.* is
-	// settable on a symlink via the L* family, golang.org/x/sys/unix's TestXattr at
-	// v0.47.0 expects Lsetxattr of user.test on a symlink to succeed there, and
-	// pr.yml's test-macos lane runs the full suite on macos-latest. The
-	// symlink-fixture probe and the row it would enable are the coverage half of the
-	// #2919 follow-up (deferred, not the permanently-MISSING dead inventory the
-	// guard's two-directional design rejects), written down here so the follow-up
-	// finds it alongside the isACLXattr note.
 	return created, nil
 }
 
