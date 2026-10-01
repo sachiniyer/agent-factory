@@ -201,6 +201,14 @@ func (i *Instance) CanConfirmPendingHandoffDelivery() bool {
 // was waiting for), and the mission plus its verdict clear together so no
 // later reader reconstructs the fence. Refusing not-delivered keeps automatic
 // recovery's ownership unambiguous.
+//
+// The attestation also decides the row's liveness (#5023): a mission the
+// incoming agent already received means the agent HAS work, so the confirmed
+// row reads LiveRunning — the same state a delivered prompt produces — until
+// the status monitor observes a genuinely idle pane. A fenced row gets that
+// from CommitHandoff already; the explicit edge below is what an unfenced
+// ambiguous row — the could-not-confirm settle — needs to not publish as a
+// settled idle session.
 func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -228,6 +236,10 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 	}
 	i.pendingHandoffMission = ""
 	i.handoffDeliveryStatus = ""
+	// A confirmed mission is work the incoming agent already has (#5023) —
+	// publish working (a no-op on the CommitHandoff arm, which already landed
+	// there) and leave the settle back to Ready to the monitor's pane evidence.
+	_ = i.transitionLocked(ObserveLiveness(LiveRunning))
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil

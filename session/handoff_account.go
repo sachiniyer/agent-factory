@@ -267,6 +267,15 @@ func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
 // replacement fence, and resolves a startup-unknown flag the probe just
 // disproved — all in one critical section so no later reader can rebuild the
 // wedge.
+//
+// The attestation also decides the row's liveness (#5023): a mission the
+// replacement agent already received means the agent HAS work, including on a
+// row a failed delivery left reading idle — clearing the marker there would
+// publish a record indistinguishable from an ordinary settled-idle session,
+// and fleet watch would emit the working → idle edge an automated driver acts
+// on. The row therefore settles on LiveRunning, the same state a successfully
+// delivered prompt leaves, and only the status monitor's own idle observation
+// — real pane evidence — moves it back.
 func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -304,6 +313,10 @@ func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) erro
 	// would keep new tabs refused until the daemon restarted.
 	i.pendingAccountSwap = nil
 	i.accountSwapLaunch = nil
+	// The confirmed mission is work the incoming agent already has (#5023):
+	// publish working — the same liveness a delivered prompt produces — and
+	// leave the settle back to Ready to the monitor's own pane evidence.
+	_ = i.transitionLocked(ObserveLiveness(LiveRunning))
 	i.touchLocked()
 	i.noteStateChangeLocked(lv, op, resetAt)
 	return nil

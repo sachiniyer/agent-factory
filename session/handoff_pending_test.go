@@ -294,6 +294,59 @@ func TestConfirmPendingHandoffDeliveryReleasesTheWedge(t *testing.T) {
 	}
 }
 
+// #5023: the confirm's attestation — the incoming agent already HAS its
+// mission — means the session has work even on a row that read idle. A
+// could-not-confirm delivery settles exactly that shape: ambiguous verdict,
+// fence already down, LiveReady. The confirm must publish LiveRunning — the
+// state a delivered prompt leaves — so the snapshot fleet watch consumes is
+// working, and only the monitor's own idle observation moves it back.
+func TestConfirmPendingHandoffDeliveryMarksWorking(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "confirmed-idle-handoff", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(Running)
+	mission := "continue the inherited work"
+	inst.SetPendingHandoffMission(mission)
+	if err := inst.RecordPendingHandoffMissionDelivery(mission, PromptSentUnverified); err != nil {
+		t.Fatal(err)
+	}
+	// The settle a failed delivery leaves: unfenced, ambiguous, already idle.
+	if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+		t.Fatal(err)
+	}
+	if got := inst.GetInFlightOp(); got != OpNone {
+		t.Fatalf("fixture op = %v, want OpNone — no fence to hide the liveness behind", got)
+	}
+	if !inst.CanConfirmPendingHandoffDelivery() {
+		t.Fatal("a settled ambiguous mission on an idle row must admit the confirm")
+	}
+
+	if err := inst.ConfirmPendingHandoffDelivery(mission); err != nil {
+		t.Fatalf("ConfirmPendingHandoffDelivery: %v", err)
+	}
+	if got := inst.GetLiveness(); got != LiveRunning {
+		t.Fatalf("liveness after confirm = %v, want Running — the agent already has the work", got)
+	}
+	if got := inst.PendingHandoffMission(); got != "" {
+		t.Fatalf("mission after confirm = %q, want retired", got)
+	}
+	if got := inst.PendingHandoffDeliveryStatus(); got != "" {
+		t.Fatalf("verdict after confirm = %q, want cleared", got)
+	}
+
+	// The monitor's next genuine idle observation is the real working → idle
+	// edge, and it settles the row exactly like a delivered prompt's session.
+	if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
+		t.Fatal(err)
+	}
+	if got := inst.GetLiveness(); got != LiveReady {
+		t.Fatalf("liveness after the monitor's idle observation = %v, want Ready", got)
+	}
+}
+
 // TestConfirmPendingHandoffDeliveryRefusals keeps the confirm path honest: it
 // is an attestation about a recorded ambiguous verdict, never a backdoor around
 // the delivery state machine.
