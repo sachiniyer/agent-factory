@@ -4044,16 +4044,20 @@ async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null
       // exhausted ITS retries carries a retryable-looking read error; wrapping
       // it as the guard's outcome lets it out of the write's schedule instead
       // of rerunning an already-exhausted read once per dispatch attempt.
-      if (guard) {
+      const checkGuard = async () => {
+        if (!guard) {
+          return true;
+        }
         let passed;
         try {
           passed = await guard();
         } catch (error) {
           throw writeRetryGuardFailure(error);
         }
-        if (!passed) {
-          return { cancelled: true };
-        }
+        return passed;
+      };
+      if (!await checkGuard()) {
+        return { cancelled: true };
       }
       if (firstAttemptAt === null) {
         try {
@@ -4063,6 +4067,12 @@ async function dispatchWorkflowWithRetry({ label, dispatch, landed, guard = null
           // a failed one cannot be told apart from a POST that committed, so
           // it leaves marked as the read's outcome, like the guard's.
           throw writeRetryGuardFailure(error);
+        }
+        // The snapshot's own retries can spend seconds — long enough for the
+        // ref the dispatch targets to move. The POST's guard is the last read
+        // before it fires, not the one that preceded the snapshot (Codex).
+        if (!await checkGuard()) {
+          return { cancelled: true };
         }
         firstAttemptAt = Date.now();
       }

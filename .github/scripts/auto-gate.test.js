@@ -11547,6 +11547,31 @@ test("#5010: a hand-fired probe surfacing inside the window is not adopted", asy
     "the automation's dispatch is adoptable; a human's workflow_dispatch probe is not");
 });
 
+// Codex review on this fix: the snapshot's own retries can spend seconds —
+// long enough for the mutable ref the dispatch targets to move after the
+// guard passed. The POST is preceded by a live-head recheck, so a head that
+// dies inside the snapshot cancels instead of validating a commit this lane
+// never saw.
+test("#5010: a head that moves during the pre-dispatch snapshot cancels the POST", async () => {
+  let live = true;
+  let guardCalls = 0;
+  let dispatchCalls = 0;
+  const outcome = await autoGate.__test.dispatchWorkflowWithRetry({
+    label: "a dispatch whose snapshot outlives its head",
+    guard: async () => {
+      guardCalls += 1;
+      return live;
+    },
+    beforeDispatch: async () => { live = false; },
+    dispatch: async () => { dispatchCalls += 1; },
+    landed: async () => null,
+    sleep: async () => {},
+  });
+  assert.equal(outcome.cancelled, true);
+  assert.equal(dispatchCalls, 0, "the POST never fired on a dead head");
+  assert.equal(guardCalls, 2, "the guard re-ran after the snapshot, immediately before the POST");
+});
+
 // Codex review on this fix: a guard that exhausted ITS OWN retries throws a
 // retryable-looking read error; unwrapped, the write retry would rerun the
 // whole exhausted guard once per dispatch attempt. It is let out immediately,
