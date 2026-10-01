@@ -351,6 +351,23 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		{"strace -o$V codex", true},
 		{"strace -p$V codex", true},
 		{`strace -o"$V" codex`, false},
+		// A "-" option prefix followed by an expansion can complete the
+		// option spelling into -E/--env and name or assign a protected
+		// variable (strace -"$V" codex with V=ECODEX_HOME=/other becomes
+		// the single argv word -ECODEX_HOME=/other). The QUOTED form stays
+		// one word but still completes the option; the UNQUOTED form can
+		// also word-split. Both fail closed, unlike the bare "-" boundary.
+		{`strace -"$V" codex`, true},
+		{"strace -$V codex", true},
+		// A value-taking strace option whose operand is the NEXT argv word
+		// still fails closed when that value is a non-literal UNQUOTED
+		// expansion: it can word-split into a further strace option the
+		// scan never sees as a separate word (strace -o $V codex with
+		// V='trace -ECODEX_HOME=/other' is passed as -o, trace,
+		// -ECODEX_HOME=/other, codex). A QUOTED separate value stays one
+		// option value, so it keeps the tail judgment.
+		{"strace -o $V codex", true},
+		{`strace -o "$V" codex`, false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -396,10 +413,18 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// A partial literal NAME continued by an expansion can complete
 		// into any denied name, so the attached form fails closed.
 		"strace -ECODEX_$V=/other codex",
-		// A harmless NAME with an UNQUOTED dynamic value still refuses:
+		// A harmless literal NAME with an UNQUOTED dynamic value still refuses:
 		// the unquoted expansion can word-split into a second -E option.
 		"strace -EFOO=$V codex",
 		"strace --env=FOO=$V codex",
+		// A "-" option prefix an expansion can complete into -E/--env
+		// refuses (quoted or unquoted), unlike the bare "-" boundary.
+		`strace -"$V" codex`,
+		"strace -$V codex",
+		// A value-taking option whose separate operand is an UNQUOTED
+		// expansion refuses: the value can word-split into a further
+		// strace env option.
+		"strace -o $V codex",
 		"xargs strace -ECODEX_HOME=$V codex",
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
@@ -416,6 +441,10 @@ func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *
 		// A -E/--env-shaped word after strace's traced command is the
 		// command's argument, not a strace environment option.
 		`strace echo -ECODEX_HOME=$V codex`,
+		// A value-taking option whose separate operand is a QUOTED
+		// expansion stays one option value, so it sets no protected
+		// variable and stays allowed.
+		`strace -o "$V" codex`,
 		// grep's -E is extended-regexp and stays accepted.
 		"grep -ECODEX_HOME=$V /etc/environment",
 	} {

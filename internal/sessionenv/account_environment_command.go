@@ -631,6 +631,18 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 			return 1, accountEnvironmentOperandDenied(literal[2:], names), boundary, false
 		default:
 			pendingValue = straceOptionAwaitsValue(literal)
+			// A value-taking strace option whose operand is the NEXT argv
+			// word consumes that word as its value. A non-literal value word
+			// with an UNQUOTED expansion can word-split into a further
+			// strace option the scan never sees as a separate argv word —
+			// e.g. `strace -o $V codex` with V='trace -ECODEX_HOME=/other'
+			// is passed as -o, trace, -ECODEX_HOME=/other, codex, and
+			// strace applies the injected -E to the traced child. A QUOTED
+			// expansion stays one option value, so it keeps the tail
+			// judgment and is consumed as a pending value below.
+			if pendingValue && len(words) >= 2 && wordHasUnquotedExpansion(words[1]) {
+				return 2, true, boundary, false
+			}
 		}
 	}
 	// An unrecognized wrapper may expose options that mutate its child's

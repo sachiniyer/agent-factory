@@ -99,6 +99,17 @@ func straceAttachedEnvOperand(word *syntax.Word) (string, bool) {
 			return "", true
 		}
 		return val, true
+	// A literal prefix of just "-" is the traced-command boundary only when
+	// the whole word is the bare "-"; this function is called solely on
+	// non-literal words, so a "-" prefix is "-" followed by an expansion
+	// (e.g. -"$V", -$V). The expansion can complete the option spelling into
+	// -E/--env and then name or assign a protected variable
+	// (strace -"$V" codex with V=ECODEX_HOME=/other becomes the single argv
+	// word -ECODEX_HOME=/other), which is distinct from the handled -E$V
+	// case: the expansion supplies the option letter, not only its operand.
+	// Fail closed with an empty operand.
+	case lit == "-":
+		return "", true
 	case strings.HasPrefix(lit, "-") && len(lit) > 1:
 		flags := lit[1:]
 		for i := 0; i < len(flags); i++ {
