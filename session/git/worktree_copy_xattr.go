@@ -327,6 +327,21 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 			return err
 		}
 	}
+	// destinationProbed tracks whether an L* call on the destination proved its
+	// route is within PATH_MAX. The L* family has no *at form, so Lsetxattr is
+	// the first L* call that touches the destination; any Lsetxattr that does not
+	// return ENAMETOOLONG (a success, an EPERM/EACCES refusal, or an
+	// EOPNOTSUPP/ENOTSUP namespace refusal) proves the route was addressable at
+	// that point. A later Lsetxattr that then returns ENAMETOOLONG means the
+	// route was diverted mid-copy (an ancestor was replaced with a symlink whose
+	// expansion exceeds PATH_MAX), not that it was always too long — the route
+	// recheck exists to detect exactly that diversion, but it cannot run on a
+	// too-long path (its Lstat would also fail), so a late ENAMETOOLONG refuses
+	// rather than skip the recheck and risk publishing attributes the earlier L*
+	// calls wrote through the diverted route. Only a first-call ENAMETOOLONG (no
+	// prior L* call on the destination) is the length-limit case errXattrPathTooLong
+	// exists for, so the nonfatal path is taken there and only there.
+	var destinationProbed bool
 	for _, name := range names {
 		value, err := readSymlinkXattrValue(sourcePath, name)
 		if err != nil {
@@ -355,8 +370,24 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 		if err := unix.Lsetxattr(destinationPath, name, value, 0); err != nil {
 			switch {
 			case errors.Is(err, unix.ENAMETOOLONG):
-				// The destination route is too long for the L* family for the same
-				// reason the source route above can be; see errXattrPathTooLong.
+				if destinationProbed {
+					// A prior Lsetxattr proved the destination route was within
+					// PATH_MAX, so a later ENAMETOOLONG means the route was
+					// diverted mid-copy (an ancestor was replaced with a symlink
+					// whose expansion exceeds PATH_MAX), not that it was always
+					// too long. The route recheck cannot run on a too-long path
+					// (its Lstat would also fail), so refuse rather than skip it
+					// and risk publishing attributes the earlier L* calls wrote
+					// through the diverted route.
+					return fmt.Errorf(
+						"cannot move worktree across filesystems: destination symlink %s route exceeded PATH_MAX after an earlier L* call succeeded (possible path diversion): %w",
+						destinationPath, err,
+					)
+				}
+				// The first L* call on the destination is the Lsetxattr above; the
+				// destination route was too long from the start (no prior L* call
+				// proved it addressable), so this is not a diversion but a length
+				// limit. See errXattrPathTooLong.
 				return errXattrPathTooLong
 			case isXattrUnsupported(err):
 				if !destinationSymlinkRejectsAllXattrs(destinationPath) {
@@ -364,6 +395,7 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 						"archive: extended attribute %q not reproduced on symlink %s (this destination does not implement that namespace): %v",
 						name, destinationPath, err,
 					)
+					destinationProbed = true
 					continue
 				}
 				log.WarningLog.Printf(
@@ -382,6 +414,22 @@ func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
 					name, destinationPath, err,
 				)
 			}
+		}
+		destinationProbed = true
+	}
+	// When every source value was skipped (vanished or too large), the loop made
+	// no Lsetxattr on the destination, so a too-long destination route was never
+	// probed by an Lsetxattr ENAMETOOLONG the way a source with a reproduced
+	// attribute would surface it. len(names) is nonzero here, so the empty-names
+	// probe above did not run either. copySymlinkEntry's assertPathResolvesToVerifiedLeaf
+	// would then Lstat the too-long destination and abort a cross-device move the
+	// descriptor-anchored F* paths copy fine — the exact abort errXattrPathTooLong
+	// exists to prevent. Probe the destination route so the caller skips the
+	// path-based prune and route recheck the same way the empty-names and
+	// unsupported-source paths do.
+	if len(names) > 0 && !destinationProbed {
+		if err := probeDestinationRouteTooLong(destinationPath); err != nil {
+			return err
 		}
 	}
 	return nil

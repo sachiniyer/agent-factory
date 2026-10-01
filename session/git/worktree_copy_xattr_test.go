@@ -367,6 +367,37 @@ func TestCopySymlinkXattrs_DestinationOnlyTooLongRouteIsNonFatal(t *testing.T) {
 		"copySymlinkXattrs must surface errXattrPathTooLong so the move continues rather than aborting")
 }
 
+// TestCopySymlinkXattrs_DestinationTooLongWithSourceXattrs pins the regression the
+// empty-names test does not cover: a source that carries at least one attribute
+// (len(names) > 0) so the copy loop reaches Lsetxattr, and a destination route
+// exceeding PATH_MAX so the first Lsetxattr returns ENAMETOOLONG. Because no prior
+// L* call has touched the destination (destinationProbed is false), this is the
+// path-too-long-from-the-start case, not a late diversion, so errXattrPathTooLong is
+// the correct non-fatal result — the route recheck would Lstat the too-long path and
+// abort a cross-device move the descriptor-anchored F* paths copy fine. A regular
+// file is the source because Linux rejects setting xattrs on a symlink with EPERM;
+// Llistxattr/Lgetxattr do not follow symlinks, so they list and read a regular
+// file's own attributes the same way they would a link's.
+func TestCopySymlinkXattrs_DestinationTooLongWithSourceXattrs(t *testing.T) {
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "link")
+	require.NoError(t, os.WriteFile(source, []byte("x"), 0o644))
+	if err := unix.Lsetxattr(source, "user.af_dest", []byte("v"), 0); err != nil {
+		t.Skipf("filesystem does not support setting extended attributes (%v); the destination-too-long probe with a source xattr cannot be exercised", err)
+	}
+	names, err := listSymlinkXattrNames(source)
+	require.NoError(t, err)
+	require.NotEmpty(t, names, "the source must carry at least one attribute so the copy loop reaches Lsetxattr")
+	tooLong := strings.Repeat("a", unix.PathMax+1)
+	err = copySymlinkSourceXattrs(source, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"a destination route longer than PATH_MAX with a source that has xattrs must surface errXattrPathTooLong from the first Lsetxattr (no prior L* call touched the destination, so this is the path-too-long-from-the-start case, not a late diversion)")
+	support := &xattrDestination{}
+	err = copySymlinkXattrs(support, source, tooLong)
+	require.ErrorIs(t, err, errXattrPathTooLong,
+		"copySymlinkXattrs must surface errXattrPathTooLong so the move continues rather than aborting")
+}
+
 // TestProbeDestinationRouteTooLong pins the limit the unsupported-source and
 // empty-names branches of copySymlinkSourceXattrs rely on: a route longer than
 // PATH_MAX makes the L* family fail with ENAMETOOLONG before the kernel resolves
