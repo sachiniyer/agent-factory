@@ -784,8 +784,10 @@ still a present, winning override.
 
 With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
---project, it clears one migrated global backend setting: docker.mount_agent_credentials,
-ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+--project, it clears one migrated global setting — a network.* key
+(listen_addr, preview_listen_addr, require_token, require_loopback_token,
+cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
