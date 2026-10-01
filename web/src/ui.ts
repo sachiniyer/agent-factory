@@ -691,6 +691,16 @@ export function renderLogin(root: HTMLElement, state: AppState, actions: Actions
   if (input) input.value = draft;
 }
 
+/** Forgets the in-memory login draft for `root` so an auth-driven return to the
+ *  login view (a resync 401, a token rejection) does not pre-fill the paste form
+ *  with a credential the daemon just rejected. The draft WeakMap is module-private
+ *  and never cleared by renderLogin itself, so disconnect() must call this on an
+ *  auth rejection; the manual-Disconnect path leaves the draft alone because its
+ *  falsy renderLogin guard already resolves `draft` to "". */
+export function clearLoginDraft(root: HTMLElement): void {
+  loginDrafts.set(root, "");
+}
+
 export function loginView(state: AppState, actions: Actions): HTMLElement {
   if (state.loginCondition === "unavailable") {
     const screen = recoveryScreen({ condition: "Cannot reach the daemon", failed: true,
