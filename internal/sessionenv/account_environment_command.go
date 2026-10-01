@@ -614,36 +614,11 @@ func wrapperTailWordHidesAccountAssignment(words []*syntax.Word, strace bool, in
 	boundary := strace && inOption && literal == "--"
 	pendingValue := false
 	if strace && inOption {
-		switch {
-		case straceSeparateEnvOption(literal):
-			// strace's env option (-E/--env, a cluster ending in E such
-			// as -fE, or the --en abbreviation) takes var[=val] as the
-			// NEXT argv word and injects or REMOVES the variable in the
-			// traced child's environment — the env arm's mutation in
-			// option spelling (strace-only: -E is extended-regexp to
-			// grep). The value word is consumed here, so it is not pending.
-			if len(words) < 2 {
-				return 1, true, boundary, false
-			}
-			value, ok := literalShellWord(words[1])
-			return 2, !ok || accountEnvironmentOperandDenied(value, names), boundary, false
-		case strings.HasPrefix(literal, "-E"):
-			return 1, accountEnvironmentOperandDenied(literal[2:], names), boundary, false
-		default:
-			pendingValue = straceOptionAwaitsValue(literal)
-			// A value-taking strace option whose operand is the NEXT argv
-			// word consumes that word as its value. A non-literal value word
-			// with an UNQUOTED expansion can word-split into a further
-			// strace option the scan never sees as a separate argv word —
-			// e.g. `strace -o $V codex` with V='trace -ECODEX_HOME=/other'
-			// is passed as -o, trace, -ECODEX_HOME=/other, codex, and
-			// strace applies the injected -E to the traced child. A QUOTED
-			// expansion stays one option value, so it keeps the tail
-			// judgment and is consumed as a pending value below.
-			if pendingValue && len(words) >= 2 && wordHasUnquotedExpansion(words[1]) {
-				return 2, true, boundary, false
-			}
+		consumed, hides, pv, done := straceOptionWordHides(literal, words, names)
+		if done {
+			return consumed, hides, boundary, false
 		}
+		pendingValue = pv
 	}
 	// An unrecognized wrapper may expose options that mutate its child's
 	// environment in option-value form — xargs's --process-slot-var=NAME

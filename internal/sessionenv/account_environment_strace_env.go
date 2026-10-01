@@ -216,6 +216,55 @@ func straceOptionAwaitsValue(literal string) bool {
 	}
 }
 
+// straceOptionWordHides judges a literal strace option word (still inside
+// strace's option region) and reports how many words it consumes, whether it
+// hides an account assignment, and the pendingValue the caller should carry
+// for a value-taking option whose operand is the NEXT argv word. done is
+// false only for the fall-through shape — a value-taking option whose next
+// word is a literal or quoted value — so the caller can continue to the
+// generic --opt=DENIED arm carrying pendingValue.
+//
+// It handles the three strace env-option spellings the wrapper tail must
+// gate: the separate-word -E/--env form (and its cluster/abbreviation
+// spellings) consuming the next word as var[=val], the attached -E NAME
+// form, and a value-taking option whose separate operand is an UNQUOTED
+// expansion that can word-split into a further strace option the scan never
+// sees as a separate argv word (strace -o $V codex with
+// V='trace -ECODEX_HOME=/other'). A QUOTED separate value stays one option
+// value, so it is consumed as a pending value and keeps the tail judgment.
+func straceOptionWordHides(literal string, words []*syntax.Word, names map[string]struct{}) (consumed int, hides, pendingValue, done bool) {
+	switch {
+	case straceSeparateEnvOption(literal):
+		// strace's env option (-E/--env, a cluster ending in E such as
+		// -fE, or the --en abbreviation) takes var[=val] as the NEXT argv
+		// word and injects or REMOVES the variable in the traced child's
+		// environment — the env arm's mutation in option spelling
+		// (strace-only: -E is extended-regexp to grep). The value word is
+		// consumed here, so it is not pending.
+		if len(words) < 2 {
+			return 1, true, false, true
+		}
+		value, ok := literalShellWord(words[1])
+		return 2, !ok || accountEnvironmentOperandDenied(value, names), false, true
+	case strings.HasPrefix(literal, "-E"):
+		return 1, accountEnvironmentOperandDenied(literal[2:], names), false, true
+	default:
+		pendingValue = straceOptionAwaitsValue(literal)
+		// A value-taking strace option whose operand is the NEXT argv word
+		// consumes that word as its value. A non-literal value word with an
+		// UNQUOTED expansion can word-split into a further strace option
+		// the scan never sees as a separate argv word — e.g.
+		// `strace -o $V codex` with V='trace -ECODEX_HOME=/other' is passed
+		// as -o, trace, -ECODEX_HOME=/other, codex, and strace applies the
+		// injected -E to the traced child. A QUOTED expansion stays one
+		// option value, so it is consumed as a pending value below.
+		if pendingValue && len(words) >= 2 && wordHasUnquotedExpansion(words[1]) {
+			return 2, true, false, true
+		}
+		return 0, false, pendingValue, false
+	}
+}
+
 // wordHasUnquotedExpansion reports whether word has a non-literal shell part
 // that is subject to word splitting — a bare (unquoted) ParamExp, CmdSubst,
 // ArithmExp, ProcSubst, &c. A non-literal expansion inside a DblQuoted or
