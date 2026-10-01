@@ -4101,7 +4101,9 @@ async function gateFollowUpRun({ github, context, since, sleep }) {
 // POST was charged with, so it must not suppress the retry.
 async function validationRunVisible({ github, context, headSha, since, sleep }) {
   const { owner, repo } = context.repo;
-  const cutoff = since ?? 0;
+  // The API reports created_at at whole-second precision; a millisecond cutoff
+  // would reject the run this POST created inside the same second.
+  const cutoff = Math.floor((since ?? 0) / 1000) * 1000;
   return settledWorkflowRun({
     label: `could not confirm whether a PR Validation run exists for ${headSha}`,
     find: async () => {

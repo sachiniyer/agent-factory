@@ -16060,18 +16060,20 @@ function fakeGateGithub({
     // head_sha. A null run publishes the default auto-gate dispatch shape —
     // every successful POST to that workflow is a run GitHub lists (#5010).
     landDispatchRun(workflowId, run) {
+      // The reconcile window keys on created_at, so the fake stamps it the way
+      // the API does — at landing, inside the window, and at WHOLE-SECOND
+      // precision, so a caller that forgets to floor its cutoff is caught.
+      const landedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
       if (workflowId === "auto-gate.yml") {
         github.gateWorkflowRuns.push({
           id: 50000 + github.gateWorkflowRuns.length,
           event: "workflow_dispatch",
-          created_at: new Date().toISOString(),
+          created_at: landedAt,
           ...run,
         });
       } else if (run?.head_sha) {
-        // The reconcile window keys on created_at, so the fake stamps it the
-        // way the API does — at landing, inside the window.
         (runsByHeadSha[run.head_sha] = runsByHeadSha[run.head_sha] || [])
-          .push({ created_at: new Date().toISOString(), ...run });
+          .push({ created_at: landedAt, ...run });
       }
     },
     rest: {
