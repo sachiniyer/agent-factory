@@ -255,6 +255,25 @@ func TestCommandMutatesAccountEnvironment_XargsEmptyReplaceMarker(t *testing.T) 
 		{"xargs --replace -L1 env", true},
 		{"xargs -I{} -n2 nohup", true},
 		{"xargs -I{} -L1 strace", true},
+		// The empty override supersedes a prior -I marker, so the leaked
+		// marker no longer reaches the xargs-input scans and a
+		// replace-canceller lets GNU run the appended-input form
+		// (#4980 review).
+		{"xargs -I@ --replace= -L1 env @ codex", false},
+		{`xargs -I@ -I "" -L1 env @ codex`, false},
+		{"xargs -I@ --replace= -L1 strace -f echo", false},
+		{`xargs -I@ -I "" -L1 strace -f echo`, false},
+		// A dynamic -I "$M" fails closed at the marker arg itself (a
+		// shadowed xargs may exec the expansion), so the empty override
+		// never runs after it; the markerKnown reset above is inert on
+		// that path but keeps the defaulted {} honest for the literal
+		// case.
+		{`xargs -I "$M" --replace= -L1 strace -f echo`, true},
+		// The reset still refuses when the defaulted {} reaches env's
+		// operand region, a command slot, or an identity option value.
+		{"xargs -I@ --replace= strace --env={} codex", true},
+		{"xargs -I@ --replace= nohup {} CODEX_HOME=/x codex", true},
+		{`xargs -I@ -I "" strace {} codex`, true},
 	} {
 		require.Equal(t, test.want, commandMutatesAccountEnvironment(test.command, names),
 			"command %q", test.command)
