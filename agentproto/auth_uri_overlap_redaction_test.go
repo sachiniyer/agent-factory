@@ -847,3 +847,61 @@ func TestRedactAccessTokenErrorRedactsOverlapHost(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactAccessTokenURLRedactsBracketedHostOverlap pins host-branch handling
+// of a bracketed IP-literal authority (RFC 3986 §3.2.2 "[ ... ]") carrying an
+// access_token= overlap. Inside the brackets ':' is an IPv6 field separator,
+// not the host/port separator, so the value must NOT end at the first ':' —
+// otherwise the IPv6-colon suffix of the bracketed literal survives the value
+// scan and leaks ([%access_token=TOP:SECRET::1] → [%ACcess_token=REDACTED:
+// SECRET::1]). The host branch selects ']' as the value terminator for a
+// bracketed authority so the value runs to the close of the literal, redacting
+// the remainder of the bracketed host exactly as the userinfo branch redacts
+// through a structural end.
+//
+// url.Parse rejects a bracketed host containing access_token= outright on
+// net/url's IP-literal validation (the bracket is parsed as an address, which
+// admits no '='), so the public-API row pins the existing fail-closed path,
+// and the direct row pins that ']' — the terminator the host branch selects for
+// a bracketed authority — redacts the whole in-bracket value, IPv6 colons
+// included (a ':' terminator would truncate at the first one and leave the
+// suffix).
+func TestRedactAccessTokenURLRedactsBracketedHostOverlap(t *testing.T) {
+	const secret = "af-sentinel-bracket-host-overlap"
+
+	t.Run("public API parse-rejects fail closed", func(t *testing.T) {
+		raw := "http://[%access_token=" + secret + ":SECRET::1]/p"
+		got := RedactAccessTokenURL(raw)
+		// url.Parse rejects the bracketed IP-literal carrying access_token=;
+		// the URL is fail-closed to "[url redacted]" rather than emitting a
+		// host-branch redaction that could split the value at an IPv6 colon.
+		if got != "[url redacted]" {
+			t.Errorf("RedactAccessTokenURL(%q) = %q; want %q (parse rejects, fail closed)",
+				raw, got, "[url redacted]")
+		}
+		if strings.Contains(got, secret) {
+			t.Errorf("secret %q survived into %q", secret, got)
+		}
+	})
+
+	t.Run("bracket-aware terminator redacts full in-bracket value", func(t *testing.T) {
+		// The terminator the host branch selects for a bracketed authority.
+		// The value span runs to the closing ']', consuming the IPv6 ':' runs
+		// a ':' terminator would split on.
+		const bracketed = "[%access_token=" + secret + ":SECRET::1]"
+		got, found := redactRawAccessTokenValue(bracketed, "]")
+		if !found {
+			t.Fatalf("redactRawAccessTokenValue(%q, %q) reported no match", bracketed, "]")
+		}
+		if strings.Contains(got, secret) {
+			t.Errorf("redactRawAccessTokenValue(%q, \"]\") = %q; secret %q survived "+
+				"(value truncated at an IPv6 colon instead of the closing ']')",
+				bracketed, got, secret)
+		}
+		const want = "[%access_token=REDACTED]"
+		if got != want {
+			t.Errorf("redactRawAccessTokenValue(%q, \"]\")\n  got  %q\n  want %q",
+				bracketed, got, want)
+		}
+	})
+}
