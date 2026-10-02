@@ -80,7 +80,20 @@ And the seam that wire-level test cannot see — the modal actually sending the
 picked backend — is covered by the web-driver selftest: `web-driver.spec.ts`'s
 create test submits the + New modal with `hook` selected against a real
 `coder-launch.sh` provisioner (`scripts/container/web-selftest-entry.sh`) and
-attaches the resulting remote session through the browser UI. Reachable is not
+attaches the resulting remote session through the browser UI.
+
+Running that browser proof is what finally pinned #1933's mechanism: a remote
+session's settled projection carried an **empty** `Worktree.RepoPath` (no local
+`gitWorktree` exists for an off-box backend), so the web rail's project scope
+filtered the row out of every project and the selection reconciler dropped it —
+the session worked, and the web could not even show it. `ToInstanceData` now
+keeps the create-scoped repo on `Worktree.RepoPath` for sandbox backends, the
+same convention the pending-create row already published. A second latent bug
+surfaced along the way — remote readiness falls back to the program *name* when
+an override resolves to a non-agent command — filed as
+[#5108](https://github.com/sachiniyer/agent-factory/issues/5108); it is shared
+daemon code, so all three surfaces are equally affected and it is reported
+rather than scored as a parity gap. Reachable is not
 the same as proven — see "Known blind spots".
 
 So when this check fails, the question is never "does the web need to catch up?"

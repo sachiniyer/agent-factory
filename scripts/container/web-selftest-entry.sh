@@ -165,8 +165,11 @@ go build -buildvcs=false -o "$BIN" .
 # The fake agent prints a deterministic ready marker (the "live output" the
 # terminal flow asserts on) then execs `cat`, so typed input echoes back — the
 # same shape the WS PTY broker round-trip uses. Because the override is a custom
-# script (not literally "claude"), af appends no agent flags and counts the pane
-# ready as soon as it shows output (#1116/#1131).
+# script (not literally "claude"), af appends no agent flags; locally it counts
+# the pane ready as soon as it shows output (#1116/#1131), and for REMOTE
+# sessions the script also prints claude's ❯ glyph — the daemon cannot inspect
+# the remote pane's real command, so resolvedAgent falls back to the config
+# name and waits for claude's composer (see the printf inside).
 cat >"$HOME_DIR/fake-agent.sh" <<EOF
 #!/bin/sh
 # Creation-state probes deliberately hold the REAL backend path open. The web test
@@ -179,6 +182,13 @@ case "\$PWD" in
     *probe-create-fail*) sleep 4; exit 42 ;;
 esac
 printf '%s\n' "$READY_MARKER"
+# Print claude's composer glyph as the prompt line. Local sessions need no glyph
+# (the tmux binding exposes this script as the pane program, so readiness is the
+# generic any-output arm), but a REMOTE session has no local tmux binding and
+# resolvedAgent falls back to the config name "claude" — whose ready arm requires
+# "❯". Without it a remote create spins the full 60s waitForReady and dies.
+# (Same shape every integration fixture uses: printf '❯ ' then exec cat.)
+printf '❯ '
 exec cat
 EOF
 chmod +x "$HOME_DIR/fake-agent.sh"
