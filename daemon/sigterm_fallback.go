@@ -208,7 +208,23 @@ func locateDaemonPID() (int, string, int, error) {
 		}
 		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, scanned), scanned, nil
 	case 1:
-		return scoped[0], "pgrep", len(pids), nil
+		// A rejected PID-file candidate the host scan did not surface is one
+		// more `--daemon` process this filter deliberately did not signal, the
+		// same way it is in the zero-match branch above: pgrepDaemonCandidates
+		// filters a /tmp/go-build* binary the PID-file classifier intentionally
+		// accepts, so a foreign/unverifiable daemon the PID file named can be
+		// absent from `pids` even when the scan found this home's own daemon. If
+		// signaling the one proven-ours PID later fails, sigtermFallback recommends
+		// the blanket `pkill -f -- '--daemon'` whenever `scanned <= 1`, which would
+		// kill exactly that rejected foreign daemon the PID-file binding refused to
+		// touch. Fold `rejectedPIDFilePID` into the count here when it was absent
+		// from `pids`, so the signaling-error branch sees `scanned > 1` and carries
+		// the scoped recovery the zero-match branch already does.
+		scanned := len(pids)
+		if rejectedPIDFilePID != 0 && !slices.Contains(pids, rejectedPIDFilePID) {
+			scanned++
+		}
+		return scoped[0], "pgrep", scanned, nil
 	default:
 		return 0, "", len(pids), fmt.Errorf(
 			"sigterm fallback: ambiguous, found %d `--daemon` processes for this home (%s) — "+
@@ -611,6 +627,24 @@ func classifyDaemonHome(pid int) daemonScope {
 	if !ok {
 		return daemonUnverifiable
 	}
+	// A process-relative procfs path such as /proc/self/cwd/state (or
+	// /proc/self/root/...) names a different directory in the DAEMON's frame
+	// than in the caller's: the kernel resolves /proc/self against the reading
+	// process, so canonicalDir resolves /proc/self/cwd as the CALLER's cwd, not
+	// the daemon's. A same-UID daemon launched from a different directory with
+	// AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its cwd>/state, but
+	// resolveHomeInDaemonFrame returns the absolute spelling unchanged and
+	// canonicalDir then resolves it in the caller's frame — comparing equal to a
+	// caller whose own home resolves to that same <caller-cwd>/state and marking
+	// the foreign daemon daemonOurs on a stale PID file or lone pgrep result
+	// (#4793 via a /proc/self magic link). sameProcessRoot only compares root and
+	// mount-namespace identity, not /proc/self resolution, so a same-namespace
+	// daemon is not caught by it. Treat a process-relative procfs home as
+	// unverifiable (the daemon's own file ops resolved it in its frame, and the
+	// caller cannot) rather than guessing ours and signalling it.
+	if isProcessRelativeProcfsHome(gotHome) {
+		return daemonUnverifiable
+	}
 	got, err := canonicalDir(gotHome)
 	if err != nil {
 		return daemonUnverifiable
@@ -652,6 +686,21 @@ func resolveHomeInDaemonFrame(pid int, home string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(cwd, home), true
+}
+
+// isProcessRelativeProcfsHome reports whether home is a /proc/self/... (or
+// "/proc/self") path. canonicalDir resolves such a path in the CALLER's frame
+// — /proc/self/cwd is the reading process's cwd, /proc/self/root its root — so
+// a same-UID daemon launched from a different directory with
+// AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its cwd>/state while
+// classifyDaemonHome resolves the same spelling against the CALLER's cwd, the
+// opposite of the frame the /proc/self magic link names. sameProcessRoot only
+// compares root and mount-namespace identity, not /proc/self resolution, so it
+// does not catch this. classifyDaemonHome treats a process-relative procfs home
+// as unverifiable rather than guessing ours and signalling a cross-cwd daemon
+// (#4793 via a /proc/self magic link).
+func isProcessRelativeProcfsHome(home string) bool {
+	return home == "/proc/self" || strings.HasPrefix(home, "/proc/self/")
 }
 
 // procRootFor returns the filesystem root the kernel exposes for pid on Linux

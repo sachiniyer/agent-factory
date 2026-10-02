@@ -1,0 +1,125 @@
+package daemon
+
+import (
+	"os"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+)
+
+// TestLocateDaemonPID_CountsRejectedPIDFileCandidateAfterScan pins the case-1
+// half of the rejected-PID-file-candidate count: when the PID file names a
+// foreign/unverifiable daemon that the host scan OMITS (a /tmp/go-build* binary
+// the PID-file classifier accepts but pgrepDaemonCandidates filters out, or any
+// foreign daemon the scan did not surface), locateDaemonPID selects this home's
+// one scanned PID (case 1) but must still surface the rejected PID-file
+// candidate toward `scanned` — otherwise a signaling failure on that PID sees
+// `scanned == 1` and recommends the blanket `pkill -f -- '--daemon'`, which
+// would kill exactly the foreign daemon the PID-file binding refused to touch.
+// The zero-match and no-scan branches already fold rejectedPIDFilePID in; this
+// pins the successful-scan branch to do the same.
+func TestLocateDaemonPID_CountsRejectedPIDFileCandidateAfterScan(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// This home's own daemon: the one proven-ours candidate the scan surfaces.
+	ours := spawnFakeDaemonWithHome(t, home)
+	// A foreign daemon the PID file names. The home binding rejects it
+	// (rejectedPIDFilePID), and the host scan is stubbed to OMIT it — the shape
+	// a /tmp/go-build* binary takes, which the PID-file classifier accepts but
+	// pgrepDaemonCandidates filters out.
+	foreign := spawnFakeDaemonWithHome(t, testguard.SocketTempDir(t))
+
+	if err := os.WriteFile(filepath.Join(home, "daemon.pid"),
+		[]byte(strconv.Itoa(foreign)), 0600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	// The scan surfaces only this home's own daemon; the foreign PID-file
+	// candidate is absent from the scan results.
+	stubDaemonScan(t, []int{ours}, nil)
+
+	pid, _, scanned, err := locateDaemonPID()
+	if err != nil {
+		t.Fatalf("locateDaemonPID: %v", err)
+	}
+	if pid != ours {
+		t.Fatalf("locateDaemonPID returned pid=%d, want this home's own pid=%d; the rejected foreign "+
+			"PID-file candidate must not be signalled", pid, ours)
+	}
+	// scanned must count the rejected PID-file candidate the scan omitted, so a
+	// signaling failure on the one proven-ours PID does not fall back to the
+	// blanket pkill (sigtermFallback sees scanned > 1 and carries the scoped
+	// recovery). Pre-fix this returned len(pids) == 1.
+	if scanned != 2 {
+		t.Errorf("locateDaemonPID returned scanned=%d, want 2 — the rejected foreign PID-file "+
+			"candidate (pid=%d) absent from the scan must be counted toward scanned so a signaling "+
+			"failure does not recommend the blanket pkill against it", scanned, foreign)
+	}
+
+	// The foreign daemon must not have been signalled by locateDaemonPID
+	// (classifyDaemonHome only classifies; it does not signal). It is still alive.
+	if !pidLooksAlive(foreign) {
+		t.Fatalf("foreign daemon pid=%d is no longer alive; locateDaemonPID must not signal a "+
+			"PID the home binding rejected", foreign)
+	}
+}
+
+// TestClassifyDaemonHome_ProcSelfHomeIsUnverifiable pins the /proc/self
+// process-frame hazard: a same-UID daemon launched from a different directory
+// with AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its cwd>/state, but
+// resolveHomeInDaemonFrame returns the absolute spelling unchanged and
+// canonicalDir resolves /proc/self/cwd against the CALLER's cwd, not the
+// daemon's. Without the guard a same-frame daemon (same root and mount
+// namespace, so sameProcessRoot does not catch it) whose home spelling resolves
+// to the caller's home compares equal and is classified daemonOurs — signalled
+// on a stale PID file or lone pgrep result (#4793 via a /proc/self magic link).
+// classifyDaemonHome fails closed (daemonUnverifiable) on a process-relative
+// procfs home rather than guessing ours. A daemon whose home resolves the same
+// way in the caller's frame (a plain absolute home, exercised by the same-frame
+// assertions in the mount-namespace tests in sigterm_fallback_test.go) is not
+// affected.
+func TestClassifyDaemonHome_ProcSelfHomeIsUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	// The caller's AGENT_FACTORY_HOME resolves to <caller-cwd>/state; without the
+	// guard the daemon's /proc/self/cwd/state resolves to the same path in the
+	// caller's frame, so the foreign daemon (launched from a different cwd) is
+	// misclassified daemonOurs.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(cwd, "state"))
+	// The daemon runs from a different cwd with a /proc/self/cwd home, so its
+	// resolved home (<its cwd>/state) is not the caller's.
+	daemonCwd := t.TempDir()
+	argv0 := filepath.Join(fakeBinDir(t), "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"AGENT_FACTORY_HOME=/proc/self/cwd/state",
+	}
+	cmd.Dir = daemonCwd
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, pid, argv0)
+	if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
+		t.Errorf("AGENT_FACTORY_HOME=/proc/self/cwd/state classified %v; want daemonUnverifiable — "+
+			"a /proc/self home resolves in the caller's frame, not the daemon's, so the classifier "+
+			"must not guess ours and signal a cross-cwd daemon", scope)
+	}
+}
