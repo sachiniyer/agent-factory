@@ -65,7 +65,7 @@ func (s *TaskPane) settleConfirmedDrafts(loaded []task.Task) {
 			continue
 		}
 		record, ok := byID[draft.ID]
-		if !ok || !task.DiffTask(record, draft).IsEmpty() {
+		if !ok || !s.editLanded(draft, record) {
 			continue
 		}
 		delete(s.unconfirmedIDs, draft.ID)
@@ -77,6 +77,74 @@ func (s *TaskPane) settleConfirmedDrafts(loaded []task.Task) {
 		s.settledDrafts = append(s.settledDrafts, name)
 	}
 	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
+}
+
+// editLanded reports whether a held draft's unconfirmed edit is now reflected
+// in the reloaded record. The settlement must compare ONLY the fields the user
+// actually patched, against their canonical forms — never the whole record by
+// raw bytes.
+//
+// The prior whole-record test (task.DiffTask(record, draft).IsEmpty()) compared
+// the daemon-canonicalized reloaded record against the pane's raw, non-canonical
+// draft, so any daemon-side normalization defeated it even when the edit landed.
+// Two normalizations run on every save (task.TaskUpdate.apply):
+//
+//   - canonicalizeTargetSession turns an all-whitespace target into "". A draft
+//     holding "   " never matched a reload holding "".
+//   - clearInapplicableCap zeroes MaxConcurrentRuns the moment a task gains a
+//     target session. The pane has no cap control (the field is absent from the
+//     edit form), so a retarget keeps the draft's old cap while the reload has
+//     it cleared — and the cap was never in the user's patch to begin with.
+//
+// Field-scoping closes both. The patch is the diff against the pane's baseline
+// (s.originals), so it carries exactly the fields the user moved; a daemon side
+// effect on a field the user never touched (the cleared cap) is never compared.
+// The fields the patch DOES carry are compared through their canonical forms, so
+// a whitespace target, an "ARCHIVE" verb, or any other value the daemon stores
+// canonicalized matches the reload. Fields the daemon stores verbatim are
+// compared raw, since apply writes the patched pointer through unchanged.
+//
+// A patch that is empty (the user toggled and reverted, or the patch was never
+// held) carries no work to confirm, so it lands by definition — there is nothing
+// a lost reply could have left unsaved.
+func (s *TaskPane) editLanded(draft, record task.Task) bool {
+	patch := task.DiffTask(s.originals[draft.ID], draft)
+	if patch.IsEmpty() {
+		return true
+	}
+	if patch.Name != nil && *patch.Name != record.Name {
+		return false
+	}
+	if patch.Prompt != nil && *patch.Prompt != record.Prompt {
+		return false
+	}
+	if patch.CronExpr != nil && *patch.CronExpr != record.CronExpr {
+		return false
+	}
+	if patch.WatchCmd != nil && *patch.WatchCmd != record.WatchCmd {
+		return false
+	}
+	if patch.TargetSession != nil &&
+		task.CanonicalTargetSession(*patch.TargetSession) != task.CanonicalTargetSession(record.TargetSession) {
+		return false
+	}
+	if patch.MaxConcurrentRuns != nil && *patch.MaxConcurrentRuns != record.MaxConcurrentRuns {
+		return false
+	}
+	if patch.OnComplete != nil &&
+		task.CanonicalOnComplete(*patch.OnComplete) != task.CanonicalOnComplete(record.OnComplete) {
+		return false
+	}
+	if patch.ProjectPath != nil && *patch.ProjectPath != record.ProjectPath {
+		return false
+	}
+	if patch.Program != nil && *patch.Program != record.Program {
+		return false
+	}
+	if patch.Enabled != nil && *patch.Enabled != record.Enabled {
+		return false
+	}
+	return true
 }
 
 // TakeSettledDraftNotice returns one notice naming every unconfirmed edit a
