@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/doctor"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,7 +139,14 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 func TestDoctorJSONExitZeroSuppressesLogHintWhenDirty(t *testing.T) {
 	requireTmuxOrSkip(t)
 
-	home := t.TempDir()
+	// SocketTempDir, not t.TempDir: the --setup profile's daemon check resolves
+	// the daemon control socket under AGENT_FACTORY_HOME, and on macOS a
+	// t.TempDir() home is ~107 bytes — past this platform's 103-byte sun_path
+	// limit — so checkDaemonHealth reports an actionable FAIL ("cannot resolve
+	// daemon socket path: ... is N bytes, over this platform's 103-byte limit")
+	// and the run exits 1 instead of 0. The real home (~/.agent-factory) is
+	// short, and so is /tmp. See testguard.SocketTempDir and daemonstatuscmd_test.
+	home := testguard.SocketTempDir(t)
 	// AGENT_FACTORY_HOME and HOME both point at the throwaway home so the
 	// config file, the log file, and git's global config (~/.gitconfig) all
 	// live inside it.
