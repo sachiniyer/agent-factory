@@ -42,6 +42,27 @@ func stageCPUFraction(t *testing.T, fracs map[int]float64) {
 	t.Cleanup(func() { cpuFraction = orig })
 }
 
+// stageCPUFractionUnknown stages the per-process CPU reader so the PIDs in
+// unknown return ErrCPUUnknown (the unmeasured case the overflow summary must
+// distinguish from idle) and the rest return their staged fraction. A
+// restricted process table or a possible owned by another UID yields
+// ErrCPUUnknown rather than a zero fraction; the summary must not flatten that
+// into the idle wording. Restored on cleanup.
+func stageCPUFractionUnknown(t *testing.T, fracs map[int]float64, unknown map[int]bool) {
+	t.Helper()
+	orig := cpuFraction
+	cpuFraction = func(p proctree.Process) (float64, float64, error) {
+		if unknown[p.PID] {
+			return 0, 60, proctree.ErrCPUUnknown
+		}
+		if f, ok := fracs[p.PID]; ok {
+			return f, 60, nil
+		}
+		return 0, 60, nil
+	}
+	t.Cleanup(func() { cpuFraction = orig })
+}
+
 // spawnPossibles stages n idle children whose TMUX env names a server PID of
 // 1<<30 — unreachable by construction (the kernel caps pids far below it), so
 // in the filtered snapshot tmuxServerDead returns true and each child lands in
@@ -155,6 +176,50 @@ func TestPossibleOrphanOverflowDescribesTailByMeasuredCPU(t *testing.T) {
 		stageCPUFraction(t, fracs)
 		assertPossibleOrphanOverflow(t, possibles, "some at up to 85% CPU", tailCount)
 	})
+
+	// An unmeasured tail is the case the measured-CPU summary must not flatten
+	// into "idle": CPUFraction returns ErrCPUUnknown (not 0) when it cannot
+	// read the counter, e.g. for a possible owned by another UID or hidden by
+	// a restricted process table. The summary must say so instead of asserting
+	// the unmeasured processes are idle.
+	t.Run("unknown_tail", func(t *testing.T) {
+		possibles := spawnPossibles(t, total)
+		fracs := make(map[int]float64, total)
+		unknown := make(map[int]bool, tailCount)
+		// The 15 hottest are measured (so they surface individually with
+		// their CPU); the 2 coldest (the hidden tail) are unmeasured.
+		for i, p := range possibles {
+			if i < possibleOrphanCap {
+				fracs[p.PID] = 0.78 - float64(i)*0.03
+			} else {
+				unknown[p.PID] = true
+			}
+		}
+		stageCPUFractionUnknown(t, fracs, unknown)
+		assertPossibleOrphanOverflow(t, possibles, "CPU unmeasured in the remainder", tailCount)
+	})
+
+	// A mixed tail — some measured, some unmeasured — keeps the measured max
+	// and names the unmeasured count, so an operator is not told a partial
+	// reading is the whole story.
+	t.Run("mixed_unknown_tail", func(t *testing.T) {
+		possibles := spawnPossibles(t, total)
+		fracs := make(map[int]float64, total)
+		unknown := make(map[int]bool, tailCount)
+		for i, p := range possibles {
+			if i < possibleOrphanCap {
+				fracs[p.PID] = 0.78 - float64(i)*0.03
+			} else if i == possibleOrphanCap {
+				// One tail process is measured at 0.33; the other is
+				// unmeasured. The 0.33 is the coldest measured value.
+				fracs[p.PID] = 0.33
+			} else {
+				unknown[p.PID] = true
+			}
+		}
+		stageCPUFractionUnknown(t, fracs, unknown)
+		assertPossibleOrphanOverflow(t, possibles, "up to 33% CPU in the remainder (1 unmeasured)", tailCount)
+	})
 }
 
 // assertPossibleOrphanOverflow runs doctor over possibles and pins the
@@ -214,6 +279,16 @@ func assertPossibleOrphanOverflow(
 			"a pegging tail must not be called idle: %q", overflow.Detail)
 		require.NotContains(t, overflow.Detail, "in the remainder",
 			"a tail at/above runawayCPUFraction must use the pegging wording, not the moderate one: %q", overflow.Detail)
+	case "CPU unmeasured in the remainder":
+		require.NotContains(t, overflow.Detail, "all idle or near-idle",
+			"an unmeasured tail must not be called idle: %q", overflow.Detail)
+		require.NotContains(t, overflow.Detail, "% CPU",
+			"an unmeasured tail has no measured fraction to report: %q", overflow.Detail)
+	case "up to 33% CPU in the remainder (1 unmeasured)":
+		require.NotContains(t, overflow.Detail, "all idle or near-idle",
+			"a mixed tail must not be called idle: %q", overflow.Detail)
+		require.NotContains(t, overflow.Detail, "some at",
+			"a tail below runawayCPUFraction must use the moderate wording, not the pegging wording: %q", overflow.Detail)
 	}
 
 	// No-regression invariants: possibles are advisory by definition, so
