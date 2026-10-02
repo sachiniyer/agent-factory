@@ -64,6 +64,18 @@ func (s *TaskPane) settleConfirmedDrafts(loaded []task.Task) {
 		if !s.unconfirmedIDs[draft.ID] || draft.ID == formID {
 			continue
 		}
+		// A damaged file can list an ID twice, and unconfirmedIDs is keyed by
+		// ID, so every row sharing it is held. If this row is an unedited
+		// sibling (empty patch) while another row sharing the ID carries the
+		// real edit, settling the sibling first would clear the shared ID and
+		// let SetTasks replace the edited row — silently dropping the held
+		// work. Defer to the edited sibling. An empty patch that is the only
+		// row with its ID (a toggled-and-reverted edit) still settles: there
+		// is no sibling to defer to, and there is nothing a lost reply could
+		// have left unsaved.
+		if s.unedited(draft) && s.hasEditedSibling(draft.ID) {
+			continue
+		}
 		record, ok := byID[draft.ID]
 		if !ok || !s.editLanded(draft, record) {
 			continue
@@ -77,6 +89,23 @@ func (s *TaskPane) settleConfirmedDrafts(loaded []task.Task) {
 		s.settledDrafts = append(s.settledDrafts, name)
 	}
 	s.dirty = len(s.dirtyIDs) > 0 || len(s.deleted) > 0
+}
+
+// hasEditedSibling reports whether another row shares id and carries a real
+// (non-empty) patch against its baseline. A damaged file listing an ID twice
+// can pair an unedited sibling with an edited one; settling the unedited copy
+// first would clear the shared ID and let SetTasks drop the edited row's held
+// work, so the unedited copy must defer (see settleConfirmedDrafts).
+func (s *TaskPane) hasEditedSibling(id string) bool {
+	for _, t := range s.tasks {
+		if t.ID != id {
+			continue
+		}
+		if !s.unedited(t) {
+			return true
+		}
+	}
+	return false
 }
 
 // editLanded reports whether a held draft's unconfirmed edit is now reflected

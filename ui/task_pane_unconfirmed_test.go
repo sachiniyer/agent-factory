@@ -183,3 +183,32 @@ func TestTaskPaneUnconfirmedSettleIgnoresConcurrentEditToUnpatchedField(t *testi
 	assert.Equal(t, `Saved edits to "demo" — the task list now shows them`, s.TakeSettledDraftNotice())
 	assert.Empty(t, s.TakeUnconfirmedQuitNotice())
 }
+
+// A damaged file listing an ID twice pairs an unedited sibling with the copy
+// the user actually edited. The unedited sibling's patch is empty, so without
+// deferring it the empty-patch settle would clear the shared ID first and let
+// SetTasks replace the edited row — silently dropping the held edit. The
+// unedited sibling must defer to the edited one, and the unlanded edit stays
+// held.
+func TestTaskPaneUnconfirmedSkipsEmptySiblingWhenDuplicateIDHasAnEdit(t *testing.T) {
+	s := NewTaskPane()
+	s.SetTasks([]task.Task{reloadTask("demo", "p"), reloadTask("demo", "p")})
+	require.Equal(t, []string{"demo", "demo"}, paneIDs(s))
+	s.SetFocus(true)
+	s.SelectTask(1)                                  // the user edits the second copy
+	require.True(t, s.HandleKeyPress(keyRunes("x"))) // Enabled true -> false
+	edits := s.ConsumeDirty()
+	require.Len(t, edits, 1)
+	s.HoldUnconfirmedEdit(edits[0].ID)
+
+	// The edit did not land; a concurrent writer changed the unedited first
+	// copy's prompt. The reload carries the unedited copy (Enabled still true).
+	s.SetTasks([]task.Task{reloadTask("demo", "cli")})
+
+	require.True(t, s.IsDirty(), "the unlanded edit on the second copy stays held")
+	assert.Empty(t, s.TakeSettledDraftNotice(), "the unedited sibling must not settle on the edit's behalf")
+	require.Len(t, s.GetTasks(), 1)
+	assert.False(t, s.GetTasks()[0].Enabled, "the edited copy is the one kept")
+	assert.Empty(t, s.ConsumeDirty(), "a held unconfirmed edit is not re-sent automatically")
+	assert.Contains(t, s.TakeUnconfirmedQuitNotice(), `could not be confirmed`)
+}
