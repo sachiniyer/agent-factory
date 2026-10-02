@@ -1313,12 +1313,16 @@ const paneLivenessBound = 30 * time.Second
 // withPasteDeliveryTiming overrides the delivery-poll knobs for a test and
 // returns a restore func for defer. It also shrinks the #3293 redelivery delay
 // to the poll interval so an observed-absent fixture retries immediately
-// instead of sleeping the production seconds-scale wait.
+// instead of sleeping the production seconds-scale wait, and the #4200
+// staged-draft waits to the same scale.
 func withPasteDeliveryTiming(maxWait, poll time.Duration) func() {
 	savedMax, savedPoll, savedRedeliver := pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay
+	savedGrace, savedSettle := strandedSubmitGrace, strandedSubmitSettle
 	pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay = maxWait, poll, poll
+	strandedSubmitGrace, strandedSubmitSettle = poll, poll
 	return func() {
 		pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay = savedMax, savedPoll, savedRedeliver
+		strandedSubmitGrace, strandedSubmitSettle = savedGrace, savedSettle
 	}
 }
 
