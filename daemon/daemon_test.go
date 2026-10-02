@@ -1104,3 +1104,42 @@ func TestStopDaemon_ForeignPIDFileCleanupLockIsBounded(t *testing.T) {
 			"must keep a foreign daemon alive even when its PID-file cleanup is bounded", foreignPID, otherHome)
 	}
 }
+
+// TestRemovePIDFileIfStillNames_RefusesSymlinkedPIDFile pins the #3672 policy on
+// the foreign-PID cleanup path: a daemon.pid that is a SYMLINK (a user
+// arrangement af did not author, since writeDaemonPIDFile refuses to write
+// through one) must be left in place — the cleanup neither reads its target
+// through the link to decide whether to unlink it nor unlinks the link. This
+// matches removeStaleDaemonPIDFile, the stop-side sibling bfc69cac added for the
+// other stale-PID branches.
+func TestRemovePIDFileIfStillNames_RefusesSymlinkedPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	const stale = 99999
+	target := filepath.Join(t.TempDir(), "daemon.pid.target")
+	if err := os.WriteFile(target, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(dir, "daemon.pid")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	removePIDFileIfStillNames(link, stale, time.Time{})
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("symlink was removed (Lstat err=%v); the foreign-PID cleanup unlinked a managed-file "+
+			"symlink af did not author", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("daemon.pid is no longer a symlink (mode=%v); the cleanup replaced the user's link", info.Mode())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("target removed (ReadFile err=%v)", err)
+	}
+	if want := fmt.Sprintf("%d", stale); string(got) != want {
+		t.Fatalf("target content changed to %q; want %q — the cleanup must not act on a symlink's target",
+			string(got), want)
+	}
+}

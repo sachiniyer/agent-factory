@@ -331,12 +331,33 @@ func acquireDaemonPIDLock(lock *os.File, deadline time.Time) bool {
 // owner, and treat the unreadable/malformed case the same way rather than
 // unlinking a file whose current contents we did not establish (#4793).
 //
+// Like removeStaleDaemonPIDFile it refuses a symlinked PID file (#3672):
+// writeDaemonPIDFile refuses to write through one, so a link here is a user
+// arrangement af did not author, and the cleanup neither reads its target
+// through the link nor unlinks the link. The refusal is taken up front, so a
+// symlinked daemon.pid is left in place the way the other stale-PID cleanups
+// leave one.
+//
 // deadline propagates the caller's admission deadline to the lock acquisition
 // (see withDaemonPIDLock): a deadline-bounded stopDaemonUntil does not block
 // indefinitely on a contended lock. On a deadline the cleanup is abandoned
 // (best-effort, logged) rather than waiting past the stop/restart budget.
 func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
 	if err := withDaemonPIDLock(pidFile, deadline, func() error {
+		// A symlinked PID file is not af's to unlink — writeDaemonPIDFile
+		// refuses to write through one, so a link here is a user arrangement
+		// af did not author. Refuse it the way the other stale-PID cleanups do
+		// (removeStaleDaemonPIDFile, #3672): do not read its target through the
+		// link to decide whether to unlink it, and do not unlink the link. A
+		// missing path (an already-gone file) is an ordinary done state, so
+		// RefuseManagedFileSymlink's nil-for-absent return falls through to the
+		// read below.
+		if err := config.RefuseManagedFileSymlink(pidFile); err != nil {
+			if errors.Is(err, config.ErrManagedFileSymlink) {
+				log.InfoLog.Printf("stale daemon PID file %q (PID: %d) is a symlink af did not write through; leaving it in place", pidFile, pid)
+			}
+			return nil
+		}
 		data, err := os.ReadFile(pidFile)
 		if err != nil {
 			// Already gone (or unreadable) — nothing to remove; a missing file
