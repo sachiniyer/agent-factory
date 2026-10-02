@@ -134,7 +134,7 @@ var auditedMkdir = map[string]struct {
 		"Creates one account beneath accounts/<agent>, whose parent is created through guarded afhome.MkdirAll; ENOENT if gone."},
 	"internal/upgradetxn/install_lock.go:ensureLockRoot": {1,
 		"Creates upgrade/ directly beneath the existing AF home; Mkdir returns ENOENT if that parent is gone."},
-	"internal/upgradetxn/storage.go:prepareMetadataParents": {1,
+	"internal/upgradetxn/storage_metadata.go:prepareMetadataParents": {1,
 		"Creates one metadata directory after validateDirectoryNoSymlink checks its immediate parent; ENOENT if gone."},
 	"internal/upgradetxn/storage.go:createDurableDirectory": {1,
 		"Requires filepath.Dir(path) == parent and validates that parent before creating its immediate child; ENOENT if gone."},
