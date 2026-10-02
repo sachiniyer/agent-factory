@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,31 +29,35 @@ import (
 //     filter out /tmp/Test* paths (Go test binaries) and the current
 //     process, and require exactly one candidate.
 //
-// Returns ShutdownViaSIGTERM when a signal was delivered, or ShutdownFailed
+// Returns ShutdownViaSIGTERM and the signalled target when a signal was
+// delivered (the process is already dead — signalAndWait waited), or ShutdownFailed
 // with an actionable error when the daemon (which is provably running — the
 // caller only invokes us after the Shutdown RPC returned method-not-found,
 // not ECONNREFUSED) could not be located or signaled. Returning
 // ShutdownNoDaemon here would contradict the established state and silently
 // leave the stale daemon running (#553).
-func sigtermFallback() (ShutdownResult, error) {
+func sigtermFallback() (ShutdownResult, ShutdownTarget, error) {
 	pid, source, err := locateDaemonPID()
 	if err != nil {
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback failed: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			err,
 		)
 	}
 	if pid == 0 {
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback: daemon is running on the control socket but no PID candidate was found (%s); "+
 				"run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			source,
 		)
 	}
 
+	// Pin the incarnation before signalling, while pid is certainly the daemon:
+	// sampled after it dies, a recycled PID would yield the replacement's token.
+	target := ShutdownTarget{PID: pid, StartToken: processStartTokenFn(pid)}
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
 	if err := signalAndWait(pid); err != nil {
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback for daemon pid %d: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			pid, err,
 		)
@@ -62,7 +67,7 @@ func sigtermFallback() (ShutdownResult, error) {
 	// a stale file. StopDaemon does this on its happy path too; doing it
 	// here keeps state tidy when the daemon binary never wrote one itself.
 	removeDaemonPIDFile()
-	return ShutdownViaSIGTERM, nil
+	return ShutdownViaSIGTERM, target, nil
 }
 
 // locateDaemonPID returns the PID of the running daemon to signal and the
@@ -130,10 +135,12 @@ func readPIDFromFile() (int, bool) {
 // for any zombie before escalating to SIGKILL — visible as a 5s pause in
 // `af upgrade` when the dying daemon's parent isn't waiting.
 //
-// On platforms without /proc (macOS), the cmdline read below returns "" and we
-// can't distinguish zombie from "kernel doesn't expose the cmdline"; we
-// fall back to the signal-0 result. The cost there is the 5s grace, which
-// is correct but slow.
+// macOS has no /proc, so there it asks ps for the process state and treats a
+// zombie ("Z") as dead. Without that, an exited-but-unreaped daemon keeps
+// passing signal 0, and WaitForShutdownCompletion would burn its full grace
+// and withhold the respawn over a daemon that is already gone (#5007). If ps
+// fails (the pid vanished between checks, or ps is missing) it falls back to
+// the signal-0 result: a ps failure must not fabricate a death.
 func pidLooksAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -150,8 +157,53 @@ func pidLooksAlive(pid int) bool {
 			return false
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		if err == nil && strings.Contains(string(out), "Z") {
+			return false
+		}
+	}
 	return true
 }
+
+// processStartToken identifies one incarnation of pid by its start time, so a
+// wait that outlives the process can tell "still the daemon" from "the PID was
+// recycled to something else" (#5007). On Linux it is /proc/<pid>/stat field
+// 22 (starttime in clock ticks), read after the LAST ')' because comm may
+// itself contain spaces and parentheses; on macOS it is `ps -o lstart=`.
+// Returns "" when the start time cannot be observed (the process is gone,
+// another platform, a read failure) — callers then rely on liveness alone.
+func processStartToken(pid int) string {
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return ""
+		}
+		stat := string(data)
+		i := strings.LastIndexByte(stat, ')')
+		if i < 0 {
+			return ""
+		}
+		// Fields after comm start at field 3 (state), so field 22 is index 19.
+		fields := strings.Fields(stat[i+1:])
+		if len(fields) < 20 {
+			return ""
+		}
+		return fields[19]
+	case "darwin":
+		out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return ""
+}
+
+// processStartTokenFn is processStartToken, indirected so a test can simulate
+// PID reuse — a real reuse cannot be arranged on demand.
+var processStartTokenFn = processStartToken
 
 // scanDaemonCandidatesFn is the process-scan entry point used by
 // locateDaemonPID. It is a function var so tests can substitute a controlled

@@ -345,6 +345,19 @@ func startDaemonHint() string {
 	return "Running af starts one from the new binary; `af daemon install` starts it and keeps it supervised across logins."
 }
 
+// shutdownIncompleteHint is the #5007 spec's bound-expired wording, shared by
+// the upgrade report and the withheld-respawn error. Its steps are ordered by
+// safety: wait and run af again first, since a draining daemon normally exits
+// on its own; escalate to `kill -9` only if it is still there after several
+// minutes, and say that the kill loses in-flight shutdown work. The verb is
+// `kill -9` because a draining daemon absorbs SIGTERM by design.
+func shutdownIncompleteHint(pid int) string {
+	if pid > 0 {
+		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait a moment and run af again. If ps -p %d still shows it after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
+	}
+	return "still finishing its shutdown — it normally exits on its own: wait a moment and run af again. If a leftover `af --daemon` still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost)."
+}
+
 // reportUpgradeRestart tells the user what the restart actually did.
 //
 // The rule (#1947): never claim the daemon is on the new binary unless it is.
@@ -392,6 +405,13 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		fmt.Fprintf(errOut, "Could not determine whether a daemon is running: %v\n", restartErr)
 		fmt.Fprintln(errOut, "No daemon was found and its process could not be verified either, so this upgrade may or may not have reached one.")
 		fmt.Fprintln(errOut, "Check with `af daemon status` before assuming either way.")
+		return
+	case restartPhaseShutdownIncomplete:
+		// The old daemon agreed to stop but is still alive at the bound, so the
+		// respawn was withheld rather than raced against it (#5007). It is not
+		// "nothing is running" and not "it refused": it is still draining.
+		fmt.Fprintln(out, "Upgraded successfully!")
+		fmt.Fprintln(errOut, "The old daemon is "+shutdownIncompleteHint(outcome.OldPID))
 		return
 	case restartPhaseRespawn:
 		// The opposite state: the old daemon is gone and nothing replaced it.

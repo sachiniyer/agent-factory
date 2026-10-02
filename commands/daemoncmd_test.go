@@ -78,7 +78,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 		*ensureCalls++
 		return nil
 	}
-	waitForShutdownCompletionFn = func() error { return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownTarget) error { return nil }
 	return restartCalls, ensureCalls
 }
 
@@ -89,7 +89,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -124,7 +124,7 @@ func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, errors.New("systemctl exited 1"))
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	_, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 		return nil
 	}
 
-	if _, err := respawnDaemonAfterUpgrade("/opt/af/new"); err != nil {
+	if _, err := respawnDaemonAfterUpgrade("/opt/af/new", daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -178,25 +178,24 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 // control socket to die before EITHER respawn branch runs — otherwise the new
 // daemon (ad-hoc EnsureDaemon ping or the unit-restarted daemon's startup ping
 // guard) sees the dying daemon as alive, skips the spawn, and nothing is left
-// running once it exits. Both branches are exercised; a wait timeout must
-// degrade to a respawn attempt, never a skipped one.
+// running once it exits. Both branches are exercised. A wait that times out
+// withholds the respawn instead (#5007); upgrade_shutdown_incomplete_test.go
+// pins that.
 func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		installed bool
-		waitErr   error
 		wantStep  string
 	}{
 		{name: "ad-hoc branch", installed: false, wantStep: "ensure"},
 		{name: "unit branch", installed: true, wantStep: "restart"},
-		{name: "wait timeout still respawns", installed: false, waitErr: errors.New("daemon control socket still answering"), wantStep: "ensure"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubRespawnCollaborators(t, tc.installed, nil)
 			var seq []string
-			waitForShutdownCompletionFn = func() error {
+			waitForShutdownCompletionFn = func(daemon.ShutdownTarget) error {
 				seq = append(seq, "wait")
-				return tc.waitErr
+				return nil
 			}
 			prevRestart, prevEnsure := restartAutostartUnitFn, ensureDaemonFromPathFn
 			restartAutostartUnitFn = func() error {
@@ -208,7 +207,7 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 				return prevEnsure(path)
 			}
 
-			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 				t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 			}
 
@@ -226,10 +225,10 @@ func TestRestartDaemonFromPathNoDaemonIsNoOp(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 		respawnDaemonFn = prevRespawn
 	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownNoDaemon, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
 	}
-	respawnDaemonFn = func(string) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		t.Fatalf("respawn must not run when no daemon is present")
 		return respawnResult{}, nil
 	}
@@ -250,11 +249,11 @@ func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 		respawnDaemonFn = prevRespawn
 	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownViaRPC, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 	var gotPath string
-	respawnDaemonFn = func(path string) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownTarget) (respawnResult, error) {
 		gotPath = path
 		return respawnResult{}, nil
 	}
@@ -346,8 +345,10 @@ func daemonRestartPresentHarness(t *testing.T, shutdown daemon.ShutdownResult, r
 	})
 	daemonRestartPresenceFn = func() daemon.ProbeAnswer { return daemon.AnswerYes() }
 	osExecutableFn = func() (string, error) { return binPath, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) { return shutdown, nil }
-	respawnDaemonFn = func(string) (respawnResult, error) { return respawn, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return shutdown, daemon.ShutdownTarget{}, nil
+	}
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) { return respawn, nil }
 	stubAutostartScope(t, false, false, nil) // no unit serves this home -> refresh no-ops
 	daemonRestartQuiet = false
 

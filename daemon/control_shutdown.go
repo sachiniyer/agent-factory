@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/rpc"
 	"os"
 	"strings"
@@ -62,32 +63,83 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // daemon's PID and sending SIGTERM directly (#504) so an `af upgrade` does
 // not leave a stale daemon running the old binary.
 //
-// Returns (ShutdownNoDaemon, nil) when no daemon is running (no socket or
-// ECONNREFUSED), (ShutdownViaRPC, nil) when the Shutdown RPC acknowledged,
-// (ShutdownViaSIGTERM, nil) when the fallback signaled a real `af --daemon`
-// process, (ShutdownFailed, err) when the daemon is provably running but
+// Returns (ShutdownNoDaemon, {}, nil) when no daemon is running (no socket or
+// ECONNREFUSED), (ShutdownViaRPC, target, nil) when the Shutdown RPC acknowledged,
+// (ShutdownViaSIGTERM, target, nil) when the fallback signaled a real `af --daemon`
+// process, (ShutdownFailed, {}, err) when the daemon is provably running but
 // the fallback could not locate or signal it (ambiguous pgrep matches, no
 // PID file with pgrep unavailable, permission denied on signal) — the
 // returned error carries the recovery hint the caller must surface — and
-// (ShutdownError, err) when the socket was present but the Shutdown RPC
+// (ShutdownError, {}, err) when the socket was present but the Shutdown RPC
 // failed with a transport error that is neither daemon-absent nor
 // method-not-found (EACCES, ECONNRESET/EPIPE, dial timeout): a daemon was
 // listening but its final state is unknown (#978).
-func RequestShutdown() (ShutdownResult, error) {
+//
+// The ShutdownTarget names the process being stopped (zero when unknown). On
+// the RPC path its PID is the acknowledging daemon's own, falling back to the
+// PID a pre-shutdown Ping reported for daemons built before ShutdownResponse
+// carried one; callers pass it to WaitForShutdownCompletion so the respawn
+// waits for that exact process to exit rather than for its socket to go quiet
+// (#5007).
+func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
-		return ShutdownNoDaemon, err
+		return ShutdownNoDaemon, ShutdownTarget{}, err
 	}
 	if _, statErr := os.Stat(socketPath); statErr != nil {
 		if errors.Is(statErr, fs.ErrNotExist) {
-			return ShutdownNoDaemon, nil
+			return ShutdownNoDaemon, ShutdownTarget{}, nil
 		}
-		return ShutdownNoDaemon, statErr
+		return ShutdownNoDaemon, ShutdownTarget{}, statErr
 	}
+	// Ping and Shutdown share ONE connection. A unix connection dies with the
+	// process that accepted it, so a Ping answered on the connection that then
+	// carries the Shutdown ack provably came from the acknowledging daemon. On
+	// separate connections the pinged daemon could exit and a replacement bind
+	// and acknowledge in between, and the wait would then track a PID that never
+	// acknowledged — see it dead and respawn into the drainer's race.
+	conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout)
+	if dialErr != nil {
+		if isDaemonAbsentErr(dialErr) {
+			return ShutdownNoDaemon, ShutdownTarget{}, nil
+		}
+		// The socket was present per the stat above, so an unclassifiable dial
+		// failure is the ambiguous contacted-but-errored outcome (#978).
+		return ShutdownError, ShutdownTarget{}, dialErr
+	}
+	defer conn.Close()
+	client := rpc.NewClient(conn)
+	defer client.Close()
+	// Capture the target's PID before asking it to stop: once it acknowledges it
+	// may stop answering, and a daemon predating ShutdownResponse.PID reports
+	// none. Bounded so a wedged responder cannot stall the upgrade.
+	var pingResp PingResponse
+	var pingToken string
 	var resp ShutdownResponse
-	if rpcErr := callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp); rpcErr != nil {
+	var rpcErr error
+	_ = conn.SetDeadline(time.Now().Add(daemonDialTimeout))
+	if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &pingResp); pingErr != nil {
+		// A Ping that missed its bound shuts this client down, so a Shutdown sent
+		// on it would fail and misreport a slow-but-healthy daemon as one that
+		// could not be stopped. Send Shutdown on a fresh connection instead, as
+		// before the Ping existed; with no Ping answered on that connection, only
+		// the ack's own PID is trusted.
+		pingResp = PingResponse{}
+		rpcErr = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
+	} else {
+		// Pin the pinged process's incarnation now, while it is certainly still
+		// the daemon: for a daemon whose ack carries no PID this is the only
+		// sample taken before it could exit and have its PID recycled.
+		if pingResp.PID > 0 {
+			pingToken = processStartTokenFn(pingResp.PID)
+		}
+		// Shutdown keeps its historical unbounded call once connected.
+		_ = conn.SetDeadline(time.Time{})
+		rpcErr = client.Call(controlServiceName+".Shutdown", ShutdownRequest{}, &resp)
+	}
+	if rpcErr != nil {
 		if isDaemonAbsentErr(rpcErr) {
-			return ShutdownNoDaemon, nil
+			return ShutdownNoDaemon, ShutdownTarget{}, nil
 		}
 		if isRPCMethodNotFoundErr(rpcErr) {
 			// Daemon is alive on the socket but does not speak Shutdown
@@ -99,12 +151,24 @@ func RequestShutdown() (ShutdownResult, error) {
 		// EACCES, ECONNRESET/EPIPE, or a dial timeout. Something was listening,
 		// so ShutdownNoDaemon would mislabel this — report the ambiguous
 		// contacted-but-errored outcome instead (#978).
-		return ShutdownError, rpcErr
+		return ShutdownError, ShutdownTarget{}, rpcErr
 	}
 	if !resp.OK {
-		return ShutdownNoDaemon, fmt.Errorf("daemon Shutdown RPC returned OK=false")
+		return ShutdownNoDaemon, ShutdownTarget{}, fmt.Errorf("daemon Shutdown RPC returned OK=false")
 	}
-	return ShutdownViaRPC, nil
+	// The Shutdown ack's PID wins; the Ping PID covers daemons built before the
+	// ack carried one.
+	pid := resp.PID
+	if pid == 0 {
+		pid = pingResp.PID
+	}
+	// An ack PID comes from a daemon that was alive to send it, so sample it
+	// now; a PID taken from the Ping reuses the pre-shutdown sample.
+	tok := pingToken
+	if pid != pingResp.PID {
+		tok = processStartTokenFn(pid)
+	}
+	return ShutdownViaRPC, ShutdownTarget{PID: pid, StartToken: tok}, nil
 }
 
 // ClassifyShutdownTarget turns the read-only ping made before a restart into
@@ -123,40 +187,100 @@ func ClassifyShutdownTarget(pingErr error) ProbeAnswer {
 	return Undetermined(fmt.Errorf("cannot determine whether a daemon is available to shut down: %w", pingErr))
 }
 
-// shutdownCompleteGrace bounds how long WaitForShutdownCompletion polls for
-// the control socket to stop answering; shutdownCompletePoll is the cadence.
-// Package vars rather than constants so tests can shorten the timeout path,
-// mirroring stopDaemonGrace/stopDaemonPoll. The grace matches
-// sigtermFallbackGrace — the wait signalAndWait already imposes on the
-// SIGTERM path. The poll is tighter than sigtermFallbackPoll because the
-// normal RPC teardown completes just past shutdownAckGrace (50ms), so a 50ms
-// cadence usually resolves the wait on its first or second check.
+// ShutdownTarget identifies the daemon process a shutdown was sent to. The zero
+// value means the process is unknown, and WaitForShutdownCompletion then falls
+// back to waiting for the control socket to go quiet.
+type ShutdownTarget struct {
+	// PID is the target's process id, 0 when unknown.
+	PID int
+	// StartToken pins the process incarnation at the moment the PID was
+	// learned (see processStartToken), so a PID recycled before or during the
+	// wait still reads as the daemon's exit. Empty when unobservable.
+	StartToken string
+}
+
+// ErrShutdownIncomplete reports that a daemon acknowledged Shutdown but had not
+// finished tearing down when WaitForShutdownCompletion's bound expired. The
+// daemon is still alive, so respawning would race it (#5007); callers withhold
+// the respawn and surface the condition instead.
+var ErrShutdownIncomplete = errors.New("daemon shutdown acknowledged but not finished")
+
+// shutdownCompleteGrace bounds how long WaitForShutdownCompletion waits for a
+// known daemon PID to exit; shutdownCompletePoll is the cadence. The grace is
+// generous because a daemon drains durable work after acknowledging Shutdown,
+// and waiting on its actual exit is the only signal that cannot mistake a
+// still-draining daemon for a gone one (#5007). shutdownSocketQuietGrace bounds
+// the no-PID fallback, which keeps the socket-quiet wait and its 5s bound —
+// sigtermFallbackGrace, the wait signalAndWait already imposes on the SIGTERM
+// path. The poll is tighter than sigtermFallbackPoll because the normal RPC
+// teardown can complete just past shutdownAckGrace (50ms). Package vars rather
+// than constants so tests can shorten the timeout paths, mirroring
+// stopDaemonGrace/stopDaemonPoll.
 var (
-	shutdownCompleteGrace = sigtermFallbackGrace
-	shutdownCompletePoll  = shutdownAckGrace
+	shutdownCompleteGrace    = 60 * time.Second
+	shutdownSocketQuietGrace = sigtermFallbackGrace
+	shutdownCompletePoll     = shutdownAckGrace
 )
 
-// WaitForShutdownCompletion blocks until the daemon control socket stops
-// answering pings, bounded by shutdownCompleteGrace. The Shutdown RPC
-// acknowledges before the daemon tears down (shutdownAckGrace plus the
-// teardown tail), so a caller that respawns immediately after RequestShutdown
-// races the dying daemon: EnsureDaemon's liveness ping — or a unit-restarted
-// daemon's startup ping guard — can see the old socket still answering, skip
-// the spawn, and leave nothing running once the old daemon exits (#854).
-// Callers on the shutdown-then-respawn path must wait for this to return
-// before respawning. It mirrors signalAndWait's poll-until-dead discipline;
-// on the SIGTERM fallback path the process is already gone, so the first ping
-// fails and the wait returns immediately. Returns an error when the daemon is
-// still answering at the deadline — the caller should warn and proceed.
-func WaitForShutdownCompletion() error {
-	deadline := time.Now().Add(shutdownCompleteGrace)
+// WaitForShutdownCompletion blocks until the daemon that acknowledged Shutdown
+// has finished tearing down. The Shutdown RPC acknowledges before the daemon
+// tears down (shutdownAckGrace plus the drain), so a caller that respawns
+// immediately after RequestShutdown races the dying daemon: EnsureDaemon's
+// liveness ping — or a unit-restarted daemon's startup ping guard — can see
+// the old daemon still answering, skip the spawn, and leave nothing running
+// once it exits (#854, #5007). Callers on the shutdown-then-respawn path must
+// wait for this to return nil before respawning.
+//
+// With target.PID > 0 (the target RequestShutdown returned) it waits for that
+// process to exit, bounded by shutdownCompleteGrace. Process exit is a positive signal;
+// socket quietness is not — a draining daemon can stop answering pings well
+// before it releases what a successor needs. Renamed or relocated binaries are
+// irrelevant here because nothing checks the process name, only liveness and
+// start time — a PID recycled to another process counts as the daemon's exit. On
+// the SIGTERM fallback path the process is already gone, so the first check
+// returns. With target.PID == 0 (unknown) it falls back to waiting for the control
+// socket to stop answering, bounded by shutdownSocketQuietGrace.
+//
+// It only observes: it never signals the process. A daemon still draining at
+// the bound is left alone, and the returned error wraps ErrShutdownIncomplete
+// so the caller can withhold the respawn and tell the user.
+func WaitForShutdownCompletion(target ShutdownTarget) error {
+	if pid := target.PID; pid > 0 {
+		// The start-time token, taken when the PID was learned, tells a recycled
+		// PID from the daemon: if the daemon exits and its PID is reused, liveness
+		// alone would wait out the grace and the hint would name an unrelated
+		// process. "" (unobservable) falls back to liveness only, and a later read
+		// that fails is not a change: a failed read must not fabricate an exit.
+		token := target.StartToken
+		gone := func() bool {
+			if !pidLooksAlive(pid) {
+				return true
+			}
+			cur := processStartTokenFn(pid)
+			return token != "" && cur != "" && cur != token
+		}
+		deadline := time.Now().Add(shutdownCompleteGrace)
+		for time.Now().Before(deadline) {
+			if gone() {
+				return nil
+			}
+			time.Sleep(shutdownCompletePoll)
+		}
+		// The process may have exited between the last in-loop check and the
+		// deadline; do not report a daemon that is already gone as still running.
+		if gone() {
+			return nil
+		}
+		return fmt.Errorf("%w: daemon pid %d still running %s after shutdown was acknowledged (it may still be draining durable work)", ErrShutdownIncomplete, pid, shutdownCompleteGrace)
+	}
+	deadline := time.Now().Add(shutdownSocketQuietGrace)
 	for time.Now().Before(deadline) {
 		if pingDaemon() != nil {
 			return nil
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
-	return fmt.Errorf("daemon control socket still answering %s after shutdown was acknowledged", shutdownCompleteGrace)
+	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownSocketQuietGrace)
 }
 
 // isDaemonAbsentErr reports whether err from a dial/RPC call indicates that
