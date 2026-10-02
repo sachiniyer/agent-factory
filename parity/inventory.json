@@ -683,16 +683,16 @@
         "pointer": "keys/keys.go KeySetBackend (ctrl+r) -> app/backend_picker.go openBackendPicker + handleStateSelectBackend -> app/session_control.go sessionStartRequest.Backend"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable"
+        "status": "yes",
+        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable; the browser's exact wire path is proven end-to-end by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/sessions.go:242,328 --backend local|docker|ssh|hook"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#1933",
-      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. web stays `partial`, NOT `yes`: what is proven is that the web SENDS the field and the daemon offers an honest picker; what is NOT proven is that a user can create a WORKING remote session from the browser — #1968 observed provisioning (launch_cmd ran, an agent-server came up) but the session timed out waiting for its program, cause unresolved. That unproven end-to-end remote create is now the whole of what keeps this row off 'parity'. See docs/dev/surface-parity.md 'reachable != user-settable'."
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. The web cell was `partial` rather than `yes` for one reason: nobody had shown a WORKING remote session created over the browser's request path — #1968 watched provisioning succeed and the session then time out waiting for its program, cause unresolved. That evidence now exists and is executable: TestWebCreateSessionOnHookBackend (integration/web_remote_hook_test.go) POSTs the modal's verbatim body — title_base/repo_path/program/prompt/backend='hook' — to /v1/CreateSession against a repo carrying remote_hooks but NO backend key (so the field, not repo config, does the routing), watches launch_cmd's agent-server come up and the daemon's readiness wait complete over the remote pane, attaches /v1/sessions/{id}/stream and reads typed input echoed back, then observes KillSession -> MsgExit -> delete_cmd reaping. Green on a PR Validation probe; the #1968 timeout does not reproduce on current master. See docs/dev/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.inplace",
@@ -757,16 +757,16 @@
         "pointer": "app/backend_picker.go: creation form backend field (ctrl+r); configured keys.new_remote opens the same field for compatibility (#4017)"
       },
       "web": {
-        "status": "partial",
-        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker — the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind)"
+        "status": "yes",
+        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker — the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind); proven end-to-end by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/api.go:589 --backend hook"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#1933",
-      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. Web remains partial: its backend picker reaches hook, but working browser remote provisioning is still unproven (#1968)."
+      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. The web reaches hook through that same explicit field — its picker never emits force_remote, which field_coverage now declares `ok` rather than a gap, because the stronger backend spelling already covers the capability (same reason the CLI's force_remote cell is `ok`). The web cell was `partial` on the strength of #1968's unproven remote provisioning; TestWebCreateSessionOnHookBackend closes that with an end-to-end pass over the browser's exact endpoints — create, events rail, stream attach + echo, kill, delete_cmd reap — green on a PR Validation probe."
     },
     {
       "id": "session.create.opt.title",
@@ -2398,7 +2398,7 @@
           "gap": "session.create.opt.inplace"
         },
         "force_remote": {
-          "gap": "session.create.opt.remote"
+          "ok": "Compatibility-only wire selector, same as the CLI/TUI decls: the web reaches the hook backend explicitly via backend='hook' picked in the ListBackends picker, which resolveBackendKind routes to the same BackendHook and wins over the legacy ForceRemote selector — the dedicated field would add nothing over the picker. Working remote provisioning over the browser's endpoints is proven by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend."
         }
       },
       "CreateTab": {

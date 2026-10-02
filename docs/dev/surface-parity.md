@@ -62,16 +62,21 @@ the web does.
 |---|---|---|---|
 | Title, program | yes | yes | yes |
 | Initial prompt | yes | yes | yes |
-| Backend (docker/ssh/hook) | yes | partial | yes |
-| Force-remote (hook) | yes | partial | yes |
+| Backend (docker/ssh/hook) | yes | yes | yes |
+| Force-remote (hook) | yes | yes | yes |
 | Account (`--account`) | yes | yes | yes |
 | In-place (`--here`) | **no** | **no** | yes |
 
-The web's two `partial` cells are not missing controls: the browser sends
-`backend` and can select `hook`, but no one has yet shown a **working** remote
-session created from it (#1968 watched provisioning succeed and the session then
-time out waiting for its program). Reachable is not the same as proven — see
-"Known blind spots".
+The web's backend and force-remote cells sat at `partial` for a long stretch —
+not for missing controls, but because nobody had shown a **working** remote
+session created over the browser's request path (#1968 watched provisioning
+succeed and the session then time out waiting for its program). The proof is
+now executable: `TestWebCreateSessionOnHookBackend`
+(`integration/web_remote_hook_test.go`) drives the browser's exact endpoints —
+the modal's `CreateSession` body with `backend:"hook"`, the events rail, the
+`{id}/stream` attach, `KillSession` — through a real `af agent-server` stood up
+by a mock `launch_cmd`, and reads typed input echoed back off the remote pane.
+Reachable is not the same as proven — see "Known blind spots".
 
 So when this check fails, the question is never "does the web need to catch up?"
 It is "which surfaces should have this, and which deliberately should not?" —
