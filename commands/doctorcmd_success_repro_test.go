@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
@@ -73,6 +74,24 @@ func requireTmuxOrSkip(t *testing.T) {
 	}
 }
 
+// filterGitConfigOverrides drops GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM from
+// the inherited environment so the child git reads the fixture's
+// $HOME/.gitconfig as the global config (and /etc/gitconfig as the system
+// config) rather than a file the test runner pointed at. Both an empty and a
+// non-empty GIT_CONFIG_GLOBAL override $HOME/.gitconfig, so the entry is dropped
+// rather than blanked.
+func filterGitConfigOverrides(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_CONFIG_GLOBAL=") ||
+			strings.HasPrefix(kv, "GIT_CONFIG_SYSTEM=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 // runDoctorSuccessSubprocess runs the built af binary with `af doctor
 // --setup --json` in a throwaway home the caller has already seeded, under a
 // real PATH so the setup prerequisites (git for checkGit, tmux for checkTmux,
@@ -103,7 +122,18 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(),
+	// Strip any inherited GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM the test runner
+	// may export (e.g. a config without a user identity): with one set, git
+	// ignores $HOME/.gitconfig, so checkGitIdentity reads the runner's global
+	// config instead of the fixture identity this test seeds below and reports
+	// an actionable git-identity finding — failing the exit-0 assertion for the
+	// runner's configuration rather than the behavior under test. An empty value
+	// still overrides (git treats an empty GIT_CONFIG_GLOBAL as "no global
+	// file"), so the variable must be dropped entirely, not cleared. With them
+	// gone, HOME=home makes git read home/.gitconfig as the global config, so the
+	// seeded user.name/user.email resolve and checkGitIdentity passes.
+	cmd.Env = append(
+		filterGitConfigOverrides(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
 	)
