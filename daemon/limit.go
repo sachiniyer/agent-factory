@@ -663,7 +663,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	as := instance.AgentServer()
 	probe := probeAbsent
 	if !forceRespawn {
-		probe = probeLiveness(instance, as)
+		// resumeFromLimit is an operator one-shot RPC under the per-session op
+		// lock, so the probe uses the operator budget — not the poll loop's 5s
+		// tie-break budget. See remoteloss.go's probeLivenessForOperator.
+		probe = probeLivenessForOperator(instance, as)
 	}
 	shouldRespawn := forceRespawn
 	switch probe {
