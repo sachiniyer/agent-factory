@@ -53,7 +53,8 @@ func unwrapTaskset(words []*syntax.Word, names map[string]struct{}, memo operand
 			return run.done(words[1:], false)
 		case option == "-a" || option == "--all-tasks" ||
 			option == "-c" || option == "--cpu-list" ||
-			tasksetChildLaunchingLongAbbrev(option):
+			tasksetChildLaunchingLongAbbrev(option) ||
+			tasksetChildLaunchingShortCluster(option):
 			words = words[1:]
 		case strings.HasPrefix(option, "-"):
 			return run.done(nil, true)
@@ -103,6 +104,38 @@ func tasksetChildLaunchingLongAbbrev(option string) bool {
 		return false
 	}
 	return strings.HasPrefix("--all-tasks", option) || strings.HasPrefix("--cpu-list", option)
+}
+
+// tasksetChildLaunchingShortCluster recognizes a combined short-flag cluster
+// composed solely of `a`/`c` runes (e.g. -ac, -ca, -cc), which util-linux
+// taskset parses as the argument-free flags -a and -c glued into one argv
+// word — getopt accepts -ac as -a -c (measured on 2.39.3: `taskset -ac
+// 0 /bin/echo X` and `taskset -ca 0 /bin/echo X` both exec the child, exit
+// 0; duplicate runes like -aa/-cc are harmless). The child-launching arm
+// used exact equality, so such a cluster fell through to
+// `case strings.HasPrefix(option, "-")` and was refused before the child
+// tail was ever judged — even a provably-safe child. This is the symmetric
+// sibling of tasksetProcessOnlyOption's cluster loop: that handler routes
+// any -p-bearing cluster to the process-only arm (checked earlier in the
+// switch), so by the time this predicate is consulted the cluster contains
+// no `p`; utilLinuxTerminalOption (also checked earlier) has already peeled
+// any h/V-bearing word. The `len < 3` / single-dash / not-`--` guard
+// confines the check to short clusters of at least two flags, leaving the
+// lone `-a` and `-c` to the exact-equality arm. The a/c-only boundary
+// matches the binary's accept/reject line on the dot: a non-a/c rune glued
+// to the cluster is `invalid option -- '<r>'` on the binary and excluded
+// here for the same reason, so a malformed cluster falls to the fail-closed
+// `HasPrefix` arm unchanged.
+func tasksetChildLaunchingShortCluster(option string) bool {
+	if len(option) < 3 || option[0] != '-' || option[1] == '-' {
+		return false
+	}
+	for _, flag := range option[1:] {
+		if flag != 'a' && flag != 'c' {
+			return false
+		}
+	}
+	return true
 }
 
 func tasksetCommandAfterMask(words []*syntax.Word, names map[string]struct{}, memo operandTailMemo) ([]*syntax.Word, bool) {

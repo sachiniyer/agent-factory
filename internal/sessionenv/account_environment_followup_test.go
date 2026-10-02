@@ -901,3 +901,150 @@ func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingLongAbbreviation
 			"command %q must be refused by the account-environment guard", command)
 	}
 }
+
+// taskset's child-launching short flags -a and -c are argument-free, so
+// util-linux getopt accepts them glued into one argv word (2.39.3: `taskset
+// -ac 0 /bin/echo X` and `taskset -ca 0 /bin/echo X` both exec the child,
+// exit 0; duplicate runes like -aa/-cc are harmless, and -acac likewise).
+// The child-launching arm `option == "-a" || ... || option == "-c"` used
+// exact equality, so a combined cluster composed only of a/c runes (e.g.
+// -ac, -ca, -cc) fell through to `case strings.HasPrefix(option, "-")` and
+// was refused before the child tail was ever judged — even a provably-safe
+// child. This is the consistency gap introduced by a2c73158, which
+// established the argument-free short-flag cluster model
+// (utilLinuxTerminalOption scanning a/c/p and tasksetProcessOnlyOption
+// iterating -p-bearing clusters) but left this arm exact-only. The fix adds
+// tasksetChildLaunchingShortCluster, the symmetric sibling of
+// tasksetProcessOnlyOption's cluster loop, so an a/c-only cluster reaches
+// tasksetCommandAfterMask and is judged by its child tail rather than
+// fail-closed at the option arm. Verified against the installed util-linux
+// 2.39.3 binary before this test was written.
+func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingShortClustersAdmitted(t *testing.T) {
+	for _, command := range []string{
+		// The clusters the bug refused; each consumes the option word, the
+		// mask/list operand falls to tasksetCommandAfterMask, and the clean
+		// child is judged non-mutating.
+		"taskset -ac 0x1 codex",
+		"taskset -ca 0x1 codex",
+		"taskset -ac 0-3 codex",
+		"taskset -ca 0-3 codex",
+		// Duplicate a/c runes are harmless duplicate flags on the binary and
+		// the child is still judged by tasksetCommandAfterMask.
+		"taskset -aa 0x1 codex",
+		"taskset -cc 0-3 codex",
+		"taskset -acac 0-3 codex",
+		// A multi-word benign child is fine: the every-suffix child-tail walk
+		// finds no identity mutation.
+		"taskset -ac 0-3 npm run dev",
+		"taskset -ca 0x1 npm run dev",
+		// A PATH-shadowed or repo-local taskset is basename-indistinguishable
+		// and lands on the same child-launching branch.
+		"./taskset -ac 0-3 codex",
+		"/usr/bin/taskset -ca 0x1 codex",
+		// Controls: the separated-flag and single-flag forms the exact-equality
+		// arm already admitted must not regress.
+		"taskset -a -c 0-3 codex",
+		"taskset -c -a 0-3 codex",
+		"taskset -a 0x1 codex",
+		"taskset -c 0-3 codex",
+		"taskset --all-tasks 0x1 codex",
+		"taskset --cpu-list 0-3 codex",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q is a safe child-launching taskset spelling and must be allowed", command)
+	}
+}
+
+// Recognizing the -ac/-ca clusters must not open an under-refusal: once the
+// option word is consumed, the mask/list operand falls to
+// tasksetCommandAfterMask, whose wrapperOperandTailMutates and
+// shadowedChildTailMutates walks judge every child slice — exactly the path
+// the separated-flag forms already take. So a mutating child tail behind a
+// cluster is now refused via the child-tail walk rather than the old
+// fail-closed option arm; the refusal outcome is unchanged. Measured on the
+// real util-linux 2.39.3 binary: `taskset -ac 0-3 env CODEX_HOME=/other
+// codex` execs the child (env sets CODEX_HOME then fails on codex, exit 127),
+// so the mutation the validator must block is the child tail, not the
+// option. These cases mirror the long-abbreviation refuse test for parity.
+func TestValidateAccountEnvironmentCommand_TasksetChildLaunchingShortClustersRefuseMutatingTail(t *testing.T) {
+	for _, command := range []string{
+		// A direct identity-variable assignment in the child tail behind the
+		// cluster must be refused via the child-tail walk.
+		"taskset -ac 0-3 env CODEX_HOME=/other codex",
+		"taskset -ca 0x1 env CODEX_HOME=/other codex",
+		"./taskset -ac 0-3 env CODEX_HOME=/other codex",
+		// A deeper permutation hits the same path.
+		"taskset -cc 0-3 env CODEX_HOME=/other codex",
+		"taskset -acac 0x1 env CODEX_HOME=/other codex",
+		// A buried xargs identity mutation behind an opaque leaf (echo): the
+		// every-suffix child-tail walk must catch it at a non-zero offset,
+		// mirroring the long-abbreviation control in
+		// TestValidateAccountEnvironmentCommand_TasksetChildLaunchingLongAbbreviationsRefuseMutatingTail.
+		"taskset -ac 0-3 echo xargs --process-slot-var CODEX_HOME codex",
+		"taskset -ca 0x1 echo xargs --process-slot-var CODEX_HOME codex",
+		// A direct account-mutating builtin in the child tail is refused.
+		"taskset -ac 0-3 unset CODEX_HOME",
+		// Controls: the separated-flag and single-flag forms must still refuse
+		// the same mutations (no regression in the exact-equality path).
+		"taskset -a -c 0-3 env CODEX_HOME=/other codex",
+		"taskset -c -a 0x1 env CODEX_HOME=/other codex",
+		"taskset -c 0-3 env CODEX_HOME=/other codex",
+		"taskset -a 0x1 env CODEX_HOME=/other codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+		require.Error(t, err, "command %q buries an identity mutation behind a taskset child-launching short cluster", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+}
+
+// The tasksetChildLaunchingShortCluster predicate's accept/reject boundary
+// matches the util-linux 2.39.3 binary: a non-a/c rune glued to the cluster
+// is `invalid option -- '<r>'` on the binary and not matched by the
+// predicate, so such a malformed cluster falls through to the fail-closed
+// `HasPrefix` arm and is refused unchanged — guarding against over-admission
+// of an attached unknown rune a shadowed taskset could interpret
+// differently. -p-bearing clusters are routed to the process-only arm
+// (checked earlier in the switch) and so never reach the predicate; their
+// childless verdicts are pinned by
+// TestValidateAccountEnvironmentCommand_AllowsProcessOnlyWrapperModes, and
+// this test confirms a -p-bearing cluster still does NOT take the
+// child-launching path even when an a/c flag precedes the p.
+func TestValidateAccountEnvironmentCommand_TasksetShortClusterBoundaryRefusesMalformed(t *testing.T) {
+	for _, command := range []string{
+		// A glued digit (binary: `invalid option -- '0'`) is not an a/c flag,
+		// so the cluster is not child-launching and fails closed.
+		"taskset -ac0 0-3 codex",
+		"taskset -ca0 0x1 codex",
+		// A glued unknown letter (binary: `invalid option -- 'x'`) ditto.
+		"taskset -ax 0x1 codex",
+		"taskset -cx 0-3 env CODEX_HOME=/other codex",
+		// A cluster of unknown letters with no p stays fail-closed.
+		"taskset -xy 0x1 codex",
+		// A lone non-a/c short flag is unchanged: fail-closed.
+		"taskset -z 0x1 codex",
+		// -p-bearing clusters route to the process-only arm and launch no
+		// child: a mutating tail behind one is admitted (no child env to
+		// mutate on the real binary), and the operand tail is still
+		// inspected — but a plain PID-list tail is inert, matching
+		// AllowsProcessOnlyWrapperModes. These confirm the two arms stay
+		// mutually exclusive: -ap/-cp/-acp never reach the child-launching
+		// predicate, so they are NOT admitted as child-launching.
+		"taskset -ap 0x1 123",
+		"taskset -cp 0-3 123",
+		"taskset -acp 0-3 123",
+	} {
+		switch command {
+		case "taskset -ap 0x1 123", "taskset -cp 0-3 123", "taskset -acp 0-3 123":
+			// process-only mode launches no child, so the clean PID-list tail
+			// is admitted (the operand-tail walk finds no mutation).
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q is process-only (p-bearing cluster) and must be admitted, not routed to child-launching", command)
+		default:
+			err := ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount())
+			require.Error(t, err, "command %q has a malformed taskset short cluster that must fail closed", command)
+			require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+				"command %q must be refused by the account-environment guard", command)
+		}
+	}
+}
