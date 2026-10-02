@@ -74,36 +74,53 @@ func requireTmuxOrSkip(t *testing.T) {
 	}
 }
 
-// filterGitConfigOverrides strips Git config overrides from the inherited
-// environment so the child git reads the fixture's $HOME/.gitconfig as the
-// global config (and /etc/gitconfig as the system config) rather than a file
-// or set of command-line entries the test runner pointed at.
+// filterInheritedGitEnv strips Git's environment from the inherited process
+// environment so the child git and the spawned af read the fixture's
+// $HOME/.gitconfig as the global config (and /etc/gitconfig as the system
+// config), operate against the fixture's repoDir (cmd.Dir), and are not
+// redirected at an external repository or identity the test runner pointed at.
 //
-// Two shapes of override are dropped:
+// Two shapes of entry are dropped, mirroring the override classification in
+// session/git/repository_environment.go (repositoryPathEnvironment), which
+// already treats these names as Git environment that must not cross the
+// boundary:
 //
-//   - GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM: a file path. Both an empty and a
-//     non-empty value override $HOME/.gitconfig (git treats an empty
-//     GIT_CONFIG_GLOBAL as "no global file"), so the entry is dropped rather
-//     than blanked.
-//   - GIT_CONFIG_COUNT with its indexed GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
-//     pairs (plus GIT_CONFIG and GIT_CONFIG_PARAMETERS): command-line config
-//     entries that git applies on top of the file config. If a runner exports
-//     these with empty user.name / user.email values, checkGitIdentity sees
-//     the inherited empty identity instead of the fixture's .gitconfig, so the
-//     asserted exit-0 run fails for the runner's configuration rather than the
-//     regression under test. The COUNT entry and every indexed KEY/VALUE entry
-//     are removed wholesale for the same reason as the file overrides above:
-//     an empty value still applies, so they cannot be blanked. This mirrors the
-//     override classification in session/git/repository_environment.go
-//     (repositoryPathEnvironment), which already treats these names as Git
-//     config overrides that must not cross the environment boundary.
-func filterGitConfigOverrides(env []string) []string {
+//   - Git config overrides: GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM (a file
+//     path — both an empty and a non-empty value override $HOME/.gitconfig, so
+//     the entry is dropped rather than blanked) and GIT_CONFIG_COUNT with its
+//     indexed GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pairs (plus GIT_CONFIG and
+//     GIT_CONFIG_PARAMETERS — command-line config entries git applies on top of
+//     the file config). If a runner exports these with empty user.name /
+//     user.email values, checkGitIdentity sees the inherited empty identity
+//     instead of the fixture's .gitconfig, so the asserted exit-0 run fails for
+//     the runner's configuration rather than the regression under test. The
+//     COUNT entry and every indexed KEY/VALUE entry are removed wholesale for
+//     the same reason as the file overrides: an empty value still applies, so
+//     they cannot be blanked.
+//   - Git repository-local variables: GIT_DIR, GIT_WORK_TREE,
+//     GIT_IMPLICIT_WORK_TREE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+//     GIT_INDEX_FILE, GIT_GRAFT_FILE, GIT_REPLACE_REF_BASE, GIT_PREFIX,
+//     GIT_INTERNAL_SUPER_PREFIX, GIT_SHALLOW_FILE, GIT_COMMON_DIR — the names
+//     `git rev-parse --local-env-vars` reports. When a test runs from a Git hook
+//     or other caller exporting GIT_DIR or GIT_WORK_TREE, the `git init` in
+//     runDoctorSuccessSubprocess would inherit them and initialize or reuse that
+//     external repository rather than repoDir, and the spawned af would inherit
+//     them and let checkGit (`git rev-parse --show-toplevel`) probe the caller's
+//     repository — making this regression test non-hermetic. An empty GIT_DIR
+//     still points git at the current directory, so these are removed, not
+//     blanked.
+func filterInheritedGitEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
 		name, _, _ := strings.Cut(kv, "=")
 		switch name {
 		case "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL",
-			"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM":
+			"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM",
+			"GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
+			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_INDEX_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
+			"GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE",
+			"GIT_COMMON_DIR":
 			continue
 		}
 		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
@@ -140,27 +157,42 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// `git init` makes one without depending on the source tree being a
 	// checkout, so the test is hermetic to where `go test` runs from.
 	repoDir := t.TempDir()
-	if err := exec.Command("git", "-C", repoDir, "init", "-q").Run(); err != nil {
+	// Filter the inherited Git environment for the `git init` itself too: if a
+	// caller exports GIT_DIR / GIT_WORK_TREE (e.g. running from a Git hook),
+	// `git -C repoDir init` would initialize or reuse that external repository
+	// rather than repoDir. filterInheritedGitEnv strips the repo-local variables
+	// so the init targets repoDir and the fixture stays hermetic.
+	initCmd := exec.Command("git", "-C", repoDir, "init", "-q")
+	initCmd.Env = filterInheritedGitEnv(os.Environ())
+	if err := initCmd.Run(); err != nil {
 		t.Skipf("git unavailable: cannot initialize a throwaway repo for checkGit: %v", err)
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = repoDir
-	// Strip inherited Git config overrides the test runner may export: a
-	// GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM file (e.g. a config without a user
-	// identity), or a GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
-	// command-line set (e.g. empty user.name / user.email values). With any of
-	// these set, git ignores or layers on top of $HOME/.gitconfig, so
-	// checkGitIdentity reads the runner's identity instead of the fixture
-	// identity this test seeds below and reports an actionable git-identity
-	// finding — failing the exit-0 assertion for the runner's configuration
-	// rather than the behavior under test. An empty value still overrides (git
-	// treats an empty GIT_CONFIG_GLOBAL as "no global file", and an empty indexed
-	// value still applies), so the entries are dropped entirely, not cleared
-	// (filterGitConfigOverrides). With them gone, HOME=home makes git read
-	// home/.gitconfig as the global config, so the seeded user.name/user.email
-	// resolve and checkGitIdentity passes.
+	// Strip inherited Git environment the test runner may export:
+	//   - Git config overrides: a GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM file
+	//     (e.g. a config without a user identity), or a GIT_CONFIG_COUNT /
+	//     GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n command-line set (e.g. empty
+	//     user.name / user.email values). With any of these set, git ignores or
+	//     layers on top of $HOME/.gitconfig, so checkGitIdentity reads the
+	//     runner's identity instead of the fixture identity this test seeds
+	//     below and reports an actionable git-identity finding — failing the
+	//     exit-0 assertion for the runner's configuration rather than the
+	//     behavior under test.
+	//   - Git repository-local variables (GIT_DIR, GIT_WORK_TREE, ...): if a
+	//     caller exports these, the spawned af inherits them and checkGit
+	//     (`git rev-parse --show-toplevel`) probes the caller's repository
+	//     instead of repoDir — again breaking the exit-0 assertion for a
+	//     reason unrelated to the regression under test.
+	// An empty value still overrides (git treats an empty GIT_CONFIG_GLOBAL as
+	// "no global file", an empty GIT_DIR still points at the current directory,
+	// and an empty indexed value still applies), so the entries are dropped
+	// entirely, not cleared (filterInheritedGitEnv). With them gone, HOME=home
+	// makes git read home/.gitconfig as the global config and cmd.Dir makes
+	// checkGit resolve repoDir, so the seeded user.name/user.email resolve and
+	// checkGitIdentity passes.
 	cmd.Env = append(
-		filterGitConfigOverrides(os.Environ()),
+		filterInheritedGitEnv(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
 	)
