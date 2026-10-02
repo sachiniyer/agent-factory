@@ -690,6 +690,13 @@ func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProj
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
+	// Enforce DeleteProjectRequest's absolute-path contract at the RPC boundary,
+	// the same guard RegisterProject and RebindProject apply (#4821, 6616c129);
+	// see normalizeDeleteProjectRequestRepoPath. The checked value is the one
+	// passed on, and the RepoID-only form (no RepoPath) is preserved.
+	if err := normalizeDeleteProjectRequestRepoPath(&req); err != nil {
+		return err
+	}
 	result, err := s.manager.DeleteProject(req)
 	for _, k := range result.Killed {
 		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
