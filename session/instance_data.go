@@ -220,6 +220,16 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				OriginalStartupStateUnknown: &startupStateUnknown,
 			}
 		}
+	} else if isSandboxBackendType(data.BackendType) {
+		// An off-box session owns no local worktree, but it still belongs to the
+		// repo its create was scoped to — Path is that repo's root for sandbox
+		// backends. The pending-create row already publishes it as
+		// Worktree.RepoPath (manager_create); carrying it on the settled
+		// projection keeps repo-scoped consumers — the web rail's project filter
+		// and the project switcher — able to attribute the session. Without it a
+		// remote session matched NO project's scope and the web could not render
+		// or keep it selected at all (#1933).
+		data.Worktree.RepoPath = i.Path
 	}
 
 	return data

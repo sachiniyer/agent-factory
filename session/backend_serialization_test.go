@@ -33,6 +33,40 @@ func TestToInstanceDataIncludesBackendType(t *testing.T) {
 	})
 }
 
+func TestToInstanceDataSandboxRepoPath(t *testing.T) {
+	// #1933: a remote session owns no local worktree, so the settled projection
+	// used to carry an empty Worktree — and repo-scoped consumers (the web
+	// rail's project filter, the project switcher) could not attribute it to
+	// ANY project. The pending-create row already publishes the repo as
+	// Worktree.RepoPath; the committed projection must keep it.
+	t.Run("sandbox backend without a worktree keeps its repo identity", func(t *testing.T) {
+		i := &Instance{
+			Title:   "remote-inst",
+			Path:    "/srv/repo",
+			backend: &HookBackend{},
+		}
+		data := i.ToInstanceData()
+		assert.Equal(t, "remote", data.BackendType)
+		assert.Equal(t, "/srv/repo", data.Worktree.RepoPath)
+		// Only the repo identity is synthesized: no local worktree exists, so
+		// the rest of the worktree record stays empty.
+		assert.Equal(t, "", data.Worktree.WorktreePath)
+	})
+
+	t.Run("local backend without a worktree leaves RepoPath empty", func(t *testing.T) {
+		// Tombstone semantics (#476 area): a local record whose worktree was
+		// already cleared must keep the empty worktree — worktreeReaped keys on
+		// RepoPath == "" && WorktreePath == "".
+		i := &Instance{
+			Title:   "local-inst",
+			Path:    "/srv/repo",
+			backend: &LocalBackend{},
+		}
+		data := i.ToInstanceData()
+		assert.Equal(t, "", data.Worktree.RepoPath)
+	})
+}
+
 func TestInstanceDataUsesLocalTmux(t *testing.T) {
 	for _, tc := range []struct {
 		backendType string
