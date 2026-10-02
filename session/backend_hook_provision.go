@@ -414,8 +414,12 @@ func (p *hookProvisioner) provisionedBackend() Backend {
 	// breaking the very teardown this field exists to complete.
 	cleanup.HasKnownHostsDir = true
 	return &HookBackend{
-		provisioner: p,
-		cleanup:     cleanup,
+		// The command the agent-server af started on the provisioned host was
+		// bound to launch (#5108) — recorded as runtime evidence when the
+		// launch RPC returns.
+		remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.environmentProgram()},
+		provisioner:        p,
+		cleanup:            cleanup,
 	}
 }
 
