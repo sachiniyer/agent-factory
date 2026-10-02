@@ -3,8 +3,10 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -214,11 +216,20 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// path-only `worktree remove` cannot make atomic by itself.
 
 	// Resolve relocation ownership before reading repo-derived restore context.
+	//
+	// A record-free ENOENT is the one claim failure restore can proceed past: the
+	// archived worktree was deleted outside af (#5102), so there is nothing to
+	// move back and the kept branch is what the respawn rebuilds from. A
+	// recovery-path claim error joins ErrRelocateStateUnknown and only formats its
+	// candidates, so it never reads as a bare ENOENT — the second test is a belt
+	// against that ever changing. No claim exists on this route, so there is none
+	// to preserve on the way out.
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
-	if err != nil {
+	worktreeGone := errors.Is(err, os.ErrNotExist) && !errors.Is(err, sessiongit.ErrRelocateStateUnknown)
+	if err != nil && !worktreeGone {
 		return "", err
 	}
-	claimTransferred := false
+	claimTransferred := worktreeGone
 	defer func() {
 		if !claimTransferred {
 			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
@@ -232,7 +243,17 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
 	// need the origin repo, so surface the actionable message (archive left
 	// intact) before either fails with a generic error.
-	if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
+	if worktreeGone {
+		// guardRepoGoneRestore stages cleanup authority over the claimed archive
+		// directory; with no directory and no claim there is nothing for it to
+		// fence, and with no repo there is nothing to rebuild from either.
+		if err := sessiongit.CheckRepoPresentForRelocation(repoPath); errors.Is(err, sessiongit.ErrRepoGone) {
+			return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone and its tracked worktree was already deleted outside af — nothing rebuildable remains; remove the session with %s",
+				req.Title, repoPath, shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, req.Title))
+		} else if err != nil {
+			return "", fmt.Errorf("cannot establish origin repo state for %s for session %q: %w", repoPath, req.Title, err)
+		}
+	} else if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
 		claimTransferred = repoGone
 		return "", err
 	}
@@ -243,6 +264,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	beforeRestoreWorktreePath()
 	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
 	if err != nil {
+		if worktreeGone {
+			return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
+		}
 		claimTransferred = true
 		return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
@@ -252,8 +276,20 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
 	claimTransferred = true
-	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
-	if err := restoreWorktreeErr; err != nil {
+	if worktreeGone {
+		// Nothing to relocate: re-aim the record at the restore destination so
+		// the respawn's RebuildFromExistingBranch recreates the worktree there
+		// from the kept branch (#5102). A refusal changed nothing on disk or in
+		// the record, so it returns plainly — none of the move route's recovery
+		// bookkeeping below applies to a claim that was never taken.
+		if err := instance.RepointAbsentWorktreeForRestore(dest); err != nil {
+			return "", fmt.Errorf("cannot restore session %q: its worktree was deleted outside af and could not be re-aimed at %s for a rebuild: %w", req.Title, dest, err)
+		}
+		// The record now names a path af is about to build, not the one that was
+		// deleted. If the rebuild does not materialize it, the poll re-derives the
+		// flag from the new path.
+		instance.ClearWorktreeMissing()
+	} else if err := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
 		}
@@ -345,6 +381,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
 	}
-	m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
+	if worktreeGone {
+		m.info().Printf("restored session %q (repo %s): worktree rebuilt at %s from its kept branch (it had been deleted outside af), agent re-spawned", req.Title, repoID, worktreePath)
+	} else {
+		m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
+	}
 	return restoredArchiveResult(instance, worktreePath)
 }

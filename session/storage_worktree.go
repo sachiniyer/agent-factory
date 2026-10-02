@@ -41,6 +41,16 @@ type GitWorktreeData struct {
 	// did not establish a safe outcome. Some states retain a second pathname;
 	// every state blocks consumers until its owning retry resolves it.
 	RelocationRecovery *GitWorktreeRelocationRecoveryData `json:"relocation_recovery,omitempty"`
+	// Missing records that WorktreePath was conclusively absent (ENOENT, with no
+	// af relocation owning it) the last time the daemon probed it: the worktree
+	// was deleted outside af (#5102). Listing surfaces render it instead of
+	// "ready", send-prompt refuses, and archive takes the no-move route. It is
+	// additive and omitempty, so an older binary ignores it on read and drops it
+	// on write — which only costs one poll interval before a current daemon
+	// re-derives it.
+	Missing bool `json:"missing,omitempty"`
+	// MissingReason is the operator-facing explanation behind Missing.
+	MissingReason string `json:"missing_reason,omitempty"`
 }
 
 type GitWorktreeRelocationRecoveryData struct {

@@ -22,6 +22,7 @@ import {
   isPendingManualHandoffDeliveryUnconfirmed,
   isPendingManualSwapDeliveryConfirmable,
   isWorking,
+  isWorktreeGone,
   type OperatorKind,
   operatorKind,
   rowStatus,
@@ -93,6 +94,29 @@ test("an in-flight operation wins over stale idle evidence", () => {
     ),
     "working",
   );
+});
+
+test("a worktree deleted outside af overrides the live dot and marks the title (#5102)", () => {
+  const gone = { missing: true, missing_reason: "tracked worktree path /w does not exist (deleted outside af)" };
+  for (const liveness of [Liveness.Ready, Liveness.Running, Liveness.Lost, Liveness.Dead, Liveness.LimitReached]) {
+    const s = sess({ title: "w", liveness, worktree: gone });
+    assert.equal(isWorktreeGone(s), true);
+    assert.equal(rowStatus(s).icon, "triangle-alert" satisfies IconName);
+    assert.equal(rowStatus(s).kind, "lost");
+    assert.equal(operatorKind(s), "broken");
+    assert.ok(rowTitle(s).includes("[worktree gone] "), rowTitle(s));
+  }
+  // The op mask still wins, exactly as render.go orders it.
+  const busy = sess({ liveness: Liveness.Ready, in_flight_op: InFlightOp.Archiving, worktree: gone });
+  assert.equal(rowStatus(busy).kind, null);
+  assert.equal(operatorKind(busy), "working");
+  // Archived rows keep their archive glyph and carry no prefix: restore rebuilds.
+  const archived = sess({ title: "w", liveness: Liveness.Archived, worktree: gone });
+  assert.equal(isWorktreeGone(archived), false);
+  assert.equal(rowStatus(archived).kind, "archived");
+  assert.equal(rowTitle(archived), "w");
+  // Absent flag: unchanged ready dot.
+  assert.equal(rowStatus(sess({ liveness: Liveness.Ready, worktree: {} })).kind, "ready");
 });
 
 test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
