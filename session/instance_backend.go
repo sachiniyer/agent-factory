@@ -507,6 +507,20 @@ func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationCla
 	return hookErr, archiveErr
 }
 
+// ArchiveTeardownWorktreeGone is the archive teardown for a session whose
+// tracked worktree was confirmed absent — a conclusive ENOENT with no af
+// relocation outstanding (#5102). The tmux teardown is identical to
+// ArchiveTeardownWithClaim's; the worktree step re-verifies the absence and
+// performs no move, since there is nothing left to relocate and the branch is
+// what restore rebuilds from. trustLiveGeneration carries the same lock contract.
+func (i *Instance) ArchiveTeardownWorktreeGone(beforeMove func() error, trustLiveGeneration bool) (hookErr, archiveErr error) {
+	mode := teardownArchive{
+		worktreeGone: true, beforeMove: beforeMove, hookErr: &hookErr, trustLiveGeneration: trustLiveGeneration,
+	}
+	archiveErr = i.teardownTabs(mode)
+	return hookErr, archiveErr
+}
+
 // SetArchived flips the instance into the inert Archived state atomically:
 // started=false (no tmux binding backs it) and liveness=Archived, clearing any
 // in-flight op. Called by the daemon after a successful archive move.
@@ -564,6 +578,26 @@ func (i *Instance) restoreArchivedWorktree(dest string, claim git.RelocationClai
 		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
 	}
 	return gw.RestoreWorktreeToWithClaim(dest, claim)
+}
+
+// RepointAbsentWorktreeForRestore is the restore-side step for an archived row
+// whose worktree was deleted outside af (#5102): there is nothing to move back,
+// so the record is re-aimed at dest and the respawn's RebuildFromExistingBranch
+// recreates the worktree there from the kept branch. It requires the held
+// restore fence, like RestoreArchivedWorktreeHeldFencedWithClaim, and has no
+// claim to preserve on refusal because the gone route never took one.
+func (i *Instance) RepointAbsentWorktreeForRestore(dest string) error {
+	i.mu.RLock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchivedFenced); err != nil {
+		i.mu.RUnlock()
+		return err
+	}
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
+	}
+	return gw.RepointAbsentWorktreePath(dest)
 }
 
 // ArchivedBranchForReclaim reports the branch an archived session is holding
@@ -680,7 +714,24 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
 	// updates gw's stored worktree path — all under i.mu here, matching how
 	// ToInstanceData reads the worktree path under i.mu.RLock.
-	if err := gw.MoveWorktree(dest); err != nil {
+	//
+	// An archived row whose worktree was deleted outside af has no bytes to move,
+	// and MoveWorktree would fail ENOENT — blocking reuse of its own title forever
+	// (#5102). Re-aim the record at the new title-keyed path instead, so its
+	// basename keeps claiming the renamed title exactly as a moved archive's does;
+	// restore then rebuilds there from the kept branch. Only a conclusive Absent
+	// takes this route: Unknown falls through to the move, which refuses on its
+	// own terms rather than letting a guess discard a worktree that may exist.
+	var relocate func(string) error = gw.MoveWorktree
+	if gw.ProbeWorktreePresence() == git.WorktreePresenceAbsent {
+		relocate = func(dest string) error {
+			if err := gw.RepointAbsentWorktreePath(dest); err != nil {
+				return fmt.Errorf("cannot rename archived session %q: its missing worktree path could not be repointed: %w", i.Title, err)
+			}
+			return nil
+		}
+	}
+	if err := relocate(dest); err != nil {
 		if newBranch != "" && newBranch != oldBranch {
 			// Best-effort: the move already failed, so this is recovery, and a
 			// second failure must not mask the first. It is reported with it —

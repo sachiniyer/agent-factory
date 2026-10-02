@@ -56,6 +56,11 @@ const (
 	watchStopLost watchStopReason = "lost"
 	// watchStopDead: observed death of the backing runtime.
 	watchStopDead watchStopReason = "dead"
+	// watchStopWorktreeGone: the tracked worktree was deleted outside af (#5102).
+	// The agent may still be up and answering probes, but its cwd is gone and
+	// send-prompt refuses it. Needs `af sessions archive` (keeps the branch;
+	// restore rebuilds) or `af sessions kill`, not a prompt.
+	watchStopWorktreeGone watchStopReason = "worktree-gone"
 	// watchStopArchived: deliberately shelved and inert until restored.
 	watchStopArchived watchStopReason = "archived"
 	// watchStopKilled: a committed kill whose teardown may still be running. The
@@ -400,6 +405,20 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	}
 	if d.PendingHandoffMission != "" {
 		return watchWorking, ""
+	}
+	// A confirmed-absent tracked worktree overrides the live liveness values: a
+	// Ready row still answers probes, so reading it as idle would tell a driver to
+	// send work that send-prompt then refuses (#5102). The positive set is named
+	// rather than "anything but Archived", for the same fail-closed reason as the
+	// swap gate above: an unrecognized liveness must still reach the upgrade
+	// branch below. Archived keeps 'archived' — it is deliberate, and restore
+	// already rebuilds a gone worktree.
+	if d.Worktree.Missing {
+		switch d.Liveness {
+		case session.LiveRunning, session.LiveReady, session.LiveLost,
+			session.LiveDead, session.LiveLimitReached:
+			return watchStopWorktreeGone, "its tracked worktree was deleted outside af; it cannot receive prompts — archive it ('af sessions archive') or remove it ('af sessions kill')"
+		}
 	}
 
 	switch d.Liveness {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -286,6 +287,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// fence untouched.
 	relocationClaim, err := instance.ClaimWorktreeRelocationForRetry()
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && !errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+			// Conclusive: the tracked worktree was deleted outside af and no
+			// relocation record claims it — a recovery-path claim error joins
+			// ErrRelocateStateUnknown and never wraps a bare ENOENT. There is
+			// nothing to move, and refusing here is what used to strand the
+			// session forever (#5102). Branch BEFORE CancelArchive: the gone
+			// route's teardown and commit run under this same held fence.
+			return m.archiveSessionWorktreeGone(repoID, req.Title, instance)
+		}
 		// Same pre-teardown cancel as the arm above, and it runs BEFORE the persist
 		// below so the record this writes carries the row's real op, not the fence.
 		_ = instance.Transition(session.CancelArchive())
@@ -513,6 +523,107 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		return archivedPath, archived, committedErr
 	}
 	return archivedPath, archived, nil
+}
+
+// archiveSessionWorktreeGone archives a local session whose tracked worktree was
+// deleted outside af (#5102). ArchiveSession routes here, still holding the
+// op-lock, the kill claim and the OpArchiving fence, once the relocation claim
+// proved the path absent with no recovery record behind it.
+//
+// It is the relocating route's tail with the move taken out: the editor and
+// post-worktree hooks are stopped, tmux is torn down, the on-archive hook runs
+// against the (gone) path, and the row commits Archived with its recorded path
+// unchanged and stamped missing, so restore knows to rebuild from the kept
+// branch rather than move bytes back. The branch is never touched.
+//
+// Because nothing moved, nothing can roll back. That removes the undo the
+// relocating route performs on a late failure, but not the rule it protects
+// (#3448/#3335): a committed outcome is claimed only once it is durable.
+func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *session.Instance) (string, session.InstanceData, error) {
+	vscodeKey := daemonInstanceKey(repoID, title)
+	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
+		_ = instance.Transition(session.CancelArchive())
+		m.persistInstance(repoID, instance)
+		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", title, err)
+	}
+	// The worktree is gone, but a post-worktree hook runner may still be alive
+	// with its cwd in the unlinked directory. Join it before teardown for the
+	// same #2770/#3650 reason the relocating route does: nothing downstream
+	// re-checks that a process from it has stopped.
+	if worktree, wtErr := instance.GetGitWorktree(); wtErr == nil && worktree != nil {
+		if err := worktree.CancelAndJoinHooks(); err != nil {
+			_ = instance.Transition(session.CancelArchive())
+			m.persistInstance(repoID, instance)
+			return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its post-worktree hooks could not be confirmed stopped; no session teardown was started: %w", title, err)
+		}
+	}
+
+	origPath := instance.GetWorktreePath()
+	// Trusting, for the same reason as the relocating route: the op-lock and
+	// killsInFlight claim held by ArchiveSession rule out a same-name
+	// replacement mid-teardown (#3413).
+	hookErr, err := archiveGoneTeardown(instance, func() error {
+		return runOnArchiveHook(onArchiveHookContext{
+			sessionID: instance.ID,
+			title:     title,
+			repoRoot:  instance.GetRepoPath(),
+			worktree:  origPath,
+		})
+	}, true)
+	if err != nil {
+		// Same recovery as the relocating route's teardown failure: drop to Lost
+		// with started kept, so the Lost loop re-spawns the agent. Its rebuild
+		// recreates the absent worktree from the branch, which is the same
+		// self-heal a restore would perform.
+		_ = instance.Transition(session.AbortArchiveToLost())
+		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
+				"failed to archive session %q AND could not record its recovered state on disk (%v); its worktree was already absent at %s: %w",
+				title, perr, origPath, err), hookErr))
+		}
+		return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
+			"failed to archive session %q (its agent will be restored in place): %w", title, err), hookErr))
+	}
+
+	_ = instance.Transition(session.CommitArchive())
+	instance.SetWorktreeMissing(fmt.Sprintf("worktree was already absent at %s when archived (deleted outside af)", origPath))
+	// Revocation follows the committed state exactly as on the relocating route
+	// (#2999/#3012). There is no rollback here to disarm it.
+	archiveCommitted := true
+	defer func() {
+		if archiveCommitted {
+			m.sandboxTokens.revoke(instance.ID)
+		}
+	}()
+	if stopErr := m.stopVSCodeForInstance(vscodeKey, instance.ID); stopErr != nil {
+		// The relocating route would move the worktree home and drop to Lost
+		// here. There is no worktree to move, so the committed archive is the
+		// only state available — claimed committed only if it reached disk.
+		if perr := archivePersist(m, repoID, instance); perr != nil {
+			return "", session.InstanceData{}, failedArchiveWithHook(title, fmt.Errorf(
+				"archived session %q in memory but could not confirm its final VS Code editor teardown (%v) or write the archive durably (%v); nothing was moved (its worktree was already absent at %s)",
+				title, stopErr, perr, origPath), hookErr)
+		}
+		archived := instance.ToInstanceData()
+		m.publishEvent(agentproto.EventSessionArchived, archived)
+		committedErr := archiveCommittedWarning(instance, hookErr, fmt.Errorf("final VS Code editor teardown was not confirmed: %w", stopErr))
+		m.warn().Printf("%v", committedErr)
+		return origPath, archived, committedErr
+	}
+	if perr := archivePersist(m, repoID, instance); perr != nil {
+		return "", session.InstanceData{}, failedArchiveWithHook(title, fmt.Errorf(
+			"archived session %q in memory but could not write it durably; nothing was moved (its worktree was already absent at %s) so there is no rollback — a daemon restart reloads the pre-archive row and the poll re-detects the absence: %w",
+			title, origPath, perr), hookErr)
+	}
+	m.info().Printf("archived session %q (repo %s): tmux torn down; worktree was already absent at %s (deleted outside af); branch kept", title, repoID, origPath)
+	archived := instance.ToInstanceData()
+	// Inside opLock, for the event-ordering reason on the relocating route.
+	m.publishEvent(agentproto.EventSessionArchived, archived)
+	if committedErr := archiveCommitWarning(instance, hookErr); committedErr != nil {
+		m.warn().Printf("%v", committedErr)
+		return origPath, archived, committedErr
+	}
+	return origPath, archived, nil
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a
@@ -749,6 +860,11 @@ var archivePersist = (*Manager).persistInstanceErr
 // its durable commit. Indirected so race tests can install an editor in the
 // exact post-move window without weakening the production ordering.
 var archiveTeardown = (*session.Instance).ArchiveTeardownWithClaim
+
+// archiveGoneTeardown is archiveTeardown's counterpart for the missing-worktree
+// route (#5102): the same tmux teardown and hook, no move. Indirected for the
+// same reason.
+var archiveGoneTeardown = (*session.Instance).ArchiveTeardownWorktreeGone
 
 // archivedWorktreePath returns the global archive location for a session's
 // relocated worktree: <AGENT_FACTORY_HOME>/archived/<repoID>/<safeTitle>/. The

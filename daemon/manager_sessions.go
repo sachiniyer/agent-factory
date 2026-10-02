@@ -506,6 +506,25 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		releaseObservationFence()
 		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
 	}
+	// A tracked worktree confirmed absent means the agent's cwd is gone even while
+	// liveness still reads Ready: delivering would paste work into a session whose
+	// working directory no longer exists (#5102). Re-probe rather than trusting
+	// the poll-maintained flag, so a path rebuilt between polls still admits the
+	// prompt and one deleted since the last poll is refused now. Nothing was sent,
+	// so notAttempted keeps the #2501 refund contract. An Archived target never
+	// reaches here: the liveness gate above refuses it as the more fundamental
+	// state.
+	if missing, changed := instance.RefreshWorktreeMissing(); missing {
+		releaseObservationFence()
+		if changed {
+			m.persistAndPublishInstance(repoID, instance)
+		}
+		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf(
+			"target session %q's tracked worktree %s is gone (deleted outside af); prompt not delivered — archive it (%s) to shelve the session and keep its branch, or kill it (%s) to remove it",
+			req.Title, instance.GetWorktreePath(),
+			shellsuggest.PositionalCommand("af", []string{"sessions", "archive"}, req.Title),
+			shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, req.Title)))
+	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
 	// is the reliable command path automated deliveries need. This crosses the

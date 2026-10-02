@@ -1,0 +1,154 @@
+package session
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session/git"
+)
+
+// worktreeMissingInstance returns an instance whose recorded worktree path is
+// path. Nothing is created on disk; tests decide whether path exists.
+func worktreeMissingInstance(t *testing.T, path string) *Instance {
+	t.Helper()
+	inst, err := NewInstance(InstanceOptions{Title: "wt-missing", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	gw, err := git.NewGitWorktreeFromStorage(
+		filepath.Join(filepath.Dir(path), "repo"), path, "wt-missing", "af/wt-missing", "", false, true,
+	)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	return inst
+}
+
+func TestRefreshWorktreeMissing_SetClearKeep(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wt")
+	inst := worktreeMissingInstance(t, path)
+
+	missing, changed := inst.RefreshWorktreeMissing()
+	assert.True(t, missing)
+	assert.True(t, changed)
+	gotMissing, reason := inst.WorktreeMissing()
+	assert.True(t, gotMissing)
+	assert.Contains(t, reason, path)
+
+	missing, changed = inst.RefreshWorktreeMissing()
+	assert.True(t, missing)
+	assert.False(t, changed, "a repeated Absent answer is not a transition")
+
+	// An af-owned relocation makes the probe Unknown: a flag already set stays
+	// set rather than being cleared on a non-answer.
+	require.NoError(t, inst.gitWorktree.RestoreRelocationRecovery(git.RelocationRecovery{
+		State: git.RelocationRecoveryStalled,
+	}))
+	missing, changed = inst.RefreshWorktreeMissing()
+	assert.True(t, missing, "Unknown must keep a previously established flag")
+	assert.False(t, changed)
+
+	// A fresh instance whose path is unanswerable is never flagged on a guess.
+	unknown := worktreeMissingInstance(t, filepath.Join(t.TempDir(), "wt"))
+	require.NoError(t, unknown.gitWorktree.RestoreRelocationRecovery(git.RelocationRecovery{
+		State: git.RelocationRecoveryStalled,
+	}))
+	missing, changed = unknown.RefreshWorktreeMissing()
+	assert.False(t, missing)
+	assert.False(t, changed)
+
+	// A rebuilt path clears the flag.
+	rebuilt := worktreeMissingInstance(t, filepath.Join(t.TempDir(), "wt"))
+	rebuilt.SetWorktreeMissing("stale")
+	require.NoError(t, os.Mkdir(rebuilt.gitWorktree.GetWorktreePath(), 0o755))
+	missing, changed = rebuilt.RefreshWorktreeMissing()
+	assert.False(t, missing)
+	assert.True(t, changed)
+	_, reason = rebuilt.WorktreeMissing()
+	assert.Empty(t, reason)
+}
+
+func TestRefreshWorktreeMissing_NoWorktreeLeavesFlag(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "no-wt", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	inst.SetWorktreeMissing("recorded earlier")
+	missing, changed := inst.RefreshWorktreeMissing()
+	assert.True(t, missing)
+	assert.False(t, changed)
+}
+
+func TestReconcileWorktreeMissing_ChangeDetection(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{Title: "reconcile", Path: t.TempDir(), Program: "claude"})
+	require.NoError(t, err)
+	assert.False(t, inst.ReconcileWorktreeMissing(false, ""))
+	assert.True(t, inst.ReconcileWorktreeMissing(true, "gone"))
+	assert.False(t, inst.ReconcileWorktreeMissing(true, "gone"))
+	assert.True(t, inst.ReconcileWorktreeMissing(true, "gone at a new path"))
+	assert.True(t, inst.ReconcileWorktreeMissing(false, ""))
+	missing, reason := inst.WorktreeMissing()
+	assert.False(t, missing)
+	assert.Empty(t, reason)
+}
+
+func TestWorktreeMissing_SerializationRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wt")
+	inst := worktreeMissingInstance(t, path)
+	_, changed := inst.RefreshWorktreeMissing()
+	require.True(t, changed)
+	_, wantReason := inst.WorktreeMissing()
+
+	data := inst.ToInstanceData()
+	assert.True(t, data.Worktree.Missing)
+	assert.Equal(t, wantReason, data.Worktree.MissingReason)
+
+	client := data.ForClientRead()
+	assert.True(t, client.Worktree.Missing, "the flag is record state, not a scrubbed projection")
+	assert.Equal(t, wantReason, client.Worktree.MissingReason)
+
+	restored, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	missing, reason := restored.WorktreeMissing()
+	assert.True(t, missing, "a restart must come back still knowing the worktree is gone")
+	assert.Equal(t, wantReason, reason)
+}
+
+func runRenameGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "user.email=t@t", "-c", "user.name=t"}, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	return strings.TrimSpace(string(out))
+}
+
+// A gone-worktree archived row must not block its own title reuse: the rename
+// repoints the record instead of attempting a move of bytes that do not exist
+// (#5102).
+func TestRenameArchived_GoneWorktreeRepointsWithoutMove(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	runRenameGit(t, repoRoot, "commit", "--allow-empty", "-m", "init")
+	wtPath := filepath.Join(filepath.Dir(repoRoot), "old-title")
+	runRenameGit(t, repoRoot, "worktree", "add", "-b", "af/old-title", wtPath)
+	require.NoError(t, os.RemoveAll(wtPath))
+
+	inst, err := NewInstance(InstanceOptions{Title: "old-title", Path: repoRoot, Program: "claude"})
+	require.NoError(t, err)
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "old-title", "af/old-title", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	inst.liveness = LiveArchived
+
+	dest := filepath.Join(filepath.Dir(repoRoot), "old-title-renamed")
+	require.NoError(t, inst.RenameArchived("old-title-renamed", dest, "af/old-title-renamed"))
+
+	assert.Equal(t, "old-title-renamed", inst.Title)
+	assert.Equal(t, "af/old-title-renamed", gw.GetBranchName())
+	assert.Equal(t, dest, gw.GetWorktreePath())
+	_, statErr := os.Lstat(dest)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "no move was attempted, so nothing exists at the new path")
+	runRenameGit(t, repoRoot, "show-ref", "--verify", "refs/heads/af/old-title-renamed")
+}

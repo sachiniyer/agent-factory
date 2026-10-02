@@ -783,6 +783,10 @@ type teardownArchive struct {
 	// trustLiveGeneration is set only by ArchiveTeardownWithClaim's caller when
 	// it holds this session's exclusive lifecycle lock (#3413); see closeTab.
 	trustLiveGeneration bool
+	// worktreeGone selects the no-move route for a worktree deleted outside af
+	// (#5102): the tabs tear down exactly as usual, but there is nothing to
+	// relocate, so handleWorktree only re-confirms the absence. claim is nil.
+	worktreeGone bool
 }
 
 // closeTab waits for the pane to exit before handleWorktree relocates the
@@ -849,6 +853,20 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 		if m.hookErr != nil {
 			*m.hookErr = beforeMoveErr
 		}
+	}
+	if m.worktreeGone {
+		// The daemon chose this route from a conclusive ENOENT taken before pane
+		// teardown, so re-confirm it at the use boundary. A path that reappeared
+		// in the meantime has bytes to preserve and belongs to the moving route;
+		// an unanswerable lstat refuses closed, and stateUnknown keeps the record
+		// recoverable so a retry can decide again.
+		path := gw.GetWorktreePath()
+		if _, statErr := git.BoundedLstat(path); statErr == nil {
+			return stateKnown, fmt.Errorf("archive %q: worktree %s reappeared before the move step; refusing the missing-worktree archive route — retry to relocate it", title, path)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return stateUnknown, fmt.Errorf("archive %q: could not confirm worktree %s absent: %w", title, path, statErr)
+		}
+		return stateKnown, nil
 	}
 	// The move is now BOUNDED, which is the case this comment used to reserve:
 	// "if the move is ever bounded, a tripped deadline must return stateUnknown

@@ -122,6 +122,13 @@ const DEAD_ICON: IconName = "circle";
 const LOST_ICON: IconName = "circle-dashed";
 const ARCHIVED_ICON: IconName = "archive";
 const LIMIT_ICON: IconName = "diamond";
+const WORKTREE_GONE_ICON: IconName = "triangle-alert";
+
+// A live row whose tracked worktree was deleted outside af (#5102), mirroring
+// render.go's worktreeGone arm: it can still read Ready, so without this it would
+// wear the ready dot while every prompt is refused. The lost colour bucket, so it
+// filters and groups with the other rows that need repair, but a distinct shape.
+const WORKTREE_GONE: RowStatus = { icon: WORKTREE_GONE_ICON, kind: "lost", label: "Worktree gone" };
 
 // A working/busy row shows NO status dot (#1766): the TUI renders a blank status
 // cell for LiveRunning / any in-flight op, and the web omits the dot entirely.
@@ -144,7 +151,17 @@ export function rowStatus(s: SessionData): RowStatus {
   if (op !== InFlightOp.None) {
     return WORKING;
   }
+  if (isWorktreeGone(s)) {
+    return WORKTREE_GONE;
+  }
   return dotForLiveness(livenessOf(s));
+}
+
+/** True for a non-archived row whose tracked worktree the daemon confirmed absent
+ *  (#5102). Archived rows are excluded, as in render.go: restore already rebuilds
+ *  a gone worktree from the kept branch, so there is nothing for the user to do. */
+export function isWorktreeGone(s: SessionData): boolean {
+  return s.worktree?.missing === true && livenessOf(s) !== Liveness.Archived;
 }
 
 /** True when the row is a working/busy session — the state that shows NO status
@@ -486,6 +503,9 @@ export function rowTitle(s: SessionData): string {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
+  }
+  if (isWorktreeGone(s)) {
+    title = "[worktree gone] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;
