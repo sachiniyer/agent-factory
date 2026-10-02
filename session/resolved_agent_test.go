@@ -144,6 +144,41 @@ func newRemoteLaunchInstance(program, resolved string, srv AgentServer) *Instanc
 	}
 }
 
+// A remote session's runtime_program must survive a daemon restart: the
+// record reloads inert + Lost through FromInstanceData's sandbox branch, which
+// never consults the #5067 unverified-reattach clear — that check lives inside
+// LocalBackend's launch/respawn, the only callers, because it exists to prove
+// a reattached LOCAL pane is still the process the launch recorded. A remote
+// record has no local pane to reattach, carries no (pid, startID) identity,
+// and is not asked for one; the inert row keeps its launch command until a
+// restore re-provisions and re-launches, which records the fresh resolution.
+func TestRemoteRuntimeProgramSurvivesRestart(t *testing.T) {
+	inst := newRemoteLaunchInstance(tmux.ProgramClaude, "./bin/sidekick", &stubAgentServer{})
+	require.NoError(t, inst.Start(true))
+	require.Equal(t, "./bin/sidekick", inst.RuntimeProgram())
+
+	restored, err := FromInstanceData(inst.ToInstanceData())
+	require.NoError(t, err)
+
+	assert.Equal(t, "./bin/sidekick", restored.RuntimeProgram(),
+		"the recorded command must survive the restart load")
+	assert.Equal(t, "", restored.ResolvedAgent(),
+		"detection must not fall back to the enum on a loaded remote record")
+	assert.Equal(t, tmux.ProgramClaude, restored.CurrentAgentName())
+
+	// A restore re-provisions a fresh sandbox and re-launches through the
+	// same boundary, so a program_overrides edit made while the session was
+	// down lands on the record — the new launch's command replaces the old
+	// one rather than stacking. The backend swap stands in for
+	// reprovisionRemote's bindProvisionResult, and the pinned agent-server
+	// stands in for the fresh endpoint it would have wired.
+	restored.backend = &dockerBackend{remoteAgentBackend: remoteAgentBackend{resolvedProgram: "/opt/bin/codex"}}
+	restored.agentSrv = &stubAgentServer{}
+	require.NoError(t, restored.Start(true))
+	assert.Equal(t, "/opt/bin/codex", restored.RuntimeProgram())
+	assert.Equal(t, tmux.ProgramCodex, restored.ResolvedAgent())
+}
+
 // failLaunchServer is a stubAgentServer whose launch RPC fails.
 type failLaunchServer struct {
 	stubAgentServer
