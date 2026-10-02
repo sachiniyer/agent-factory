@@ -109,18 +109,22 @@ func requireTmuxOrSkip(t *testing.T) {
 //     repository — making this regression test non-hermetic. An empty GIT_DIR
 //     still points git at the current directory, so these are removed, not
 //     blanked.
-//   - Git trace variables: GIT_TRACE and the GIT_TRACE2* family
-//     (GIT_TRACE2_PERF, GIT_TRACE2_EVENT, GIT_TRACE2_BRIEF, ...). --setup invokes
-//     `git rev-parse` and `git config` in checkGit/checkGitIdentity; with tracing
-//     enabled (e.g. GIT_TRACE=1, or a GIT_TRACE2* destination) Git writes trace
-//     diagnostics to stderr (e.g. "trace: built-in: git rev-parse
+//   - Git trace variables: the full GIT_TRACE* family — GIT_TRACE (general
+//     tracing) and the named sub-traces GIT_TRACE_SETUP, GIT_TRACE_PERFORMANCE,
+//     GIT_TRACE_PACKET, ... plus the GIT_TRACE2* family (GIT_TRACE2_PERF,
+//     GIT_TRACE2_EVENT, GIT_TRACE2_BRIEF, ...). --setup invokes `git rev-parse`
+//     and `git config` in checkGit/checkGitIdentity; with any tracing enabled Git
+//     writes trace diagnostics to stderr (e.g. "trace: built-in: git rev-parse
 //     --show-toplevel"), which breaks the empty-stderr assertion this test pins
-//     even though the JSON log-close behavior is correct. These are not
+//     even though the JSON log-close behavior is correct. Matching only the
+//     GIT_TRACE2 prefix would leave the legacy GIT_TRACE_SETUP /
+//     GIT_TRACE_PERFORMANCE variables in the child environment, so those would
+//     still emit to stderr on a runner that exports them. These are not
 //     repository-local (git rev-parse --local-env-vars does not list them), but
 //     they are inherited the same way and produce stderr output the test must not
 //     see, so they are stripped here too. An empty value still turns tracing on
-//     for GIT_TRACE (an empty value means "1" per git's docs for the boolean
-//     trace variables), so the entry is dropped rather than blanked.
+//     for the boolean trace variables (an empty value means "1" per git's docs),
+//     so the entry is dropped rather than blanked.
 func filterInheritedGitEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
@@ -132,12 +136,12 @@ func filterInheritedGitEnv(env []string) []string {
 			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 			"GIT_INDEX_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
 			"GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE",
-			"GIT_COMMON_DIR", "GIT_TRACE":
+			"GIT_COMMON_DIR":
 			continue
 		}
 		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
 			strings.HasPrefix(name, "GIT_CONFIG_VALUE_") ||
-			strings.HasPrefix(name, "GIT_TRACE2") {
+			strings.HasPrefix(name, "GIT_TRACE") {
 			continue
 		}
 		out = append(out, kv)
@@ -189,11 +193,22 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// hermetic. A later same-named entry overrides the inherited one for getenv
 	// (the same mechanism AGENT_FACTORY_HOME already relies on), so the
 	// fixture value wins over any runner-exported HOME/XDG_CONFIG_HOME.
+	// GIT_CONFIG_NOSYSTEM=1 makes git (including the `git init` below) skip
+	// /etc/gitconfig entirely. filterInheritedGitEnv only removes GIT_CONFIG_SYSTEM
+	// (which points git at a *different* system file but, if unset, leaves the
+	// default /etc/gitconfig in force). A runner whose /etc/gitconfig sets
+	// init.templateDir would have `git init` copy that template's .git/config —
+	// which can carry an empty user.name/user.email — into repoDir, where it
+	// overrides the fixture's later $HOME/.gitconfig and makes checkGitIdentity
+	// actionable for a runner-config reason rather than the regression under test.
+	// Disabling the system config keeps the init hermetic to the fixture's global
+	// config alone.
 	childEnv := append(
 		filterInheritedGitEnv(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"GIT_CONFIG_NOSYSTEM=1",
 	)
 	initCmd := exec.Command("git", "-C", repoDir, "init", "-q")
 	initCmd.Env = childEnv
