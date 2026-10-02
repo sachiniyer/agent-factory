@@ -645,7 +645,11 @@ async function retryTransient(
       if (selfContradictory && !(await subject.exists())) {
         throw subjectGone(subject, error);
       }
-      if (!selfContradictory && !isRetryableGitHubError(error)) {
+      if (
+        !selfContradictory &&
+        !isRetryableGitHubError(error) &&
+        !(readFailure && isUnreadableResponseBody(error))
+      ) {
         throw error;
       }
       if (attempt >= delays.length) {
@@ -777,6 +781,24 @@ function isRetryableGitHubError(error) {
   }
   const detail = `${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`;
   return /fetch failed|network|socket|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(detail);
+}
+
+// A response whose body never made it intact to the parser — cut mid-payload
+// at the edge, it surfaces from octokit as a bare SyntaxError ("Unterminated
+// string in JSON", "Unexpected end of JSON input") carrying neither a status
+// nor a GraphQL errors array, so the classifiers above cannot see it for what
+// it is: a transport defect, not a verdict (#4975). It is admitted only for
+// READS, via retryTransient's readFailure flag — a truncated write response
+// can mean the write committed, and replaying it is the ambiguity #4763 routes
+// through reconcileAmbiguousCreate instead.
+function isUnreadableResponseBody(error) {
+  if (error instanceof SyntaxError || error?.name === "SyntaxError") {
+    return true;
+  }
+  const detail = `${error?.name || ""} ${error?.message || ""}`;
+  return /Unterminated string|Unexpected end of JSON input|Unexpected token.*JSON|JSON\.parse|invalid json/i.test(
+    detail,
+  );
 }
 
 function isRetryableGraphQLError(error) {
@@ -5507,8 +5529,6 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
                         externalId
                         permalink
                         title
-                        summary
-                        text
                         checkSuite { app { databaseId slug } }
                       }
                       ... on StatusContext {
@@ -5711,6 +5731,47 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
               per_page: 100,
             }),
         );
+      }
+      // The decision run's output carries the stamped evaluation, the
+      // blocked-source summary, and the required-check snapshot every
+      // reevaluation consumer reads — up to ~128 KiB of summary+text. It is
+      // the ONLY run on the head those consumers open, so the GraphQL page no
+      // longer selects output fields for every context of every PR: one
+      // truncated page then cost the whole snapshot (#4975). A completed
+      // non-success decision is the one that needs them, and it is read back
+      // per-run over REST instead.
+      const prNumber = Number(pull?.number);
+      const identity = Number.isSafeInteger(prNumber) && prNumber > 0
+        ? decisionIdentity(prNumber, headSha)
+        : null;
+      const decision = identity && newestCheckGeneration(
+        checkRuns.filter(
+          (run) =>
+            run.name === identity.checkName &&
+            run.external_id === identity.externalId &&
+            run.app?.id === GITHUB_ACTIONS_APP_ID,
+        ),
+      );
+      if (
+        decision &&
+        decision.status === "completed" &&
+        decision.conclusion !== "success" &&
+        Number.isSafeInteger(decision.id)
+      ) {
+        const detail = await retryRead(
+          `could not read the decision check run at ${headSha}`,
+          () =>
+            github.rest.checks.get({
+              owner,
+              repo,
+              check_run_id: decision.id,
+            }),
+        );
+        decision.output = {
+          title: detail?.data?.output?.title ?? decision.output?.title,
+          summary: detail?.data?.output?.summary,
+          text: detail?.data?.output?.text,
+        };
       }
       pulls.push(pull);
       checkRunsByHead.set(headSha, checkRuns);
