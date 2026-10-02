@@ -173,9 +173,12 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 	// verb does: a runtime that answers restores the binding
 	// (ResolveStartupState), and anything else refuses the retry with the row
 	// untouched. If readiness then fails, the marker goes back up below.
+	// The explicit retry is an operator one-shot RPC, so the probe uses
+	// probeLivenessForOperator's budget — not the poll loop's 5s tie-break
+	// budget. See remoteloss.go.
 	wasUnknown := entry.instance.StartupStateUnknown()
 	if wasUnknown {
-		if probe := probeLiveness(entry.instance, entry.instance.AgentServer()); probe != probeAlive {
+		if probe := probeLivenessForOperator(entry.instance, entry.instance.AgentServer()); probe != probeAlive {
 			return false, fmt.Errorf(
 				"session %q's runtime could not be confirmed live (%s), so its pending mission was not resent; "+
 					"if the pane is gone, restore or kill owns this row",

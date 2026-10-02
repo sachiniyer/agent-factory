@@ -431,7 +431,9 @@ func (m *Manager) commitNewAccountSwapIdentity(
 			return false, errors.Join(refusal, m.persistSettlement(repoID, key, instance))
 		}
 		if scheduled.manual && !instance.LimitReached() {
-			probe := probeLiveness(instance, instance.AgentServer())
+			// Operator one-shot RPC: use the operator probe budget, not the
+			// poll loop's 5s tie-break budget. See remoteloss.go.
+			probe := probeLivenessForOperator(instance, instance.AgentServer())
 			if probe == probeAbsent || probe == probeAnsweredDead {
 				// The agent may have stopped before a sibling refused teardown.
 				// No identity was selected: persist ordinary recovery on the old one.
@@ -724,8 +726,13 @@ func (m *Manager) settleReplacementRuntime(
 // prepareRuntimeForAccountSwap establishes that every old local pane is gone
 // before the replacement is recorded. An unanswered probe refuses, while an
 // absent agent still triggers a sibling-pane recheck for retry safety.
+//
+// The probe uses the operator-initiated budget (probeLivenessForOperator): an
+// account swap is an operator one-shot RPC under the per-session op lock, not a
+// poll-loop serial-walk caller, so the poll's 5s tie-break budget does not fit
+// it. See remoteloss.go.
 func (m *Manager) prepareRuntimeForAccountSwap(key string, instance *session.Instance) error {
-	probe := probeLiveness(instance, instance.AgentServer())
+	probe := probeLivenessForOperator(instance, instance.AgentServer())
 	if probe == probeUnknown {
 		return fmt.Errorf("cannot switch accounts for %q: its current runtime did not answer the liveness probe; not starting another identity while the old one may still be running", instance.Title)
 	}
