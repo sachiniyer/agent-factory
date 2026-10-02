@@ -681,10 +681,13 @@ func (i *Instance) TmuxAlive() bool {
 // with, and an override may point it at a different program entirely (#1116).
 //
 // Once the tmux session exists, its program string (override-resolved and
-// flag-injected by Start) is the ground truth. Before Start — or in tests
-// that never attach a tmux session — detection falls back to the raw Program
-// value, which also covers legacy free-form persisted values like
-// "/home/foo/bin/claude --plugin-dir x" (#677).
+// flag-injected by Start) is the ground truth. A remote session has no local
+// tmux binding; the command its runtime launched is still on record, because
+// the remote launch boundary writes the same runtime_program evidence the
+// local backend writes (#5067, #5108). Only when neither exists — before
+// Start, or for a runtime that recorded nothing — does detection fall back to
+// the raw Program value, which also covers legacy free-form persisted values
+// like "/home/foo/bin/claude --plugin-dir x" (#677).
 func (i *Instance) ResolvedAgent() string {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
