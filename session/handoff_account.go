@@ -233,10 +233,20 @@ func (i *Instance) pendingManualAccountSwapDeliveryUnconfirmedLocked() bool {
 // CanRetryPendingManualAccountSwapDelivery reports whether an operator can
 // inspect a known replacement pane and explicitly override ambiguous delivery.
 // Startup-unknown is inert because there is no confirmed runtime to inspect.
+//
+// The limit wall is admitted here even though it is excluded from the
+// agent-handoff twin (CanRetryPendingHandoffMissionDelivery): the daemon's
+// manual-swap ResumeFromLimit fork re-pastes the pending mission
+// (deliverManualAccountMission), so the row's restart IS a resend. Admitting
+// LiveLimitReached routes the row to the honest "Retry send — submit the
+// pending mission again" picker label instead of the agent-handoff-twin's
+// "Resume from limit — the pending mission is not resent" label, which is
+// true only for the agent-handoff arm whose daemon sends the session goal
+// (SendPromptWithEvidence) without resending.
 func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
 	return knownLive && i.inFlightOp == OpNone && !i.startupStateUnknown && !i.userKilled &&
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
