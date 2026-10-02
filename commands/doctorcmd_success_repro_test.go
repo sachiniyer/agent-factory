@@ -75,26 +75,43 @@ func requireTmuxOrSkip(t *testing.T) {
 
 // runDoctorSuccessSubprocess runs the built af binary with `af doctor
 // --setup --json` in a throwaway home the caller has already seeded, under a
-// real PATH so the setup prerequisites (git + the in-repo CWD for checkGit,
-// tmux for checkTmux, /bin/true for the program_overrides.claude override)
-// resolve to PASS. The af binary runs by absolute path from afTestBinary, so
-// it does not need PATH to locate itself. Returns stdout, stderr, and the
-// process exit code. This is the exit-0 counterpart of runDoctorSubprocess in
-// doctorcmd_exit_test.go, which empties PATH to FORCE exit 1; this one needs
-// exit 0, so PATH must resolve the setup prerequisites.
+// real PATH so the setup prerequisites (git for checkGit, tmux for checkTmux,
+// /bin/true for the program_overrides.claude override) resolve to PASS. The
+// af binary runs by absolute path from afTestBinary, so it does not need PATH
+// to locate itself. Returns stdout, stderr, and the process exit code. This is
+// the exit-0 counterpart of runDoctorSubprocess in doctorcmd_exit_test.go,
+// which empties PATH to FORCE exit 1; this one needs exit 0, so PATH must
+// resolve the setup prerequisites.
+//
+// cmd.Dir is a freshly-initialized throwaway git repo rather than the test
+// binary's CWD: checkGit (doctor/setup.go) runs `git rev-parse --show-toplevel`
+// against the subprocess's working directory, and the binary's CWD is the
+// commands/ package — which is a git checkout in a normal checkout and on
+// CI, but NOT when the module is built from a source archive or the module
+// cache (no .git). Running from a temp git repo keeps the exit-0 assertion
+// independent of whether the source tree happens to be a checkout, so the
+// behavior under test (the success-path log close) is what the test pins.
 func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdout, stderr []byte, exitCode int) {
 	t.Helper()
 	bin := afTestBinary(t)
+	// checkGit needs a git repo for its CWD (doctor/setup.go:141); a temp
+	// `git init` makes one without depending on the source tree being a
+	// checkout, so the test is hermetic to where `go test` runs from.
+	repoDir := t.TempDir()
+	if err := exec.Command("git", "-C", repoDir, "init", "-q").Run(); err != nil {
+		t.Skipf("git unavailable: cannot initialize a throwaway repo for checkGit: %v", err)
+	}
 	cmd := exec.Command(bin, args...)
+	cmd.Dir = repoDir
 	cmd.Env = append(os.Environ(),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
 	)
 	// Inherit the real PATH (do NOT empty it): checkGit needs git on PATH and a
-	// repo CWD (the test binary's CWD is the commands/ package inside the repo),
-	// checkTmux needs tmux on PATH, and program_overrides.claude="true" needs
-	// /bin/true on PATH. Emptying PATH turns each of these into an actionable
-	// FAIL (exit 1) — the trick doctorcmd_exit_test.go uses on purpose.
+	// repo CWD (cmd.Dir above), checkTmux needs tmux on PATH, and
+	// program_overrides.claude="true" needs /bin/true on PATH. Emptying PATH
+	// turns each of these into an actionable FAIL (exit 1) — the trick
+	// doctorcmd_exit_test.go uses on purpose.
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
