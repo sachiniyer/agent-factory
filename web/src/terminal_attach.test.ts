@@ -4,6 +4,7 @@ import test from "node:test";
 
 register("./browser_stub_loader.mjs", import.meta.url);
 const { AttachTerminal } = await import("./terminal.js");
+const { decode, Op } = await import("./frame.js");
 
 // Exercise the real initial-fit/connection boundary without constructing xterm.
 // Browser coverage below separately checks the actual surface and input wiring.
@@ -61,4 +62,23 @@ test("disposal before the queued attach prevents socket construction and status 
   // Real connect() must return before touching any absent browser dependencies.
   await Promise.resolve();
   assert.deepEqual(calls, ["fit", "resize"]);
+});
+
+// Codex review on #4983: xterm's DEFAULT mouse encoding (wheel-capable tracking
+// without SGR 1006) emits reports on onBinary — a byte string, one char per
+// byte — which used to go nowhere because only onData was forwarded.
+test("binary output reaches the socket byte-for-byte, never UTF-8 split", () => {
+  const sent: Uint8Array[] = [];
+  const t = Object.assign(Object.create(AttachTerminal.prototype), {
+    stopped: false,
+    exited: false,
+    send: (frame: Uint8Array) => (sent.push(frame), true),
+  }) as { sendBinary(data: string): void };
+  // A wheel-up report at col 101, row 115: every coordinate byte is ≥ 0x80,
+  // exactly what a UTF-8 pass would have split into two.
+  t.sendBinary("\x1b[M\x60\x85\x93");
+  assert.equal(sent.length, 1);
+  const frame = decode(sent[0]);
+  assert.equal(frame.op, Op.Input);
+  assert.deepEqual(Array.from(frame.data), [0x1b, 0x5b, 0x4d, 0x60, 0x85, 0x93]);
 });

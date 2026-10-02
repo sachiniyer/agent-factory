@@ -177,6 +177,73 @@ func (t *TmuxSession) panePID() (paneRow, error) {
 	return row, nil
 }
 
+// PaneRootProcess resolves the pane root's process identity — the (PID,
+// StartID) pair proctree treats as one process instance — so a launch can
+// record what it started and a later reattach can prove whether the same
+// process still stands behind the reused session name (#5066). A held dead
+// pane, an unanswerable query, or an uninspectable pid each return an error:
+// "cannot prove" must never masquerade as an identity.
+func (t *TmuxSession) PaneRootProcess() (proctree.Process, error) {
+	row, err := t.panePID()
+	if err != nil {
+		return proctree.Process{}, err
+	}
+	if row.dead {
+		return proctree.Process{}, fmt.Errorf("tmux session %s: pane root is a held dead pane", t.sanitizedName)
+	}
+	proc, err := proctree.Lookup(row.pid)
+	if err != nil {
+		return proctree.Process{}, fmt.Errorf("cannot inspect pane root pid %d: %w", row.pid, err)
+	}
+	return proc, nil
+}
+
+// PaneRootProcessMatches reports whether SOME pane of this session is rooted
+// at the recorded (pid, start-time) identity — not only the active one, which
+// is what panePID resolves: between launch and a daemon restart the user can
+// split the window or focus a shell tab, moving the active-pane pointer while
+// the launched agent keeps running in its own pane. The recorded pair names
+// exactly one kernel process, so a session-wide scan cannot attribute it to a
+// wrong pane (#5066 review). A reaped row carrying the pid means the kernel
+// handed it elsewhere — no match. An unanswerable list or a vanished session
+// returns an error: "cannot prove" must never masquerade as either verdict.
+func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	output, err := t.outputTmuxBounded(ctx, "list-panes", "-s", "-t", exactTarget(t.sanitizedName), "-F", paneRowFormat)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, fmt.Errorf("%w: list-panes for %s after %s", ErrTmuxTimeout, t.sanitizedName, tmuxCommandTimeout)
+		}
+		if missingTmuxSession(err, t.sanitizedName) {
+			return false, errPaneQueryFoundNoPane
+		}
+		return false, fmt.Errorf("failed to list session panes: %w", err)
+	}
+	if strings.TrimSpace(string(output)) == "" {
+		return false, errPaneQueryFoundNoPane
+	}
+	for _, field := range strings.Fields(string(output)) {
+		row, err := parsePaneRow(field)
+		if err != nil {
+			return false, fmt.Errorf("unexpected list-panes row %q", field)
+		}
+		if row.pid != pid || row.reaped {
+			continue
+		}
+		proc, err := proctree.Lookup(pid)
+		if err != nil {
+			return false, fmt.Errorf("cannot inspect pane root pid %d: %w", pid, err)
+		}
+		if proc.StartID == startID {
+			return true, nil
+		}
+	}
+	// No pane carries the recorded identity: the launched root was killed, its
+	// pane closed, or the pid reused — not the recorded launch.
+	return false, nil
+}
+
 // ProbePaneExit reports whether the command in the session's pane has finished,
 // and, when it has, the exit status and death time tmux recorded. It is how a
 // process tab's completion is observed rather than inferred from absence

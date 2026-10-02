@@ -27,6 +27,13 @@ var legacyDeprecationLogged sync.Map
 // pre-#3358 parent-keyed config to once per corrected repository identity.
 var retainedLegacyBareRepoConfigLogged sync.Map
 
+// resetRetainedLegacyBareRepoConfigWarnings clears that memo. captureLog calls
+// it so a test asserting the warning is not silenced by an earlier test in the
+// same process that happened to use the same repo and legacy identity.
+func resetRetainedLegacyBareRepoConfigWarnings() {
+	retainedLegacyBareRepoConfigLogged.Clear()
+}
+
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
@@ -38,7 +45,8 @@ type ResolvedConfig struct {
 	// file; the global-only fields (e.g. AutoUpdate, DaemonPollInterval,
 	// BranchPrefix, DetachKeys — the manifest's full sourceGlobalOnly set)
 	// always come from the global config because LoadInRepoConfig rejects them
-	// per-repo.
+	// per-repo. BranchPrefix additionally ignores the personal-project layer
+	// until #4539: a stored per-project value is kept but never wins.
 	Config
 
 	// PostWorktreeCommands are the effective post-worktree hooks: the
@@ -512,6 +520,11 @@ func materializeResolution(global *Config, projectRoot string, entries []Manifes
 		value.resolved.Value = clonedInterface(value.value)
 		res.Resolution = append(res.Resolution, value.resolved)
 	}
+	// A stored personal branch_prefix resolves as precedence-disallowed; relabel
+	// it as the accepted-but-unapplied state it actually is (#4539) so explain
+	// output and the get/list marker describe it honestly. No-op on the
+	// global-only resolve, which carries no personal document.
+	annotateProjectBranchPrefix(res)
 	refreshResolutionValues(res)
 	return res, nil
 }
@@ -695,7 +708,7 @@ func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
 		if os.IsNotExist(err) {
 			return
 		}
-		key := repo.ID + "|" + legacyID
+		key := repo.ID + "|" + legacyID + "|inspect-error"
 		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
 			return
 		}

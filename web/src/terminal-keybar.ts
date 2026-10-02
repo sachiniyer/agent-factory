@@ -163,6 +163,9 @@ function ctrlModifiedEmission(text: string): string | undefined {
   }
   if (code >= 51 && code <= 55) return String.fromCharCode(code - 24);
   if (code === 56) return "\x7f";
+  // Ctrl+/ is US — the same byte as Ctrl+_ (xterm.js's ev.key "/" case,
+  // xtermjs/xterm.js#5457; the VT102-era alias readline binds as undo).
+  if (text === "/") return "\x1f";
   return undefined;
 }
 

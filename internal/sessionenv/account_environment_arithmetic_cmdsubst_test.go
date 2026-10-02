@@ -741,3 +741,45 @@ func TestValidateAccountEnvironmentCommand_NegativeLiteralNumericTestsDoNotWeake
 		require.Error(t, err, "command %q has a non-numeric-literal operand and must stay refused", command)
 	}
 }
+
+// TestValidateAccountEnvironmentCommand_QueryOnlyLetWrapperIsAllowed is the
+// regression test for the false-positive class where isWrappedLetCall
+// misidentified a query-only command/builtin invocation of the word `let` as a
+// let execution.  `command -v let`, `command -V let`, and all combined-flag
+// variants are display-only: they print information about `let` and never
+// invoke it, so they contain no arithmetic context at all.  Before the fix,
+// isWrappedLetCall stripped every leading option (including -v/-V) and then saw
+// the trailing `let`, returning true and firing the inverted arithmetic guard
+// — producing a misleading "shell arithmetic" error for a command with no
+// arithmetic.
+//
+// The four execute-with-operand forms at the bottom are the contrast: -p is
+// an execute modifier (runs the builtin), and bare `let`/`command let`/
+// `builtin let` with an operand evaluate real arithmetic.  All four stay
+// refused.
+func TestValidateAccountEnvironmentCommand_QueryOnlyLetWrapperIsAllowed(t *testing.T) {
+	for _, command := range []string{
+		// Query-only: -v/-V display information; never invoke let.
+		"command -v let",
+		"command -V let",
+		"command -vp let",
+		"command -Vp let",
+		"command -pv let",
+		"command -v -p let",
+		"command -v -- let",
+		"builtin -v let",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q is query-only and never invokes let; it must be allowed", command)
+	}
+	for _, command := range []string{
+		// Execute: these run let with an arithmetic operand.
+		"let x",
+		"command let x",
+		"command -p let x",
+		"builtin let x",
+	} {
+		require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+			"command %q executes let with an operand; it must be refused", command)
+	}
+}

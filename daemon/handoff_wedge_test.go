@@ -438,3 +438,99 @@ func TestReloadedAmbiguousMissionLoadsWithoutTheFence(t *testing.T) {
 	require.Equal(t, session.OpReplacing, reloaded2.GetInFlightOp(),
 		"positive non-delivery still reconstructs the fence for automatic recovery")
 }
+
+// #5023: a confirmed delivery means the incoming agent already HAS its mission,
+// so the row the settlement publishes must read as working. A LiveReady record
+// here is the settled-idle snapshot fleet watch emits a false working → idle
+// edge on — one an automated driver answers by prompting an agent that is still
+// processing the confirmed mission. Only the status monitor's own idle
+// observation may move the row back.
+func TestConfirmHandoffDelivery_ConfirmedMissionReadsAsWorking(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{
+		FakeBackend:    session.NewFakeBackend(),
+		deliveryStatus: session.PromptSentUnverified,
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "confirmed-handoff", backend)
+	mission := "continue the inherited work"
+	inst.SetPendingHandoffMission(mission)
+	require.NoError(t, inst.RecordPendingHandoffMissionDelivery(mission, session.PromptSentUnverified))
+	// The shape #5023 names: a settled ambiguous verdict on a row already
+	// reading idle, with no fence left to hold it working.
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	require.Equal(t, session.OpNone, inst.GetInFlightOp())
+	manager.persistInstance(repoID, inst)
+
+	performed, err := manager.confirmHandoffDelivery(ConfirmHandoffDeliveryRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.NoError(t, err)
+	require.True(t, performed)
+
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
+		"a confirmed delivery is a working session — the agent already has its mission")
+	require.Empty(t, inst.PendingHandoffMission())
+	_, prompts := backend.snapshot()
+	require.Empty(t, prompts, "confirm never resends")
+
+	rec := recordFor(t, repoID, inst.Title)
+	require.NotNil(t, rec)
+	require.Equal(t, session.LiveRunning, rec.Liveness,
+		"fleet watch consumes this snapshot — a Ready record here is the false idle edge")
+	require.Empty(t, rec.PendingHandoffMission)
+
+	// The monitor owns the way back: handoffBackend reports a still, prompt-free
+	// pane, so this poll's idle settle is genuine pane evidence — the real
+	// working → idle edge, landing when it is real.
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"the monitor's own idle observation settles the confirmed row")
+}
+
+// The manual account swap's confirm is the same exit on the sibling marker —
+// the #5023-named path. A failed mission delivery leaves LiveReady with
+// PendingAccountSwap still set (the row #4997's fleet gate holds as working),
+// and the confirm must publish LiveRunning rather than the settled-idle record
+// a plain marker clear would write. The monitor's own idle probe moves it back.
+func TestConfirmHandoffDelivery_ConfirmedAccountSwapReadsAsWorking(t *testing.T) {
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "continue the work", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	backend.sendPromptErr = errors.New("delivery interrupted")
+
+	_, err := manager.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repoID, Account: "personal"})
+	require.ErrorContains(t, err, "delivery interrupted")
+
+	// Fixture check: the exact #5023 shape — idle, unfenced, mission
+	// unconfirmed but possibly delivered.
+	require.Equal(t, session.LiveReady, inst.GetLiveness())
+	_, _, pending := inst.PendingAccountSwap()
+	require.True(t, pending, "fixture: the failed delivery left the swap pending")
+	require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
+
+	performed, err := manager.confirmHandoffDelivery(ConfirmHandoffDeliveryRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.NoError(t, err)
+	require.True(t, performed)
+
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
+		"a confirmed swap delivery is a working session — the replacement already has its mission")
+	_, _, stillPending := inst.PendingAccountSwap()
+	require.False(t, stillPending, "the confirm retires the pending swap")
+
+	rec := recordFor(t, repoID, inst.Title)
+	require.NotNil(t, rec)
+	require.Equal(t, session.LiveRunning, rec.Liveness,
+		"fleet watch consumes this snapshot — a Ready record here is the false idle edge")
+	require.Nil(t, rec.PendingAccountSwap)
+
+	// Same ownership as the mission leg: the pending-swap gate skips this row's
+	// poll while the marker is set, so this Ready is the monitor's own verdict
+	// on a still pane — after the confirm retired the marker.
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"the monitor's own idle observation settles the confirmed row")
+}

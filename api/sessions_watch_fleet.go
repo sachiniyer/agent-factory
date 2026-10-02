@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -107,12 +108,285 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 	if d.UserKilled {
 		return watchStopKilled, "killed; its teardown may still be running"
 	}
-	// A record whose startup could not be confirmed has a liveness value that
-	// describes nothing, so it is asked before the liveness axis. Reading it would
-	// produce exactly the fabricated-idle this command must not emit.
+	// A pending account swap is a durable replacement transaction whose mission
+	// delivery may not have settled, and it reaches the watch path populated
+	// even on a LiveReady record with no operation in flight: the manual
+	// delivery path drops the OpRespawning fence before ClearPendingAccountSwap
+	// when the prompt cannot be confirmed. Reading such a row as idle would
+	// fabricate the one verdict this surface is documented never to emit, and
+	// makes the fleet form disagree with the single-title path. Match
+	// session.ClassifyActivity, which gates on PendingAccountSwap before the
+	// liveness axis for the same reason (#4027).
+	//
+	// The swap gate holds the slot as `working` only for the in-motion liveness
+	// values a mid-swap record carries while its mission settles — LiveRunning,
+	// and LiveReady (the latter because the manual delivery path can leave a
+	// mid-swap row at LiveReady with no operation in flight). Every other value
+	// is a verdict a driver must hear instead of polling until --timeout, so the
+	// gate positively names the in-motion set and lets the rest fall through:
+	//
+	//   - A terminal backing runtime (lost/dead/archived). The status loop
+	//     resumes normal probing once a swap leaves LiveLimitReached
+	//     (TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows),
+	//     so fleet watch reports the terminal reason and the restore
+	//     instruction rather than holding the row as working.
+	//   - A swap parked at a usage limit on the incoming identity.
+	//     ParkManualAccountSwapAtLimit holds PendingAccountSwap with
+	//     LiveLimitReached and keeps the OpRespawning fence, so reporting
+	//     `working` would suppress the documented `usage-limited` edge and a
+	//     driver would never learn the session is parked and must not be
+	//     prompted. It is reported below, ahead of the InFlightOp axis, because
+	//     that retained fence would otherwise read as in motion and mask it.
+	//   - A swap whose replacement vanished before readiness. The delivery path
+	//     marks the row StartupStateUnknown while keeping PendingAccountSwap
+	//     (TestHandoffAccountReadinessFailureBecomesInert); that row is inert
+	//     and operator-action-required, and holding it as `working` would mask
+	//     the `unknown` a driver needs to inspect and remove.
+	//   - An unrecognized liveness value a newer daemon persists alongside the
+	//     swap (e.g. session.Liveness(9999)). It is not an in-motion value this
+	//     build knows, so matching it here would return `working` and fleet
+	//     watch would time out without telling the driver to upgrade — the
+	//     fail-closed guarantee TestClassifyWatchStop_UnknownLivenessDoesNotUseTheLegacyFallback
+	//     makes for a non-swap row, inverted on the one path an automated
+	//     driver acts on. Leaving it out lets it fall through to the
+	//     unknown-liveness branch below.
+	if d.PendingAccountSwap != nil &&
+		!d.StartupStateUnknown &&
+		(d.Liveness == session.LiveRunning || d.Liveness == session.LiveReady) {
+		return watchWorking, ""
+	}
 	if d.StartupStateUnknown {
 		return watchStopUnknown,
 			"af could not confirm which runtime owns this workspace; inspect it and remove it explicitly before retrying"
+	}
+	// ParkManualAccountSwapAtLimit leaves PendingAccountSwap populated with
+	// LiveLimitReached and does NOT release the OpRespawning fence (the settle
+	// path only lowers it on success), so a swap parked at a usage limit reaches
+	// the watch path as a row the InFlightOp axis below would otherwise hold as
+	// in motion. That suppresses the `usage-limited` edge a driver is owed: the
+	// incoming identity is at a quota wall, the scheduler waits for its reset
+	// window, and fleet watch would time out without saying the session is
+	// parked and must not be prompted. Report it here, ahead of the InFlightOp
+	// axis and with the liveness axis's own reason, mirroring how a terminal
+	// runtime outranks the swap above. Scoped to PendingAccountSwap because a
+	// non-swap row parked at a limit carries OpNone (the park clears the fence),
+	// so the InFlightOp axis already lets it fall through to the liveness switch.
+	//
+	// Restricted to a MANUAL pending swap: ParkManualAccountSwapAtLimit is the
+	// only settle path that attributes the wall to the INCOMING identity while
+	// keeping the respawn fence, and it requires PendingAccountSwap.Manual. An
+	// AUTOMATIC swap resume also reaches the watch path with all three fields
+	// set — resumeFromLimitLockedOutcome raises OpRespawning, then
+	// SelectAccountAutomatically installs PendingAccountSwap while the ORIGINAL
+	// account's LiveLimitReached is still present, before
+	// RespawnForAccountSwapWithLiveBoundary clears it — but that row is
+	// mid-replacement, not parked: the limit it carries is the outgoing
+	// identity's stale value, the replacement has not settled, and reporting
+	// `usage-limited` here would make fleet watch return early instead of
+	// waiting for the delivery. An AUTOMATIC swap with OpRespawning (the
+	// active-resume view) is left to the InFlightOp axis below, which holds it
+	// as `working` — the verdict a driver needs while the replacement
+	// delivers. An AUTOMATIC swap with OpNone at LiveLimitReached is the
+	// crash-recovered pre-respawn view of the same mid-replacement row, and
+	// the gate below holds that as `working` too.
+	//
+	// The override is gated on InFlightOp for the same version-skew reason the
+	// InFlightOp axis below is fail-closed: a newer daemon can persist a
+	// PendingAccountSwap.Manual row at LiveLimitReached carrying an InFlightOp
+	// value this build has no name for, and matching it here would emit
+	// `usage-limited` ahead of that axis, returning early on a stale limit
+	// while an operation this client cannot read is still running. Restrict the
+	// override to the two values a parked swap actually carries — OpRespawning
+	// (the fence ParkManualAccountSwapAtLimit keeps) and OpNone (the
+	// disk-scrubbed view, or the fence released once the limit lifts) — so any
+	// other operation falls through to the InFlightOp axis and is held as
+	// working, the version-skew-safe verdict.
+	//
+	// Gated on ReplacementPanesStarted so the override fires only for a limit
+	// observed on the INCOMING identity. Both park paths —
+	// ParkManualAccountSwapAtLimit and the manual deliverManualAccountMission
+	// settle — run after RespawnForAccountSwapWithLiveBoundary marked the
+	// replacement panes started (ValidateAccountSwapReplacementPanes requires
+	// it before any settle/deliver), so a parked manual swap always carries it.
+	// A manual swap that has NOT started its replacement yet reaches this point
+	// with OpRespawning and ReplacementPanesStarted=false: handoffAccount on a
+	// session already at LiveLimitReached commits the incoming identity before
+	// RespawnForAccountSwapWithLiveBoundary clears the OUTGOING account's stale
+	// liveness, so the row carries the outgoing identity's stale limit while
+	// the requested replacement is actively executing. Reporting usage-limited
+	// there would end fleet watch early instead of waiting for the delivery, so
+	// the active-resume view falls through to the InFlightOp axis, which holds
+	// OpRespawning as working — the same verdict the automatic active-resume
+	// row below gets.
+	//
+	// ReplacementPanesStarted is still not enough on its own. A manual swap that
+	// HAS started its replacement can reach the watch path with the OUTGOING
+	// account's stale LiveLimitReached still set: RespawnForAccountSwapWithLiveBoundary
+	// marks the replacement panes started, then resumeFromLimitLockedOutcome's
+	// restorePendingLiveness re-parks the limit under the resume fence before
+	// settleReplacementRuntime has checked or delivered to the incoming runtime
+	// (daemon/limit.go; session/liveness.go), and that re-park restores
+	// LiveLimitReached without touching limitAccount/limitAgent. The post-respawn
+	// snapshot therefore carries PendingAccountSwap.Manual, the outgoing
+	// identity's stale LiveLimitReached, OpRespawning (actively delivering), and
+	// ReplacementPanesStarted=true — every field this gate names — while the
+	// replacement is still executing, not parked. Reporting usage-limited there
+	// would let fleet watch return early on the outgoing account's stale wall.
+	// Gate the override on the limit's IDENTITY as well: ParkManualAccountSwapAtLimit
+	// is the only settle path that attributes the wall to the incoming identity,
+	// and it sets limitAccount/limitAgent to the current account/agent, so
+	// requiring LimitAccount == Account and LimitAgent == CurrentAgent proves the
+	// wall is the committed incoming identity's. The post-respawn active-resume
+	// row still carries the outgoing identity's limitAccount/limitAgent, so it no
+	// longer matches and falls through to the InFlightOp axis, which holds
+	// OpRespawning as working until the replacement delivers — the verdict a
+	// driver needs instead of an early return on the outgoing account's stale
+	// limit.
+	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual && d.Liveness == session.LiveLimitReached &&
+		d.PendingAccountSwap.ReplacementPanesStarted &&
+		d.LimitAccount == d.Account && d.LimitAgent == d.CurrentAgent &&
+		(d.InFlightOp == session.OpRespawning || d.InFlightOp == session.OpNone) {
+		return watchStopUsageLimited, "blocked on a provider usage limit; af resumes it automatically — do not send it a prompt"
+	}
+	// A crash-recovered AUTOMATIC swap at the original account's limit keeps
+	// PendingAccountSwap populated while its operation fence is gone: a
+	// daemon restart immediately after the swap's identity checkpoint strips
+	// OpRespawning on the way to disk, and FromInstanceData does not rebuild
+	// the fence for an unresolved PendingAccountSwap, so the restored row
+	// carries PendingAccountSwap (automatic, so the manual-only override
+	// above did not match) with the ORIGINAL account's stale LiveLimitReached
+	// and OpNone until the first ResumeLimitedSessions pass re-raises the
+	// fence and continues the replacement. Reading that row as
+	// `usage-limited` would make fleet watch return early and tell the driver
+	// the session is parked at a quota wall when it is not — the replacement
+	// is about to resume — so hold it as `working` the way the active-resume
+	// path above does.
+	//
+	// Not every automatic OpNone row at LiveLimitReached with a pending swap
+	// is that crash-recovered pre-respawn shape. settleReplacementRuntime
+	// re-parks an automatic replacement that itself reached the INCOMING
+	// identity's wall at LiveLimitReached while retaining PendingAccountSwap,
+	// and the error path's EndLimitResume then lowers the fence to OpNone — a
+	// row genuinely parked at the incoming identity's limit that a driver is
+	// owed a `usage-limited` edge for while the scheduler waits out its reset
+	// window. The two share every field the snapshot carries except
+	// ReplacementPanesStarted: the crash-recovered row's replacement never
+	// started (the restart hit between the identity checkpoint and
+	// RespawnForAccountSwapWithLiveBoundary), while the incoming-limit park's
+	// replacement did start (RespawnForAccountSwapWithLiveBoundary completed
+	// before settle). Gate the `working` verdict on !ReplacementPanesStarted so
+	// the crash-recovered pre-respawn row is still held as working, and the
+	// genuine incoming-limit park (ReplacementPanesStarted) falls through to
+	// the liveness switch below and reports `usage-limited` the way a settled
+	// non-swap row does.
+	// Restricted to OpNone because an automatic swap with OpRespawning is the
+	// active-resume shape the InFlightOp axis below already holds as
+	// `working`, with the same verdict.
+	if d.PendingAccountSwap != nil && !d.PendingAccountSwap.Manual &&
+		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone &&
+		!d.PendingAccountSwap.ReplacementPanesStarted {
+		return watchWorking, ""
+	}
+	// A crash-recovered MANUAL swap at the original (outgoing) account's limit
+	// keeps PendingAccountSwap populated while its operation fence is gone, and
+	// ResumeLimitedSessions restarts the swap and continues the pending mission
+	// delivery. Reading such a row as `usage-limited` would make fleet watch
+	// return early instead of waiting for the delivery, so it is held as
+	// `working` the way the automatic crash-recovery gate above and the
+	// InFlightOp axis below do.
+	//
+	// ParkManualAccountSwapAtLimit is the only manual settle path that attributes
+	// the wall to the INCOMING identity: it sets limitAccount/limitAgent to the
+	// current account/agent (session/handoff_account.go) and runs only after
+	// RespawnForAccountSwapWithLiveBoundary marked ReplacementPanesStarted. So a
+	// manual row at LiveLimitReached with OpNone that does NOT match that profile
+	// is a crash-recovery view of an in-flight replacement, not a parked one:
+	//
+	//   - !ReplacementPanesStarted: the daemon crashed between the durable
+	//     PendingAccountSwap commit and RespawnForAccountSwapWithLiveBoundary
+	//     (daemon/account_swap.go), so storage stripped OpRespawning while the
+	//     replacement never started. The genuine park always carries
+	//     ReplacementPanesStarted.
+	//   - ReplacementPanesStarted with the OUTGOING identity's limitAccount/
+	//     limitAgent: the daemon crashed after the post-respawn checkpoint
+	//     (daemon/limit.go) stripped OpRespawning, and restorePendingLiveness
+	//     re-parked the outgoing account's stale wall via
+	//     ReparkLimitUnderResumeFence (session/liveness.go), which restores
+	//     LiveLimitReached without touching limitAccount/limitAgent — so the
+	//     row carries the outgoing limit while Account/CurrentAgent are the
+	//     committed incoming identity. The genuine park carries the incoming
+	//     identity (it sets limitAccount/limitAgent to the current account/agent).
+	//
+	// Both are snapshot-distinguishable from the genuine manual park, which the
+	// override above already reports as `usage-limited` (it requires
+	// ReplacementPanesStarted and the incoming identity), so this gate fires only
+	// on the complement. Restricted to OpNone because a manual swap with
+	// OpRespawning is the active-resume shape the InFlightOp axis below already
+	// holds as `working`.
+	//
+	// The LimitAgent/CurrentAgent mismatch is gated on CurrentAgent != "" because
+	// CurrentAgent is a PROJECTION-ONLY field scrubbed by ForStorage before disk
+	// persistence (session/storage.go) and not rebuilt by the disk-fallback
+	// read path (diskListSessions → ForClientRead). A genuine
+	// ParkManualAccountSwapAtLimit park read off disk therefore carries a
+	// nonempty LimitAgent (persisted) but an empty CurrentAgent, and matching the
+	// mismatch unconditionally would hold that genuine park as `working` and
+	// suppress the `usage-limited` edge whenever the daemon is unreachable. The
+	// disk-fallback genuine park still carries LimitAccount == Account (both
+	// persisted, both the incoming identity), so it does not match the
+	// LimitAccount != Account disjunct and falls through to the liveness switch
+	// below, which reports `usage-limited`. A post-respawn crash in the
+	// disk-fallback view usually keeps LimitAccount != Account (outgoing vs
+	// incoming, both persisted), so the LimitAccount disjunct still holds it as
+	// `working` without needing the agent comparison. The exception is a
+	// cross-AGENT handoff that KEEPS the account label (e.g. claude/work →
+	// codex/work): the limit's Account is the OUTGOING identity's, which is the
+	// same label the incoming identity committed, so LimitAccount == Account
+	// even though the limit is the outgoing agent's. CurrentAgent is scrubbed
+	// on disk, so the agent mismatch above does not fire either, and the row
+	// would fall through to `usage-limited` while ResumeLimitedSessions still
+	// owes the replacement. The committed incoming agent is durable on the
+	// pending swap (PendingAccountSwap.AccountAgent, set at commit by
+	// SelectAccountForHandoff and not scrubbed by ForStorage), so when the
+	// projection-only CurrentAgent is empty and the persisted incoming agent is
+	// known, compare the limit's agent against it: a mismatch is the
+	// cross-agent crash-recovery row and stays `working`. A genuine
+	// ParkManualAccountSwapAtLimit park read off disk carries LimitAgent ==
+	// AccountAgent (both the incoming identity, since the park attributes the
+	// wall to the incoming agent), so this disjunct does not fire on it and it
+	// still falls through to `usage-limited`.
+	//
+	// The legacy exception: a same-account cross-agent handoff written before
+	// AccountSwapData.AccountAgent existed carries an empty AccountAgent
+	// (session/account_limit_data.go), so the agent disjunct above would not
+	// fire and the recoverable outgoing limit would fall through to
+	// `usage-limited`. The persisted incoming launch command
+	// (PendingAccountSwap.Program, the same plan.base the daemon resolves to
+	// the committed namespace via sessionenv.AgentForCommand in
+	// committedAccountSwap/selectAccountLocked) is a second durable incoming-
+	// agent source, so resolve it as a fallback when AccountAgent is empty.
+	// AgentForCommand returns "" unless the command is a single literal agent
+	// invocation, so this never fires on a record whose Program is itself empty
+	// (a still-older legacy record with no persisted incoming-agent source at
+	// all, which conservatively keeps today's `usage-limited` behavior) or
+	// whose Program is non-literal. The genuine park is still preserved: it
+	// carries LimitAgent == the Program-resolved incoming agent (the park
+	// attributes the wall to the incoming identity), so the mismatch is false.
+	swapAccountAgent := ""
+	if d.PendingAccountSwap != nil {
+		swapAccountAgent = d.PendingAccountSwap.AccountAgent
+		if swapAccountAgent == "" {
+			swapAccountAgent = sessionenv.AgentForCommand(d.PendingAccountSwap.Program)
+		}
+	}
+	if d.PendingAccountSwap != nil && d.PendingAccountSwap.Manual &&
+		d.Liveness == session.LiveLimitReached && d.InFlightOp == session.OpNone &&
+		(!d.PendingAccountSwap.ReplacementPanesStarted ||
+			d.LimitAccount != d.Account ||
+			(d.CurrentAgent != "" && d.LimitAgent != d.CurrentAgent) ||
+			(d.CurrentAgent == "" && swapAccountAgent != "" &&
+				d.LimitAgent != swapAccountAgent)) {
+		return watchWorking, ""
 	}
 	// ANY operation in flight means the session is in motion, including one this
 	// binary does not recognise. That last part is the point: a newer daemon can
