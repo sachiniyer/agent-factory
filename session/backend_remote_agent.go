@@ -1,10 +1,22 @@
 package session
 
+import "strings"
+
 // remoteAgentBackend is the common backend behavior for workspaces whose data
 // plane is an AgentServer reached through the daemon. Docker, SSH, and hook
 // runtimes differ only in how they provision and reap that workspace; after
 // provisioning, their lifecycle and agent-facing operations must stay identical.
-type remoteAgentBackend struct{}
+type remoteAgentBackend struct {
+	// resolvedProgram is the override-resolved command the provisioned
+	// agent-server is bound to launch — the --program value the runtime handed
+	// it (or handed the launch/provision hook that started it). The launch RPC
+	// records it on the instance as runtime evidence, the remote twin of
+	// LocalBackend's setRuntimeLaunch (#5067), so agent detection keys off the
+	// command the session ACTUALLY runs rather than the configured enum
+	// (#5108). Empty on an inert backend rebuilt from disk — which Launch can
+	// never succeed on anyway (deadRemoteAgentServer refuses).
+	resolvedProgram string
+}
 
 // Capabilities reports the common off-box runtime contract. Tab management is
 // false because the AgentServer's tab API is data-plane only: it can drive an
@@ -56,6 +68,15 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 		return err
 	}
 	i.mu.Lock()
+	// The launch RPC's success is the boundary at which the bound command
+	// positively established this runtime — record it here rather than at
+	// provision so a failed launch leaves no claim about a command that never
+	// ran. A remote session has no pane to pin a (pid, startID) identity to,
+	// so the command alone is the evidence; it is the record
+	// resolvedAgentLocked reads when no local tmux binding exists (#5108).
+	if program := strings.TrimSpace(b.resolvedProgram); program != "" {
+		i.setRuntimeProgramLocked(program)
+	}
 	if !i.started {
 		i.started = true
 		i.touchLocked()
