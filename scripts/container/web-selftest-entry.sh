@@ -407,6 +407,17 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_MIS" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_DEAD" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_ORDER" >/dev/null 2>&1 || true
+    # Sweep hook-provisioned sessions the named list cannot know: the serial
+    # create test submits through the modal, so if an assertion fails the row
+    # outlives its test and its detached agent-server contaminates every later
+    # test's rail. launch_cmd namespaces each session under $HOOK_STATE, so the
+    # directory names ARE the session names — kill them through the daemon first
+    # (proper delete_cmd teardown), then reap any pid that survived anyway.
+    for d in "$HOOK_STATE"/*/; do
+        [ -d "$d" ] || continue
+        "$BIN" sessions kill "$(basename "$d")" >/dev/null 2>&1 || true
+        [ -f "$d/pid" ] && kill "$(cat "$d/pid")" >/dev/null 2>&1 || true
+    done
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
