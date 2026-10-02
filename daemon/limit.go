@@ -322,7 +322,7 @@ type ResumeFromLimitResponse struct {
 // success worth logging. The manual-retry path exposes this same distinction
 // through ResumeFromLimitResponse.OK (outcome == resumePerformed).
 func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, error) {
-	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap, false)
 }
 
 // fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
@@ -369,7 +369,9 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 // resumeFromLimitOutcome calls this body directly; the auto-resume scheduler's
 // resumeLimitedSession reaches it through resumeFromLimitLockedWithAccount. Both
 // take the two locks before calling in, so this body never acquires either itself.
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (outcome resumeFromLimitOutcome, resultErr error) {
+// operatorInitiated selects the liveness-probe budget: the explicit RPC uses
+// probeLivenessForOperator; the poll-driven scheduler keeps the short poll budget.
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap, operatorInitiated bool) (outcome resumeFromLimitOutcome, resultErr error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
@@ -529,7 +531,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			lockEntered = true
 			var err error
 			fallbackEligible, err = m.commitNewAccountSwapIdentity(
-				repoID, key, requestedTitle, instance, accountSwap, liveConfig)
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated)
 			return err
 		})
 		swapErr := lockErr
@@ -552,10 +554,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	as := instance.AgentServer()
 	probe := probeAbsent
 	if !forceRespawn {
-		// resumeFromLimit is an operator one-shot RPC under the per-session op
-		// lock, so the probe uses the operator budget — not the poll loop's 5s
-		// tie-break budget. See remoteloss.go's probeLivenessForOperator.
-		probe = probeLivenessForOperator(instance, as)
+		// Caller-specific budget — see the operatorInitiated doc above and remoteloss.go.
+		if operatorInitiated {
+			probe = probeLivenessForOperator(instance, as)
+		} else {
+			probe = probeLiveness(instance, as)
+		}
 	}
 	shouldRespawn := forceRespawn
 	switch probe {
