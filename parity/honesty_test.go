@@ -98,7 +98,9 @@ func TestDerivationSeesLazyCobraSurface(t *testing.T) {
 // unresolved — so the inventory held session.create.opt.backend's web cell at
 // `partial`, not `yes`, until TestWebCreateSessionOnHookBackend
 // (integration/web_remote_hook_test.go) drove the browser's exact endpoints
-// through a working hook-backend create. This remains the package's oldest
+// through a working hook-backend create and the web-driver selftest submitted
+// the + New modal itself with hook selected (the modal-to-wire seam this
+// static derivation cannot see). This remains the package's oldest
 // blind spot class — "reachable != user-settable" under Known blind spots: the
 // derivation reads call sites, not outcomes. #1936 is the same trap mirrored.
 func TestDerivationSeesWebCreateOptions(t *testing.T) {

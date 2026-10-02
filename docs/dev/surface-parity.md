@@ -71,12 +71,17 @@ The web's backend and force-remote cells sat at `partial` for a long stretch —
 not for missing controls, but because nobody had shown a **working** remote
 session created over the browser's request path (#1968 watched provisioning
 succeed and the session then time out waiting for its program). The proof is
-now executable: `TestWebCreateSessionOnHookBackend`
+now executable at both seams: `TestWebCreateSessionOnHookBackend`
 (`integration/web_remote_hook_test.go`) drives the browser's exact endpoints —
 the modal's `CreateSession` body with `backend:"hook"`, the events rail, the
 `{id}/stream` attach, `KillSession` — through a real `af agent-server` stood up
 by a mock `launch_cmd`, and reads typed input echoed back off the remote pane.
-Reachable is not the same as proven — see "Known blind spots".
+And the seam that wire-level test cannot see — the modal actually sending the
+picked backend — is covered by the web-driver selftest: `web-driver.spec.ts`'s
+create test submits the + New modal with `hook` selected against a real
+`coder-launch.sh` provisioner (`scripts/container/web-selftest-entry.sh`) and
+attaches the resulting remote session through the browser UI. Reachable is not
+the same as proven — see "Known blind spots".
 
 So when this check fails, the question is never "does the web need to catch up?"
 It is "which surfaces should have this, and which deliberately should not?" —

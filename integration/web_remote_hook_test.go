@@ -82,6 +82,22 @@ func TestWebCreateSessionOnHookBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession backend=hook over the web's own endpoint: %v", err)
 	}
+	// From here the create is COMMITTED: launch_cmd may already have spawned the
+	// agent-server, so every later failure must still reap it. This cleanup
+	// registers after `state`'s t.TempDir, so it runs BEFORE that dir is removed
+	// (LIFO) — the harness's own cleanupSessions runs after, when delete.sh
+	// could no longer read its pidfile.
+	killed := false
+	t.Cleanup(func() {
+		if killed || created.Instance.Title == "" {
+			return
+		}
+		_ = h.tryHTTPPost("/v1/KillSession", map[string]any{"title": created.Instance.Title, "repo_id": ""}, nil)
+		deadline := time.Now().Add(15 * time.Second)
+		for mockHookServerAlive(state, session.Slugify(created.Instance.Title)) && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
 	if created.Warning != "" {
 		t.Fatalf("CreateSession returned a committed-but-failed warning: %s", created.Warning)
 	}
@@ -127,6 +143,7 @@ func TestWebCreateSessionOnHookBackend(t *testing.T) {
 	}, nil); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
+	killed = true
 	waitUntil(t, 5*time.Second, "attached remote terminal received MsgExit on kill", func() bool {
 		return term.sawExit()
 	})

@@ -6737,8 +6737,9 @@ test.describe("create → kill (one session, two flows)", () => {
     await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
 
-    // Back to the repo default: the notice clears, Create is live again, and the
-    // submit below sends NO backend — so this create stays local.
+    // Back to the repo default: the notice clears and Create is live again. The
+    // round-trip proves the pick is not sticky; the submit below re-selects
+    // hook, so this create does NOT stay local.
     await backendSelect.selectOption("");
     await expect(modal.locator(".af-backend-hint")).toHaveText("");
     await expect(modal.locator("button.af-primary")).toBeEnabled();
@@ -6794,8 +6795,20 @@ test.describe("create → kill (one session, two flows)", () => {
     // Title is required; the project picker defaults to the scoped project (redesign
     // PR2 — the first mock repo A/B live in), so the created session lands there and is
     // visible in the scoped rail. Program is left at "Repo default" (claude → the fake
-    // agent). Submit with the modal's Create button.
+    // agent).
     await modal.locator('input[aria-label="Session title"]').fill(created);
+
+    // The submit goes out with backend=hook (#1933/#5107): the picker already
+    // proved the option exists and enables Create; sending it is the seam a
+    // regression could silently break — daemon-side remote create is covered by
+    // integration's TestWebCreateSessionOnHookBackend, so the browser half must
+    // carry the modal-to-createSession propagation all the way to a WORKING
+    // remote session. The fixture's coder-launch.sh is a real provisioner, so
+    // everything asserted below — row ready, Agent tab attached, ready marker —
+    // arrives over the daemon's remote-pane proxy, not a local PTY.
+    await backendSelect.selectOption("hook");
+    await expect(modal.locator(".af-backend-hint")).toHaveText("");
+    await expect(modal.locator("button.af-primary")).toBeEnabled();
     await modal.locator("button.af-primary").click();
 
     // The fast path may cross OpCreating between animation frames, but it must still
