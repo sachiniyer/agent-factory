@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -127,6 +128,37 @@ func removeDaemonPIDFile() {
 	}
 }
 
+// removeStaleDaemonPIDFile removes a stale daemon PID file from an af-managed
+// path. Used by stopDaemonUntil's stale-PID branches — the entry-time janitor
+// that fires when the PID file's contents look stale, NOT the teardown of a
+// PID the daemon wrote — so it is the stop-side sibling to writeDaemonPIDFile
+// and the reach asymmetric with removeDaemonPIDFile (which fires on the
+// daemon's own SIGTERM teardown of a PID file af WROTE).
+//
+// It uses config.RemoveFileRefusingLink for the same reason writeDaemonPIDFile
+// and removeDaemonPIDFile do (#3672): writeDaemonPIDFile refuses to write
+// through a link, so af cannot have authored this file — unlinking one here
+// would delete an arrangement af never touched. The four stale-PID branches
+// used to bypass this with a bare os.Remove, unlinks the link while its target
+// kept whatever the user planted — the asymmetry RemoveFileRefusingLink exists
+// to prevent on the autostart teardown and the daemon teardown, and the one
+// place the PID file's stop-side cleanup leaked through os.Remove.
+//
+// Logs the symlink refusal and unexpected removal errors; a successful removal
+// or an already-absent file are silent (the caller has already logged why the
+// PID looked stale). The caller's "removing stale file"-style prior log line
+// was dropped because on the refused-symlink case that line claimed an action
+// that did not happen (#3672): the refusal log here is what stays truthful.
+func removeStaleDaemonPIDFile(pidFile string, pid int) {
+	if err := config.RemoveFileRefusingLink(pidFile); err != nil {
+		if errors.Is(err, config.ErrManagedFileSymlink) {
+			log.InfoLog.Printf("daemon PID file (PID: %d) is a symlink af did not write through; leaving it in place", pid)
+		} else if !os.IsNotExist(err) {
+			log.WarningLog.Printf("failed to remove stale PID file: %v", err)
+		}
+	}
+}
+
 // stopDaemonGrace bounds how long StopDaemon waits for a SIGTERM'd daemon to
 // exit before escalating to SIGKILL. stopDaemonPoll is the polling cadence.
 // Package vars rather than constants so tests can shorten them. Production
@@ -185,31 +217,31 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 
 	// Defensively refuse to kill our own process or obviously invalid PIDs.
 	if pid <= 1 || pid == os.Getpid() {
-		log.InfoLog.Printf("daemon PID file contained invalid PID %d; removing stale file", pid)
-		_ = os.Remove(pidFile)
+		log.InfoLog.Printf("daemon PID file contained invalid PID %d", pid)
+		removeStaleDaemonPIDFile(pidFile, pid)
 		return false, nil
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		// On unix, FindProcess never returns an error, but handle it defensively anyway.
-		log.InfoLog.Printf("daemon process (PID: %d) not found; removing stale PID file", pid)
-		_ = os.Remove(pidFile)
+		log.InfoLog.Printf("daemon process (PID: %d) not found", pid)
+		removeStaleDaemonPIDFile(pidFile, pid)
 		return false, nil
 	}
 
 	// Check the process exists at all. Signal 0 is a no-op that just validates permissions/existence.
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		log.InfoLog.Printf("daemon process (PID: %d) is not running (%v); removing stale PID file", pid, err)
-		_ = os.Remove(pidFile)
+		log.InfoLog.Printf("daemon process (PID: %d) is not running (%v)", pid, err)
+		removeStaleDaemonPIDFile(pidFile, pid)
 		return false, nil
 	}
 
 	// Verify the process is actually an agent-factory daemon before signaling it. If we can't verify,
 	// err on the side of caution and treat the PID file as stale rather than signaling a random process.
 	if !isAgentFactoryDaemon(pid) {
-		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon; removing stale PID file", pid)
-		_ = os.Remove(pidFile)
+		log.InfoLog.Printf("PID %d does not look like an agent-factory daemon", pid)
+		removeStaleDaemonPIDFile(pidFile, pid)
 		return false, nil
 	}
 
