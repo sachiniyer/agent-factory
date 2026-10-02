@@ -74,17 +74,40 @@ func requireTmuxOrSkip(t *testing.T) {
 	}
 }
 
-// filterGitConfigOverrides drops GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM from
-// the inherited environment so the child git reads the fixture's
-// $HOME/.gitconfig as the global config (and /etc/gitconfig as the system
-// config) rather than a file the test runner pointed at. Both an empty and a
-// non-empty GIT_CONFIG_GLOBAL override $HOME/.gitconfig, so the entry is dropped
-// rather than blanked.
+// filterGitConfigOverrides strips Git config overrides from the inherited
+// environment so the child git reads the fixture's $HOME/.gitconfig as the
+// global config (and /etc/gitconfig as the system config) rather than a file
+// or set of command-line entries the test runner pointed at.
+//
+// Two shapes of override are dropped:
+//
+//   - GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM: a file path. Both an empty and a
+//     non-empty value override $HOME/.gitconfig (git treats an empty
+//     GIT_CONFIG_GLOBAL as "no global file"), so the entry is dropped rather
+//     than blanked.
+//   - GIT_CONFIG_COUNT with its indexed GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
+//     pairs (plus GIT_CONFIG and GIT_CONFIG_PARAMETERS): command-line config
+//     entries that git applies on top of the file config. If a runner exports
+//     these with empty user.name / user.email values, checkGitIdentity sees
+//     the inherited empty identity instead of the fixture's .gitconfig, so the
+//     asserted exit-0 run fails for the runner's configuration rather than the
+//     regression under test. The COUNT entry and every indexed KEY/VALUE entry
+//     are removed wholesale for the same reason as the file overrides above:
+//     an empty value still applies, so they cannot be blanked. This mirrors the
+//     override classification in session/git/repository_environment.go
+//     (repositoryPathEnvironment), which already treats these names as Git
+//     config overrides that must not cross the environment boundary.
 func filterGitConfigOverrides(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_CONFIG_GLOBAL=") ||
-			strings.HasPrefix(kv, "GIT_CONFIG_SYSTEM=") {
+		name, _, _ := strings.Cut(kv, "=")
+		switch name {
+		case "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL",
+			"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM":
+			continue
+		}
+		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 			continue
 		}
 		out = append(out, kv)
@@ -122,16 +145,20 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = repoDir
-	// Strip any inherited GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM the test runner
-	// may export (e.g. a config without a user identity): with one set, git
-	// ignores $HOME/.gitconfig, so checkGitIdentity reads the runner's global
-	// config instead of the fixture identity this test seeds below and reports
-	// an actionable git-identity finding — failing the exit-0 assertion for the
-	// runner's configuration rather than the behavior under test. An empty value
-	// still overrides (git treats an empty GIT_CONFIG_GLOBAL as "no global
-	// file"), so the variable must be dropped entirely, not cleared. With them
-	// gone, HOME=home makes git read home/.gitconfig as the global config, so the
-	// seeded user.name/user.email resolve and checkGitIdentity passes.
+	// Strip inherited Git config overrides the test runner may export: a
+	// GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM file (e.g. a config without a user
+	// identity), or a GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n
+	// command-line set (e.g. empty user.name / user.email values). With any of
+	// these set, git ignores or layers on top of $HOME/.gitconfig, so
+	// checkGitIdentity reads the runner's identity instead of the fixture
+	// identity this test seeds below and reports an actionable git-identity
+	// finding — failing the exit-0 assertion for the runner's configuration
+	// rather than the behavior under test. An empty value still overrides (git
+	// treats an empty GIT_CONFIG_GLOBAL as "no global file", and an empty indexed
+	// value still applies), so the entries are dropped entirely, not cleared
+	// (filterGitConfigOverrides). With them gone, HOME=home makes git read
+	// home/.gitconfig as the global config, so the seeded user.name/user.email
+	// resolve and checkGitIdentity passes.
 	cmd.Env = append(
 		filterGitConfigOverrides(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
