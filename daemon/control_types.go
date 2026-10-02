@@ -265,6 +265,19 @@ type RestoreSessionResponse struct {
 // When both are set they must identify the same project. At least one must be
 // set. Deleting an unknown project is a clean no-op; a registered project with no
 // live sessions is deregistered.
+//
+// When RepoPath is set it must be absolute (or ~-prefixed) after surrounding
+// whitespace is trimmed, under the same rule as RegisterProjectRequest.Path and
+// RebindProjectRequest.Path (#4821, 6616c129): the daemon has no access to the
+// caller's working directory, so a relative RepoPath would resolve against the
+// daemon's own cwd and delete whatever project it landed on. The daemon REFUSES
+// one at the RPC boundary before any mutation, inverting the most destructive
+// operation in the projects family onto the same guard its siblings already
+// carry. Callers whose input can be relative resolve it against the user's cwd
+// BEFORE sending: the CLI's `af projects delete` does this (api/projects.go), the
+// TUI refuses to dispatch when RepoID is empty, and the web only ever supplies
+// daemon-host paths. RepoID-only requests (no RepoPath) are unaffected — no path
+// is resolved, the root is derived from the registry.
 type DeleteProjectRequest struct {
 	RepoPath string `json:"repo_path"`
 	RepoID   string `json:"repo_id"`
