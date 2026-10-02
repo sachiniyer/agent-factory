@@ -205,6 +205,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// from a pre-#3650 record, which is what makes absence mean today's
 			// behaviour for both.
 			HookScopeUnitPrefix: i.gitWorktree.HookScopeUnitPrefix(),
+			// Durable record state, not a projection: the poll that maintains it
+			// runs only in the daemon, so a restart must come back still knowing
+			// the worktree was deleted outside af until a probe proves otherwise
+			// (#5102).
+			Missing:       i.worktreeMissing,
+			MissingReason: i.worktreeMissingReason,
 		}
 		if hasRecovery {
 			data.Worktree.RelocationRecovery = &GitWorktreeRelocationRecoveryData{
@@ -519,6 +525,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
 			instance.gitWorktree = gw
+			instance.worktreeMissing = data.Worktree.Missing
+			instance.worktreeMissingReason = data.Worktree.MissingReason
 		}
 
 		// Rebuild the instance's tab list from disk so every tab (agent + shell)
