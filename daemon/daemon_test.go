@@ -821,3 +821,225 @@ func TestStopDaemon_RefusesSelfPID(t *testing.T) {
 		t.Fatalf("expected PID file to be removed, stat err = %v", err)
 	}
 }
+
+// TestStopDaemon_ForeignHomePIDFileNotKilled is the cross-home regression for
+// StopDaemon's happy path. A stale daemon.pid in THIS home (AG=home H1) points
+// at a live `af --daemon` serving a DIFFERENT AGENT_FACTORY_HOME (H2) — the PID
+// the kernel recycled onto H2's daemon. isAgentFactoryDaemon passes (it IS an
+// af daemon), so the pre-fix code SIGTERM'd it and reported stopped=true,
+// taking down an unrelated daemon (possibly another user's on a shared host).
+// With the home binding (pidBelongsToThisHome), StopDaemon must treat the PID
+// as stale: remove the PID file, report stopped=false, and leave the foreign
+// daemon alive. The two PID-validation paths (StopDaemon and locateDaemonPID)
+// must agree (#1004).
+func TestStopDaemon_ForeignHomePIDFileNotKilled(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	// The OTHER home's daemon: a live `af --daemon` serving a different
+	// AGENT_FACTORY_HOME. Its PID is what the stale daemon.pid names.
+	otherHome := testguard.SocketTempDir(t)
+	foreignPID := spawnFakeDaemonWithHome(t, otherHome)
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", foreignPID)), 0600); err != nil {
+		t.Fatalf("failed to write PID file: %v", err)
+	}
+
+	stopped, err := StopDaemon()
+	if err != nil {
+		t.Fatalf("StopDaemon returned error: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for a foreign home's daemon pid=%d; expected false "+
+			"(the home binding should have kept it from signaling a daemon serving %q)", foreignPID, otherHome)
+	}
+
+	// The foreign home's daemon MUST still be alive — the home binding kept
+	// StopDaemon from SIGTERM-ing a daemon serving a different AGENT_FACTORY_HOME.
+	if !pidLooksAlive(foreignPID) {
+		t.Fatalf("StopDaemon killed a foreign home's daemon (pid=%d serving %q); the stale PID file "+
+			"bypassed the home binding", foreignPID, otherHome)
+	}
+
+	// PID file should have been cleaned up as stale.
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("expected stale PID file to be removed, stat err = %v", err)
+	}
+}
+
+// TestStopDaemon_UnverifiableHomePIDFileIsNotSignaledAndNotOrphaned is the
+// inconclusive-binding companion to TestStopDaemon_ForeignHomePIDFileNotKilled.
+// A stale daemon.pid in THIS home points at a live `af --daemon` whose
+// AGENT_FACTORY_HOME the caller cannot RESOLVE: "~other" is a "~user" form
+// config.ConfigDirFor rejects, so verifyScopedDaemon classifies the candidate
+// daemonUnverifiable rather than daemonForeign. StopDaemon must fail closed on
+// the kill — do not SIGTERM a PID that might be another home's daemon (#4793) —
+// but it must NOT fail open by deleting the PID file: that orphans the live
+// daemon the file names, and every later recovery loses its handle to it. So it
+// leaves the PID file in place, returns stopped=false with an error that tells
+// the caller why, and leaves the candidate daemon untouched. The two
+// PID-validation paths must still agree (#1004): locateDaemonPID falls through
+// to the pgrep ambiguity guard on the same inconclusive binding.
+func TestStopDaemon_UnverifiableHomePIDFileIsNotSignaledAndNotOrphaned(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	// A candidate whose AGENT_FACTORY_HOME the caller cannot resolve: "~other"
+	// is a "~user" form config.ConfigDirFor rejects, so the home binding is
+	// inconclusive (daemonUnverifiable), the case the bool pidBelongsToThisHome
+	// collapses into "not ours". Its binary lives outside /tmp/Test* (fakeBinDir),
+	// so it is not rejected as a Go test binary before the home check runs.
+	const unresolvableHome = "~other"
+	unverifiable := spawnFakeDaemonWithHome(t, unresolvableHome)
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", unverifiable)), 0600); err != nil {
+		t.Fatalf("failed to write PID file: %v", err)
+	}
+
+	stopped, err := StopDaemon()
+	if err == nil {
+		t.Fatalf("StopDaemon returned nil error for an unresolvable home binding; expected to be told "+
+			"why it could not bind pid=%d", unverifiable)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for an unverifiable-home pid=%d; expected false "+
+			"(no signal on an inconclusive binding)", unverifiable)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d", unverifiable)) {
+		t.Errorf("StopDaemon error %q does not name the unverifiable pid=%d", err.Error(), unverifiable)
+	}
+
+	// The PID file MUST still be there — deleting it on an inconclusive binding
+	// orphans the live daemon the file names.
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("StopDaemon removed the PID file on an inconclusive binding; the live daemon pid=%d is "+
+			"now orphaned from its handle: %v", unverifiable, err)
+	}
+
+	// The candidate daemon MUST still be alive — StopDaemon did not signal a
+	// PID it could not prove to bind to this home.
+	if !pidLooksAlive(unverifiable) {
+		t.Fatalf("StopDaemon signaled the unverifiable-home daemon pid=%d; an inconclusive binding is "+
+			"not a license to kill a PID that may be another home's daemon", unverifiable)
+	}
+}
+
+// TestRemovePIDFileIfStillNames_KeepsReplacementFile pins the TOCTOU narrowing on
+// StopDaemon's foreign-PID removal. stopDaemonUntil read a stale foreign PID
+// and proved the process it names serves another home; in the window between
+// that read and the unlink, a same-home daemon may have started and atomically
+// rewritten daemon.pid with its own PID. The removal must re-read and leave that
+// valid replacement in place — otherwise the new daemon is live but no longer
+// discoverable by StopDaemon, the untracked-daemon state the PID file exists to
+// prevent. The genuine stale case (file unchanged) is still removed.
+func TestRemovePIDFileIfStillNames_KeepsReplacementFile(t *testing.T) {
+	t.Run("unchanged stale PID file is removed", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "daemon.pid")
+		const stale = 99999
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+			t.Fatalf("write stale PID file: %v", err)
+		}
+		removePIDFileIfStillNames(pidFile, stale, time.Time{})
+		if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+			t.Fatalf("expected stale PID file naming %d to be removed, stat err=%v", stale, err)
+		}
+	})
+
+	t.Run("replacement PID file is kept", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "daemon.pid")
+		const stale, fresh = 99999, 88888
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+			t.Fatalf("write stale PID file: %v", err)
+		}
+		// A newly-started same-home daemon rewrote daemon.pid with its own PID
+		// after stopDaemonUntil read the stale foreign one (atomic write).
+		if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", fresh)), 0600); err != nil {
+			t.Fatalf("write replacement PID file: %v", err)
+		}
+		removePIDFileIfStillNames(pidFile, stale, time.Time{})
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Fatalf("replacement PID file was removed; a newly-started daemon's handle is lost: %v", err)
+		}
+		if got := strings.TrimSpace(string(data)); got != fmt.Sprintf("%d", fresh) {
+			t.Fatalf("PID file = %q, want the replacement %d preserved", got, fresh)
+		}
+	})
+
+	t.Run("missing file is a no-op", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "daemon.pid")
+		removePIDFileIfStillNames(missing, 99999, time.Time{})
+		if _, err := os.Stat(missing); !os.IsNotExist(err) {
+			t.Fatalf("removePIDFileIfStillNames created or touched %q, stat err=%v", missing, err)
+		}
+	})
+}
+
+// TestRemovePIDFileIfStillNames_CoordinatesWithWriterLock pins the lock the
+// stale-PID removal takes against the daemon PID-file writer. The removal's
+// read-compare-unlink must NOT interleave with a same-home daemon's atomic
+// temp-then-rename; if it did, the unlink could delete a freshly-written
+// replacement PID file and orphan the new daemon. With the writer holding the
+// PID-file lock (the same lock writeDaemonPIDFile takes), the removal blocks
+// until the writer releases, and only then unlinks the still-stale file. The
+// lock is a sidecar flock (daemon.pid.lock), so holding it from an independent
+// file description must stall removePIDFileIfStillNames exactly as a real
+// concurrent write would.
+func TestRemovePIDFileIfStillNames_CoordinatesWithWriterLock(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "daemon.pid")
+	const stale = 13579
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+		t.Fatalf("write stale PID file: %v", err)
+	}
+
+	// Simulate a same-home daemon's writer holding the PID-file lock.
+	held, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		removePIDFileIfStillNames(pidFile, stale, time.Time{})
+		close(done)
+	}()
+
+	// While the writer holds the lock, the removal must not return and must
+	// not unlink the file.
+	select {
+	case <-done:
+		t.Fatalf("removePIDFileIfStillNames removed the PID file while the writer held the lock; the removal is not coordinated with the PID-file writer")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("PID file removed while the writer lock was held: %v", err)
+	}
+
+	// Releasing the writer's lock lets the removal proceed and unlink the
+	// still-stale file.
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	held.Close()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("removePIDFileIfStillNames did not complete after the writer lock was released")
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("expected the stale PID file to be removed once the writer lock was released, stat err=%v", err)
+	}
+}
