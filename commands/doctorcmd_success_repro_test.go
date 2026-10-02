@@ -191,10 +191,27 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// makes git read home/.gitconfig as the global config and cmd.Dir makes
 	// checkGit resolve repoDir, so the seeded user.name/user.email resolve and
 	// checkGitIdentity passes.
+	//
+	// XDG_CONFIG_HOME is isolated alongside HOME: the --setup daemon check
+	// (daemon/legacy_units.go defaultSystemdUserDir) resolves the systemd user
+	// unit dir from $XDG_CONFIG_HOME when it is an absolute path, else
+	// $HOME/.config/systemd/user. A runner exporting an absolute XDG_CONFIG_HOME
+	// pointing at a host agent-factory-daemon.service (or a malformed one) makes
+	// daemon.AutostartUnitServesHome consult the runner's unit and report a
+	// problem row (exit 1) for the runner's autostart state rather than the
+	// regression under test. Point it at the throwaway home's .config so the
+	// daemon check scans the fixture (no unit installed) and stays exit 0
+	// regardless of the runner's XDG_CONFIG_HOME. This resolves to the same
+	// $HOME/.config path on a clean runner (HOME=home), so it only overrides a
+	// hostile inherited value and never changes the clean-runner behavior. A
+	// later same-named entry overrides the inherited one for getenv (the same
+	// mechanism HOME and AGENT_FACTORY_HOME already rely on in this append), so
+	// the fixture value wins over any runner-exported XDG_CONFIG_HOME.
 	cmd.Env = append(
 		filterInheritedGitEnv(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
 	// Inherit the real PATH (do NOT empty it): checkGit needs git on PATH and a
 	// repo CWD (cmd.Dir above), checkTmux needs tmux on PATH, and
