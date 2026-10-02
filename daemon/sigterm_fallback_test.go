@@ -1276,6 +1276,91 @@ func TestClassifyDaemonHome_ForeignMountNamespaceUnverifiable(t *testing.T) {
 	}
 }
 
+// TestClassifyDaemonHome_SameRootForeignMountNamespaceUnverifiable pins the
+// mount-namespace half of the cross-namespace guard that the root-string
+// comparison alone misses: a candidate whose /proc/<pid>/root resolves to the
+// SAME path as the caller's but lives in a DISTINCT mount namespace can
+// bind-mount a different directory at an absolute AGENT_FACTORY_HOME, so an
+// equal textual spelling is not the same directory. classifyDaemonHome must
+// fail closed (daemonUnverifiable) when the mount-namespace inodes differ, not
+// only when the roots differ. CI runners cannot create a distinct mount
+// namespace unprivileged, so procMountNSFor is the seam: the test injects a
+// candidate inode that differs from the caller's and asserts the same daemon
+// stays daemonOurs when the inodes match.
+func TestClassifyDaemonHome_SameRootForeignMountNamespaceUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// A same-frame daemon serving this home is bound by default; the guard
+	// must not regress this, and the assertion guards against a guard that
+	// always rejects (which would also "fix" the bug for the wrong reason).
+	ours := spawnFakeDaemonWithHome(t, home)
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Fatalf("same-frame daemon serving this home classified %v; want daemonOurs", scope)
+	}
+
+	// A candidate whose root matches the caller's (so procRootFor agrees) but
+	// whose mount namespace differs: same root string, different mount table,
+	// so an absolute home resolved in the caller's frame can name a different
+	// directory than the candidate sees. The classifier must fail closed
+	// rather than guess ours and signal a cross-namespace daemon.
+	selfIno, ok := procMountNSFor(os.Getpid())
+	if !ok {
+		t.Fatalf("could not read the caller's /proc/self/ns/mnt to set up the cross-namespace stub")
+	}
+	origRoot, origNS := procRootFor, procMountNSFor
+	procRootFor = func(p int) (string, bool) { return origRoot(p) } // keep roots equal
+	procMountNSFor = func(p int) (uint64, bool) {
+		if p == ours {
+			return selfIno + 1, true // distinct inode, same root
+		}
+		return origNS(p)
+	}
+	t.Cleanup(func() {
+		procRootFor = origRoot
+		procMountNSFor = origNS
+	})
+	if scope := classifyDaemonHome(ours); scope != daemonUnverifiable {
+		t.Errorf("same-root cross-mount-namespace daemon classified %v; want daemonUnverifiable — a "+
+			"distinct mount namespace can bind-mount a different directory at an absolute home even "+
+			"when /proc/<pid>/root matches, so the textual comparison is untrustworthy", scope)
+	}
+	// Restoring the real readers re-classifies the same daemon as ours, so the
+	// unverifiable verdict above came from the mount-namespace guard, not a
+	// side effect of the daemon exiting or losing its env between the calls.
+	procRootFor = origRoot
+	procMountNSFor = origNS
+	if scope := classifyDaemonHome(ours); scope != daemonOurs {
+		t.Errorf("same-frame daemon re-classified %v after restoring the real readers; want "+
+			"daemonOurs — the cross-namespace unverifiable verdict must come from the mount-namespace "+
+			"guard, not the daemon having exited or lost its env", scope)
+	}
+}
+
+// TestSameProcessRoot_SameMountNamespaceIsTrue pins the common-case
+// precondition for the mount-namespace guard added to sameProcessRoot: a
+// process in the CALLER's own mount namespace (its own pid, and a child it
+// spawned into the same namespace) shares the caller's mount table, so the
+// guard does not regress the everyday same-frame classification.
+// procMountNSFor's default reads the kernel's /proc/<pid>/ns/mnt inode, so
+// this is the real path, not the seam.
+func TestSameProcessRoot_SameMountNamespaceIsTrue(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	if !sameProcessRoot(os.Getpid()) {
+		t.Errorf("sameProcessRoot(self) = false; want true — the caller shares its own mount namespace")
+	}
+	ours := spawnFakeDaemonWithHome(t, testguard.SocketTempDir(t))
+	if !sameProcessRoot(ours) {
+		t.Errorf("sameProcessRoot(child pid=%d) = false; want true — a child the test spawned shares "+
+			"the caller's mount namespace, so the guard must not reject the common same-frame case", ours)
+	}
+}
+
 // TestWriteDaemonPIDFile_BoundedLockAcquisition pins the bounded startup write:
 // if another writer holds the sidecar PID-file lock when RunDaemon reaches
 // writeDaemonPIDFile (which happens AFTER the control socket is bound and the

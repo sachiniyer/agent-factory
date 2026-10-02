@@ -653,6 +653,32 @@ var procRootFor = func(pid int) (string, bool) {
 	return link, true
 }
 
+// procMountNSFor returns the inode identifying pid's mount namespace on Linux
+// (/proc/<pid>/ns/mnt), so a candidate that shares the caller's root string but
+// lives in a distinct mount namespace — a bind-mount at the configured home
+// path whose backing store is a different directory — is not read in the
+// caller's frame. A distinct mount namespace can keep "/" as the same root
+// string while bind-mounting a different directory at an absolute
+// AGENT_FACTORY_HOME, so the root-string comparison procRootFor performs is
+// not enough on its own: the same root with a different mount table can still
+// name a different directory at the home path. The ok return is false when
+// /proc is not present (not Linux — no mount-namespace hazard, the existing
+// root comparison stands) or when the ns/mnt link cannot be read (the process
+// exited between probes, or the link is unavailable). A package var so a test
+// can simulate a candidate whose mount namespace differs from the caller's,
+// which CI runners cannot create unprivileged.
+var procMountNSFor = func(pid int) (uint64, bool) {
+	fi, err := os.Stat(fmt.Sprintf("/proc/%d/ns/mnt", pid))
+	if err != nil {
+		return 0, false
+	}
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Ino, true
+}
+
 // sameProcessRoot reports whether the process at pid shares the caller's
 // filesystem root, so an absolute path resolved and compared in the caller's
 // frame names the same directory the candidate sees. classifyDaemonHome
@@ -678,6 +704,39 @@ func sameProcessRoot(pid int) bool {
 		return false
 	}
 	self, ok := procRootFor(os.Getpid())
+	if !ok {
+		return false
+	}
+	if cand != self {
+		return false
+	}
+	// Equal root strings are not enough: a distinct mount namespace can keep
+	// the same root path while bind-mounting a different directory at an
+	// absolute AGENT_FACTORY_HOME, so the textual home comparison the root
+	// check guards still resolves to a different directory. Compare mount-
+	// namespace identity so such a candidate fails closed (#4793).
+	return sameMountNamespace(pid)
+}
+
+// sameMountNamespace reports whether pid lives in the caller's mount namespace.
+// /proc/<pid>/ns/mnt is a symlink whose inode names the namespace; equal inodes
+// mean the same mount table, so an equal root and home path name the same
+// directory. A distinct inode means the candidate sees a different mount table
+// even with a matching root, so an equal textual AGENT_FACTORY_HOME is not the
+// same directory — sameProcessRoot fails closed rather than reading the
+// candidate's path in the caller's frame. On platforms without /proc (macOS)
+// there is no mount-namespace hazard and this returns true so the root
+// comparison stands; an unreadable ns/mnt (the process exited between probes)
+// returns false so the candidate falls through unverifiable.
+func sameMountNamespace(pid int) bool {
+	if _, err := os.Stat("/proc"); err != nil {
+		return true
+	}
+	cand, ok := procMountNSFor(pid)
+	if !ok {
+		return false
+	}
+	self, ok := procMountNSFor(os.Getpid())
 	if !ok {
 		return false
 	}

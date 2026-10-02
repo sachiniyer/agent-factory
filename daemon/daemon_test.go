@@ -1043,3 +1043,64 @@ func TestRemovePIDFileIfStillNames_CoordinatesWithWriterLock(t *testing.T) {
 		t.Fatalf("expected the stale PID file to be removed once the writer lock was released, stat err=%v", err)
 	}
 }
+
+// TestStopDaemon_ForeignPIDFileCleanupLockIsBounded pins the bounded stop-side
+// cleanup: public StopDaemon carries no caller deadline, so when its foreign-PID
+// branch reaches removePIDFileIfStillNames while another writer is suspended or
+// stalled on daemon.pid.lock, the lock acquisition must NOT block forever in
+// LOCK_EX (which would hang StopDaemon — and with it upgrade recovery and
+// autostart handoff). pidLockCleanupDeadline floors the zero deadline at
+// stopDaemonPIDLockBudget so the best-effort cleanup is abandoned within the
+// budget and StopDaemon returns, leaving the foreign daemon untouched.
+func TestStopDaemon_ForeignPIDFileCleanupLockIsBounded(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+
+	otherHome := testguard.SocketTempDir(t)
+	foreignPID := spawnFakeDaemonWithHome(t, otherHome)
+
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", foreignPID)), 0600); err != nil {
+		t.Fatalf("failed to write PID file: %v", err)
+	}
+
+	// Simulate a writer suspended/stalled on the sidecar PID-file lock so the
+	// foreign-PID cleanup cannot acquire it.
+	held, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open lock: %v", err)
+	}
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+	defer held.Close()
+
+	orig := stopDaemonPIDLockBudget
+	stopDaemonPIDLockBudget = 50 * time.Millisecond
+	t.Cleanup(func() { stopDaemonPIDLockBudget = orig })
+
+	start := time.Now()
+	stopped, err := StopDaemon()
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("StopDaemon returned error: %v", err)
+	}
+	if stopped {
+		t.Fatalf("StopDaemon reported stopped=true for a foreign home's daemon pid=%d; expected false", foreignPID)
+	}
+	// A bounded acquisition abandons within ~budget; an unbounded one blocks
+	// forever. Assert an upper bound well below the production budget so a
+	// regression to the old indefinite wait fails fast.
+	if elapsed > time.Second {
+		t.Fatalf("StopDaemon blocked for %s on a contended PID-file lock; the zero-deadline "+
+			"cleanup acquisition is not bounded", elapsed)
+	}
+	if !pidLooksAlive(foreignPID) {
+		t.Fatalf("StopDaemon killed a foreign home's daemon (pid=%d serving %q); the home binding "+
+			"must keep a foreign daemon alive even when its PID-file cleanup is bounded", foreignPID, otherHome)
+	}
+}

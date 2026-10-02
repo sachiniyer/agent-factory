@@ -172,6 +172,31 @@ var (
 	stopDaemonPoll  = sigtermFallbackPoll
 )
 
+// stopDaemonPIDLockBudget bounds how long the foreign/unverifiable PID-file
+// cleanup waits on the sidecar daemon.pid.lock when the caller carries no
+// deadline — public StopDaemon passes a zero deadline, so without a floor the
+// cleanup's withDaemonPIDLock would block forever in LOCK_EX on a writer
+// suspended or stalled on daemon.pid.lock, hanging StopDaemon (and with it
+// upgrade recovery and autostart handoff). A finite budget abandons the
+// best-effort cleanup instead, mirroring the bounded startup write
+// (daemonPIDLockStartupBudget). Package var so tests can shorten it; the
+// cleanup is best-effort, so a lock this budget cannot acquire is dropped (the
+// stale PID file is left; a later caller re-reads and re-checks it).
+var stopDaemonPIDLockBudget = daemonPIDLockStartupBudget
+
+// pidLockCleanupDeadline returns the deadline to pass to the PID-file lock the
+// foreign/unverifiable cleanup paths take. A deadline-bounded stopDaemonUntil
+// caller threads its own deadline through; a zero deadline (public StopDaemon,
+// which carries none) is floored at stopDaemonPIDLockBudget so the lock
+// acquisition cannot block indefinitely on a writer suspended or stalled on
+// daemon.pid.lock (withDaemonPIDLock blocks forever on a zero deadline).
+func pidLockCleanupDeadline(deadline time.Time) time.Time {
+	if !deadline.IsZero() {
+		return deadline
+	}
+	return time.Now().Add(stopDaemonPIDLockBudget)
+}
+
 // StopDaemon attempts to stop a running daemon process if it exists. The bool
 // return reports whether a live agent-factory daemon was actually signaled: it
 // is false (with a nil error) when there was nothing to stop — no PID file, an
@@ -265,10 +290,10 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		// Proven to serve this home: signal it below.
 	case daemonForeign:
 		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
-		removePIDFileIfStillNames(pidFile, pid, deadline)
+		removePIDFileIfStillNames(pidFile, pid, pidLockCleanupDeadline(deadline))
 		return false, nil
 	default: // daemonUnverifiable — inconclusive; neither signal nor orphan a live daemon.
-		if reclaimDeadUnverifiablePIDFile(pidFile, pid, deadline) {
+		if reclaimDeadUnverifiablePIDFile(pidFile, pid, pidLockCleanupDeadline(deadline)) {
 			return false, nil
 		}
 		return false, fmt.Errorf("PID %d could not be bound to this home (uid, AGENT_FACTORY_HOME, or path unresolved); not signaling and leaving the PID file in place", pid)
