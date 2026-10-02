@@ -74,13 +74,15 @@ func requireTmuxOrSkip(t *testing.T) {
 	}
 }
 
-// filterInheritedGitEnv strips Git's environment from the inherited process
-// environment so the child git and the spawned af read the fixture's
-// $HOME/.gitconfig as the global config (and /etc/gitconfig as the system
-// config), operate against the fixture's repoDir (cmd.Dir), and are not
-// redirected at an external repository or identity the test runner pointed at.
+// filterInheritedEnv strips Git's and the shell's startup environment from the
+// inherited process environment so the child git and the spawned af read the
+// fixture's $HOME/.gitconfig as the global config (and /etc/gitconfig as the
+// system config), operate against the fixture's repoDir (cmd.Dir), and are not
+// redirected at an external repository or identity the test runner pointed at,
+// and so the child shell's startup resolves from the fixture HOME rather than
+// the runner's.
 //
-// Two shapes of entry are dropped, mirroring the override classification in
+// Three shapes of entry are dropped, mirroring the override classification in
 // session/git/repository_environment.go (repositoryPathEnvironment), which
 // already treats these names as Git environment that must not cross the
 // boundary:
@@ -125,7 +127,22 @@ func requireTmuxOrSkip(t *testing.T) {
 //     see, so they are stripped here too. An empty value still turns tracing on
 //     for the boolean trace variables (an empty value means "1" per git's docs),
 //     so the entry is dropped rather than blanked.
-func filterInheritedGitEnv(env []string) []string {
+//   - Shell startup overrides: ZDOTDIR (zsh), BASH_ENV (non-interactive bash),
+//     ENV (interactive POSIX sh), and HISTFILE — the names
+//     internal/testguard/userhome.go clears for subprocesses (userRootOverrides),
+//     which send a shell to startup files outside HOME. The spawned af's config
+//     load runs the Claude shell probe (config/claude_probe.go GetClaudeCommand),
+//     which spawns SHELL and sources its rc; an inherited ZDOTDIR would point zsh
+//     at the runner's startup files instead of the fixture's $HOME, and an
+//     inherited BASH_ENV / ENV sources an arbitrary runner file even before the
+//     rc, causing startup side effects or the probe's five-second timeout. With
+//     SHELL pinned to /bin/sh (set in childEnv below) the probe's else-branch runs
+//     `sh -c "which claude"` and sources nothing, but other code paths in the
+//     spawned af may still spawn a shell, so the overrides are dropped here too.
+//     For these an empty value already means "no file" (bash/sh source BASH_ENV/
+//     ENV only when non-empty, and an unset ZDOTDIR falls back to HOME), so
+//     dropping them is what clears the redirect; it mirrors testguard's Unsetenv.
+func filterInheritedEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
 		name, _, _ := strings.Cut(kv, "=")
@@ -136,7 +153,8 @@ func filterInheritedGitEnv(env []string) []string {
 			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 			"GIT_INDEX_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
 			"GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE",
-			"GIT_COMMON_DIR":
+			"GIT_COMMON_DIR",
+			"ZDOTDIR", "BASH_ENV", "ENV", "HISTFILE":
 			continue
 		}
 		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
@@ -175,7 +193,7 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// checkout, so the test is hermetic to where `go test` runs from.
 	repoDir := t.TempDir()
 	// The `git init` and the spawned af share one filtered, fixture-scoped
-	// environment (childEnv). filterInheritedGitEnv strips the Git
+	// environment (childEnv). filterInheritedEnv strips the Git
 	// config/repository/trace variables a runner may export so `git init`
 	// targets repoDir (not an external GIT_DIR) and the child reads the
 	// fixture's $HOME/.gitconfig as the global config. HOME and XDG_CONFIG_HOME
@@ -194,7 +212,7 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// (the same mechanism AGENT_FACTORY_HOME already relies on), so the
 	// fixture value wins over any runner-exported HOME/XDG_CONFIG_HOME.
 	// GIT_CONFIG_NOSYSTEM=1 makes git (including the `git init` below) skip
-	// /etc/gitconfig entirely. filterInheritedGitEnv only removes GIT_CONFIG_SYSTEM
+	// /etc/gitconfig entirely. filterInheritedEnv only removes GIT_CONFIG_SYSTEM
 	// (which points git at a *different* system file but, if unset, leaves the
 	// default /etc/gitconfig in force). A runner whose /etc/gitconfig sets
 	// init.templateDir would have `git init` copy that template's .git/config —
@@ -204,11 +222,19 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// Disabling the system config keeps the init hermetic to the fixture's global
 	// config alone.
 	childEnv := append(
-		filterInheritedGitEnv(os.Environ()),
+		filterInheritedEnv(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 		"GIT_CONFIG_NOSYSTEM=1",
+		// Pin SHELL to a fixture-safe /bin/sh so the spawned af's Claude
+		// shell probe (config/claude_probe.go GetClaudeCommand) takes the
+		// else-branch and runs `sh -c "which claude"` instead of spawning an
+		// interactive bash/zsh that sources the runner's rc. filterInheritedEnv
+		// drops the ZDOTDIR/BASH_ENV/ENV startup overrides that would redirect
+		// even a non-interactive shell at the runner's files, so the probe and
+		// any other shell the child spawns resolve startup from the fixture HOME.
+		"SHELL=/bin/sh",
 	)
 	initCmd := exec.Command("git", "-C", repoDir, "init", "-q")
 	initCmd.Env = childEnv
