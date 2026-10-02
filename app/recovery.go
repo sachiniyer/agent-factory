@@ -27,9 +27,18 @@ func (m *home) restoreFailedCreate() bool {
 	m.store.AddInstance(instance)
 	m.sidebar.SelectInstance(instance)
 	m.namingInstance = instance
-	m.pendingProgram, m.pendingPrompt = req.Program, failed.rawPrompt
+	// The field re-seeds from the placeholder's Program — the value the user was
+	// shown — not req.Program, which is the WIRE value and is "" for a submit
+	// whose program was implicit (#4889 review). The restored draft is a
+	// confirmed choice either way, so what the resubmit sends is the value the
+	// user is looking at.
+	m.pendingProgram, m.pendingPrompt = instance.Program, failed.rawPrompt
 	m.pendingBackend, m.pendingAccount = req.Backend, req.Account
 	m.pendingAccountChosen = true
+	// The restored draft's program is a value the user already submitted once —
+	// a confirmed choice, so the resubmit sends it concretely on the wire rather
+	// than as "" (#4889 review).
+	m.pendingProgramChosen = true
 	m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
 	m.menu.SetNamingBackend(m.pendingBackend != "")
 	m.menu.SetNamingAccount(m.pendingAccount != "")
