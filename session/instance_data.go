@@ -230,12 +230,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// stable when IdentityPath differs from the operational workspace Path
 		// (a bare repository's linked-worktree registration). Without it a remote
 		// session matched NO project's scope and the web could not render or keep
-		// it selected at all (#1933). The fallback covers instances built without
-		// the daemon's create path, where Path is the requested workspace.
+		// it selected at all (#1933). No Path fallback: consumers treat a nonempty
+		// RepoPath as already canonical (api/sessionRepoID hashes it verbatim), so
+		// publishing the operational workspace under a bare+linked registration
+		// would move the row to a bogus project — for a record that never carried
+		// an identity, empty stays honest and matches the pre-#1933 projection.
 		data.Worktree.RepoPath = i.repoIdentityPath
-		if data.Worktree.RepoPath == "" {
-			data.Worktree.RepoPath = i.Path
-		}
 	}
 
 	return data

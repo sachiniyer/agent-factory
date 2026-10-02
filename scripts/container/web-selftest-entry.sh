@@ -327,7 +327,20 @@ done
 [ -n "\$NAME" ] || { echo "delete: --name required" >&2; exit 64; }
 PIDFILE="\$STATE/\$NAME/pid"
 if [ -f "\$PIDFILE" ]; then
-  kill "\$(cat "\$PIDFILE")" 2>/dev/null || true
+  PID="\$(cat "\$PIDFILE")"
+  kill "\$PID" 2>/dev/null || true
+  # Keep the pidfile until the process is confirmed gone — removing it on
+  # SIGTERM alone would report a SIGTERM-ignoring server as reaped.
+  tries=0
+  while [ \$tries -lt 100 ]; do
+    kill -0 "\$PID" 2>/dev/null || break
+    sleep 0.1
+    tries=\$((tries + 1))
+  done
+  if kill -0 "\$PID" 2>/dev/null; then
+    echo "delete: agent-server pid \$PID still alive after SIGTERM" >&2
+    exit 1
+  fi
   rm -f "\$PIDFILE"
 fi
 printf '{"deleted":true}\n'

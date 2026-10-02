@@ -262,7 +262,19 @@ done
 [ -n "$NAME" ] || { echo "delete: --name required" >&2; exit 64; }
 PIDFILE="$STATE/$NAME/pid"
 if [ -f "$PIDFILE" ]; then
-  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  PID="$(cat "$PIDFILE")"
+  kill "$PID" 2>/dev/null || true
+  # Keep the pidfile until the process is confirmed gone: tests poll it via
+  # mockHookServerAlive to prove the agent-server actually exited, and removing
+  # it on SIGTERM alone would report a SIGTERM-ignoring process as reaped.
+  for _ in $(seq 1 100); do
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$PID" 2>/dev/null; then
+    echo "delete: agent-server pid $PID still alive after SIGTERM" >&2
+    exit 1
+  fi
   rm -f "$PIDFILE"
 fi
 printf '{"deleted":true}\n'

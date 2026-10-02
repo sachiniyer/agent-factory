@@ -41,9 +41,10 @@ func TestToInstanceDataSandboxRepoPath(t *testing.T) {
 	// Worktree.RepoPath; the committed projection must keep it.
 	t.Run("sandbox backend without a worktree keeps its repo identity", func(t *testing.T) {
 		i := &Instance{
-			Title:   "remote-inst",
-			Path:    "/srv/repo",
-			backend: &HookBackend{},
+			Title:            "remote-inst",
+			Path:             "/srv/repo",
+			repoIdentityPath: "/srv/repo",
+			backend:          &HookBackend{},
 		}
 		data := i.ToInstanceData()
 		assert.Equal(t, "remote", data.BackendType)
@@ -51,6 +52,19 @@ func TestToInstanceDataSandboxRepoPath(t *testing.T) {
 		// Only the repo identity is synthesized: no local worktree exists, so
 		// the rest of the worktree record stays empty.
 		assert.Equal(t, "", data.Worktree.WorktreePath)
+	})
+
+	t.Run("sandbox backend never projects the workspace as identity", func(t *testing.T) {
+		// A record that never carried a canonical identity — anything predating
+		// the field — emits an empty RepoPath rather than publishing Path as if
+		// it were canonical: consumers hash a nonempty RepoPath verbatim, so the
+		// operational linked checkout would move the row to a bogus project.
+		i := &Instance{
+			Title:   "remote-legacy",
+			Path:    "/srv/bare/linked-checkout",
+			backend: &HookBackend{},
+		}
+		assert.Equal(t, "", i.ToInstanceData().Worktree.RepoPath)
 	})
 
 	t.Run("sandbox backend projects the canonical identity, not the workspace", func(t *testing.T) {

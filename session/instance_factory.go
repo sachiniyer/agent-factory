@@ -214,7 +214,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// Reaping was never the gap here; the gap was that an unconfirmed reap left
 	// nothing behind but a sentence.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		who := sandboxIdentity{id: opts.ID, title: opts.Title, path: absPath, createdAt: opts.CreatedAt}
+		who := sandboxIdentity{id: opts.ID, title: opts.Title, path: absPath, createdAt: opts.CreatedAt, repoIdentityPath: opts.RepoIdentityPath}
 		return ProvisionResult{}, discardUnusableSandbox(who, res, opts.SandboxCredentials, rerr)
 	}
 	return res, nil
@@ -568,7 +568,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 						// constructor already decided — never re-derived from the combined
 						// error, which can carry a sentinel from the client-build cause.
 						return nil, newSandboxOrphanError(
-							sandboxIdentity{id: id, title: opts.Title, path: absPath, createdAt: t}, res,
+							sandboxIdentity{id: id, title: opts.Title, path: absPath, createdAt: t, repoIdentityPath: opts.RepoIdentityPath}, res,
 							fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
 								errors.Join(err, cleanupErr)))
 					}
