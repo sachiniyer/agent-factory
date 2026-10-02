@@ -109,6 +109,18 @@ func requireTmuxOrSkip(t *testing.T) {
 //     repository — making this regression test non-hermetic. An empty GIT_DIR
 //     still points git at the current directory, so these are removed, not
 //     blanked.
+//   - Git trace variables: GIT_TRACE and the GIT_TRACE2* family
+//     (GIT_TRACE2_PERF, GIT_TRACE2_EVENT, GIT_TRACE2_BRIEF, ...). --setup invokes
+//     `git rev-parse` and `git config` in checkGit/checkGitIdentity; with tracing
+//     enabled (e.g. GIT_TRACE=1, or a GIT_TRACE2* destination) Git writes trace
+//     diagnostics to stderr (e.g. "trace: built-in: git rev-parse
+//     --show-toplevel"), which breaks the empty-stderr assertion this test pins
+//     even though the JSON log-close behavior is correct. These are not
+//     repository-local (git rev-parse --local-env-vars does not list them), but
+//     they are inherited the same way and produce stderr output the test must not
+//     see, so they are stripped here too. An empty value still turns tracing on
+//     for GIT_TRACE (an empty value means "1" per git's docs for the boolean
+//     trace variables), so the entry is dropped rather than blanked.
 func filterInheritedGitEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
@@ -120,11 +132,12 @@ func filterInheritedGitEnv(env []string) []string {
 			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 			"GIT_INDEX_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
 			"GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE",
-			"GIT_COMMON_DIR":
+			"GIT_COMMON_DIR", "GIT_TRACE":
 			continue
 		}
 		if strings.HasPrefix(name, "GIT_CONFIG_KEY_") ||
-			strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
+			strings.HasPrefix(name, "GIT_CONFIG_VALUE_") ||
+			strings.HasPrefix(name, "GIT_TRACE2") {
 			continue
 		}
 		out = append(out, kv)
@@ -184,6 +197,10 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	//     (`git rev-parse --show-toplevel`) probes the caller's repository
 	//     instead of repoDir — again breaking the exit-0 assertion for a
 	//     reason unrelated to the regression under test.
+	//   - Git trace variables (GIT_TRACE, GIT_TRACE2*): a runner that enables
+	//     tracing makes the git invocations in checkGit/checkGitIdentity write
+	//     trace diagnostics to stderr, which would break the empty-stderr
+	//     assertion this test pins even though the log-close behavior is correct.
 	// An empty value still overrides (git treats an empty GIT_CONFIG_GLOBAL as
 	// "no global file", an empty GIT_DIR still points at the current directory,
 	// and an empty indexed value still applies), so the entries are dropped
