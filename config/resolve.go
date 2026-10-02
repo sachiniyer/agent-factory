@@ -27,6 +27,13 @@ var legacyDeprecationLogged sync.Map
 // pre-#3358 parent-keyed config to once per corrected repository identity.
 var retainedLegacyBareRepoConfigLogged sync.Map
 
+// resetRetainedLegacyBareRepoConfigWarnings clears that memo. captureLog calls
+// it so a test asserting the warning is not silenced by an earlier test in the
+// same process that happened to use the same repo and legacy identity.
+func resetRetainedLegacyBareRepoConfigWarnings() {
+	retainedLegacyBareRepoConfigLogged.Clear()
+}
+
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
@@ -701,7 +708,7 @@ func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
 		if os.IsNotExist(err) {
 			return
 		}
-		key := repo.ID + "|" + legacyID
+		key := repo.ID + "|" + legacyID + "|inspect-error"
 		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
 			return
 		}
