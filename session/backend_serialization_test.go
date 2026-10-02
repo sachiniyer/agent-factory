@@ -53,6 +53,34 @@ func TestToInstanceDataSandboxRepoPath(t *testing.T) {
 		assert.Equal(t, "", data.Worktree.WorktreePath)
 	})
 
+	t.Run("sandbox backend projects the canonical identity, not the workspace", func(t *testing.T) {
+		// A repo registered through a bare repository's linked worktree has an
+		// operational workspace Path that differs from the canonical
+		// IdentityPath the pending row and the durable repo key use. The settled
+		// projection must carry the identity path or the row would jump projects
+		// when creation settles — the same disappearance the field exists to
+		// prevent.
+		i := &Instance{
+			Title:            "remote-linked",
+			Path:             "/srv/bare/linked-checkout",
+			repoIdentityPath: "/srv/bare.git",
+			backend:          &HookBackend{},
+		}
+		assert.Equal(t, "/srv/bare.git", i.ToInstanceData().Worktree.RepoPath)
+	})
+
+	t.Run("sandbox repo identity survives the record round-trip", func(t *testing.T) {
+		data := InstanceData{
+			Title:       "remote-linked",
+			Path:        "/srv/bare/linked-checkout",
+			BackendType: "remote",
+			Worktree:    GitWorktreeData{RepoPath: "/srv/bare.git"},
+		}
+		reloaded, err := FromInstanceData(data)
+		require.NoError(t, err)
+		assert.Equal(t, "/srv/bare.git", reloaded.ToInstanceData().Worktree.RepoPath)
+	})
+
 	t.Run("local backend without a worktree leaves RepoPath empty", func(t *testing.T) {
 		// Tombstone semantics (#476 area): a local record whose worktree was
 		// already cleared must keep the empty worktree — worktreeReaped keys on

@@ -56,6 +56,14 @@ type Instance struct {
 	// preventing checkpoints from silently migrating legacy rows (#3358). It is
 	// empty until a fresh instance's first save and is protected by mu.
 	storageRepoID string
+	// repoIdentityPath is the owning repo's canonical identity
+	// (RepoContext.IdentityPath), resolved at create and kept for backends that
+	// own no local worktree — the same value the pending-create row publishes as
+	// Worktree.RepoPath. Path is the operational workspace; the two diverge when
+	// the repo was registered through a bare repository's linked worktree, so
+	// repo-scoped consumers must not re-derive identity from Path. Protected by
+	// mu.
+	repoIdentityPath string
 	// Branch is the branch of the instance.
 	Branch string
 	// liveness and inFlightOp are the two orthogonal axes of session state

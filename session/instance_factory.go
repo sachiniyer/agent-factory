@@ -44,6 +44,13 @@ type InstanceOptions struct {
 	SandboxCredentials SandboxCredentials
 	// Path is the path to the workspace.
 	Path string
+	// RepoIdentityPath is the owning repo's canonical identity path
+	// (RepoContext.IdentityPath). The daemon supplies it at create so worktree-
+	// less sandbox backends can keep projecting Worktree.RepoPath with the same
+	// value the pending row announced — under a bare repository's linked-worktree
+	// registration it differs from Path, which is the operational checkout.
+	// Empty leaves the projection to its Path fallback.
+	RepoIdentityPath string
 	// Program is the program to run in the instance (e.g. "claude", "aider --model ollama_chat/gemma3:1b")
 	Program string
 	// Account scopes the session to a registered credential account (#3051).
@@ -596,6 +603,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		taskRunActive:         opts.TaskID != "",
 		liveness:              LiveReady,
 		Path:                  absPath,
+		repoIdentityPath:      opts.RepoIdentityPath,
 		Program:               opts.Program,
 		Account:               opts.Account,
 		accountAgent:          accountAgent,
