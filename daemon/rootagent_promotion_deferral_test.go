@@ -880,7 +880,10 @@ func TestUnprovenLatchSurvivesAnUnreadableRegistry(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	stalled := filepath.Join(binDir, "stalled")
-	script := "#!/bin/sh\n: > \"" + stalled + "\"\nwhile :; do :; done\n"
+	// Still a CPU spin, not a sleep — but bounded so a leaked child cannot
+	// burn forever (#4412). ~50M builtin iterations outlive the 250ms proof
+	// window by orders of magnitude.
+	script := "#!/bin/sh\n: > \"" + stalled + "\"\n_af_i=0; while [ \"$_af_i\" -lt 50000000 ]; do _af_i=$((_af_i + 1)); done\n"
 	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

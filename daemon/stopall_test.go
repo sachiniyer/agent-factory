@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -39,14 +38,8 @@ func spawnFakeDaemonWithHome(t *testing.T, home string) int {
 		env = append(env, "AGENT_FACTORY_HOME="+home)
 	}
 	cmd.Env = env
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start fake daemon: %v", err)
-	}
+	testguard.StartGroupProcess(t, cmd)
 	pid := cmd.Process.Pid
-	t.Cleanup(func() {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	})
 	waitForArgv(t, pid, argv0)
 	return pid
 }
@@ -233,14 +226,8 @@ func TestVerifyScopedDaemon_NonDaemonNeverMatches(t *testing.T) {
 	argv0 := filepath.Join(fakeBinDir(t), "some-other-tool")
 	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "AGENT_FACTORY_HOME=" + home}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	testguard.StartGroupProcess(t, cmd)
 	pid := cmd.Process.Pid
-	t.Cleanup(func() {
-		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	})
 	waitForArgv(t, pid, argv0)
 
 	if got := verifyScopedDaemon(pid, uid, want); got != daemonForeign {

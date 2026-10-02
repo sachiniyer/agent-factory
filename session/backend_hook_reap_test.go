@@ -16,6 +16,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -615,13 +616,10 @@ func TestHookQuiesceNeverSignalsAStalePgid(t *testing.T) {
 	shrinkHookTimeouts(t, 50*time.Millisecond, 5*time.Second)
 
 	// Stands in for whatever now owns a recycled pgid.
-	sentinel := exec.Command("sleep", "30")
-	sentinel.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, sentinel.Start())
+	sentinel := testguard.StartGroupProcess(t, exec.Command("sleep", "30"))
 	stalePgid := sentinel.Process.Pid
 	exited := make(chan error, 1)
 	go func() { exited <- sentinel.Wait() }()
-	t.Cleanup(func() { _ = sentinel.Process.Kill() })
 
 	h := newHookState(t, "", "")
 	p := newHookProvisioner(h, "stale pgid")
@@ -946,14 +944,17 @@ func TestHookLaunchDoesNotKillBackgroundedChildren(t *testing.T) {
 (
   trap 'echo alive > %s' USR1
   : > %s
-  while true; do echo "still here" >&2; sleep 0.05; done
+  %s
 ) &
 child_pid=$!
 echo "$child_pid" > %s
-while [[ ! -e %s ]]; do sleep 0.01; done
+%s
 echo '{"url":"http://10.0.0.7:8080","token":"secret"}'
 exit 0
-`, shellsuggest.Arg(ackFile), shellsuggest.Arg(readyFile), shellsuggest.Arg(pidFile), shellsuggest.Arg(readyFile)))
+`, shellsuggest.Arg(ackFile), shellsuggest.Arg(readyFile),
+		testguard.BoundedLoop(50*time.Millisecond, 5*time.Minute, `echo "still here" >&2; sleep 0.05`),
+		shellsuggest.Arg(pidFile),
+		testguard.BoundedGateWait(readyFile, 10*time.Millisecond, 5*time.Minute)))
 	writeHookScript(t, h.delete, "true")
 
 	p := newHookProvisioner(h, "background child")
