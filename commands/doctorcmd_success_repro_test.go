@@ -170,66 +170,45 @@ func runDoctorSuccessSubprocess(t *testing.T, home string, args ...string) (stdo
 	// `git init` makes one without depending on the source tree being a
 	// checkout, so the test is hermetic to where `go test` runs from.
 	repoDir := t.TempDir()
-	// Filter the inherited Git environment for the `git init` itself too: if a
-	// caller exports GIT_DIR / GIT_WORK_TREE (e.g. running from a Git hook),
-	// `git -C repoDir init` would initialize or reuse that external repository
-	// rather than repoDir. filterInheritedGitEnv strips the repo-local variables
-	// so the init targets repoDir and the fixture stays hermetic.
-	initCmd := exec.Command("git", "-C", repoDir, "init", "-q")
-	initCmd.Env = filterInheritedGitEnv(os.Environ())
-	if err := initCmd.Run(); err != nil {
-		t.Skipf("git unavailable: cannot initialize a throwaway repo for checkGit: %v", err)
-	}
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = repoDir
-	// Strip inherited Git environment the test runner may export:
-	//   - Git config overrides: a GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM file
-	//     (e.g. a config without a user identity), or a GIT_CONFIG_COUNT /
-	//     GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n command-line set (e.g. empty
-	//     user.name / user.email values). With any of these set, git ignores or
-	//     layers on top of $HOME/.gitconfig, so checkGitIdentity reads the
-	//     runner's identity instead of the fixture identity this test seeds
-	//     below and reports an actionable git-identity finding — failing the
-	//     exit-0 assertion for the runner's configuration rather than the
-	//     behavior under test.
-	//   - Git repository-local variables (GIT_DIR, GIT_WORK_TREE, ...): if a
-	//     caller exports these, the spawned af inherits them and checkGit
-	//     (`git rev-parse --show-toplevel`) probes the caller's repository
-	//     instead of repoDir — again breaking the exit-0 assertion for a
-	//     reason unrelated to the regression under test.
-	//   - Git trace variables (GIT_TRACE, GIT_TRACE2*): a runner that enables
-	//     tracing makes the git invocations in checkGit/checkGitIdentity write
-	//     trace diagnostics to stderr, which would break the empty-stderr
-	//     assertion this test pins even though the log-close behavior is correct.
-	// An empty value still overrides (git treats an empty GIT_CONFIG_GLOBAL as
-	// "no global file", an empty GIT_DIR still points at the current directory,
-	// and an empty indexed value still applies), so the entries are dropped
-	// entirely, not cleared (filterInheritedGitEnv). With them gone, HOME=home
-	// makes git read home/.gitconfig as the global config and cmd.Dir makes
-	// checkGit resolve repoDir, so the seeded user.name/user.email resolve and
-	// checkGitIdentity passes.
-	//
-	// XDG_CONFIG_HOME is isolated alongside HOME: the --setup daemon check
-	// (daemon/legacy_units.go defaultSystemdUserDir) resolves the systemd user
-	// unit dir from $XDG_CONFIG_HOME when it is an absolute path, else
-	// $HOME/.config/systemd/user. A runner exporting an absolute XDG_CONFIG_HOME
-	// pointing at a host agent-factory-daemon.service (or a malformed one) makes
-	// daemon.AutostartUnitServesHome consult the runner's unit and report a
-	// problem row (exit 1) for the runner's autostart state rather than the
-	// regression under test. Point it at the throwaway home's .config so the
-	// daemon check scans the fixture (no unit installed) and stays exit 0
-	// regardless of the runner's XDG_CONFIG_HOME. This resolves to the same
-	// $HOME/.config path on a clean runner (HOME=home), so it only overrides a
-	// hostile inherited value and never changes the clean-runner behavior. A
-	// later same-named entry overrides the inherited one for getenv (the same
-	// mechanism HOME and AGENT_FACTORY_HOME already rely on in this append), so
-	// the fixture value wins over any runner-exported XDG_CONFIG_HOME.
-	cmd.Env = append(
+	// The `git init` and the spawned af share one filtered, fixture-scoped
+	// environment (childEnv). filterInheritedGitEnv strips the Git
+	// config/repository/trace variables a runner may export so `git init`
+	// targets repoDir (not an external GIT_DIR) and the child reads the
+	// fixture's $HOME/.gitconfig as the global config. HOME and XDG_CONFIG_HOME
+	// are pointed at the fixture home for BOTH commands: the --setup daemon
+	// check resolves the systemd user dir from $XDG_CONFIG_HOME
+	// (daemon/legacy_units.go defaultSystemdUserDir), and the `git init` reads
+	// $HOME/.gitconfig for its own settings — in particular init.templateDir.
+	// If `git init` kept the runner's HOME, a runner whose global git config
+	// sets init.templateDir would copy that template's .git/config (which can
+	// carry an empty user.name/user.email) into repoDir, where it takes
+	// precedence over the fixture's later $HOME/.gitconfig and makes
+	// checkGitIdentity actionable for a runner-config reason rather than the
+	// regression under test. Giving initCmd the same fixture HOME means the
+	// init reads the fixture's .gitconfig (no init.templateDir) and stays
+	// hermetic. A later same-named entry overrides the inherited one for getenv
+	// (the same mechanism AGENT_FACTORY_HOME already relies on), so the
+	// fixture value wins over any runner-exported HOME/XDG_CONFIG_HOME.
+	childEnv := append(
 		filterInheritedGitEnv(os.Environ()),
 		"AGENT_FACTORY_HOME="+home,
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
+	initCmd := exec.Command("git", "-C", repoDir, "init", "-q")
+	initCmd.Env = childEnv
+	if err := initCmd.Run(); err != nil {
+		t.Skipf("git unavailable: cannot initialize a throwaway repo for checkGit: %v", err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = repoDir
+	// childEnv is the same filtered, fixture-scoped environment built above for
+	// `git init`: the spawned af inherits it so checkGit/checkGitIdentity read
+	// the fixture's $HOME/.gitconfig, checkGit resolves repoDir (not an
+	// inherited GIT_DIR), and the --setup daemon check resolves the systemd user
+	// dir from the fixture's $XDG_CONFIG_HOME. See the childEnv comment above
+	// for the per-variable rationale.
+	cmd.Env = childEnv
 	// Inherit the real PATH (do NOT empty it): checkGit needs git on PATH and a
 	// repo CWD (cmd.Dir above), checkTmux needs tmux on PATH, and
 	// program_overrides.claude="true" needs /bin/true on PATH. Emptying PATH
