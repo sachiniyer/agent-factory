@@ -218,7 +218,7 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 					m.composer = nil
 				}
 				return []byte(deliveryBoundarySentinel + "\n" + joinedFrame +
-					deliveryBoundaryGridSentinel + "\n" + frame), nil
+					boundaryGridMarker(c.Args) + "\n" + frame), nil
 			}
 			if strings.Contains(joined, "display-message") && strings.Contains(joined, "capture-pane") {
 				m.snapshots++
@@ -248,6 +248,20 @@ func (m *stagedDraftPane) exec() cmd_test.MockCmdExec {
 	}
 }
 
+// boundaryGridMarker returns the grid delimiter this boundary command asked
+// tmux to print between the two captures — which is per-capture now, so the
+// mock must replay the exact argv marker the way real tmux echoes its
+// display-message argument.
+func boundaryGridMarker(args []string) string {
+	for i := 0; i+2 < len(args); i++ {
+		if args[i] == "display-message" && args[i+1] == "-p" &&
+			strings.HasPrefix(args[i+2], deliveryBoundaryGridSentinel) {
+			return args[i+2]
+		}
+	}
+	return deliveryBoundaryGridSentinel
+}
+
 func (m *stagedDraftPane) counts() (pastes, enters int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -268,6 +282,29 @@ func sendStaged(t *testing.T, m *stagedDraftPane, prompt string) (PromptDelivery
 	require.NoError(t, err)
 	pastes, enters := m.counts()
 	return status, pastes, enters
+}
+
+// TestPaneEchoedDelimiterCannotForgeBoundarySplit: the visible pane carries a
+// line equal to the grid delimiter — and a second wearing the nonce format —
+// because the submitted prompt discussed this very mechanism (the #4530
+// review case). Pane content must never be able to stand in for the delimiter
+// tmux prints between the two boundary captures: a forged split truncates the
+// joined frame and hands the remedy a "grid" frame that is really joined-mode
+// leftovers plus the real delimiter plus the grid, so the row indexes it
+// compares are nonsense and the chip strand wrongly stands down — or the
+// corrupted frame seeds the monitor baseline. The real delimiter carries a
+// per-capture nonce the pane cannot guess, so the strand still remedies.
+func TestPaneEchoedDelimiterCannotForgeBoundarySplit(t *testing.T) {
+	m := &stagedDraftPane{swallowedEnters: 1, render: codexChipRender}
+	m.transcript = []string{
+		"agent quoting the source it was asked about:",
+		deliveryBoundaryGridSentinel,
+		deliveryBoundaryGridSentinel + "-0123456789abcdef0123456789abcdef",
+	}
+	status, pastes, enters := sendStaged(t, m, redeliverPrompt)
+	require.Equal(t, PromptSentUnverified, status)
+	require.Equal(t, 1, pastes, "the remedy must never re-paste")
+	require.Equal(t, 2, enters, "a delimiter forged in pane content must not break the boundary split")
 }
 
 // TestChipStrandGetsExactlyOneRemedyEnter is the one remediable #4200 shape:
