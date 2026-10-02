@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -159,6 +160,18 @@ func (p *ProjectPickerOverlay) SetDegraded(degraded bool) { p.degraded = degrade
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
 	p.maxWidth = width
 	p.maxHeight = height
+}
+
+// SetSelectedIndex moves the cursor onto the given row — the click action for a
+// project row or the trailing "+ Add project…" row, mirroring the public
+// *SelectionOverlay.SetSelectedIndex the sibling pickers expose. Out-of-range
+// indices no-op. The add-row index (== len(p.all)) is a valid target: Enter on
+// it drops into add mode, so a click on it does the same; the caller synthesizes
+// Enter after this, exactly as the sibling pickers do.
+func (p *ProjectPickerOverlay) SetSelectedIndex(idx int) {
+	if idx >= 0 && idx < p.rowCount() {
+		p.selectedIdx = idx
+	}
 }
 
 // IsSubmitted reports whether the user chose an existing project (a switch).
@@ -435,14 +448,7 @@ func (p *ProjectPickerOverlay) Render() string {
 	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
 	// degraded notice when present) and window the navigable rows into what
 	// remains.
-	avail := textRect.H - 4
-	if p.degraded {
-		avail--
-	}
-	if avail < 1 {
-		avail = 1
-	}
-	start, end, showAbove, showBelow := budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
+	start, end, showAbove, showBelow := p.listRowWindow(textRect.H)
 	if showAbove {
 		lines = append(lines, truncateOverlayLine(overflowStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
@@ -551,4 +557,69 @@ func finishRender(style lipgloss.Style, fit, textRect layout.Rect, lines []strin
 		style = style.Height(fit.H)
 	}
 	return ui.RenderDialog(style, strings.Join(lines, "\n"))
+}
+
+// listRowWindow returns the navigable-row window the list branch of Render
+// paints, shared with RegisterZones so the rows registered as click targets
+// are exactly the rows on screen — a windowing change moves the zones with it
+// instead of leaving them pointing at stale cells. available is the row budget
+// Render reserves after the fixed chrome (title, blank, blank, hint — plus the
+// degraded notice when present).
+func (p *ProjectPickerOverlay) listRowWindow(textHeight int) (start, end int, showAbove, showBelow bool) {
+	avail := textHeight - 4
+	if p.degraded {
+		avail--
+	}
+	if avail < 1 {
+		avail = 1
+	}
+	start, end, showAbove, showBelow = budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
+	return start, end, showAbove, showBelow
+}
+
+// RegisterZones registers one full-width clickable zone per visible project
+// row (and the trailing "+ Add project…" row) — the same primitive every
+// sibling picker's *SelectionOverlay registers, so a left press on a row
+// selects and submits it like j/k + enter instead of being silently swallowed.
+// The add/rebind path-input forms register nothing: their only interactive
+// surface is the text field, which a row click could not submit, so the
+// keyboard remains the only driver there exactly as it already is in keyboard
+// mode.
+//
+// Row identity comes from the SAME window plan Render paints, not from the
+// rendered text, so a project whose name collides with chrome or another row
+// cannot bind its click to the wrong target. The line offset is the dialog's
+// top inset plus the deterministic list layout (title, blank, the degraded
+// notice, the above-overflow row), mirroring *SearchOverlay's renderFrame-
+// derived firstRow.
+func (p *ProjectPickerOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) {
+	if reg == nil || p.adding || p.rebinding {
+		return
+	}
+	rendered := p.Render()
+	width := renderedWidth(rendered)
+	style := searchOverlayStyle()
+	fit := fitOverlayContent(p.width, 0, p.maxWidth, p.maxHeight, style)
+	if fit.W <= 0 {
+		fit.W = p.width
+	}
+	if fit.W <= 0 {
+		fit.W = 1
+	}
+	textRect := overlayTextRect(fit, style)
+	start, end, showAbove, _ := p.listRowWindow(textRect.H)
+	firstRowLine := 2 // title + blank
+	if p.degraded {
+		firstRowLine++
+	}
+	if showAbove {
+		firstRowLine++
+	}
+	rowLine := style.GetBorderTopSize() + style.GetPaddingTop() + firstRowLine
+	for i := start; i < end; i++ {
+		reg.Register(zones.OverlaySelectRow(i), layout.Rect{
+			X: origin.X, Y: origin.Y + rowLine, W: width, H: 1,
+		})
+		rowLine++
+	}
 }
