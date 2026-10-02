@@ -98,7 +98,15 @@ func requireTmuxOrSkip(t *testing.T) {
 //     the runner's configuration rather than the regression under test. The
 //     COUNT entry and every indexed KEY/VALUE entry are removed wholesale for
 //     the same reason as the file overrides: an empty value still applies, so
-//     they cannot be blanked.
+//     they cannot be blanked. GIT_TEMPLATE_DIR is dropped for the same reason:
+//     it points `git init` at a template directory whose .git/config can carry
+//     an empty user.name/user.email that overrides the seeded $HOME/.gitconfig
+//     and makes checkGitIdentity actionable for a runner-config reason rather
+//     than the regression under test. GIT_CONFIG_NOSYSTEM (set in childEnv
+//     below) already disables /etc/gitconfig, but GIT_TEMPLATE_DIR is a
+//     separate env var that bypasses the file config, so it must be stripped
+//     here; an empty value still points git at the default template, so the
+//     entry is removed rather than blanked.
 //   - Git repository-local variables: GIT_DIR, GIT_WORK_TREE,
 //     GIT_IMPLICIT_WORK_TREE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
 //     GIT_INDEX_FILE, GIT_GRAFT_FILE, GIT_REPLACE_REF_BASE, GIT_PREFIX,
@@ -154,6 +162,7 @@ func filterInheritedEnv(env []string) []string {
 			"GIT_INDEX_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
 			"GIT_PREFIX", "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE",
 			"GIT_COMMON_DIR",
+			"GIT_TEMPLATE_DIR",
 			"ZDOTDIR", "BASH_ENV", "ENV", "HISTFILE":
 			continue
 		}
