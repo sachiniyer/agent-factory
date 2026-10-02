@@ -476,22 +476,33 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	// The compatibility projection must capture original values before either it
+	// or the relocation fence below overwrites them. The live archiveReportSource
+	// block above already stamps the fence pre-projection; on the disk-reload path
+	// (archiveReportSource == nil) the recapture below would otherwise run after
+	// projectPending{AccountSwap,Handoff}ForPreviousRelease set
+	// d.StartupStateUnknown = true and snapshot the projected value as the
+	// "original". Snapshot the fence now and reuse it at recapture, exactly as the
+	// live block does. Guarded to the recapture path so the live path pays nothing.
+	var fenceSnapshot *git.ArchiveRollbackFence
+	if d.archiveReportSource == nil && d.ArchiveReport != nil && !d.ArchiveReport.Empty() && d.ArchiveReport.RollbackFence == nil {
+		fenceSnapshot = archiveRollbackFence(d)
+	}
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
-	// The compatibility projection must capture original values before either it
-	// or the relocation fence below overwrites them. Older binaries ignore
-	// ArchiveReport, but the previous release understands the inert/ownership
-	// fields and relocation recovery. Together they refuse restore and explicit
-	// kill instead of publishing an incomplete tree or deleting the report's row.
+	// Older binaries ignore ArchiveReport, but the previous release understands
+	// the inert/ownership fields and relocation recovery. Together they refuse
+	// restore and explicit kill instead of publishing an incomplete tree or
+	// deleting the report's row.
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		report := *d.ArchiveReport
 		if !reportDetached {
 			report = d.ArchiveReport.Clone()
 		}
 		if report.RollbackFence == nil {
-			report.RollbackFence = archiveRollbackFence(d)
+			report.RollbackFence = fenceSnapshot
 		}
 		d.ArchiveReport = &report
 		d.StartupStateUnknown = true
