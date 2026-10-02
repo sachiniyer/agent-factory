@@ -196,6 +196,14 @@ type Instance struct {
 	// system-prompt arguments. Unlike Program (the requested agent label), this is
 	// durable evidence about the process being adopted after a daemon restart.
 	runtimeProgram string
+	// runtimePID and runtimeStartID pin runtimeProgram to the concrete pane-root
+	// process af launched: a surviving tmux NAME cannot prove it still names that
+	// process, but the name's pane root carrying the recorded (pid, kernel
+	// start-time) pair can — that is what lets a daemon restart's reattach keep
+	// the launch claim instead of retiring it (#5066). Zero on records written
+	// before this evidence existed and everywhere runtimeProgram is cleared.
+	runtimePID     int
+	runtimeStartID uint64
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.

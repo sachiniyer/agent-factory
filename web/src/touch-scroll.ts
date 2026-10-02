@@ -11,6 +11,11 @@ export const TouchScroll = (now: () => number) => {
     get active() {
       return samples.length !== 0;
     },
+    // Momentum live: set by a nonzero release(), cleared by decay or stop().
+    // Distinct from active, which tracks the held gesture (samples) instead.
+    get coasting() {
+      return v !== 0;
+    },
     push(y: number): number {
       const last = samples.at(-1);
       samples.push({ y, t: now() });
