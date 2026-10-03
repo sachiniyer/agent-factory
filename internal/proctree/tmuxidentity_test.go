@@ -121,6 +121,100 @@ func TestOccupantsOfDir_ExcludesATmuxClient(t *testing.T) {
 	require.False(t, got[client], "a tmux client is not an occupant")
 }
 
+// The descendant-of-matching-ancestor shape, which the sibling test above does
+// not reach. OccupantsOfDir excludes tmux in its outer per-pid scan, but then
+// walks TreeOf for every process whose cwd matched and appends the whole
+// subtree. That inner walk had NO IsTmuxProcess guard, so a tmux process
+// reached as a DESCENDANT of a matching ancestor was admitted — violating the
+// contract at occupants.go:104-115 ("a tmux CLIENT ... must stay excluded").
+// The outer loop also continue's without marking seen, so iteration order
+// could not rescue the pid: a later TreeOf walk re-discovered it unpruned.
+//
+// Construction: a shell whose cwd is the worktree backgrounds a fake tmux and
+// waits on it. The shell is an ordinary (non-tmux) process whose cwd matches
+// the worktree, so the outer loop accepts it; its TreeOf subtree includes the
+// tmux-named child. The fake tmux mirrors tmuxNamedProcess (a copy of sleep
+// renamed tmux, so argv[0] basename AND Comm both report tmux).
+func TestOccupantsOfDir_ExcludesATmuxDescendantOfAMatchingAncestor(t *testing.T) {
+	worktree := t.TempDir()
+
+	sleepPath, err := exec.LookPath("sleep")
+	require.NoError(t, err)
+	body, err := os.ReadFile(sleepPath)
+	require.NoError(t, err)
+	fakeTmux := filepath.Join(t.TempDir(), "tmux")
+	require.NoError(t, os.WriteFile(fakeTmux, body, 0o755))
+
+	shell := exec.Command("sh", "-c", `"$1" 300 & wait`, "sh", fakeTmux)
+	shell.Dir = worktree
+	require.NoError(t, shell.Start())
+	t.Cleanup(func() {
+		_ = shell.Process.Kill()
+		_, _ = shell.Process.Wait()
+	})
+
+	shellPID := shell.Process.Pid
+	// Wait for the shell's cwd to be readable and locate its tmux-named
+	// child by PPID (same poll shape as tmuxNamedProcess), then wait for the
+	// child's reads to be answerable before asserting on them.
+	deadline := time.Now().Add(5 * time.Second)
+	var childPID int
+	for time.Now().Before(deadline) && childPID == 0 {
+		if _, ok := WorkingDir(shellPID); ok {
+			snap, snapErr := Snapshot()
+			if snapErr == nil {
+				for pid, p := range snap {
+					if p.PPID == shellPID && filepath.Base(Argv(pid)[0]) == "tmux" {
+						childPID = pid
+						break
+					}
+				}
+			}
+		}
+		if childPID != 0 {
+			if cp, lerr := Lookup(childPID); lerr == nil && cp.Comm == "tmux" {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NotZero(t, childPID, "the tmux-named child of the shell must become readable")
+	// SIGKILL on the shell does not reach its backgrounded child: kill and reap
+	// the fake-tmux child explicitly so no `sleep 300` is left reparented to PID 1.
+	t.Cleanup(func() {
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+		reapDeadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(reapDeadline) {
+			if _, err := Lookup(childPID); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+
+	require.True(t, IsTmuxProcess(childPID), "the child is named tmux (excluded by contract)")
+	require.False(t, IsTmuxProcess(shellPID), "the shell is ordinary (the matching ancestor)")
+
+	// Confirm the child is genuinely in the shell's TreeOf subtree — i.e. the
+	// buggy inner walk would reach it.
+	snap, err := Snapshot()
+	require.NoError(t, err)
+	inTree := false
+	for _, p := range TreeOf(snap, shellPID) {
+		if p.PID == childPID {
+			inTree = true
+		}
+	}
+	require.True(t, inTree, "the tmux-named child must be in the shell's TreeOf subtree")
+
+	occupants, err := OccupantsOfDir(worktree)
+	require.NoError(t, err)
+	got := pidsOf(occupants)
+	require.True(t, got[shellPID], "the worktree-dwelling shell is reported")
+	require.False(t, got[childPID],
+		"a tmux process reached via the TreeOf descendant walk must NOT be reported — the contract excludes every tmux process anywhere in the result")
+}
+
 // Every shape IsTmuxServer has to decide, pinned without a live tmux. Each row
 // names the platform fact it stands for.
 func TestTmuxServerIdentity(t *testing.T) {
