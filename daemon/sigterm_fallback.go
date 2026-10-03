@@ -645,6 +645,19 @@ func classifyDaemonHome(pid int) daemonScope {
 	if isProcessRelativeProcfsHome(gotHome) {
 		return daemonUnverifiable
 	}
+	// The spelling guard does not see through a symlink whose TARGET is a
+	// process-relative procfs path: AGENT_FACTORY_HOME=link where link ->
+	// /proc/self/cwd/state resolves the daemon's home in the DAEMON's frame
+	// (<its cwd>/state) but canonicalDir follows the link in the CALLER's
+	// frame, so a same-UID, same-namespace foreign daemon launched from a
+	// different cwd compares equal to wantHome and is misclassified daemonOurs
+	// (#4793 via a procfs-indirected symlink). sameProcessRoot does not catch
+	// this (root and mount-namespace match). Walk the symlink chain and treat a
+	// home whose resolved chain enters a process-relative procfs path as
+	// unverifiable — see homeSymlinkEntersProcessRelativeProcfs.
+	if homeSymlinkEntersProcessRelativeProcfs(gotHome) {
+		return daemonUnverifiable
+	}
 	got, err := canonicalDir(gotHome)
 	if err != nil {
 		return daemonUnverifiable

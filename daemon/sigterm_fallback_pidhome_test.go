@@ -177,3 +177,58 @@ func TestClassifyDaemonHome_NonCanonicalProcSelfHomeIsUnverifiable(t *testing.T)
 		})
 	}
 }
+
+// TestClassifyDaemonHome_ProcfsIndirectedSymlinkHomeIsUnverifiable pins the
+// procfs-indirection hazard isProcessRelativeProcfsHome's spelling guard does
+// not catch: AGENT_FACTORY_HOME is a normal-looking symlink whose TARGET is a
+// process-relative procfs path (link -> /proc/self/cwd/state). The daemon
+// resolves link in its own frame (<its cwd>/state), but canonicalDir follows
+// the link in the CALLER's frame (/proc/self/cwd is the reading process's cwd),
+// so a same-UID, same-namespace daemon launched from a different cwd compares
+// equal to wantHome and is misclassified daemonOurs on a stale PID file or lone
+// pgrep result. sameProcessRoot does not catch it (root and mount-namespace
+// match). homeSymlinkEntersProcessRelativeProcfs walks the link target and
+// rejects a home whose resolved chain enters a process-relative procfs path.
+func TestClassifyDaemonHome_ProcfsIndirectedSymlinkHomeIsUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	// The caller's home resolves to <caller-cwd>/state; without the fix the
+	// daemon's AGENT_FACTORY_HOME=link resolves the same way in the caller's
+	// frame and the foreign daemon is misclassified daemonOurs.
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(cwd, "state"))
+	daemonCwd := t.TempDir()
+	// link is a relative symlink in the daemon's cwd whose target is a
+	// process-relative procfs path: the daemon resolves it against its own
+	// cwd (<its cwd>/state), but canonicalDir follows /proc/self in the
+	// caller's frame.
+	if err := os.Symlink("/proc/self/cwd/state", filepath.Join(daemonCwd, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	argv0 := filepath.Join(fakeBinDir(t), "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"AGENT_FACTORY_HOME=link",
+	}
+	cmd.Dir = daemonCwd
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, pid, argv0)
+	if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
+		t.Errorf("AGENT_FACTORY_HOME=link (symlink to /proc/self/cwd/state) classified %v; "+
+			"want daemonUnverifiable — a symlink whose target is a process-relative procfs "+
+			"path resolves in the caller's frame under canonicalDir, not the daemon's, so the "+
+			"classifier must not guess ours and signal a cross-cwd daemon", scope)
+	}
+}
