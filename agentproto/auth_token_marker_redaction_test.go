@@ -259,6 +259,24 @@ func TestRedactAccessTokenLiteralOutsideMarkersIsIndependentOfMarkerContext(t *t
 			token: "",
 			want:  "access_token=REDACTED and RED",
 		},
+		{
+			name:  "right-straddling token redacts suffix past marker",
+			text:  "err: REDACTEDfoo end",
+			token: "EDfoo",
+			want:  "err: REDACTEDREDACTED end",
+		},
+		{
+			name:  "left-straddling token redacts prefix before marker",
+			text:  "err: fooREDACTED end",
+			token: "fooRED",
+			want:  "err: REDACTEDREDACTED end",
+		},
+		{
+			name:  "straddling token inside coincidental marker is redacted",
+			text:  "REDACTEDfoo",
+			token: "EDfoo",
+			want:  "REDACTEDREDACTED",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := redactAccessTokenLiteralOutsideMarkers(tc.text, tc.token); got != tc.want {
@@ -266,5 +284,33 @@ func TestRedactAccessTokenLiteralOutsideMarkersIsIndependentOfMarkerContext(t *t
 					tc.text, tc.token, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRedactAccessTokenLiteralOutsideMarkersStraddleRedactsCoincidentalMarker
+// is the regression test for the straddle case a naive split-on-marker
+// implementation misses: a token that begins inside a coincidental "REDACTED"
+// (not one the earlier passes wrote) and ends in the following segment. The
+// split approach confines the literal pass to segments between markers, so
+// neither segment contains the whole token and the secret survives. The scan
+// redacts the suffix past the marker, restoring the whole-message replacement
+// guarantee for arbitrary transport error text the catch-all was originally
+// written to cover.
+func TestRedactAccessTokenLiteralOutsideMarkersStraddleRedactsCoincidentalMarker(t *testing.T) {
+	// Right straddle: token starts in the marker suffix, ends past it.
+	// "EDfoo" begins at the "E" of "REDACTED" (index 6) and ends in "foo".
+	if got := redactAccessTokenLiteralOutsideMarkers("REDACTEDfoo", "EDfoo"); strings.Contains(got, "EDfoo") {
+		t.Errorf("right straddle: token survived in %q", got)
+	}
+	if got := redactAccessTokenLiteralOutsideMarkers("REDACTEDfoo", "EDfoo"); !strings.Contains(got, "REDACTED") {
+		t.Errorf("right straddle: marker lost in %q", got)
+	}
+	// Left straddle: token starts before the marker, ends inside it.
+	// "fooRED" ends at the "D" of "REDACTED" (index 8), starts in "foo".
+	if got := redactAccessTokenLiteralOutsideMarkers("fooREDACTED", "fooRED"); strings.Contains(got, "fooRED") {
+		t.Errorf("left straddle: token survived in %q", got)
+	}
+	if got := redactAccessTokenLiteralOutsideMarkers("fooREDACTED", "fooRED"); !strings.Contains(got, "REDACTED") {
+		t.Errorf("left straddle: marker lost in %q", got)
 	}
 }

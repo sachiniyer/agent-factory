@@ -345,24 +345,84 @@ func RedactAccessTokenError(err error, token string) error {
 // prefix of "REDACTED" (R, RE, RED, REDA, REDAC, REDACT, REDACTE): it rewrites a
 // marker into the marker plus its own tail and re-injects the secret bytes
 // immediately after access_token= (e.g. token="RED" turns access_token=REDACTED
-// into access_token=REDACTEDACTED). Splitting on the marker confines the literal
-// pass to bytes the earlier passes left untouched; the markers are re-joined
-// verbatim, so they can neither grow nor re-emit the token. An empty token is
+// into access_token=REDACTEDACTED). The scan walks the text left to right,
+// emitting each marker verbatim and redacting the token only in the bytes the
+// earlier passes left untouched, so a marker can neither grow nor re-emit the
+// token. A token that straddles a marker boundary — starting inside a marker
+// and ending past it, or starting before a marker and ending inside it — is
+// still redacted: only the bytes outside the marker carry the secret, so only
+// those are replaced with the marker. This avoids the regression a naive
+// split-on-marker would have for a coincidental "REDACTED" in arbitrary
+// transport error text that the earlier passes did not write (where a token
+// like "EDfoo" straddling a coincidental marker would survive unredacted
+// because neither split segment contains the whole token). An empty token is
 // the caller's "no catch-all" signal and leaves the text untouched (a bare
 // strings.ReplaceAll(text, "", …) would insert the marker between every byte,
 // which is the other reason the guard lives here rather than at the call site).
-// For a non-empty token and a text with no marker the split is a single
-// segment, so the function reduces to strings.ReplaceAll(text, token,
+// For a non-empty token and a text with no marker the scan never matches a
+// marker, so the function reduces to strings.ReplaceAll(text, token,
 // accessTokenRedaction).
 func redactAccessTokenLiteralOutsideMarkers(text, token string) string {
 	if token == "" {
 		return text
 	}
-	segments := strings.Split(text, accessTokenRedaction)
-	for i, seg := range segments {
-		segments[i] = strings.ReplaceAll(seg, token, accessTokenRedaction)
+	var b strings.Builder
+	marker := accessTokenRedaction
+	markerLen := len(marker)
+	tokenLen := len(token)
+	i := 0
+	for i < len(text) {
+		// A marker is always emitted verbatim: matching the token inside it
+		// would re-inject the secret (the corruption this catch-all exists
+		// to prevent) or extend the marker.
+		if strings.HasPrefix(text[i:], marker) {
+			b.WriteString(marker)
+			markerEnd := i + markerLen
+			// Right straddle: a token starting inside this marker and ending
+			// past it. The in-marker bytes are the marker's own (coincidental
+			// overlap with the token); only the suffix past the marker is the
+			// secret, so redact that suffix with the marker and skip past it.
+			next := markerEnd
+			for j := max(i, markerEnd-tokenLen+1); j < markerEnd; j++ {
+				if j+tokenLen <= markerEnd {
+					continue // token fully inside the marker; leave it alone
+				}
+				if strings.HasPrefix(text[j:], token) {
+					b.WriteString(marker)
+					next = j + tokenLen
+					break
+				}
+			}
+			i = next
+			continue
+		}
+		if strings.HasPrefix(text[i:], token) {
+			// Left straddle: a token starting here may end inside a later
+			// marker. Redact the part before the marker and let the next
+			// iteration emit the marker verbatim.
+			searchStart := i + 1
+			searchEnd := i + tokenLen + markerLen
+			if searchEnd > len(text) {
+				searchEnd = len(text)
+			}
+			if searchStart < searchEnd {
+				if idx := strings.Index(text[searchStart:searchEnd], marker); idx >= 0 {
+					markerAt := searchStart + idx
+					if markerAt < i+tokenLen {
+						b.WriteString(marker)
+						i = markerAt
+						continue
+					}
+				}
+			}
+			b.WriteString(marker)
+			i += tokenLen
+			continue
+		}
+		b.WriteByte(text[i])
+		i++
 	}
-	return strings.Join(segments, accessTokenRedaction)
+	return b.String()
 }
 
 // RedactAccessTokenText is the logging-boundary backstop for an access_token
