@@ -165,8 +165,11 @@ go build -buildvcs=false -o "$BIN" .
 # The fake agent prints a deterministic ready marker (the "live output" the
 # terminal flow asserts on) then execs `cat`, so typed input echoes back — the
 # same shape the WS PTY broker round-trip uses. Because the override is a custom
-# script (not literally "claude"), af appends no agent flags and counts the pane
-# ready as soon as it shows output (#1116/#1131).
+# script (not literally "claude"), af appends no agent flags; locally it counts
+# the pane ready as soon as it shows output (#1116/#1131), and for REMOTE
+# sessions the script also prints claude's ❯ glyph — the daemon cannot inspect
+# the remote pane's real command, so resolvedAgent falls back to the config
+# name and waits for claude's composer (see the printf inside).
 cat >"$HOME_DIR/fake-agent.sh" <<EOF
 #!/bin/sh
 # Creation-state probes deliberately hold the REAL backend path open. The web test
@@ -179,6 +182,13 @@ case "\$PWD" in
     *probe-create-fail*) sleep 4; exit 42 ;;
 esac
 printf '%s\n' "$READY_MARKER"
+# Print claude's composer glyph as the prompt line. Local sessions need no glyph
+# (the tmux binding exposes this script as the pane program, so readiness is the
+# generic any-output arm), but a REMOTE session has no local tmux binding and
+# resolvedAgent falls back to the config name "claude" — whose ready arm requires
+# "❯". Without it a remote create spins the full 60s waitForReady and dies.
+# (Same shape every integration fixture uses: printf '❯ ' then exec cat.)
+printf '❯ '
 exec cat
 EOF
 chmod +x "$HOME_DIR/fake-agent.sh"
@@ -226,11 +236,17 @@ if [ ! -d "$BROWSE/$BROWSE_L1/$BROWSE_L2/$BROWSE_REPO/.git" ]; then
     )
 fi
 
-# #2189: the primary repo has a real, versioned remote-hook configuration. The
-# commands only need to be discoverable for ListBackends' side-effect-free
-# availability check; the browser test never provisions a remote workspace.
+# #2189: the primary repo has a real, versioned remote-hook configuration.
 # Keeping the executable's real name in launch_cmd is what lets the daemon turn
 # af's internal "hook" key into the intent-bearing picker label.
+#
+# These are REAL provisioners, not availability stubs: the web-driver spec
+# submits a backend=hook create through the + New modal and expects a working
+# remote session (the browser-level half of the session.create.opt.backend /
+# .remote parity evidence; the wire-level half is integration's
+# TestWebCreateSessionOnHookBackend). The scripts below are a shell port of
+# integration's writeMockHookLaunch/writeMockHookDelete — clone origin, spawn a
+# real `af agent-server`, answer {"url","token"} — so keep the two in lockstep.
 mkdir -p "$MOCK/.agent-factory"
 cat >"$MOCK/.agent-factory/config.json" <<'EOF'
 {
@@ -243,14 +259,93 @@ EOF
 git -C "$MOCK" add .agent-factory/config.json
 git -C "$MOCK" commit -qm "configure mock remote sandbox"
 
-for hook in coder-launch.sh coder-delete.sh; do
-    cat >"/usr/local/bin/$hook" <<'EOF'
+# The hook backend refuses a repo with no CloneURL before launch_cmd runs, and
+# hands the script that URL as --repo. A local bare clone stands in for GitHub
+# (self-contained, no network) — the same trick integration's fixture uses.
+git clone -q --bare "$MOCK" "$MOCK.git"
+git -C "$MOCK" remote add origin "$MOCK.git"
+
+HOOK_STATE=/work/hook-sandboxes
+mkdir -p "$HOOK_STATE"
+
+# launch_cmd contract (docs/remote-hooks.md): flags --name/--title/--repo, with
+# --program + --program-resolved when the daemon resolved an override; clone the
+# workspace, run `af agent-server` detached on a private AGENT_FACTORY_HOME, and
+# print its {addr, token} banner as {"url","token"}. Paths are baked in — the
+# hook's environment is filtered, so ambient exports may not survive.
+cat >"/usr/local/bin/coder-launch.sh" <<EOF
 #!/bin/sh
-# The web selftest only probes availability; provisioning would be a fixture bug.
-exit 99
-EOF
-    chmod +x "/usr/local/bin/$hook"
+AF_BIN="$BIN"
+STATE="$HOOK_STATE"
+NAME="" TITLE="" REPO="" PROGRAM="" PROGRAM_RESOLVED=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --name) NAME="\$2"; shift 2;;
+    --title) TITLE="\$2"; shift 2;;
+    --repo) REPO="\$2"; shift 2;;
+    --program) PROGRAM="\$2"; shift 2;;
+    --program-resolved) PROGRAM_RESOLVED="--program-resolved"; shift;;
+    --branch) shift 2;;
+    --session-env) shift 2;;
+    *) shift;;
+  esac
 done
+[ -n "\$NAME" ] || { echo "launch: --name required" >&2; exit 64; }
+DIR="\$STATE/\$NAME"
+mkdir -p "\$DIR/home"
+git clone -q "\$REPO" "\$DIR/workspace"
+BANNER="\$DIR/banner.json"
+LOG="\$DIR/agent-server.log"
+: > "\$BANNER"
+ARGS="agent-server --listen 127.0.0.1:0 --repo \$DIR/workspace --title \$TITLE"
+[ -n "\$PROGRAM" ] && ARGS="\$ARGS --program \$PROGRAM"
+[ -n "\$PROGRAM_RESOLVED" ] && ARGS="\$ARGS \$PROGRAM_RESOLVED"
+AGENT_FACTORY_HOME="\$DIR/home" TERM=xterm nohup "\$AF_BIN" \$ARGS >"\$BANNER" 2>"\$LOG" &
+echo \$! > "\$DIR/pid"
+i=0
+while [ \$i -lt 200 ]; do
+  grep -q '"addr"' "\$BANNER" 2>/dev/null && break
+  i=\$((i + 1)); sleep 0.1
+done
+ADDR=\$(sed -n 's/.*"addr":"\([^"]*\)".*/\1/p' "\$BANNER")
+TOKEN=\$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' "\$BANNER")
+[ -n "\$ADDR" ] || { echo "launch: af agent-server printed no banner:" >&2; cat "\$LOG" >&2; exit 1; }
+printf '{"url":"http://%s","token":"%s"}\n' "\$ADDR" "\$TOKEN"
+EOF
+chmod +x "/usr/local/bin/coder-launch.sh"
+
+cat >"/usr/local/bin/coder-delete.sh" <<EOF
+#!/bin/sh
+STATE="$HOOK_STATE"
+NAME=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --name) NAME="\$2"; shift 2;;
+    *) shift;;
+  esac
+done
+[ -n "\$NAME" ] || { echo "delete: --name required" >&2; exit 64; }
+PIDFILE="\$STATE/\$NAME/pid"
+if [ -f "\$PIDFILE" ]; then
+  PID="\$(cat "\$PIDFILE")"
+  kill "\$PID" 2>/dev/null || true
+  # Keep the pidfile until the process is confirmed gone — removing it on
+  # SIGTERM alone would report a SIGTERM-ignoring server as reaped.
+  tries=0
+  while [ \$tries -lt 100 ]; do
+    kill -0 "\$PID" 2>/dev/null || break
+    sleep 0.1
+    tries=\$((tries + 1))
+  done
+  if kill -0 "\$PID" 2>/dev/null; then
+    echo "delete: agent-server pid \$PID still alive after SIGTERM" >&2
+    exit 1
+  fi
+  rm -f "\$PIDFILE"
+fi
+printf '{"deleted":true}\n'
+EOF
+chmod +x "/usr/local/bin/coder-delete.sh"
 
 # --- start the daemon + wait for the HTTP listener --------------------------
 # Both are functions because the harness restarts the daemon once, to seed a record
@@ -312,6 +407,17 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_MIS" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_DEAD" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_ORDER" >/dev/null 2>&1 || true
+    # Sweep hook-provisioned sessions the named list cannot know: the serial
+    # create test submits through the modal, so if an assertion fails the row
+    # outlives its test and its detached agent-server contaminates every later
+    # test's rail. launch_cmd namespaces each session under $HOOK_STATE, so the
+    # directory names ARE the session names — kill them through the daemon first
+    # (proper delete_cmd teardown), then reap any pid that survived anyway.
+    for d in "$HOOK_STATE"/*/; do
+        [ -d "$d" ] || continue
+        "$BIN" sessions kill "$(basename "$d")" >/dev/null 2>&1 || true
+        [ -f "$d/pid" ] && kill "$(cat "$d/pid")" >/dev/null 2>&1 || true
+    done
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true

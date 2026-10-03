@@ -220,6 +220,22 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				OriginalStartupStateUnknown: &startupStateUnknown,
 			}
 		}
+	} else if isSandboxBackendType(data.BackendType) {
+		// An off-box session owns no local worktree, but it still belongs to the
+		// repo its create was scoped to. The pending-create row publishes the
+		// repo's canonical IdentityPath as Worktree.RepoPath (manager_create);
+		// carrying the same value on the settled projection keeps repo-scoped
+		// consumers — the web rail's project filter and the project switcher —
+		// able to attribute the session, and keeps the pending→settled hand-off
+		// stable when IdentityPath differs from the operational workspace Path
+		// (a bare repository's linked-worktree registration). Without it a remote
+		// session matched NO project's scope and the web could not render or keep
+		// it selected at all (#1933). No Path fallback: consumers treat a nonempty
+		// RepoPath as already canonical (api/sessionRepoID hashes it verbatim), so
+		// publishing the operational workspace under a bare+linked registration
+		// would move the row to a bogus project — for a record that never carried
+		// an identity, empty stays honest and matches the pre-#1933 projection.
+		data.Worktree.RepoPath = i.repoIdentityPath
 	}
 
 	return data
@@ -410,6 +426,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
 		instance.backend = newInertSandboxBackend(data.BackendType)
+		// Carry the recorded repo identity so the reloaded row keeps projecting
+		// the same Worktree.RepoPath its writer stamped (#1933) — records from
+		// before the field existed leave it empty and Path stands in.
+		instance.repoIdentityPath = data.Worktree.RepoPath
 		// A metadata-only tab needs nothing this branch cannot rebuild: a web tab is
 		// a name and a URL, binding no tmux and reading no worktree. Dropping it made
 		// off-box admission non-durable — the tab vanished at the next daemon restart

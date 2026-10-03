@@ -195,14 +195,16 @@ func writeMockHookLaunch(t *testing.T, path, afBin, state string) string {
 	body := fmt.Sprintf(`
 AF_BIN=%q
 STATE=%q
-NAME="" TITLE="" REPO="" PROGRAM=""
+NAME="" TITLE="" REPO="" PROGRAM="" PROGRAM_RESOLVED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2;;
     --title) TITLE="$2"; shift 2;;
     --repo) REPO="$2"; shift 2;;
     --program) PROGRAM="$2"; shift 2;;
+    --program-resolved) PROGRAM_RESOLVED="--program-resolved"; shift;;
     --branch) shift 2;;
+    --session-env) shift 2;;
     *) shift;;
   esac
 done
@@ -215,6 +217,12 @@ LOG="$DIR/agent-server.log"
 : > "$BANNER"
 ARGS="agent-server --listen 127.0.0.1:0 --repo $DIR/workspace --title $TITLE"
 [ -n "$PROGRAM" ] && ARGS="$ARGS --program $PROGRAM"
+# The daemon resolves program_overrides BEFORE launch_cmd runs and marks the
+# result --program-resolved so the agent-server cannot apply a SECOND lookup
+# from the cloned repo's own config (docs/remote-hooks.md). Forward it: dropping
+# the flag re-resolves the already-final command — silently wrong for an
+# override path, which is exactly what the web-path test below sends.
+[ -n "$PROGRAM_RESOLVED" ] && ARGS="$ARGS $PROGRAM_RESOLVED"
 # nohup, matching docs/remote-hooks.md's recipe exactly — this fixture is the
 # doc's script, so the two must not drift (a fixture that detaches differently
 # from the doc tests something no user runs). setsid was the original spelling
@@ -254,7 +262,19 @@ done
 [ -n "$NAME" ] || { echo "delete: --name required" >&2; exit 64; }
 PIDFILE="$STATE/$NAME/pid"
 if [ -f "$PIDFILE" ]; then
-  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  PID="$(cat "$PIDFILE")"
+  kill "$PID" 2>/dev/null || true
+  # Keep the pidfile until the process is confirmed gone: tests poll it via
+  # mockHookServerAlive to prove the agent-server actually exited, and removing
+  # it on SIGTERM alone would report a SIGTERM-ignoring process as reaped.
+  for _ in $(seq 1 100); do
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$PID" 2>/dev/null; then
+    echo "delete: agent-server pid $PID still alive after SIGTERM" >&2
+    exit 1
+  fi
   rm -f "$PIDFILE"
 fi
 printf '{"deleted":true}\n'
