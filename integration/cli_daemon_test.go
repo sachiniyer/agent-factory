@@ -317,7 +317,22 @@ func buildBinary(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	repoRoot := filepath.Dir(filepath.Dir(file))
-	bin := filepath.Join(t.TempDir(), "af")
+	// StopDaemon's PID-file reclaim path binds the candidate to THIS home via
+	// pidBelongsToThisHome, whose classifier (classifyDaemonHome) deliberately
+	// does NOT apply the isTestBinaryArgs heuristic to a recorded PID, so a
+	// binary under /tmp/Test* or /tmp/go-build* is reclaimable. The HOST-WIDE
+	// pgrep scan the SIGTERM fallback uses still applies that heuristic
+	// (pgrepDaemonCandidates), and t.TempDir() names paths under /tmp/Test*;
+	// a daemon built there would be invisible to that scan. Build the binary
+	// into a temp dir that does NOT trip the host-scan filter — the same trick
+	// daemon/stopall_test.go's fakeBinDir uses to keep its fake daemons out of
+	// /tmp/Test*.
+	binDir, err := os.MkdirTemp("", "af-integration-bin")
+	if err != nil {
+		t.Fatalf("make bin dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(binDir) })
+	bin := filepath.Join(binDir, "af")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", bin, repoRoot)

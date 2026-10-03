@@ -101,13 +101,16 @@ func daemonPIDFilePath() (string, error) {
 // It REFUSES a symlinked path (#3672). The PID file is af's own liveness
 // bookkeeping at a path af chose, written on start and deleted on teardown, so
 // a link there is neither af's to write through nor af's to replace — the same
-// answer the bearer token and the autostart unit take.
+// answer the bearer token and the autostart unit take. It takes the PID-file
+// lock (withDaemonPIDLock) so a stop's read-compare-unlink can't interleave.
 func writeDaemonPIDFile() error {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return err
 	}
-	return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	return withDaemonPIDLock(path, time.Now().Add(daemonPIDLockStartupBudget), func() error {
+		return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+	})
 }
 
 // removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
@@ -169,6 +172,31 @@ var (
 	stopDaemonPoll  = sigtermFallbackPoll
 )
 
+// stopDaemonPIDLockBudget bounds how long the foreign/unverifiable PID-file
+// cleanup waits on the sidecar daemon.pid.lock when the caller carries no
+// deadline — public StopDaemon passes a zero deadline, so without a floor the
+// cleanup's withDaemonPIDLock would block forever in LOCK_EX on a writer
+// suspended or stalled on daemon.pid.lock, hanging StopDaemon (and with it
+// upgrade recovery and autostart handoff). A finite budget abandons the
+// best-effort cleanup instead, mirroring the bounded startup write
+// (daemonPIDLockStartupBudget). Package var so tests can shorten it; the
+// cleanup is best-effort, so a lock this budget cannot acquire is dropped (the
+// stale PID file is left; a later caller re-reads and re-checks it).
+var stopDaemonPIDLockBudget = daemonPIDLockStartupBudget
+
+// pidLockCleanupDeadline returns the deadline to pass to the PID-file lock the
+// foreign/unverifiable cleanup paths take. A deadline-bounded stopDaemonUntil
+// caller threads its own deadline through; a zero deadline (public StopDaemon,
+// which carries none) is floored at stopDaemonPIDLockBudget so the lock
+// acquisition cannot block indefinitely on a writer suspended or stalled on
+// daemon.pid.lock (withDaemonPIDLock blocks forever on a zero deadline).
+func pidLockCleanupDeadline(deadline time.Time) time.Time {
+	if !deadline.IsZero() {
+		return deadline
+	}
+	return time.Now().Add(stopDaemonPIDLockBudget)
+}
+
 // StopDaemon attempts to stop a running daemon process if it exists. The bool
 // return reports whether a live agent-factory daemon was actually signaled: it
 // is false (with a nil error) when there was nothing to stop — no PID file, an
@@ -178,6 +206,13 @@ var (
 // no daemon.pid, so a true success line here would be a lie. It verifies the
 // PID actually belongs to an agent-factory daemon before signaling it, so a
 // stale or reused PID in the PID file can't take down an unrelated process.
+// That cmdline check is paired with a home binding (pidBelongsToThisHome): a
+// stale daemon.pid whose PID was recycled by ANOTHER AGENT_FACTORY_HOME's
+// `af --daemon` passes the cmdline check while serving a different control
+// socket, and signaling it would kill an unrelated daemon — possibly another
+// user's on a shared host. The same binding gates locateDaemonPID so the two
+// PID-validation paths agree (#1004), mirroring the cross-home gate the unit
+// operations already carry (#1919).
 //
 // Shutdown is graceful by default: SIGTERM gives the daemon's signal handler a
 // chance to run SaveInstances() and clean up the PID file (see RunDaemon). We
@@ -245,46 +280,113 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 		return false, nil
 	}
 
-	// Send SIGTERM so the daemon's signal handler can SaveInstances() before
-	// exit (#571). A race where the daemon exits between the signal-0 probe
-	// above and this call is benign: errIsProcessGone covers both ESRCH and
-	// the os.ErrProcessDone surface.
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		if errIsProcessGone(err) {
-			log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-			cleanupDaemonRuntimeFiles(pidFile, deadline)
-			return true, nil
+	// Bind the PID to THIS home before signaling (#4793, #1919, #1004). The
+	// cmdline check above cannot tell this home's `af --daemon` from another
+	// home's. A PROVEN-foreign PID is a stale PID file; an INCONCLUSIVE binding
+	// (daemonUnverifiable) is neither safe to signal nor safe to orphan by
+	// deleting the PID file over it — leave the file and surface why.
+	// Capture the process identity at the home-binding decision so the
+	// SIGTERM→SIGKILL escalation is bound to the instance classifyDaemonHome
+	// proved serves this home, not a PID the kernel recycled between the
+	// decision and the signal. proc (an os.Process for the numeric PID) is
+	// PID-only — its Signal has no instance check, so a recycled PID serving
+	// another home would be terminated and the grace poll (pidLooksAlive)
+	// would mistake the replacement for the original still being alive and
+	// SIGKILL it (#4793 review). proctree.Signal revalidates the StartID
+	// immediately before each signal and refuses (ErrIdentityChanged) when the
+	// PID no longer names this instance; AliveSame revalidates the same
+	// instance for the grace poll, so a recycled PID is neither signaled nor
+	// waited on.
+	switch scope := classifyDaemonHome(pid); scope {
+	case daemonOurs:
+		// Proven to serve this home: capture its identity and signal it
+		// through the identity-checked path below.
+		daemonProc, perr := proctree.Lookup(pid)
+		if perr != nil {
+			if errors.Is(perr, proctree.ErrProcessExited) {
+				// The classified daemon exited between the home binding and this
+				// snapshot; nothing to signal, and a recycled PID is not. Clean
+				// up the way the errIsProcessGone SIGTERM path below does.
+				log.InfoLog.Printf("daemon process (PID: %d) exited before the signal; cleaning up", pid)
+				cleanupDaemonRuntimeFiles(pidFile, deadline)
+				return true, nil
+			}
+			// Could not bind the identity; do not fall back to a PID-only signal
+			// that could hit a recycled PID. Leave the PID file for the next
+			// caller to re-evaluate (the binding was proven, the snapshot was
+			// not — a transient /proc read failure, not a foreign daemon).
+			log.WarningLog.Printf("could not capture process identity for daemon pid %d; not signaling (%v)", pid, perr)
+			return false, nil
 		}
-		return false, fmt.Errorf("failed to signal daemon process: %w", err)
-	}
 
-	// Poll for graceful exit.
-	gracefulDeadline := admissionBoundedDeadline(deadline, stopDaemonGrace)
-	exited := false
-	for time.Now().Before(gracefulDeadline) {
-		if !pidLooksAlive(pid) {
-			exited = true
-			break
+		// Send SIGTERM through the identity-checked signaler so a recycled PID is
+		// refused (ErrIdentityChanged) rather than terminated.
+		if err := proctree.Signal(daemonProc, syscall.SIGTERM); err != nil {
+			if errors.Is(err, proctree.ErrIdentityChanged) {
+				if !pidLooksAlive(pid) {
+					// The classified daemon exited on its own before SIGTERM
+					// landed; it is gone, which is the desired outcome and not a
+					// recycled-PID signal.
+					log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
+					cleanupDaemonRuntimeFiles(pidFile, deadline)
+					return true, nil
+				}
+				// The PID was recycled onto another process between the home
+				// binding and the signal; do not terminate the replacement.
+				return false, fmt.Errorf("daemon pid %d exited and its number was recycled onto a different process before SIGTERM; not signaling the replacement", pid)
+			}
+			return false, fmt.Errorf("failed to signal daemon process: %w", err)
 		}
-		if !waitUntilAdmissionDeadline(gracefulDeadline, stopDaemonPoll) {
-			break
-		}
-	}
 
-	if exited {
-		log.InfoLog.Printf("daemon process (PID: %d) exited gracefully after SIGTERM", pid)
-	} else if admissionDeadlineExpired(deadline) {
-		return true, daemonAdmissionDeadlineError()
-	} else {
-		log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
-		if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
-			return false, fmt.Errorf("failed to stop daemon process: %w", err)
+		// Poll for graceful exit. AliveSame checks the captured instance, not the
+		// PID number, so a recycled PID does not masquerade as the original still
+		// being alive (which would send it SIGKILL).
+		gracefulDeadline := admissionBoundedDeadline(deadline, stopDaemonGrace)
+		exited := false
+		for time.Now().Before(gracefulDeadline) {
+			if !proctree.AliveSame(daemonProc) {
+				exited = true
+				break
+			}
+			if !waitUntilAdmissionDeadline(gracefulDeadline, stopDaemonPoll) {
+				break
+			}
 		}
-	}
 
-	cleanupDaemonRuntimeFiles(pidFile, deadline)
-	log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
-	return true, nil
+		if exited {
+			log.InfoLog.Printf("daemon process (PID: %d) exited gracefully after SIGTERM", pid)
+		} else if admissionDeadlineExpired(deadline) {
+			return true, daemonAdmissionDeadlineError()
+		} else {
+			log.WarningLog.Printf("daemon process (PID: %d) did not exit within %s of SIGTERM; escalating to SIGKILL", pid, stopDaemonGrace)
+			if err := proctree.Signal(daemonProc, syscall.SIGKILL); err != nil {
+				if errors.Is(err, proctree.ErrIdentityChanged) {
+					// Exited between the grace poll and SIGKILL — the daemon is
+					// gone, which is the desired outcome; a recycled PID is not
+					// signaled.
+					log.InfoLog.Printf("daemon process (PID: %d) exited before SIGKILL landed; cleaning up", pid)
+					cleanupDaemonRuntimeFiles(pidFile, deadline)
+					return true, nil
+				}
+				if !errIsProcessGone(err) {
+					return false, fmt.Errorf("failed to stop daemon process: %w", err)
+				}
+			}
+		}
+
+		cleanupDaemonRuntimeFiles(pidFile, deadline)
+		log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
+		return true, nil
+	case daemonForeign:
+		log.InfoLog.Printf("PID %d is not this home's agent-factory daemon; removing stale PID file", pid)
+		removePIDFileIfStillNames(pidFile, pid, pidLockCleanupDeadline(deadline))
+		return false, nil
+	default: // daemonUnverifiable — inconclusive; neither signal nor orphan a live daemon.
+		if reclaimDeadUnverifiablePIDFile(pidFile, pid, pidLockCleanupDeadline(deadline)) {
+			return false, nil
+		}
+		return false, fmt.Errorf("PID %d could not be bound to this home (uid, AGENT_FACTORY_HOME, or path unresolved); not signaling and leaving the PID file in place", pid)
+	}
 }
 
 // isAgentFactoryDaemon checks whether the process at pid looks like an agent-factory daemon:
