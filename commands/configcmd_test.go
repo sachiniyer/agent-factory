@@ -209,11 +209,21 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	}
 }
 
-func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
+func TestConfigSetHelpListsEveryProjectAdmittedKey(t *testing.T) {
 	want := "(default_program, program_overrides, program_overrides.<agent>, default_accounts, " +
-		"default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command)"
+		"default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, " +
+		"limit_account_candidates)"
 	if !strings.Contains(configSetCmd.Long, want) {
-		t.Fatalf("config set help omits a valid per-project structured form; want %q in:\n%s", want, configSetCmd.Long)
+		t.Fatalf("config set help omits a valid per-project key form; want %q in:\n%s", want, configSetCmd.Long)
+	}
+	// The parenthetical enumerates every key the manifest admits to the personal
+	// per-project layer — the same set resolveProjectSettable enforces — so a key
+	// that gains the layer without appearing here is stale help (#3869 added
+	// limit_account_candidates to the layer and this list lagged).
+	for _, entry := range config.Manifest() {
+		if entry.Sources.Has(config.SourceProjectPersonal) && !strings.Contains(configSetCmd.Long, entry.Key) {
+			t.Errorf("config set help omits personal-admitted key %q", entry.Key)
+		}
 	}
 }
 
