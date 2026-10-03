@@ -1,12 +1,16 @@
 package app
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // #2479: a kill that times out against a WEDGED LOCAL daemon must OFFER an
@@ -106,7 +110,13 @@ func TestKillTimeout_RemoteTargetDoesNotOfferRestart(t *testing.T) {
 	model, _ := h.Update(instanceKilledMsg{target: target, err: wedgedKillResult()})
 	hm := model.(*home)
 	assert.NotEqual(t, stateConfirm, hm.state, "a remote wedged daemon must not open a local-restart confirm")
-	assert.Contains(t, hm.errBox.FullError(), "failed to kill", "the plain error must surface instead")
+	// #4824: a wedged remote daemon may have torn the session down with only the
+	// reply lost, so the outcome is unknown — say "could not be confirmed", never
+	// the "session is retained" recovery that would invite a second kill of a
+	// session that may already be gone.
+	assert.Nil(t, hm.recovery, "a remote wedged daemon must not show the 'session is retained' recovery")
+	assert.Contains(t, hm.errBox.FullError(), "could not be confirmed", "the unknown-outcome message must surface instead")
+	assert.NotContains(t, hm.errBox.FullError(), "failed to kill", "the kill is not known to have failed")
 }
 
 // When the restart itself cannot run, the last-resort fallback is a clear message
@@ -124,4 +134,78 @@ func TestDaemonRestartFailure_FallsBackToAClearMessage(t *testing.T) {
 	assert.Contains(t, full, "could not restart the daemon", "the fallback must say the restart failed")
 	assert.Contains(t, full, "spawn refused", "the fallback must carry the underlying cause")
 	assert.Contains(t, full, "af daemon restart", "the last-resort fallback may name the manual command")
+}
+
+// TestKillTimeout_RemoteWedgedDaemonRoutesToUnknownOutcome is the regression lock
+// for #4824 on the REMOTE arm of handleInstanceKilled. A kill that times out
+// against a wedged remote daemon (errDaemonUnresponsive) is an outcome the client
+// cannot confirm — the daemon may have torn the session down with only the reply
+// lost — so it must surface "could not be confirmed", never the "session is
+// retained" recovery that invites a second kill of a session that may already be
+// gone.
+//
+// killSessionThroughDaemon rewraps the timeout into errDaemonUnresponsive with a
+// single %w, dropping context.DeadlineExceeded from the chain, so the handler
+// cannot rely on mutationOutcomeUnknown (which keys on the deadline) and must
+// route on the error identity instead. The first three assertions pin that root
+// cause; the rest pin the routing it forces, end-to-end through Update.
+func TestKillTimeout_RemoteWedgedDaemonRoutesToUnknownOutcome(t *testing.T) {
+	setRemoteTargetForTest(t, true)
+	setRestartActionForTest(t, func() error {
+		t.Fatal("a remote target must never run the local daemon restart")
+		return nil
+	})
+
+	// Root cause: the rewrap keeps only errDaemonUnresponsive and drops the
+	// deadline, so mutationOutcomeUnknown cannot recognize the timeout as
+	// uncertain — the handler must not depend on that signal for this error.
+	wrapped := wedgedKillResult()
+	require.True(t, errors.Is(wrapped, errDaemonUnresponsive), "precondition: the timeout wraps errDaemonUnresponsive")
+	require.False(t, errors.Is(wrapped, context.DeadlineExceeded), "the rewrap drops the deadline from the chain")
+	require.False(t, mutationOutcomeUnknown(wrapped), "mutationOutcomeUnknown cannot see this as uncertain — the handler routes by identity instead")
+
+	h := newTestHome(t)
+	inst := newKillableInstance(t, "remote-wedged")
+	require.NoError(t, inst.Transition(session.BeginKill()))
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	target := captureSessionActionTarget(inst, h.repoID)
+
+	model, _ := h.Update(instanceKilledMsg{target: target, err: wrapped})
+	hm := model.(*home)
+
+	require.NotEqual(t, stateConfirm, hm.state, "a remote wedged daemon must not open a local-restart confirm")
+	require.Nil(t, hm.recovery, "a remote timeout is an unknown outcome, not a 'retained' session")
+	assert.Contains(t, hm.errBox.FullError(), "could not be confirmed", "the #4824 unknown-outcome wording must surface")
+	assert.Contains(t, hm.errBox.FullError(), "the sidebar", "the message must point the user at authoritative state before retrying")
+	assert.NotContains(t, hm.errBox.FullError(), "session is retained", "the retained wording wrongly implies the kill did not run")
+	assert.NotContains(t, hm.errBox.FullError(), "failed to kill", "the kill is not known to have failed")
+	assert.Contains(t, hm.errBox.FullError(), "remote-wedged", "the notice must name the session whose outcome is unknown")
+
+	// The fence still reverts: holding it would strand the row if the kill never
+	// ran, and the next snapshot removes the row if the kill landed.
+	assert.NotEqual(t, session.OpKilling, inst.GetInFlightOp(), "the optimistic kill fence reverts so the row cannot strand")
+	assert.Contains(t, collectTitles(h.store.GetInstances()), "remote-wedged",
+		"the row is not removed on a guess; the snapshot decides")
+}
+
+// TestKillTimeout_LocalWedgedDaemonStillOffersRestart guards the other arm of the
+// errDaemonUnresponsive branch: the restructure must not change the LOCAL
+// behavior, which keeps the more specific in-interface restart offer (#2479)
+// rather than the generic "could not be confirmed" message.
+func TestKillTimeout_LocalWedgedDaemonStillOffersRestart(t *testing.T) {
+	setRemoteTargetForTest(t, false)
+	setRestartActionForTest(t, func() error { return nil })
+
+	h := newTestHome(t)
+	resizeHome(h, 120, 45)
+	target := armKilledInstance(t, h, "local-wedged")
+
+	model, _ := h.Update(instanceKilledMsg{target: target, err: wedgedKillResult()})
+	hm := model.(*home)
+	require.Equal(t, stateConfirm, hm.state, "a wedged local daemon must still open the restart confirm")
+	require.NotNil(t, hm.confirmationOverlay)
+	assert.Contains(t, hm.confirmationOverlay.Render(), "Restart it?", "the confirm must offer the restart")
+	assert.Nil(t, hm.recovery, "the local restart offer preempts the 'retained' recovery")
+	assert.Empty(t, hm.errBox.FullError(), "the restart offer preempts the unknown-outcome message")
 }
