@@ -29,6 +29,18 @@ func TestHandoffTargetIsCurrent(t *testing.T) {
 		{"same name, override elsewhere", tmux.ProgramCodex, tmux.ProgramCodex, tmux.ProgramAider, tmux.ProgramCodex, false},
 		{"opaque wrapper of the running enum", tmux.ProgramClaude, tmux.ProgramClaude, "", tmux.ProgramClaude, true},
 		{"opaque wrapper of another enum", tmux.ProgramClaude, tmux.ProgramAider, "", tmux.ProgramClaude, false},
+		// Whitespace on the RECORDED enum reaches this predicate untrimmed:
+		// the daemon's bare RPC create path stores req.Program raw, so
+		// i.Program can carry leading or trailing whitespace while every
+		// launch path re-tokenizes it away. The opaque branch must compare
+		// symmetrically (trim both sides) or the guard is silently defeated
+		// and a self-handoff stops a working agent and restarts it fresh.
+		{"opaque recorded with leading space", tmux.ProgramClaude, tmux.ProgramClaude, "", " " + tmux.ProgramClaude, true},
+		{"opaque recorded with trailing space", tmux.ProgramClaude, tmux.ProgramClaude, "", tmux.ProgramClaude + " ", true},
+		{"opaque recorded with surrounding space", tmux.ProgramClaude, tmux.ProgramClaude, "", " " + tmux.ProgramClaude + " ", true},
+		{"opaque target with leading space", tmux.ProgramClaude, " " + tmux.ProgramClaude, "", tmux.ProgramClaude, true},
+		{"opaque both sides whitespace", tmux.ProgramClaude, " " + tmux.ProgramClaude + " ", "", "\t" + tmux.ProgramClaude + "\t", true},
+		{"opaque recorded whitespace, other enum", tmux.ProgramClaude, tmux.ProgramAider, "", " " + tmux.ProgramClaude, false},
 		// The round-6 case: an opaque wrapper whose ARGUMENTS name an agent
 		// makes current token-scan to codex while the recorded enum is aider.
 		// --to aider is that exact override again — a self-handoff the old
@@ -92,6 +104,74 @@ func TestValidateHandoffTarget_OpaqueOverrideKeepsTheSameTargetGuard(t *testing.
 	require.False(t, handoffTargetOffered(inst, tmux.ProgramClaude),
 		"a picker fed the same resolutions must not offer the refused row")
 	require.True(t, handoffTargetOffered(inst, tmux.ProgramAider))
+}
+
+// A stored i.Program carrying surrounding whitespace reaches the opaque branch
+// untrimmed: the daemon's bare RPC create path stores req.Program raw while
+// every launch path re-tokenizes the value, so the whitespace never surfaces in
+// normal operation but lives on in the record the same-target guard reads. The
+// guard must trim the recorded enum symmetrically with the requested target or a
+// self-handoff under an opaque wrapper is admitted: Tab.Conversation is wiped,
+// Program is rewritten to the trimmed enum, and a self-handoff row reaches the
+// ledger. This is the non-predicate regression: it exercises the real
+// validateHandoffTargetLocked -> HandoffTargetIsCurrent -> SwapAgentProgram path
+// for both leading and trailing whitespace, asserting every destructive side
+// effect is refused.
+func TestValidateHandoffTarget_OpaqueWrapperRejectsWhitespaceStoredSelfHandoff(t *testing.T) {
+	const wrapper = "/home/dev/bin/agent-wrapper"
+	saveProgramOverrides(t, map[string]string{
+		tmux.ProgramClaude: wrapper,
+	})
+
+	for _, tc := range []struct {
+		name   string
+		stored string
+	}{
+		{"leading space", " " + tmux.ProgramClaude},
+		{"trailing space", tmux.ProgramClaude + " "},
+		{"surrounding space", " " + tmux.ProgramClaude + " "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := handoffTestInstance(t, tc.stored)
+			inst.Tabs[0].Conversation = AgentConversationData{
+				Agent:       tc.stored,
+				ID:          "conv-outgoing-42",
+				CaptureKind: ConversationCaptureInjected,
+			}
+			inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+				"af_whitespace", wrapper, nil, nil))
+
+			require.Empty(t, HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude),
+				"precondition: wrapper is opaque so the opaque branch is used")
+			require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
+				"precondition: the session is claude by its configured enum")
+
+			require.ErrorContains(t, inst.ValidateHandoffTarget(tmux.ProgramClaude), "already running claude",
+				"the guard must refuse the self-handoff despite whitespace on the stored enum")
+			_, err := inst.SwapAgentProgram(tmux.ProgramClaude, HandoffReasonManual, "abc123", false)
+			require.ErrorContains(t, err, "already running claude",
+				"the state mutation must refuse what the guard refuses")
+			// No destructive side effect may fire on a refused self-handoff.
+			require.Equal(t, tc.stored, inst.AgentProgram(),
+				"Program must not be rewritten to the trimmed enum on a refused self-handoff")
+			require.Equal(t, AgentConversationData{
+				Agent:       tc.stored,
+				ID:          "conv-outgoing-42",
+				CaptureKind: ConversationCaptureInjected,
+			}, inst.AgentConversation(),
+				"the live conversation slot must not be wiped on a refused self-handoff")
+			require.Empty(t, inst.Tabs[0].Handoffs,
+				"a refused self-handoff must not reach the ledger")
+
+			// A DIFFERENT agent under its own opaque wrapper is still a real
+			// handoff the guard must admit — trimming the recorded enum must
+			// not over-match and refuse a genuine cross-agent swap.
+			require.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramCodex),
+				"a different agent is still reachable despite recorded whitespace")
+			require.False(t, handoffTargetOffered(inst, tmux.ProgramClaude),
+				"a picker fed the same resolutions must not offer the refused row")
+		})
+	}
 }
 
 // handoffTargetOffered answers what the TUI picker's filter answers for
