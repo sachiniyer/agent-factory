@@ -326,15 +326,43 @@ func RedactAccessTokenError(err error, token string) error {
 	}
 
 	message := redactAccessTokenTextOutsideStructuredURL(err.Error(), urlErr)
-	if token != "" {
-		message = strings.ReplaceAll(message, token, accessTokenRedaction)
-	}
+	message = redactAccessTokenLiteralOutsideMarkers(message, token)
 	if message != err.Error() {
 		// A non-URL error carried the credential somewhere the structured pass
 		// could not reach. Drop its type rather than retain the secret.
 		return errors.New(message)
 	}
 	return err
+}
+
+// redactAccessTokenLiteralOutsideMarkers replaces every occurrence of token in
+// text with accessTokenRedaction, but never matches inside a marker the structured
+// or text passes have already written. RedactAccessTokenError's catch-all runs
+// after RedactAccessTokenURL and redactAccessTokenTextOutsideStructuredURL, so
+// by the time it sees the message every access_token= value has already become
+// the literal "REDACTED". A bare strings.ReplaceAll keyed on the secret would
+// match the token inside those markers whenever the token is a case-sensitive
+// prefix of "REDACTED" (R, RE, RED, REDA, REDAC, REDACT, REDACTE): it rewrites a
+// marker into the marker plus its own tail and re-injects the secret bytes
+// immediately after access_token= (e.g. token="RED" turns access_token=REDACTED
+// into access_token=REDACTEDACTED). Splitting on the marker confines the literal
+// pass to bytes the earlier passes left untouched; the markers are re-joined
+// verbatim, so they can neither grow nor re-emit the token. An empty token is
+// the caller's "no catch-all" signal and leaves the text untouched (a bare
+// strings.ReplaceAll(text, "", …) would insert the marker between every byte,
+// which is the other reason the guard lives here rather than at the call site).
+// For a non-empty token and a text with no marker the split is a single
+// segment, so the function reduces to strings.ReplaceAll(text, token,
+// accessTokenRedaction).
+func redactAccessTokenLiteralOutsideMarkers(text, token string) string {
+	if token == "" {
+		return text
+	}
+	segments := strings.Split(text, accessTokenRedaction)
+	for i, seg := range segments {
+		segments[i] = strings.ReplaceAll(seg, token, accessTokenRedaction)
+	}
+	return strings.Join(segments, accessTokenRedaction)
 }
 
 // RedactAccessTokenText is the logging-boundary backstop for an access_token
