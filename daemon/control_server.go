@@ -379,13 +379,14 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	// validation every shipped client applies (see validateCreateProgram for why
 	// this gate is at the RPC boundary, not Manager.CreateSession, which the
 	// root-agent ensure loop calls with command strings that must NOT be trimmed).
-	// Trim the accepted program here too: it is stored verbatim into
-	// Instance.Program, and ResolveProgram's exact program_overrides lookup would
-	// miss a " claude" override key.
+	// trimProgramEnumIfBare normalizes only a bare enum with surrounding whitespace
+	// into Instance.Program (the form the opaque same-target guard and
+	// ResolveProgram's exact program_overrides lookup care about); it preserves
+	// arbitrary command strings verbatim so an intentional trailing space survives.
 	if err := validateCreateProgram(req.Program); err != nil {
 		return err
 	}
-	req.Program = strings.TrimSpace(req.Program)
+	req.Program = trimProgramEnumIfBare(req.Program)
 	managerDelegated = true
 	data, err := s.manager.CreateSession(ctx, req)
 	// A committed retained create (#3233) lands in the envelope with the

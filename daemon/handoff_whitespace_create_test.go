@@ -166,3 +166,39 @@ func TestDeliverPrompt_WhitespaceProgramIsNormalizedAtAutoCreateThenOpaqueSelfHa
 	require.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramCodex),
 		"a different agent stays reachable despite the trimmed recorded enum")
 }
+
+// TestTrimProgramEnumIfBarePreservesCommandStrings guards the regression Codex
+// flagged on the create-boundary trim: validateCreateProgram deliberately accepts
+// full agent command strings, not just enum names, so an unconditional TrimSpace
+// would strip an intentional trailing space from a real command (e.g.
+// `claude --append-system-prompt foo\ `, whose final argument is a trailing
+// space) while leaving the escape, so tmux would run a literal trailing
+// backslash. Only a bare enum with surrounding whitespace is normalized; an
+// accepted command string is returned verbatim.
+func TestTrimProgramEnumIfBarePreservesCommandStrings(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare enum", "claude", "claude"},
+		{"leading whitespace on enum", " claude", "claude"},
+		{"trailing whitespace on enum", "codex ", "codex"},
+		{"surrounding whitespace on enum", "  aider  ", "aider"},
+		{"empty stays empty", "", ""},
+		// A real command string: even though it starts with a supported enum,
+		// it is not a bare enum, so it must be preserved verbatim — including
+		// the trailing escaped space.
+		{"command with trailing escaped space preserved",
+			"claude --append-system-prompt foo\\ ", "claude --append-system-prompt foo\\ "},
+		{"command with surrounding whitespace not a bare enum",
+			"  claude --model opus  ", "  claude --model opus  "},
+		{"env-prefixed command preserved", "CLAUDE_CONFIG_DIR=/x claude", "CLAUDE_CONFIG_DIR=/x claude"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, trimProgramEnumIfBare(tc.in),
+				"trimProgramEnumIfBare must only trim a bare supported enum, never an arbitrary command string")
+		})
+	}
+}
