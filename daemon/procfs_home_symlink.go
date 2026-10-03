@@ -137,11 +137,32 @@ func isProcessRelativeProcfsHome(home string) bool {
 // procfs-indirection signal this guard looks for). A relative link target is
 // joined against its parent directory the way the kernel resolves it.
 func homeSymlinkEntersProcessRelativeProcfs(home string) bool {
-	abs, err := filepath.Abs(home)
-	if err != nil {
-		return false
+	// Walk the home WITHOUT collapsing it with filepath.Clean first. The
+	// kernel applies a symlink target and only then a trailing `..`
+	// (AGENT_FACTORY_HOME=A/link/.. with A/link -> /proc/self/cwd/state
+	// resolves in the DAEMON's frame to its own cwd via /proc/self/cwd/..,
+	// not to the caller's A), so a same-UID, same-namespace daemon launched
+	// from a different cwd can serve a different directory while the cleaned
+	// spelling the caller canonicalizes collapses `link/..` to the parent
+	// and the procfs target is never inspected — the foreign daemon is
+	// misclassified daemonOurs on a stale PID file or lone pgrep result
+	// (#4793 via a `..`-collapsed procfs symlink). filepath.Abs would clean
+	// the path before the chain walk and lose the symlink; walk the uncleaned
+	// absolute path so symlinkChainEntersProcfs follows `link` with the `..`
+	// rejoined onto its target, the same way a direct procfs spelling is
+	// caught. A relative home is already joined to the daemon's cwd (and
+	// cleaned) by resolveHomeInDaemonFrame before this call, so the relative
+	// branch only matters for a direct relative input; it joins to the
+	// caller's cwd the way resolveHomeInDaemonFrame joined to the daemon's.
+	abs := home
+	if !filepath.IsAbs(home) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return false
+		}
+		abs = filepath.Join(cwd, home)
 	}
-	return symlinkChainEntersProcfs(filepath.Clean(abs), "", map[string]bool{})
+	return symlinkChainEntersProcfs(abs, "", map[string]bool{})
 }
 
 // symlinkChainEntersProcfs is the recursive core of

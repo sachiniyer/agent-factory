@@ -433,3 +433,63 @@ func TestClassifyDaemonHome_ProcNumericPidCwdHomeIsUnverifiable(t *testing.T) {
 			"not guess ours and signal a cross-cwd daemon", pid, scope)
 	}
 }
+
+// TestHomeSymlinkEntersProcessRelativeProcfs_DotDotCollapsesProcfsSymlink
+// pins the `..`-collapse bypass the cleaned chain walk missed: a home spelled
+// A/link/.. where A/link -> /proc/self/cwd/state resolves in the DAEMON's frame
+// to its own cwd (kernel follows the link to /proc/self/cwd, then applies
+// `..`), but filepath.Clean collapses `link/..` to A before the chain walk, so
+// the procfs target is never inspected and the guard returned false. Walking
+// the uncleaned path follows `link` with the `..` rejoined onto its target
+// (/proc/self/cwd/state/.. -> /proc/self/cwd), so the procfs indirection is
+// caught (#4793 via a `..`-collapsed procfs symlink).
+func TestHomeSymlinkEntersProcessRelativeProcfs_DotDotCollapsesProcfsSymlink(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	A := t.TempDir()
+	if err := os.Symlink("/proc/self/cwd/state", filepath.Join(A, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	// Build the home WITHOUT filepath.Join, which would clean `link/..` to A
+	// and lose the very procfs-symlink collapse this test exercises.
+	home := filepath.Join(A, "link") + "/.."
+	if !homeSymlinkEntersProcessRelativeProcfs(home) {
+		t.Errorf("homeSymlinkEntersProcessRelativeProcfs(%q) = false; want true — `..` collapses a "+
+			"procfs symlink the cleaned chain walk dropped, so the guard must follow `link` with the "+
+			"`..` rejoined onto its /proc/self target", home)
+	}
+}
+
+// TestClassifyDaemonHome_DotDotCollapsedProcfsSymlinkHomeIsUnverifiable pins the
+// same `..`-collapse hazard end-to-end: a same-UID, same-namespace daemon
+// launched from a different cwd B with AGENT_FACTORY_HOME=A/link/.. (where
+// A/link -> /proc/self/cwd/state) resolves its home in the DAEMON's frame to B
+// (via /proc/self/cwd/..), but the cleaned spelling the caller canonicalizes
+// collapses `link/..` to A. With the caller's home set to A, the foreign
+// daemon was misclassified daemonOurs on a stale PID file or lone pgrep result
+// (#4793 via a `..`-collapsed procfs symlink). The uncleaned chain walk
+// catches the procfs indirection and classifies it daemonUnverifiable.
+func TestClassifyDaemonHome_DotDotCollapsedProcfsSymlinkHomeIsUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	// The caller's home is A; the daemon spells its home as A/link/.. where
+	// A/link -> /proc/self/cwd/state. Pre-fix the cleaned spelling collapsed
+	// `link/..` to A and the foreign daemon (launched from a different cwd)
+	// compared equal to the caller's home.
+	A := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", A)
+	if err := os.Symlink("/proc/self/cwd/state", filepath.Join(A, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	B := t.TempDir()
+	// Build the home WITHOUT filepath.Join, which would clean `link/..` to A
+	// and lose the very procfs-symlink collapse this test exercises.
+	daemonPid := spawnFakeDaemonIn(t, filepath.Join(A, "link")+"/..", fakeBinDir(t), B)
+	if scope := classifyDaemonHome(daemonPid); scope != daemonUnverifiable {
+		t.Errorf("AGENT_FACTORY_HOME=%s/link/.. (link -> /proc/self/cwd/state) classified %v; want "+
+			"daemonUnverifiable — `..` collapses a procfs symlink the cleaned chain walk dropped, "+
+			"so the classifier must not guess ours and signal a cross-cwd daemon", A, scope)
+	}
+}

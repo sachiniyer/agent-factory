@@ -87,7 +87,24 @@ func sigtermFallback() (ShutdownResult, error) {
 	}
 
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
-	if err := signalAndWait(pid); err != nil {
+	if err := signalClassifiedDaemon(pid); err != nil {
+		if errors.Is(err, errSignalTargetChanged) {
+			// The PID locateDaemonPID proved serves this home exited and its
+			// number was recycled onto a live process we did not classify
+			// (likely another home's daemon) before the signal landed; the
+			// identity-checked signal refused to signal the replacement, so a
+			// recycled PID is not killed. Do NOT recommend the blanket
+			// `pkill -f -- '--daemon'` — that command has no home or PID
+			// constraint, so following it would kill exactly the recycled PID
+			// the identity check just refused to touch, plus any unrelated
+			// process carrying "--daemon". The caller must rediscover the
+			// daemon serving this home by its PID (#4793 review).
+			return ShutdownFailed, fmt.Errorf(
+				"sigterm fallback: the daemon pid %d proven to serve this home exited before SIGTERM and its PID was recycled onto another process; not signalling the replacement — "+
+					"stop the daemon serving this home by its PID, then retry `af upgrade`",
+				pid,
+			)
+		}
 		if scanned > 1 {
 			// locateDaemonPID returned this proven-ours PID alongside one or
 			// more foreign/unverifiable `--daemon` candidates (counted in
@@ -300,7 +317,26 @@ var daemonPIDLockStartupBudget = 2 * time.Second
 // deadline. The lock is abandoned (the write is best-effort anyway) rather
 // than waiting indefinitely on a suspended writer or a stalled filesystem.
 func withDaemonPIDLock(pidFile string, deadline time.Time, fn func() error) error {
-	lock, err := os.OpenFile(pidFile+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	lockPath := pidFile + ".lock"
+	// os.OpenFile FOLLOWS a pre-existing daemon.pid.lock symlink, so a
+	// symlinked sidecar is not a stable coordination object: a holder swapped
+	// between the remover acquiring its lock and a new daemon acquiring its
+	// own would let the remover hold the old inode (and read the stale PID)
+	// while the writer holds the replacement inode and atomically writes a
+	// fresh PID file — the remover then unlinks that fresh file, reopening
+	// the read/compare/unlink race the sidecar lock is there to close (#4793
+	// review). Open with O_NOFOLLOW so a symlink at the lock path is refused
+	// atomically (ELOOP), the same way upgradetxn's locks refuse one; af
+	// created this sidecar (O_CREATE) and re-opens it, so a link is a user
+	// arrangement af did not author — the same policy writeDaemonPIDFile and
+	// removeDaemonPIDFile take against a symlinked daemon.pid (#3672).
+	// Callers treat lock-acquisition failure as best-effort: the startup
+	// write is logged and proceeds (readers fall back to the pgrep scan), and
+	// the stop-side removal leaves the stale file (safe — readers re-verify
+	// cmdline + the home binding before acting), so a refused lock degrades
+	// to the same safe "leave it" outcome a contended or untrusted-FS lock
+	// already does.
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0644)
 	if err != nil {
 		return fmt.Errorf("open daemon PID lock: %w", err)
 	}
@@ -944,49 +980,6 @@ func isTestBinaryArgs(args []string) bool {
 		}
 	}
 	return false
-}
-
-// signalAndWait sends SIGTERM to pid, polls for exit up to
-// sigtermFallbackGrace, and escalates to SIGKILL if it has not exited.
-func signalAndWait(pid int) error {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("FindProcess: %w", err)
-	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		if errIsProcessGone(err) {
-			return nil
-		}
-		return fmt.Errorf("SIGTERM: %w", err)
-	}
-
-	deadline := time.Now().Add(sigtermFallbackGrace)
-	for time.Now().Before(deadline) {
-		if !pidLooksAlive(pid) {
-			return nil
-		}
-		time.Sleep(sigtermFallbackPoll)
-	}
-
-	log.WarningLog.Printf("sigterm fallback: pid %d did not exit within %s; escalating to SIGKILL", pid, sigtermFallbackGrace)
-	if err := proc.Signal(syscall.SIGKILL); err != nil && !errIsProcessGone(err) {
-		return fmt.Errorf("SIGKILL: %w", err)
-	}
-	return nil
-}
-
-// errIsProcessGone reports whether err from Signal indicates the target is
-// already gone. POSIX returns ESRCH; os.Process surfaces this as "os: process
-// already finished".
-func errIsProcessGone(err error) bool {
-	if err == nil {
-		return false
-	}
-	if err == os.ErrProcessDone {
-		return true
-	}
-	return strings.Contains(err.Error(), "process already finished") ||
-		strings.Contains(err.Error(), "no such process")
 }
 
 // formatPIDList renders []int as a comma-separated list for user-facing

@@ -1289,3 +1289,50 @@ func TestRemovePIDFileIfStillNames_UnverifiableReplacementNotUnlinked(t *testing
 			"daemon; a proven-foreign PID must still be unlinked: stat err=%v", foreign, err)
 	}
 }
+
+// TestWithDaemonPIDLock_RefusesSymlinkedLock pins the sidecar-lock symlink
+// refusal (#4793 review). os.OpenFile FOLLOWS a pre-existing daemon.pid.lock
+// symlink, so a symlinked sidecar is not a stable coordination object: a
+// holder swapped between the remover acquiring its lock and a new daemon
+// acquiring its own would let the remover hold the old inode (reading the
+// stale PID) while the writer holds the replacement inode and atomically
+// writes a fresh PID file — the remover then unlinks that fresh file,
+// reopening the read/compare/unlink race the sidecar lock closes.
+// withDaemonPIDLock opens with O_NOFOLLOW so a symlink at the lock path is
+// refused atomically (ELOOP), the same policy writeDaemonPIDFile and
+// removeDaemonPIDFile take against a symlinked daemon.pid (#3672): the link is
+// left in place and the protected body does not run.
+func TestWithDaemonPIDLock_RefusesSymlinkedLock(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "daemon.pid")
+	// A pre-existing daemon.pid.lock that is a symlink — a user arrangement af
+	// did not author (writeDaemonPIDFile created the sidecar, so a link is not
+	// af's to open through).
+	target := filepath.Join(t.TempDir(), "daemon.pid.lock.target")
+	if err := os.WriteFile(target, []byte{}, 0600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := pidFile + ".lock"
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	ran := false
+	err := withDaemonPIDLock(pidFile, time.Time{}, func() error { ran = true; return nil })
+	if err == nil {
+		t.Fatalf("withDaemonPIDLock succeeded through a symlinked lock; the sidecar must refuse a " +
+			"symlink so the lock inode cannot be swapped out from under a holder")
+	}
+	if ran {
+		t.Fatalf("withDaemonPIDLock ran the protected body through a symlinked lock; the sidecar " +
+			"must refuse the symlink before acquiring the lock")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("symlinked lock removed (Lstat err=%v); withDaemonPIDLock must not unlink a user's "+
+			"link it refused to open", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("daemon.pid.lock is no longer a symlink (mode=%v); withDaemonPIDLock replaced the "+
+			"user's link instead of refusing it", info.Mode())
+	}
+}
