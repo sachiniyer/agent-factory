@@ -64,8 +64,14 @@ func TestHookProvisionFailureRemovesKnownHostsDirectory(t *testing.T) {
 				calls++
 				switch calls {
 				case 1:
+					// makeSessionDir: mktemp prints the per-session dir.
 					return []byte("/remote/session\n"), nil
 				case 2:
+					// resolveSessionDirSymlinks: pwd -P on the session dir.
+					// Returning the same path is a no-op resolution; production
+					// replaces it with the symlink-resolved physical path.
+					return []byte("/remote/session\n"), nil
+				case 3:
 					return nil, provisionErr
 				default:
 					// reap requires the remote challenge transformed to uppercase.
@@ -79,7 +85,7 @@ func TestHookProvisionFailureRemovesKnownHostsDirectory(t *testing.T) {
 		_, err := p.provisionHost()
 		require.Error(t, err)
 		assert.ErrorIs(t, err, provisionErr)
-		assert.Equal(t, 3, calls, "the partial workspace must be reaped before returning")
+		assert.Equal(t, 4, calls, "the partial workspace must be reaped before returning")
 		assert.NoDirExists(t, dir, "the pin leaked after the transport stopped and reaped")
 	})
 }

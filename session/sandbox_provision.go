@@ -81,6 +81,41 @@ func (w *sandboxWorkspace) makeSessionDir(timeout time.Duration) error {
 	return nil
 }
 
+// resolveSessionDirSymlinks resolves the remote session directory to its physical
+// (symlink-free) path, so the reaper's argv[0] identity check matches the running
+// agent-server's resolved path.
+//
+// The agent-server re-execs through os.Executable(), which on Linux reads
+// /proc/self/exe — the kernel-resolved physical path. When a session-directory
+// ancestor is a symlink (e.g. a symlinked $HOME, as the automounter symlink form
+// produces), the running process's /proc/<pid>/cmdline argv[0] carries the
+// resolved spelling, while the mktemp-printed session dir carries the unresolved
+// one. The reaper (remotePIDIdentityKillScript) compares its `expected` against
+// that argv[0], so an unresolved expected mismatches: the reaper skips the kill,
+// still rm -rf's the directory, and latches success for an orphaned agent-server.
+// Resolving here — at provision time, the same moment os.Executable() resolves
+// it for the re-exec — captures the identity token the reaper needs; persisting
+// the resolved path in the cleanup handle keeps that token stable across a daemon
+// restart (the process's argv[0] does not change). Re-resolving at reap time is
+// deliberately avoided: remote symlink topology can change between provision and
+// reap, which would introduce a new mismatch against the still-running process's
+// launch-time argv.
+//
+// BEST-EFFORT: a remote shell that cannot resolve the path leaves the session dir
+// as mktemp printed it. That preserves the existing behavior on hosts where
+// resolution is unavailable, rather than introducing a new provision failure mode.
+// The POSIX `pwd -P` builtin this relies on is available everywhere the reaper's
+// own POSIX shell features are.
+func (w *sandboxWorkspace) resolveSessionDirSymlinks(timeout time.Duration) {
+	out, err := w.shell.Run(timeout, "(cd "+shellQuote(w.SessionDir)+" && pwd -P)", nil, false)
+	if err != nil {
+		return
+	}
+	if resolved := strings.TrimSpace(string(out)); resolved != "" {
+		w.SessionDir = resolved
+	}
+}
+
 // configureGit sets a git identity and marks every directory safe on the remote
 // so the clone + worktree creation don't trip on "dubious ownership" or a missing
 // committer identity.
@@ -218,8 +253,13 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 		args = append(args, "--session-env", name)
 	}
 	// The marker re-execs the staged binary it is already running, so a symlinked
-	// session directory changes no identity comparison: there is none. Policy and
-	// the agent-server effect are derived from the same structured arguments.
+	// session directory changes no launch-side identity comparison: there is none
+	// here — policy and the agent-server effect are derived from the same
+	// structured arguments. The re-exec DOES resolve argv[0] through
+	// os.Executable, so the reap-side identity check (remotePIDIdentityKillScript)
+	// compares against a resolved path; resolveSessionDirSymlinks provisions that
+	// resolved path before the launch so the reaper's `expected` stays in
+	// agreement.
 	filteredInner, err := sessionenv.WrapAgentServerCommand(w.AfPath(), w.spec.SessionEnvPassthrough, args)
 	if err != nil {
 		return "", fmt.Errorf("preparing filtered agent-server environment failed: %w", err)
