@@ -48,21 +48,6 @@ func (t *TmuxSession) SetEnvPassthrough(names []string) error {
 	return nil
 }
 
-// SetAccount selects the credential account this session's agent runs as. An
-// empty name leaves the session on the ambient identity, exactly as before this
-// feature existed.
-func (t *TmuxSession) SetAccount(name string) {
-	t.programMu.Lock()
-	defer t.programMu.Unlock()
-	t.account = name
-	t.accountEnvironmentOnly = false
-	if name == "" {
-		t.accountAgent = ""
-		return
-	}
-	t.accountAgent = sessionenv.AgentForCommand(t.program)
-}
-
 // Account is the credential account this session's next Start launches under,
 // or "" for the ambient identity.
 func (t *TmuxSession) Account() string {
@@ -191,15 +176,6 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 		t.accountAgent,
 		t.accountEnvironmentOnly,
 		append([]string(nil), t.accountLoginEnv...)
-}
-
-// It SNAPSHOTS rather than taking the program as a parameter: the caller used to
-// read program through its own lock and this read the declaration through
-// another, so a rewrite landing between them wrapped an old command with a new
-// declaration (#3083 review).
-func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment()
-	return wrapped, launchEnv, importNames, err
 }
 
 func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []string, string, error) {
