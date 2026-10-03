@@ -101,3 +101,68 @@ func TestCreateRPC_WhitespaceProgramIsNormalizedAtCreateThenOpaqueSelfHandoffIsR
 	require.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramCodex),
 		"a different agent stays reachable")
 }
+
+// TestDeliverPrompt_WhitespaceProgramIsNormalizedAtAutoCreateThenOpaqueSelfHandoffIsRefused
+// exercises the other RPC auto-create boundary the CreateSession trim does not
+// reach: POST /v1/DeliverPrompt targeting a missing session flows through
+// Manager.createMissingPromptTarget, which validates req.Program and passes it
+// raw to Manager.CreateSession. Without a trim there, a " claude" would be stored
+// verbatim into Instance.Program, miss ResolveProgram's exact "claude" override
+// key, and launch the bare command — and the opaque same-target guard would then
+// admit a destructive self-handoff. The trim at the auto-create boundary makes
+// the stored enum agree with the override and the guard.
+func TestDeliverPrompt_WhitespaceProgramIsNormalizedAtAutoCreateThenOpaqueSelfHandoffIsRefused(t *testing.T) {
+	const wrapper = "/home/dev/bin/agent-wrapper"
+
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: wrapper}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	// Deliver to a missing session so createMissingPromptTarget auto-creates it.
+	// A leading space on Program tokenizes to ["claude"] and passes
+	// validateCreateProgram; the auto-create boundary must trim it before
+	// CreateSession stores it, mirroring controlServer.createSession.
+	const title = "ws-deliver"
+	_, err = manager.DeliverPrompt(DeliverPromptRequest{
+		Title:    title,
+		RepoPath: repoPath,
+		Program:  " " + tmux.ProgramClaude,
+		Prompt:   "init",
+	})
+	require.NoError(t, err, "validateCreateProgram must accept a leading-space program (tokenization trims)")
+
+	inst, ok := manager.instances[daemonInstanceKey(repo.ID, title)]
+	require.True(t, ok, "the auto-created session must be registered in the manager")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+		"the DeliverPrompt auto-create path must trim the program enum into i.Program")
+
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		title, wrapper, nil, nil))
+
+	require.Empty(t, session.HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude),
+		"precondition: the opaque wrapper forces the opaque branch of the guard")
+	require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
+		"precondition: the session is claude by its configured enum")
+
+	require.ErrorContains(t, inst.ValidateHandoffTarget(tmux.ProgramClaude), "already running claude")
+	_, swapErr := inst.SwapAgentProgram(tmux.ProgramClaude, session.HandoffReasonManual, "abc123def456", false)
+	require.ErrorContains(t, swapErr, "already running claude",
+		"the state mutation must refuse what the guard refuses")
+
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+		"Program must not be rewritten on a refused self-handoff")
+	require.Empty(t, inst.Tabs[0].Handoffs,
+		"a refused self-handoff must not reach the ledger")
+
+	require.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramCodex),
+		"a different agent stays reachable despite the trimmed recorded enum")
+}
