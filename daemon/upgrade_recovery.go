@@ -82,6 +82,16 @@ func HandleUpgradeRecoveryExec() {
 		log.Close()
 		os.Exit(1)
 	}
+	// Mirror the error-path close above. A nil return is not always a clean
+	// recovery: adoptAfterUpgradeCommit (daemon/upgrade_forward.go) logs
+	// WARNINGs on exit-0 paths (candidateAbsent, fresh-daemon start/ready
+	// failures) that set dirty=true — without this close the operator-facing
+	// "wrote logs to <path>" hint (log/log.go:565, gated on
+	// fileWasOpened && report && dirty) never reaches stderr, leaving the
+	// same "detail only in the rotating log file" situation the error-path
+	// close prevents. The #1749 dirty gate keeps a genuinely clean success
+	// (dirty=false) silent, so this adds no noise to a clean recovery.
+	log.Close()
 	os.Exit(0)
 }
 
