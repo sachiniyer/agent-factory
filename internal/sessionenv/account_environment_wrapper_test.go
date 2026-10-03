@@ -165,9 +165,6 @@ func TestValidateAccountEnvironmentCommand_WrapperGuardStaysNarrow(t *testing.T)
 		// only its own process's environment and execs nothing, so the tail
 		// assignment overrides no running agent.
 		"strace env CODEX_HOME=/other",
-		// A dynamic tail word could expand to `env`, but with no command word
-		// after the assignment the result is still print mode.
-		"strace $W CODEX_HOME=/other",
 		// xargs with a literal command whose argv cannot reach env: items and
 		// substitutions land in the command's own arguments.
 		"xargs",
@@ -253,6 +250,289 @@ func TestCommandMutatesAccountEnvironment_UnmodeledWrapperAssignment(t *testing.
 		// An option word whose value is a denied NAME= assignment mutates the
 		// child's environment even when the option is not strace's.
 		{"unrecognized --setenv=CODEX_HOME=/other codex", true},
+		// Attached -E NAME[=value] and --env=NAME[=value] forms whose value
+		// is a shell expansion: literalShellWord fails on the ParamExp, so
+		// the strace -E/--env handler above was previously unreachable for
+		// these. The literal NAME sits in the word's Lit prefix and names
+		// the variable strace sets (or, when `$V` is unset, sets to "" —
+		// which af's resolvers read as the ambient home), so the override
+		// occurs for any expansion. The attached non-literal form must
+		// fail closed the same way the separate-word form already does.
+		{"strace -ECODEX_HOME=$V codex", true},
+		{"strace --env=CODEX_HOME=$V codex", true},
+		{`strace -ECODEX_HOME="$V" codex`, true},
+		{"strace -EOPENAI_API_KEY=$V codex", true},
+		{"strace -EBASH_ENV=$V codex", true},
+		// A short-option cluster whose first value-taking flag is E
+		// (-fECODEX_HOME=$V = -f -E CODEX_HOME=$V) and the unambiguous
+		// abbreviation --en= of --env= are the same env option the
+		// repository's strace model already recognizes, and override the
+		// protected variable too, so they fail closed the same way.
+		{"strace -fECODEX_HOME=$V codex", true},
+		{`strace -fECODEX_HOME="$V" codex`, true},
+		{"strace -fE$V codex", true},
+		{"strace --en=CODEX_HOME=$V codex", true},
+		// A NAME that is only a literal prefix continues into the
+		// non-literal tail (no '=' ends it), so the expansion can complete
+		// it into any denied name (e.g. V=HOME) — fail closed.
+		{"strace -ECODEX_$V=/other codex", true},
+		{"strace -ECODEX_HOME$V codex", true},
+		// Fully-dynamic value: the whole operand after -E is a shell
+		// expansion that can name or assign a protected variable.
+		{"strace -E$V codex", true},
+		// Reachable through xargs: unwrapXargs peels to the inner strace
+		// invocation, whose attached non-literal option must still refuse.
+		{"xargs strace -ECODEX_HOME=$V codex", true},
+		{"xargs strace -E$V codex", true},
+		// A harmless literal NAME with an UNQUOTED dynamic value still
+		// refuses: the unquoted expansion is subject to word splitting and
+		// can produce a second -E option the scan never sees as a separate
+		// shell word (e.g. V="x -ECODEX_HOME=/other").
+		{"strace -EFOO=$V codex", true},
+		{"strace --env=FOO=$V codex", true},
+		// The same harmless NAME with a QUOTED dynamic value stays one
+		// option value (no word splitting), so it sets only the harmless
+		// NAME and stays allowed, matching the attached literal -EFOO=1.
+		{`strace -EFOO="$V" codex`, false},
+		{`strace --env=FOO="$V" codex`, false},
+		// The separate-word `-E <value>` form evaluates the value as one
+		// word; a non-literal value is unprovable, so it still refuses —
+		// pinning that this fix does not loosen the stricter separate form.
+		{"strace -E FOO=$V codex", true},
+		// strace stops parsing options at its traced command (or "--"), so
+		// a -E/--env-shaped word after that command is the command's
+		// argument, not a strace environment option, and stays allowed.
+		{`strace echo -ECODEX_HOME=$V codex`, false},
+		{`strace echo -ECODEX_HOME="$V" codex`, false},
+		{`strace -- echo -ECODEX_HOME=$V codex`, false},
+		// The option region does NOT end at a value word a value-taking
+		// strace option consumes: -o consumes file as its output name, so
+		// the -E CODEX_HOME that follows is still a strace option and
+		// still refuses — pinning that the boundary fix keeps the override
+		// the previous scan caught.
+		{"strace -o file -E CODEX_HOME=/other codex", true},
+		// Non-strace -E keeps its meaning: extended-regexp to grep.
+		{"grep -ECODEX_HOME=$V /etc/environment", false},
+		// A bare "-" is a non-option argv element (strace's traced
+		// command, per straceInputRegion's own handling), so a
+		// -E/--env-shaped word after it is the traced program's
+		// argument, not a strace environment option, and stays allowed.
+		{`strace - -ECODEX_HOME=$V codex`, false},
+		{`strace - --env=CODEX_HOME=/other codex`, false},
+		{`strace - -E CODEX_HOME=/other codex`, false},
+		// The "-" boundary still lets a real env option before it refuse.
+		{"strace -E CODEX_HOME=/other - codex", true},
+		// A short-option cluster whose first value-taking flag is E at
+		// the cluster's end (-fE … = -f -E …) and a long --env
+		// abbreviation with no attached =value (--en …) take var[=val]
+		// as the NEXT argv word, so a denied or non-literal operand there
+		// overrides the traced child's protected variable the same way
+		// the exact -E/--env form does.
+		{"strace -fE CODEX_HOME=/other codex", true},
+		{"strace -fE CODEX_HOME codex", true},
+		{"strace -fE CODEX_$V=/other codex", true},
+		{"strace --en CODEX_HOME=/other codex", true},
+		{"strace --en CODEX_HOME codex", true},
+		{"strace -fE FOO=1 codex", false},
+		{"strace -fE FOO=$V codex", true},
+		// The separate-word form refuses any non-literal value word,
+		// matching the exact -E/--env form: `strace -fE FOO="$V"` is the
+		// same as `strace -E FOO="$V"`, not the attached `-EFOO="$V"`.
+		{`strace -fE FOO="$V" codex`, true},
+		// A non-literal strace option word whose value is an UNQUOTED
+		// expansion can word-split into a further strace option the scan
+		// never sees as a separate word (strace -o$V with
+		// V='out -ECODEX_HOME=/other' splits into -oout and
+		// -ECODEX_HOME=/other), so any such option fails closed. A QUOTED
+		// expansion stays one option value, so it keeps the tail judgment.
+		{"strace -o$V codex", true},
+		{"strace -p$V codex", true},
+		{`strace -o"$V" codex`, false},
+		// A "-" option prefix followed by an expansion can complete the
+		// option spelling into -E/--env and name or assign a protected
+		// variable (strace -"$V" codex with V=ECODEX_HOME=/other becomes
+		// the single argv word -ECODEX_HOME=/other). The QUOTED form stays
+		// one word but still completes the option; the UNQUOTED form can
+		// also word-split. Both fail closed, unlike the bare "-" boundary.
+		{`strace -"$V" codex`, true},
+		{"strace -$V codex", true},
+		// A value-taking strace option whose operand is the NEXT argv word
+		// still fails closed when that value is a non-literal UNQUOTED
+		// expansion: it can word-split into a further strace option the
+		// scan never sees as a separate word (strace -o $V codex with
+		// V='trace -ECODEX_HOME=/other' is passed as -o, trace,
+		// -ECODEX_HOME=/other, codex). A QUOTED separate value stays one
+		// option value, so it keeps the tail judgment.
+		{"strace -o $V codex", true},
+		{`strace -o "$V" codex`, false},
+		// An incomplete option prefix followed by a QUOTED expansion can
+		// complete the option spelling into -E/--env and name or assign a
+		// protected variable: strace --"$V" codex with
+		// V=env=CODEX_HOME=/other becomes the single argv word
+		// --env=CODEX_HOME=/other, and strace -f"$V" codex with
+		// V=ECODEX_HOME=/other becomes -fECODEX_HOME=/other (strace reads
+		// -f -E CODEX_HOME=/other). The quoted form stays one word but
+		// still completes the option, so it fails closed, unlike a
+		// value-taking non-E option (strace -o"$V") whose quoted value
+		// stays one option value.
+		{`strace --"$V" codex`, true},
+		{`strace -f"$V" codex`, true},
+		// A QUOTED multi-value expansion does not stay one argv word:
+		// "$@" and "${name[@]}" expand to one word per positional or
+		// array element and can split an attached or pending option value
+		// into a further strace option (strace -EFOO="$@" codex with
+		// set -- x -ECODEX_HOME=/other -> -EFOO=x, -ECODEX_HOME=/other;
+		// strace -o "$@" codex the same way), so they fail closed like the
+		// unquoted form. A QUOTED scalar value stays one word (control
+		// above: strace -EFOO="$V" / strace -o "$V").
+		{`strace -EFOO="$@" codex`, true},
+		{`strace --env=FOO="$@" codex`, true},
+		{`strace -o "$@" codex`, true},
+		{`strace -o"$@" codex`, true},
+		// "$*" joins into one word even when quoted, so a QUOTED "$*"
+		// value stays one option value and stays allowed (control).
+		{`strace -EFOO="$*" codex`, false},
+		// A fully non-literal word in strace's option region (no literal
+		// prefix at all) can expand to a -E/--env option that overrides the
+		// protected variable (strace "$V" codex / strace $V codex with
+		// V=-ECODEX_HOME=/other), so it fails closed the way the
+		// partial-prefix forms (-"$V", --"$V", -f"$V") already do.
+		{`strace "$V" codex`, true},
+		{"strace $V codex", true},
+		// A dynamic option-region word with no literal prefix can also be a
+		// -E option even when the words after it spell no env command: with
+		// $W=-ECODEX_HOME=/other, strace $W CODEX_HOME=/other applies -E and
+		// traces the bare assignment token, so it fails closed (the earlier
+		// print-mode reading missed the option spelling).
+		{"strace $W CODEX_HOME=/other", true},
+		// A pending value a value-taking strace option consumes as its
+		// next argv word is that option's value (a filename), not a strace
+		// option itself: a quoted -E-shaped word after -o stays allowed,
+		// matching the literal -o value, instead of being read as an
+		// attached -E option (strace -o "-ECODEX_HOME=$V" codex).
+		{`strace -o "-ECODEX_HOME=$V" codex`, false},
+		{`strace -o "-EFOO=$V" codex`, false},
+		{`strace -o "-EFOO=1" codex`, false},
+		// The unquoted pending value is already caught when -o is
+		// recognized, so a -E option after -o's value still refuses.
+		{"strace -o strace -E CODEX_HOME=/other codex", true},
+		// An unquoted backslash escape stays in a syntax.Lit, so the raw
+		// operand name is not shell-stable: strace -E\CODEX_HOME=/other
+		// codex literalizes the operand to \CODEX_HOME=/other (not denied)
+		// while the shell removes the backslash and strace receives
+		// -ECODEX_HOME=/other. Fail closed for an unquoted escape in the
+		// operand word, attached or separate; a backslash inside quotes is
+		// literal and stays allowed (control).
+		{`strace -E\CODEX_HOME=/other codex`, true},
+		{`strace -E \CODEX_HOME=/other codex`, true},
+		{`strace -E\CODEX_HOME codex`, true},
+		{`strace -E"CODEX\HOME"=/other codex`, false},
+		// The same unquoted-backslash hazard applies when the operand's
+		// value is a QUOTED shell expansion: strace -E\CODEX_HOME="$V" codex
+		// literalizes the operand to \CODEX_HOME= (not denied) while the
+		// shell removes the backslash and strace receives -ECODEX_HOME=<V>,
+		// overriding the protected variable. wordHasUnquotedExpansion is
+		// false for the quoted $V, so the dynamic branch must reject the
+		// unquoted backslash before trusting the literal name.
+		{`strace -E\CODEX_HOME="$V" codex`, true},
+		{`strace --env=\CODEX_HOME="$V" codex`, true},
+		// The traced command can itself be strace: its argv is a fresh
+		// strace invocation whose -E/--env options apply to the ultimately
+		// traced child (strace strace -E CODEX_HOME=/other codex), so the
+		// scan re-enters the option region instead of treating the inner
+		// strace's argv as the traced command's inert arguments. A -E-shaped
+		// word past the inner traced command is its argument and stays
+		// allowed; a harmless inner -E (attached, quoted) stays allowed.
+		{"strace strace -E CODEX_HOME=/other codex", true},
+		{"strace strace --env=CODEX_HOME=/other codex", true},
+		{"strace strace -ECODEX_HOME=/other codex", true},
+		{"strace strace strace -E CODEX_HOME=/other codex", true},
+		{"strace strace echo -E CODEX_HOME=/other codex", false},
+		{"strace strace -E FOO=1 codex", false},
+		{`strace strace -EFOO="$V" codex`, false},
+		{`strace strace -o "-ECODEX_HOME=$V" codex`, false},
+		// The traced command can be a modeled wrapper whose own options
+		// mutate the child environment: xargs's --process-slot-var=NAME
+		// sets NAME on every exec'd command. Past strace's traced-command
+		// boundary the generic --opt=DENIED arm is gated, so the scan must
+		// delegate to unwrapXargs to analyze xargs's options — matching the
+		// verdict bare xargs produces. A non-denied NAME and a command
+		// with no env mutation stay allowed.
+		{"strace xargs --process-slot-var=CODEX_HOME codex", true},
+		{"strace xargs --process-slot-var CODEX_HOME codex", true},
+		{"strace xargs --process-slot-var=PORT codex", false},
+		{"strace xargs echo hi", false},
+		// A backslash escape in an attached -E operand's VALUE names the
+		// harmless value's variable, not a protected one: the shell removes
+		// the backslash and strace receives -EFOO=$V (FOO is non-protected),
+		// so it stays allowed. A backslash in the NAME (before the first '=')
+		// still fails closed: strace -E\CODEX_HOME=/other literalizes the
+		// name to \CODEX_HOME while strace receives CODEX_HOME.
+		{`strace -EFOO=\$V codex`, false},
+		{`strace -E\CODEX_HOME=/other codex`, true},
+		{`strace -ECODEX_HOME=\$V codex`, true},
+		// A $@ or ${name[@]} nested in a parameter expansion's alternative
+		// (strace -EFOO="${V:+$@}" codex) is still under the outer double
+		// quote, so it splits into a further -E option the scan never sees as
+		// a separate word and fails closed. A scalar alternative
+		// (${V:+x}) stays one word and stays allowed.
+		{`strace -EFOO="${V:+$@}" codex`, true},
+		{`strace -EFOO="${V:+x}" codex`, false},
+		{`strace -EFOO="${V:-"$@"}" codex`, true},
+		// The traced command can be an unmodeled wrapper that runs a child
+		// and sets its environment through its own options: systemd-run's
+		// --setenv=NAME[=VALUE] sets NAME on the transient service's child.
+		// Delegate its tail to the non-strace wrapper scan so a denied
+		// --setenv= overrides while a non-denied NAME and a leaf command
+		// stay allowed.
+		{"strace systemd-run --setenv=CODEX_HOME=/other codex", true},
+		{"strace systemd-run --setenv=CODEX_HOME codex", true},
+		{"strace systemd-run --setenv=PORT=3000 codex", false},
+		{"strace systemd-run echo hi", false},
+		// strace's "--" only ends its OWN option parsing; the next word is
+		// still the traced command. When that command is a wrapper the scan
+		// analyzes (strace re-enters, xargs/systemd-run delegate), the
+		// region must stay open past "--" so its env-mutating options are
+		// inspected; a leaf command after "--" still ends the region.
+		{"strace -- strace -E CODEX_HOME=/other codex", true},
+		{"strace -- strace echo -E CODEX_HOME=/other codex", false},
+		{"strace -- xargs --process-slot-var=CODEX_HOME codex", true},
+		{"strace -- systemd-run --setenv=CODEX_HOME=/other codex", true},
+		// The traced command can be a modeled peelAccountWrapper passthrough
+		// wrapper (nice, nohup, timeout, setsid, stdbuf, ionice, taskset)
+		// that runs a child whose environment its own options do not set but
+		// the child's command might: strace nice strace -E CODEX_HOME=/other
+		// codex runs an inner strace via nice whose -E overrides the
+		// protected variable while the scan treated nice's tail as inert.
+		// The scan delegates the wrapper's whole tail to the same command
+		// analysis a bare invocation gets, so a denied inner -E/--env, a
+		// nested env, or a shell refuse; a leaf child and a non-denied inner
+		// -E stay allowed. "--" keeps the region open for the same wrappers.
+		{"strace nice strace -E CODEX_HOME=/other codex", true},
+		{"strace nice strace --env=CODEX_HOME=/other codex", true},
+		{"strace nice strace -ECODEX_HOME=/other codex", true},
+		{"strace nohup strace -E CODEX_HOME=/other codex", true},
+		{"strace timeout 5 strace -E CODEX_HOME=/other codex", true},
+		{"strace setsid strace -E CODEX_HOME=/other codex", true},
+		{"strace stdbuf -o0 strace -E CODEX_HOME=/other codex", true},
+		{"strace ionice -c 2 strace -E CODEX_HOME=/other codex", true},
+		{"strace taskset 1 strace -E CODEX_HOME=/other codex", true},
+		{"strace nice nice strace -E CODEX_HOME=/other codex", true},
+		{"strace nice -n 5 strace -E CODEX_HOME=/other codex", true},
+		{"strace nice strace env CODEX_HOME=/other codex", true},
+		{"strace -- nice strace -E CODEX_HOME=/other codex", true},
+		{"strace -- nice echo -E CODEX_HOME=/other codex", false},
+		{"strace nice echo -E CODEX_HOME=/other codex", false},
+		{"strace nice echo hi", false},
+		{"strace nice codex", false},
+		{"strace nohup codex", false},
+		{"strace timeout 5 codex", false},
+		{"strace nice -n 5 npm run dev", false},
+		{"strace nice -n 5 strace -E FOO=1 codex", false},
+		{"strace nice strace echo -E CODEX_HOME=/other codex", false},
+		{"strace nice strace -E FOO=1 codex", false},
+		{"strace nice env CODEX_HOME codex", false},
+		{"strace nice env PORT=3000 codex", false},
 	}
 	for _, test := range cases {
 		got := commandMutatesAccountEnvironment(test.command, codex)
@@ -275,6 +555,166 @@ func TestApplyAccountEnvironment_RefusesUnmodeledWrapperHiddenAssignment(t *test
 		_, err := ApplyAccountEnvironment(nil, command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
 		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+	}
+}
+
+// The attached strace -E NAME[=value] and --env=NAME[=value] forms whose value
+// is a shell expansion pass the production gate only by way of the predicate
+// the previous test pins. Confirm the end-to-end guard refuses representative
+// shapes (and the xargs-fronted variant that peels to the same inner strace
+// invocation), whereas a non-denied NAME with a quoted dynamic value and a
+// -E/--env-shaped word past strace's traced command stay accepted.
+func TestValidateAccountEnvironmentCommand_RefusesStraceAttachedEnvExpansion(t *testing.T) {
+	account := scopedProcessTabAccount()
+	for _, command := range []string{
+		"strace -ECODEX_HOME=$V codex",
+		"strace --env=CODEX_HOME=$V codex",
+		"strace -E$V codex",
+		"strace -EBASH_ENV=$V codex",
+		// Short-option clusters and unambiguous abbreviations are the
+		// same strace env option and override the protected variable too.
+		"strace -fECODEX_HOME=$V codex",
+		"strace --en=CODEX_HOME=$V codex",
+		// A partial literal NAME continued by an expansion can complete
+		// into any denied name, so the attached form fails closed.
+		"strace -ECODEX_$V=/other codex",
+		// A harmless literal NAME with an UNQUOTED dynamic value still refuses:
+		// the unquoted expansion can word-split into a second -E option.
+		"strace -EFOO=$V codex",
+		"strace --env=FOO=$V codex",
+		// A "-" option prefix an expansion can complete into -E/--env
+		// refuses (quoted or unquoted), unlike the bare "-" boundary.
+		`strace -"$V" codex`,
+		"strace -$V codex",
+		// A value-taking option whose separate operand is an UNQUOTED
+		// expansion refuses: the value can word-split into a further
+		// strace env option.
+		"strace -o $V codex",
+		// An incomplete option prefix a QUOTED expansion can complete into
+		// -E/--env refuses (--"$V" -> --env=..., -f"$V" -> -fE...).
+		`strace --"$V" codex`,
+		`strace -f"$V" codex`,
+		// A QUOTED multi-value expansion ("$@") splits into one word per
+		// positional and can inject a further -E option the scan never
+		// sees as a separate word.
+		`strace -EFOO="$@" codex`,
+		`strace -o "$@" codex`,
+		// A fully non-literal word in strace's option region (no literal
+		// prefix) can expand to a -E/--env option and override the
+		// protected variable.
+		`strace "$V" codex`,
+		"strace $V codex",
+		// An unquoted backslash escape in the -E operand is not
+		// shell-stable: strace receives the dequoted name.
+		`strace -E\CODEX_HOME=/other codex`,
+		`strace -E \CODEX_HOME=/other codex`,
+		// An unquoted backslash escape in the -E operand with a QUOTED
+		// dynamic value: the shell removes the backslash so strace receives
+		// the dequoted denied name, but wordHasUnquotedExpansion is false
+		// for the quoted value, so the backslash must be checked before
+		// trusting the literal name.
+		`strace -E\CODEX_HOME="$V" codex`,
+		`strace --env=\CODEX_HOME="$V" codex`,
+		// The traced command can be a modeled wrapper (xargs) whose own
+		// options mutate the child environment; the scan delegates to
+		// unwrapXargs past strace's command boundary.
+		"strace xargs --process-slot-var=CODEX_HOME codex",
+		"strace xargs --process-slot-var CODEX_HOME codex",
+		// The traced command is itself strace; its -E/--env applies to the
+		// ultimately traced child.
+		"strace strace -E CODEX_HOME=/other codex",
+		"strace strace -ECODEX_HOME=/other codex",
+		"xargs strace strace -E CODEX_HOME=/other codex",
+		"xargs strace -ECODEX_HOME=$V codex",
+		// A $@ nested in a parameter-expansion alternative still splits
+		// under the outer double quote and can inject a further -E option.
+		`strace -EFOO="${V:+$@}" codex`,
+		// The traced command can be an unmodeled env-setting wrapper
+		// (systemd-run --setenv=NAME) and re-enter after strace's "--".
+		"strace systemd-run --setenv=CODEX_HOME=/other codex",
+		"strace -- strace -E CODEX_HOME=/other codex",
+		"strace -- xargs --process-slot-var=CODEX_HOME codex",
+		"strace -- systemd-run --setenv=CODEX_HOME=/other codex",
+		// The traced command can be a modeled peelAccountWrapper passthrough
+		// wrapper (nice/nohup/timeout/…) that runs a child whose -E/--env
+		// overrides the protected variable; the scan delegates the wrapper's
+		// whole tail to the bare command analysis, re-entering for an inner
+		// strace, and "--" keeps the region open for the same wrappers.
+		"strace nice strace -E CODEX_HOME=/other codex",
+		"strace nohup strace -E CODEX_HOME=/other codex",
+		"strace timeout 5 strace -E CODEX_HOME=/other codex",
+		"strace nice -n 5 strace -E CODEX_HOME=/other codex",
+		"strace nice nice strace -E CODEX_HOME=/other codex",
+		"strace nice strace env CODEX_HOME=/other codex",
+		"strace -- nice strace -E CODEX_HOME=/other codex",
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "command %q sets a protected variable via a strace -E/--env expansion and must be refused", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable",
+			"command %q must be refused by the account-environment guard", command)
+	}
+	for _, command := range []string{
+		// A harmless literal NAME with a QUOTED dynamic value stays one
+		// option value (no word splitting) and sets only that NAME, so the
+		// attached non-literal form stays accepted.
+		`strace -EFOO="$V" codex`,
+		`strace --env=FOO="$V" codex`,
+		// A -E/--env-shaped word after strace's traced command is the
+		// command's argument, not a strace environment option.
+		`strace echo -ECODEX_HOME=$V codex`,
+		// A value-taking option whose separate operand is a QUOTED
+		// expansion stays one option value, so it sets no protected
+		// variable and stays allowed.
+		`strace -o "$V" codex`,
+		// A -E-shaped word a value-taking option consumes as its value
+		// (a filename) is not a strace option and stays allowed.
+		`strace -o "-ECODEX_HOME=$V" codex`,
+		// A backslash inside quotes is literal (not an escape), so the
+		// operand name is shell-stable and, being non-denied, stays allowed.
+		`strace -E"CODEX\HOME"=/other codex`,
+		// The nested strace re-entry does not over-refuse: a -E-shaped
+		// word past the inner traced command is its argument, and a
+		// harmless inner -E (attached, quoted) stays allowed.
+		"strace strace echo -E CODEX_HOME=/other codex",
+		`strace strace -EFOO="$V" codex`,
+		`strace strace -o "-ECODEX_HOME=$V" codex`,
+		// A backslash inside quotes is literal (not an escape), so the
+		// operand name is shell-stable and, with a non-denied NAME, stays
+		// allowed even when the value is a quoted dynamic expansion.
+		`strace -E"CODEX\HOME"="$V" codex`,
+		// A traced xargs with a non-denied --process-slot-var and a
+		// command with no env mutation stays allowed.
+		"strace xargs --process-slot-var=PORT codex",
+		"strace xargs echo hi",
+		// A backslash in an attached -E operand's VALUE names the harmless
+		// value's variable (FOO), not a protected one; a scalar alternative
+		// (${V:+x}) stays one word; a non-denied systemd-run --setenv and a
+		// leaf traced command after "--" stay allowed.
+		`strace -EFOO=\$V codex`,
+		`strace -EFOO="${V:+x}" codex`,
+		"strace systemd-run --setenv=PORT=3000 codex",
+		"strace systemd-run echo hi",
+		"strace -- strace echo -E CODEX_HOME=/other codex",
+		// A traced passthrough wrapper (nice/nohup/timeout/…) that runs a
+		// harmless child stays allowed: the delegation re-enters the scan for
+		// an inner strace but a leaf child or a non-denied inner -E does
+		// not mutate the protected variable.
+		"strace nice echo hi",
+		"strace nice codex",
+		"strace nice -n 5 npm run dev",
+		"strace nohup codex",
+		"strace timeout 5 codex",
+		"strace nice -n 5 strace -E FOO=1 codex",
+		"strace nice strace -E FOO=1 codex",
+		"strace nice strace echo -E CODEX_HOME=/other codex",
+		"strace nice env CODEX_HOME codex",
+		"strace nice env PORT=3000 codex",
+		"strace -- nice echo -E CODEX_HOME=/other codex",
+		// grep's -E is extended-regexp and stays accepted.
+		"grep -ECODEX_HOME=$V /etc/environment",
+	} {
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, account),
+			"command %q sets no protected variable and must stay allowed", command)
 	}
 }
 

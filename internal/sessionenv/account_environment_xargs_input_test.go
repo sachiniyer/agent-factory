@@ -197,7 +197,11 @@ func TestCommandMutatesAccountEnvironment_XargsInputPositions(t *testing.T) {
 		// Abbreviated and hidden options consume no marker here.
 		{"xargs -I{} strace --fol echo {}", false},
 		// An unparseable link no input reaches keeps the walk's verdict.
-		{"xargs -I{} strace nice -E x", false},
+		// The walk now recurses through a traced passthrough wrapper (nice),
+		// and nice's -E is an option the binary rejects, so a shadowed nice
+		// could exec x; the verdict matches the no-marker `xargs strace nice
+		// -E x` above.
+		{"xargs -I{} strace nice -E x", true},
 		// No child to run: strace with only options after the marker, and a
 		// nested xargs that names no command (it runs echo).
 		{"xargs -I{} strace -f -{} --", false},
