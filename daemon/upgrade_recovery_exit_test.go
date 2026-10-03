@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
 // These tests exercise the WHOLE af binary as a subprocess because the bug
@@ -214,5 +218,202 @@ func TestRecoveryExitLogsHintOnActorFailure(t *testing.T) {
 
 	// The recovery handler writes nothing to stdout; assert it stays empty
 	// so a future change that adds a stdout write is a visible signal.
+	assert.Empty(t, stdout, "the recovery handler writes nothing to stdout; got: %q", stdout)
+}
+
+// recoveryExit0ReexecEnv routes a re-exec of this test binary (not the
+// production af binary — the seams that fake the supervisor and adopt are
+// Go package vars only callable from inside this test process) to
+// recoveryExit0ReexecMain, mirroring the fakeVSCodeEnv pattern in
+// daemon_test.go:29-32. The child's argv IS the recovery invocation
+// (__upgrade-recovery --home ... --transaction ...) so
+// HandleUpgradeRecoveryExec parses it normally; the env var only tells
+// TestMain to override the daemon-package seams before calling
+// HandleUpgradeRecoveryExec (a TestBinary re-exec, unlike the production
+// binary, shares this file's package vars).
+const recoveryExit0ReexecEnv = "AF_TEST_RECOVERY_EXIT0_REEXEC"
+
+// recoveryExit0ReexecMain is the re-exec child entry point for the exit-0
+// dirty-path test. It overrides the two daemon-package seam vars that
+// RunUpgradeRecoveryActor dispatches through so no real supervisor run,
+// lease acquisition, or daemon lifecycle is needed, then calls
+// HandleUpgradeRecoveryExec — the SAME function the production binary
+// runs, on the SAME os.Exit path the bug lives on. The seams simulate a
+// fully successful supervisor run (journal removed during cleanup) and an
+// adopt failure (the :132 WARNING sets dirty=true), which is the
+// daemonless-after-irreversible-commit outcome this test guards.
+func recoveryExit0ReexecMain() {
+	// runRecoveryActorFn: a successful commit removes active.json during
+	// lease.Cleanup (supervisor.go cleanup()). The stub removes it so the
+	// second upgradetxn.Load in RunUpgradeRecoveryActor returns
+	// ErrNoActiveTransaction, unlocking the adoptAfterUpgradeCommitFn
+	// hand-off — the same signal a real committed supervisor produces.
+	runRecoveryActorFn = func(_ context.Context, invocation upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) error {
+		_ = os.Remove(filepath.Join(invocation.HomeDir, "upgrade", "active.json"))
+		return nil
+	}
+	// adoptAfterUpgradeCommitFn: simulates the candidateAbsent + fresh-daemon
+	// failure path (upgrade_forward.go:174-178) — the upgrade is
+	// irreversibly committed, an adopt error means the home is daemonless.
+	// The error triggers the :132 WARNING in RunUpgradeRecoveryActor, which
+	// sets dirty=true on a path that returns nil (exit 0).
+	adoptAfterUpgradeCommitFn = func(_, _ string) error {
+		return errors.New("test: candidate absent and fresh-daemon start failed")
+	}
+	HandleUpgradeRecoveryExec()
+	// HandleUpgradeRecoveryExec exits on every terminal path. This is
+	// unreachable, but if a code change breaks that contract the test
+	// would hang without it.
+	os.Exit(0)
+}
+
+// prepareValidJournal calls upgradetxn.Prepare to publish a real, valid,
+// fully-validated active.json for txnID under home, so the first
+// upgradetxn.Load in RunUpgradeRecoveryActor (the ourTransaction check)
+// succeeds and sets ourTransaction=true. Prepare creates every artifact
+// validateJournal checks (recovery lock, transaction directory, binary
+// snapshots, metadata), which is why a hand-written journal file does NOT
+// work: validateJournal (storage.go:24-118) checks directory existence,
+// recovery-lock identity/nonce, daemon-snapshot/recovery-job pairing, and
+// binary-artifact path derivation.
+func prepareValidJournal(t *testing.T, home, txnID string) {
+	t.Helper()
+	binDir := t.TempDir()
+	executable := filepath.Join(binDir, "af")
+	// Distinct bytes so Prepare's byte-identical check passes.
+	require.NoError(t, os.WriteFile(executable, []byte("previous-binary-bytes"), 0o755))
+	_, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID:             txnID,
+		HomeDir:        home,
+		ExecutablePath: executable,
+		FromVersion:    "1.0.100",
+		ToVersion:      "1.0.101",
+		Candidate:      []byte("candidate-binary-bytes"),
+		RecoveryJob:    upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached},
+	})
+	require.NoError(t, err, "Prepare must publish a valid journal for the exit-0 dirty-path test")
+}
+
+// TestRecoveryExit0LogsHintOnDirty is the previously-failing test for the
+// exit-0 half of the fix. HandleUpgradeRecoveryExec's success branch ran
+// os.Exit(0) without log.Close(), so on every exit-0 path that recorded a
+// WARNING (dirty=true — adoptAfterUpgradeCommit's candidateAbsent/fresh-daemon
+// failures, surfaced via the :132 WARNING), the operator-facing
+// "wrote logs to <path>" hint never reached stderr. The process exited 0
+// with empty stderr even though the home was daemonless after an
+// irreversible commit, and the only record was a WARNING in
+// agent-factory.log with no in-band pointer.
+//
+// This is fundamentally harder to reproduce than the error-path test above
+// (a corrupt journal short-circuits at Load, before the supervisor),
+// because the supervisor must SUCCEED COMPLETELY before
+// adoptAfterUpgradeCommit runs. The test bridges that gap by re-execing
+// the TEST BINARY (not the production binary) with the recovery argv and a
+// re-exec env var: TestMain routes that to recoveryExit0ReexecMain, which
+// overrides the daemon-package seam vars (runRecoveryActorFn,
+// adoptAfterUpgradeCommitFn) to simulate a successful commit + journal
+// removal + adopt failure, then calls the real HandleUpgradeRecoveryExec
+// — the exact code the production binary runs. Before the fix the child
+// exited 0 with empty stderr despite dirty=true; after the fix log.Close()
+// emits the hint.
+func TestRecoveryExit0LogsHintOnDirty(t *testing.T) {
+	home := canonicalHome(t, t.TempDir())
+	prepareValidJournal(t, home, "test-txn-exit0")
+
+	// Re-exec THIS test binary (os.Executable) — not the production af
+	// binary — so the seam overrides in recoveryExit0ReexecMain take
+	// effect. The production binary shares none of the test's package vars.
+	self, err := os.Executable()
+	require.NoError(t, err, "os.Executable: the re-exec child needs this test binary's path")
+
+	cmd := exec.Command(self, "__upgrade-recovery", "--home", home, "--transaction", "test-txn-exit0")
+	cmd.Env = append(recoveryChildEnv(home), recoveryExit0ReexecEnv+"=1")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	require.NoError(t, cmd.Start())
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var exitCode int
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			ee, ok := runErr.(*exec.ExitError)
+			require.Truef(t, ok, "recovery re-exec failed to run: %v (stderr: %s)", runErr, errBuf.String())
+			exitCode = ee.ExitCode()
+		} else {
+			exitCode = 0
+		}
+	case <-time.After(60 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("recovery re-exec did not exit within 60s; a wedged child must fail the test, not hang the suite (stderr: %s)", errBuf.String())
+	}
+	stdout, stderr := outBuf.Bytes(), errBuf.Bytes()
+
+	// (1) A nil recovery-actor return must surface as exit 0: the stubbed
+	// runRecoveryActorFn succeeds (journal removed) and the adopt error is
+	// logged as a WARNING, not returned as an error.
+	require.Equal(t, 0, exitCode,
+		"a committed upgrade with a failed adopt must exit 0 (the WARNING, not a returned error, is the signal), got %d (stderr: %q)", exitCode, stderr)
+
+	// (2) The :132 WARNING must be in the rotating log file the handler's
+	// log.WarningLog writes to (the only place it lands on the file-open
+	// path), so the hinted pointer is worth following.
+	logPath := filepath.Join(home, "agent-factory.log")
+	logBytes, err := os.ReadFile(logPath)
+	require.NoError(t, err, "the recovery run must have written its log at %s", logPath)
+	assert.Contains(t, string(logBytes), "upgrade committed but arming the post-upgrade daemon did not complete",
+		"the log file must record the :132 WARNING about the failed adopt")
+
+	// (3) THE FIX: the "wrote logs to <path>" hint reaches stderr before
+	// exit 0. Before the fix, os.Exit(0) ran without log.Close(), so
+	// stderr was empty despite dirty=true and an operator reading the
+	// journal (Linux) or recovery.log (macOS) had no in-band pointer to
+	// the log file holding the WARNING about a daemonless, irreversible-
+	// commit outcome.
+	assert.Contains(t, string(stderr), "wrote logs to ",
+		"stderr should contain the 'wrote logs to' hint before exit 0 when dirty=true, but it is empty — os.Exit(0) skipped log.Close(); stderr was: %q", stderr)
+	assert.Contains(t, string(stderr), logPath,
+		"the hint must name the log file the actor wrote to (%s); got: %q", logPath, stderr)
+
+	// The recovery handler writes nothing to stdout.
+	assert.Empty(t, stdout, "the recovery handler writes nothing to stdout; got: %q", stdout)
+}
+
+// TestRecoveryExit0CleanStaysSilent is the no-regression guard for the
+// #1749 quiet-success invariant (log/log.go:564): a genuinely clean
+// recovery (no WARNING/ERROR recorded → dirty=false) must NOT print the
+// "wrote logs to <path>" hint on exit 0. Adding log.Close() before
+// os.Exit(0) is only safe because the dirty gate suppresses the hint when
+// nothing worth reading was logged. This test uses the PRODUCTION af
+// binary (no seams needed — the no-active-transaction path returns nil
+// hermetically without a supervisor run) and an empty home (no journal),
+// which is the cleanest exit-0 path: runRecoveryActorWith returns nil for
+// ErrNoActiveTransaction without logging, and ourTransaction stays false,
+// so RunUpgradeRecoveryActor returns nil with dirty=false.
+func TestRecoveryExit0CleanStaysSilent(t *testing.T) {
+	home := canonicalHome(t, t.TempDir())
+	// No journal planted: the no-active-transaction path is the cleanest
+	// exit-0 surface (no WARNING, no ERROR, dirty stays false).
+
+	bin := buildAFBinary(t)
+	stdout, stderr, exitCode := runRecoverySubprocess(t, bin, home,
+		"__upgrade-recovery", "--home", home, "--transaction", "no-such-txn")
+
+	// (1) A no-active-transaction recovery invocation exits 0 so the
+	// persistent job's Restart=on-failure cannot turn a harmless tail
+	// into a loop (recovery_actor.go:68-71).
+	require.Equal(t, 0, exitCode,
+		"a no-active-transaction recovery must exit 0, got %d (stderr: %q)", exitCode, stderr)
+
+	// (2) THE INVARIANT: no "wrote logs to" hint on a clean exit 0. The
+	// dirty gate (fileWasOpened && report && dirty) stays false because
+	// no WARNING/ERROR was recorded. If this assertion fails, the fix
+	// added noise to a clean recovery — the deferral rationale #4794
+	// deferred this exact change to avoid.
+	assert.NotContains(t, string(stderr), "wrote logs to",
+		"a clean exit-0 (dirty=false) must stay silent under #1749; stderr was: %q", stderr)
+
+	// The recovery handler writes nothing to stdout.
 	assert.Empty(t, stdout, "the recovery handler writes nothing to stdout; got: %q", stdout)
 }
