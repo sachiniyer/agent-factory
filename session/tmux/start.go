@@ -347,6 +347,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPDialogPartiallyRendered(content) {
 			return true
 		}
+		// The legacy folder-trust dialog is not atomic either: Claude Code
+		// paints its question, then its body, then its options one row at a
+		// time. claudeLegacyTrustDialogOf reports a frame that is a proper
+		// prefix of the dialog — or a complete one whose cursor is not on Yes —
+		// as partial: hold without a key, never report the pane clear.
+		if claudeLegacyTrustDialogOf(content) == claudeLegacyTrustPartial {
+			return true
+		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
 		//
@@ -536,8 +544,13 @@ func reverseVideoURLSubject(line string) bool {
 // co-occur with a dialog-chrome marker only the real modal renders ("Yes, I
 // trust this folder" or the "Enter to confirm" affordance), so a stray mention
 // of the phrase in scrollback or agent output never triggers a dismissal. The
-// old wording is a self-contained, dialog-specific string and stays matched
-// as-is.
+// old wording ("Do you trust the files in this folder?") is decided by
+// claudeLegacyTrustDialogOf: the question must be a whole row that opens the
+// pane's trailing region, and every row below it must be one the legacy dialog
+// paints, in its order. The phrase alone is the same hazard the MCP branch's
+// footer-is-last rule refuses — af's own source contains the legacy phrase
+// verbatim, so a visible rendering of this file's contents (a diff, a review
+// reply, pasted release notes) carries it too.
 //
 // The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
 // 1. Yes ... Enter to confirm") is anchored on its unique question "do you
@@ -566,9 +579,15 @@ func claudeTrustPromptPresent(content string) bool {
 	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
 		claudeMCPTrustFooterIsLast(content)
 
-	return reworded ||
-		mcpDialog ||
-		strings.Contains(content, "Do you trust the files in this folder?")
+	// Legacy folder-trust dialog — the question as a whole row, opening a
+	// trailing region that holds only rows the dialog paints, complete, with
+	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
+	// the question verbatim, so the phrase alone must never fire —
+	// "a prose mention of one phrase must never inject Enter into a working
+	// agent."
+	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
+
+	return reworded || mcpDialog || legacy
 }
 
 // RestoreResult says whether RestoreWithResult reattached to the persisted

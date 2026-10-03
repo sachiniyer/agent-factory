@@ -650,10 +650,11 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 		// The MCP-server trust prompt, or the legacy folder-trust wording.
 		// Neither renders a row af can locate by label and neither is what
 		// regressed in 2.1.257, so both keep the historical Enter tap on
-		// whatever Claude Code preselected. The MCP branch is structurally
-		// guarded at the predicate (claudeMCPTrustFooterIsLast) so only a live
-		// modal — footer last — reaches this Enter; the legacy wording stays
-		// a bare substring match.
+		// whatever Claude Code preselected. Both are structurally guarded at
+		// the predicate — claudeMCPTrustFooterIsLast for the MCP branch,
+		// claudeLegacyTrustDialogOf for the legacy branch — so only a live
+		// modal reaches this Enter; quoted output with the composer painted
+		// below it never reaches this branch.
 		if err := t.TapEnter(); err != nil {
 			log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
 			return true
