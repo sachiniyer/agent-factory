@@ -537,6 +537,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 					if existing != nil {
 						if prior := existing[key]; prior != nil {
 							next[key] = prior
+							materialized++
 							continue
 						}
 					}
@@ -549,6 +550,9 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 			if existing != nil {
 				if instance := existing[key]; instance != nil {
 					next[key] = instance
+					if stableIDMatchesForDaemon(instance.ID, item.ID) {
+						materialized++
+					}
 					continue
 				}
 			}
