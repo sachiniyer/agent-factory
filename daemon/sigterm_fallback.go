@@ -44,7 +44,7 @@ import (
 // ShutdownNoDaemon here would contradict the established state and silently
 // leave the stale daemon running (#553).
 func sigtermFallback() (ShutdownResult, error) {
-	pid, source, scanned, err := locateDaemonPID()
+	pid, proc, source, scanned, err := locateDaemonPID()
 	if err != nil {
 		if scanned > 0 {
 			// An ambiguity (multiple same-home `--daemon` candidates) or
@@ -87,7 +87,7 @@ func sigtermFallback() (ShutdownResult, error) {
 	}
 
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
-	if err := signalClassifiedDaemon(pid); err != nil {
+	if err := signalClassifiedDaemon(pid, proc); err != nil {
 		if errors.Is(err, errSignalTargetChanged) {
 			// The PID locateDaemonPID proved serves this home exited and its
 			// number was recycled onto a live process we did not classify
@@ -133,20 +133,26 @@ func sigtermFallback() (ShutdownResult, error) {
 	return ShutdownViaSIGTERM, nil
 }
 
-// locateDaemonPID returns the PID of the running daemon to signal, the source
-// it was found in ("pid-file" or "pgrep"), and the count of `--daemon`
-// candidates the host scan surfaced (0 when no scan ran, e.g. no PID file and
-// pgrep unavailable). On failure to locate a PID, returns (0, source, scanned,
-// nil) where source describes the suspected PID source for diagnostics (e.g.
-// "pid-file pid=N foreign, pgrep: no matches for this home" or "no pid-file,
-// pgrep unavailable") and scanned is the number of foreign/unverifiable
-// candidates that were found and deliberately left untouched — including a
-// PID-file entry the home binding rejected as a live foreign or unverifiable
-// daemon, counted even when the scan finds nothing or does not run, so
-// sigtermFallback does not recommend a blanket pkill that would kill it. An
-// error is returned only for hard failures (ambiguous pgrep results, pgrep
-// itself failing to execute).
-func locateDaemonPID() (int, string, int, error) {
+// locateDaemonPID returns the PID of the running daemon to signal, a
+// proctree.Process snapshot captured AT the classification decision (the
+// instance whose home classifyDaemonHome proved ours, not a later Lookup that
+// could observe a recycled PID), the source it was found in ("pid-file" or
+// "pgrep"), and the count of `--daemon` candidates the host scan surfaced (0
+// when no scan ran, e.g. no PID file and pgrep unavailable). On failure to
+// locate a PID, returns (0, zero Process, source, scanned, nil) where source
+// describes the suspected PID source for diagnostics (e.g. "pid-file pid=N
+// foreign, pgrep: no matches for this home" or "no pid-file, pgrep
+// unavailable") and scanned is the number of foreign/unverifiable candidates
+// that were found and deliberately left untouched — including a PID-file entry
+// the home binding rejected as a live foreign or unverifiable daemon, counted
+// even when the scan finds nothing or does not run, so sigtermFallback does
+// not recommend a blanket pkill that would kill it. An error is returned only
+// for hard failures (ambiguous pgrep results, pgrep itself failing to
+// execute). The returned Process binds the signal to the instance the home
+// binding proved ours: a PID the kernel recycled between this classification
+// and the signal has a different StartID, so proctree.Signal refuses it
+// (ErrIdentityChanged) rather than terminating the replacement (#4793).
+func locateDaemonPID() (int, proctree.Process, string, int, error) {
 	pidFileSource := "no pid-file"
 	// rejectedPIDFilePID is the PID a daemon.pid entry named when it was a
 	// LIVE `af --daemon` the home binding PROVED serves another home
@@ -155,7 +161,7 @@ func locateDaemonPID() (int, string, int, error) {
 	// blanket `pkill -f -- '--daemon'` (no home or PID constraint) would kill
 	// it; counting it toward `scanned` even when the subsequent pgrep scan
 	// finds nothing — or does not run, because pgrep is unavailable or errors
-	// — keeps sigtermFallback from recommending that blanket pkill against
+	// — keeps sigtermFallback from recommending a blanket pkill against
 	// the very process the PID-file binding just refused to touch. A dead
 	// or non-daemon PID-file entry is plain stale (no live foreign daemon
 	// for a blanket pkill to hit), so it counts as 0.
@@ -168,7 +174,7 @@ func locateDaemonPID() (int, string, int, error) {
 		default:
 			switch classifyDaemonHome(pid) {
 			case daemonOurs:
-				return pid, "pid-file", 0, nil
+				return pid, captureDaemonIdentity(pid), "pid-file", 0, nil
 			case daemonForeign:
 				log.InfoLog.Printf("sigterm fallback: PID file pid=%d is a live daemon serving ANOTHER home; not signalling; falling back to pgrep", pid)
 				pidFileSource = fmt.Sprintf("pid-file pid=%d foreign", pid)
@@ -191,9 +197,9 @@ func locateDaemonPID() (int, string, int, error) {
 			scanned = 1
 		}
 		if errors.Is(err, errPgrepUnavailable) {
-			return 0, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), scanned, nil
+			return 0, proctree.Process{}, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), scanned, nil
 		}
-		return 0, "", scanned, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
+		return 0, proctree.Process{}, "", scanned, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
 	}
 	// Reclassify every scanned candidate by uid and AGENT_FACTORY_HOME before
 	// selecting a signal target. The pgrep scan returns every `--daemon`
@@ -223,7 +229,7 @@ func locateDaemonPID() (int, string, int, error) {
 		if rejectedPIDFilePID != 0 && !slices.Contains(pids, rejectedPIDFilePID) {
 			scanned++
 		}
-		return 0, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, scanned), scanned, nil
+		return 0, proctree.Process{}, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, scanned), scanned, nil
 	case 1:
 		// A rejected PID-file candidate the host scan did not surface is one
 		// more `--daemon` process this filter deliberately did not signal, the
@@ -241,9 +247,9 @@ func locateDaemonPID() (int, string, int, error) {
 		if rejectedPIDFilePID != 0 && !slices.Contains(pids, rejectedPIDFilePID) {
 			scanned++
 		}
-		return scoped[0], "pgrep", scanned, nil
+		return scoped[0], captureDaemonIdentity(scoped[0]), "pgrep", scanned, nil
 	default:
-		return 0, "", len(pids), fmt.Errorf(
+		return 0, proctree.Process{}, "", len(pids), fmt.Errorf(
 			"sigterm fallback: ambiguous, found %d `--daemon` processes for this home (%s) — "+
 				"kill the right one manually then re-run `af upgrade`",
 			len(scoped), formatPIDList(scoped),

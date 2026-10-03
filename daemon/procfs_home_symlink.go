@@ -170,9 +170,19 @@ func homeSymlinkEntersProcessRelativeProcfs(home string) bool {
 // before descending into its parent, so a symlink at any depth of the home
 // (the leaf, or an ancestor component such as /home/link/state with
 // /home/link -> /proc/self/cwd) is caught. When path is a symlink it follows
-// the immediate target (cleaned, and joined against the link's parent when
-// relative) and recurses into it so a chain of links ending in a process-
-// relative procfs path is detected.
+// the immediate target (joined against the link's parent when relative) and
+// recurses into it so a chain of links ending in a process-relative procfs
+// path is detected.
+//
+// The target is walked UNCLEANED: a lexical filepath.Clean would collapse a
+// target such as link2/.. (where link2 -> /proc/self/cwd/state) to the
+// parent directory, erasing link2 before the chain walk inspects it, so the
+// kernel's actual resolution (follow link2, then apply ..) is lost and a
+// nested procfs indirection the daemon serves in its own frame is misread in
+// the caller's (#4793 via a nested procfs symlink). The cleaned spelling is
+// still checked directly (isProcessRelativeProcfsHome cleans it), and a
+// process-relative target is caught there; the uncleaned walk is what catches a
+// target whose OWN components are symlinks the lexical clean would drop.
 //
 // suffix is the portion of the original home that sits below path (the
 // components walked past toward the root): a symlink at path resolves to
@@ -200,14 +210,33 @@ func symlinkChainEntersProcfs(path, suffix string, seen map[string]bool) bool {
 	seen[key] = true
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if target, err := os.Readlink(path); err == nil {
+			// joinedClean is the link's target resolved against the link's
+			// parent (for a relative target) and cleaned, for the direct
+			// procfs check — a target that is itself a process-relative procfs
+			// path (link -> /proc/self/cwd) is caught here without a walk.
+			joinedClean := target
 			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(path), target)
+				joinedClean = filepath.Join(filepath.Dir(path), target)
 			}
-			target = filepath.Clean(target)
-			if isProcessRelativeProcfsHome(rejoinSuffix(target, suffix)) {
+			joinedClean = filepath.Clean(joinedClean)
+			if isProcessRelativeProcfsHome(rejoinSuffix(joinedClean, suffix)) {
 				return true
 			}
-			if symlinkChainEntersProcfs(target, suffix, seen) {
+			// walkTarget is the same target walked UNCLEANED, so a nested
+			// symlink the lexical Clean would collapse (link2/.. where link2 ->
+			// /proc/self/cwd/state) is followed as a component by the parent
+			// walk below (it reaches link2 with the .. rejoined as suffix) and
+			// not erased. The kernel follows link2 and applies the trailing ..
+			// in its target's frame; filepath.Clean would reduce link2/.. to the
+			// parent and drop link2, missing the procfs indirection. The
+			// parent walk's own Lstat/Readlink follows each symlink component
+			// without resolving a trailing .. through it, so the nested
+			// link2 is reached and readlinked the way the daemon resolves it.
+			walkTarget := target
+			if !filepath.IsAbs(target) {
+				walkTarget = filepath.Dir(path) + string(filepath.Separator) + target
+			}
+			if symlinkChainEntersProcfs(walkTarget, suffix, seen) {
 				return true
 			}
 		}

@@ -13,11 +13,12 @@ import (
 
 // TestSignalClassifiedDaemon_KillsSameInstance pins the identity-checked
 // signal's happy path: a PID locateDaemonPID proved serves this home is
-// captured as a proctree.Process at classification time and signaled through
-// proctree.Signal, which revalidates the instance immediately before the kill.
-// The same-instance daemon is SIGTERM'd and exits, the outcome signalAndWait
-// already produced — the identity check is the added safety, not a behaviour
-// change for the genuine target (#4793 review).
+// captured as a proctree.Process at the classification decision (here,
+// captureDaemonIdentity) and signaled through proctree.Signal, which
+// revalidates the instance immediately before the kill. The same-instance
+// daemon is SIGTERM'd and exits, the outcome signalAndWait already produced —
+// the identity check is the added safety, not a behaviour change for the
+// genuine target (#4793 review).
 func TestSignalClassifiedDaemon_KillsSameInstance(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("proctree identity needs /proc")
@@ -25,9 +26,13 @@ func TestSignalClassifiedDaemon_KillsSameInstance(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	ours := spawnFakeDaemonWithHome(t, home)
+	proc := captureDaemonIdentity(ours)
+	if proc.PID == 0 {
+		t.Fatalf("captureDaemonIdentity(ours=%d) returned a zero Process; the live daemon's identity must be capturable to bind the signal", ours)
+	}
 
-	if err := signalClassifiedDaemon(ours); err != nil {
-		t.Fatalf("signalClassifiedDaemon(ours=%d): %v", ours, err)
+	if err := signalClassifiedDaemon(ours, proc); err != nil {
+		t.Fatalf("signalClassifiedDaemon(ours=%d, proc): %v", ours, err)
 	}
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
@@ -39,6 +44,47 @@ func TestSignalClassifiedDaemon_KillsSameInstance(t *testing.T) {
 	if pidLooksAlive(ours) {
 		t.Fatalf("this home's daemon pid=%d did not exit within 8s after signalClassifiedDaemon; the "+
 			"identity-checked signal must terminate the same-instance target", ours)
+	}
+}
+
+// TestSignalClassifiedDaemon_UsesCapturedIdentity pins that signalClassifiedDaemon
+// signals through the identity captured at the classification decision (proc),
+// not a fresh proctree.Lookup of the PID — so a PID the kernel recycled between
+// classification and the signal (the captured StartID no longer matches the
+// live process) is refused rather than terminated. signalClassifiedDaemon must
+// not re-Lookup the PID (a fresh Lookup would snapshot the recycled replacement
+// and signal it), and must not fall back to a PID-only signal when the snapshot
+// is unavailable (#4793 review).
+func TestSignalClassifiedDaemon_UsesCapturedIdentity(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("proctree identity needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	ours := spawnFakeDaemonWithHome(t, home)
+
+	// Capture the live identity, then corrupt its StartID to model a PID the
+	// kernel recycled between the classification decision and the signal: the
+	// PID is still alive (still this home's daemon) but the captured identity no
+	// longer matches the live process, exactly the instance-check failure a
+	// recycle produces. signalClassifiedDaemon must refuse the recycled PID
+	// (errSignalTargetChanged), not signal it.
+	real, err := proctree.Lookup(ours)
+	if err != nil {
+		t.Fatalf("proctree.Lookup(ours=%d): %v", ours, err)
+	}
+	stale := real
+	stale.StartID = real.StartID + 1
+
+	if err := signalClassifiedDaemon(ours, stale); !errors.Is(err, errSignalTargetChanged) {
+		t.Fatalf("signalClassifiedDaemon(ours=%d, stale) err=%v; want errSignalTargetChanged — "+
+			"a PID whose captured identity no longer matches the live process must not be signaled, "+
+			"even though the PID is still this home's daemon (the snapshot was captured at the "+
+			"classification decision and binds the signal to that instance, not a fresh Lookup)", ours, err)
+	}
+	if !pidLooksAlive(ours) {
+		t.Fatalf("this home's daemon pid=%d was killed by signalClassifiedDaemon against a stale identity; "+
+			"the identity-checked signal must not terminate a PID whose captured instance no longer matches", ours)
 	}
 }
 
