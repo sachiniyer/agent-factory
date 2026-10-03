@@ -12,7 +12,7 @@ func TestReadTerminalState(t *testing.T) {
 	dir := t.TempDir()
 	// A non-80x24 pane size — a custom `default-size` is exactly the shape the
 	// broker's repaint path must not assume away (#4480).
-	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1 0 200 60\\n'\n"
+	script := "#!/bin/sh\nprintf '7 11 1 1 0 1 0 0 1 200 60\\n'\n"
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake tmux: %v", err)
 	}
