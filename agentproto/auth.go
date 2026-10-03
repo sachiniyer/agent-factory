@@ -351,7 +351,13 @@ func RedactAccessTokenError(err error, token string) error {
 // token. A token that straddles a marker boundary — starting inside a marker
 // and ending past it, or starting before a marker and ending inside it — is
 // still redacted: only the bytes outside the marker carry the secret, so only
-// those are replaced with the marker. This avoids the regression a naive
+// those are replaced with the marker. A token that *contains* the marker
+// (e.g. "REDACTEDR" or "prefixREDACTEDsecret") is the inverse case: the
+// embedded marker is part of the secret, not a marker to preserve, so the
+// scan redacts the whole token with a single marker rather than emitting the
+// embedded marker verbatim and redacting the remainder separately (which
+// would reconstruct the token across two markers or leave its suffix
+// unredacted). This avoids the regression a naive
 // split-on-marker would have for a coincidental "REDACTED" in arbitrary
 // transport error text that the earlier passes did not write (where a token
 // like "EDfoo" straddling a coincidental marker would survive unredacted
@@ -370,8 +376,29 @@ func redactAccessTokenLiteralOutsideMarkers(text, token string) string {
 	marker := accessTokenRedaction
 	markerLen := len(marker)
 	tokenLen := len(token)
+	// When the token itself contains the marker (e.g. "REDACTEDR" or
+	// "prefixREDACTEDsecret"), the marker the scan would otherwise preserve is
+	// part of the secret, not a redaction marker. Emitting it verbatim and then
+	// redacting the remaining token bytes separately reconstructs the token
+	// across two markers ("REDACTEDREDACTED" still contains "REDACTEDR") or
+	// leaves the token's suffix past the marker unredacted
+	// ("REDACTEDREDACTEDsecret"). Such a token must be replaced wholesale with
+	// a single marker, so a token match takes priority over marker
+	// preservation whenever the token contains the marker.
+	tokenContainsMarker := strings.Contains(token, marker)
 	i := 0
 	for i < len(text) {
+		// A token that contains the marker matches as a whole: redact it with a
+		// single marker so its embedded marker cannot be split off and
+		// preserved. This runs before the marker branch below so a real marker
+		// that is also the prefix of a longer token (token == "REDACTEDR",
+		// text == "REDACTEDR") is consumed as the token rather than emitted
+		// verbatim and then re-extended.
+		if tokenContainsMarker && i+tokenLen <= len(text) && text[i:i+tokenLen] == token {
+			b.WriteString(marker)
+			i += tokenLen
+			continue
+		}
 		// A marker is always emitted verbatim: matching the token inside it
 		// would re-inject the secret (the corruption this catch-all exists
 		// to prevent) or extend the marker.

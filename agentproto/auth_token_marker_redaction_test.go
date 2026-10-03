@@ -314,3 +314,87 @@ func TestRedactAccessTokenLiteralOutsideMarkersStraddleRedactsCoincidentalMarker
 		t.Errorf("left straddle: marker lost in %q", got)
 	}
 }
+
+// TestRedactAccessTokenLiteralOutsideMarkersTokenContainingMarker is the
+// regression test for the inverse of the marker-substring case: a token that
+// *contains* the whole marker internally. The earlier scan emitted the
+// embedded marker verbatim and redacted the token's other bytes separately,
+// which reconstructed the token across the two emitted markers (a token equal
+// to the marker plus a suffix, e.g. "REDACTEDR", produced "REDACTEDREDACTED"
+// which still contains the credential contiguously) or left the token's suffix
+// past the marker unredacted (a token with a marker in the middle, e.g.
+// "prefixREDACTEDsecret", produced "REDACTEDREDACTEDsecret"). When the token
+// contains the marker the embedded marker is part of the secret, so the scan
+// must replace the whole token with a single marker. The bare-token shape is
+// the one RedactAccessTokenError reaches for an unstructured error whose
+// message is the token itself.
+func TestRedactAccessTokenLiteralOutsideMarkersTokenContainingMarker(t *testing.T) {
+	// Token equal to the marker plus a suffix: the right-straddle branch used
+	// to preserve the leading marker and emit a second marker, reconstructing
+	// the credential across the boundary.
+	t.Run("marker plus suffix token", func(t *testing.T) {
+		token := "REDACTEDR"
+		got := redactAccessTokenLiteralOutsideMarkers(token, token)
+		if strings.Contains(got, token) {
+			t.Errorf("token %q reconstructed in output %q", token, got)
+		}
+		if got != accessTokenRedaction {
+			t.Errorf("token %q: got %q, want a single marker %q", token, got, accessTokenRedaction)
+		}
+	})
+	// Token with the marker in the middle: the left-straddle branch used to
+	// redact only the prefix before the marker, emit the marker verbatim, and
+	// leave the suffix past the marker unredacted.
+	t.Run("marker in middle of token", func(t *testing.T) {
+		token := "prefixREDACTEDsecret"
+		got := redactAccessTokenLiteralOutsideMarkers(token, token)
+		if strings.Contains(got, token) {
+			t.Errorf("token %q survived in output %q", token, got)
+		}
+		if strings.Contains(got, "secret") {
+			t.Errorf("token suffix %q survived in output %q", "secret", got)
+		}
+		if got != accessTokenRedaction {
+			t.Errorf("token %q: got %q, want a single marker %q", token, got, accessTokenRedaction)
+		}
+	})
+	// Token containing the marker with surrounding prose: the token occurrence
+	// is redacted wholesale while an unrelated real marker elsewhere in the
+	// text is preserved verbatim (the scan must still not match a token inside
+	// a marker it did not write).
+	t.Run("marker-containing token redacted, co-located real marker preserved", func(t *testing.T) {
+		token := "REDACTEDR"
+		text := "access_token=REDACTED and saw " + token + " here"
+		got := redactAccessTokenLiteralOutsideMarkers(text, token)
+		if strings.Contains(got, token) {
+			t.Errorf("token %q survived in %q", token, got)
+		}
+		if outTok := extractAccessTokenValue(got); outTok != accessTokenRedaction {
+			t.Errorf("co-located marker corrupted: value = %q, want %q; full: %s",
+				outTok, accessTokenRedaction, got)
+		}
+		if !strings.Contains(got, "saw "+accessTokenRedaction+" here") {
+			t.Errorf("token occurrence was not redacted: %s", got)
+		}
+	})
+}
+
+// TestRedactAccessTokenErrorTokenContainingMarker is the end-to-end regression
+// for the same token-contains-marker shape through RedactAccessTokenError: an
+// unstructured error whose message is the bare token must not reconstruct the
+// credential across two markers or leave a suffix unredacted.
+func TestRedactAccessTokenErrorTokenContainingMarker(t *testing.T) {
+	for _, token := range []string{"REDACTEDR", "prefixREDACTEDsecret"} {
+		token := token
+		t.Run(token, func(t *testing.T) {
+			got := RedactAccessTokenError(errors.New(token), token).Error()
+			if strings.Contains(got, token) {
+				t.Errorf("token %q survived in redacted error: %q", token, got)
+			}
+			if strings.Count(got, accessTokenRedaction) != 1 {
+				t.Errorf("token %q: want exactly one marker, got %q (count %d)",
+					token, got, strings.Count(got, accessTokenRedaction))
+			}
+		})
+	}
+}
