@@ -123,3 +123,57 @@ func TestClassifyDaemonHome_ProcSelfHomeIsUnverifiable(t *testing.T) {
 			"must not guess ours and signal a cross-cwd daemon", scope)
 	}
 }
+
+// TestClassifyDaemonHome_NonCanonicalProcSelfHomeIsUnverifiable pins the bypass
+// of the /proc/self guard by a non-canonical spelling: a same-UID daemon
+// launched from a different directory with AGENT_FACTORY_HOME=/proc//self/cwd/state
+// (a doubled slash) serves <its cwd>/state, but the raw "/proc/self/" prefix
+// check returned false while canonicalDir cleaned the doubled slash and
+// resolved /proc/self in the caller's frame, so the foreign daemon compared
+// equal to the caller's home and was classified daemonOurs. isProcessRelativeProcfsHome
+// now cleans the home before the prefix test, so the non-canonical form is
+// caught the same way the canonical one is. The /dev/fd alias (a symlink to
+// /proc/self/fd on Linux) is the same process-relative hazard and is rejected
+// for the same reason.
+func TestClassifyDaemonHome_NonCanonicalProcSelfHomeIsUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(cwd, "state"))
+	for _, spelling := range []string{
+		"/proc//self/cwd/state",        // doubled slash
+		"/proc/self/../self/cwd/state", // .. that lexical-cleans to /proc/self/cwd/state
+		"/dev/fd/3/state",              // /dev/fd alias (symlink to /proc/self/fd on Linux)
+	} {
+		spelling := spelling
+		t.Run(spelling, func(t *testing.T) {
+			daemonCwd := t.TempDir()
+			argv0 := filepath.Join(fakeBinDir(t), "af")
+			cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"AGENT_FACTORY_HOME=" + spelling,
+			}
+			cmd.Dir = daemonCwd
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start fake daemon: %v", err)
+			}
+			pid := cmd.Process.Pid
+			t.Cleanup(func() {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				_, _ = cmd.Process.Wait()
+			})
+			waitForArgv(t, pid, argv0)
+			if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
+				t.Errorf("AGENT_FACTORY_HOME=%s classified %v; want daemonUnverifiable — "+
+					"a non-canonical procfs home cleans to a /proc/self/... path that "+
+					"resolves in the caller's frame, not the daemon's, so the classifier "+
+					"must not guess ours and signal a cross-cwd daemon", spelling, scope)
+			}
+		})
+	}
+}

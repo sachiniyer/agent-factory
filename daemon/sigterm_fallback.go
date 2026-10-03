@@ -689,18 +689,35 @@ func resolveHomeInDaemonFrame(pid int, home string) (string, bool) {
 }
 
 // isProcessRelativeProcfsHome reports whether home is a /proc/self/... (or
-// "/proc/self") path. canonicalDir resolves such a path in the CALLER's frame
-// — /proc/self/cwd is the reading process's cwd, /proc/self/root its root — so
-// a same-UID daemon launched from a different directory with
-// AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its cwd>/state while
-// classifyDaemonHome resolves the same spelling against the CALLER's cwd, the
-// opposite of the frame the /proc/self magic link names. sameProcessRoot only
-// compares root and mount-namespace identity, not /proc/self resolution, so it
-// does not catch this. classifyDaemonHome treats a process-relative procfs home
-// as unverifiable rather than guessing ours and signalling a cross-cwd daemon
-// (#4793 via a /proc/self magic link).
+// "/proc/self") path, or an equivalent process-relative alias the kernel
+// resolves against the READING process (/proc/thread-self/..., /dev/fd/... —
+// /dev/fd is a symlink to /proc/self/fd on Linux). canonicalDir resolves such a
+// path in the CALLER's frame — /proc/self/cwd is the reading process's cwd,
+// /proc/self/root its root — so a same-UID daemon launched from a different
+// directory with AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its
+// cwd>/state while classifyDaemonHome resolves the same spelling against the
+// CALLER's cwd, the opposite of the frame the /proc/self magic link names.
+// sameProcessRoot only compares root and mount-namespace identity, not
+// /proc/self resolution, so it does not catch this. classifyDaemonHome treats a
+// process-relative procfs home as unverifiable rather than guessing ours and
+// signalling a cross-cwd daemon (#4793 via a /proc/self magic link).
+//
+// A non-canonical spelling such as /proc//self/cwd/state (a doubled slash), or
+// /proc/self/../self/cwd/state, names the same magic link after lexical
+// cleaning, but the raw prefix check missed it: canonicalDir cleans the path
+// and then resolves /proc/self in the caller's frame, so the raw spelling
+// bypassed the guard and a foreign same-UID daemon was classified daemonOurs.
+// Clean the home before the prefix test so the non-canonical form is caught the
+// same way the canonical one is.
 func isProcessRelativeProcfsHome(home string) bool {
-	return home == "/proc/self" || strings.HasPrefix(home, "/proc/self/")
+	cleaned := filepath.Clean(home)
+	switch {
+	case cleaned == "/proc/self", strings.HasPrefix(cleaned, "/proc/self/"),
+		strings.HasPrefix(cleaned, "/proc/thread-self/"),
+		cleaned == "/dev/fd", strings.HasPrefix(cleaned, "/dev/fd/"):
+		return true
+	}
+	return false
 }
 
 // procRootFor returns the filesystem root the kernel exposes for pid on Linux
