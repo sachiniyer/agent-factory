@@ -347,6 +347,23 @@ func acquireDaemonPIDLock(lock *os.File, deadline time.Time) bool {
 // owner, and treat the unreadable/malformed case the same way rather than
 // unlinking a file whose current contents we did not establish (#4793).
 //
+// The number-only compare the lock guards is not enough on its own: a foreign
+// PID that exits can have its number recycled by a same-home daemon that writes
+// the same PID value to the PID file, so a stale entry that still names the old
+// number can be the new daemon's freshly-written file. Re-classify the live PID
+// under the lock (pidBelongsToThisHome) and leave the file when the PID now
+// belongs to this home's daemon — a recycled number on our own daemon is its
+// handle, not the stale foreign entry to unlink (#4793).
+//
+// The sidecar lock this held is no coordination at all on a filesystem whose
+// flock cannot be trusted (NFS, SMB, 9p, FUSE — see lockFSReliable in
+// singleton_lock.go): the writer's temp-then-rename is not serialized against
+// this read-compare-unlink, so the very race the lock prevents on local
+// filesystems reopens on a network one. The removal is skipped there and the
+// stale file is left; a stale PID file is safe to leave because readers re-verify
+// it (cmdline + home binding) before acting, and the writer's fresh file is
+// preserved.
+//
 // Like removeStaleDaemonPIDFile it refuses a symlinked PID file (#3672):
 // writeDaemonPIDFile refuses to write through one, so a link here is a user
 // arrangement af did not author, and the cleanup neither reads its target
@@ -359,6 +376,19 @@ func acquireDaemonPIDLock(lock *os.File, deadline time.Time) bool {
 // indefinitely on a contended lock. On a deadline the cleanup is abandoned
 // (best-effort, logged) rather than waiting past the stop/restart budget.
 func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
+	// On a filesystem whose flock cannot be trusted (NFS, SMB, 9p, FUSE — see
+	// lockFSReliable in singleton_lock.go), the sidecar daemon.pid.lock does not
+	// serialize the writer's temp-then-rename against this read-compare-unlink:
+	// a successful flock may silently no-op, so a same-home daemon's freshly
+	// written PID file can land in the window between the re-read and the unlink
+	// and be deleted — the race the lock is meant to prevent (#4793). Skip the
+	// conditional removal there and leave the stale file; readers re-verify a PID
+	// file (cmdline + home binding) before acting, so a stale file left in place
+	// is safe, and the writer's fresh one is preserved.
+	if ok, _ := lockFSReliable(filepath.Dir(pidFile)); !ok {
+		log.InfoLog.Printf("stale daemon PID file %q on a filesystem whose flock is untrusted; leaving it in place", pidFile)
+		return
+	}
 	if err := withDaemonPIDLock(pidFile, deadline, func() error {
 		// A symlinked PID file is not af's to unlink — writeDaemonPIDFile
 		// refuses to write through one, so a link here is a user arrangement
@@ -391,6 +421,18 @@ func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
 		}
 		if current != pid {
 			return nil // a new daemon has written its own PID; keep the file
+		}
+		// The number still names the stale PID, but the kernel may have recycled
+		// that PID onto a freshly-started same-home daemon that wrote this same
+		// number to the PID file. A number-only compare would unlink that valid
+		// replacement and orphan the new daemon. Re-classify the live PID: if it
+		// now belongs to this home's daemon (pidBelongsToThisHome), the recycled
+		// number is the new daemon's, and the file is its — leave it. A dead or
+		// foreign PID (the original foreign daemon, or the recycled number now on
+		// an unrelated process) is not this home's daemon and the stale entry is
+		// safe to unlink. (#4793)
+		if pidBelongsToThisHome(pid) {
+			return nil
 		}
 		if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
 			log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
@@ -699,38 +741,6 @@ func resolveHomeInDaemonFrame(pid int, home string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(cwd, home), true
-}
-
-// isProcessRelativeProcfsHome reports whether home is a /proc/self/... (or
-// "/proc/self") path, or an equivalent process-relative alias the kernel
-// resolves against the READING process (/proc/thread-self/..., /dev/fd/... —
-// /dev/fd is a symlink to /proc/self/fd on Linux). canonicalDir resolves such a
-// path in the CALLER's frame — /proc/self/cwd is the reading process's cwd,
-// /proc/self/root its root — so a same-UID daemon launched from a different
-// directory with AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its
-// cwd>/state while classifyDaemonHome resolves the same spelling against the
-// CALLER's cwd, the opposite of the frame the /proc/self magic link names.
-// sameProcessRoot only compares root and mount-namespace identity, not
-// /proc/self resolution, so it does not catch this. classifyDaemonHome treats a
-// process-relative procfs home as unverifiable rather than guessing ours and
-// signalling a cross-cwd daemon (#4793 via a /proc/self magic link).
-//
-// A non-canonical spelling such as /proc//self/cwd/state (a doubled slash), or
-// /proc/self/../self/cwd/state, names the same magic link after lexical
-// cleaning, but the raw prefix check missed it: canonicalDir cleans the path
-// and then resolves /proc/self in the caller's frame, so the raw spelling
-// bypassed the guard and a foreign same-UID daemon was classified daemonOurs.
-// Clean the home before the prefix test so the non-canonical form is caught the
-// same way the canonical one is.
-func isProcessRelativeProcfsHome(home string) bool {
-	cleaned := filepath.Clean(home)
-	switch {
-	case cleaned == "/proc/self", strings.HasPrefix(cleaned, "/proc/self/"),
-		strings.HasPrefix(cleaned, "/proc/thread-self/"),
-		cleaned == "/dev/fd", strings.HasPrefix(cleaned, "/dev/fd/"):
-		return true
-	}
-	return false
 }
 
 // procRootFor returns the filesystem root the kernel exposes for pid on Linux

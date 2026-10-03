@@ -1143,3 +1143,85 @@ func TestRemovePIDFileIfStillNames_RefusesSymlinkedPIDFile(t *testing.T) {
 			string(got), want)
 	}
 }
+
+// TestRemovePIDFileIfStillNames_SkipsUntrustedFilesystem pins the untrusted-FS
+// guard (#4793 review): the sidecar daemon.pid.lock that serializes the
+// read-compare-unlink against the writer's temp-then-rename is only real on a
+// filesystem whose flock can be trusted (see lockFSReliable in singleton_lock).
+// On NFS, SMB, 9p, or FUSE a successful flock may silently no-op, so the
+// writer's atomic rename can land between the removal's re-read and its unlink
+// and have its freshly-written PID file deleted — the race the lock is there to
+// prevent. removePIDFileIfStillNames skips the conditional removal on an
+// untrusted filesystem and leaves the stale file; a PID file is best-effort
+// (readers re-verify it via cmdline + the home binding), so a stale file left in
+// place is safe and the writer's fresh file is preserved. forceReliableFS forces
+// the untrusted verdict without a real network mount.
+func TestRemovePIDFileIfStillNames_SkipsUntrustedFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "daemon.pid")
+	const stale = 99999
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+		t.Fatalf("write stale PID file: %v", err)
+	}
+
+	forceReliableFS(t, false)
+	removePIDFileIfStillNames(pidFile, stale, time.Time{})
+
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("removePIDFileIfStillNames removed the stale PID file on a filesystem whose flock is "+
+			"untrusted; the conditional removal must be skipped so the writer's atomic rename is not raced, "+
+			"orphaning a same-home daemon's fresh file: %v", err)
+	}
+}
+
+// TestRemovePIDFileIfStillNames_RecycledPIDNotUnlinked pins the recycled-PID
+// hazard the number-only compare misses (#4793 review). The stale PID file names
+// a live `af --daemon` serving THIS home — the number was recycled from a
+// foreign/unverifiable process to a same-home daemon that wrote the same number
+// to daemon.pid. A number-only compare treats the file as the stale entry and
+// unlinks it, orphaning the new same-home daemon; the same home binding the
+// PID-file path already uses to gate the kill (pidBelongsToThisHome) re-validates
+// the live PID under the lock and leaves the file when the PID is now this
+// home's daemon, so the recycled number is not mistaken for the stale foreign
+// entry. The genuine stale case (a dead or foreign PID) is still removed.
+func TestRemovePIDFileIfStillNames_RecycledPIDNotUnlinked(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// A same-home daemon whose PID was recycled onto a stale entry's number.
+	// pidBelongsToThisHome(ourPID) is true, so the recycled file is this home's
+	// daemon's handle, not the stale foreign entry to unlink.
+	ours := spawnFakeDaemonWithHome(t, home)
+	pidFile := filepath.Join(home, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", ours)), 0600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	// The file names the same PID value as this home's live daemon; the
+	// number-only compare would treat it as the stale entry and unlink it. The
+	// home binding re-validates the live PID under the lock and leaves the file.
+	removePIDFileIfStillNames(pidFile, ours, time.Time{})
+
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("removePIDFileIfStillNames removed the PID file when the PID it names is this home's "+
+			"own live daemon (pid=%d); the number was recycled onto it, so unlinking it orphans the new "+
+			"daemon — the same home binding the PID-file path uses must leave the file: %v", ours, err)
+	}
+
+	// The genuine stale case (a PID that is NOT this home's daemon) is still
+	// removed: a foreign PID the kernel has not recycled onto our own daemon.
+	foreignHome := testguard.SocketTempDir(t)
+	foreign := spawnFakeDaemonWithHome(t, foreignHome)
+	staleFile := filepath.Join(home, "stale-foreign.pid")
+	if err := os.WriteFile(staleFile, []byte(fmt.Sprintf("%d", foreign)), 0600); err != nil {
+		t.Fatalf("write stale foreign PID file: %v", err)
+	}
+	removePIDFileIfStillNames(staleFile, foreign, time.Time{})
+	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+		t.Fatalf("removePIDFileIfStillNames left a stale PID file (pid=%d) that names a FOREIGN home's "+
+			"daemon; the home binding must not keep a foreign entry: stat err=%v", foreign, err)
+	}
+}

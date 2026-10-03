@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -230,5 +231,107 @@ func TestClassifyDaemonHome_ProcfsIndirectedSymlinkHomeIsUnverifiable(t *testing
 			"want daemonUnverifiable — a symlink whose target is a process-relative procfs "+
 			"path resolves in the caller's frame under canonicalDir, not the daemon's, so the "+
 			"classifier must not guess ours and signal a cross-cwd daemon", scope)
+	}
+}
+
+// TestIsProcessRelativeProcfsHome_ProcNumericPidMagicLinks pins the /proc/<pid>/...
+// extension of isProcessRelativeProcfsHome. The /proc/self guard caught the
+// caller-relative spellings, but /proc/<pid>/{cwd,root,exe,fd,fdinfo,ns,map_files}
+// resolve against <pid>, not the caller: canonicalDir follows /proc/<pid>/cwd in
+// the READING process's frame, so a foreign same-UID, same-namespace daemon
+// launched with AGENT_FACTORY_HOME=/proc/<other-pid>/cwd/state (where <other-pid>
+// later chdir's) is read in the caller's frame and can match wantHome where the
+// daemon that owns the socket did not (#4793). Each of these magic links is the
+// same cross-frame hazard as /proc/self/... and must be unverifiable. A bare
+// /proc/<pid> or a non-magic entry (/proc/<pid>/cmdline, /proc/<pid>/stat) is not
+// a process-relative path and must not be rejected — those are regular files.
+func TestIsProcessRelativeProcfsHome_ProcNumericPidMagicLinks(t *testing.T) {
+	for _, home := range []string{
+		"/proc/1/cwd",
+		"/proc/1/cwd/state",
+		"/proc/12345/root/state",
+		"/proc/12345/root",
+		"/proc/9999/exe",
+		"/proc/9999/fd/3",
+		"/proc/9999/fdinfo/5",
+		"/proc/9999/ns/mnt",
+		"/proc/9999/map_files/foo",
+		// Non-canonical spellings clean to the same magic link.
+		"/proc//1/cwd/state",
+		"/proc/1/../1/cwd/state",
+		// /proc/<pid>/{thread-self, fdinfo}... and the existing /dev/fd alias are
+		// covered by the /proc/thread-self and /dev/fd branches.
+	} {
+		if !isProcessRelativeProcfsHome(home) {
+			t.Errorf("isProcessRelativeProcfsHome(%q) = false; want true — a /proc/<pid>/magic-link "+
+				"home resolves against <pid>, not the caller, the same cross-frame hazard as /proc/self", home)
+		}
+	}
+	// A bare /proc/<pid> or a non-magic entry is not a process-relative path: the
+	// former names a per-process directory, the latter a regular file (/proc/<pid>/stat,
+	// /proc/<pid>/cmdline). Rejecting them would block legitimate absolute homes that
+	// happen to live under /proc/<pid> by coincidence.
+	for _, home := range []string{
+		"/proc/1",
+		"/proc/1/stat",
+		"/proc/1/cmdline",
+		"/proc/1/environ",
+		"/proc/1/io",
+		"/proc/1/status",
+		"/home/user/.agent-factory",
+		"/tmp/agent-factory/state",
+	} {
+		if isProcessRelativeProcfsHome(home) {
+			t.Errorf("isProcessRelativeProcfsHome(%q) = true; want false — a bare /proc/<pid> or a "+
+				"non-magic entry is not a process-relative path", home)
+		}
+	}
+}
+
+// TestClassifyDaemonHome_ProcNumericPidCwdHomeIsUnverifiable pins the
+// /proc/<pid>/cwd hazard that the /proc/self guard did not cover. The caller's
+// AGENT_FACTORY_HOME resolves to <caller-cwd>/state; a same-UID, same-namespace
+// daemon launched from a different cwd with AGENT_FACTORY_HOME=/proc/<pid>/cwd/state
+// serves the directory <pid> points at, but canonicalDir resolves /proc/<pid>/cwd
+// in the CALLER's frame (the reading process's frame), so without the guard a
+// foreign daemon whose home resolves to the caller's <caller-cwd>/state compares
+// equal and is classified daemonOurs on a stale PID file or lone pgrep result.
+// isProcessRelativeProcfsHome now treats /proc/<pid>/{cwd,...} as unverifiable
+// too, so classifyDaemonHome fails closed (#4793 via a PID-addressed procfs path).
+func TestClassifyDaemonHome_ProcNumericPidCwdHomeIsUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	// The caller's home resolves to <caller-cwd>/state; without the guard the
+	// daemon's /proc/<pid>/cwd/state (with <pid> the caller's own PID) resolves
+	// to the same path in the caller's frame, so the foreign daemon would compare
+	// equal to the caller's home.
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(cwd, "state"))
+	pid := os.Getpid()
+	daemonCwd := t.TempDir()
+	argv0 := filepath.Join(fakeBinDir(t), "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"AGENT_FACTORY_HOME=" + fmt.Sprintf("/proc/%d/cwd/state", pid),
+	}
+	cmd.Dir = daemonCwd
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	daemonPid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-daemonPid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, daemonPid, argv0)
+	if scope := classifyDaemonHome(daemonPid); scope != daemonUnverifiable {
+		t.Errorf("AGENT_FACTORY_HOME=/proc/%d/cwd/state classified %v; want daemonUnverifiable — "+
+			"a /proc/<pid>/cwd home resolves against <pid>, not the caller, so the classifier must "+
+			"not guess ours and signal a cross-cwd daemon", pid, scope)
 	}
 }

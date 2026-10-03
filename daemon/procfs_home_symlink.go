@@ -3,7 +3,86 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// isProcNumericMagicLink reports whether cleaned is a
+// /proc/<pid>/{cwd,root,exe,fd,fdinfo,ns,map_files} magic link (with or without
+// a trailing path). The kernel resolves these per-process against the process
+// <pid> — /proc/<pid>/cwd is that process's live cwd, /proc/<pid>/root its
+// root, /proc/<pid>/fd/<n> its open file descriptors — so a home spelled through
+// one is the same cross-frame hazard isProcessRelativeProcfsHome guards for
+// /proc/self/...: a same-UID, same-namespace foreign daemon launched with
+// AGENT_FACTORY_HOME=/proc/<other-pid>/cwd/state serves the directory <other-pid>
+// points at, while canonicalDir resolves the same spelling in the CALLER's frame
+// (or the other process chdir's after the daemon bound its socket), so a stale
+// PID file or lone pgrep result can misclassify it daemonOurs (#4793 via a
+// PID-addressed procfs path). A bare /proc/<pid> or a non-magic entry
+// (/proc/<pid>/cmdline, /proc/<pid>/stat — regular files) is not a magic link.
+func isProcNumericMagicLink(cleaned string) bool {
+	const proc = "/proc/"
+	if !strings.HasPrefix(cleaned, proc) {
+		return false
+	}
+	rest := cleaned[len(proc):]
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return false // "/proc" or "/proc/<pid>" alone, not a magic link.
+	}
+	pidStr := rest[:slash]
+	for i := 0; i < len(pidStr); i++ {
+		if pidStr[i] < '0' || pidStr[i] > '9' {
+			return false // /proc/self, /proc/thread-self, etc. handled by the spelling guard.
+		}
+	}
+	magic := rest[slash+1:]
+	if i := strings.IndexByte(magic, '/'); i >= 0 {
+		magic = magic[:i]
+	}
+	switch magic {
+	case "cwd", "root", "exe", "fd", "fdinfo", "ns", "map_files":
+		return true
+	}
+	return false
+}
+
+// isProcessRelativeProcfsHome reports whether home is a /proc/self/... (or
+// "/proc/self") path, or an equivalent process-relative alias the kernel
+// resolves against the READING process (/proc/thread-self/..., /dev/fd/... —
+// /dev/fd is a symlink to /proc/self/fd on Linux). canonicalDir resolves such a
+// path in the CALLER's frame — /proc/self/cwd is the reading process's cwd,
+// /proc/self/root its root — so a same-UID daemon launched from a different
+// directory with AGENT_FACTORY_HOME=/proc/self/cwd/state serves <its
+// cwd>/state while classifyDaemonHome resolves the same spelling against the
+// CALLER's cwd, the opposite of the frame the /proc/self magic link names.
+// sameProcessRoot only compares root and mount-namespace identity, not
+// /proc/self resolution, so it does not catch this. classifyDaemonHome treats a
+// process-relative procfs home as unverifiable rather than guessing ours and
+// signalling a cross-cwd daemon (#4793 via a /proc/self magic link).
+//
+// A /proc/<pid>/{cwd,root,exe,fd,fdinfo,ns,map_files} magic link is the same
+// hazard addressed at another process: the kernel resolves it against <pid>, not
+// the caller, so a foreign same-UID, same-namespace daemon can match wantHome
+// under canonicalDir where the daemon that owns the socket did not. isProcNumericMagicLink
+// catches that shape too.
+//
+// A non-canonical spelling such as /proc//self/cwd/state (a doubled slash), or
+// /proc/self/../self/cwd/state, names the same magic link after lexical
+// cleaning, but the raw prefix check missed it: canonicalDir cleans the path
+// and then resolves /proc/self in the caller's frame, so the raw spelling
+// bypassed the guard and a foreign same-UID daemon was classified daemonOurs.
+// Clean the home before the prefix test so the non-canonical form is caught the
+// same way the canonical one is.
+func isProcessRelativeProcfsHome(home string) bool {
+	cleaned := filepath.Clean(home)
+	switch {
+	case cleaned == "/proc/self", strings.HasPrefix(cleaned, "/proc/self/"),
+		strings.HasPrefix(cleaned, "/proc/thread-self/"),
+		cleaned == "/dev/fd", strings.HasPrefix(cleaned, "/dev/fd/"):
+		return true
+	}
+	return isProcNumericMagicLink(cleaned)
+}
 
 // homeSymlinkEntersProcessRelativeProcfs reports whether home, or any symlink
 // reached while resolving it, targets a process-relative procfs path that
