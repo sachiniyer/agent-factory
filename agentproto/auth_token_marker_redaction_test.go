@@ -398,3 +398,67 @@ func TestRedactAccessTokenErrorTokenContainingMarker(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactAccessTokenLiteralOutsideMarkersStraddleDoesNotReconstructToken is
+// the regression test for a token that straddles a marker boundary whose
+// out-of-marker part is a prefix (right straddle) or suffix (left straddle) of
+// the marker. The earlier straddle fix emitted a second marker for the
+// out-of-marker bytes, which concatenated two markers and reconstructed the
+// token at the marker-to-marker boundary: the last byte of the first marker
+// plus the first byte of the second formed the token (e.g. token "DR" across
+// "REDACTEDREDACTED": the "D" of the first marker and the "R" of the second).
+// Unlike the token-contains-marker case, the token does not itself contain
+// "REDACTED", so it reaches the straddle branches. The scan must drop the
+// out-of-marker bytes instead of emitting a marker when that concatenation
+// would reconstruct the token.
+func TestRedactAccessTokenLiteralOutsideMarkersStraddleDoesNotReconstructToken(t *testing.T) {
+	// Right straddle: token "DR" starts at the last byte of a marker ("D") and
+	// ends past it ("R"). The suffix "R" is a prefix of the marker, so emitting
+	// a second marker for it produces "REDACTEDREDACTED", which still contains
+	// "DR" across the boundary. The scan must drop the "R" instead.
+	t.Run("right straddle, suffix is marker prefix", func(t *testing.T) {
+		text := "REDACTEDR"
+		token := "DR"
+		got := redactAccessTokenLiteralOutsideMarkers(text, token)
+		if strings.Contains(got, token) {
+			t.Errorf("right straddle: token %q reconstructed in %q", token, got)
+		}
+		if !strings.Contains(got, accessTokenRedaction) {
+			t.Errorf("right straddle: marker lost in %q", got)
+		}
+	})
+	// Left straddle: token "DRED" starts before a marker ("D") and ends inside
+	// it ("RED"). The prefix "D" is a suffix of the marker, so emitting a marker
+	// for it produces "REDACTEDREDACTED", which still contains "DRED" across the
+	// boundary. The scan must drop the "D" instead.
+	t.Run("left straddle, prefix is marker suffix", func(t *testing.T) {
+		text := "DREDACTED"
+		token := "DRED"
+		got := redactAccessTokenLiteralOutsideMarkers(text, token)
+		if strings.Contains(got, token) {
+			t.Errorf("left straddle: token %q reconstructed in %q", token, got)
+		}
+		if !strings.Contains(got, accessTokenRedaction) {
+			t.Errorf("left straddle: marker lost in %q", got)
+		}
+	})
+	// Right straddle with surrounding prose: the reconstruction must be prevented
+	// even when the straddle is embedded in a larger message.
+	t.Run("right straddle in prose", func(t *testing.T) {
+		text := "err: REDACTEDR failed"
+		token := "DR"
+		got := redactAccessTokenLiteralOutsideMarkers(text, token)
+		if strings.Contains(got, token) {
+			t.Errorf("right straddle in prose: token %q reconstructed in %q", token, got)
+		}
+	})
+	// Left straddle with surrounding prose.
+	t.Run("left straddle in prose", func(t *testing.T) {
+		text := "err: DREDACTED failed"
+		token := "DRED"
+		got := redactAccessTokenLiteralOutsideMarkers(text, token)
+		if strings.Contains(got, token) {
+			t.Errorf("left straddle in prose: token %q reconstructed in %q", token, got)
+		}
+	})
+}

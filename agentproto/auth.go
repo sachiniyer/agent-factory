@@ -409,13 +409,22 @@ func redactAccessTokenLiteralOutsideMarkers(text, token string) string {
 			// past it. The in-marker bytes are the marker's own (coincidental
 			// overlap with the token); only the suffix past the marker is the
 			// secret, so redact that suffix with the marker and skip past it.
+			// When the suffix is a prefix of the marker (e.g. token "DR" across
+			// "REDACTEDR": the marker ends in "D", the suffix is "R"), emitting
+			// a second marker right after the first reconstructs the token at
+			// the marker-to-marker boundary ("REDACTEDREDACTED" still contains
+			// "DR"). In that case drop the secret suffix instead of emitting a
+			// marker so no second marker is concatenated.
 			next := markerEnd
 			for j := max(i, markerEnd-tokenLen+1); j < markerEnd; j++ {
 				if j+tokenLen <= markerEnd {
 					continue // token fully inside the marker; leave it alone
 				}
 				if strings.HasPrefix(text[j:], token) {
-					b.WriteString(marker)
+					suffix := text[markerEnd : j+tokenLen]
+					if !strings.HasPrefix(marker, suffix) {
+						b.WriteString(marker)
+					}
 					next = j + tokenLen
 					break
 				}
@@ -426,7 +435,14 @@ func redactAccessTokenLiteralOutsideMarkers(text, token string) string {
 		if strings.HasPrefix(text[i:], token) {
 			// Left straddle: a token starting here may end inside a later
 			// marker. Redact the part before the marker and let the next
-			// iteration emit the marker verbatim.
+			// iteration emit the marker verbatim. When the prefix is a
+			// suffix of the marker (e.g. token "DRED" across "DREDACTED":
+			// the prefix "D" is the marker's last byte, the in-marker part
+			// "RED" is the marker's first three), emitting a marker for the
+			// prefix right before the existing marker reconstructs the token
+			// at the marker-to-marker boundary ("REDACTEDREDACTED" still
+			// contains "DRED"). In that case drop the secret prefix instead
+			// of emitting a marker so no second marker is concatenated.
 			searchStart := i + 1
 			searchEnd := i + tokenLen + markerLen
 			if searchEnd > len(text) {
@@ -436,7 +452,10 @@ func redactAccessTokenLiteralOutsideMarkers(text, token string) string {
 				if idx := strings.Index(text[searchStart:searchEnd], marker); idx >= 0 {
 					markerAt := searchStart + idx
 					if markerAt < i+tokenLen {
-						b.WriteString(marker)
+						prefix := text[i:markerAt]
+						if !strings.HasSuffix(marker, prefix) {
+							b.WriteString(marker)
+						}
 						i = markerAt
 						continue
 					}
