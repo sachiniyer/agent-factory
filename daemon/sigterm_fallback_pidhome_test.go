@@ -306,6 +306,86 @@ func TestIsProcessRelativeProcfsHome_ProcNumericPidMagicLinks(t *testing.T) {
 	}
 }
 
+// TestHomeSymlinkEntersProcessRelativeProcfs_AncestorAliasToProc pins the
+// ancestor-alias hazard the leaf-only symlink walk missed: AGENT_FACTORY_HOME
+// reaches procfs through an ancestor symlink (here /tmp/<pid-alias> -> /proc
+// with /tmp/<pid-alias>/self/cwd/state). The daemon resolves the home in its
+// own frame (<its cwd>/state via /proc/self/cwd), but the symlink chain walk
+// followed the ancestor /tmp/<pid-alias> to /proc and dropped the unresolved
+// self/cwd/state suffix, so isProcessRelativeProcfsHome(/proc) returned false
+// and classifyDaemonHome canonicalized the path in the CALLER's frame — marking
+// a same-UID, same-namespace daemon launched from another cwd daemonOurs
+// (#4793 via an ancestor procfs alias). Carrying the suffix re-joins it to
+// /proc/self/cwd/state, so the home is treated as unverifiable.
+func TestHomeSymlinkEntersProcessRelativeProcfs_AncestorAliasToProc(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	root := t.TempDir()
+	// An ancestor alias to /proc: /tmp/<alias>/self/cwd/state resolves through
+	// /tmp/<alias> -> /proc to /proc/self/cwd/state, a process-relative path the
+	// leaf-only Readlink dropped the suffix for.
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink("/proc", alias); err != nil {
+		t.Fatalf("symlink /proc -> %s: %v", alias, err)
+	}
+	home := filepath.Join(alias, "self", "cwd", "state")
+	if !homeSymlinkEntersProcessRelativeProcfs(home) {
+		t.Errorf("homeSymlinkEntersProcessRelativeProcfs(%q) = false; want true — "+
+			"an ancestor alias to /proc rejoins to /proc/self/cwd/state, a "+
+			"process-relative path the guard must catch", home)
+	}
+}
+
+// TestClassifyDaemonHome_ProcAncestorAliasHomeIsUnverifiable pins the same
+// ancestor-alias hazard end-to-end: a same-UID, same-namespace daemon launched
+// from a different cwd with AGENT_FACTORY_HOME=/tmp/<alias>/self/cwd/state (where
+// /tmp/<alias> -> /proc) resolves its home through /proc/self/cwd in its own
+// frame, but the previous leaf-only symlink walk read the alias target as /proc
+// and dropped the self/cwd/state suffix, so the home was canonicalized in the
+// CALLER's frame and the foreign daemon was misclassified daemonOurs. The
+// suffix-carrying walk rejoins /proc/self/cwd/state and classifies it
+// daemonUnverifiable instead.
+func TestClassifyDaemonHome_ProcAncestorAliasHomeIsUnverifiable(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(cwd, "state"))
+	root := t.TempDir()
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink("/proc", alias); err != nil {
+		t.Fatalf("symlink /proc -> %s: %v", alias, err)
+	}
+	daemonCwd := t.TempDir()
+	argv0 := filepath.Join(fakeBinDir(t), "af")
+	cmd := fakeDaemonCmd(t, argv0, "sleep 300; :", "--daemon")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"AGENT_FACTORY_HOME=" + filepath.Join(alias, "self", "cwd", "state"),
+	}
+	cmd.Dir = daemonCwd
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake daemon: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	waitForArgv(t, pid, argv0)
+	if scope := classifyDaemonHome(pid); scope != daemonUnverifiable {
+		t.Errorf("AGENT_FACTORY_HOME=%s/self/cwd/state (alias to /proc) classified %v; "+
+			"want daemonUnverifiable — an ancestor alias to /proc rejoins to "+
+			"/proc/self/cwd/state, which resolves in the caller's frame, not the "+
+			"daemon's, so the classifier must not guess ours and signal a cross-cwd daemon",
+			alias, scope)
+	}
+}
+
 // TestClassifyDaemonHome_ProcNumericPidCwdHomeIsUnverifiable pins the
 // /proc/<pid>/cwd hazard that the /proc/self guard did not cover. The caller's
 // AGENT_FACTORY_HOME resolves to <caller-cwd>/state; a same-UID, same-namespace

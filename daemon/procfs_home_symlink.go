@@ -141,7 +141,7 @@ func homeSymlinkEntersProcessRelativeProcfs(home string) bool {
 	if err != nil {
 		return false
 	}
-	return symlinkChainEntersProcfs(filepath.Clean(abs), map[string]bool{})
+	return symlinkChainEntersProcfs(filepath.Clean(abs), "", map[string]bool{})
 }
 
 // symlinkChainEntersProcfs is the recursive core of
@@ -151,24 +151,42 @@ func homeSymlinkEntersProcessRelativeProcfs(home string) bool {
 // /home/link -> /proc/self/cwd) is caught. When path is a symlink it follows
 // the immediate target (cleaned, and joined against the link's parent when
 // relative) and recurses into it so a chain of links ending in a process-
-// relative procfs path is detected. seen bounds the walk against a cycle
-// (symlink loops); a non-symlink ancestor returns false at that component and
-// lets the parent walk continue.
-func symlinkChainEntersProcfs(path string, seen map[string]bool) bool {
-	if seen[path] {
+// relative procfs path is detected.
+//
+// suffix is the portion of the original home that sits below path (the
+// components walked past toward the root): a symlink at path resolves to
+// target, but the home the kernel actually opened is target joined with that
+// suffix, so the rejoined path is what must be checked, not target alone. An
+// ancestor alias such as /tmp/p -> /proc with
+// AGENT_FACTORY_HOME=/tmp/p/self/cwd/state made the previous leaf-only walk read
+// /tmp/p's target as /proc and drop the unresolved self/cwd/state, so the guard
+// returned false and classifyDaemonHome canonicalized /tmp/p/self/cwd/state in
+// the CALLER's frame — /proc/self/cwd is the reading process's cwd — marking a
+// same-UID daemon launched from another cwd daemonOurs (#4793 via an ancestor
+// procfs alias). Carrying the suffix re-joins it to /proc/self/cwd/state and
+// fails closed. The suffix follows the original home's components up the parent
+// walk; a symlink target's own ancestors are not walked with it (their basenames
+// are not components of the home), so the suffix always names real components of
+// the home rather than the target's directory layout. seen bounds the walk
+// against a cycle (symlink loops) and is keyed by path plus suffix so the same
+// node reached under different suffixes is still inspected; a non-symlink
+// ancestor returns false at that component and lets the parent walk continue.
+func symlinkChainEntersProcfs(path, suffix string, seen map[string]bool) bool {
+	key := path + "\x00" + suffix
+	if seen[key] {
 		return false
 	}
-	seen[path] = true
+	seen[key] = true
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		if target, err := os.Readlink(path); err == nil {
 			if !filepath.IsAbs(target) {
 				target = filepath.Join(filepath.Dir(path), target)
 			}
 			target = filepath.Clean(target)
-			if isProcessRelativeProcfsHome(target) {
+			if isProcessRelativeProcfsHome(rejoinSuffix(target, suffix)) {
 				return true
 			}
-			if symlinkChainEntersProcfs(target, seen) {
+			if symlinkChainEntersProcfs(target, suffix, seen) {
 				return true
 			}
 		}
@@ -177,5 +195,16 @@ func symlinkChainEntersProcfs(path string, seen map[string]bool) bool {
 	if parent == path {
 		return false
 	}
-	return symlinkChainEntersProcfs(parent, seen)
+	return symlinkChainEntersProcfs(parent, filepath.Join(filepath.Base(path), suffix), seen)
+}
+
+// rejoinSuffix is the path a symlink at an ancestor of home resolves the home
+// to: the ancestor's target with the suffix below it. An empty suffix (the
+// home's leaf, or a chain that reached the home itself) is the target verbatim,
+// so isProcessRelativeProcfsHome's existing direct-target behaviour is kept.
+func rejoinSuffix(target, suffix string) string {
+	if suffix == "" {
+		return target
+	}
+	return filepath.Clean(filepath.Join(target, suffix))
 }
