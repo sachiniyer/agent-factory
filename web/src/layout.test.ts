@@ -388,3 +388,144 @@ test("sameLayout: splitting really is a layout change", () => {
   const closed = closeLeaf(split, leaves(split)[1].id);
   assert.equal(sameLayout(closed, split), false);
 });
+
+// --- remapByIdentity + validate: cross-client close of the last tab -------------
+//
+// split.ts's setSession (same-session resync) runs `remapByIdentity` then `validate`
+// (split.ts:469-470). When another client closes the highest-ordinal tab — a PURE
+// shrink, no replacement — a dead pane left at its now-out-of-range ordinal used to
+// fall through to `validate`, which CLAMPED it down onto the survivor's ordinal and
+// (keeping the FIRST leaf in visual order) evicted the survivor when the dead pane
+// was visually earlier. The survivor's AttachTerminal was then disposed and its
+// scrollback lost; the dead pane was rebound to the survivor's tab. remapByIdentity
+// now closes those out-of-range dead leaves itself, so validate never clamps a dead
+// leaf onto a survivor.
+
+/** The exact setSession sequence (split.ts:469-470): remap then validate against the
+ *  new tab count. `tabCount` mirrors split.ts:446 (1 when the list is empty). */
+function setSessionSequence(tree: LayoutNode, prevIds: string[], ids: string[]): LayoutNode {
+  const settled = remapByIdentity(tree, prevIds, ids);
+  const tabCount = ids.length > 0 ? ids.length : 1;
+  return validate(settled, tabCount);
+}
+
+test("pure shrink with dead pane visually FIRST: the SURVIVOR must keep its pane (regression)", () => {
+  // A split-LEFT puts the new, higher-ordinal tab's pane visually first. The user's
+  // original pane (tab 0, "id-a") is visually LAST and holds the scrollback. Another
+  // client closes the last tab ("id-b"), a pure 2→1 shrink with no replacement.
+  resetIds();
+  const root = singleLeaf(0);
+  const two = splitLeaf(root, root.id, "left", 1); // visual order: [leaf2(tab1), leaf1(tab0)]
+  const Lnew = leaves(two)[0]; // shows "id-b" (tab 1) — the soon-to-close pane, visually first
+  const Lorig = leaves(two)[1]; // shows "id-a" (tab 0) — the SURVIVOR with scrollback
+  assert.equal(Lnew.tab, 1);
+  assert.equal(Lorig.tab, 0);
+
+  const out = setSessionSequence(two, ["id-a", "id-b"], ["id-a"]);
+
+  const ls = leaves(out);
+  assert.equal(ls.length, 1, "the shrink collapses to a single pane");
+  assert.equal(
+    ls[0].id,
+    Lorig.id,
+    "the original 'id-a' pane (the survivor) must be the one kept — it holds the live tab",
+  );
+  assert.equal(ls[0].tab, 0, "and it stays on its tab's ordinal");
+  assert.notEqual(ls[0].id, Lnew.id, "the dead 'id-b' pane must NOT be the one rebound to id-a");
+});
+
+test("pure shrink with dead pane visually LAST: the survivor ALSO keeps its pane (control)", () => {
+  // The common split-RIGHT ordering [orig, new] puts the dead pane visually last, where
+  // validate's keep-first happens to pick the right pane even without the fix. Pinned so
+  // the fix cannot regress the orientation that already worked.
+  resetIds();
+  const root = singleLeaf(0);
+  const two = splitLeaf(root, root.id, "right", 1); // visual order: [leaf1(tab0), leaf2(tab1)]
+  const Lorig = leaves(two)[0]; // shows "id-a" (tab 0) — the survivor
+  const Lnew = leaves(two)[1]; // shows "id-b" (tab 1) — the soon-to-close pane, visually last
+
+  const out = setSessionSequence(two, ["id-a", "id-b"], ["id-a"]);
+
+  const ls = leaves(out);
+  assert.equal(ls.length, 1);
+  assert.equal(ls[0].id, Lorig.id, "the survivor keeps its pane regardless of visual order");
+  assert.equal(ls[0].tab, 0);
+  assert.notEqual(ls[0].id, Lnew.id);
+});
+
+test("pure shrink across THREE panes: only the dead pane closes, every survivor keeps its pane", () => {
+  // Three panes with the highest-ordinal (dead-after-shrink) pane visually FIRST, so
+  // validate's keep-first would otherwise clamp it down and evict a survivor. remap
+  // must close ONLY the dead pane; the two survivors stay on their own tabs.
+  resetIds();
+  const tree: LayoutNode = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: { kind: "leaf", id: "Ldead", tab: 2 }, // shows "id-c" — visually FIRST, will close
+    b: {
+      kind: "split",
+      id: "S2",
+      dir: "row",
+      ratio: 0.5,
+      a: { kind: "leaf", id: "La", tab: 0 }, // shows "id-a"
+      b: { kind: "leaf", id: "Lb", tab: 1 }, // shows "id-b"
+    },
+  };
+
+  // Another client closes the last tab "id-c": 3 → 2.
+  const out = setSessionSequence(tree, ["id-a", "id-b", "id-c"], ["id-a", "id-b"]);
+  const ls = leaves(out);
+  assert.deepEqual(
+    ls.map((l) => l.id),
+    ["La", "Lb"],
+    "only the dead pane (Ldead) closes; both survivors keep their panes",
+  );
+  assert.deepEqual(ls.map((l) => l.tab), [0, 1], "survivors stay on their own tabs' ordinals");
+});
+
+test("a close+REPLACE (count-stable) still closes the dead pane via the survivor-wins guard, not the shrink guard", () => {
+  // The pre-existing close+replace path: another client closes "id-a" and creates
+  // "id-c", so the survivor "id-b" MOVES 2→1 (the dead slot) and claims it. The dead
+  // leaf at tab 1 is closed by the claimed-collision loop (its slot still EXISTS), so
+  // the new out-of-range loop must NOT also fire — both guards coexist harmlessly.
+  resetIds();
+  const tree: LayoutNode = {
+    kind: "split",
+    id: "S1",
+    dir: "row",
+    ratio: 0.5,
+    a: { kind: "leaf", id: "Ldead", tab: 1 }, // shows "id-a" — will close, visually FIRST
+    b: { kind: "leaf", id: "Lsurv", tab: 2 }, // shows "id-b" — survivor, moves 2→1
+  };
+  const prevIds = ["id-agent", "id-a", "id-b"];
+  const ids = ["id-agent", "id-b", "id-c"]; // count unchanged (3→3)
+
+  const out = setSessionSequence(tree, prevIds, ids);
+  const ls = leaves(out);
+  assert.equal(ls.length, 1, "the dead pane closes, leaving the survivor");
+  assert.equal(ls[0].id, "Lsurv", "the survivor wins the now-shared ordinal");
+  assert.equal(ls[0].tab, 1, "it follows id-b to its new ordinal");
+  assert.notEqual(ls[0].id, "Ldead");
+});
+
+test("a SOLE dead leaf out-of-range is NOT closed by remapByIdentity — it degrades to validate's clamp", () => {
+  // The last pane cannot be closed (closeLeaf returns null). A single dead leaf must
+  // fall through to validate, which clamps it to max — the documented degrade for a
+  // session that lost its only shown tab. The new out-of-range loop leaves it be.
+  resetIds();
+  const tree: LayoutNode = { kind: "leaf", id: "Lonly", tab: 1 }; // shows "id-b"
+
+  // remapByIdentity alone: moved.size === 0 (nothing survives), so it returns the
+  // tree unchanged — the new loop never runs.
+  const remapped = remapByIdentity(tree, ["id-a", "id-b"], ["id-a"]);
+  assert.equal(remapped, tree, "a sole dead leaf with no survivor is returned untouched");
+  assert.equal(leaves(remapped)[0].tab, 1);
+
+  // The full setSession sequence then degrades via validate's clamp to the only slot.
+  const out = setSessionSequence(tree, ["id-a", "id-b"], ["id-a"]);
+  assert.equal(leaves(out).length, 1);
+  assert.equal(leaves(out)[0].id, "Lonly", "the sole pane is retained");
+  assert.equal(leaves(out)[0].tab, 0, "validate clamps it to the only surviving ordinal");
+});
