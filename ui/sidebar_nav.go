@@ -421,6 +421,12 @@ func (s *Sidebar) selectTabStop(stop sidebarTabStop) bool {
 
 	s.proj.SetSelectedInstance(inst)
 	s.proj.SetActiveTab(stop.tabIndex)
+	// The folded-instance-Down case is handled in tryMoveVerticalNavStop, which
+	// moves the cursor to the next instance row instead of targeting this
+	// instance's hidden tabs, so selectTabStop is reached for the same instance
+	// only on a normal dive into its (expanded) tabs. From a header or archived
+	// cursor the target tab must be revealed and selected normally. In both
+	// cases clearing the explicit-collapse override is the right thing.
 	s.treeCollapsed = ""
 	for i, sec := range s.sections {
 		if sec.Kind == SectionInstances {
@@ -490,7 +496,24 @@ func (s *Sidebar) tryMoveVerticalNavStop(dir int) bool {
 		target = cur + dir
 	} else if sel.Kind == SectionInstances && !sel.IsTab {
 		if dir > 0 {
-			target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
+			instances := s.proj.GetInstances()
+			if s.treeCollapsed != "" && sel.ItemIndex >= 0 && sel.ItemIndex < len(instances) &&
+				s.treeCollapsed == instances[sel.ItemIndex].Title {
+				if s.moveCursorToNextInstanceRow() {
+					return true
+				}
+				// Last live instance, folded: a Down must not target this
+				// instance's hidden tabs (that would re-expand the fold, #4770).
+				// Fall through to the next stop strictly past this instance —
+				// the Archived rows moveVerticalNavStop's #1518 reveal fallback
+				// exposes below it — so the tail lands on the first archived
+				// session instead of trapping on the folded row. Until that
+				// fallback runs there is no such stop, so target stays -1 and the
+				// fallback reveals it.
+				target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex+1)
+			} else {
+				target = firstNavStopAtOrAfterInstance(stops, sel.ItemIndex)
+			}
 		} else {
 			target = lastTabStopBeforeInstance(stops, sel.ItemIndex)
 		}
@@ -687,6 +710,38 @@ func (s *Sidebar) moveCursorToInstanceRow(instIdx int) {
 			return
 		}
 	}
+}
+
+// moveCursorToNextInstanceRow advances the cursor to the next live instance
+// row below the current cursor, if one is visible in the Instances section,
+// and reports whether the cursor moved. It returns false when the cursor
+// already rests on the last instance row (there is nothing below it to move
+// to within the section). Used by Down off an explicitly folded instance to
+// move past it instead of diving into its hidden tabs.
+//
+// The row predicate mirrors the one normal vertical nav (liveTabStops) uses
+// to decide what is a stop: the IsRootSep hairline (#2513) is a display-only
+// SectionInstances item that is neither a header nor a tab — it must be
+// excluded so the cursor never lands on its ItemIndex == -1 row, and in-flight
+// (non-expandable) instance rows are skipped so a folded-Down does not
+// retarget selection onto a transient session that normal j/k navigation
+// never stops on. When no next expandable instance row is visible, this
+// returns false so the caller's reveal-Archived fallback (or a no-op) takes
+// over instead of trapping the cursor on a non-target row.
+func (s *Sidebar) moveCursorToNextInstanceRow() bool {
+	instances := s.proj.GetInstances()
+	for j := s.selectedIdx + 1; j < len(s.visibleItems); j++ {
+		item := s.visibleItems[j]
+		if item.Kind != SectionInstances || item.IsHeader || item.IsTab || item.IsRootSep {
+			continue
+		}
+		if item.ItemIndex >= 0 && item.ItemIndex < len(instances) && !tree.Expandable(instances[item.ItemIndex]) {
+			continue
+		}
+		s.selectedIdx = j
+		return true
+	}
+	return false
 }
 
 // GetSelectedInstance returns the instance under the cursor — including when
