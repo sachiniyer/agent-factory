@@ -238,7 +238,13 @@ func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
 		return nil, fmt.Errorf("encode global config snapshot: %w", err)
 	}
 	snapshot := snapshotConfig(global)
-	snapshot.source.builtIn = snapshotConfig(DefaultConfig())
+	// Use the compiled-in defaults, not DefaultConfig(), as the built-in
+	// provenance baseline: DefaultConfig() reruns the machine-dependent claude
+	// probe and would reintroduce the auto-detected ProgramOverrides the
+	// operator may have cleared, changing the effective snapshot. The
+	// auto-detected override lives in the handed-off global layer, not the
+	// built-in baseline (#5113).
+	snapshot.source.builtIn = snapshotConfig(staticDefaultConfig())
 	if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
 		return nil, fmt.Errorf("describe global config snapshot: %w", err)
 	}
