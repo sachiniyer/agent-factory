@@ -37,9 +37,10 @@ func TestValidateAccountEnvironmentCommand_IoniceDynamicClassCanaries(t *testing
 		// Nothing after the token: the empty reading exits for want of a value.
 		`ionice -c"$CLASS"`,
 		`ionice -n"$LEVEL"`,
-		// Nested wrappers still unwrap.
+		// Nested wrappers still unwrap when the inner wrapper's options are
+		// literal: the inner option loop consumes them before the outer
+		// wrapper's child-tail scan starts, so the scan never re-judges them.
 		`ionice -c"$CLASS" taskset -c 0-3 npm run dev`,
-		`nice -n 10 ionice -c"$CLASS" npm run dev`,
 		// Words that look like class names but are not exact matches.
 		`ionice -c"$CLASS" best npm run dev`,
 		`ionice -c"$CLASS" idler`,
@@ -47,6 +48,87 @@ func TestValidateAccountEnvironmentCommand_IoniceDynamicClassCanaries(t *testing
 		t.Run(command, func(t *testing.T) {
 			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
 				"command %q cannot change the account environment and must stay allowed", command)
+		})
+	}
+}
+
+// Nesting a dynamic-option ionice under a wrapper that scans its child tail
+// (nice, or ionice itself) is REFUSED for parity with the existing ionice
+// behavior: the outer wrapper's child-tail scan (shadowedChildTailMutates)
+// re-judges the inner ionice's dynamic option token — e.g. `-c"$CLASS"` — as a
+// suffix position, and a non-literal suffix head fails closed because it could
+// expand to env or a same-shell builtin after word splitting. `ionice ionice
+// -c"$CLASS" npm run dev` was already refused by ionice's own scan before the
+// #4708 parity fix extended the scan to nice/nohup/timeout/setsid/stdbuf; the
+// fix makes `nice -n 10 ionice -c"$CLASS" npm run dev` match it. The dynamic
+// option is only safe when the inner wrapper's option loop consumes it
+// BEFORE the outer scan runs (the literal-option composition above), which a
+// scanning outer wrapper cannot do for the inner option words.
+func TestValidateAccountEnvironmentCommand_DynamicClassNestedUnderScanningWrapperRefuses(t *testing.T) {
+	for _, command := range []string{
+		`nice -n 10 ionice -c"$CLASS" npm run dev`,
+		`ionice ionice -c"$CLASS" npm run dev`,
+		`ionice -c 3 ionice -c"$CLASS" npm run dev`,
+		`taskset 0x1 ionice -c"$CLASS" npm run dev`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q nests a dynamic ionice option under a scanning wrapper and must fail closed for parity", command)
+		})
+	}
+}
+
+// A pinned ionice option token — `--class="$X"`, `--classdata="$N"` (the `=`
+// pins the value inside one argv word even when empty) or `-c2"$X"`/`-n2"$X"`
+// (literal value text after the flag) — is the self-contained token
+// unwrapIonice's pinned branch proves can never resolve to env, a mutating
+// builtin, or a shell (account_environment_builtins.go:425-431). The #4708
+// child-tail scan that the sibling wrappers now share re-judges every suffix
+// head, and a non-literal head fails closed, so without preserving that proof
+// nesting the token under a scanning wrapper refused commands plain `ionice`
+// accepts (`nice ionice --class="$CLASS" npm run dev`). The carve-out in
+// wrapperOperandTailMutatesUncached preserves it, so these stay ALLOWED; the
+// dynamic `-c"$CLASS"` form (TestValidateAccountEnvironmentCommand_
+// DynamicClassNestedUnderScanningWrapperRefuses) stays refused for parity.
+func TestValidateAccountEnvironmentCommand_PinnedClassNestedUnderScanningWrapperStays(t *testing.T) {
+	for _, command := range []string{
+		// The review's exact shape, under each scanning sibling wrapper.
+		`nice ionice --class="$CLASS" npm run dev`,
+		`nice -n 10 ionice --class="$CLASS" npm run dev`,
+		`nohup ionice --class="$CLASS" npm run dev`,
+		`timeout 5 ionice --class="$CLASS" npm run dev`,
+		`setsid ionice --class="$CLASS" npm run dev`,
+		`stdbuf -o0 ionice --class="$CLASS" npm run dev`,
+		// The other pinned spellings the same proof covers.
+		`nice ionice --classdata="$N" npm run dev`,
+		`nice ionice -c2"$X" npm run dev`,
+		`nice -n 10 ionice -n4"$X" npm run dev`,
+		// ionice/taskset already ran this scan (#4708); the pinned proof applies
+		// there too, so nesting under them is accepted for the same reason.
+		`ionice ionice --class="$CLASS" npm run dev`,
+		`taskset 0x1 ionice --class="$CLASS" npm run dev`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.NoError(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q nests a pinned ionice option whose fixed prefix can never be a command head", command)
+		})
+	}
+}
+
+// Preserving the pinned-token proof must not skip the child it schedules: the
+// words after the pinned option still judge exactly as plain `ionice` judges
+// them, so a buried mutation stays REFUSED.
+func TestValidateAccountEnvironmentCommand_PinnedClassNestedUnderScanningWrapperStillJudgesChild(t *testing.T) {
+	for _, command := range []string{
+		`nice ionice --class="$CLASS" env CODEX_HOME=/other codex`,
+		`nohup ionice --class="$CLASS" unset CODEX_HOME`,
+		`timeout 5 ionice --class="$CLASS" sh -c 'unset CODEX_HOME; codex'`,
+		`setsid ionice --class="$CLASS" xargs --process-slot-var=CODEX_HOME codex`,
+		`ionice ionice --class="$CLASS" env CODEX_HOME=/other codex`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			require.Error(t, ValidateAccountEnvironmentCommand(command, scopedProcessTabAccount()),
+				"command %q changes the account environment through ionice's child", command)
 		})
 	}
 }
