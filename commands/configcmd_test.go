@@ -218,23 +218,39 @@ func TestConfigSetHelpListsEveryProjectAdmittedKey(t *testing.T) {
 	}
 	// The parenthetical enumerates every key the manifest admits to the personal
 	// per-project layer — the same set resolveProjectSettable enforces. Check the
-	// parenthetical itself, not the whole Long: an admitted key already appears in
+	// parenthetical itself, not the whole Long (an admitted key already appears in
 	// the global "Settable keys" list, so a Long-wide search can never catch one
-	// missing here (#3869 added limit_account_candidates to the layer and this
-	// list lagged).
+	// missing here), and compare both directions at top-level-key granularity so a
+	// key that loses the layer cannot linger in help (#3869 added
+	// limit_account_candidates to the layer and this list lagged).
 	start := strings.Index(configSetCmd.Long, "are accepted there\n(")
 	if start < 0 {
 		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
 	}
-	rest := configSetCmd.Long[start:]
-	end := strings.Index(rest, ");")
+	rest := configSetCmd.Long[start+len("are accepted there\n("):]
+	end := strings.Index(rest, ")")
 	if end < 0 {
 		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
 	}
-	admitted := rest[:end]
+	listed := map[string]bool{}
+	for _, tok := range strings.Split(rest[:end], ", ") {
+		top, _, _ := strings.Cut(tok, ".")
+		listed[top] = true
+	}
+	admitted := map[string]bool{}
 	for _, entry := range config.Manifest() {
-		if entry.Sources.Has(config.SourceProjectPersonal) && !strings.Contains(admitted, entry.Key) {
-			t.Errorf("config set help's per-project list omits admitted key %q", entry.Key)
+		if entry.Sources.Has(config.SourceProjectPersonal) {
+			admitted[entry.Key] = true
+		}
+	}
+	for key := range admitted {
+		if !listed[key] {
+			t.Errorf("config set help's per-project list omits admitted key %q", key)
+		}
+	}
+	for key := range listed {
+		if !admitted[key] {
+			t.Errorf("config set help's per-project list claims key %q the manifest does not admit per project", key)
 		}
 	}
 }
