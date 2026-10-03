@@ -217,12 +217,24 @@ func TestConfigSetHelpListsEveryProjectAdmittedKey(t *testing.T) {
 		t.Fatalf("config set help omits a valid per-project key form; want %q in:\n%s", want, configSetCmd.Long)
 	}
 	// The parenthetical enumerates every key the manifest admits to the personal
-	// per-project layer — the same set resolveProjectSettable enforces — so a key
-	// that gains the layer without appearing here is stale help (#3869 added
-	// limit_account_candidates to the layer and this list lagged).
+	// per-project layer — the same set resolveProjectSettable enforces. Check the
+	// parenthetical itself, not the whole Long: an admitted key already appears in
+	// the global "Settable keys" list, so a Long-wide search can never catch one
+	// missing here (#3869 added limit_account_candidates to the layer and this
+	// list lagged).
+	start := strings.Index(configSetCmd.Long, "are accepted there\n(")
+	if start < 0 {
+		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
+	}
+	rest := configSetCmd.Long[start:]
+	end := strings.Index(rest, ");")
+	if end < 0 {
+		t.Fatalf("config set help lost its per-project admission parenthetical:\n%s", configSetCmd.Long)
+	}
+	admitted := rest[:end]
 	for _, entry := range config.Manifest() {
-		if entry.Sources.Has(config.SourceProjectPersonal) && !strings.Contains(configSetCmd.Long, entry.Key) {
-			t.Errorf("config set help omits personal-admitted key %q", entry.Key)
+		if entry.Sources.Has(config.SourceProjectPersonal) && !strings.Contains(admitted, entry.Key) {
+			t.Errorf("config set help's per-project list omits admitted key %q", entry.Key)
 		}
 	}
 }
