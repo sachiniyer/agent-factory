@@ -59,6 +59,14 @@ func TestScrubLogRedactsSanitizedTitleInSiblingRecoveryPath(t *testing.T) {
 // status rejects []InstanceData decoding. The fallback must both omit its
 // sensitive alternate_path value and retain enough title context to scrub the
 // same sibling spelling from the separately collected daemon log.
+//
+// It additionally pins #3588's cross-section parity contract for the fallback path
+// the typed path already upholds: the verbatim repo_path and its private directory
+// leaf must not survive scrubLog. #4115 deliberately registers no root for the
+// untyped value, so the fallback's substitution for the typed path's [repo:1] is a
+// log-scope blank to [redacted] rather than a numbered token — assert the path is
+// gone AND that [repo:1] is not fabricated (which would require the registration
+// #4115 declined), so a regression toward EITHER leak survives this test.
 func TestScrubLogRedactsSanitizedTitleFromRejectedRecord(t *testing.T) {
 	r := &redactor{}
 	r.noteAFHome(siblingLeakAFHome)
@@ -80,6 +88,25 @@ func TestScrubLogRedactsSanitizedTitleFromRejectedRecord(t *testing.T) {
 	if strings.Contains(got, siblingLeakDiskTitle) {
 		t.Fatalf("scrubLog leaked the sanitized session title %q after typed decode rejection:\n%s",
 			siblingLeakDiskTitle, got)
+	}
+	// The parity contract the typed-path witness (TestScrubLogRedactsSanitizedTitleInSiblingRecoveryPath)
+	// already enforces for ConfidentialClient: the verbatim repo path and its private leaf must
+	// not survive the log scrub. The fallback's marker stands in for the typed path's [repo:1].
+	for _, secret := range []string{siblingLeakRepo, "ConfidentialClient", siblingLeakTitle} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubLog leaked %q after typed decode rejection:\n%s", secret, got)
+		}
+	}
+	for _, want := range []string{"WORKTREE_MISSING_DETECTED", "identity unresolved"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scrubLog removed triage value %q:\n%s", want, got)
+		}
+	}
+	// The repo path is blanked, not numbered: [repo:1] would require noteRepoRoot on the
+	// untyped value, which #4115 deliberately declined. Its absence proves the fallback
+	// did not register a root to get the path out of the log.
+	if strings.Contains(got, "[repo:1]") {
+		t.Errorf("scrubLog fabricated a numbered root token for an untyped fallback repo_path:\n%s", got)
 	}
 }
 
