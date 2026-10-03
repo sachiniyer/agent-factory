@@ -10,20 +10,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCreateRPC_WhitespaceProgramIsStoredRawThenOpaqueSelfHandoffIsRefused
+// TestCreateRPC_WhitespaceProgramIsNormalizedAtCreateThenOpaqueSelfHandoffIsRefused
 // exercises the real daemon control-socket round-trip the bug report describes:
 // the bare RPC create path gates Program through validateCreateProgram (the
-// tokenizer trims leading/trailing whitespace, so " claude" is accepted) and
-// manager_create.go:116 stores req.Program RAW with no strings.TrimSpace, so
-// i.Program reaches the same-target guard untrimmed. With an opaque
-// program_overrides.claude wrapper (effective ""), the guard's opaque branch
-// must still refuse a self-handoff despite whitespace on the recorded enum.
+// tokenizer trims leading/trailing whitespace, so " claude" is accepted). The
+// fix trims req.Program at the RPC create boundary (controlServer.createSession,
+// not Manager.CreateSession — the root-agent ensure loop calls the latter
+// directly with command strings that must not be trimmed) so the stored enum
+// cannot carry surrounding whitespace: ResolveProgram's program_overrides lookup
+// is an EXACT map key, so an untrimmed " claude" would miss the "claude"
+// override and launch the bare command instead of the wrapper, and the opaque
+// same-target guard would then refuse a genuine cross-command transition.
+// Normalizing at the boundary is the single point that makes every reader — the
+// override resolution, the recorded enum the guard compares, and the
+// title-reservation helpers — agree on the trimmed identity.
 //
-// This closes the round-trip the session-level repro only simulates: there the
-// whitespace stored value is injected directly via handoffTestInstance; here it
-// flows through validateCreateProgram -> manager.CreateSession -> NewInstance
-// -> i.Program and survives untrimmed, then the guard reads it.
-func TestCreateRPC_WhitespaceProgramIsStoredRawThenOpaqueSelfHandoffIsRefused(t *testing.T) {
+// With an opaque program_overrides.claude wrapper (effective ""), the guard's
+// opaque branch must refuse a self-handoff. This closes the round-trip the
+// session-level repro only simulates: there the whitespace value is injected
+// directly via handoffTestInstance; here it flows through validateCreateProgram
+// -> controlServer.createSession (which trims) -> Manager.CreateSession -> NewInstance
+// -> i.Program.
+func TestCreateRPC_WhitespaceProgramIsNormalizedAtCreateThenOpaqueSelfHandoffIsRefused(t *testing.T) {
 	const wrapper = "/home/dev/bin/agent-wrapper"
 
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
@@ -58,10 +66,12 @@ func TestCreateRPC_WhitespaceProgramIsStoredRawThenOpaqueSelfHandoffIsRefused(t 
 
 	inst, ok := manager.instances[daemonInstanceKey(repo.ID, title)]
 	require.True(t, ok, "the created session must be registered in the manager")
-	// The daemon stored req.Program RAW (manager_create.go:116): i.Program
-	// carries the leading whitespace every launch path re-tokenizes away.
-	require.Equal(t, " "+tmux.ProgramClaude, inst.AgentProgram(),
-		"precondition: the daemon create path must persist the whitespace into i.Program untrimmed")
+	// The create path normalizes the program enum: i.Program is the trimmed
+	// "claude", not " claude". This is the fix — ResolveProgram's override
+	// lookup is an exact map key, so an untrimmed value would miss the
+	// "claude" override and launch the bare command instead of the wrapper.
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+		"the daemon create path must trim the program enum into i.Program")
 
 	// Agent conversations are cleared on a destructive self-handoff; seed one so
 	// a refusal (no wipe) and a bug (wipe) are distinguishable.
@@ -73,21 +83,21 @@ func TestCreateRPC_WhitespaceProgramIsStoredRawThenOpaqueSelfHandoffIsRefused(t 
 	require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
 		"precondition: the session is claude by its configured enum")
 
-	// The guard must refuse the self-handoff despite the whitespace on the
-	// recorded enum, naming the same agent it identified.
+	// The guard must refuse the self-handoff: the recorded enum is the trimmed
+	// claude and the target is claude, so the opaque branch matches.
 	require.ErrorContains(t, inst.ValidateHandoffTarget(tmux.ProgramClaude), "already running claude")
 	_, swapErr := inst.SwapAgentProgram(tmux.ProgramClaude, session.HandoffReasonManual, "abc123def456", false)
 	require.ErrorContains(t, swapErr, "already running claude",
 		"the state mutation must refuse what the guard refuses")
 
 	// No destructive side effect may fire on a refused self-handoff.
-	require.Equal(t, " "+tmux.ProgramClaude, inst.AgentProgram(),
-		"Program must not be rewritten to the trimmed enum on a refused self-handoff")
+	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
+		"Program must not be rewritten on a refused self-handoff")
 	require.Empty(t, inst.Tabs[0].Handoffs,
 		"a refused self-handoff must not reach the ledger")
 
-	// A different agent is still a real handoff the guard must admit — trimming
-	// the recorded enum must not over-match and block a genuine cross-agent swap.
+	// A different agent is still a real handoff the guard must admit — the
+	// trimmed recorded enum must not over-match and block a genuine swap.
 	require.NoError(t, inst.ValidateHandoffTarget(tmux.ProgramCodex),
-		"a different agent stays reachable despite recorded whitespace")
+		"a different agent stays reachable")
 }
