@@ -30,6 +30,18 @@ func TestMain(m *testing.M) {
 		fakeVSCodeServerMain()
 		return
 	}
+	// A re-exec of this test binary standing in for an upgrade-recovery
+	// subprocess whose exit-0 path must be driven with test-injected seams
+	// (no real supervisor, daemon, or adopt operation). It must return
+	// BEFORE the tripwires and sandboxing below for the same reason the
+	// fakeVSCode re-exec does: it is a child process of a test, not a test
+	// run, and must neither run the suite nor trip the guards its parent
+	// armed. See TestRecoveryExit0LogsHintOnDirty in
+	// upgrade_recovery_exit_test.go.
+	if os.Getenv(recoveryExit0ReexecEnv) != "" {
+		recoveryExit0ReexecMain()
+		return
+	}
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux
