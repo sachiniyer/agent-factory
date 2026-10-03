@@ -1225,3 +1225,67 @@ func TestRemovePIDFileIfStillNames_RecycledPIDNotUnlinked(t *testing.T) {
 			"daemon; the home binding must not keep a foreign entry: stat err=%v", foreign, err)
 	}
 }
+
+// TestRemovePIDFileIfStillNames_UnverifiableReplacementNotUnlinked pins the
+// inconclusive-binding half of the recycled-PID recheck in removePIDFileIfStillNames.
+// The stale PID file names a value the kernel recycled onto a live `af --daemon`
+// whose AGENT_FACTORY_HOME the caller cannot resolve: "~other" is a "~user" form
+// config.ConfigDirFor rejects, so classifyDaemonHome returns daemonUnverifiable
+// (the case the bool pidBelongsToThisHome collapses into "not ours"). Pre-fix the
+// recheck treated every non-daemonOurs result as removable and unlinked the file,
+// orphaning a live daemon whose freshly-written daemon.pid this recycle landed on
+// and contradicting the daemonUnverifiable policy stopDaemonUntil applies. The
+// recheck must retain the file unless the current process is PROVEN foreign (or
+// dead, which classifies foreign): an inconclusive binding is neither signalled
+// nor deleted, the same way stopDaemonUntil neither signals nor orphans an
+// unverifiable PID.
+func TestRemovePIDFileIfStillNames_UnverifiableReplacementNotUnlinked(t *testing.T) {
+	if _, err := os.Stat("/proc"); err != nil {
+		t.Skip("scoping by AF home needs /proc")
+	}
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// A live `af --daemon` whose AGENT_FACTORY_HOME the caller cannot resolve:
+	// "~other" is a "~user" form config.ConfigDirFor rejects, so
+	// classifyDaemonHome classifies it daemonUnverifiable. Its binary lives
+	// outside /tmp/Test* (fakeBinDir) so it is not rejected as a Go test binary
+	// before the home check runs.
+	const unresolvableHome = "~other"
+	unverifiable := spawnFakeDaemonWithHome(t, unresolvableHome)
+	if scope := classifyDaemonHome(unverifiable); scope != daemonUnverifiable {
+		t.Fatalf("classifyDaemonHome(unverifiable pid=%d) = %v; want daemonUnverifiable — the test "+
+			"fixture must produce an inconclusive binding for the recheck to exercise", unverifiable, scope)
+	}
+
+	// The PID file names this live unverifiable daemon's PID. The number-only
+	// compare would treat it as the stale entry and unlink it; the recheck must
+	// classify the live PID and, on an inconclusive binding, retain the file.
+	pidFile := filepath.Join(home, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", unverifiable)), 0600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+
+	removePIDFileIfStillNames(pidFile, unverifiable, time.Time{})
+
+	if _, err := os.Stat(pidFile); err != nil {
+		t.Fatalf("removePIDFileIfStillNames removed the PID file when the PID it names is a live "+
+			"daemon whose home binding is unverifiable (pid=%d); the recycled number may be this home's "+
+			"own daemon whose /proc frame was unreadable in this moment, so unlinking it orphans the live "+
+			"daemon — an inconclusive binding is neither signalled nor deleted: %v", unverifiable, err)
+	}
+
+	// The genuine stale case (a PID that is PROVEN foreign) is still removed, so
+	// the unverifiable retention does not widen into keeping a foreign entry.
+	foreignHome := testguard.SocketTempDir(t)
+	foreign := spawnFakeDaemonWithHome(t, foreignHome)
+	staleFile := filepath.Join(home, "stale-foreign.pid")
+	if err := os.WriteFile(staleFile, []byte(fmt.Sprintf("%d", foreign)), 0600); err != nil {
+		t.Fatalf("write stale foreign PID file: %v", err)
+	}
+	removePIDFileIfStillNames(staleFile, foreign, time.Time{})
+	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+		t.Fatalf("removePIDFileIfStillNames left a stale PID file (pid=%d) that names a FOREIGN home's "+
+			"daemon; a proven-foreign PID must still be unlinked: stat err=%v", foreign, err)
+	}
+}

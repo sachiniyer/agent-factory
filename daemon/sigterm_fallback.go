@@ -422,20 +422,20 @@ func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
 		if current != pid {
 			return nil // a new daemon has written its own PID; keep the file
 		}
-		// The number still names the stale PID, but the kernel may have recycled
-		// that PID onto a freshly-started same-home daemon that wrote this same
-		// number to the PID file. A number-only compare would unlink that valid
-		// replacement and orphan the new daemon. Re-classify the live PID: if it
-		// now belongs to this home's daemon (pidBelongsToThisHome), the recycled
-		// number is the new daemon's, and the file is its — leave it. A dead or
-		// foreign PID (the original foreign daemon, or the recycled number now on
-		// an unrelated process) is not this home's daemon and the stale entry is
-		// safe to unlink. (#4793)
-		if pidBelongsToThisHome(pid) {
+		// The number still names the stale PID, but the kernel may have recycled it
+		// onto a same-home daemon that wrote the same number. Re-classify the live
+		// PID with the tri-state classifier (not the bool helper, which collapses
+		// daemonUnverifiable into "not ours"): a PROVEN-foreign (or dead) PID is
+		// unlinked; daemonOurs is the recycled number's new owner, and
+		// daemonUnverifiable may be this home's own daemon whose environ could not
+		// be read — unlinking it would orphan the live daemon, so retain it. (#4793)
+		switch classifyDaemonHome(pid) {
+		case daemonOurs, daemonUnverifiable:
 			return nil
-		}
-		if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
-			log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
+		case daemonForeign:
+			if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+				log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
+			}
 		}
 		return nil
 	}); err != nil {
