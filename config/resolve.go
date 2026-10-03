@@ -238,7 +238,7 @@ func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
 		return nil, fmt.Errorf("encode global config snapshot: %w", err)
 	}
 	snapshot := snapshotConfig(global)
-	snapshot.source.builtIn = snapshotConfig(global)
+	snapshot.source.builtIn = snapshotConfig(DefaultConfig())
 	if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
 		return nil, fmt.Errorf("describe global config snapshot: %w", err)
 	}
