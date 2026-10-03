@@ -389,11 +389,18 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 // identity has been selected, so an already-due ordinary resume may retain the
 // old identity after an admission or teardown refusal, but never after a failed
 // identity checkpoint.
+//
+// operatorInitiated selects the liveness-probe budget the runtime prep uses
+// (see resumeFromLimitLockedOutcome): the explicit manual-swap RPC keeps the
+// operator budget, while the poll-driven scheduler keeps the poll loop's short
+// tie-break budget so a blackholed remote does not hold the global
+// config-apply/account-limit fences it has already acquired for the swap.
 func (m *Manager) commitNewAccountSwapIdentity(
 	repoID, key, requestedTitle string,
 	instance *session.Instance,
 	scheduled *autoAccountSwap,
 	global *config.Config,
+	operatorInitiated bool,
 ) (fallbackEligible bool, err error) {
 	fallbackDue := scheduled.fallbackDue
 	var admitted *autoAccountSwap
@@ -411,7 +418,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	// completion log must name the identity actually selected.
 	*scheduled = *admitted
 
-	err = m.prepareRuntimeForAccountSwap(key, instance)
+	err = m.prepareRuntimeForAccountSwap(key, instance, operatorInitiated)
 	if err == nil {
 		// The outgoing runtime is conclusively stopped, so its append-only
 		// transcript is final: carry it into the incoming account now, before
@@ -431,7 +438,9 @@ func (m *Manager) commitNewAccountSwapIdentity(
 			return false, errors.Join(refusal, m.persistSettlement(repoID, key, instance))
 		}
 		if scheduled.manual && !instance.LimitReached() {
-			probe := probeLiveness(instance, instance.AgentServer())
+			// Operator one-shot RPC: use the operator probe budget, not the
+			// poll loop's 5s tie-break budget. See remoteloss.go.
+			probe := probeLivenessForOperator(instance, instance.AgentServer())
 			if probe == probeAbsent || probe == probeAnsweredDead {
 				// The agent may have stopped before a sibling refused teardown.
 				// No identity was selected: persist ordinary recovery on the old one.
@@ -722,8 +731,22 @@ func (m *Manager) settleReplacementRuntime(
 // prepareRuntimeForAccountSwap establishes that every old local pane is gone
 // before the replacement is recorded. An unanswered probe refuses, while an
 // absent agent still triggers a sibling-pane recheck for retry safety.
-func (m *Manager) prepareRuntimeForAccountSwap(key string, instance *session.Instance) error {
-	probe := probeLiveness(instance, instance.AgentServer())
+//
+// operatorInitiated selects the probe budget: an explicit manual-swap RPC keeps
+// probeLivenessForOperator's longer budget, while the poll-driven auto-resume
+// caller keeps the poll loop's short tie-break budget (remoteLostConfirmTimeout).
+// The auto path reaches here while already holding the global config-apply and
+// account-limit fences (resumeFromLimitLockedOutcome acquires them before calling
+// commitNewAccountSwapIdentity), so the operator budget would hold those fences
+// for the whole probe; the manual RPC holds no such global fences for other
+// sessions. See remoteloss.go.
+func (m *Manager) prepareRuntimeForAccountSwap(key string, instance *session.Instance, operatorInitiated bool) error {
+	var probe livenessProbe
+	if operatorInitiated {
+		probe = probeLivenessForOperator(instance, instance.AgentServer())
+	} else {
+		probe = probeLiveness(instance, instance.AgentServer())
+	}
 	if probe == probeUnknown {
 		return fmt.Errorf("cannot switch accounts for %q: its current runtime did not answer the liveness probe; not starting another identity while the old one may still be running", instance.Title)
 	}

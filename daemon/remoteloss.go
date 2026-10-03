@@ -68,7 +68,58 @@ var (
 	// status, root-ensure, lost-restore and limit-resume for EVERY other
 	// session (#1794). The confirmation only has to break a tie the debounce
 	// has already all but settled, so it gets a tight budget.
+	//
+	// This budget is for the POLL LOOP only: settleRemoteProbeFailure's
+	// debounce confirmation and remoteSandboxLiveness's pre-recovery probe,
+	// both reached inside RefreshStatuses's serial walk after a slow failure.
+	// The operator-initiated one-shot probes reached through
+	// probeLivenessForOperator use remoteConfirmProbeTimeout instead — see
+	// that var for why the 5s tie-break budget does not fit them.
 	remoteLostConfirmTimeout = 5 * time.Second
+	// remoteConfirmProbeTimeout bounds the operator-initiated Alive() probe
+	// driven through probeLivenessForOperator: ConfirmHandoffDelivery, the
+	// startup-unknown arm of retryPendingHandoff, the limit-resume re-spawn
+	// gate, and the account-swap runtime prep. It is deliberately SEPARATE
+	// from remoteLostConfirmTimeout and sized for a structurally different
+	// caller.
+	//
+	// remoteLostConfirmTimeout's shortness is justified ONLY for the daemon's
+	// serial poll walk: a failed Snapshot already spent the full
+	// remoteAgentCallTimeout (30s), and RefreshStatuses walks instances
+	// SERIALLY, so an unbounded second probe would let one blackholed sandbox
+	// stall status, root-ensure, lost-restore and limit-resume for EVERY other
+	// session (#1794). None of that applies to an operator RPC: it is a
+	// one-shot action under a single per-session op lock — no prior 30s call
+	// already spent, no serial walk of other sessions to protect, no debounce
+	// tie to break. Inheriting the poll's 5s budget (as cc0208b did when it
+	// wired the new confirm/retry verbs to probeLiveness) was never
+	// re-justified for this context and cuts a live-but-slow runtime off
+	// mid-probe.
+	//
+	// The budget must be at least as long as the transport's own dial timeout.
+	// The remote agent-server HTTP client dials with a 10s TCP budget
+	// (remoteAgentDialTimeout) and bounds the whole control round-trip at 30s
+	// (remoteAgentCallTimeout); both live in the session package unexported, so
+	// they are named as literals here (status_remote_test.go does the same).
+	// A caller budget shorter than the dial timeout lets the probe give up
+	// before the transport even finishes establishing the connection on a cold
+	// link — the 5s budget is shorter than the 10s dial it runs on top of, so a
+	// remote whose /v1/agent/alive exceeds 5s answered probeUnknown and both
+	// operator exits refused on every retry, leaving only restore/kill (which
+	// discard unpushed commits) — the exact harm the #1794/#2589 "unreachable is
+	// not dead" discipline exists to prevent.
+	//
+	// Matching the transport's call timeout (30s) makes the caller's budget
+	// EQUAL to the underlying Alive() call's own, so aliveWithin's timer never
+	// fires before the transport gives up: the operator probe waits exactly as
+	// long as the transport itself would, and aliveWithin's buffered-channel
+	// goroutine settles at the same bound rather than outliving the caller. The
+	// trade-off is operator wait time on a truly unreachable remote — a
+	// one-shot, per-session cost to the operator, not a stall affecting other
+	// sessions — and both ends land in the same safe probeUnknown refusal; the
+	// looser budget only widens the window in which a live-but-slow remote can
+	// answer and avoid the destructive path.
+	remoteConfirmProbeTimeout = 30 * time.Second
 )
 
 // remoteLossState is the per-session debounce state. Guarded by Manager.mu.
@@ -420,9 +471,39 @@ func (p livenessProbe) notAliveReason() string {
 // REMOTE instances only. A local probe is in-process (no network to hang on) and
 // its Alive never errors, so it answers directly; wrapping it would spend a
 // goroutine and a timer per idle session per tick for nothing.
+//
+// This is the POLL-LOOP entry: it bounds a remote probe with the serial-walk
+// tie-break budget remoteLostConfirmTimeout (5s), which is justified by the
+// failed Snapshot and serial RefreshStatuses walk that precede it (#1794). The
+// one idle-branch poll caller below (refreshInstanceStatus) uses this form for
+// exactly that reason. Operator-initiated one-shot RPCs — confirm, retry,
+// limit-resume, account-swap — have no prior failed call and no serial walk, so
+// they use probeLivenessForOperator and a budget that does not cut a cold-but-live
+// connection off before it can answer.
 func probeLiveness(instance *session.Instance, as session.AgentServer) livenessProbe {
+	return probeLivenessWithin(instance, as, remoteLostConfirmTimeout)
+}
+
+// probeLivenessForOperator is the operator-initiated RPC form of probeLiveness:
+// ConfirmHandoffDelivery, the startup-unknown arm of retryPendingHandoff, the
+// limit-resume re-spawn gate, and the account-swap runtime prep. It bounds a
+// remote probe with remoteConfirmProbeTimeout (see that var) rather than the
+// poll loop's 5s tie-break budget, because none of the 5s justification — a
+// prior 30s Snapshot already spent, a serial walk of other sessions to protect,
+// a debounce tie to break (#1794) — applies to a one-shot action under a single
+// per-session op lock. Local instances are in-process and answer directly, so
+// the timeout is irrelevant on that branch.
+func probeLivenessForOperator(instance *session.Instance, as session.AgentServer) livenessProbe {
+	return probeLivenessWithin(instance, as, remoteConfirmProbeTimeout)
+}
+
+// probeLivenessWithin is the shared remote-vs-local probe. For a REMOTE instance
+// the probe crosses a network, so it runs under the caller's timeout via
+// aliveWithin (probeUnknown on no answer); for a LOCAL instance it is in-process
+// and answers directly.
+func probeLivenessWithin(instance *session.Instance, as session.AgentServer, timeout time.Duration) livenessProbe {
 	if isRemoteWorkspace(instance) {
-		return aliveWithin(as, remoteLostConfirmTimeout)
+		return aliveWithin(as, timeout)
 	}
 	alive, err := as.Alive()
 	if err != nil {
