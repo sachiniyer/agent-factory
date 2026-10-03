@@ -8,17 +8,22 @@ import (
 
 // isProcNumericMagicLink reports whether cleaned is a
 // /proc/<pid>/{cwd,root,exe,fd,fdinfo,ns,map_files} magic link (with or without
-// a trailing path). The kernel resolves these per-process against the process
-// <pid> — /proc/<pid>/cwd is that process's live cwd, /proc/<pid>/root its
-// root, /proc/<pid>/fd/<n> its open file descriptors — so a home spelled through
-// one is the same cross-frame hazard isProcessRelativeProcfsHome guards for
-// /proc/self/...: a same-UID, same-namespace foreign daemon launched with
-// AGENT_FACTORY_HOME=/proc/<other-pid>/cwd/state serves the directory <other-pid>
-// points at, while canonicalDir resolves the same spelling in the CALLER's frame
-// (or the other process chdir's after the daemon bound its socket), so a stale
-// PID file or lone pgrep result can misclassify it daemonOurs (#4793 via a
-// PID-addressed procfs path). A bare /proc/<pid> or a non-magic entry
-// (/proc/<pid>/cmdline, /proc/<pid>/stat — regular files) is not a magic link.
+// a trailing path), or the per-task form
+// /proc/<pid>/task/<tid>/{cwd,root,exe,fd,fdinfo,ns,map_files}. The kernel
+// resolves these per-process (and per-thread) against the process <pid> —
+// /proc/<pid>/cwd is that process's live cwd, /proc/<pid>/root its root,
+// /proc/<pid>/fd/<n> its open file descriptors, and /proc/<pid>/task/<tid>/cwd
+// is thread <tid>'s live cwd — so a home spelled through one is the same
+// cross-frame hazard isProcessRelativeProcfsHome guards for /proc/self/...: a
+// same-UID, same-namespace foreign daemon launched with
+// AGENT_FACTORY_HOME=/proc/<other-pid>/cwd/state (or
+// /proc/<other-pid>/task/<tid>/cwd/state) serves the directory <other-pid>
+// points at, while canonicalDir resolves the same spelling in the CALLER's
+// frame (or the other process — or thread — chdir's after the daemon bound its
+// socket), so a stale PID file or lone pgrep result can misclassify it
+// daemonOurs (#4793 via a PID-addressed procfs path). A bare /proc/<pid> or a
+// non-magic entry (/proc/<pid>/cmdline, /proc/<pid>/stat — regular files) is
+// not a magic link.
 func isProcNumericMagicLink(cleaned string) bool {
 	const proc = "/proc/"
 	if !strings.HasPrefix(cleaned, proc) {
@@ -35,11 +40,39 @@ func isProcNumericMagicLink(cleaned string) bool {
 			return false // /proc/self, /proc/thread-self, etc. handled by the spelling guard.
 		}
 	}
-	magic := rest[slash+1:]
-	if i := strings.IndexByte(magic, '/'); i >= 0 {
-		magic = magic[:i]
+	entry := rest[slash+1:]
+	// /proc/<pid>/task/<tid>/{cwd,root,exe,fd,fdinfo,ns,map_files} is the same
+	// per-thread magic-link set the kernel resolves against <pid>/<tid>, not the
+	// caller. A home spelled through one (e.g.
+	// AGENT_FACTORY_HOME=/proc/<pid>/task/<tid>/cwd/state) is the same
+	// cross-frame hazard as the per-process form: the first component after
+	// <pid> is "task", which the magic switch below does not match, so without
+	// this form the guard returned false and a /proc/<pid>/task/<tid>/... home
+	// bypassed it. Recognize the task/<tid>/ form and apply the same magic-link
+	// set to the per-thread entry (including its fd links); a bare
+	// /proc/<pid>/task or /proc/<pid>/task/<tid> directory is not a magic link.
+	if entry == "task" || strings.HasPrefix(entry, "task/") {
+		tidRest := entry[len("task"):]
+		if !strings.HasPrefix(tidRest, "/") {
+			return false // "/proc/<pid>/task" or "/proc/<pid>/task/" alone is a directory.
+		}
+		tidRest = tidRest[1:]
+		tidSlash := strings.IndexByte(tidRest, '/')
+		if tidSlash <= 0 {
+			return false // "/proc/<pid>/task/<tid>" alone is the thread directory, not a magic link.
+		}
+		tidStr := tidRest[:tidSlash]
+		for i := 0; i < len(tidStr); i++ {
+			if tidStr[i] < '0' || tidStr[i] > '9' {
+				return false // a non-numeric <tid> is not a /proc task entry.
+			}
+		}
+		entry = tidRest[tidSlash+1:]
 	}
-	switch magic {
+	if i := strings.IndexByte(entry, '/'); i >= 0 {
+		entry = entry[:i]
+	}
+	switch entry {
 	case "cwd", "root", "exe", "fd", "fdinfo", "ns", "map_files":
 		return true
 	}

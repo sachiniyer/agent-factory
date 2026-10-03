@@ -256,6 +256,18 @@ func TestIsProcessRelativeProcfsHome_ProcNumericPidMagicLinks(t *testing.T) {
 		"/proc/9999/fdinfo/5",
 		"/proc/9999/ns/mnt",
 		"/proc/9999/map_files/foo",
+		// The per-task form /proc/<pid>/task/<tid>/{cwd,root,exe,fd,fdinfo,ns,map_files}
+		// is the same per-thread magic link the kernel resolves against <pid>/<tid>,
+		// not the caller, so a home spelled through it is the same cross-frame hazard.
+		"/proc/1/task/2/cwd",
+		"/proc/1/task/2/cwd/state",
+		"/proc/12345/task/67/root/state",
+		"/proc/12345/task/67/root",
+		"/proc/9999/task/3/exe",
+		"/proc/9999/task/3/fd/7",
+		"/proc/9999/task/3/fdinfo/5",
+		"/proc/9999/task/3/ns/mnt",
+		"/proc/9999/task/3/map_files/foo",
 		// Non-canonical spellings clean to the same magic link.
 		"/proc//1/cwd/state",
 		"/proc/1/../1/cwd/state",
@@ -278,12 +290,18 @@ func TestIsProcessRelativeProcfsHome_ProcNumericPidMagicLinks(t *testing.T) {
 		"/proc/1/environ",
 		"/proc/1/io",
 		"/proc/1/status",
+		// The per-task directory /proc/<pid>/task and /proc/<pid>/task/<tid>
+		// themselves are not magic links — only the entries under <tid> are.
+		"/proc/1/task",
+		"/proc/1/task/2",
+		"/proc/1/task/2/stat",
+		"/proc/1/task/2/cmdline",
 		"/home/user/.agent-factory",
 		"/tmp/agent-factory/state",
 	} {
 		if isProcessRelativeProcfsHome(home) {
-			t.Errorf("isProcessRelativeProcfsHome(%q) = true; want false — a bare /proc/<pid> or a "+
-				"non-magic entry is not a process-relative path", home)
+			t.Errorf("isProcessRelativeProcfsHome(%q) = true; want false — a bare /proc/<pid>, "+
+				"a per-task directory, or a non-magic entry is not a process-relative path", home)
 		}
 	}
 }
