@@ -288,7 +288,7 @@ func TestDialStream_StalledHandshakeTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, e := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		_, e := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 		errc <- e
 	}()
 	select {
@@ -327,7 +327,7 @@ func TestDialStream_StalledRequestWriteTimesOut(t *testing.T) {
 
 	errc := make(chan error, 1)
 	go func() {
-		_, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+		_, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 		errc <- err
 	}()
 	select {
@@ -378,7 +378,7 @@ func TestDialStream_SlowTCPDialKeepsFullHandshakeBudget(t *testing.T) {
 		}
 	}
 
-	sc, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0)
 	if err != nil {
 		t.Fatalf("TCP dial used the WebSocket handshake budget: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestDialStream_RejectedUpgradeClosesPerDialTransport(t *testing.T) {
 		return &closeNotifyConn{Conn: conn, closed: closed}, nil
 	}
 
-	if _, err := c.DialStream(context.Background(), "alpha", "", "", 0, 0); err == nil {
+	if _, err := c.DialStream(context.Background(), StreamSession{Title: "alpha"}, "", 0, 0); err == nil {
 		t.Fatal("rejected WebSocket upgrade unexpectedly succeeded")
 	}
 	select {
@@ -490,7 +490,7 @@ func TestDialStream_RemoteThreadsTokenHeaderAndQuery(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sc, err := c.DialStream(ctx, "alpha", "", "", 0, 0)
+	sc, err := c.DialStream(ctx, StreamSession{Title: "alpha"}, "", 0, 0)
 	if err != nil {
 		t.Fatalf("DialStream over HTTP: %v", err)
 	}

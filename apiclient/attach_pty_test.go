@@ -268,7 +268,7 @@ func TestAttachTerminalHandbackHelper(t *testing.T) {
 		// own anything. Exiting 0 here is the child reporting a clean failure; the
 		// parent then checks what it left behind.
 		dead := NewWithSocket(filepath.Join(t.TempDir(), "no-daemon.sock"))
-		if _, derr := dead.AttachStream(context.Background(), "alpha", "", "", 0); derr == nil {
+		if _, derr := dead.AttachStream(context.Background(), StreamSession{Title: "alpha"}, "", 0); derr == nil {
 			t.Fatalf("attaching over a dead socket must fail")
 		}
 		fmt.Println(attachHelperReady)
@@ -276,7 +276,7 @@ func TestAttachTerminalHandbackHelper(t *testing.T) {
 	}
 
 	c, connCh := attachWSServer(t)
-	done, err := c.AttachStream(context.Background(), "alpha", "", "", 0)
+	done, err := c.AttachStream(context.Background(), StreamSession{Title: "alpha"}, "", 0)
 	if err != nil {
 		t.Fatalf("AttachStream: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
@@ -69,20 +70,20 @@ func (f *fakeLiveTerm) TerminalModes() (terminal.Modes, bool) {
 func (f *fakeLiveTerm) SetSizeOwner(on bool) { f.sizeOwner = on }
 
 // stubLiveTermFactory points the attachment seam at fake attachments and returns
-// the created fakes + the session titles they were created for.
-func stubLiveTermFactory(t *testing.T) (created *[]*fakeLiveTerm, titles *[]string) {
+// the created fakes + the session addresses they were created for.
+func stubLiveTermFactory(t *testing.T) (created *[]*fakeLiveTerm, addrs *[]apiclient.StreamSession) {
 	t.Helper()
 	var fakes []*fakeLiveTerm
-	var names []string
+	var dialed []apiclient.StreamSession
 	orig := newLiveTermPaneFn
-	newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
+	newLiveTermPaneFn = func(s apiclient.StreamSession, tabID string, tab, width, height int) liveTermAttachment {
 		f := newFakeLiveTerm()
 		fakes = append(fakes, f)
-		names = append(names, title)
+		dialed = append(dialed, s)
 		return f
 	}
 	t.Cleanup(func() { newLiveTermPaneFn = orig })
-	return &fakes, &names
+	return &fakes, &dialed
 }
 
 // focusedFake returns the fakeLiveTerm bound to the focused pane, or nil. It is
@@ -107,12 +108,13 @@ func liveTestHome(t *testing.T) (*home, *session.Instance) {
 
 func TestSyncLiveTermPaneBindsFocusedPane(t *testing.T) {
 	h, inst := liveTestHome(t)
-	fakes, titles := stubLiveTermFactory(t)
+	fakes, addrs := stubLiveTermFactory(t)
 
 	h.syncLiveTermPane()
 
 	require.Len(t, *fakes, 1, "the visible eligible pane must bind a live attachment")
-	assert.Equal(t, inst.Title, (*titles)[0], "attachment targets the pane's session title")
+	assert.Equal(t, apiclient.StreamSession{ID: inst.ID}, (*addrs)[0],
+		"attachment targets the pane's session by stable id, id-only")
 	p := h.focusedOpenPane()
 	require.NotNil(t, p)
 	require.NotNil(t, h.liveTerms[p.ID()])
@@ -297,13 +299,13 @@ func TestLiveBindKeyIncludesTabID(t *testing.T) {
 
 	// Model an older-daemon projection before ID backfill: bound positionally.
 	inst.Tabs[1].ID = ""
-	keyBefore, _, _, tabIDBefore, _, ok := h.liveBindCandidate(p)
+	keyBefore, _, tabIDBefore, _, ok := h.liveBindCandidate(p)
 	require.True(t, ok)
 	assert.Empty(t, tabIDBefore, "a tab with no adopted id streams by ordinal")
 
 	// The snapshot adopts the daemon-minted id. NOTHING else about the pane changed.
 	inst.Tabs[1].ID = "adopted-stable-id"
-	keyAfter, _, _, tabIDAfter, _, ok := h.liveBindCandidate(p)
+	keyAfter, _, tabIDAfter, _, ok := h.liveBindCandidate(p)
 	require.True(t, ok)
 	assert.Equal(t, "adopted-stable-id", tabIDAfter)
 
@@ -321,12 +323,12 @@ func TestLiveBindKeyChangesWhenTabIdentitySwapsAtSameOrdinal(t *testing.T) {
 	p := openTestPane(t, h, inst, 1)
 
 	inst.Tabs[1].ID = "tab-a"
-	keyA, _, _, _, _, ok := h.liveBindCandidate(p)
+	keyA, _, _, _, ok := h.liveBindCandidate(p)
 	require.True(t, ok)
 
 	// Tab a was closed and replaced at the same ordinal by a different tab.
 	inst.Tabs[1].ID = "tab-b"
-	keyB, _, _, _, _, ok := h.liveBindCandidate(p)
+	keyB, _, _, _, ok := h.liveBindCandidate(p)
 	require.True(t, ok)
 
 	assert.NotEqual(t, keyA, keyB,
