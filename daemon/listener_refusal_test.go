@@ -461,14 +461,15 @@ func TestUpgradeCandidateFloorsRetainedSocketOnTokenlessWrite(t *testing.T) {
 }
 
 // TestUpgradeCandidateFloorHeldThroughJournalLossTeardown pins the ordering the
-// journal's mid-apply disappearance creates (#5137 review): the deferral check
-// runs TWICE per apply — retireWebBeforePostureSwap pre-swap and reconcile
-// post-swap — so a journal present for the first but gone for the second leaves
-// reconcile holding a still-bound socket with the tokenless posture already
-// published onto it. The probation floor must stay armed through the refusal
-// teardown and clear only after the socket is gone: a request landing between
-// an early clear and the retire would read the swapped config with no floor and
-// be served the full control API unauthenticated.
+// journal's mid-apply disappearance creates (#5137 review): the carry decision
+// is read ONCE per apply — retireWebBeforePostureSwap records it and reconcile
+// consumes it — so a journal present at that read governs the whole apply even
+// if the journal is gone by the time reconcile runs: the socket stays bound
+// AND floored. The refusal then lands on the NEXT apply, whose own read sees
+// the journal gone: the floor must stay armed through that retire and clear
+// only after the socket is gone — a request landing between an early clear
+// and the retire would read the swapped tokenless config with no floor and be
+// served the full control API unauthenticated.
 func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0"
@@ -488,9 +489,9 @@ func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 	require.NotEmpty(t, addr, "precondition: the deferred socket is bound")
 	require.True(t, m.probationTokenFloor.Load(), "precondition: the floor is armed")
 
-	// The journal then vanishes mid-apply: present for the pre-swap check (the
-	// socket is kept bound) and gone for reconcile's (the refusal must run for
-	// real against a still-serving socket).
+	// The journal then vanishes: present for the first apply's single read
+	// (socket kept bound+floored through the whole apply) and gone for the
+	// second's (the refusal retires it for real).
 	journalCalls := 0
 	loadUpgradeJournalFn = func(string) (upgradetxn.Journal, error) {
 		journalCalls++
@@ -500,8 +501,9 @@ func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 		return upgradetxn.Journal{}, errors.New("no active upgrade transaction")
 	}
 
-	// Any request answered 200 in the teardown window is the hole: the floor was
-	// cleared before the socket retired. 401 = still floored, 0 = already gone.
+	// Any request answered 200 anywhere in the window is the hole: the floor
+	// was cleared while a socket still served the tokenless posture. 401 =
+	// floored, 0 = already gone — both safe; only 200 means unfloored serving.
 	answers := make(chan int, 4096)
 	stop := make(chan struct{})
 	go func() {
@@ -525,17 +527,32 @@ func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 	tomlPath := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), config.TomlConfigFileName)
 	require.NoError(t, os.WriteFile(tomlPath,
 		[]byte("[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n"), 0600))
+
+	// Apply 1: the journal is still there for the pre-swap read, so the carry
+	// decision stands for the whole apply — the socket stays bound and floored
+	// even though the journal is gone by reconcile.
 	_, err = m.ApplyConfig()
 	require.NoError(t, err)
+	require.Equal(t, 1, journalCalls,
+		"one journal read per apply — reconcile consumes the pre-swap decision, it does not re-read")
+	snap := m.lifecycle.snapshot().listeners
+	require.True(t, snap.TCPBound,
+		"the carry decision governs the whole apply — a mid-apply journal loss cannot split it")
+	require.True(t, m.probationTokenFloor.Load(), "the floor rides the kept socket")
+
+	// Apply 2: the journal is gone for this apply's own read, so the refusal
+	// runs for real — retiring the socket while the floor still holds.
+	_, err = m.ApplyConfig()
+	require.NoError(t, err)
+	require.Equal(t, 2, journalCalls,
+		"anti-vacuous: the journal was present for apply 1's read and gone for apply 2's")
 	close(stop)
 	for code := range answers {
 		require.NotEqual(t, http.StatusOK, code,
 			"a 200 in the teardown window means the floor cleared before the socket retired")
 	}
 
-	require.GreaterOrEqual(t, journalCalls, 2,
-		"anti-vacuous: the apply must have seen the journal present then gone")
-	snap := m.lifecycle.snapshot().listeners
+	snap = m.lifecycle.snapshot().listeners
 	require.False(t, snap.TCPBound, "with the journal gone the refused socket retires for real")
 	require.NotEmpty(t, snap.TCPRefusalReason)
 	require.False(t, m.probationTokenFloor.Load(),
