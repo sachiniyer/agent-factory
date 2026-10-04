@@ -274,6 +274,52 @@ func TestDaemonLegacyBoundListenerUnderRefusedDiskPosture(t *testing.T) {
 	require.Contains(t, rows4[0].Detail, "still serving 0.0.0.0:8443 unauthenticated")
 }
 
+// TestDaemonOptInOnDiskWhileRunningRefuses is the reverse drift of the
+// bound-under-refused case (#5137 review): the disk now opts in to the
+// unauthenticated listener, but the RUNNING daemon still refuses it — a
+// hand-edit is not an apply, so nothing serves. The opted-in "serves the
+// control API" Warn would claim a live exposure that does not exist and
+// contradict the refusal row; the single Warn here is the pending restart —
+// still naming what the restart will expose.
+func TestDaemonOptInOnDiskWhileRunningRefuses(t *testing.T) {
+	testguard.IsolateTmux(t)
+	opts := testOptions(t, false)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
+		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\nallow_unauthenticated_network = true\n"), 0600))
+
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
+			SocketExists:  true,
+			PingErr:       nil,
+			HTTPListening: daemon.AnswerYes(),
+			Listeners: daemon.DaemonListenerStatus{
+				HTTPUnixBound:    true,
+				TCPConfigured:    true,
+				TCPListenAddr:    "0.0.0.0:8443",
+				TCPBound:         false,
+				TCPRefusalReason: "network.listen_addr \"0.0.0.0:8443\" is reachable from the network … (refused)",
+			},
+		}
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	listenerRows := findCheckRows(report, "listener")
+	require.Len(t, listenerRows, 1,
+		"one row owns the drift — the exposure claim must not print beside the live refusal")
+	require.Equal(t, StatusWarn, listenerRows[0].Status)
+	require.Contains(t, listenerRows[0].Detail, "refused to bind")
+	require.Contains(t, listenerRows[0].Detail, "no authentication",
+		"the restart's consequence — the opt-in WILL expose — must stay in the warning")
+	require.NotContains(t, listenerRows[0].Detail, "is reachable from the network",
+		"the opted-in row's present-tense reachability claim is false while the daemon refuses")
+	require.Contains(t, listenerRows[0].Remediation, "af daemon restart")
+}
+
 // TestDaemonNotRunningStillPassesOnASafeConfig guards the other direction: the
 // exposure row must fire on the unsafe posture ONLY. An ordinary user who has just
 // not started a daemon yet gets the on-demand pass and no listener row at all.

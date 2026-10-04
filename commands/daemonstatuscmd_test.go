@@ -457,6 +457,19 @@ func TestListenerStatusWarningBoundUnderRefusedPosture(t *testing.T) {
 	opted := *refused
 	opted.AllowUnauthenticatedNetwork = true
 	require.Equal(t, config.ListenerExposureNotice(&opted), listenerStatusWarning(&opted, nil, bound))
+
+	// The reverse drift (#5137 review): the disk opts IN while the running
+	// daemon still refuses — nothing is serving, so the exposure notice's
+	// "af serves its full control API" claim would be false against the same
+	// report's `(refused)` listener line. The warning names the pending restart
+	// and what it exposes.
+	warn = listenerStatusWarning(&opted, nil, notBound)
+	require.Contains(t, warn, "refuses to bind")
+	require.Contains(t, warn, "af daemon restart")
+	require.Contains(t, warn, "DeliverPrompt",
+		"the restart's consequence — the opt-in WILL expose — must stay in the warning")
+	require.NotContains(t, warn, "af serves its",
+		"no live-service claim while the running daemon holds the refusal")
 }
 
 // TestCollectDaemonStatusSafeConfigIsUnwarned is the other direction: a user who

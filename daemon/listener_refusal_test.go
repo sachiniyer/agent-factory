@@ -735,6 +735,56 @@ func TestPingReportsProbationTokenFloor(t *testing.T) {
 		"Ping must report what the socket enforces — the floor, not the tokenless file")
 }
 
+// TestUpgradeJournalLossMidApplyKeepsFloorOnRetainedSocket pins the journal-read
+// TOCTOU (#5137 review): retireWebBeforePostureSwap and reconcile each used to
+// read the upgrade journal independently. A journal removed between the two
+// reads left the pre-swap phase keeping the socket bound under the floor while
+// reconcile computed carries=false, cleared the floor, and — when the applied
+// rebind FAILED and retained the network socket — left it answering the new
+// tokenless posture unauthenticated. One carry decision now serves the apply.
+func TestUpgradeJournalLossMidApplyKeepsFloorOnRetainedSocket(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = true // the pre-upgrade daemon serves the network tokened
+	m, wl := upgradeCandidateListeners(t, cfg, "txn-5137")
+	stubUpgradeJournal(t, upgradetxn.Journal{
+		ID:     "txn-5137",
+		Daemon: upgradetxn.DaemonSnapshot{Listeners: upgradetxn.ListenerExpectation{TCPBound: true}},
+	}, nil)
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	bound := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	require.NotEmpty(t, bound)
+	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
+		"precondition: the socket answers on the network but demands the token")
+
+	// The apply moves listen_addr to a loopback the bind cannot take AND drops
+	// the token requirement, so the retained network socket would serve the
+	// tokenless posture — the exact shape the floor exists for. The journal
+	// vanishes between the pre-swap phase and reconcile.
+	moved := *m.Config()
+	moved.ListenAddr = "127.0.0.2:0"
+	moved.RequireToken = false
+	moved.AllowUnauthenticatedNetwork = false
+	wl.listenTCP = func(string, string) (net.Listener, error) {
+		return nil, errors.New("forced rebind failure")
+	}
+	wl.retireWebBeforePostureSwap(&moved) // journal still present: carries
+	m.live.Store(&moved)
+	stubUpgradeJournal(t, upgradetxn.Journal{}, errors.New("journal gone"))
+
+	failed, err = wl.reconcile(&moved)
+	require.Error(t, err)
+	require.Contains(t, failed, "network.listen_addr")
+	require.True(t, m.probationTokenFloor.Load(),
+		"the floor must outlive the journal's mid-apply disappearance — the socket is still serving")
+	require.Equal(t, bound, m.lifecycle.snapshot().listeners.TCPBoundAddr,
+		"the retained socket still answers on the old network address")
+	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
+		"a retained network socket under a tokenless apply keeps demanding the bearer token")
+}
+
 // TestTrackerRefusesLateHijacksFromSeveredGenerations pins the generation
 // watermark (#5137 review): a WS handler whose upgrade passed the old gate
 // before a policy retire can report StateHijacked only AFTER a new listener has

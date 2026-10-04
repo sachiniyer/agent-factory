@@ -267,14 +267,21 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 					"then restart the daemon so the fixed posture takes effect: af daemon restart")
 			}
 		} else if config.ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
-			report.Warn(sectionDaemon, "listener",
-				fmt.Sprintf("network.allow_unauthenticated_network is set, so network.listen_addr %q is reachable from the network "+
-					"and serves the control API (including DeliverPrompt, which runs instructions through your agents) "+
-					"with no authentication", cfg.ListenAddr),
-				"if that is not what you want, run `af config set network.require_token true` to require a bearer token (`af token "+
-					"show` prints it), `af config set network.listen_addr 127.0.0.1:8443` to serve this machine only, or "+
-					"`af config set network.allow_unauthenticated_network false` to drop the opt-in",
-				false)
+			// When the RUNNING daemon refuses this very posture nothing is
+			// serving — "serves the control API" would contradict the drift row
+			// below, which owns the report for the unapplied opt-in. A daemon
+			// that never answered the ping keeps the posture Warn: it describes
+			// what the next start serves.
+			if h.PingErr != nil || h.Listeners.TCPRefusalReason == "" {
+				report.Warn(sectionDaemon, "listener",
+					fmt.Sprintf("network.allow_unauthenticated_network is set, so network.listen_addr %q is reachable from the network "+
+						"and serves the control API (including DeliverPrompt, which runs instructions through your agents) "+
+						"with no authentication", cfg.ListenAddr),
+					"if that is not what you want, run `af config set network.require_token true` to require a bearer token (`af token "+
+						"show` prints it), `af config set network.listen_addr 127.0.0.1:8443` to serve this machine only, or "+
+						"`af config set network.allow_unauthenticated_network false` to drop the opt-in",
+					false)
+			}
 		}
 	}
 	// A refused RUNNING listener is a separate fact from the disk posture above:
@@ -283,9 +290,13 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	// apply). A Warn, not a second Fail — the disk check owns the verdict, this
 	// row only says the running daemon has not caught up with it.
 	if h.PingErr == nil && h.Listeners.TCPRefusalReason != "" && cfg != nil && config.ListenerBindRefusal(cfg) == "" {
+		posture := ""
+		if config.ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
+			posture = ", and once restarted that opted-in listener serves the control API with no authentication"
+		}
 		report.Warn(sectionDaemon, "listener",
 			fmt.Sprintf("the running daemon refused to bind the TCP listener on %s, but the config on disk no longer "+
-				"triggers the refusal", h.Listeners.TCPListenAddr),
+				"triggers the refusal%s", h.Listeners.TCPListenAddr, posture),
 			"restart the daemon so the listener binds with the fixed config: af daemon restart", true)
 	}
 	// "A unit file exists" is not "this home has autostart". There is one unit

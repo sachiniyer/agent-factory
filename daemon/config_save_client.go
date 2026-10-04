@@ -236,8 +236,9 @@ func staleDaemonListenerWriteRefusal(key, version string) error {
 	}
 	return fmt.Errorf(
 		"the running daemon (%s) predates af's unauthenticated-listener refusal (#5137): it would accept "+
-			"this %s write and serve the control API unauthenticated — nothing was written; "+
-			"restart the daemon (`af daemon restart`) so the write can be gated, then retry", v, key)
+			"this %s write and serve the control API unauthenticated — nothing was written; upgrade af on "+
+			"its host and restart the daemon (`af daemon restart`), then retry — or edit config.toml on the "+
+			"host directly to accept the exposure", v, key)
 }
 
 // isRPCMethodMissing reports whether a net/rpc call failed because the serving

@@ -1326,7 +1326,8 @@ export async function setConfigValue(key: string, value: string, token: string):
       throw new ApiError(404,
         `the daemon predates af's unauthenticated-listener refusal (#5137): it would accept this ${key} write ` +
         "and serve the control API — including DeliverPrompt — to anyone who can reach the address, " +
-        "so nothing was written. Upgrade that daemon, or run the write on its host",
+        "so nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the " +
+        "exposure deliberately, edit config.toml on the host instead",
         e.code, e.daemonRejected);
     }
     throw e;

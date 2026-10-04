@@ -98,6 +98,8 @@ func refusalCapableRouteError(method, key string, err error) error {
 	return fmt.Errorf(
 		"the daemon at %s predates af's unauthenticated-listener refusal (#5137): it would accept this %s write "+
 			"and serve the control API — including DeliverPrompt — to anyone who can reach the address, "+
-			"so nothing was written. Upgrade that daemon, or run the write on its host",
+			"so nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the "+
+			"exposure deliberately, edit config.toml on the host instead — the refusal guards remote writes, not "+
+			"local file edits",
 		RemoteTargetURL(), config.CanonicalConfigKey(key))
 }

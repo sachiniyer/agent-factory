@@ -278,6 +278,18 @@ func listenerStatusWarning(current *config.Config, boot *daemon.DaemonBootConfig
 		}
 		return refusal
 	}
+	// The reverse drift: an opted-in disk posture with a live REFUSAL is not
+	// serving anything — the notice below would claim an active exposure while
+	// the listener line says (refused). Report the pending change, and what the
+	// restart will actually do, instead.
+	if listeners != nil && !listeners.TCPBound && listeners.TCPRefusalReason != "" {
+		return fmt.Sprintf(
+			"the running daemon refuses to bind the TCP listener on %s, and the disk config now opts in "+
+				"(network.allow_unauthenticated_network=true) — nothing is serving until `af daemon restart` "+
+				"applies it, which WILL expose the control API (including DeliverPrompt) with no authentication. "+
+				"If that is not what you want, run `af config set network.require_token true` or drop the opt-in "+
+				"with `af config set network.allow_unauthenticated_network false`", current.ListenAddr)
+	}
 	return config.ListenerExposureNotice(current)
 }
 

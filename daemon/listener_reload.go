@@ -111,6 +111,17 @@ type webListeners struct {
 	// only from the policy-retire paths; the preview listener has none, so it
 	// gets no tracker.
 	webTracker *connTracker
+
+	// applyCarryRefusedSocket carries retireWebBeforePostureSwap's
+	// upgrade-candidate decision into the reconcile of the SAME apply: the
+	// journal must be read once per apply, not once per phase. Two independent
+	// reads straddle a removal window — a journal that vanished mid-apply would
+	// leave the pre-swap phase having kept the socket bound and floored while
+	// reconcile computes carries=false, drops the floor, and leaves a retained
+	// network socket answering unauthenticated after a failed rebind. nil means
+	// no pre-swap ran (the startup reconcile), and reconcile then reads the
+	// journal itself. Consume-and-clear: set by the next apply's pre-swap.
+	applyCarryRefusedSocket *bool
 }
 
 // newWebListeners builds the manager (never binds — startHTTPServer's initial
@@ -169,7 +180,18 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	// (adoptAfterUpgradeCommit), whose own startup reconcile then refuses
 	// honestly.
 	refusal := config.ListenerBindRefusal(newCfg)
-	carries := wl.upgradeCandidateCarriesRefusedListener()
+	// One journal decision per apply: retireWebBeforePostureSwap already read it
+	// for this apply, and a removal landing between the two reads would split
+	// the answer — socket kept bound and floored pre-swap, floor dropped here
+	// while a retained socket still answers unauthenticated. nil means the
+	// startup reconcile ran alone, so the journal is read now.
+	var carries bool
+	if wl.applyCarryRefusedSocket != nil {
+		carries = *wl.applyCarryRefusedSocket
+		wl.applyCarryRefusedSocket = nil
+	} else {
+		carries = wl.upgradeCandidateCarriesRefusedListener()
+	}
 	deferral := refusal != "" && carries
 	// The floor rides carries, not just deferral: while the journal window is
 	// open this candidate must never let a kept-bound socket serve
@@ -366,10 +388,15 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	// the incoming posture says — upgradeCandidateCarriesRefusedListener's whole
 	// point is that the previous-binary supervisor can still re-validate the
 	// candidate against the journaled bound listener until the journal is gone.
+	// The decision is handed to reconcile: a journal removal landing between the
+	// two reads would have this phase keep+flooring the socket while reconcile
+	// decides the candidate carries nothing and clears the floor under it.
+	carries := wl.upgradeCandidateCarriesRefusedListener()
+	wl.applyCarryRefusedSocket = &carries
 	// But bound must never become unauthenticated on the way through: a
 	// retained socket answering on a network address floors to the bearer token
 	// for the window rather than serving the incoming tokenless posture.
-	if wl.upgradeCandidateCarriesRefusedListener() {
+	if carries {
 		wl.manager.probationTokenFloor.Store(wl.servingUnauthenticatedLocked(newCfg))
 		return
 	}
