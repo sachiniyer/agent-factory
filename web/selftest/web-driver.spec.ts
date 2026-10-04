@@ -4241,22 +4241,27 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
     let markSaveStarted!: () => void;
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
-    await p.route("**/v1/SetConfigValue", async (route) => {
-      const body = route.request().postDataJSON() as { key: string; value: string };
-      markSaveStarted();
-      await saveMayFinish;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
-            restart_notice: "",
-          },
-          error: null,
-        }),
+    // auto_update does not force the listener posture safe, so its save takes
+    // SetConfigValueGuarded — intercept the pair (same twin the daemons that
+    // enforce #5137 serve).
+    for (const routePattern of ["**/v1/SetConfigValue", "**/v1/SetConfigValueGuarded"]) {
+      await p.route(routePattern, async (route) => {
+        const body = route.request().postDataJSON() as { key: string; value: string };
+        markSaveStarted();
+        await saveMayFinish;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: {
+              result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+              restart_notice: "",
+            },
+            error: null,
+          }),
+        });
       });
-    });
+    }
 
     await openTokenless(p);
     await p.locator('.af-viewtab[data-view="config"]').click();
