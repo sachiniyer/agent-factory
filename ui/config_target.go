@@ -166,9 +166,11 @@ func remoteConfigSet(key, value string) (*config.SetResult, string, error) {
 	defer client.CloseIdleConnections()
 
 	// The #5137 skew check rides inside SetConfigValue, same as `af config set
-	// --daemon-url`: an exposure-capable write takes the guarded route that
-	// only refusal-capable daemons serve, so the capability proof and the write
-	// are one request and a pre-#5137 daemon fails closed with a 404.
+	// --daemon-url`: EVERY write takes the guarded route that only
+	// refusal-capable daemons serve — an old daemon's write→apply gap means no
+	// key is provably safe — so the capability proof and the write are one
+	// request and a pre-#5137 daemon fails closed with a 404 apiclient already
+	// translated into the policy refusal.
 	//
 	// The flat alias is the version-skew wire spelling, exactly as on the local
 	// socket (daemon.SetGlobalConfigValue) and in `af config set --daemon-url`
