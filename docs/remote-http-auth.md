@@ -100,9 +100,17 @@ TLS termination or a private network (see
 ### 1. Point the listener at the network
 
 `network.listen_addr` is a **global-only** key (a cloned repo must never be able to open
-a network port). Set it with `af config set network.listen_addr <host:port>`, or
-hand-edit your global config directly. Change the default loopback address to a
-routable one:
+a network port). From the default `network.require_token=false`, the CLI order matters:
+the write guard refuses to *create* a tokenless network posture, so turn the token on
+first, then move the address — the reverse sequence fails at the first command:
+
+```console
+$ af config set network.require_token true
+$ af config set network.listen_addr 0.0.0.0:8443
+```
+
+Or hand-edit your global config directly — the TOML block lands atomically, so key
+order inside it does not matter:
 
 ```toml
 # ~/.agent-factory/config.toml
@@ -112,7 +120,7 @@ listen_addr = "0.0.0.0:8443"   # routable — reachable from the network (opt-in
 require_token = true            # STRONGLY recommended: the default is false (no token)
 ```
 
-Set `network.require_token = true` in the same edit. It defaults to `false`, so a network
+It defaults to `false`, so a network
 bind without it would serve an **unauthenticated** control plane to everyone who can
 route to the port — and af **refuses the listener** rather than serve that. Omit
 the token only on a network you fully trust (a private tailnet/VPN) or behind an

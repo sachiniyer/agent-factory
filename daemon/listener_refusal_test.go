@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -731,6 +732,38 @@ func TestPingReportsProbationTokenFloor(t *testing.T) {
 	require.NotNil(t, resp.BootConfig)
 	require.True(t, resp.BootConfig.RequireToken,
 		"Ping must report what the socket enforces — the floor, not the tokenless file")
+}
+
+// TestTrackerRefusesLateHijacksFromSeveredGenerations pins the generation
+// watermark (#5137 review): a WS handler whose upgrade passed the old gate
+// before a policy retire can report StateHijacked only AFTER a new listener has
+// bound. A shared severing boolean would lift on the new bind and admit that
+// conn — an unauthenticated stream surviving indefinitely under the tokened
+// posture. The watermark keeps every pre-sever generation dead no matter when
+// its stragglers arrive.
+func TestTrackerRefusesLateHijacksFromSeveredGenerations(t *testing.T) {
+	tr := newConnTracker()
+	genA := tr.begin()
+
+	// The refusal severs, then a new (allowed) generation binds — the straggler
+	// still has not hijacked.
+	tr.sever()
+	genB := tr.begin()
+
+	late, latePeer := net.Pipe()
+	defer func() { _ = latePeer.Close() }()
+	tr.track(genA, late)
+	require.Empty(t, tr.conns, "a severed generation's late hijack must not be tracked")
+	_, err := latePeer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.ErrClosedPipe,
+		"the late hijack must be closed on arrival, not admitted to the new generation")
+
+	// The new generation admits and tracks normally.
+	fresh, freshPeer := net.Pipe()
+	defer func() { _ = freshPeer.Close() }()
+	tr.track(genB, fresh)
+	require.Len(t, tr.conns, 1, "the post-sever generation is above the watermark")
+	require.Contains(t, tr.conns, fresh)
 }
 
 // TestClosedWebSocketUnregistersFromTracker pins the bounded-growth half of the

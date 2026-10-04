@@ -235,31 +235,47 @@ type livePosture struct {
 // Membership is two-way: ConnState adds a conn when it hijacks, and the wrapped
 // conn removes itself on Close (net/http never reports a state for a hijacked
 // conn again — without the self-removal every finished stream would stay
-// strongly referenced for the daemon's life). severing latches true on the first
-// policy sever so a conn hijacking mid-sweep dies on arrival instead of landing
-// untracked; begin lifts it when a new generation binds — a latch that outlived
-// the refusal it served would break that generation's streams.
+// strongly referenced for the daemon's life). Severing is a generation
+// WATERMARK, not a shared latch: sever() retires every generation allocated so
+// far, so a conn whose handler hijacks LATE — its upgrade passed the old gate
+// before the retire, and http.Server reports StateHijacked only after — dies
+// on arrival even if a new generation has since bound. A boolean latch cannot
+// express that: the new generation's begin() would lift the severing that the
+// late-arriving retired-generation conn still needs to hit.
 type connTracker struct {
-	mu       sync.Mutex
-	severing bool
-	conns    map[net.Conn]struct{}
+	mu             sync.Mutex
+	nextGen        uint64
+	severedThrough uint64
+	conns          map[net.Conn]struct{}
 }
 
 func newConnTracker() *connTracker {
 	return &connTracker{conns: make(map[net.Conn]struct{})}
 }
 
-// track records a conn the server just handed to a hijacking handler, or closes
-// it on the spot when a policy sever is in force. The close runs outside mu so
-// trackedConn.Close's self-removal cannot re-enter the lock.
-func (t *connTracker) track(c net.Conn) {
+// begin allocates the generation a freshly bound listener belongs to; its ID is
+// closed over by that server's ConnState. Generations are monotonic, and
+// sever() retires every ID ≤ severedThrough — so a generation created before
+// the sever is dead no matter when its stragglers hijack, while the next bind's
+// generation numbers above the watermark and is unaffected by it.
+func (t *connTracker) begin() uint64 {
 	t.mu.Lock()
-	severing := t.severing
-	if !severing {
+	defer t.mu.Unlock()
+	t.nextGen++
+	return t.nextGen
+}
+
+// track records a conn the server just handed to a hijacking handler, or closes
+// it on the spot when its generation is dead. The close runs outside mu so
+// trackedConn.Close's self-removal cannot re-enter the lock.
+func (t *connTracker) track(gen uint64, c net.Conn) {
+	t.mu.Lock()
+	dead := gen <= t.severedThrough
+	if !dead {
 		t.conns[c] = struct{}{}
 	}
 	t.mu.Unlock()
-	if severing {
+	if dead {
 		_ = c.Close()
 	}
 }
@@ -272,14 +288,16 @@ func (t *connTracker) untrack(c net.Conn) {
 	t.mu.Unlock()
 }
 
-// sever force-closes every tracked conn now and any that hijack until the next
-// generation begins. retire() drains in-flight NORMAL requests — the refusal's
-// own reply still reaches its client — while a hijacked stream has no reply
-// left to give: it only lives to keep serving a posture the socket must stop
-// serving. Closes run outside mu for the same re-entrancy reason as track.
+// sever force-closes every tracked conn now and marks every generation that has
+// ever begun as dead — a late hijack from a retired listener's still-running
+// handler is then refused on arrival even after a new generation binds.
+// retire() drains in-flight NORMAL requests — the refusal's own reply still
+// reaches its client — while a hijacked stream has no reply left to give: it
+// only lives to keep serving a posture the socket must stop serving. Closes
+// run outside mu for the same re-entrancy reason as track.
 func (t *connTracker) sever() {
 	t.mu.Lock()
-	t.severing = true
+	t.severedThrough = t.nextGen
 	conns := make([]net.Conn, 0, len(t.conns))
 	for c := range t.conns {
 		conns = append(conns, c)
@@ -289,15 +307,6 @@ func (t *connTracker) sever() {
 	for _, c := range conns {
 		_ = c.Close()
 	}
-}
-
-// begin lifts the severing latch for a newly bound generation. Called inside the
-// listener constructor just before Serve starts accepting, so a conn on the new
-// listener can never race the latch that severed its predecessor.
-func (t *connTracker) begin() {
-	t.mu.Lock()
-	t.severing = false
-	t.mu.Unlock()
 }
 
 // trackedListener wraps the raw listener so every accepted conn is a trackedConn
@@ -470,15 +479,16 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 		// http.Server stops tracking a connection the moment it is hijacked,
 		// which is what makes a policy retire incomplete without sever: the
 		// tracker must be able to name the conns Shutdown and Close cannot.
+		// The generation is allocated BEFORE Serve accepts — this listener's
+		// conns tag it at hijack time so a sever that predates a straggler's
+		// upgrade still reaches it.
+		gen := hijacked.begin()
 		listener = &trackedListener{Listener: listener, tracker: hijacked}
 		srv.ConnState = func(c net.Conn, st http.ConnState) {
 			if st == http.StateHijacked {
-				hijacked.track(c)
+				hijacked.track(gen, c)
 			}
 		}
-		// Lift the severing latch before Serve accepts this generation — a conn
-		// on the NEW listener must never hit the latch that severed the old one.
-		hijacked.begin()
 	}
 	h := &tcpListenerHandle{srv: srv, ln: listener, addr: listener.Addr().String()}
 	go func() {
