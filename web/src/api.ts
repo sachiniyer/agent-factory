@@ -1190,11 +1190,16 @@ export async function setConfigValue(key: string, value: string, token: string):
   try {
     return await af<ConfigSetResponse>("SetConfigValueGuarded", { key, value }, token);
   } catch (e) {
-    // The guarded route's fail-closed answer is a 404 — translate THAT one
-    // case, because "404 page not found" does not tell the operator their write
-    // was refused rather than merely unrouted (apiclient's
-    // refusalCapableRouteError does the same for the CLI/TUI paths).
-    if (e instanceof ApiError && e.status === 404) {
+    // The guarded route's fail-closed answer is a 404 — but only a 404 the
+    // DAEMON provably sent may be rewritten as the refusal: a proxy can
+    // substitute its own 404 after forwarding the write, and claiming
+    // "nothing was written" about a committed mutation is the unsafe direction
+    // (an opted-in listener may already be serving). Provenance is the
+    // daemon_rejected marker or the legacy catch-all's exact envelope — the
+    // same two evidences apiclient.routeNotServed404 accepts. Anything else
+    // stays the unmarked 404 it is: uncertain, not refused.
+    if (e instanceof ApiError && e.status === 404 &&
+      (e.daemonRejected || (e.code === "" && e.message === 'unknown route "/v1/SetConfigValueGuarded"'))) {
       throw new ApiError(404,
         `the daemon predates af's unauthenticated-listener refusal (#5137): accepting this ${key} write ` +
         "triggers its whole-file apply, which binds whatever listen_addr the file holds — the control " +

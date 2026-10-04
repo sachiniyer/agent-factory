@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { getConfig, setConfigValue } from "./api.js";
+import { ApiError, getConfig, setConfigValue } from "./api.js";
 import { type ConfigStatus, canCommit, controlKind, createKeyedQueue, saveNotice, shouldCloseSavedField } from "./config.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
@@ -239,11 +239,13 @@ test("setConfigValue takes the guarded endpoint for every key and value", async 
   }
 });
 
-test("setConfigValue translates the guarded route's 404 into the fail-closed refusal", async () => {
+test("setConfigValue translates the guarded route's daemon-proven 404 into the fail-closed refusal", async () => {
   // The 404 IS the capability check: a daemon that predates the refusal does
   // not serve SetConfigValueGuarded, so nothing was written. The form must say
-  // that — not "404 Not Found" — and it must still throw.
-  stubFetch(null, { ok: false, status: 404 });
+  // that — not "404 Not Found" — and it must still throw. The stub reproduces
+  // the pre-#5137 catch-all's exact envelope, which is the provenance the
+  // translation requires.
+  stubFetch(null, { ok: false, status: 404, error: 'unknown route "/v1/SetConfigValueGuarded"' });
 
   await assert.rejects(
     () => setConfigValue("network.require_token", "false", "tok"),
@@ -253,6 +255,31 @@ test("setConfigValue translates the guarded route's 404 into the fail-closed ref
       return true;
     },
   );
+});
+
+test("an unmarked 404 on the guarded route stays uncertain — never 'nothing was written'", async () => {
+  // A proxy can substitute its own 404 AFTER forwarding the write, so an
+  // unattributed one cannot be called a refusal: the mutation may have
+  // committed, and for allow_unauthenticated_network=true that could mean the
+  // unauthenticated listener is already serving. The raw ApiError must
+  // surface unchanged (#5137 review).
+  for (const noEnvelope of [true, false]) {
+    // Two shapes: a non-envelope proxy 404 (status text only) and an envelope
+    // whose message does not prove the daemon's catch-all.
+    stubFetch(null, noEnvelope
+      ? { ok: false, status: 404 }
+      : { ok: false, status: 404, error: "some intermediary said no" });
+    await assert.rejects(
+      () => setConfigValue("network.allow_unauthenticated_network", "true", "tok"),
+      (err: Error) => {
+        assert.equal(err instanceof ApiError, true);
+        assert.equal((err as ApiError).status, 404);
+        assert.doesNotMatch(err.message, /nothing was written|predates af/,
+          "an unmarked 404 must not claim the write was refused — the mutation may have committed");
+        return true;
+      },
+    );
+  }
 });
 
 // The web half of the anti-drift guarantee.

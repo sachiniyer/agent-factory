@@ -6852,7 +6852,7 @@ async function setConfigValue(key, value, token2) {
   try {
     return await af("SetConfigValueGuarded", { key, value }, token2);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) {
+    if (e instanceof ApiError && e.status === 404 && (e.daemonRejected || e.code === "" && e.message === 'unknown route "/v1/SetConfigValueGuarded"')) {
       throw new ApiError(
         404,
         `the daemon predates af's unauthenticated-listener refusal (#5137): accepting this ${key} write triggers its whole-file apply, which binds whatever listen_addr the file holds \u2014 the control API, including DeliverPrompt, served unauthenticated if that posture is tokenless \u2014 so the write is refused rather than risk it \u2014 nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host instead`,
