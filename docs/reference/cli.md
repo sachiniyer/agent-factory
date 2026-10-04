@@ -54,6 +54,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — Reclaim disk from old archived sessions
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -1640,6 +1641,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — Reclaim disk from old archived sessions
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2027,6 +2029,49 @@ af sessions preview <title> [flags]
 | `--tab` | `int` | Tab slot to capture, 0-based as the tab bar reads left to right (slot 0 is the agent tab) (default `0`) |
 | `--tab-id` | `string` | Stable id of the tab to capture (#1738); wins over --tab-name and --tab |
 | `--tab-name` | `string` | Name of the tab to capture, as reported by "af sessions get" (not the TUI's "Agent"/"Terminal" label); wins over --tab |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions prune
+
+Reclaim disk from old archived sessions
+
+Prune archived sessions older than --older-than, measured from each
+session's archive time.
+
+Without --apply this is a dry run: it lists each archived session it would
+prune (title, archive time, bytes reclaimed) plus a total, and changes
+nothing. With --apply it deletes those sessions' archived worktrees and
+provider conversation captures, runs 'git worktree prune' for the repo, and
+tombstones each record — the row stays listed in 'af sessions list --all'
+with its title, branch, archive time and prune time.
+
+Pruning never deletes a branch. 'af sessions restore' on a pruned session
+refuses and names the kept branch, so the work can be recreated from it.
+Only archived sessions are eligible; live, lost, dead or in-flight sessions,
+and archives whose move is incomplete, are skipped with their reasons.
+
+--apply asks for confirmation when stdin is a terminal; in scripts and pipes
+it proceeds on the flag alone.
+
+```
+af sessions prune --older-than <duration> [--repo <path> | --all] [--apply] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | Span every project instead of only the current/--repo one |
+| `--apply` |  | Actually delete: without it, prune is a dry run that lists what it would reclaim |
+| `--older-than` | `string` | Prune sessions archived longer than this duration ago (required, for example 720h for thirty days) |
 
 **Global flags**
 

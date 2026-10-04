@@ -598,6 +598,18 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 	return resp.ArchivedPath, err
 }
 
+// PruneSessions asks the daemon to evaluate archived sessions against a
+// prune request (#5136) — a dry run listing the reclaimable sessions, or an
+// apply that deletes their files and tombstones the records.
+func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
+	var resp PruneSessionsResponse
+	err := callDaemon("PruneSessions", req, &resp)
+	if err != nil && !isMutationCommitted(err) {
+		return PruneSessionsResponse{}, err
+	}
+	return resp, err
+}
+
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
 func RestoreSession(req RestoreSessionRequest) (string, error) {
 	var resp RestoreSessionResponse

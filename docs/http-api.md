@@ -240,6 +240,17 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `sent-unverified` means the paste and Enter were accepted while a readable pane
 did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
+`PruneSessions` returns
+`{ "ok": true, "applied": <bool>, "older_than": "<duration>", "archived_before": "<rfc3339>", "pruned": [<entry>…], "skipped"?: [<entry>…], "incomplete"?: [<entry>…], "reclaimed_bytes": <int>, "warnings"?: [<string>…] }`:
+a dry run (`apply` omitted/false) lists in `pruned` each archived session it
+WOULD prune — `{ "id"?, "title", "repo_id", "branch", "archived_at",
+"reclaimed_bytes" }` — and changes nothing; `apply: true` performs the
+deletion and stamps `pruned_at` on each entry. `skipped` entries
+(`{ "title", "repo_id", "reason" }`) were evaluated and refused before
+anything was touched; `incomplete` entries started deleting but could not be
+confirmed finished and need operator attention or a re-run. `older_than` is
+required and must be a positive Go duration measured from each session's
+archive time, and the request needs a scope — `repo_id` or `all: true`;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
@@ -270,6 +281,8 @@ RFC 3339 timestamps:
 | --- | --- |
 | `created_at` | When the session was created. |
 | `updated_at` | When the session state last mutated: lifecycle, identity, prompt delivery, tab roster, or pane activity. Reads, serialization, and cache refreshes do not advance it. |
+| `archived_at` | When the session's archive move committed; `--older-than` for `PruneSessions` is measured from it. Omitted on live sessions; records archived before the field existed report nothing and prune falls back to `updated_at`. |
+| `pruned_at` | When `PruneSessions --apply` deleted the session's archived worktree and captures and tombstoned the record. Present only on pruned tombstones: the row stays listed, restore refuses naming the kept branch, and `lifecycle_action` is suppressed so no client advertises restore. |
 
 `updated_at` survives saves and restarts. Older records retain their last save
 time; a missing or zero stored value falls back to `created_at` when loaded.

@@ -205,6 +205,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/PruneSessions",
+		Description: "Prune old archived sessions: dry-run lists what would be reclaimed; apply deletes archived worktrees and provider captures, tombstones the records, and keeps branches.",
+		requestType: reflect.TypeOf(PruneSessionsRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PruneSessions) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/RestoreSession",
 		Description: "Restore an archived, Lost, or Dead session; an optional expected daemon boot ID refuses before admission if the process changed.",
 		requestType: reflect.TypeOf(RestoreSessionRequest{}),

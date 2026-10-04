@@ -905,6 +905,14 @@ func init() {
 	sessionsRestoreCmd.Flags().Bool("force-reap", false,
 		"replace a reachable sandbox WITHOUT pushing its work first (discards anything it has not pushed)")
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
+
+	sessionsPruneCmd.Flags().StringVar(&sessionsPruneOlderThanStr, "older-than", "",
+		"Prune sessions archived longer than this duration ago (required, for example 720h for thirty days)")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneApplyFlag, "apply", false,
+		"Actually delete: without it, prune is a dry run that lists what it would reclaim")
+	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneAllFlag, "all", false,
+		"Span every project instead of only the current/--repo one")
+	SessionsCmd.AddCommand(sessionsPruneCmd)
 	SessionsCmd.AddCommand(sessionsAttachCmd)
 	SessionsCmd.AddCommand(sessionsWhoamiCmd)
 

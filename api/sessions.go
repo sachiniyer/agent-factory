@@ -33,6 +33,7 @@ var (
 	killSessionViaDaemon    = daemon.KillSession
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
+	pruneSessionsViaDaemon  = daemon.PruneSessions
 	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = daemon.SendPromptWithStatus
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus
