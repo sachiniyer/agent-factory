@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -403,35 +402,6 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 	}
 }
 
-// TestApplyConfigTokenlessNetworkWarnsAndBinds: a tokenless non-loopback address is
-// WARNED about at save time and BINDS — never refused (#2168 Phase 0; the #2556
-// correction the plan called out). ApplyConfig surfaces the exposure notice as a
-// warning and the listener comes up on the network address.
-func TestApplyConfigTokenlessNetworkWarnsAndBinds(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.ListenAddr = "127.0.0.1:0"
-	m, _, _ := boundWebListeners(t, cfg)
-
-	// Move to a tokenless network bind on an ephemeral port on all interfaces.
-	_, err := config.SetGlobalConfigValue("listen_addr", "0.0.0.0:0")
-	require.NoError(t, err)
-	_, err = config.SetGlobalConfigValue("require_token", "false")
-	require.NoError(t, err)
-
-	result, err := m.ApplyConfig()
-	require.NoError(t, err, "a tokenless network bind must NOT be refused (#2168)")
-	require.Empty(t, result.FailedListenerKeys, "the network bind must succeed, not fail")
-
-	exposed := false
-	for _, w := range result.Warnings {
-		if strings.Contains(w, "require_token is false") {
-			exposed = true
-		}
-	}
-	require.True(t, exposed, "the tokenless-network exposure notice must be surfaced at save time, got %v", result.Warnings)
-	require.NotEmpty(t, m.lifecycle.snapshot().listeners.TCPBoundAddr, "the listener must have bound the network address")
-}
-
 // grabFreeLoopbackAddr returns a currently-free 127.0.0.1:port address by binding
 // and immediately releasing it. Callers that require a later bind to succeed must
 // retry the complete reserve-and-bind operation; retrying this reservation alone
@@ -485,6 +455,7 @@ func boundPort(t *testing.T, boundAddr string) string {
 func TestSetListenAddrSamePortNarrowingRepliesOnTheListenerItMoves(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.AllowUnauthenticatedNetwork = true // #5137: a tokenless wildcard bind needs the opt-in
 	m, _, oldBound := boundWebListeners(t, cfg)
 	port := boundPort(t, oldBound)
 	// Dial the wildcard listener over loopback.
@@ -512,6 +483,7 @@ func TestSetListenAddrSamePortNarrowingRepliesOnTheListenerItMoves(t *testing.T)
 func TestWebListenerSamePortNarrowingAppliesLive(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.AllowUnauthenticatedNetwork = true // #5137: a tokenless wildcard bind needs the opt-in
 	m, wl, oldBound := boundWebListeners(t, cfg)
 	port := boundPort(t, oldBound)
 	require.Equal(t, http.StatusOK, getStatus(t, "127.0.0.1:"+port, "/v1/health"))
@@ -542,6 +514,7 @@ func TestWebListenerSamePortWideningAppliesLive(t *testing.T) {
 	newAddr := "0.0.0.0:" + port
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
@@ -589,6 +562,7 @@ func TestWebListenerSamePortRebindFailureRestoresOldListener(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
@@ -705,6 +679,7 @@ func TestWebListenerSamePortRollbackFailureClearsBoundState(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
@@ -739,6 +714,7 @@ func TestWebListenerSamePortRollbackFailureClearsBoundState(t *testing.T) {
 func TestWebListenerSamePortLeadingZeroPortAppliesLive(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.AllowUnauthenticatedNetwork = true // #5137: a tokenless wildcard bind needs the opt-in
 	m, wl, oldBound := boundWebListeners(t, cfg)
 	port := boundPort(t, oldBound)
 
@@ -792,6 +768,7 @@ func TestWebListenerSamePortWideningBlockedBySiblingKeepsHandle(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
@@ -839,6 +816,7 @@ func TestWebListenerIPv4WildcardRequestSeesIPv6Sibling(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
@@ -874,7 +852,8 @@ func TestWebListenerSamePortSiblingMovedInSameApplyRetries(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = "0.0.0.0:" + port
-	next.PreviewListenAddr = "" // torn down in the same apply — the blocker leaves
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
+	next.PreviewListenAddr = ""             // torn down in the same apply — the blocker leaves
 	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
@@ -908,6 +887,7 @@ func TestWebListenerSamePortIPv6WideningAppliesLive(t *testing.T) {
 	newAddr := "[::]:" + port
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
@@ -1116,6 +1096,7 @@ func TestWebListenerMutualDeclineIsNotASwap(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = newAddr
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	next.PreviewListenAddr = newAddr
 	m.live.Store(&next)
 
@@ -1192,6 +1173,7 @@ func TestWebListenerSamePortSwapFlushesInflightRequest(t *testing.T) {
 	// the request is in the handler…
 	next := *m.Config()
 	next.ListenAddr = "0.0.0.0:" + port
+	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	m.live.Store(&next)
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "the same-port widening must succeed while the request is in flight")

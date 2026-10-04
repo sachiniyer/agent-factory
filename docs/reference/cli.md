@@ -865,13 +865,17 @@ Settable keys:
   keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
-                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and network.require_token defaults to false —
-                             set network.require_token = true in the same breath, or anyone who can reach the
-                             address controls this machine. af serves plain HTTP, so front a routable
-                             listener with a TLS-terminating proxy or a private network.
+                             warning: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) with
+                             network.require_token off is refused by default — the daemon still starts and
+                             the unix socket still works, but the TCP listener stays unbound until
+                             network.require_token = true, a loopback address, or
+                             network.allow_unauthenticated_network = true lands. af serves plain HTTP, so
+                             front a routable listener with a TLS-terminating proxy or a private network.
   network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
   network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.allow_unauthenticated_network  true | false  (default false: explicit opt-in that lets a non-loopback
+                             listen_addr bind with the token off — the full control API, DeliverPrompt included,
+                             is then served unauthenticated to anyone who can reach the address)
   network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
                              Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
@@ -902,9 +906,9 @@ Settable keys:
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
 Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
-require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
-ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
-canonical grouped values.
+require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
+docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
 uses the same apply-on-save path as the TUI and web config panes (#2480). Most

@@ -1,6 +1,12 @@
 package apiclient
 
-import "github.com/sachiniyer/agent-factory/daemon"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
+)
 
 // The config read/write trio (#3679, #3708). These are the HTTP twins of the
 // daemon's controlServer.GetConfig and its admission-gated SetConfigValue /
@@ -36,11 +42,30 @@ func (c *Client) GetConfig(req daemon.GetConfigRequest) (daemon.GetConfigRespons
 	return resp, nil
 }
 
-// SetConfigValue writes one global config key on the targeted daemon.
+// The #5137 unauthenticated-listener refusal reaches REMOTE writes through the
+// guarded twin routes: SetConfigValue and UnsetConfigValue select
+// /v1/SetConfigValueGuarded / /v1/UnsetConfigValueGuarded — same request shape,
+// same daemon handler — for any write that could CREATE the refused posture
+// (config.ListenerPostureWriteExposure / ListenerPostureUnsetExposure answer
+// that), because a pre-#5137 daemon's writer has no listenerWriteRefusal and
+// would accept the write and bind the very listener this build declines to.
+//
+// Route selection, not a health preflight, is the capability check: the guarded
+// path only exists on daemons that enforce the refusal, so the write and the
+// proof arrive in the SAME request — a health-then-write pair could land its
+// second leg on a different, older daemon after a restart or behind a
+// mixed-version front. A 404 on the guarded route is the fail-closed answer:
+// the write never happened. Safe writes (require_token on, a loopback
+// listen_addr, revoking the opt-in) keep the plain routes — an old daemon
+// applies them safely and they are exactly the remediation an old daemon needs.
 func (c *Client) SetConfigValue(req daemon.SetConfigValueRequest) (daemon.SetConfigValueResponse, error) {
 	var resp daemon.SetConfigValueResponse
-	if err := c.call("SetConfigValue", req, &resp); err != nil {
-		return daemon.SetConfigValueResponse{}, err
+	method := "SetConfigValue"
+	if config.ListenerPostureWriteExposure(req.Key, req.Value) {
+		method += "Guarded"
+	}
+	if err := c.call(method, req, &resp); err != nil {
+		return daemon.SetConfigValueResponse{}, refusalCapableRouteError(method, req.Key, err)
 	}
 	return resp, nil
 }
@@ -49,8 +74,30 @@ func (c *Client) SetConfigValue(req daemon.SetConfigValueRequest) (daemon.SetCon
 // targeted daemon.
 func (c *Client) UnsetConfigValue(req daemon.UnsetConfigValueRequest) (daemon.UnsetConfigValueResponse, error) {
 	var resp daemon.UnsetConfigValueResponse
-	if err := c.call("UnsetConfigValue", req, &resp); err != nil {
-		return daemon.UnsetConfigValueResponse{}, err
+	method := "UnsetConfigValue"
+	if config.ListenerPostureUnsetExposure(req.Key) {
+		method += "Guarded"
+	}
+	if err := c.call(method, req, &resp); err != nil {
+		return daemon.UnsetConfigValueResponse{}, refusalCapableRouteError(method, req.Key, err)
 	}
 	return resp, nil
+}
+
+// refusalCapableRouteError translates the one guarded-route failure whose raw
+// form is misleading: a 404 there does not mean the route is missing in some
+// generic sense — it means the answering daemon predates the #5137 refusal and
+// would have served the exposure the write was about to create. Naming that —
+// and that nothing was written — beats a bare "daemon does not serve" line.
+// Everything else passes through unchanged, including the plain-route 404 a
+// pre-#3679 daemon still gives for UnsetConfigValue itself.
+func refusalCapableRouteError(method, key string, err error) error {
+	if !strings.HasSuffix(method, "Guarded") || !IsRouteNotServed(err) {
+		return err
+	}
+	return fmt.Errorf(
+		"the daemon at %s predates af's unauthenticated-listener refusal (#5137): it would accept this %s write "+
+			"and serve the control API — including DeliverPrompt — to anyone who can reach the address, "+
+			"so nothing was written. Upgrade that daemon, or run the write on its host",
+		RemoteTargetURL(), config.CanonicalConfigKey(key))
 }

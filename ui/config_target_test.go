@@ -83,10 +83,23 @@ func serveRemoteDaemon(t *testing.T, version string, handlers map[string]func(bo
 
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/health" {
-			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, Version: version}))
+			// The stub models THIS build's daemon, so its health answer carries
+			// the #5137 unauthenticated-listener-refusal capability — the same
+			// claim the guarded-route mirroring below makes routable.
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{
+				OK: true, Version: version,
+				RefusesUnauthenticatedNetworkListener: true,
+			}))
 			return
 		}
 		h, ok := handlers[r.URL.Path]
+		// This stub models THIS build's daemon, so the config-write twins a
+		// test registers under the plain names also answer at their #5137
+		// guarded routes — a guarded write is an exposure-capable write aimed
+		// at exactly the daemons that serve it.
+		if !ok && strings.HasSuffix(r.URL.Path, "Guarded") {
+			h, ok = handlers[strings.TrimSuffix(r.URL.Path, "Guarded")]
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_ = apiproto.WriteEnvelope(w, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
@@ -611,6 +624,11 @@ func serveControlStub(t *testing.T, stub any) {
 // the tokenless-network exposure drop: a TUI edit of network.listen_addr to a
 // non-loopback address while require_token is false, with NO daemon running.
 //
+// The seed opts the exposure in with allow_unauthenticated_network: since #5137
+// the same write without it is REFUSED outright (the pane sees an error, not a
+// warning), so the warn-and-serve surface this test pins only exists under the
+// opt-in.
+//
 // On the no-daemon fallback, daemon.SetGlobalConfigValue's apply poke
 // cannot dial the control socket, so resp.Warnings stays nil while
 // resp.Result.Warnings carries the exposureWarning the write produced. Before
@@ -630,6 +648,7 @@ func TestLocalConfigSetSurfacesExposureWarningNoDaemon(t *testing.T) {
 		"",
 		"[network]",
 		"require_token = false",
+		"allow_unauthenticated_network = true",
 		"",
 	}, "\n")
 	if err := os.WriteFile(cfgPath, []byte(seed), 0644); err != nil {

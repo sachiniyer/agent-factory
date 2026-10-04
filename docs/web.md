@@ -319,7 +319,9 @@ reverse proxies, and TLS setup.
 
 By default, `network.require_token = false`, so any peer that can reach the
 listener gets full control without a token. Loopback binding keeps that access
-on the host; it does not separate the host's local users.
+on the host; it does not separate the host's local users. A **non-loopback**
+bind under this default is refused — the port never opens — unless
+`network.allow_unauthenticated_network = true` accepts the exposure explicitly.
 
 With `network.require_token = true`, network peers must authenticate. Loopback
 peers are exempt only on a loopback-bound listener, unless
@@ -335,8 +337,10 @@ other connection errors keep it for a retry. **Disconnect** clears it.
 
 On a shared machine, enable both `network.require_token` and
 `network.require_loopback_token`, or disable the listener. Before binding a
-routable address, enable `network.require_token`; otherwise anyone who can reach
-it has full control. The daemon warns about this combination but still serves it.
+routable address, enable `network.require_token`; otherwise af refuses the
+listener — `network.allow_unauthenticated_network = true` is the explicit
+opt-in that binds it anyway and serves the control API to anyone who can reach
+it.
 Use an SSH tunnel, private network, or TLS-terminating proxy for remote transport.
 The daemon itself serves plain HTTP.
 

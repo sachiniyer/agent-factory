@@ -66,6 +66,12 @@ func globalConfigSet(key, value string) (daemon.SetConfigValueResponse, error) {
 	}
 	defer client.CloseIdleConnections()
 
+	// The #5137 skew check rides inside SetConfigValue: an exposure-capable
+	// write goes to the guarded route only refusal-capable daemons serve, so a
+	// pre-#5137 daemon answers 404 — capability proof and write in the same
+	// request, no health preflight to race a daemon swap, and never a local
+	// fallback (that would write the WRONG machine, #3678).
+	//
 	// The flat alias is the version-skew wire spelling, exactly as on the local
 	// socket (daemon.SetGlobalConfigValue): an older daemon's allowlist predates
 	// the grouped TOML name, a newer one canonicalizes the alias before writing,
@@ -109,6 +115,9 @@ func globalConfigUnset(key string) (daemon.UnsetConfigValueResponse, error) {
 	}
 	defer client.CloseIdleConnections()
 
+	// Same #5137 skew check as the set path — unsetting network.require_token
+	// is the exposure-capable direction, so UnsetConfigValue routes it to the
+	// guarded twin an old daemon does not serve.
 	resp, err := client.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: key})
 	if err != nil {
 		return daemon.UnsetConfigValueResponse{}, remoteConfigWriteError(client, "af config unset", "UnsetConfigValue", err)

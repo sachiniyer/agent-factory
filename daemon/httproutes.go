@@ -371,6 +371,22 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(SetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetConfigValue) },
 	},
+	// Guarded twins of the write pair (#5137): the same request types and the
+	// same handlers, registered under names a pre-#5137 daemon does not serve.
+	// The route's EXISTENCE is the refusal-capability proof — a client that must
+	// not hand an exposure-capable listener write to a daemon whose writer lacks
+	// the listenerWriteRefusal gate sends it to the guarded path, where an old
+	// daemon's catch-all 404 is an atomic fail-closed answer in the same request
+	// as the write itself. A health-then-write preflight cannot promise that: a
+	// restart or a mixed-version replica set could move the second request onto
+	// an old daemon.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/SetConfigValueGuarded",
+		Description: "SetConfigValue served only by daemons that enforce the unauthenticated-listener refusal — a 404 is the client's fail-closed capability signal.",
+		requestType: reflect.TypeOf(SetConfigValueRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetConfigValue) },
+	},
 	// The unset counterpart (#3679). It is served for the same reason SetConfigValue
 	// is: the write pair is what a CLI pointed at a REMOTE daemon calls, and only a
 	// pair makes `--daemon-url` mean one thing across the `af config` group. Its
@@ -386,6 +402,13 @@ var httpRoutes = []HTTPRoute{
 		Method:      http.MethodPost,
 		Path:        "/v1/UnsetConfigValue",
 		Description: "Clear one migrated global backend setting, exactly as `af config unset` does (both alias spellings, atomically).",
+		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/UnsetConfigValueGuarded",
+		Description: "UnsetConfigValue served only by daemons that enforce the unauthenticated-listener refusal — a 404 is the client's fail-closed capability signal.",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
 	},

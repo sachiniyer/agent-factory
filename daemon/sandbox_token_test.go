@@ -123,6 +123,10 @@ func TestSandboxAllowedPath_DeniesTheOperatorOnlyVerbs(t *testing.T) {
 		"/v1/SuggestSessionName",
 		"/v1/SetConfigValue",
 		"/v1/UnsetConfigValue",
+		// The #5137 guarded twins are the same handlers under a
+		// capability-proof name — a sandbox must never reach either spelling.
+		"/v1/SetConfigValueGuarded",
+		"/v1/UnsetConfigValueGuarded",
 		"/v1/DeleteProject",
 		"/v1/KillSession",
 	} {

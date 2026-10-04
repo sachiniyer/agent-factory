@@ -146,7 +146,10 @@ func TestExposureWarningPreviewStaysSilentOnUnrelatedKeys(t *testing.T) {
 func TestExposureWarningPreviewNotCrossWiredWithControlPlane(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:8443"
-	cfg.RequireToken = false               // control plane exposed
+	cfg.RequireToken = false // control plane exposed
+	// #5137: without the opt-in this posture is refused, not warned — the
+	// exposureWarning branch under test only exists while it is serving.
+	cfg.AllowUnauthenticatedNetwork = true
 	cfg.PreviewListenAddr = "0.0.0.0:8444" // preview also exposed
 
 	// A control-plane key write returns the control-plane notice.
@@ -181,7 +184,9 @@ func TestExposureWarningPreviewNotCrossWiredWithControlPlane(t *testing.T) {
 func TestExposureWarningPreviewLoopbackStaysSilentOnAnyKey(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ListenAddr = "0.0.0.0:8443"
-	cfg.RequireToken = false                 // control plane exposed
+	cfg.RequireToken = false // control plane exposed
+	// #5137: without the opt-in this posture is refused, not warned.
+	cfg.AllowUnauthenticatedNetwork = true
 	cfg.PreviewListenAddr = "127.0.0.1:8444" // preview loopback (safe)
 
 	w := exposureWarning(cfg, "network.listen_addr")

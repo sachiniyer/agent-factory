@@ -293,15 +293,14 @@ func TestPrintDaemonStatusHumanNotRunning(t *testing.T) {
 	}
 }
 
-// TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart is the
-// #2168 Phase 0 status surface, and it flips what #2090 asserted here.
+// TestCollectDaemonStatusReportsRefusalWithoutClaimingItCannotStart is the
+// #5137 status surface, and it flips what #2168 Phase 0 asserted here.
 //
-// #2090 printed "not running and cannot start" on this config and suppressed the
-// on-demand line. Both are now false: the daemon starts and serves. Keeping them
-// would be a status command lying about a live capability — the same fabricated
-// negative in the other direction. What survives is the exposure, reported as a
-// warning alongside the ordinary on-demand wording.
-func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testing.T) {
+// The disk posture is a non-loopback listen_addr with the token off and no
+// opt-in: the daemon STILL starts (the refusal is listener-scoped, so the
+// on-demand line stays true), but ExposureWarning now carries the refusal
+// reason — ListenerBindRefusal verbatim — not a warn-and-serve notice.
+func TestCollectDaemonStatusReportsRefusalWithoutClaimingItCannotStart(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
@@ -309,9 +308,16 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 
 	info := collectDaemonStatus()
 	require.False(t, info.Running)
-	require.NotEmpty(t, info.ExposureWarning, "an exposed listener must be reported, not implied")
-	require.Contains(t, info.ExposureWarning, "network.require_token")
+	require.NotEmpty(t, info.ExposureWarning, "a refused listener must be reported, not implied")
+	require.Contains(t, info.ExposureWarning, "refused")
 	require.Contains(t, info.ExposureWarning, "0.0.0.0:8443")
+	for _, fix := range []string{
+		"network.require_token true", "af token show",
+		"network.listen_addr 127.0.0.1:8443", "network.allow_unauthenticated_network true",
+	} {
+		require.Contains(t, info.ExposureWarning, fix,
+			"the status surface must carry the same three fixes as every other refusal surface")
+	}
 
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
@@ -319,11 +325,138 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 	printDaemonStatusHuman(cmd, info)
 	got := out.String()
 	require.Contains(t, got, "starts on demand",
-		"the on-demand promise is true again — this config starts fine")
+		"the on-demand promise is still true — the refusal is scoped to the TCP listener")
 	require.NotContains(t, got, "cannot start",
-		"there is no config the daemon refuses to start under any more")
-	require.Contains(t, got, "warning:", "the exposure still has to reach the operator")
+		"there is still no config the daemon refuses to start under")
+	require.Contains(t, got, "warning:", "the refusal still has to reach the operator")
 	require.Contains(t, got, "DeliverPrompt")
+}
+
+// TestCollectDaemonStatusOptedInExposureWarns covers the opted-in half: with
+// allow_unauthenticated_network = true the listener DOES bind and serve
+// unauthenticated, so ExposureWarning carries the serving-exposure notice —
+// "af serves" — and not the refusal.
+func TestCollectDaemonStatusOptedInExposureWarns(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\nallow_unauthenticated_network = true\n"), 0600))
+
+	info := collectDaemonStatus()
+	require.NotEmpty(t, info.ExposureWarning, "a serving unauthenticated exposure is still reported")
+	require.Contains(t, info.ExposureWarning, "0.0.0.0:8443")
+	require.Contains(t, info.ExposureWarning, "af serves")
+	require.NotContains(t, info.ExposureWarning, "refused",
+		"an opted-in listener is serving, not refused — the notice must not conflate them")
+}
+
+// TestPrintDaemonStatusHumanRefusedListener pins the lifecycle rendering: a
+// configured-but-refused TCP listener prints "(refused)" with the shared reason,
+// not "(not bound)" — the refused state is a decision, and a bare not-bound
+// would send the operator debugging a port that was never attempted.
+func TestPrintDaemonStatusHumanRefusedListener(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running: true,
+		Listeners: &daemon.DaemonListenerStatus{
+			HTTPUnixBound:     true,
+			TCPConfigured:     true,
+			TCPListenAddr:     "0.0.0.0:8443",
+			TCPBound:          false,
+			TCPRefusalReason:  "network.listen_addr \"0.0.0.0:8443\" is reachable from the network … refused",
+			PreviewConfigured: false,
+		},
+		ControlSocket:     "/h/daemon.sock",
+		ControlSocketFile: true,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "tcp listener:   0.0.0.0:8443 (refused)",
+		"a refused listener is a decision — the line must say so")
+	require.Contains(t, got, "refused:      network.listen_addr",
+		"the refusal reason the lifecycle recorded must reach the operator")
+	require.NotContains(t, got, "(not bound)",
+		"a refused listener is not 'not bound' — that phrase belongs to a bind that was attempted")
+}
+
+// TestListenerStatusWarningBoundUnderRefusedPosture pins the version-skew
+// surface: a daemon still BOUND while the disk posture is refused is running
+// code from before the #5137 refusal (a current daemon retires the socket on
+// apply), so it is still serving the API unauthenticated. The refusal text
+// would be a false "safe" claim — the warning must name the serving socket
+// and the restart that enforces the policy instead.
+func TestListenerStatusWarningBoundUnderRefusedPosture(t *testing.T) {
+	refused := config.DefaultConfig()
+	refused.ListenAddr = "0.0.0.0:8443"
+	refused.RequireToken = false
+
+	// The still-serving case: Ping reports the socket bound, so the disk
+	// refusal is describing a policy this daemon build does not have. A nil
+	// BootConfig stands in for a responder that predates the field entirely —
+	// which also predates the refusal, so the bound socket IS the exposure.
+	bound := &daemon.DaemonListenerStatus{
+		TCPConfigured: true, TCPListenAddr: "0.0.0.0:8443",
+		TCPBound: true, TCPBoundAddr: "0.0.0.0:8443",
+	}
+	warn := listenerStatusWarning(refused, nil, bound)
+	for _, want := range []string{"still serving", "0.0.0.0:8443", "af daemon restart", "DeliverPrompt"} {
+		require.Contains(t, warn, want,
+			"a bound socket under a refused posture must be reported as the live exposure it is")
+	}
+	require.NotContains(t, warn, "the TCP listener is refused",
+		"the refusal text is a false safe claim while the socket is still bound")
+
+	// A daemon that DOES carry BootConfig gets its live posture consulted: a
+	// bound socket the live config still serves unauthenticated is the same
+	// exposure; a bound socket the live config keeps safe (token on, or a
+	// loopback addr the disk edit abandoned) is restart-pending drift, not an
+	// unauthenticated claim.
+	liveExposed := &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: false}
+	require.Contains(t, listenerStatusWarning(refused, liveExposed, bound), "still serving 0.0.0.0:8443 unauthenticated",
+		"a live posture that is itself unauthenticated confirms the exposure")
+	liveSafe := &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: true}
+	drift := listenerStatusWarning(refused, liveSafe, bound)
+	require.Contains(t, drift, "socket is safe",
+		"a bound socket the live config still authenticates is drift, not an unauthenticated exposure")
+	require.NotContains(t, drift, "unauthenticated",
+		"claiming unauthenticated against a tokened socket would be a false exposure claim")
+	require.Contains(t, drift, "af daemon restart")
+
+	// The retained-socket divergence (#5137): a failed rebind leaves the OLD
+	// network socket answering while the live config already names loopback —
+	// classifying boot.ListenAddr would read that live network socket as safe.
+	// The bound address, not the configured one, is what the exposure is.
+	liveConfigMoved := &daemon.DaemonBootConfig{ListenAddr: "127.0.0.1:9999", RequireToken: false}
+	require.Contains(t, listenerStatusWarning(refused, liveConfigMoved, bound), "still serving 0.0.0.0:8443 unauthenticated",
+		"a socket still bound on the network address is exposed no matter what the live config names")
+
+	// And the converse: the retained socket moved to loopback while the live
+	// config still names the network address — the loopback socket is safe, so
+	// drift, not exposure.
+	loopbackBound := &daemon.DaemonListenerStatus{
+		TCPConfigured: true, TCPListenAddr: "0.0.0.0:8443",
+		TCPBound: true, TCPBoundAddr: "127.0.0.1:8443",
+	}
+	liveNetwork := &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: false}
+	require.Contains(t, listenerStatusWarning(refused, liveNetwork, loopbackBound), "socket is safe",
+		"a socket bound on loopback is not network-reachable even if the config names a network addr")
+
+	// The refused case: nothing bound — the refusal itself is the report.
+	notBound := &daemon.DaemonListenerStatus{
+		TCPConfigured: true, TCPListenAddr: "0.0.0.0:8443",
+		TCPBound: false, TCPRefusalReason: "…",
+	}
+	require.Equal(t, config.ListenerBindRefusal(refused), listenerStatusWarning(refused, nil, notBound))
+	require.Equal(t, config.ListenerBindRefusal(refused), listenerStatusWarning(refused, nil, nil),
+		"no running daemon reports no bound socket — the disk refusal stands")
+
+	// The opted-in case stays the serving notice (unchanged behavior).
+	opted := *refused
+	opted.AllowUnauthenticatedNetwork = true
+	require.Equal(t, config.ListenerExposureNotice(&opted), listenerStatusWarning(&opted, nil, bound))
 }
 
 // TestCollectDaemonStatusSafeConfigIsUnwarned is the other direction: a user who

@@ -145,7 +145,9 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// socket and control plane every local client depends on must not regress
 	// because a web port could not open. The auth/CORS keys apply live per request
 	// (livePosture) and never come through here. A tokenless network bind is
-	// reported, not refused (#2168 Phase 0), by bindWebLocked's banner.
+	// REFUSED since #5137 — reconcile declines the socket and logs the reason at
+	// ERROR — unless network.allow_unauthenticated_network opts in, in which case
+	// bindWebLocked's banner reports the exposure it is serving.
 	wl := newWebListeners(manager, mux, newPreviewMux(cs))
 	manager.webListeners = wl
 	if _, err := wl.reconcile(manager.cfg); err != nil {

@@ -419,10 +419,13 @@ type Config struct {
 	// DISABLES the web server entirely (no TCP listener, pure-unix daemon). A
 	// routable value like "0.0.0.0:8443" or a LAN/Tailscale IP exposes it to the
 	// network (opt-in). Pair it with require_token=true unless you trust the
-	// network: a non-loopback bind with the token off serves the control plane
-	// unauthenticated, which the daemon ALLOWS and warns about once at startup
-	// (ListenerExposureNotice). #2090 made that combination a startup refusal;
-	// #2168 Phase 0 reversed it — the choice is the operator's, not af's.
+	// network: a non-loopback bind with the token off is REFUSED — the daemon
+	// starts anyway and keeps serving its unix sockets, but the TCP listener
+	// stays unbound (#5137, ListenerBindRefusal) — unless the operator also sets
+	// allow_unauthenticated_network = true to accept the risk explicitly.
+	// #2090 made that combination a fatal startup refusal and crash-looped the
+	// autostart unit; #2168 Phase 0 made it warn-and-serve; #5137 lands between
+	// them: the LISTENER is refused, never the daemon.
 	// The listener is plain HTTP — af terminates no TLS of
 	// its own; put a routable listener behind a reverse proxy (nginx/caddy) or a
 	// private network (Tailscale/VPN) if you need transport encryption. See
@@ -447,11 +450,10 @@ type Config struct {
 	//
 	// The default is safe only because listen_addr is loopback-only
 	// (127.0.0.1:8443): nothing off-box can reach a listener the tokenless posture
-	// applies to. Pairing this default with a NON-loopback listen_addr serves an
-	// unauthenticated control plane to everyone who can route to it. That is
-	// ALLOWED and warned about once at daemon start (ListenerExposureNotice) —
-	// #2090 made it a refusal, #2168 Phase 0 reversed that by owner decision — so
-	// a network bind SHOULD set require_token = true, and af will not do it for you.
+	// applies to. Pairing this default with a NON-loopback listen_addr is
+	// REFUSED: the TCP listener stays unbound while the daemon and its unix
+	// sockets keep working (#5137, ListenerBindRefusal), unless the operator sets
+	// allow_unauthenticated_network = true to accept the exposure explicitly.
 	// Note that require_loopback_token cannot substitute: it is inert while this
 	// key is false, because tokenDisabled short-circuits the gate. The listener is
 	// plain HTTP (no TLS) regardless — this key is only about the token, and the
@@ -484,6 +486,27 @@ type Config struct {
 	// Global-only (daemon network surface), like require_token — a cloned repo must
 	// never be able to flip it. See docs/remote-http-auth.md.
 	RequireLoopbackToken bool `json:"require_loopback_token" toml:"require_loopback_token"`
+	// AllowUnauthenticatedNetwork is the explicit opt-in that releases the
+	// #5137 listener refusal: set it true to let a NON-loopback listen_addr
+	// bind while require_token is false — serving the full control API,
+	// DeliverPrompt included, to anyone who can route to the address with no
+	// authentication and no TLS. It defaults to FALSE, so a non-loopback
+	// tokenless bind is refused out of the box: the daemon starts and the unix
+	// control socket still works, but the TCP listener stays unbound until one
+	// of the three named fixes lands — require_token = true, a loopback
+	// listen_addr, or this key.
+	//
+	// It is deliberately a posture key, not a bind address: it changes nothing
+	// on a loopback or tokened listener, and it is read LIVE like the other
+	// auth-posture keys, so a saved flip takes effect on the running daemon's
+	// next reconcile without a restart. A hand-edit that withdraws it under a
+	// serving tokenless network listener retires that listener at the next
+	// ApplyConfig — the refusal is posture, not a startup check.
+	//
+	// Global-only, like the rest of the network surface: a cloned repo must
+	// never be able to open an unauthenticated network port. See
+	// docs/remote-http-auth.md.
+	AllowUnauthenticatedNetwork bool `json:"allow_unauthenticated_network" toml:"allow_unauthenticated_network"`
 	// PreviewListenAddr binds a SECOND plain-HTTP TCP listener — the dedicated
 	// web-tab PREVIEW origin (#1856). It exists so previews can eventually be
 	// served CROSS-ORIGIN to the SPA (listen_addr): a framed dev server on a

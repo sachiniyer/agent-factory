@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 )
@@ -48,6 +49,16 @@ type DaemonListenerStatus struct {
 	TCPBound      bool   `json:"tcp_bound"`
 	TCPListenAddr string `json:"tcp_listen_addr,omitempty"`
 	TCPBoundAddr  string `json:"tcp_bound_addr,omitempty"`
+	// TCPRefusalReason is non-empty only while the daemon is REFUSING to bind
+	// the configured control listener: a non-loopback listen_addr with
+	// network.require_token off and no network.allow_unauthenticated_network
+	// opt-in (#5137). It distinguishes "configured but the bind failed or was
+	// never attempted" (the not-bound case) from "deliberately not bound" — and
+	// carries the shared remediation sentence verbatim, so every surface that
+	// renders it (af daemon status, af doctor, Ping's listeners block) states
+	// the same three fixes. A bound listener can never carry one: setTCPBound
+	// clears it.
+	TCPRefusalReason string `json:"tcp_refusal_reason,omitempty"`
 	// Preview* mirror the TCP* fields for the web-tab preview listener (#1856),
 	// the second TCP listener bound from preview_listen_addr. PreviewConfigured is
 	// whether preview_listen_addr is set; PreviewBound / PreviewBoundAddr report
@@ -249,6 +260,26 @@ func (l *daemonLifecycle) setTCPBound(addr string) {
 	defer l.mu.Unlock()
 	l.listeners.TCPBound = true
 	l.listeners.TCPBoundAddr = addr
+	// A listener that just bound cannot be in the refused posture — the refusal
+	// means "no listener". Clearing here keeps the two states exclusive even if
+	// a posture flip raced a rebind.
+	l.listeners.TCPRefusalReason = ""
+}
+
+// setTCPRefused records the one configured-but-not-bound state that is a
+// DECISION rather than a failure: the #5137 refusal of a tokenless non-loopback
+// control listener. It is a single locked update — configured, unbound, and
+// reasoned together — so a concurrent /v1/health or `af daemon status` snapshot
+// can never render the pair half-applied: a refused listener always reports
+// TCPConfigured=true with TCPBound=false and the remediation text beside them.
+func (l *daemonLifecycle) setTCPRefused(addr, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.listeners.TCPConfigured = true
+	l.listeners.TCPListenAddr = addr
+	l.listeners.TCPBound = false
+	l.listeners.TCPBoundAddr = ""
+	l.listeners.TCPRefusalReason = reason
 }
 
 func (l *daemonLifecycle) clearTCPBound() {
@@ -269,16 +300,23 @@ func (l *daemonLifecycle) clearTCPBound() {
 // configured↔unconfigured boundary left TCPConfigured/TCPListenAddr contradicting
 // TCPBound for the rest of the boot — exactly the stale snapshot `af daemon status`
 // keys on (`daemoncmd.go` checks TCPConfigured first) and `/v1/health` serialises.
-// Call this ONLY from the config-driven success branches of bindWebLocked: after a
-// successful bind (with the configured address, not the kernel-resolved one) and on
-// the addr=="" opt-out teardown. The unexpected-listener-death closure must NOT
+// Call this ONLY from the config-driven branches of bindWebLocked: after a
+// successful bind (with the configured address, not the kernel-resolved one),
+// on the addr=="" opt-out teardown, and on the no-retained-socket pre-bind
+// resync that leaves the refused posture (a failed bind there is honestly
+// "configured, not bound" — never a stale refusal). The
+// unexpected-listener-death closure must NOT
 // call it — network.listen_addr is still set there, so the configured half must
 // stay so `af daemon status` renders "<addr> (not bound)" rather than "disabled".
+// The refusal half clears here too: every caller of this setter is a posture
+// that ISN'T refused (an allowed bind, or the opt-out), so a reason left over
+// from a refused generation would be stale.
 func (l *daemonLifecycle) setTCPConfigured(addr string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.listeners.TCPConfigured = addr != ""
 	l.listeners.TCPListenAddr = addr
+	l.listeners.TCPRefusalReason = ""
 }
 
 func (l *daemonLifecycle) setPreviewBound(addr string) {
@@ -314,4 +352,42 @@ func (l *daemonLifecycle) clearHTTPListeners() {
 	l.listeners.TCPBoundAddr = ""
 	l.listeners.PreviewBound = false
 	l.listeners.PreviewBoundAddr = ""
+}
+
+// Ping is the lifecycle snapshot made RPC: every field it answers except
+// Version, PID, and the capability flags is read from the daemonLifecycle, so
+// the handler lives here with the state it reports rather than in
+// control_server.go with the mutating handlers.
+func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	resp.AccountHandoff = true
+	resp.RefusesUnauthenticatedNetworkListener = true
+	resp.Version = Version()
+	resp.PID = os.Getpid()
+	if s.manager != nil && s.manager.lifecycle != nil {
+		state := s.manager.lifecycle.snapshot()
+		resp.BootID = state.bootID
+		resp.TransactionID = state.transactionID
+		resp.Phase = state.phase
+		resp.Listeners = state.listeners
+	}
+	if s.manager != nil {
+		// The LIVE posture, not the boot snapshot: the listener/auth keys are
+		// applied-live (#2480), so m.cfg can go stale the moment a config write
+		// lands, and every BootConfig consumer — the running-vs-disk drift rows,
+		// `af daemon status`, doctor's listener classification — is asking what
+		// this daemon enforces NOW.
+		if live := s.manager.Config(); live != nil {
+			resp.BootConfig = daemonBootConfig(live)
+			if s.manager.probationTokenFloor.Load() {
+				// The upgrade-probation floor is enforcement OUTSIDE the file:
+				// while it holds, the control listener's gate demands the
+				// bearer token even though the loaded config reads tokenless.
+				// Report what the socket enforces — otherwise status and doctor
+				// would call a floored socket unauthenticated.
+				resp.BootConfig.RequireToken = true
+			}
+		}
+	}
+	return nil
 }

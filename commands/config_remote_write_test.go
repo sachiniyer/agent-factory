@@ -43,7 +43,9 @@ type stubDaemon struct {
 
 	mu         sync.Mutex
 	setReqs    []daemon.SetConfigValueRequest
+	setPaths   []string
 	unsetReqs  []daemon.UnsetConfigValueRequest
+	unsetPaths []string
 	healthHits int
 
 	// configPath is the file this "daemon host" reports writing. It is
@@ -53,6 +55,14 @@ type stubDaemon struct {
 	// version is what GET /v1/health reports. Empty models a daemon predating
 	// version reporting (#1044), which still answers Ping.
 	version string
+	// refusalCapable models a daemon whose writer carries the #5137
+	// unauthenticated-listener refusal. One flag drives BOTH halves of that
+	// claim — GET /v1/health's RefusesUnauthenticatedNetworkListener field and
+	// whether the /v1/*ConfigValueGuarded routes answer — because on a real
+	// daemon they ship together. False is every daemon already deployed:
+	// its health answer lacks the field entirely and its mux 404s the guarded
+	// paths, which is exactly the client's fail-closed signal.
+	refusalCapable bool
 	// unserved names routes this daemon does not have, modelling an older build.
 	unserved map[string]bool
 
@@ -116,17 +126,30 @@ func (d *stubDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		_ = apiproto.WriteEnvelope(w, apiproto.Failure(fmt.Sprintf("unknown route %q", r.URL.Path)))
 		return
 	}
+	// The guarded routes are the #5137 capability made routable: they exist
+	// only on a daemon whose writer carries the refusal, so this stub serves
+	// them under the same flag it reports — a pre-refusal daemon answers its
+	// catch-all 404 on the guarded path, the same bytes as `unserved`.
+	if strings.HasSuffix(r.URL.Path, "Guarded") && !d.refusalCapable {
+		w.WriteHeader(http.StatusNotFound)
+		_ = apiproto.WriteEnvelope(w, apiproto.Failure(fmt.Sprintf("unknown route %q", r.URL.Path)))
+		return
+	}
 	switch r.URL.Path {
 	case "/v1/health":
 		d.mu.Lock()
 		d.healthHits++
 		d.mu.Unlock()
-		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, Version: d.version}))
-	case "/v1/SetConfigValue":
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{
+			OK: true, Version: d.version,
+			RefusesUnauthenticatedNetworkListener: d.refusalCapable,
+		}))
+	case "/v1/SetConfigValue", "/v1/SetConfigValueGuarded":
 		var req daemon.SetConfigValueRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		d.mu.Lock()
 		d.setReqs = append(d.setReqs, req)
+		d.setPaths = append(d.setPaths, r.URL.Path)
 		d.mu.Unlock()
 		var applied []string
 		if d.applyOutcome == "applied" {
@@ -147,11 +170,12 @@ func (d *stubDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			daemon.SetConfigValueResponse
 			ApplyOutcome string `json:"apply_outcome"`
 		}{resp, d.applyOutcome}))
-	case "/v1/UnsetConfigValue":
+	case "/v1/UnsetConfigValue", "/v1/UnsetConfigValueGuarded":
 		var req daemon.UnsetConfigValueRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		d.mu.Lock()
 		d.unsetReqs = append(d.unsetReqs, req)
+		d.unsetPaths = append(d.unsetPaths, r.URL.Path)
 		d.mu.Unlock()
 		resp := daemon.UnsetConfigValueResponse{
 			Result:        &config.UnsetResult{Key: req.Key, Removed: true, Path: d.configPath},
@@ -173,10 +197,31 @@ func (d *stubDaemon) sets() []daemon.SetConfigValueRequest {
 	return append([]daemon.SetConfigValueRequest(nil), d.setReqs...)
 }
 
+// setRoutes records which ROUTE each write arrived on — the point of the #5137
+// guarded twins is invisible in the request bodies, which are identical either
+// way, so the tests assert the path itself.
+func (d *stubDaemon) setRoutes() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.setPaths...)
+}
+
 func (d *stubDaemon) unsets() []daemon.UnsetConfigValueRequest {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return append([]daemon.UnsetConfigValueRequest(nil), d.unsetReqs...)
+}
+
+func (d *stubDaemon) unsetRoutes() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.unsetPaths...)
+}
+
+func (d *stubDaemon) healthHitCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.healthHits
 }
 
 // remoteRoute is remoteTargetRoutes bound to a live stub's URL, which only
@@ -437,6 +482,113 @@ func TestConfigWriteSkewRefusalHonorsJSON(t *testing.T) {
 	}
 }
 
+// TestConfigSetRefusesAPreRefusalDaemon is the remote half of the #5137
+// version-skew protection: an exposure-capable write takes the guarded route a
+// pre-#5137 daemon does not serve, so its 404 — answered by the SAME request
+// that would have performed the write — is the fail-closed capability check.
+// No health probe runs first: the route itself is the proof, so a daemon swap
+// between a hypothetical probe and the write cannot reroute the write onto an
+// old daemon. (As always on the remote path, nothing falls back to the
+// caller's own config.)
+func TestConfigSetRefusesAPreRefusalDaemon(t *testing.T) {
+	for _, name := range remoteRouteNames {
+		t.Run(name, func(t *testing.T) {
+			home := newConfigHome(t)
+			stub := newStubDaemon(t, "1.9.0") // refusalCapable defaults false: every pre-#5137 daemon
+			target := remoteRouteTo(name, stub.url())
+			t.Setenv("AF_DAEMON_URL", target.env)
+
+			_, _, err := runConfigCLI(t, withRoute(target.prefix,
+				"set", "network.listen_addr", "0.0.0.0:8443")...)
+			if err == nil {
+				t.Fatal("an exposure-capable write to a pre-refusal daemon must be refused")
+			}
+			for _, want := range []string{"predates af's unauthenticated-listener refusal", stub.url(), "network.listen_addr"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal must contain %q so the reader can act on it, got: %q", want, err)
+				}
+			}
+			if got := stub.sets(); len(got) != 0 {
+				t.Errorf("the write must never reach a daemon that cannot refuse it, got %+v", got)
+			}
+			if got := stub.healthHitCount(); got != 0 {
+				t.Errorf("the guarded route IS the capability check — no health probe runs, got %d", got)
+			}
+			requireGlobalConfigUnchanged(t, home, nil)
+		})
+	}
+}
+
+func TestConfigUnsetRefusesAPreRefusalDaemon(t *testing.T) {
+	home := newConfigHome(t)
+	stub := newStubDaemon(t, "1.9.0")
+	t.Setenv("AF_DAEMON_URL", stub.url())
+
+	// Unsetting network.require_token is the exposure-capable direction.
+	_, _, err := runConfigCLI(t, "unset", "network.require_token")
+	if err == nil {
+		t.Fatal("unsetting require_token on a pre-refusal daemon must be refused")
+	}
+	if !strings.Contains(err.Error(), "predates af's unauthenticated-listener refusal") {
+		t.Errorf("the refusal must name the policy the daemon lacks, got: %q", err)
+	}
+	if got := stub.unsets(); len(got) != 0 {
+		t.Errorf("the unset must never reach a daemon that cannot refuse it, got %+v", got)
+	}
+	requireGlobalConfigUnchanged(t, home, nil)
+}
+
+// TestConfigSetRoutesExposureWriteToACapableDaemon is the same write against a
+// daemon that DOES enforce the refusal: it lands on the guarded route, which
+// only such a daemon serves — the path the request took is itself the recorded
+// proof that the write went to a writer that can refuse it.
+func TestConfigSetRoutesExposureWriteToACapableDaemon(t *testing.T) {
+	home := newConfigHome(t)
+	stub := newStubDaemon(t, "1.10.0")
+	stub.refusalCapable = true
+	t.Setenv("AF_DAEMON_URL", stub.url())
+
+	_, _, err := runConfigCLI(t, "set", "network.listen_addr", "0.0.0.0:8443")
+	if err != nil {
+		t.Fatalf("a refusal-capable daemon gates the write itself — the CLI routes it: %v", err)
+	}
+	got := stub.setRoutes()
+	if len(got) != 1 || got[0] != "/v1/SetConfigValueGuarded" {
+		t.Fatalf("the exposure-capable write must take the guarded route, got %v", got)
+	}
+	if got := stub.healthHitCount(); got != 0 {
+		t.Errorf("no capability probe — the guarded route is the proof, got %d health reads", got)
+	}
+	requireGlobalConfigUnchanged(t, home, nil)
+}
+
+// TestConfigSetRoutesSafeWritesToAPreRefusalDaemon pins the remediation
+// direction: writes that cannot create the refused posture — the token coming
+// ON, listen_addr back to loopback — are exactly the fixes an operator applies
+// to a stale daemon, so they keep the plain route an old daemon does serve.
+func TestConfigSetRoutesSafeWritesToAPreRefusalDaemon(t *testing.T) {
+	for _, args := range [][]string{
+		{"set", "network.require_token", "true"},
+		{"set", "network.listen_addr", "127.0.0.1:8443"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			home := newConfigHome(t)
+			stub := newStubDaemon(t, "1.9.0")
+			t.Setenv("AF_DAEMON_URL", stub.url())
+
+			_, _, err := runConfigCLI(t, args...)
+			if err != nil {
+				t.Fatalf("the remediation write must reach a daemon that can apply it safely: %v", err)
+			}
+			got := stub.setRoutes()
+			if len(got) != 1 || got[0] != "/v1/SetConfigValue" {
+				t.Fatalf("a write that cannot create the posture keeps the plain route, got %v", got)
+			}
+			requireGlobalConfigUnchanged(t, home, nil)
+		})
+	}
+}
+
 // TestConfigWriteJSONRendersFailedApplyOutcome pins the automation surface of
 // #4247. The write succeeded on disk, but the running daemon did not adopt it;
 // stdout therefore needs a distinct machine field for BOTH verbs. Matching a
@@ -537,6 +689,9 @@ func TestConfigSetRendersEveryFailedApplyWarningOnce(t *testing.T) {
 	const applyWarning = "saved config, but live apply failed: reload config: forced"
 	newConfigHome(t)
 	stub := newStubDaemon(t, "1.9.0")
+	// require_token=false is exposure-capable, so this daemon must serve the
+	// guarded route for the write to be routed at all.
+	stub.refusalCapable = true
 	stub.applyOutcome = "failed"
 	stub.setNotice = "Saved — the running daemon could not apply the new configuration."
 	stub.writeWarnings = []string{writeWarning}

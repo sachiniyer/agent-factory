@@ -73,10 +73,13 @@ type tokenGatePolicy struct {
 //   - tokenDisabled from require_token=false, THE DEFAULT — drop the token for ALL
 //     peers, so the daemon-served web UI opens with no login. Paired with the
 //     loopback-only default listen_addr, nothing off-host can reach it. A tokenless
-//     gate CAN front a network listener: #2090 refused to bind that combination,
-//     and #2168 Phase 0 reversed the refusal by owner decision, so startHTTPServer
-//     binds it and warns once instead. Nothing below authenticates such a peer —
-//     that is the configuration doing exactly what it says.
+//     gate CAN front a network listener, but only when the operator opted in:
+//     #5137 makes that combination a refused bind by default (the daemon starts
+//     and the unix sockets still work; the TCP listener stays unbound), and
+//     allow_unauthenticated_network=true is the explicit release — which is when
+//     this policy actually gets to run tokenless on the network. Nothing below
+//     authenticates such a peer — that is the configuration doing exactly what
+//     it says.
 //   - loopbackExempt lets same-machine peers skip the token, BUT only when the
 //     listener is LOOPBACK-BOUND. On a network bind the exemption is withheld
 //     regardless of require_loopback_token: a same-host reverse proxy connects
@@ -208,6 +211,123 @@ type livePosture struct {
 	// previewWarmingUp reports whether the daemon is still restoring, so a denial on
 	// the preview origin can render the RETRYING notice instead of the terminal one.
 	previewWarmingUp func() bool
+	// tokenFloor forces the gate to demand a bearer token regardless of the
+	// snapshot's require_token (#5137). The upgrade-probation deferral sets it:
+	// a candidate whose journal recorded the TCP listener bound must keep it
+	// bound — the previous-binary supervisor knows only TCPBound — but binding
+	// it under the loaded config's tokenless posture would serve the control
+	// API unauthenticated for the whole probation window even where the old
+	// daemon was authenticated. The floor preserves the strongest safe posture:
+	// bound, token required, until adoption replaces the candidate with a fresh
+	// daemon that enforces the refusal for real. Nil means no floor.
+	tokenFloor func() bool
+}
+
+// connTracker tracks the HIJACKED connections — WebSocket upgrades — of one
+// listener KIND across its generations (#5137). http.Server forgets a conn the
+// moment it is hijacked, so neither Shutdown's drain nor Close reaches it; a
+// stream opened on listener generation A survives A's retirement and outlives
+// the handle that owned it. The tracker therefore lives on the listener owner
+// (webListeners), not the handle: a later POLICY retire — a refusal — must be
+// able to name every hijacked conn the kind is still serving, not only the ones
+// the current generation admitted.
+//
+// Membership is two-way: ConnState adds a conn when it hijacks, and the wrapped
+// conn removes itself on Close (net/http never reports a state for a hijacked
+// conn again — without the self-removal every finished stream would stay
+// strongly referenced for the daemon's life). severing latches true on the first
+// policy sever so a conn hijacking mid-sweep dies on arrival instead of landing
+// untracked; begin lifts it when a new generation binds — a latch that outlived
+// the refusal it served would break that generation's streams.
+type connTracker struct {
+	mu       sync.Mutex
+	severing bool
+	conns    map[net.Conn]struct{}
+}
+
+func newConnTracker() *connTracker {
+	return &connTracker{conns: make(map[net.Conn]struct{})}
+}
+
+// track records a conn the server just handed to a hijacking handler, or closes
+// it on the spot when a policy sever is in force. The close runs outside mu so
+// trackedConn.Close's self-removal cannot re-enter the lock.
+func (t *connTracker) track(c net.Conn) {
+	t.mu.Lock()
+	severing := t.severing
+	if !severing {
+		t.conns[c] = struct{}{}
+	}
+	t.mu.Unlock()
+	if severing {
+		_ = c.Close()
+	}
+}
+
+// untrack drops a conn — called by trackedConn.Close, so a finished stream
+// releases its slot rather than growing the set for the daemon's life.
+func (t *connTracker) untrack(c net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
+}
+
+// sever force-closes every tracked conn now and any that hijack until the next
+// generation begins. retire() drains in-flight NORMAL requests — the refusal's
+// own reply still reaches its client — while a hijacked stream has no reply
+// left to give: it only lives to keep serving a posture the socket must stop
+// serving. Closes run outside mu for the same re-entrancy reason as track.
+func (t *connTracker) sever() {
+	t.mu.Lock()
+	t.severing = true
+	conns := make([]net.Conn, 0, len(t.conns))
+	for c := range t.conns {
+		conns = append(conns, c)
+	}
+	clear(t.conns)
+	t.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+// begin lifts the severing latch for a newly bound generation. Called inside the
+// listener constructor just before Serve starts accepting, so a conn on the new
+// listener can never race the latch that severed its predecessor.
+func (t *connTracker) begin() {
+	t.mu.Lock()
+	t.severing = false
+	t.mu.Unlock()
+}
+
+// trackedListener wraps the raw listener so every accepted conn is a trackedConn
+// — the one reliable hook for "this conn is gone" that exists for hijacked conns.
+type trackedListener struct {
+	net.Listener
+	tracker *connTracker
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &trackedConn{Conn: c, tracker: l.tracker}, nil
+}
+
+// trackedConn removes itself from the tracker on Close — the ONLY teardown event
+// a hijacked conn still reports, since http.Server's ConnState is silent for it
+// after StateHijacked.
+type trackedConn struct {
+	net.Conn
+	untrackOnce sync.Once
+	tracker     *connTracker
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.untrackOnce.Do(func() { c.tracker.untrack(c) })
+	return err
 }
 
 // startTCPListener binds the plain-HTTP TCP listener on addr and serves mux
@@ -231,14 +351,18 @@ type livePosture struct {
 // token rotate` takes effect for new connections without a daemon restart. An
 // override supplies its own already-minted credential and is compared as-is.
 func startTCPListener(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture) (*tcpListenerHandle, tcpListenerInfo, error) {
-	return startTCPListenerWithListen(mux, addr, cfg, policy, shell, auth, live, net.Listen)
+	return startTCPListenerWithListen(mux, addr, cfg, policy, shell, auth, live, nil, net.Listen)
 }
 
 // startTCPListenerWithListen is startTCPListener with the socket constructor
 // supplied by the restartable-listener owner. Production uses net.Listen; the
 // seam lets lifecycle tests fail the listener underneath http.Server without
 // conflating that path with tearing the server down through the returned handle.
-func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, listen func(network, address string) (net.Listener, error)) (*tcpListenerHandle, tcpListenerInfo, error) {
+// hijacked, when non-nil, is the listener KIND's connTracker (see above): the
+// listener is wrapped so conns self-unregister, and ConnState reports each
+// hijack into it. Nil means no hijack tracking — the preview and agent-server
+// listeners have no policy retire that would ever need one.
+func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Config, policy tokenGatePolicy, shell webShell, auth *tcpListenerAuth, live *livePosture, hijacked *connTracker, listen func(network, address string) (net.Listener, error)) (*tcpListenerHandle, tcpListenerInfo, error) {
 	var token string
 	var expectedToken func() (string, error)
 	var expectedForRequest func(*http.Request) (string, error)
@@ -296,6 +420,12 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				// config (webListenerPolicy's terms), loopback judged from the fixed
 				// bound address, not the possibly-mid-change config.ListenAddr.
 				g.tokenDisabled = !c.RequireToken
+				if live.tokenFloor != nil && live.tokenFloor() {
+					// The upgrade-probation floor: the candidate keeps the
+					// journaled socket bound but must not serve it
+					// unauthenticated while the file it loaded reads refused.
+					g.tokenDisabled = false
+				}
 				g.loopbackExempt = boundLoopback && !c.RequireLoopbackToken
 			}
 			cors := c.CORSAllowedOrigins
@@ -336,6 +466,20 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 	done := make(chan struct{})
+	if hijacked != nil {
+		// http.Server stops tracking a connection the moment it is hijacked,
+		// which is what makes a policy retire incomplete without sever: the
+		// tracker must be able to name the conns Shutdown and Close cannot.
+		listener = &trackedListener{Listener: listener, tracker: hijacked}
+		srv.ConnState = func(c net.Conn, st http.ConnState) {
+			if st == http.StateHijacked {
+				hijacked.track(c)
+			}
+		}
+		// Lift the severing latch before Serve accepts this generation — a conn
+		// on the NEW listener must never hit the latch that severed the old one.
+		hijacked.begin()
+	}
 	h := &tcpListenerHandle{srv: srv, ln: listener, addr: listener.Addr().String()}
 	go func() {
 		defer close(done)

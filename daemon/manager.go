@@ -49,6 +49,15 @@ type Manager struct {
 	// NOT go through here — their handlers read live config per request.
 	webListeners *webListeners
 
+	// probationTokenFloor is the livePosture tokenFloor for the control
+	// listener while the upgrade-candidate deferral holds (#5137): the
+	// journal records TCPBound but no auth posture, so a kept-bound socket
+	// demands the bearer token for the window rather than guess. It lives on
+	// Manager, not webListeners, because Ping reads it during warm-up while
+	// startHTTPServer is still writing m.webListeners — dereferencing that
+	// pointer there is a data race.
+	probationTokenFloor atomic.Bool
+
 	// sandboxTokens holds the per-session callback credentials handed to
 	// provisioned sandboxes (#2999). In memory only and never persisted: a
 	// daemon restart invalidates every outstanding one, which is the correct

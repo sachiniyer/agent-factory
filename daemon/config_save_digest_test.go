@@ -282,3 +282,119 @@ func TestClientFallbackAppliesTheDigestSkewRule(t *testing.T) {
 		require.Contains(t, strings.Join(resp.Warnings, "\n"), skewedApplyDigestWarning)
 	})
 }
+
+// preRefusalControl models a post-#3231 pre-#5137 daemon: it answers Ping and
+// serves the admission-gated config writes, but its PingResponse predates the
+// RefusesUnauthenticatedNetworkListener field, so it decodes false — and its
+// writer has no listenerWriteRefusal, so it WOULD accept an exposure-capable
+// write and bind the listener this build declines. setCalls/unsetCalls record
+// whether the write was sent at all.
+type preRefusalControl struct {
+	setCalls   int
+	unsetCalls int
+	// capable flips the Ping answer to the #5137 build's: the write must then
+	// route rather than refuse.
+	capable bool
+}
+
+func (c *preRefusalControl) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.OK = true
+	resp.Version = "1.0.200"
+	resp.RefusesUnauthenticatedNetworkListener = c.capable
+	return nil
+}
+
+func (c *preRefusalControl) SetConfigValue(req SetConfigValueRequest, resp *SetConfigValueResponse) error {
+	c.setCalls++
+	resp.Result = &config.SetResult{Key: req.Key, Value: req.Value}
+	return nil
+}
+
+func (c *preRefusalControl) UnsetConfigValue(req UnsetConfigValueRequest, resp *UnsetConfigValueResponse) error {
+	c.unsetCalls++
+	resp.Result = &config.UnsetResult{Key: req.Key, Removed: true}
+	return nil
+}
+
+// TestListenerWriteGateRefusesAPreRefusalDaemon is the local-socket half of the
+// #5137 version-skew protection: an exposure-capable write — a non-loopback
+// listen_addr or the token coming off — sent to a daemon whose Ping does not
+// advertise the refusal capability would be ACCEPTED and bound unauthenticated.
+// The client refuses before the write is sent, names the restart, and writes
+// nothing.
+func TestListenerWriteGateRefusesAPreRefusalDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*preRefusalControl) error
+	}{
+		{name: "set non-loopback listen_addr", call: func(c *preRefusalControl) error {
+			_, err := SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+			return err
+		}},
+		{name: "set require_token false", call: func(c *preRefusalControl) error {
+			_, err := SetGlobalConfigValue("network.require_token", "false")
+			return err
+		}},
+		{name: "unset require_token", call: func(c *preRefusalControl) error {
+			_, err := UnsetGlobalConfigValue("network.require_token")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := configClientHome(t)
+			stub := &preRefusalControl{}
+			serveControlStub(t, stub)
+
+			err := tc.call(stub)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "predates af's unauthenticated-listener refusal",
+				"the refusal must name the policy the daemon lacks, got: %v", err)
+			require.Contains(t, err.Error(), "af daemon restart",
+				"the refusal must name the restart that arms the gate, got: %v", err)
+			require.Equal(t, 0, stub.setCalls+stub.unsetCalls,
+				"the write must never be sent to a daemon that cannot refuse it")
+			require.NoFileExists(t, filepath.Join(home, config.TomlConfigFileName),
+				"a refused write must not fall back to a local config write")
+		})
+	}
+}
+
+// TestListenerWriteGateRoutesToACapableDaemon is the same write to a daemon
+// that DOES advertise the capability — it routes, because the daemon's own
+// writer carries the refusal (and would refuse an unsafe resulting posture
+// itself). A safe-direction write to a pre-refusal daemon also routes: turning
+// the token ON is the remediation, and an old daemon applies it safely.
+func TestListenerWriteGateRoutesToACapableDaemon(t *testing.T) {
+	t.Run("exposure-capable write to a refusal-capable daemon", func(t *testing.T) {
+		configClientHome(t)
+		stub := &preRefusalControl{capable: true}
+		serveControlStub(t, stub)
+
+		_, err := SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+		require.NoError(t, err, "a capable daemon gates the write itself — the client routes it")
+		require.Equal(t, 1, stub.setCalls)
+	})
+	t.Run("safe write to a pre-refusal daemon routes ungated", func(t *testing.T) {
+		configClientHome(t)
+		stub := &preRefusalControl{}
+		serveControlStub(t, stub)
+
+		_, err := SetGlobalConfigValue("network.require_token", "true")
+		require.NoError(t, err, "turning the token ON is the remediation — an old daemon applies it safely")
+		require.Equal(t, 1, stub.setCalls)
+	})
+	t.Run("ping failure is not a refusal — the local writer still gates", func(t *testing.T) {
+		configClientHome(t)
+		// applyOnlyControl has no Ping method at all (pre-#1960): the gate must
+		// not refuse on a transport failure — the write falls back to this
+		// build's own config writer, which refuses the refused posture on disk.
+		serveControlStub(t, &applyOnlyControl{})
+
+		_, err := SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "refusing to write",
+			"the LOCAL refusal still gates when the daemon cannot answer, got: %v", err)
+		require.NotContains(t, err.Error(), "predates",
+			"a daemon that cannot answer Ping is not called stale — the shared refusal is the message")
+	})
+}

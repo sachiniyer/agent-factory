@@ -30,6 +30,7 @@ var configKeyAliases = []configKeyAlias{
 	{canonical: "network.preview_listen_addr", legacy: "preview_listen_addr", section: "network", leaf: "preview_listen_addr"},
 	{canonical: "network.require_token", legacy: "require_token", section: "network", leaf: "require_token"},
 	{canonical: "network.require_loopback_token", legacy: "require_loopback_token", section: "network", leaf: "require_loopback_token"},
+	{canonical: "network.allow_unauthenticated_network", legacy: "allow_unauthenticated_network", section: "network", leaf: "allow_unauthenticated_network"},
 	{canonical: "network.cors_allowed_origins", legacy: "cors_allowed_origins", section: "network", leaf: "cors_allowed_origins"},
 }
 
@@ -47,11 +48,12 @@ type globalSettingsTables struct {
 		SSH string `toml:"ssh"`
 	} `toml:"sandbox"`
 	Network struct {
-		ListenAddr           string   `toml:"listen_addr"`
-		PreviewListenAddr    string   `toml:"preview_listen_addr"`
-		RequireToken         bool     `toml:"require_token"`
-		RequireLoopbackToken bool     `toml:"require_loopback_token"`
-		CORSAllowedOrigins   []string `toml:"cors_allowed_origins"`
+		ListenAddr                  string   `toml:"listen_addr"`
+		PreviewListenAddr           string   `toml:"preview_listen_addr"`
+		RequireToken                bool     `toml:"require_token"`
+		RequireLoopbackToken        bool     `toml:"require_loopback_token"`
+		AllowUnauthenticatedNetwork bool     `toml:"allow_unauthenticated_network"`
+		CORSAllowedOrigins          []string `toml:"cors_allowed_origins"`
 	} `toml:"network"`
 }
 

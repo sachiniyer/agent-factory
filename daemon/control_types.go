@@ -708,14 +708,37 @@ type ResumeStatusPollResponse struct {
 
 type PingRequest struct{}
 
-// DaemonBootConfig is the small immutable config posture a running daemon
-// reports through Ping. It is deliberately narrower than config.Config: status
-// only needs the listener/auth values that can differ after a supported
-// hand-edit, and Ping must never become a general config or secret export.
+// DaemonBootConfig is the small config posture a running daemon reports
+// through Ping. It is deliberately narrower than config.Config: status only
+// needs the listener/auth values that can differ after a supported hand-edit,
+// and Ping must never become a general config or secret export.
+//
+// The name is historical: the fields are populated from the daemon's LIVE
+// config (Manager.Config()), not the frozen startup m.cfg, because every one of
+// them became applied-live under #2480 — what a consumer needs is the posture
+// the daemon enforces now, and a boot-time snapshot would misreport that for
+// the rest of the boot.
 type DaemonBootConfig struct {
 	ListenAddr           string `json:"listen_addr"`
 	RequireToken         bool   `json:"require_token"`
 	RequireLoopbackToken bool   `json:"require_loopback_token"`
+	// AllowUnauthenticatedNetwork is part of the listener/auth posture: a
+	// responder that predates #5137 omits it, so a client decodes false — which
+	// is exactly what it means there: the key did not exist, so no opt-in was
+	// in force.
+	AllowUnauthenticatedNetwork bool `json:"allow_unauthenticated_network"`
+}
+
+// daemonBootConfig snapshots the LIVE listener/auth posture Ping reports — the
+// caller passes Manager.Config(), not the frozen m.cfg (see the DaemonBootConfig
+// doc for both the narrow field set and the live-not-boot semantics).
+func daemonBootConfig(cfg *config.Config) *DaemonBootConfig {
+	return &DaemonBootConfig{
+		ListenAddr:                  cfg.ListenAddr,
+		RequireToken:                cfg.RequireToken,
+		RequireLoopbackToken:        cfg.RequireLoopbackToken,
+		AllowUnauthenticatedNetwork: cfg.AllowUnauthenticatedNetwork,
+	}
 }
 
 type PingResponse struct {
@@ -726,6 +749,18 @@ type PingResponse struct {
 	// safe account-aware admission rules. Older daemons omit the field, decode
 	// as false, and therefore never receive the destructive mutation.
 	AccountHandoff bool `json:"account_handoff,omitempty"`
+	// RefusesUnauthenticatedNetworkListener is the same kind of affirmative
+	// capability: a daemon reports true only when its config writer and its
+	// listener reconcile enforce the #5137 refusal of a tokenless
+	// non-loopback control bind. A daemon that predates the policy omits the
+	// field — decoding false — which tells a NEWER client it must not route an
+	// exposure-capable listener write to it (config.ListenerPostureWriteExposure):
+	// that daemon's writer has no listenerWriteRefusal, so it would accept the
+	// write and bind the very listener this build refuses. The unix-socket
+	// client gates on this field (daemon/config_save_client.go); the HTTP
+	// client instead sends exposure-capable writes to the /v1/*ConfigValueGuarded
+	// routes, whose absence on an old daemon fails the write request itself.
+	RefusesUnauthenticatedNetworkListener bool `json:"refuses_unauthenticated_network_listener,omitempty"`
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides
 	// Ping because Ping is the one RPC that answers throughout the daemon's

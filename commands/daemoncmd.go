@@ -137,15 +137,22 @@ type daemonStatusInfo struct {
 	ConfigMatches     string                       `json:"config_matches_running_daemon,omitempty"`
 	ConfigDetail      string                       `json:"config_detail,omitempty"`
 	BinaryStale       bool                         `json:"binary_stale"`
-	// ExposureWarning is non-empty when the config on disk serves the control API
-	// unauthenticated on a network address (#2090) — an ALLOWED posture since
-	// #2168 Phase 0, so this reports it rather than predicting a failure.
+	// ExposureWarning is non-empty when the config on disk describes the #2090
+	// exposure shape — a non-loopback listen_addr with the token off. Since
+	// #5137 the text it carries is the REFUSAL reason (ListenerBindRefusal)
+	// unless network.allow_unauthenticated_network opted in, in which case it is
+	// the serving-exposure notice (ListenerExposureNotice) — with one
+	// correction for skew: a daemon still BOUND under a refused disk posture is
+	// serving its last-applied config, so the line reports what that socket is
+	// actually serving (live exposure or restart-pending drift) instead of the
+	// refusal's false "safe" claim.
 	//
 	// It replaces cannot_start_reason, which named a dead end that no longer
-	// exists: the daemon starts and serves in this configuration now, so a field
-	// meaning "it cannot start" could only ever have been wrong. omitempty keeps
-	// the JSON byte-identical for every consumer whose posture is safe, which is
-	// every consumer on the default config.
+	// exists: the daemon starts under either posture now — what is refused is
+	// the TCP listener, not the process — so a field meaning "it cannot start"
+	// could only ever have been wrong. omitempty keeps the JSON byte-identical
+	// for every consumer whose posture is safe, which is every consumer on the
+	// default config.
 	ExposureWarning string `json:"exposure_warning,omitempty"`
 }
 
@@ -200,11 +207,11 @@ func collectDaemonStatus() daemonStatusInfo {
 	// daemon status` never writes config as a side effect). Reported whether or
 	// not a daemon is running: an exposed listener is most worth saying when it is
 	// actually being served. The comparison below pairs this disk read with the
-	// immutable posture returned by the running daemon's Ping (#2168 Phase 4).
+	// live posture returned by the running daemon's Ping (#2168 Phase 4).
 	var current *config.Config
 	if load, err := config.LoadConfigReadOnly(); err == nil {
 		current = load.Config
-		info.ExposureWarning = config.ListenerExposureNotice(current)
+		info.ExposureWarning = listenerStatusWarning(current, h.BootConfig, info.Listeners)
 	}
 	if info.Running {
 		supervised := daemon.AnswerNo()
@@ -228,6 +235,49 @@ func collectDaemonStatus() daemonStatusInfo {
 	return info
 }
 
+// listenerStatusWarning composes the exposure/refusal line for `af daemon
+// status`: the disk posture's refusal is the headline when it applies — "the
+// daemon refuses to bind this" is strictly more actionable than the exposure
+// notice the opted-in variant still serves — with ONE exception. A daemon
+// still BOUND under a refused disk posture is served by its last-applied
+// config, not the file: a build that enforces the refusal retires the socket
+// on apply, so bound here means a pre-refusal daemon — or a hand-edit no apply
+// has reconciled. Printing the refusal text there would be a false "safe"
+// claim against a live socket, so what that socket is serving NOW is reported
+// instead: BootConfig carries the live posture (nil from a responder that
+// predates the field, which also predates the refusal), and only a socket
+// still serving unauthenticated is the live exposure; a socket the live config
+// still makes safe is plain drift awaiting a restart.
+func listenerStatusWarning(current *config.Config, boot *daemon.DaemonBootConfig, listeners *daemon.DaemonListenerStatus) string {
+	if refusal := config.ListenerBindRefusal(current); refusal != "" {
+		if listeners != nil && listeners.TCPBound {
+			addr := listeners.TCPBoundAddr
+			if addr == "" {
+				addr = listeners.TCPListenAddr
+			}
+			// Classify the SOCKET actually answering (addr — the kernel-resolved
+			// bound address), not boot.ListenAddr: a retained socket after a
+			// failed rebind deliberately diverges them, so the live config can
+			// name loopback while the socket still answers on the network.
+			if boot == nil || config.ListenerServesUnauthenticatedNetwork(addr, boot.RequireToken) {
+				return fmt.Sprintf(
+					"the running daemon predates the unauthenticated-listener refusal (or has not applied the "+
+						"refused file) and is still serving %s unauthenticated — af's full control API, including "+
+						"DeliverPrompt, is reachable by anyone who can route to that address. Restart the daemon "+
+						"(`af daemon restart`) so the listener is refused, or close the exposure now with "+
+						"`af config set network.require_token true` or `af config set network.listen_addr "+
+						"127.0.0.1:8443`", addr)
+			}
+			return fmt.Sprintf(
+				"the running daemon still serves %s, but under its last-applied config that socket is safe — "+
+					"the config on disk now refuses the bind entirely. Restart the daemon (`af daemon restart`) "+
+					"so the disk posture applies", addr)
+		}
+		return refusal
+	}
+	return config.ListenerExposureNotice(current)
+}
+
 // printDaemonStatusHuman renders the snapshot as a short human report mirroring
 // the wording `af doctor` uses for the daemon check.
 func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
@@ -235,9 +285,9 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	if info.Running {
 		fmt.Fprintln(w, "daemon: running")
 	} else {
-		// The on-demand promise is unconditional again: since #2168 Phase 0 there
-		// is no config the daemon refuses to start under, so there is no posture
-		// that makes this line a lie.
+		// The on-demand promise is unconditional: since #2168 Phase 0 there is no
+		// config the daemon refuses to START under — #5137 kept that, scoping its
+		// refusal to the TCP listener alone, so this line is never a lie.
 		fmt.Fprintln(w, "daemon: not running (starts on demand when you run af with an enabled task)")
 	}
 	if info.Phase != "" {
@@ -263,6 +313,13 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 			fmt.Fprintln(w, "  tcp listener:   disabled")
 		case info.Listeners.TCPBound:
 			fmt.Fprintf(w, "  tcp listener:   %s (bound)\n", info.Listeners.TCPBoundAddr)
+		case info.Listeners.TCPRefusalReason != "":
+			// Configured, unbound, and refused is a DECISION (#5137), not a bind
+			// failure — "(not bound)" would send the operator debugging a port
+			// that was never attempted, so the reason is printed with the three
+			// fixes it carries.
+			fmt.Fprintf(w, "  tcp listener:   %s (refused)\n", info.Listeners.TCPListenAddr)
+			fmt.Fprintf(w, "    refused:      %s\n", info.Listeners.TCPRefusalReason)
 		default:
 			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
 		}

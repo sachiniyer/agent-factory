@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // ListenerServesUnauthenticatedNetwork reports whether cfg would serve the
 // daemon's full control API to network peers with NO authentication — the
@@ -25,12 +29,15 @@ import "fmt"
 //
 // The loopback test is IsLoopbackListenAddr, the SAME predicate the daemon's
 // token gate derives its policy from. Two definitions of "is this loopback"
-// drifting apart is how a security check rots, so there is only one.
+// drifting apart is how a security check rots, so there is only one. "Loopback"
+// means exactly 127.0.0.0/8, ::1, or localhost: every wildcard, private, and
+// Tailscale (100.64.0.0/10) address is NON-loopback — a tailnet is a network
+// like any other and gets no special case (#5137).
 //
 // This predicate is the ONE definition of the exposure. Every surface that
-// mentions it — the daemon's startup warning (daemon/tcpserver.go), `af config
-// set` (exposureWarning), `af doctor`, `af daemon status` — asks it rather than
-// re-deriving the answer.
+// mentions it — the daemon's startup warning (daemon/listener_reload.go),
+// `af config set` (exposureWarning), `af doctor`, `af daemon status` — asks it
+// rather than re-deriving the answer.
 func ListenerServesUnauthenticatedNetwork(listenAddr string, requireToken bool) bool {
 	if listenAddr == "" {
 		return false // web server disabled — nothing is served at all
@@ -38,40 +45,110 @@ func ListenerServesUnauthenticatedNetwork(listenAddr string, requireToken bool) 
 	return !requireToken && !IsLoopbackListenAddr(listenAddr)
 }
 
+// ListenerBindRefusal returns the reason the daemon REFUSES to bind cfg's
+// control-plane TCP listener, or "" when the posture is allowed (#5137).
+//
+// The refusal is exactly the exposure predicate above plus one term: the
+// operator's explicit opt-in, network.allow_unauthenticated_network. A
+// non-loopback bind with the token off is therefore refused BY DEFAULT —
+// #2168 Phase 0's warn-and-serve posture is reversed by owner decision, because
+// a warning is not a boundary: a listener that answers DeliverPrompt
+// unauthenticated runs instructions through the operator's agents for anyone
+// who can route to the address.
+//
+// The refusal is scoped to the TCP listener only. The daemon itself still
+// starts, and the unix control socket is unaffected, so the TUI, CLI, and
+// sessions keep working — breaking the whole install over a network posture
+// would be worse than the exposure (and is exactly what crash-looped the
+// autostart unit under #2090's process-level refusal, #2168 §1.2). Returning
+// the reason as a string rather than a bool keeps the message identical on
+// every surface that reports it — the startup log line, the `af config set`
+// refusal, the `af doctor` FAIL, and `af daemon status` — so the remediation
+// can never drift between them.
+func ListenerBindRefusal(cfg *Config) string {
+	if cfg == nil || !ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) || cfg.AllowUnauthenticatedNetwork {
+		return ""
+	}
+	return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, so af's "+
+		"full control API — including DeliverPrompt, which runs instructions through your agents — would be served to "+
+		"anyone who can reach that address, with no authentication and no TLS · the TCP listener is refused; the daemon "+
+		"itself still starts and the unix control socket still works, so the TUI, CLI, and sessions are unaffected · "+
+		"fix one of: `af config set network.require_token true` to require a bearer token (`af token show` prints it), "+
+		"`af config set network.listen_addr 127.0.0.1:8443` to serve this machine only, or `af config set "+
+		"network.allow_unauthenticated_network true` to accept the risk explicitly", cfg.ListenAddr)
+}
+
+// ListenerPostureWriteExposure reports whether a `config set` of key=value
+// could make a daemon SERVE the control API unauthenticated when the daemon
+// performing the write predates the #5137 refusal — i.e. whether a remote
+// write must take the guarded route that only refusal-capable daemons serve
+// (apiclient.SetConfigValue). The refusal itself lives in the daemon's writer
+// (listenerWriteRefusal); a daemon without it accepts the write and binds the
+// listener this build declines to.
+//
+// Only two writes can create the exposure: pointing network.listen_addr at a
+// non-loopback address, and turning network.require_token off. Everything else
+// is excluded on one of two grounds: it cannot create the posture (a loopback
+// or empty listen_addr, the token coming ON), or an old daemon already rejects
+// it by shape (network.allow_unauthenticated_network is unknown to its
+// allowlist, so a pre-#5137 daemon refuses that write itself).
+func ListenerPostureWriteExposure(key, value string) bool {
+	switch canonicalConfigKey(key) {
+	case "network.listen_addr":
+		return value != "" && !IsLoopbackListenAddr(value)
+	case "network.require_token":
+		// Parse the way the receiving writer does — canonicalizeScalar trims
+		// before ParseBool, so a padded " false " disables the token on the
+		// daemon that accepts it. Classifying the raw string instead would
+		// route that write around the guarded route this exists to force.
+		on, err := strconv.ParseBool(strings.TrimSpace(value))
+		return err == nil && !on
+	}
+	return false
+}
+
+// ListenerPostureUnsetExposure is ListenerPostureWriteExposure for `config
+// unset`: removing network.require_token turns it off, the exposure-capable
+// direction. Removing network.listen_addr disables the listener outright —
+// safe under any writer — and removing network.allow_unauthenticated_network
+// is refused by a pre-#5137 daemon's unknown-key handling on its own.
+func ListenerPostureUnsetExposure(key string) bool {
+	return canonicalConfigKey(key) == "network.require_token"
+}
+
 // ListenerExposureNotice returns the one-line operator notice for a config that
 // serves the control API unauthenticated on a network interface (#2090), or ""
 // when the posture is safe.
 //
-// This posture is ALLOWED. #2090 originally made it a refusal — the daemon would
-// not start — and #2168 reverses that by owner decision: "just allow binding to
-// 0.0.0.0 without a token. Assume users are safe and will do the right thing."
-// The exposure is real (the API this listener serves includes DeliverPrompt,
-// which types instructions into a running agent and submits them, and an agent
-// runs with the user's shell permissions), so it is still SAID — once, plainly,
-// with the way to add auth. It is no longer decided on the user's behalf.
+// Since #5137 this posture is reached ONLY through the explicit opt-in,
+// network.allow_unauthenticated_network — without it the TCP listener is
+// refused outright (ListenerBindRefusal), so this notice never describes a bind
+// the operator did not deliberately ask for. The notice still matters on the
+// opted-in bind: the exposure is real (the API this listener serves includes
+// DeliverPrompt, which types instructions into a running agent and submits
+// them, and an agent runs with the user's shell permissions), so it is still
+// SAID — once, plainly, with the way to add auth.
 //
-// The refusal also had a failure mode the warning does not: a config the daemon
-// rejects on every attempt is not a transient failure, but the autostart unit's
-// Restart=on-failure could not tell the difference, so a hand-edit to
-// 0.0.0.0 + network.require_token = false crash-looped the unit indefinitely (#2168 §1.2).
-// A warning cannot crash-loop.
-//
-// A string, not an error: every caller now reports it rather than acting on it,
-// and an error return is an invitation to `if err != nil { return err }` — which
-// is exactly the refusal being removed.
+// A string, not an error: every caller reports it rather than acting on it.
+// The acting-on-it decision lives in ListenerBindRefusal — keeping this a
+// string is what stops it growing a second refusal channel.
 //
 // Callers must emit this AT MOST ONCE per daemon start. It is deliberately not
-// wired into any per-request or per-connection path: a warning repeated on every
-// call is a warning nobody reads.
+// wired into any per-request or per-connection path: a warning repeated on
+// every call is a warning nobody reads.
 func ListenerExposureNotice(cfg *Config) string {
-	if cfg == nil || !ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
+	// A refused bind serves nothing, so "af serves its full control API" would
+	// be a lie: the refusal reason (ListenerBindRefusal) is the notice for that
+	// posture, and surfaces pick it first. Gate here too so a caller that
+	// forgets can never print the exposure half of a refused bind.
+	if cfg == nil || !ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) || ListenerBindRefusal(cfg) != "" {
 		return ""
 	}
 	return fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, so af serves its "+
 		"full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can "+
-		"reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token "+
-		"(`af token show` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only",
-		cfg.ListenAddr)
+		"reach that address, with no authentication and no TLS · run `af config set network.require_token true` to require "+
+		"a bearer token (`af token show` prints it), or `af config set network.listen_addr 127.0.0.1:8443` to serve this "+
+		"machine only", cfg.ListenAddr)
 }
 
 // PreviewListenerExposureNotice returns the one-line operator notice for the
