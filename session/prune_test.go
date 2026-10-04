@@ -161,7 +161,8 @@ func TestPruneTimestampsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	var decoded InstanceData
 	require.NoError(t, json.Unmarshal(storedPayload, &decoded))
-	require.Equal(t, pruned, decoded.PrunedAt)
+	require.True(t, decoded.PrunedAt.Equal(pruned),
+		"pruned_at must round-trip the same instant (JSON normalizes the location)")
 
 	reloaded, err := FromInstanceData(decoded)
 	require.NoError(t, err)

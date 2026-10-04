@@ -86,7 +86,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// purpose (#5136). Refuse before any admission gate and NAME
 	// the branch that still holds the work — it is the only way back.
 	if prunedAt := instance.PrunedAt(); !prunedAt.IsZero() {
-		if branch := instance.GetBranch(); branch != "" {
+		if branch := pruneBranchFor(instance.ToInstanceData()); branch != "" {
 			return "", fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree was deleted; the branch %q was kept, so recreate the work from that branch",
 				title, prunedAt.Format(time.RFC3339), branch)
 		}

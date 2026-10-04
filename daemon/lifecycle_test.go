@@ -240,6 +240,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"HandoffSessionV2":       blockedDuringProbation,
 	"KillSession":            blockedDuringProbation,
 	"PauseStatusPoll":        blockedDuringProbation,
+	"PruneSessions":          blockedDuringProbation,
 	"ReapConfigAgent":        blockedDuringProbation,
 	"RegisterProject":        blockedDuringProbation,
 	"ReloadTasks":            blockedDuringProbation,

@@ -121,15 +121,17 @@ func TestPruneSessions_RefusesRestoreNamingBranch(t *testing.T) {
 func TestPruneSessions_SkipsIneligibleRows(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 
-	// A live row in the same repo.
-	registerStarted(t, manager, repoID, repoPath, "live-row", session.NewFakeBackend(), true, session.Running)
-
-	// An archived row old enough to take the cutoff.
+	// An archived row old enough to take the cutoff — seeded FIRST because
+	// ArchiveSession refreshes the in-memory map from disk, and the test
+	// helpers rewrite the repo file with only the row they register.
 	oldInst, _ := registerArchivable(t, manager, repoID, repoPath, "old-row")
 	oldInst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "old-row", RepoID: repoID})
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond)
+
+	// A live row in the same repo, registered after the archive refresh.
+	registerStarted(t, manager, repoID, repoPath, "live-row", session.NewFakeBackend(), true, session.Running)
 
 	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
 	require.NoError(t, err)

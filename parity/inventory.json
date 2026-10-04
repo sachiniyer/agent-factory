@@ -989,6 +989,24 @@
       "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 — it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
     },
     {
+      "id": "session.prune",
+      "title": "Reclaim disk from old archived sessions (manual, opt-in)",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_prune.go sessionsPruneCmd -> daemon/control_client.go PruneSessions -> controlServer.PruneSessions (daemon/prune.go)"
+      },
+      "verdict": "deliberate",
+      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. The daemon route POST /v1/PruneSessions is public so the same RPC is reachable for remote daemons and external tooling; it is a mutation-gated handler whose dry run is a read."
+    },
+    {
       "id": "session.restore",
       "title": "Restore an archived, Lost, or Dead session",
       "tui": {
@@ -1581,6 +1599,7 @@
       "af sessions kill": "session.kill",
       "af sessions list": "session.list",
       "af sessions preview": "session.preview",
+      "af sessions prune": "session.prune",
       "af sessions restore": "session.restore",
       "af sessions retry-limit": "session.limit-retry",
       "af sessions send-prompt": "session.send-prompt",
@@ -1629,6 +1648,7 @@
       "POST /v1/ListOnComplete": "task.on-complete",
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
+      "POST /v1/PruneSessions": "session.prune",
       "POST /v1/RegisterAccount": "session.accounts",
       "POST /v1/RegisterProject": "project.add",
       "POST /v1/RebindProject": "project.rebind",
@@ -1862,6 +1882,10 @@
       "af sessions preview --tab": "session.preview-tab",
       "af sessions preview --tab-id": "session.preview-tab",
       "af sessions preview --tab-name": "session.preview-tab",
+      "af sessions prune --all": "session.prune",
+      "af sessions prune --apply": "session.prune",
+      "af sessions prune --help": "meta.discovery",
+      "af sessions prune --older-than": "session.prune",
       "af sessions restore --force-reap": "session.restore",
       "af sessions restore --help": "meta.discovery",
       "af sessions retry-limit --delivered": "session.handoff-delivery-confirm",
@@ -2366,6 +2390,13 @@
           },
           "expect.project_path": {
             "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+          }
+        }
+      },
+      "PruneSessionsRequest": {
+        "cli": {
+          "apply": {
+            "ok": "Reached by sessionsPruneCmd after the dry-run plan renders and the optional TTY confirm answers yes (api/sessions_prune.go assigns req.Apply post-literal). The CLI AST derivation recognizes composite-literal fields but not post-literal assignment, so it conservatively reports the field as absent."
           }
         }
       }
