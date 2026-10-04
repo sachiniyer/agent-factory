@@ -6946,7 +6946,10 @@ function listenerPostureWriteExposure(key, value) {
 async function setConfigValue(key, value, token2) {
   const guarded = listenerPostureWriteExposure(key, value);
   try {
-    return await af(guarded ? "SetConfigValueGuarded" : "SetConfigValue", { key, value }, token2);
+    if (guarded) {
+      return await af("SetConfigValueGuarded", { key, value }, token2);
+    }
+    return await af("SetConfigValue", { key, value }, token2);
   } catch (e) {
     if (guarded && e instanceof ApiError && e.status === 404) {
       throw new ApiError(

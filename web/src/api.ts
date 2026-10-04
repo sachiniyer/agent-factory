@@ -1311,7 +1311,12 @@ function listenerPostureWriteExposure(key: string, value: string): boolean {
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
   const guarded = listenerPostureWriteExposure(key, value);
   try {
-    return await af<ConfigSetResponse>(guarded ? "SetConfigValueGuarded" : "SetConfigValue", { key, value }, token);
+    // Two literal call sites, not a computed name: the parity audit's webCallRe
+    // reads only literal/const method arguments and must inventory both routes.
+    if (guarded) {
+      return await af<ConfigSetResponse>("SetConfigValueGuarded", { key, value }, token);
+    }
+    return await af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
   } catch (e) {
     // The guarded route's fail-closed answer is a 404 — translate THAT one
     // case, because "404 page not found" does not tell the operator their write

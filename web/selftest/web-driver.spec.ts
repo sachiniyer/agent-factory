@@ -4316,6 +4316,11 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
   // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
   // applies live and would otherwise rebind this very daemon's listener. Only the
   // canned reply drives configStatus + ConfigPane.update/render.
+  //
+  // "abcdef" is a non-loopback listen_addr, so #5137 routes this write through
+  // SetConfigValueGuarded — the interception below names that route and the mock
+  // failing to fire means the client's route selection regressed, not just the
+  // focus path under test.
   const ctx = await browser.newContext();
   let releaseSave: (() => void) | undefined;
   try {
@@ -4323,7 +4328,7 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
     let markSaveStarted!: () => void;
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
-    await p.route("**/v1/SetConfigValue", async (route) => {
+    await p.route("**/v1/SetConfigValueGuarded", async (route) => {
       const body = route.request().postDataJSON() as { key: string; value: string };
       markSaveStarted();
       await saveMayFinish;

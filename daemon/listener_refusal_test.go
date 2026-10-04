@@ -565,9 +565,10 @@ func TestPingReportsServingAddrAfterFailedRebind(t *testing.T) {
 	moved.ListenAddr = "127.0.0.2:0"
 	m.live.Store(&moved)
 	failed, err := wl.reconcile(&moved)
-	require.NoError(t, err)
-	require.Contains(t, failed, "network.listen_addr",
-		"precondition: the rebind was attempted and failed")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "still serving on the previous address",
+		"precondition: the rebind was attempted, failed, and retained the old socket")
+	require.Contains(t, failed, "network.listen_addr")
 	require.Equal(t, "127.0.0.2:0", m.Config().ListenAddr,
 		"precondition: the live config already carries the requested address")
 	require.Equal(t, addr, m.lifecycle.snapshot().listeners.TCPBoundAddr,
@@ -754,8 +755,10 @@ func TestTrackerRefusesLateHijacksFromSeveredGenerations(t *testing.T) {
 	defer func() { _ = latePeer.Close() }()
 	tr.track(genA, late)
 	require.Empty(t, tr.conns, "a severed generation's late hijack must not be tracked")
+	// net.Pipe's close is asymmetric: the closed end reads ErrClosedPipe, the
+	// peer reads EOF — the peer's EOF is what proves the hijack died on arrival.
 	_, err := latePeer.Read(make([]byte, 1))
-	require.ErrorIs(t, err, io.ErrClosedPipe,
+	require.ErrorIs(t, err, io.EOF,
 		"the late hijack must be closed on arrival, not admitted to the new generation")
 
 	// The new generation admits and tracks normally.
