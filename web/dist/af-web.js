@@ -6938,9 +6938,9 @@ function listenerPostureWriteExposure(key, value) {
     case "network.listen_addr":
       return value !== "" && !isLoopbackListenAddr(value);
     case "network.require_token":
-      return parseGoBool(value.trim()) === false;
+      return parseGoBool(value.trim()) !== true;
     default:
-      return false;
+      return true;
   }
 }
 async function setConfigValue(key, value, token2) {
@@ -6954,7 +6954,7 @@ async function setConfigValue(key, value, token2) {
     if (guarded && e instanceof ApiError && e.status === 404) {
       throw new ApiError(
         404,
-        `the daemon predates af's unauthenticated-listener refusal (#5137): it would accept this ${key} write and serve the control API \u2014 including DeliverPrompt \u2014 to anyone who can reach the address, so nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host instead`,
+        `the daemon predates af's unauthenticated-listener refusal (#5137): accepting this ${key} write triggers its whole-file apply, which binds whatever listen_addr the file holds \u2014 the control API, including DeliverPrompt, served unauthenticated if that posture is tokenless \u2014 so the write is refused rather than risk it \u2014 nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host instead`,
         e.code,
         e.daemonRejected
       );

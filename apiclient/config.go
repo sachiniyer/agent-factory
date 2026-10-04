@@ -45,19 +45,22 @@ func (c *Client) GetConfig(req daemon.GetConfigRequest) (daemon.GetConfigRespons
 // The #5137 unauthenticated-listener refusal reaches REMOTE writes through the
 // guarded twin routes: SetConfigValue and UnsetConfigValue select
 // /v1/SetConfigValueGuarded / /v1/UnsetConfigValueGuarded — same request shape,
-// same daemon handler — for any write that could CREATE the refused posture
-// (config.ListenerPostureWriteExposure / ListenerPostureUnsetExposure answer
-// that), because a pre-#5137 daemon's writer has no listenerWriteRefusal and
-// would accept the write and bind the very listener this build declines to.
+// same daemon handler — for any write that could leave the daemon serving the
+// refused posture (config.ListenerPostureWriteExposure /
+// ListenerPostureUnsetExposure answer that). The rule is broad on purpose: an
+// old daemon's write handler ends in Manager.ApplyConfig, which loads the
+// WHOLE file, so an unrelated write lands on a hand-edited tokenless
+// listen_addr just as surely as the listener write itself. Only writes that
+// force the listener safe on their own — the token coming on, a loopback or
+// empty listen_addr — stay on the plain routes: an old daemon applies them
+// safely, and they are exactly the remediation an old daemon needs.
 //
 // Route selection, not a health preflight, is the capability check: the guarded
 // path only exists on daemons that enforce the refusal, so the write and the
 // proof arrive in the SAME request — a health-then-write pair could land its
 // second leg on a different, older daemon after a restart or behind a
 // mixed-version front. A 404 on the guarded route is the fail-closed answer:
-// the write never happened. Safe writes (require_token on, a loopback
-// listen_addr, revoking the opt-in) keep the plain routes — an old daemon
-// applies them safely and they are exactly the remediation an old daemon needs.
+// the write never happened.
 func (c *Client) SetConfigValue(req daemon.SetConfigValueRequest) (daemon.SetConfigValueResponse, error) {
 	var resp daemon.SetConfigValueResponse
 	method := "SetConfigValue"
@@ -96,10 +99,11 @@ func refusalCapableRouteError(method, key string, err error) error {
 		return err
 	}
 	return fmt.Errorf(
-		"the daemon at %s predates af's unauthenticated-listener refusal (#5137): it would accept this %s write "+
-			"and serve the control API — including DeliverPrompt — to anyone who can reach the address, "+
-			"so nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the "+
-			"exposure deliberately, edit config.toml on the host instead — the refusal guards remote writes, not "+
-			"local file edits",
+		"the daemon at %s predates af's unauthenticated-listener refusal (#5137): accepting this %s write "+
+			"triggers its whole-file apply, which binds whatever listen_addr the file holds — the control "+
+			"API, including DeliverPrompt, served unauthenticated if that posture is tokenless — so the "+
+			"write is refused rather than risk it — nothing was written. Upgrade af on that host and restart "+
+			"its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host "+
+			"instead — the refusal guards remote writes, not local file edits",
 		RemoteTargetURL(), config.CanonicalConfigKey(key))
 }

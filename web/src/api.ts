@@ -1283,10 +1283,12 @@ function isLoopbackListenAddr(addr: string): boolean {
 
 /** Port of config.ListenerPostureWriteExposure: whether this key=value could
  *  leave a daemon that PREDATES the #5137 refusal serving the control API
- *  unauthenticated — the signal to take the guarded route. Only two writes
- *  qualify: pointing network.listen_addr at a non-loopback address, and turning
- *  network.require_token off. Everything else either cannot create the posture
- *  or is a write an old daemon rejects by shape on its own. */
+ *  unauthenticated — the signal to take the guarded route. The rule is
+ *  inverted from "which keys create the posture": EVERY write an old daemon
+ *  accepts ends in a whole-file ApplyConfig, so a config.toml already holding
+ *  a tokenless network listen_addr binds on any save. Only writes that force
+ *  the listener safe by themselves stay on the plain route — the token coming
+ *  ON, or listen_addr going loopback/empty. */
 function listenerPostureWriteExposure(key: string, value: string): boolean {
   const k = key === "listen_addr" ? "network.listen_addr"
     : key === "require_token" ? "network.require_token"
@@ -1295,9 +1297,9 @@ function listenerPostureWriteExposure(key: string, value: string): boolean {
     case "network.listen_addr":
       return value !== "" && !isLoopbackListenAddr(value);
     case "network.require_token":
-      return parseGoBool(value.trim()) === false;
+      return parseGoBool(value.trim()) !== true;
     default:
-      return false;
+      return true;
   }
 }
 
@@ -1324,10 +1326,11 @@ export async function setConfigValue(key: string, value: string, token: string):
     // refusalCapableRouteError does the same for the CLI/TUI paths).
     if (guarded && e instanceof ApiError && e.status === 404) {
       throw new ApiError(404,
-        `the daemon predates af's unauthenticated-listener refusal (#5137): it would accept this ${key} write ` +
-        "and serve the control API — including DeliverPrompt — to anyone who can reach the address, " +
-        "so nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the " +
-        "exposure deliberately, edit config.toml on the host instead",
+        `the daemon predates af's unauthenticated-listener refusal (#5137): accepting this ${key} write ` +
+        "triggers its whole-file apply, which binds whatever listen_addr the file holds — the control " +
+        "API, including DeliverPrompt, served unauthenticated if that posture is tokenless — so the " +
+        "write is refused rather than risk it — nothing was written. Upgrade af on that host and restart " +
+        "its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host instead",
         e.code, e.daemonRejected);
     }
     throw e;

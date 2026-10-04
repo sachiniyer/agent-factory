@@ -57,16 +57,19 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
-			// #5137 version-skew gate: an exposure-capable listener write sent
-			// to a daemon that predates the refusal policy would be ACCEPTED —
-			// its writer has no listenerWriteRefusal — and the listener then
-			// bound unauthenticated. Ping first; the capability field is
-			// affirmative, so an older daemon decodes false and the write is
-			// refused here before it can be made. A Ping FAILURE is not a
-			// refusal: a daemon too old to answer Ping is also too old to serve
-			// SetConfigValue, so the write then falls back to this build's own
-			// gated writer — and a transport failure fails the write call next
-			// anyway.
+			// #5137 version-skew gate: a write a pre-refusal daemon could turn
+			// into the unauthenticated bind must never reach it. That is wider
+			// than the listener keys — the daemon's write handler ends in
+			// ApplyConfig, which loads the WHOLE file, so any accepted write on
+			// a config.toml already in the refused posture binds the tokenless
+			// network listener. ListenerPostureWriteExposure therefore guards
+			// everything except writes that force the listener safe on their
+			// own. Ping first; the capability field is affirmative, so an
+			// older daemon decodes false and the write is refused here before
+			// it can be made. A Ping FAILURE is not a refusal: a daemon too
+			// old to answer Ping is also too old to serve SetConfigValue, so
+			// the write then falls back to this build's own gated writer — and
+			// a transport failure fails the write call next anyway.
 			//
 			// Why a Ping suffices here while the HTTP path needs the guarded
 			// /v1/*Guarded route: this socket names exactly ONE process. Probe
@@ -166,11 +169,12 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
-			// The same #5137 skew gate as SetGlobalConfigValue: unsetting
-			// network.require_token is the exposure-capable direction, and a
-			// pre-refusal daemon would accept it and serve the bind this build
-			// declines. Ping failure is not a refusal — see the set path for
-			// why a probe suffices on this socket.
+			// The same #5137 skew gate as SetGlobalConfigValue: every unset but
+			// network.listen_addr (the one that forces the listener safe) is
+			// guarded, because a pre-refusal daemon's apply loads the whole
+			// file — a refused posture already on disk binds on any accepted
+			// write. Ping failure is not a refusal — see the set path for why
+			// a probe suffices on this socket.
 			if config.ListenerPostureUnsetExposure(key) {
 				var ping PingResponse
 				if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
@@ -235,10 +239,11 @@ func staleDaemonListenerWriteRefusal(key, version string) error {
 		v = "version " + version
 	}
 	return fmt.Errorf(
-		"the running daemon (%s) predates af's unauthenticated-listener refusal (#5137): it would accept "+
-			"this %s write and serve the control API unauthenticated — nothing was written; upgrade af on "+
-			"its host and restart the daemon (`af daemon restart`), then retry — or edit config.toml on the "+
-			"host directly to accept the exposure", v, key)
+		"the running daemon (%s) predates af's unauthenticated-listener refusal (#5137): accepting this %s "+
+			"write triggers its whole-file apply, which binds whatever listen_addr the file holds — "+
+			"unauthenticated if that posture is tokenless — so the write is refused here instead of risking "+
+			"it. Upgrade af on that host and restart the daemon (`af daemon restart`), then retry; to accept "+
+			"the exposure deliberately, edit config.toml on the host itself", v, key)
 }
 
 // isRPCMethodMissing reports whether a net/rpc call failed because the serving

@@ -239,58 +239,120 @@ func collectDaemonStatus() daemonStatusInfo {
 }
 
 // listenerStatusWarning composes the exposure/refusal line for `af daemon
-// status`: the disk posture's refusal is the headline when it applies — "the
-// daemon refuses to bind this" is strictly more actionable than the exposure
-// notice the opted-in variant still serves — with ONE exception. A daemon
-// still BOUND under a refused disk posture is served by its last-applied
-// config, not the file: a build that enforces the refusal retires the socket
-// on apply, so bound here means a pre-refusal daemon — or a hand-edit no apply
-// has reconciled. Printing the refusal text there would be a false "safe"
-// claim against a live socket, so what that socket is serving NOW is reported
-// instead: BootConfig carries the live posture (nil from a responder that
-// predates the field, which also predates the refusal), and only a socket
-// still serving unauthenticated is the live exposure; a socket the live config
-// still makes safe is plain drift awaiting a restart.
+// status`. The LIVE socket decides what is serving right now — a daemon still
+// BOUND under a refused disk posture is served by its last-applied config, not
+// the file (a build that enforces the refusal retires the socket on apply, so
+// bound there means a pre-refusal daemon or a hand-edit no apply has
+// reconciled), and an opted-in file under a tokened responder exposes nothing
+// until restart. BootConfig carries that live posture — nil from a responder
+// that predates the field, which also predates the refusal. Disk posture only
+// decides what a restart will do: refuse, expose (the opt-in), or bind safely.
 func listenerStatusWarning(current *config.Config, boot *daemon.DaemonBootConfig, listeners *daemon.DaemonListenerStatus) string {
-	if refusal := config.ListenerBindRefusal(current); refusal != "" {
-		if listeners != nil && listeners.TCPBound {
-			addr := listeners.TCPBoundAddr
-			if addr == "" {
-				addr = listeners.TCPListenAddr
-			}
-			// Classify the SOCKET actually answering (addr — the kernel-resolved
-			// bound address), not boot.ListenAddr: a retained socket after a
-			// failed rebind deliberately diverges them, so the live config can
-			// name loopback while the socket still answers on the network.
-			if boot == nil || config.ListenerServesUnauthenticatedNetwork(addr, boot.RequireToken) {
-				return fmt.Sprintf(
-					"the running daemon predates the unauthenticated-listener refusal (or has not applied the "+
-						"refused file) and is still serving %s unauthenticated — af's full control API, including "+
-						"DeliverPrompt, is reachable by anyone who can route to that address. Restart the daemon "+
-						"(`af daemon restart`) so the listener is refused, or close the exposure now with "+
-						"`af config set network.require_token true` or `af config set network.listen_addr "+
-						"127.0.0.1:8443`", addr)
-			}
+	// Live posture is authoritative for what is answering RIGHT NOW: boundAddr
+	// is the kernel-resolved address of the socket — a retained socket after a
+	// failed rebind deliberately diverges from the requested address — and the
+	// responder's RequireToken is its actual auth gate. A responder that
+	// predates #5137 carries no boot config — the field did not exist — so the
+	// missing report reads as tokenless.
+	liveBound := listeners != nil && listeners.TCPBound
+	boundAddr := ""
+	liveExposed := false
+	if liveBound {
+		boundAddr = listeners.TCPBoundAddr
+		if boundAddr == "" {
+			boundAddr = listeners.TCPListenAddr
+		}
+		liveExposed = config.ListenerServesUnauthenticatedNetwork(boundAddr, boot != nil && boot.RequireToken)
+	}
+	diskRefusal := config.ListenerBindRefusal(current)
+	// Non-empty only when disk OPTS IN to unauthenticated network serving —
+	// the refused posture reports through diskRefusal instead.
+	diskExposure := config.ListenerExposureNotice(current)
+
+	switch {
+	case liveExposed:
+		// Something is answering unauthenticated on a network address right
+		// now — report the live socket and let disk posture decide the
+		// remediation.
+		switch {
+		case diskRefusal != "":
+			return fmt.Sprintf(
+				"the running daemon predates the unauthenticated-listener refusal (or has not applied the "+
+					"refused file) and is still serving %s unauthenticated — af's full control API, including "+
+					"DeliverPrompt, is reachable by anyone who can route to that address. Restart the daemon "+
+					"(`af daemon restart`) so the listener is refused, or close the exposure now with "+
+					"`af config set network.require_token true` or `af config set network.listen_addr "+
+					"127.0.0.1:8443`", boundAddr)
+		case diskExposure != "":
+			// Disk opts in AND the live socket already serves that way — the
+			// exposure survives restart. Name the answering address, not the
+			// requested one, since a retained rebind can diverge them.
+			live := *current
+			live.ListenAddr = boundAddr
+			live.RequireToken = false
+			live.AllowUnauthenticatedNetwork = true
+			return config.ListenerExposureNotice(&live)
+		default:
+			// Disk is safe but the socket predates it: the exposure is live
+			// and restart is the fix.
+			return fmt.Sprintf(
+				"the running daemon is still serving %s unauthenticated — af's full control API, including "+
+					"DeliverPrompt, is reachable by anyone who can route to that address — while the config on "+
+					"disk no longer allows it. Restart the daemon (`af daemon restart`) so the disk posture "+
+					"applies, or close the exposure now with `af config set network.require_token true`",
+				boundAddr)
+		}
+
+	case liveBound:
+		// Bound but safe — tokened or loopback. What a restart brings is the
+		// only open question.
+		switch {
+		case diskRefusal != "":
 			return fmt.Sprintf(
 				"the running daemon still serves %s, but under its last-applied config that socket is safe — "+
 					"the config on disk now refuses the bind entirely. Restart the daemon (`af daemon restart`) "+
-					"so the disk posture applies", addr)
+					"so the disk posture applies", boundAddr)
+		case diskExposure != "":
+			return fmt.Sprintf(
+				"the disk config opts into unauthenticated network serving, but the running daemon still serves "+
+					"%s under its last-applied safe posture — nothing is exposed yet, and `af daemon restart` "+
+					"WILL expose the control API (including DeliverPrompt) with no authentication. If that is "+
+					"not what you want, run `af config set network.require_token true` or drop the opt-in with "+
+					"`af config set network.allow_unauthenticated_network false`", boundAddr)
 		}
-		return refusal
-	}
-	// The reverse drift: an opted-in disk posture with a live REFUSAL is not
-	// serving anything — the notice below would claim an active exposure while
-	// the listener line says (refused). Report the pending change, and what the
-	// restart will actually do, instead.
-	if listeners != nil && !listeners.TCPBound && listeners.TCPRefusalReason != "" {
+		return ""
+
+	case listeners != nil && listeners.TCPRefusalReason != "":
+		// Nothing bound and the refusal is the live answer — report what a
+		// restart does, not a serving claim.
+		if diskExposure != "" {
+			return fmt.Sprintf(
+				"the running daemon refuses to bind the TCP listener on %s, and the disk config now opts in "+
+					"(network.allow_unauthenticated_network=true) — nothing is serving until `af daemon restart` "+
+					"applies it, which WILL expose the control API (including DeliverPrompt) with no "+
+					"authentication. If that is not what you want, run `af config set network.require_token "+
+					"true` or drop the opt-in with `af config set network.allow_unauthenticated_network false`",
+				current.ListenAddr)
+		}
+		if diskRefusal != "" {
+			return diskRefusal
+		}
+		// The refusal is the daemon's last-applied posture while disk has
+		// since gone safe — a pending safe rebind, not a pending exposure.
 		return fmt.Sprintf(
-			"the running daemon refuses to bind the TCP listener on %s, and the disk config now opts in "+
-				"(network.allow_unauthenticated_network=true) — nothing is serving until `af daemon restart` "+
-				"applies it, which WILL expose the control API (including DeliverPrompt) with no authentication. "+
-				"If that is not what you want, run `af config set network.require_token true` or drop the opt-in "+
-				"with `af config set network.allow_unauthenticated_network false`", current.ListenAddr)
+			"the running daemon refuses to bind the TCP listener on %s under its last-applied config, and the "+
+				"disk config is now safe — nothing is serving until `af daemon restart` retries the bind, "+
+				"which will succeed under the new posture", current.ListenAddr)
+
+	default:
+		// No bound socket and no reported refusal — a bind failure, a disabled
+		// listener, or a responder too old to say. Disk posture is all there
+		// is to report.
+		if diskRefusal != "" {
+			return diskRefusal
+		}
+		return diskExposure
 	}
-	return config.ListenerExposureNotice(current)
 }
 
 // printDaemonStatusHuman renders the snapshot as a short human report mirroring

@@ -470,6 +470,48 @@ func TestListenerStatusWarningBoundUnderRefusedPosture(t *testing.T) {
 		"the restart's consequence — the opt-in WILL expose — must stay in the warning")
 	require.NotContains(t, warn, "af serves its",
 		"no live-service claim while the running daemon holds the refusal")
+
+	// But a live refusal under a disk posture that has since gone SAFE is not
+	// a pending exposure at all — it is a pending safe rebind, and the warning
+	// must not claim the restart exposes anything.
+	safeDisk := *refused
+	safeDisk.RequireToken = true
+	warn = listenerStatusWarning(&safeDisk, nil, notBound)
+	require.Contains(t, warn, "refuses to bind")
+	require.Contains(t, warn, "af daemon restart")
+	require.NotContains(t, warn, "unauthenticated",
+		"a safe disk posture makes the refusal pending-safe, not pending-exposed")
+	require.NotContains(t, warn, "DeliverPrompt")
+
+	// The opted-in disk under a responder still enforcing its last-applied
+	// SAFE posture is restart-pending drift, not an active exposure: "serves
+	// the control API" is a false present-tense claim against a tokened socket.
+	warn = listenerStatusWarning(&opted, liveSafe, bound)
+	require.Contains(t, warn, "nothing is exposed yet")
+	require.Contains(t, warn, "WILL expose",
+		"the restart's consequence still must be named")
+	require.NotContains(t, warn, "is reachable from the network",
+		"no present-tense exposure claim while the live socket enforces the token")
+
+	// And an opted-in disk under a live socket that already serves
+	// unauthenticated names the ANSWERING address, not the requested one — a
+	// retained rebind can diverge them.
+	optedMoved := *refused
+	optedMoved.AllowUnauthenticatedNetwork = true
+	optedMoved.ListenAddr = "192.168.1.5:8443"
+	warn = listenerStatusWarning(&optedMoved, liveExposed, bound)
+	require.Contains(t, warn, "0.0.0.0:8443",
+		"the answering socket's address is the claim, not the requested 192.168.1.5")
+	require.NotContains(t, warn, "192.168.1.5")
+
+	// A live socket still serving unauthenticated under a SAFE disk posture
+	// (the token came on, no restart yet) is the exposure itself — restart is
+	// the fix.
+	warn = listenerStatusWarning(&safeDisk, liveExposed, bound)
+	require.Contains(t, warn, "still serving 0.0.0.0:8443 unauthenticated")
+	require.Contains(t, warn, "af daemon restart")
+	require.NotContains(t, warn, "WILL expose",
+		"the exposure is present-tense; restart removes it rather than causing it")
 }
 
 // TestCollectDaemonStatusSafeConfigIsUnwarned is the other direction: a user who

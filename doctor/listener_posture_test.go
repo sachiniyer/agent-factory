@@ -320,6 +320,75 @@ func TestDaemonOptInOnDiskWhileRunningRefuses(t *testing.T) {
 	require.Contains(t, listenerRows[0].Remediation, "af daemon restart")
 }
 
+// TestDaemonOptInOnDiskUnderBoundSocket is the bound counterpart of
+// TestDaemonOptInOnDiskWhileRunningRefuses (#5137 review): the disk opts in
+// while a daemon still running its last-applied config answers. Whether the
+// socket is an exposure right now is the LIVE token gate's answer, not the
+// file's — a tokened responder under an opted-in file is restart-pending
+// drift, and only a socket genuinely serving unauthenticated earns the
+// present-tense claim.
+func TestDaemonOptInOnDiskUnderBoundSocket(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	bound := daemon.DaemonListenerStatus{
+		HTTPUnixBound: true,
+		TCPConfigured: true, TCPListenAddr: "0.0.0.0:8443",
+		TCPBound: true, TCPBoundAddr: "0.0.0.0:8443",
+	}
+	writeOpted := func(opts *Options) {
+		require.NoError(t, os.WriteFile(
+			filepath.Join(opts.ConfigDir, config.TomlConfigFileName),
+			[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = false\nallow_unauthenticated_network = true\n"), 0600))
+	}
+
+	// The tokened responder: the opt-in is written but nothing is exposed yet —
+	// restart-pending drift, not the live-exposure claim.
+	opts := testOptions(t, false)
+	writeOpted(&opts)
+	opts.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    filepath.Join(opts.ConfigDir, "daemon.sock"),
+			SocketExists:  true,
+			PingErr:       nil,
+			HTTPListening: daemon.AnswerYes(),
+			Listeners:     bound,
+			BootConfig:    &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: true},
+		}
+	}
+	report, err := Run(opts)
+	require.NoError(t, err)
+	listenerRows := findCheckRows(report, "listener")
+	require.Len(t, listenerRows, 1)
+	require.Equal(t, StatusWarn, listenerRows[0].Status)
+	require.Contains(t, listenerRows[0].Detail, "nothing is exposed yet",
+		"a tokened live socket under an opted-in file is pending drift, not an exposure")
+	require.NotContains(t, listenerRows[0].Detail, "serves 0.0.0.0:8443 from the network with no authentication",
+		"the present-tense serving claim is false while the responder enforces the token")
+
+	// The tokenless responder IS the opt-in's exposure — the same Warn the
+	// daemon-down case draws, now true of the answering socket.
+	opts2 := testOptions(t, false)
+	writeOpted(&opts2)
+	opts2.daemonHealth = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			SocketPath:    filepath.Join(opts2.ConfigDir, "daemon.sock"),
+			SocketExists:  true,
+			PingErr:       nil,
+			HTTPListening: daemon.AnswerYes(),
+			Listeners:     bound,
+			BootConfig:    &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: false},
+		}
+	}
+	report2, err := Run(opts2)
+	require.NoError(t, err)
+	rows2 := findCheckRows(report2, "listener")
+	require.Len(t, rows2, 1)
+	require.Equal(t, StatusWarn, rows2[0].Status)
+	require.Contains(t, rows2[0].Detail, "serves 0.0.0.0:8443 from the network with no authentication")
+	require.False(t, rows2[0].Problem,
+		"an opted-in live exposure is still the operator's choice — Warn, not Problem")
+}
+
 // TestDaemonNotRunningStillPassesOnASafeConfig guards the other direction: the
 // exposure row must fire on the unsafe posture ONLY. An ordinary user who has just
 // not started a daemon yet gets the on-demand pass and no listener row at all.

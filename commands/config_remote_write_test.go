@@ -247,6 +247,9 @@ func TestConfigSetRoutesTheGlobalWriteToTheTargetedDaemon(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			home := newConfigHome(t)
 			stub := newStubDaemon(t, "1.9.0")
+			// default_program does not force the listener posture safe, so the
+			// write takes the guarded route — the stub must serve it.
+			stub.refusalCapable = true
 			target := remoteRouteTo(name, stub.url())
 			t.Setenv("AF_DAEMON_URL", target.env)
 
@@ -288,6 +291,9 @@ func TestConfigUnsetRoutesTheGlobalClearToTheTargetedDaemon(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			home := newConfigHome(t)
 			stub := newStubDaemon(t, "1.9.0")
+			// ssh.host_key_verification does not force the listener posture
+			// safe, so the unset takes the guarded route — the stub serves it.
+			stub.refusalCapable = true
 			target := remoteRouteTo(name, stub.url())
 			t.Setenv("AF_DAEMON_URL", target.env)
 
@@ -353,6 +359,7 @@ func TestConfigSetOfListenAddrNamesWhereTheRemoteDaemonIsListening(t *testing.T)
 func TestConfigSetOfAnOrdinaryKeyNamesNoListener(t *testing.T) {
 	newConfigHome(t)
 	stub := newStubDaemon(t, "1.9.0")
+	stub.refusalCapable = true // an unrelated key takes the guarded route
 	t.Setenv("AF_DAEMON_URL", "")
 
 	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "default_program", "codex")
@@ -367,6 +374,7 @@ func TestConfigSetOfAnOrdinaryKeyNamesNoListener(t *testing.T) {
 func TestConfigSetSendsTheLegacyAliasAndEchoesTheCanonicalKey(t *testing.T) {
 	newConfigHome(t)
 	stub := newStubDaemon(t, "1.9.0")
+	stub.refusalCapable = true // ssh.host_key_verification takes the guarded route
 	t.Setenv("AF_DAEMON_URL", "")
 
 	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(),
@@ -413,9 +421,12 @@ func TestConfigSetRefusesADaemonThatDoesNotServeTheRoute(t *testing.T) {
 	stub := newStubDaemon(t, "0.9.1", "/v1/SetConfigValue")
 	t.Setenv("AF_DAEMON_URL", "")
 
-	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "default_program", "codex")
+	// The write must stay on the plain route to test ITS absence — only a
+	// safe-forcing value does that: an unrelated key would take the guarded
+	// twin and hit the policy refusal before route-skew handling.
+	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "network.require_token", "true")
 	requireRouteSkewRefusal(t, err, "af config set", "SetConfigValue", stub.url(), "0.9.1")
-	if strings.Contains(out, "set default_program") {
+	if strings.Contains(out, "set network.require_token") {
 		t.Errorf("a refused set must print no success line, got stdout: %q", out)
 	}
 	// The whole point: no fallback. A local config.toml here would be the change
@@ -424,11 +435,15 @@ func TestConfigSetRefusesADaemonThatDoesNotServeTheRoute(t *testing.T) {
 }
 
 func TestConfigUnsetRefusesADaemonThatDoesNotServeTheRoute(t *testing.T) {
-	const unsettable = "ssh.host_key_verification"
+	// network.listen_addr is the only unset that keeps the plain route — it
+	// restores the loopback default; every other key goes guarded and would
+	// hit the policy refusal instead of the route-skew path under test.
+	const unsettable = "network.listen_addr"
 	home := newConfigHome(t)
 	// Seed a real local value, so a fallback would have something to clear and
-	// "unchanged" is a claim with teeth rather than a vacuous one.
-	seeded := seedGlobalConfig(t, home, "set", unsettable, "accept-new")
+	// "unchanged" is a claim with teeth rather than a vacuous one. (A loopback
+	// value only — a tokenless network listen_addr would itself be refused.)
+	seeded := seedGlobalConfig(t, home, "set", unsettable, "127.0.0.1:8443")
 	stub := newStubDaemon(t, "0.9.1", "/v1/UnsetConfigValue")
 	t.Setenv("AF_DAEMON_URL", "")
 
@@ -451,7 +466,10 @@ func TestConfigWriteSkewRefusalNamesAnUnreportedVersion(t *testing.T) {
 	stub := newStubDaemon(t, "", "/v1/SetConfigValue")
 	t.Setenv("AF_DAEMON_URL", "")
 
-	_, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "default_program", "codex")
+	// The write must stay on the PLAIN route to reach its 404 — only a
+	// safe-forcing value does that (anything else takes the guarded twin and
+	// hits the policy refusal, which is the #5137 variant of this same skew).
+	_, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "network.require_token", "true")
 	if err == nil {
 		t.Fatal("a daemon that does not serve the route must be refused")
 	}
@@ -468,8 +486,10 @@ func TestConfigWriteSkewRefusalHonorsJSON(t *testing.T) {
 	stub := newStubDaemon(t, "0.9.1", "/v1/SetConfigValue")
 	t.Setenv("AF_DAEMON_URL", "")
 
+	// Safe-forcing write for the same reason: the plain route is the one whose
+	// absence the skew refusal reports.
 	_, errOut, err := runConfigCLI(t, "--daemon-url", stub.url(),
-		"set", "default_program", "codex", "--json")
+		"set", "network.require_token", "true", "--json")
 	if err == nil {
 		t.Fatal("the skew refusal must fail under --json too")
 	}
@@ -558,6 +578,38 @@ func TestConfigSetRoutesExposureWriteToACapableDaemon(t *testing.T) {
 	}
 	if got := stub.healthHitCount(); got != 0 {
 		t.Errorf("no capability probe — the guarded route is the proof, got %d health reads", got)
+	}
+	requireGlobalConfigUnchanged(t, home, nil)
+}
+
+// TestConfigSetRoutesUnrelatedWritesToTheGuardedRoute pins the widened rule:
+// an old daemon answers EVERY accepted write with a whole-file ApplyConfig, so
+// an unrelated key on a file already holding the refused posture binds it just
+// the same. Only writes that force the listener safe by themselves keep the
+// plain route — everything else is guarded, end to end.
+func TestConfigSetRoutesUnrelatedWritesToTheGuardedRoute(t *testing.T) {
+	home := newConfigHome(t)
+	stub := newStubDaemon(t, "1.10.0")
+	stub.refusalCapable = true
+	t.Setenv("AF_DAEMON_URL", stub.url())
+
+	for _, args := range [][]string{
+		{"set", "default_program", "codex"},
+		{"set", "network.allow_unauthenticated_network", "false"},
+		{"unset", "network.preview_listen_addr"},
+	} {
+		if _, _, err := runConfigCLI(t, args...); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	sets, unsets := stub.setRoutes(), stub.unsetRoutes()
+	if len(sets) != 2 {
+		t.Fatalf("both sets must have landed, got %v", sets)
+	}
+	for _, route := range append(sets, unsets...) {
+		if !strings.HasSuffix(route, "Guarded") {
+			t.Errorf("every non-safe-forcing write takes the guarded route, got %q", route)
+		}
 	}
 	requireGlobalConfigUnchanged(t, home, nil)
 }
@@ -670,6 +722,10 @@ func TestConfigWriteJSONRendersFailedApplyOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			newConfigHome(t)
 			stub := newStubDaemon(t, "1.9.0")
+			// Unrelated and unset writes take the guarded route too — an old
+			// daemon's whole-file apply can bind the file's own listener
+			// posture — so the stub must serve it for the write to land.
+			stub.refusalCapable = true
 			stub.applyOutcome = tc.outcome
 			t.Setenv("AF_DAEMON_URL", "")
 

@@ -365,3 +365,64 @@ func TestExposureWarningAgreesWithTheDaemonNotice(t *testing.T) {
 		}
 	}
 }
+
+// The stale-daemon route guard. Every write an old daemon accepts ends in a
+// whole-file ApplyConfig, so ANY write can bind a tokenless network listener
+// already sitting in the file — the only writes that may take the plain route
+// are the ones that force the listener posture safe by themselves.
+func TestListenerPostureWriteExposureFailsClosed(t *testing.T) {
+	t.Run("only safe-forcing sets stay unguarded", func(t *testing.T) {
+		safe := [][2]string{
+			{"network.require_token", "true"},
+			{"network.require_token", "True"},
+			{"network.require_token", "1"},
+			{"require_token", "true"}, // the legacy flat alias
+			{"network.listen_addr", ""},
+			{"network.listen_addr", "127.0.0.1:8443"},
+			{"network.listen_addr", "127.53.0.9:8443"},
+			{"network.listen_addr", "[::1]:8443"},
+			{"network.listen_addr", "localhost:8443"},
+			{"listen_addr", "127.0.0.1:8443"}, // the legacy flat alias
+		}
+		for _, kv := range safe {
+			assert.False(t, ListenerPostureWriteExposure(kv[0], kv[1]),
+				"%s=%s forces the listener safe — it must keep the plain route", kv[0], kv[1])
+		}
+	})
+	t.Run("every other set is guarded", func(t *testing.T) {
+		guarded := [][2]string{
+			{"network.listen_addr", "0.0.0.0:8443"},
+			{"network.listen_addr", "10.0.0.5:8443"},
+			{"network.listen_addr", "100.64.1.2:8443"},
+			{"network.listen_addr", "example.com:8443"},
+			{"network.listen_addr", ":8443"},
+			{"listen_addr", "0.0.0.0:8443"},
+			{"network.require_token", "false"},
+			{"network.require_token", " false "},
+			{"require_token", "0"},
+			{"network.require_token", "not-a-bool"}, // unparseable fails closed
+			// The whole-file-apply reason: unrelated keys are dangerous the
+			// moment the file itself holds the refused posture.
+			{"default_program", "claude"},
+			{"update_channel", "preview"},
+			{"network.allow_unauthenticated_network", "true"},
+			{"network.allow_unauthenticated_network", "false"},
+		}
+		for _, kv := range guarded {
+			assert.True(t, ListenerPostureWriteExposure(kv[0], kv[1]),
+				"%s=%s does not force the listener safe — it must take the guarded route", kv[0], kv[1])
+		}
+	})
+	t.Run("unset is guarded unless it restores the loopback default", func(t *testing.T) {
+		assert.False(t, ListenerPostureUnsetExposure("network.listen_addr"),
+			"unsetting listen_addr restores the default loopback bind")
+		assert.False(t, ListenerPostureUnsetExposure("listen_addr"),
+			"the flat alias unset restores the same default")
+		assert.True(t, ListenerPostureUnsetExposure("network.require_token"),
+			"unsetting require_token restores the tokenless default")
+		assert.True(t, ListenerPostureUnsetExposure("network.allow_unauthenticated_network"),
+			"unsetting the opt-in does not itself make a non-loopback tokenless file safe")
+		assert.True(t, ListenerPostureUnsetExposure("default_program"),
+			"an unrelated unset rides the same whole-file apply")
+	})
+}

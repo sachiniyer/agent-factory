@@ -4417,22 +4417,28 @@ test("config: a later save's status does not pull focus out of the field the use
   const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
   try {
     const p = await ctx.newPage();
-    await p.route("**/v1/SetConfigValue", async (route) => {
-      const body = route.request().postDataJSON() as { key: string; value: string };
-      startResolvers.get(body.key)?.();
-      await holds[body.key];
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: {
-            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
-            restart_notice: "",
-          },
-          error: null,
-        }),
+    // branch_prefix does not force the listener posture safe, so its write
+    // takes SetConfigValueGuarded; the loopback listen_addr keeps the plain
+    // route. Intercept the pair — the guarded twin is the route a daemon that
+    // enforces the #5137 refusal serves.
+    for (const routePattern of ["**/v1/SetConfigValue", "**/v1/SetConfigValueGuarded"]) {
+      await p.route(routePattern, async (route) => {
+        const body = route.request().postDataJSON() as { key: string; value: string };
+        startResolvers.get(body.key)?.();
+        await holds[body.key];
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: {
+              result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+              restart_notice: "",
+            },
+            error: null,
+          }),
+        });
       });
-    });
+    }
 
     await openTokenless(p);
     await p.locator('.af-viewtab[data-view="config"]').click();
