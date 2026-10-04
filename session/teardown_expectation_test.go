@@ -100,7 +100,10 @@ func TestTeardownExpectedFromInstanceState(t *testing.T) {
 		{name: "kill tombstone", mutate: func(i *Instance) { i.userKilled = true }, want: true},
 		{name: "OpKilling", mutate: func(i *Instance) { i.SetInFlightOpForTest(OpKilling) }, want: true},
 		{name: "OpArchiving", mutate: func(i *Instance) { i.SetInFlightOpForTest(OpArchiving) }, want: true},
-		{name: "owed on_complete", mutate: func(i *Instance) { i.owedOnComplete = &PendingOnCompleteData{} }, want: true},
+		// A filed on_complete is NOT teardown evidence: it is recorded before
+		// teardown begins and the session is still meant to be running until
+		// the discharge, which itself raises the kill/archive fence.
+		{name: "owed on_complete filed, not discharged", mutate: func(i *Instance) { i.owedOnComplete = &PendingOnCompleteData{} }, want: false},
 		// Deliberately not teardown state: OpCreating is af building the
 		// session — a vanish there is the anomaly ERROR exists for — and the
 		// replacement ops attribute through their own close()'s mark.
@@ -137,12 +140,13 @@ func TestKillTeardownMonitorGoesSilentAtInfo(t *testing.T) {
 }
 
 // TestArchiveTeardownMonitorGoesSilentAtInfo is the issue's archive half:
-// archive keeps started=true (the OpArchiving fence owns the teardown
-// window), so the unconditional close() mark — not the predicate — is what
-// demotes the post-teardown poll. No op is raised here on purpose: the mark
-// alone must cover it.
+// archive keeps started=true while the OpArchiving fence owns the teardown
+// window, so a poll that still observes the close from inside the fence is
+// demoted by the instance predicate — af's own op state — exactly as a
+// SnapshotAgent call in flight when BeginArchive landed would be.
 func TestArchiveTeardownMonitorGoesSilentAtInfo(t *testing.T) {
 	inst, ts, _ := newGoneExpectInstance(t)
+	inst.SetInFlightOpForTest(OpArchiving)
 
 	// nil worktree: the pane teardown — including the mark — already ran by
 	// the time handleWorktree reports there is nothing to relocate.
@@ -158,7 +162,7 @@ func TestArchiveTeardownMonitorGoesSilentAtInfo(t *testing.T) {
 
 // TestExternalTmuxDeathMonitorGoesSilentAtError is the property's other
 // half: a session whose tmux is killed out from under af — no mark, no
-// tombstone, no op, no owed on_complete — still reports at ERROR.
+// tombstone, no teardown op — still reports at ERROR.
 func TestExternalTmuxDeathMonitorGoesSilentAtError(t *testing.T) {
 	inst, ts, m := newGoneExpectInstance(t)
 

@@ -157,13 +157,11 @@ func TestCloseBoundGenerationAlreadyDeadReturnsNil(t *testing.T) {
 
 // TestCloseBoundGenerationThatLostTheNameStillKillsTheName is the bound
 // branch's other fork: the identity probe ANSWERS, but with a different
-// generation than the monitor polls. kill-session targets the name, so it
-// reaches the replacement, not the bound generation — but the teardown must
-// still proceed AND the mark still lands: close() is af's recorded teardown
-// op, so the bound monitor going silent inside it is the expected end of a
-// teardown af initiated (#5138). Reading "answered with someone else" as the
-// unanswered early return would silently stop killing sessions af was asked
-// to kill.
+// generation than the monitor polls. No mark may land — kill-session targets
+// the name, so it will reach the replacement, not the bound generation — but
+// the teardown itself must still proceed. Reading "answered with someone else"
+// as the unanswered early return would silently stop killing sessions af was
+// asked to kill.
 func TestCloseBoundGenerationThatLostTheNameStillKillsTheName(t *testing.T) {
 	shortTmuxTimeout(t, markTestTimeout)
 	session, m, _ := boundCloseSession(t)
@@ -177,8 +175,8 @@ func TestCloseBoundGenerationThatLostTheNameStillKillsTheName(t *testing.T) {
 		"and the process-tree capture must still run before it")
 	require.NoError(t, err)
 	require.Equal(t, PaneStateKnown, state)
-	require.True(t, session.teardownInitiated(),
-		"af asked for this session's teardown — the mark lands whatever the name resolves to (#5138)")
+	require.False(t, session.teardownInitiated(),
+		"the kill targets the name's owner, which is not the bound generation — its mark must not land")
 }
 
 // TestCloseUnboundMonitorSkipsTheIdentityProbe is the control for all of the

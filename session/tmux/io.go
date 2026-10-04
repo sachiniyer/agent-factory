@@ -134,20 +134,26 @@ func newReattachStatusMonitor() *statusMonitor {
 // monitor gets an id-less generation to carry the mark — the pre-binding
 // name-scoped behavior.
 //
-// A BOUND monitor's mark no longer asks what the name resolves to (#5138).
-// The earlier rule read the mark as "kill-session hit this generation" and
-// refused when the name answered for nothing or for a replacement — but the
-// mark records something simpler: af asked for this session's teardown.
-// close() IS that recorded op, and a monitor going silent inside it is the
-// expected end of a teardown af initiated whether the bound generation died
-// before close() could aim at it — the ordinary shape of archive/kill/
-// on_complete teardowns — or the kill lands afterward. The name probe still
-// runs, but only for its budget veto: a server wedged enough to refuse it
-// will fail kill-session the same way, so close() reports the run unknown
-// from the probe's own failure rather than paying a second and third command
-// budget for the same non-answer (Codex on #4473). The resolution cannot run
-// under monitorMu — it is a tmux command with a deadline, exactly what the
-// lock ordering forbids holding it across.
+// A BOUND monitor is marked only while the name still resolves to its
+// generation: kill-session targets the NAME, so when the name already answers
+// for a different generation this request is aimed at the replacement, not at
+// the bound session that vanished on its own — and marking the bound
+// generation would launder that unrequested death into af's request (Codex on
+// #4473, #5138). An answered probe reporting nothing at the name is the same
+// refusal in the other direction: the bound generation already vanished
+// without af asking, kill-session cannot target it, and marking it would
+// launder that unrequested death into af's request at the next poll. The
+// archive/kill/on_complete window those already-gone teardowns produce is
+// covered instead by the instance-level expectation poll supplies through
+// the ExpectingTeardown variants — af's own op fence and kill tombstone —
+// which says "tearing down" without claiming this close caused the death
+// (#5138). A probe that never answers is different again: no mark lands
+// and probeAnswered reports false, because a server wedged enough to refuse
+// the probe will fail the kill the same way — close() reports the run
+// unknown there rather than paying a second and third command budget for
+// the same non-answer (Codex on #4473). The resolution cannot run under
+// monitorMu — it is a tmux command with a deadline, exactly what the lock
+// ordering forbids holding it across.
 // probeAnswered is false only when the name-resolution probe ran and never
 // got an answer: the server is wedged, so the caller should not spend another
 // command budget on a kill that cannot be delivered — and no mark lands,
@@ -160,8 +166,12 @@ func (t *TmuxSession) markTeardownInitiated() (marked *statusMonitor, probeAnswe
 		return nil, true
 	}
 	if g := mon.generation; g != nil && g.sessionID != "" {
-		if _, answered := t.confirmedGeneration(); !answered {
+		live, answered := t.confirmedGeneration()
+		if !answered {
 			return nil, false
+		}
+		if live == nil || !g.sameAs(live) {
+			return nil, true
 		}
 	}
 	t.monitorMu.Lock()
