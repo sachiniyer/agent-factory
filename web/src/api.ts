@@ -1165,6 +1165,142 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
   return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
 }
 
+// --- #5137 guarded-write route selection ------------------------------------
+//
+// SetConfigValueGuarded is the fail-closed twin of SetConfigValue: it exists
+// only on daemons that enforce the #5137 refusal of a tokenless non-loopback
+// control bind, so posting an exposure-capable write there is the capability
+// check AND the write in one request — a stale tab writing through a rollback
+// or downgrade, or a proxy fronting mixed-version daemons, gets a 404 rather
+// than an accepted write that binds the very listener this build declines to.
+// The Go client (apiclient.SetConfigValue) selects the same way; the classifier
+// below is a port of config.ListenerPostureWriteExposure and must not drift —
+// the two are the same contract on two transports.
+
+/** strconv.ParseBool's accepted set — the daemon's writer canonicalizes values
+ *  with it (config.canonicalizeScalar trims then parses), so the classifier
+ *  must agree on exactly these spellings. undefined = the Go error branch. */
+function parseGoBool(v: string): boolean | undefined {
+  switch (v) {
+    case "1": case "t": case "T": case "true": case "TRUE": case "True":
+      return true;
+    case "0": case "f": case "F": case "false": case "FALSE": case "False":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+/** net.ParseIP's strict dotted quad: four decimal octets, no octal/hex/short
+ *  forms — "127.1" is NOT an IP to Go, and leading zeros are a parse failure. */
+function parseIPv4(s: string): number[] | null {
+  const parts = s.split(".");
+  if (parts.length !== 4) return null;
+  const out: number[] = [];
+  for (const p of parts) {
+    if (!/^[0-9]+$/.test(p) || (p.length > 1 && p[0] === "0")) return null;
+    const n = Number(p);
+    if (n > 255) return null;
+    out.push(n);
+  }
+  return out;
+}
+
+/** Expands an IPv6 literal (optional "::", optional dotted-quad tail holding
+ *  the last 32 bits) to eight hextets, mirroring net.ParseIP's grammar.
+ *  null on any malformation. */
+function parseIPv6Hextets(host: string): number[] | null {
+  let h = host.toLowerCase();
+  if (!h.includes(":")) return null;
+  const dot = h.lastIndexOf(".");
+  if (dot !== -1) {
+    const start = h.lastIndexOf(":", dot);
+    if (start === -1) return null;
+    const q = parseIPv4(h.slice(start + 1));
+    if (q === null) return null;
+    h = h.slice(0, start + 1) + ((q[0] << 8) | q[1]).toString(16) + ":" + ((q[2] << 8) | q[3]).toString(16);
+  }
+  const halves = h.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] === "" ? [] : halves[0].split(":");
+  const right = halves.length === 2 ? (halves[1] === "" ? [] : halves[1].split(":")) : [];
+  if (left.includes("") || right.includes("")) return null;
+  if (halves.length === 1 && left.length !== 8) return null;
+  if (halves.length === 2 && left.length + right.length > 7) return null;
+  const hextets = [...left, ...new Array(8 - left.length - right.length).fill("0"), ...right];
+  if (hextets.length !== 8) return null;
+  const nums: number[] = [];
+  for (const x of hextets) {
+    if (!/^[0-9a-f]{1,4}$/.test(x)) return null;
+    nums.push(parseInt(x, 16));
+  }
+  return nums;
+}
+
+/** net.ParseIP + IP.IsLoopback: 127.0.0.0/8, ::1, and the v4-mapped
+ *  ::ffff:a.b.c.d form with a 127 first octet (the mapped prefix is in the
+ *  address, not the spelling — "::ffff:7f00:1" is the same address). */
+function isLoopbackIP(host: string): boolean {
+  const v4 = parseIPv4(host);
+  if (v4 !== null) return v4[0] === 127;
+  const h = parseIPv6Hextets(host);
+  if (h === null) return false;
+  if (h.every((n, i) => n === (i === 7 ? 1 : 0))) return true;
+  return h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff && h[6] >> 8 === 127;
+}
+
+/** The host half of a listen_addr the way net.SplitHostPort reads it:
+ *  "[v6]:port" yields the literal, "host:port" the name, and anything
+ *  SplitHostPort would error on falls back to the whole string — a bare host
+ *  or a bare IPv6 literal both classify by their own spelling, and junk fails
+ *  safe to non-loopback downstream. */
+function listenAddrHost(addr: string): string {
+  const a = addr.trim();
+  if (a.startsWith("[")) {
+    const end = a.indexOf("]");
+    // SplitHostPort parses a bracketed literal only as "[v6]:port" — "]" not
+    // followed by ":", a missing "]", or a port containing another ":" are all
+    // parse errors, and on error Go's caller falls back to the WHOLE string as
+    // the host. A bare "[::1]" is therefore not loopback to Go, and a guarded
+    // route loses nothing by agreeing.
+    if (end === -1 || a[end + 1] !== ":" || a.slice(end + 2).includes(":")) return a;
+    return a.slice(1, end);
+  }
+  const last = a.lastIndexOf(":");
+  if (last === -1 || a.indexOf(":") !== last) return a; // bare host, or bare IPv6
+  return a.slice(0, last);
+}
+
+/** Port of config.IsLoopbackListenAddr: true only for 127.0.0.0/8, ::1 (incl.
+ *  its v4-mapped spelling), and localhost. Empty host — ":8443", every
+ *  interface — and unparseable values are NOT loopback. */
+function isLoopbackListenAddr(addr: string): boolean {
+  const host = listenAddrHost(addr);
+  if (host === "") return false;
+  if (host.toLowerCase() === "localhost") return true;
+  return isLoopbackIP(host);
+}
+
+/** Port of config.ListenerPostureWriteExposure: whether this key=value could
+ *  leave a daemon that PREDATES the #5137 refusal serving the control API
+ *  unauthenticated — the signal to take the guarded route. Only two writes
+ *  qualify: pointing network.listen_addr at a non-loopback address, and turning
+ *  network.require_token off. Everything else either cannot create the posture
+ *  or is a write an old daemon rejects by shape on its own. */
+function listenerPostureWriteExposure(key: string, value: string): boolean {
+  const k = key === "listen_addr" ? "network.listen_addr"
+    : key === "require_token" ? "network.require_token"
+    : key;
+  switch (k) {
+    case "network.listen_addr":
+      return value !== "" && !isLoopbackListenAddr(value);
+    case "network.require_token":
+      return parseGoBool(value.trim()) === false;
+    default:
+      return false;
+  }
+}
+
 /** Sets one global config key, exactly as `af config set key value` does: the
  *  daemon hands the value to the same validator and the same file-locked atomic
  *  writer, so an invalid value is rejected here with the CLI's own message
@@ -1173,7 +1309,23 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  Throws ApiError carrying the validator's message on a rejected value — the
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
-  return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
+  const guarded = listenerPostureWriteExposure(key, value);
+  try {
+    return await af<ConfigSetResponse>(guarded ? "SetConfigValueGuarded" : "SetConfigValue", { key, value }, token);
+  } catch (e) {
+    // The guarded route's fail-closed answer is a 404 — translate THAT one
+    // case, because "404 page not found" does not tell the operator their write
+    // was refused rather than merely unrouted (apiclient's
+    // refusalCapableRouteError does the same for the CLI/TUI paths).
+    if (guarded && e instanceof ApiError && e.status === 404) {
+      throw new ApiError(404,
+        `the daemon predates af's unauthenticated-listener refusal (#5137): it would accept this ${key} write ` +
+        "and serve the control API — including DeliverPrompt — to anyone who can reach the address, " +
+        "so nothing was written. Upgrade that daemon, or run the write on its host",
+        e.code, e.daemonRejected);
+    }
+    throw e;
+  }
 }
 
 // --- config assistant (#2467) ----------------------------------------------

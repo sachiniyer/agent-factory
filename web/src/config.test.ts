@@ -198,6 +198,76 @@ test("setConfigValue sends no Authorization header for the tokenless credential"
   assert.equal(cap.auth, undefined);
 });
 
+// --- #5137 guarded-route selection -----------------------------------------
+//
+// A write that could leave a PRE-#5137 daemon serving the control API
+// unauthenticated must go to SetConfigValueGuarded — a route only refusal-capable
+// daemons serve, so a rollback/downgrade or mixed-version proxy fails the write
+// closed (404) instead of accepting it. The classifier is a port of
+// config.ListenerPostureWriteExposure; these cases pin the two transports to the
+// same answers.
+
+test("setConfigValue routes exposure-capable writes to the guarded endpoint", async () => {
+  for (const [key, value] of [
+    ["network.listen_addr", "0.0.0.0:8443"],
+    ["network.listen_addr", "192.168.1.5:8443"],
+    ["network.listen_addr", "100.64.1.2:8443"], // tailnet is network-reachable
+    ["network.listen_addr", "example.com:8443"], // hostnames resolve non-loopback
+    ["network.listen_addr", ":8443"],            // empty host = every interface
+    ["listen_addr", "0.0.0.0:8443"],             // the legacy flat alias
+    ["network.require_token", "false"],
+    ["network.require_token", " FALSE "],        // padded + alternate spelling parse as off
+    ["require_token", "0"],                      // the legacy flat alias, Go bool "0"
+  ] as const) {
+    const cap = stubFetch({
+      result: { key, value, path: "/tmp/config.toml", requires_restart: false },
+      restart_notice: "",
+    });
+    await setConfigValue(key, value, "tok");
+    assert.equal(cap.url, "/v1/SetConfigValueGuarded", `${key}=${value}`);
+  }
+});
+
+test("setConfigValue keeps the plain route for writes an old daemon applies safely", async () => {
+  for (const [key, value] of [
+    ["network.listen_addr", "127.0.0.1:8443"],
+    ["network.listen_addr", "127.53.0.9:8443"],   // all of 127/8 is loopback
+    ["network.listen_addr", "[::1]:8443"],
+    ["network.listen_addr", "[::ffff:127.0.0.1]:8443"], // v4-mapped loopback
+    ["network.listen_addr", "localhost:8443"],
+    ["network.listen_addr", ""],                  // the opt-out disables the listener
+    ["network.require_token", "true"],
+    ["network.require_token", "True"],
+    ["network.require_token", "not-a-bool"],      // the writer's own ParseBool rejects it — not exposure
+    ["network.allow_unauthenticated_network", "false"], // revoking the opt-in is tightening
+    ["network.allow_unauthenticated_network", "true"],  // unknown-key shape rejects on old daemons
+    ["update_channel", "preview"],
+  ] as const) {
+    const cap = stubFetch({
+      result: { key, value, path: "/tmp/config.toml", requires_restart: false },
+      restart_notice: "",
+    });
+    await setConfigValue(key, value, "tok");
+    assert.equal(cap.url, "/v1/SetConfigValue", `${key}=${value}`);
+  }
+});
+
+test("setConfigValue translates the guarded route's 404 into the fail-closed refusal", async () => {
+  // The 404 IS the capability check: a daemon that predates the refusal does
+  // not serve SetConfigValueGuarded, so nothing was written. The form must say
+  // that — not "404 Not Found" — and it must still throw.
+  stubFetch(null, { ok: false, status: 404 });
+
+  await assert.rejects(
+    () => setConfigValue("network.require_token", "false", "tok"),
+    (err: Error) => {
+      assert.match(err.message, /predates af's unauthenticated-listener refusal/);
+      assert.match(err.message, /nothing was written/);
+      return true;
+    },
+  );
+});
+
 // The web half of the anti-drift guarantee.
 //
 // The Go side pins that every config_types.go key has a manifest entry

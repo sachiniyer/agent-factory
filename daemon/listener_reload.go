@@ -177,7 +177,12 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	// diverged from the file (the configured posture alone understates what
 	// answers), and including the deferral case where (re)binding the refused
 	// address is exactly what keeps the supervisor's TCPBound check green.
-	wl.manager.probationTokenFloor.Store(carries && wl.servingUnauthenticatedLocked(newCfg))
+	floor := carries && wl.servingUnauthenticatedLocked(newCfg)
+	if floor {
+		// Armed BEFORE any bind or retire below: a deferred bind must never
+		// answer unfloored, and the gate reads the floor per request.
+		wl.manager.probationTokenFloor.Store(true)
+	}
 	if deferral {
 		if wl.webConfigAddr != newCfg.ListenAddr || wl.webHandle == nil {
 			log.WarningLog.Printf("upgrade candidate is keeping network.listen_addr %q bound for "+
@@ -196,6 +201,14 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 		(newCfg.ListenAddr == "" && wl.webHandle != nil) ||
 		(newCfg.ListenAddr == "" && lcfg.TCPConfigured) {
 		webErr = wl.bindWebLocked(newCfg.ListenAddr)
+	}
+	if !floor {
+		// Cleared only AFTER the socket state settled above: refuseWebLocked's
+		// retire is what actually removes a refused socket, and a request
+		// landing between a premature clear and that retire would read the
+		// already-swapped tokenless config with no floor — served
+		// unauthenticated on a socket still bound.
+		wl.manager.probationTokenFloor.Store(false)
 	}
 	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
 		(newCfg.PreviewListenAddr == "" && wl.previewHandle != nil) ||

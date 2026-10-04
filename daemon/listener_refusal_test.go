@@ -410,6 +410,9 @@ func TestUpgradeCandidateApplyKeepsJournaledSocket(t *testing.T) {
 		"an apply under the active journal must keep the socket the supervisor expects")
 	require.Equal(t, http.StatusUnauthorized, getStatus(t, addr, "/v1/health"),
 		"the socket is still bound AND still enforcing the token floor")
+	require.NotContains(t, result.Warnings, config.ListenerBindRefusal(m.Config()),
+		"the deferred candidate is bound and token-gated, not refused — the warning "+
+			"must follow the reconcile outcome, not the refused file")
 }
 
 // TestUpgradeCandidateFloorsRetainedSocketOnTokenlessWrite is the
@@ -454,6 +457,129 @@ func TestUpgradeCandidateFloorsRetainedSocketOnTokenlessWrite(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, getStatus(t, addr, "/v1/health"),
 		"a kept-bound network socket must demand the token through the journal window — "+
 			"a published tokenless posture cannot reach it")
+}
+
+// TestUpgradeCandidateFloorHeldThroughJournalLossTeardown pins the ordering the
+// journal's mid-apply disappearance creates (#5137 review): the deferral check
+// runs TWICE per apply — retireWebBeforePostureSwap pre-swap and reconcile
+// post-swap — so a journal present for the first but gone for the second leaves
+// reconcile holding a still-bound socket with the tokenless posture already
+// published onto it. The probation floor must stay armed through the refusal
+// teardown and clear only after the socket is gone: a request landing between
+// an early clear and the retire would read the swapped config with no floor and
+// be served the full control API unauthenticated.
+func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = false
+	m, wl := upgradeCandidateListeners(t, cfg, "txn-5137")
+
+	// The deferral establishes the bound+floored socket first.
+	journal := upgradetxn.Journal{
+		ID:     "txn-5137",
+		Daemon: upgradetxn.DaemonSnapshot{Listeners: upgradetxn.ListenerExpectation{TCPBound: true}},
+	}
+	stubUpgradeJournal(t, journal, nil)
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	addr := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	require.NotEmpty(t, addr, "precondition: the deferred socket is bound")
+	require.True(t, m.probationTokenFloor.Load(), "precondition: the floor is armed")
+
+	// The journal then vanishes mid-apply: present for the pre-swap check (the
+	// socket is kept bound) and gone for reconcile's (the refusal must run for
+	// real against a still-serving socket).
+	journalCalls := 0
+	loadUpgradeJournalFn = func(string) (upgradetxn.Journal, error) {
+		journalCalls++
+		if journalCalls == 1 {
+			return journal, nil
+		}
+		return upgradetxn.Journal{}, errors.New("no active upgrade transaction")
+	}
+
+	// Any request answered 200 in the teardown window is the hole: the floor was
+	// cleared before the socket retired. 401 = still floored, 0 = already gone.
+	answers := make(chan int, 4096)
+	stop := make(chan struct{})
+	go func() {
+		defer close(answers)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			resp, err := http.Get("http://" + addr + "/v1/health")
+			if err != nil {
+				answers <- 0
+				continue
+			}
+			_ = resp.Body.Close()
+			answers <- resp.StatusCode
+		}
+	}()
+
+	tomlPath := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), config.TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlPath,
+		[]byte("[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\n"), 0600))
+	_, err = m.ApplyConfig()
+	require.NoError(t, err)
+	close(stop)
+	for code := range answers {
+		require.NotEqual(t, http.StatusOK, code,
+			"a 200 in the teardown window means the floor cleared before the socket retired")
+	}
+
+	require.GreaterOrEqual(t, journalCalls, 2,
+		"anti-vacuous: the apply must have seen the journal present then gone")
+	snap := m.lifecycle.snapshot().listeners
+	require.False(t, snap.TCPBound, "with the journal gone the refused socket retires for real")
+	require.NotEmpty(t, snap.TCPRefusalReason)
+	require.False(t, m.probationTokenFloor.Load(),
+		"the floor clears once the socket it protected is gone")
+}
+
+// TestPingReportsServingAddrAfterFailedRebind is the status half of the
+// retained-socket case (#5137 review): a failed live rebind deliberately keeps
+// the PREVIOUS listener serving while Manager.Config() already carries the
+// requested address. Ping's BootConfig must therefore report the address the
+// listener owner is actually serving (the lifecycle's configured half), not the
+// file-shaped request — otherwise RunningConfigMatches sees file==requested==
+// reported and answers "yes" for a socket still bound on the old address, and
+// doctor misses the pending restart.
+func TestPingReportsServingAddrAfterFailedRebind(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.RequireToken = true
+	m, wl, addr := boundWebListeners(t, cfg)
+
+	// The live rebind fails: the requested address is stored in the live config
+	// but the old socket keeps serving.
+	wl.listenTCP = func(string, string) (net.Listener, error) {
+		return nil, errors.New("address already in use (forced by the test)")
+	}
+	moved := *m.Config()
+	moved.ListenAddr = "127.0.0.2:0"
+	m.live.Store(&moved)
+	failed, err := wl.reconcile(&moved)
+	require.NoError(t, err)
+	require.Contains(t, failed, "network.listen_addr",
+		"precondition: the rebind was attempted and failed")
+	require.Equal(t, "127.0.0.2:0", m.Config().ListenAddr,
+		"precondition: the live config already carries the requested address")
+	require.Equal(t, addr, m.lifecycle.snapshot().listeners.TCPBoundAddr,
+		"precondition: the retained socket still answers on the old address")
+
+	var resp PingResponse
+	require.NoError(t, (&controlServer{manager: m}).Ping(PingRequest{}, &resp))
+	require.NotNil(t, resp.BootConfig)
+	require.Equal(t, "127.0.0.1:0", resp.BootConfig.ListenAddr,
+		"BootConfig must name the socket's producing address, not the stored request")
+	require.Contains(t, RunningConfigDifference(resp.BootConfig, m.Config()),
+		`running "127.0.0.1:0", file "127.0.0.2:0"`,
+		"the drift report must surface the failed rebind, not claim a match")
 }
 
 // TestRefusalSeversHijackedWebSocketStreams is the hole retire() cannot close

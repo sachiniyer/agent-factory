@@ -523,7 +523,9 @@ newer — is covered on three sides:
   exposure-capable writes go to `/v1/SetConfigValueGuarded` /
   `/v1/UnsetConfigValueGuarded`, routes only refusal-capable daemons serve, so
   an older daemon's 404 is the refusal — the capability proof and the write
-  arrive in one request and cannot be split by a daemon swap. Remote writes
+  arrive in one request and cannot be split by a daemon swap. The web config
+  form selects the same guarded route, so a stale browser tab writing through
+  a rollback or a mixed-version proxy fails closed the same way. Remote writes
   never fall back to your local config.
 - Safe writes — the token on, the address back to loopback — keep the plain
   routes, since an older daemon applies them safely and they are exactly the

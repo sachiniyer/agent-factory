@@ -397,13 +397,23 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// daemon log already holds it at ERROR from reconcile; this repeats it on
 	// the channel the person making the change reads.
 	//
-	// Transition-gated on the lifecycle's recorded reason (captured
-	// pre-reconcile): a posture that stays refused across an unrelated save
-	// does not re-warn, matching the exposure notice's own at-most-once
-	// contract — and a NEW refusal (a different address, or the first refusal)
-	// always fires because the reason text differs.
-	if refusal := config.ListenerBindRefusal(newCfg); refusal != "" && refusal != preReconcileRefusal {
-		result.Warnings = append(result.Warnings, refusal)
+	// The predicate is the lifecycle's POST-reconcile recorded refusal, not
+	// ListenerBindRefusal(newCfg): reconcile is the authority on whether the
+	// posture actually refused, and the upgrade-deferral path deliberately
+	// keeps a refused-FILE socket bound under the probation token floor for
+	// the supervisor's TCPBound check. Judging the file there would re-warn
+	// "refused" on every apply during the whole journal window for a listener
+	// that is in fact bound and token-gated. Transition-gated on the recorded
+	// reason (pre- vs post-reconcile): a posture that stays refused across an
+	// unrelated save does not re-warn, matching the exposure notice's own
+	// at-most-once contract — and a NEW refusal (a different address, or the
+	// first refusal) always fires because the reason text differs.
+	postReconcileRefusal := ""
+	if m.lifecycle != nil {
+		postReconcileRefusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
+	}
+	if postReconcileRefusal != "" && postReconcileRefusal != preReconcileRefusal {
+		result.Warnings = append(result.Warnings, postReconcileRefusal)
 	}
 
 	// The web-tab preview listener's exposure notice (#1856) — the preview analog
