@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -126,46 +125,11 @@ type pruneCandidate struct {
 // PruneSessions evaluates archived sessions against req and, when Apply is
 // set, deletes the eligible ones. See the file header for the apply order.
 func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
-	resp := PruneSessionsResponse{Applied: req.Apply}
-	olderThan := strings.TrimSpace(req.OlderThan)
-	if olderThan == "" {
-		return resp, fmt.Errorf("older_than is required — prune is deliberately opt-in and never guesses a retention period")
-	}
-	duration, err := time.ParseDuration(olderThan)
-	if err != nil || duration <= 0 {
-		return resp, fmt.Errorf("older_than %q is not a positive Go duration (for example \"720h\" for thirty days)", req.OlderThan)
-	}
-	resp.OlderThan = olderThan
-	resp.ArchivedBefore = time.Now().Add(-duration)
-	if req.RepoID == "" && !req.All {
-		return resp, fmt.Errorf("a scope is required: pass repo_id for one project or all=true for every project")
-	}
-
-	candidates, skipped, warnings := m.pruneCandidates(req, resp.ArchivedBefore)
-	resp.Skipped = skipped
-	resp.Warnings = warnings
-
-	for _, cand := range candidates {
-		entry := cand.entry
-		if req.Apply {
-			warns, partial, pruneErr := m.pruneOneSession(cand, resp.ArchivedBefore)
-			resp.Warnings = append(resp.Warnings, warns...)
-			if pruneErr != nil {
-				bucket := &resp.Skipped
-				if partial {
-					bucket = &resp.Incomplete
-				}
-				*bucket = append(*bucket, PruneSkippedEntry{
-					Title: entry.Title, RepoID: entry.RepoID, Reason: pruneErr.Error()})
-				continue
-			}
-			entry.PrunedAt = time.Now()
-		}
-		resp.Pruned = append(resp.Pruned, entry)
-		resp.ReclaimedBytes += entry.ReclaimedBytes
-	}
-	resp.OK = true
-	return resp, nil
+	// PROBE REVERT (#5136 fail-first): the manager's prune logic is stubbed so
+	// the committed daemon tests prove they catch the missing behavior. Every
+	// TestPruneSessions_* assertion must fail here — the scan, the apply, the
+	// skips and the validation all report an empty success.
+	return PruneSessionsResponse{OK: true, Applied: req.Apply, OlderThan: req.OlderThan}, nil
 }
 
 // pruneCandidates enumerates every in-scope session row — the live map plus

@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -82,17 +81,8 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.I
 // one body avoids a second title lookup between those sibling paths.
 func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
 	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
-	// A pruned tombstone is not restorable: its worktree and captures were
-	// deleted on purpose (#5136). Refuse before any admission gate and NAME
-	// the branch that still holds the work — it is the only way back.
-	if prunedAt := instance.PrunedAt(); !prunedAt.IsZero() {
-		if branch := instance.GetBranch(); branch != "" {
-			return "", fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree and captures were deleted; the branch %q was kept, so recreate the work from that branch",
-				title, prunedAt.Format(time.RFC3339), branch)
-		}
-		return "", fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree and captures were deleted",
-			title, prunedAt.Format(time.RFC3339))
-	}
+	// PROBE REVERT (#5136 fail-first): the pruned-tombstone refusal is removed
+	// so the committed restore test proves it catches a missing guard.
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
