@@ -6848,110 +6848,11 @@ async function getConfig(token2) {
   const resp = await af("GetConfig", {}, token2);
   return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
 }
-function parseGoBool(v) {
-  switch (v) {
-    case "1":
-    case "t":
-    case "T":
-    case "true":
-    case "TRUE":
-    case "True":
-      return true;
-    case "0":
-    case "f":
-    case "F":
-    case "false":
-    case "FALSE":
-    case "False":
-      return false;
-    default:
-      return void 0;
-  }
-}
-function parseIPv4(s) {
-  const parts = s.split(".");
-  if (parts.length !== 4) return null;
-  const out = [];
-  for (const p of parts) {
-    if (!/^[0-9]+$/.test(p) || p.length > 1 && p[0] === "0") return null;
-    const n = Number(p);
-    if (n > 255) return null;
-    out.push(n);
-  }
-  return out;
-}
-function parseIPv6Hextets(host) {
-  let h2 = host.toLowerCase();
-  if (!h2.includes(":")) return null;
-  const dot = h2.lastIndexOf(".");
-  if (dot !== -1) {
-    const start = h2.lastIndexOf(":", dot);
-    if (start === -1) return null;
-    const q = parseIPv4(h2.slice(start + 1));
-    if (q === null) return null;
-    h2 = h2.slice(0, start + 1) + (q[0] << 8 | q[1]).toString(16) + ":" + (q[2] << 8 | q[3]).toString(16);
-  }
-  const halves = h2.split("::");
-  if (halves.length > 2) return null;
-  const left = halves[0] === "" ? [] : halves[0].split(":");
-  const right = halves.length === 2 ? halves[1] === "" ? [] : halves[1].split(":") : [];
-  if (left.includes("") || right.includes("")) return null;
-  if (halves.length === 1 && left.length !== 8) return null;
-  if (halves.length === 2 && left.length + right.length > 7) return null;
-  const hextets = [...left, ...new Array(8 - left.length - right.length).fill("0"), ...right];
-  if (hextets.length !== 8) return null;
-  const nums = [];
-  for (const x of hextets) {
-    if (!/^[0-9a-f]{1,4}$/.test(x)) return null;
-    nums.push(parseInt(x, 16));
-  }
-  return nums;
-}
-function isLoopbackIP(host) {
-  const v4 = parseIPv4(host);
-  if (v4 !== null) return v4[0] === 127;
-  const h2 = parseIPv6Hextets(host);
-  if (h2 === null) return false;
-  if (h2.every((n, i) => n === (i === 7 ? 1 : 0))) return true;
-  return h2.slice(0, 5).every((n) => n === 0) && h2[5] === 65535 && h2[6] >> 8 === 127;
-}
-function listenAddrHost(addr) {
-  const a = addr.trim();
-  if (a.startsWith("[")) {
-    const end = a.indexOf("]");
-    if (end === -1 || a[end + 1] !== ":" || a.slice(end + 2).includes(":")) return a;
-    return a.slice(1, end);
-  }
-  const last = a.lastIndexOf(":");
-  if (last === -1 || a.indexOf(":") !== last) return a;
-  return a.slice(0, last);
-}
-function isLoopbackListenAddr(addr) {
-  const host = listenAddrHost(addr);
-  if (host === "") return false;
-  if (host.toLowerCase() === "localhost") return true;
-  return isLoopbackIP(host);
-}
-function listenerPostureWriteExposure(key, value) {
-  const k = key === "listen_addr" ? "network.listen_addr" : key === "require_token" ? "network.require_token" : key;
-  switch (k) {
-    case "network.listen_addr":
-      return value !== "" && !isLoopbackListenAddr(value);
-    case "network.require_token":
-      return parseGoBool(value.trim()) !== true;
-    default:
-      return true;
-  }
-}
 async function setConfigValue(key, value, token2) {
-  const guarded = listenerPostureWriteExposure(key, value);
   try {
-    if (guarded) {
-      return await af("SetConfigValueGuarded", { key, value }, token2);
-    }
-    return await af("SetConfigValue", { key, value }, token2);
+    return await af("SetConfigValueGuarded", { key, value }, token2);
   } catch (e) {
-    if (guarded && e instanceof ApiError && e.status === 404) {
+    if (e instanceof ApiError && e.status === 404) {
       throw new ApiError(
         404,
         `the daemon predates af's unauthenticated-listener refusal (#5137): accepting this ${key} write triggers its whole-file apply, which binds whatever listen_addr the file holds \u2014 the control API, including DeliverPrompt, served unauthenticated if that posture is tokenless \u2014 so the write is refused rather than risk it \u2014 nothing was written. Upgrade af on that host and restart its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host instead`,

@@ -391,21 +391,17 @@ func TestConfigPaneEditRefusesADaemonThatDoesNotServeSetConfigValue(t *testing.T
 		},
 	})
 
-	// A safe-forcing write keeps the plain route — anything else takes the
-	// guarded twin and would hit the #5137 policy refusal rather than the
-	// route-absence skew this test pins. A loopback listen_addr is the one
-	// free-text row that qualifies (require_token is a boolean select); the
-	// port must differ from the 127.0.0.1:8443 default or the save is a no-op.
-	c := editKeyInPane(t, remoteManifest(), d.url+" · "+remotePath, "network.listen_addr", "127.0.0.1:9999")
+	// EVERY write posts to the guarded twin (#5137): this stub serves only the
+	// plain route, so the guarded 404 comes back as the policy refusal — the
+	// daemon predates the refusal and cannot be trusted to apply any write.
+	c := editKeyInPane(t, remoteManifest(), d.url+" · "+remotePath, "default_program", "codex")
 
 	if !c.statusIsError {
-		t.Fatalf("a daemon that does not serve SetConfigValue must be refused, got status %q", c.status)
+		t.Fatalf("a daemon that does not serve SetConfigValueGuarded must be refused, got status %q", c.status)
 	}
 	for _, want := range []string{
-		"does not serve the SetConfigValue route",
-		"version 0.9.1",
-		"Nothing was written",
-		"never falls back",
+		"predates af's unauthenticated-listener refusal",
+		"nothing was written",
 		d.url,
 	} {
 		if !strings.Contains(c.status, want) {
@@ -492,7 +488,9 @@ func TestConfigPaneRemoteEditSendsTheLegacyAliasAndEchoesTheCanonicalKey(t *test
 		t.Fatalf("the remote save failed: %s", c.status)
 	}
 
-	body, called := d.body("/v1/SetConfigValue")
+	// The write lands on the guarded twin (#5137 — every write does); the
+	// stub's mirroring serves it from the plain handler registered above.
+	body, called := d.body("/v1/SetConfigValueGuarded")
 	if !called {
 		t.Fatal("the edit never reached the targeted daemon")
 	}

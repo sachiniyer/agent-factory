@@ -82,8 +82,9 @@ test("setConfigValue posts the key and the RAW value for the daemon to validate"
   });
   const resp = await setConfigValue("update_channel", "preview", "tok");
 
-  // update_channel does not force the listener posture safe, so the write
-  // takes the guarded route — a daemon that cannot enforce #5137 404s it.
+  // Every write takes the guarded route — a daemon that cannot enforce #5137
+  // 404s it, and a key classifier cannot decide this (an old daemon's apply is
+  // a whole-file reload whose write→apply gap is not atomic).
   assert.equal(cap.url, "/v1/SetConfigValueGuarded");
   assert.deepEqual(cap.body, { key: "update_channel", value: "preview" });
   // The echo is the CANONICAL value the writer reported — the UI shows this
@@ -200,34 +201,34 @@ test("setConfigValue sends no Authorization header for the tokenless credential"
   assert.equal(cap.auth, undefined);
 });
 
-// --- #5137 guarded-route selection -----------------------------------------
+// --- #5137 the guarded write route -----------------------------------------
 //
-// A write that could leave a PRE-#5137 daemon serving the control API
-// unauthenticated must go to SetConfigValueGuarded — a route only refusal-capable
-// daemons serve, so a rollback/downgrade or mixed-version proxy fails the write
-// closed (404) instead of accepting it. The classifier is a port of
-// config.ListenerPostureWriteExposure; these cases pin the two transports to the
-// same answers.
+// EVERY config write posts to SetConfigValueGuarded — a route only
+// refusal-capable daemons serve, so a rollback/downgrade or mixed-version
+// proxy fails the write closed (404) instead of accepting it. A key-based
+// classifier cannot decide this: a pre-#5137 daemon's write handler ends in a
+// whole-file ApplyConfig whose write→apply gap is not atomic, so even a
+// "safe" value can be swapped on disk before the apply reads it. The cases
+// below keep the formerly divergent spellings pinned to the one answer.
 
-test("setConfigValue routes writes that do not force the listener safe to the guarded endpoint", async () => {
+test("setConfigValue takes the guarded endpoint for every key and value", async () => {
   for (const [key, value] of [
     ["network.listen_addr", "0.0.0.0:8443"],
     ["network.listen_addr", "192.168.1.5:8443"],
-    ["network.listen_addr", "100.64.1.2:8443"], // tailnet is network-reachable
-    ["network.listen_addr", "example.com:8443"], // hostnames resolve non-loopback
-    ["network.listen_addr", ":8443"],            // empty host = every interface
-    ["listen_addr", "0.0.0.0:8443"],             // the legacy flat alias
+    ["listen_addr", "0.0.0.0:8443"],          // the legacy flat alias
     ["network.require_token", "false"],
-    ["network.require_token", " FALSE "],        // padded + alternate spelling parse as off
-    ["require_token", "0"],                      // the legacy flat alias, Go bool "0"
-    ["network.require_token", "not-a-bool"],     // unparseable — fails closed, does not force safe
-    // Unrelated keys are guarded too: an old daemon's write ends in a
-    // whole-file ApplyConfig, which binds whatever listener posture the file
-    // already holds — the write need not touch a listener key at all.
-    ["network.allow_unauthenticated_network", "false"],
+    ["network.require_token", "not-a-bool"],
     ["network.allow_unauthenticated_network", "true"],
     ["update_channel", "preview"],
     ["default_program", "claude"],
+    // The formerly safe-forcing writes take it too — no write is provably
+    // safe against an old daemon's non-atomic write→apply sequence.
+    ["network.listen_addr", "127.0.0.1:8443"],
+    ["network.listen_addr", "[::1]:8443"],
+    ["network.listen_addr", "localhost:8443"],
+    ["network.listen_addr", ""],
+    ["network.require_token", "true"],
+    ["require_token", "true"],                // the legacy flat alias
   ] as const) {
     const cap = stubFetch({
       result: { key, value, path: "/tmp/config.toml", requires_restart: false },
@@ -235,28 +236,6 @@ test("setConfigValue routes writes that do not force the listener safe to the gu
     });
     await setConfigValue(key, value, "tok");
     assert.equal(cap.url, "/v1/SetConfigValueGuarded", `${key}=${value}`);
-  }
-});
-
-test("setConfigValue keeps the plain route only for writes that force the listener safe", async () => {
-  for (const [key, value] of [
-    ["network.listen_addr", "127.0.0.1:8443"],
-    ["network.listen_addr", "127.53.0.9:8443"],   // all of 127/8 is loopback
-    ["network.listen_addr", "[::1]:8443"],
-    ["network.listen_addr", "[::ffff:127.0.0.1]:8443"], // v4-mapped loopback
-    ["network.listen_addr", "localhost:8443"],
-    ["network.listen_addr", ""],                  // the opt-out disables the listener
-    ["listen_addr", "127.0.0.1:8443"],            // the legacy flat alias, safe direction
-    ["network.require_token", "true"],
-    ["network.require_token", "True"],
-    ["require_token", "true"],                    // the legacy flat alias, safe direction
-  ] as const) {
-    const cap = stubFetch({
-      result: { key, value, path: "/tmp/config.toml", requires_restart: false },
-      restart_notice: "",
-    });
-    await setConfigValue(key, value, "tok");
-    assert.equal(cap.url, "/v1/SetConfigValue", `${key}=${value}`);
   }
 });
 

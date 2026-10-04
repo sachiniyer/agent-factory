@@ -1,10 +1,6 @@
 package config
 
-import (
-	"fmt"
-	"strconv"
-	"strings"
-)
+import "fmt"
 
 // ListenerServesUnauthenticatedNetwork reports whether cfg would serve the
 // daemon's full control API to network peers with NO authentication — the
@@ -76,56 +72,6 @@ func ListenerBindRefusal(cfg *Config) string {
 		"fix one of: `af config set network.require_token true` to require a bearer token (`af token show` prints it), "+
 		"`af config set network.listen_addr 127.0.0.1:8443` to serve this machine only, or `af config set "+
 		"network.allow_unauthenticated_network true` to accept the risk explicitly", cfg.ListenAddr)
-}
-
-// ListenerPostureWriteExposure reports whether a `config set` of key=value
-// could make a daemon SERVE the control API unauthenticated when the daemon
-// performing the write predates the #5137 refusal — i.e. whether a remote
-// write must take the guarded route that only refusal-capable daemons serve
-// (apiclient.SetConfigValue). The refusal itself lives in the daemon's writer
-// (listenerWriteRefusal); a daemon without it accepts the write and binds the
-// listener this build declines to.
-//
-// The rule is inverted from "which keys can create the exposure": EVERY write
-// an old daemon accepts ends in Manager.ApplyConfig, which loads the WHOLE
-// file — so a config.toml already hand-edited into the refused posture binds
-// the tokenless network listener on a default_program save just as surely as
-// on the listen_addr write that created it. The client cannot read the remote
-// file to distinguish, so the only writes kept on the plain route are the
-// ones that force the listener posture safe by themselves — the token coming
-// ON, or listen_addr going loopback/empty — because an old daemon applying
-// the result can only bind safer than the file was. Everything else goes
-// guarded and fails closed (404) on daemons that predate the refusal.
-//
-// Writes of network.allow_unauthenticated_network itself join the guarded
-// default: the flag is meaningless to a pre-#5137 writer (rejected by its
-// allowlist), but the apply it triggers is not — and the guarded route's 404
-// names the upgrade path either way.
-func ListenerPostureWriteExposure(key, value string) bool {
-	switch canonicalConfigKey(key) {
-	case "network.require_token":
-		// Only an ON write forces the whole file safe — the apply binds
-		// whatever listen_addr it holds under the token. Parse the way the
-		// receiving writer does — canonicalizeScalar trims before ParseBool —
-		// and treat an unparseable value as exposure-capable rather than
-		// routing it around the guarded path.
-		on, err := strconv.ParseBool(strings.TrimSpace(value))
-		return err != nil || !on
-	case "network.listen_addr":
-		// Loopback or empty forces the listener safe regardless of the rest
-		// of the file: nothing off-box can reach the bind at all.
-		return value != "" && !IsLoopbackListenAddr(value)
-	}
-	return true
-}
-
-// ListenerPostureUnsetExposure is ListenerPostureWriteExposure for `config
-// unset`, under the same inverted rule: the only unset that forces the
-// listener safe is removing network.listen_addr, which restores the loopback
-// default. Every other unset — require_token most of all — leaves the file's
-// posture for the old daemon's whole-file apply to enforce.
-func ListenerPostureUnsetExposure(key string) bool {
-	return canonicalConfigKey(key) != "network.listen_addr"
 }
 
 // ListenerExposureNotice returns the one-line operator notice for a config that

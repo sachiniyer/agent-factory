@@ -57,30 +57,27 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
-			// #5137 version-skew gate: a write a pre-refusal daemon could turn
-			// into the unauthenticated bind must never reach it. That is wider
-			// than the listener keys — the daemon's write handler ends in
-			// ApplyConfig, which loads the WHOLE file, so any accepted write on
-			// a config.toml already in the refused posture binds the tokenless
-			// network listener. ListenerPostureWriteExposure therefore guards
-			// everything except writes that force the listener safe on their
-			// own. Ping first; the capability field is affirmative, so an
-			// older daemon decodes false and the write is refused here before
-			// it can be made. A Ping FAILURE is not a refusal: a daemon too
-			// old to answer Ping is also too old to serve SetConfigValue, so
-			// the write then falls back to this build's own gated writer — and
-			// a transport failure fails the write call next anyway.
+			// #5137 version-skew gate: EVERY write a pre-refusal daemon
+			// accepts ends in ApplyConfig loading the WHOLE file, and the
+			// write→apply gap is not atomic — a hand edit after the writer's
+			// file-lock release is what the apply binds, so even a
+			// safe-forcing write (the token coming on, a loopback
+			// listen_addr) cannot promise its own outcome. The capability
+			// field is affirmative, so an older daemon decodes false and
+			// the write is refused here before it is made. A Ping FAILURE
+			// is not a refusal: a daemon too old to answer Ping is also too
+			// old to serve SetConfigValue, so the write then falls back to
+			// this build's own gated writer — and a transport failure fails
+			// the write call next anyway.
 			//
 			// Why a Ping suffices here while the HTTP path needs the guarded
 			// /v1/*Guarded route: this socket names exactly ONE process. Probe
 			// and write cannot land on different daemons — there is no URL in
 			// front to retarget the second call — and a restart between them
 			// kills the connection rather than swapping in an older build.
-			if config.ListenerPostureWriteExposure(key, value) {
-				var ping PingResponse
-				if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
-					return SetConfigValueResponse{}, staleDaemonListenerWriteRefusal(key, ping.Version)
-				}
+			var ping PingResponse
+			if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
+				return SetConfigValueResponse{}, staleDaemonListenerWriteRefusal(key, ping.Version)
 			}
 			// The flat alias is the version-skew wire spelling: an older daemon's
 			// SetConfigValue allowlist predates the grouped TOML name, while a new
@@ -169,17 +166,15 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
-			// The same #5137 skew gate as SetGlobalConfigValue: every unset but
-			// network.listen_addr (the one that forces the listener safe) is
-			// guarded, because a pre-refusal daemon's apply loads the whole
-			// file — a refused posture already on disk binds on any accepted
-			// write. Ping failure is not a refusal — see the set path for why
-			// a probe suffices on this socket.
-			if config.ListenerPostureUnsetExposure(key) {
-				var ping PingResponse
-				if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
-					return UnsetConfigValueResponse{}, staleDaemonListenerWriteRefusal(key, ping.Version)
-				}
+			// The same #5137 skew gate as SetGlobalConfigValue — EVERY unset:
+			// a pre-refusal daemon's whole-file apply can bind whatever
+			// posture a hand edit leaves between the write and the apply, so
+			// no key's own direction is provable on the other side. Ping
+			// failure is not a refusal — see the set path for why a probe
+			// suffices on this socket.
+			var ping PingResponse
+			if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
+				return UnsetConfigValueResponse{}, staleDaemonListenerWriteRefusal(key, ping.Version)
 			}
 			callErr := client.Call(controlServiceName+".UnsetConfigValue",
 				UnsetConfigValueRequest{Key: key}, &resp)
@@ -228,11 +223,11 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 	return resp, nil
 }
 
-// staleDaemonListenerWriteRefusal is the refusal an exposure-capable
-// network-listener write gets when the daemon answering the control socket
-// predates the #5137 refusal policy. It is a CLIENT-side gate — the write
-// refusal itself lives in the daemon's writer, so a daemon too old to have it
-// cannot enforce it; the message names the restart that arms it.
+// staleDaemonListenerWriteRefusal is the refusal ANY config write gets when
+// the daemon answering the control socket predates the #5137 refusal policy.
+// It is a CLIENT-side gate — the write refusal itself lives in the daemon's
+// writer, so a daemon too old to have it cannot enforce it; the message names
+// the restart that arms it.
 func staleDaemonListenerWriteRefusal(key, version string) error {
 	v := "an older version"
 	if version != "" {

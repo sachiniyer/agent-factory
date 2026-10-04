@@ -59,9 +59,13 @@ func checkListenerPosture(report *Report, h daemon.HealthStatus, cfg *config.Con
 				// Classify the socket actually answering (addr), not the live
 				// config's listen_addr: a retained socket after a failed rebind
 				// deliberately diverges the two, so BootConfig can name loopback
-				// while the socket still answers on the network address.
-				if h.BootConfig == nil ||
-					config.ListenerServesUnauthenticatedNetwork(addr, h.BootConfig.RequireToken) {
+				// while the socket still answers on the network address. A
+				// responder that predates #5137 omits BootConfig entirely — the
+				// unknown-auth assumption there must only fire for an address
+				// the network can actually reach: a loopback-bound socket is
+				// safe whatever its daemon enforces.
+				liveTokened := h.BootConfig != nil && h.BootConfig.RequireToken
+				if config.ListenerServesUnauthenticatedNetwork(addr, liveTokened) {
 					report.Fail(sectionDaemon, "listener",
 						fmt.Sprintf("the running daemon predates the unauthenticated-listener refusal (or has not "+
 							"applied the refused file) and is still serving %s unauthenticated — af's full control "+
@@ -70,9 +74,15 @@ func checkListenerPosture(report *Report, h daemon.HealthStatus, cfg *config.Con
 							"now with `af config set network.require_token true` or `af config set "+
 							"network.listen_addr 127.0.0.1:8443`")
 				} else {
+					// Loopback-bound needs no token to be safe; a network
+					// bound socket is safe because its config requires one.
+					safeWhy := "under its last-applied config that socket is safe"
+					if config.IsLoopbackListenAddr(addr) {
+						safeWhy = "it is bound to loopback, which nothing off-box can reach"
+					}
 					report.Warn(sectionDaemon, "listener",
-						fmt.Sprintf("the running daemon still serves %s, but under its last-applied config that "+
-							"socket is safe — the config on disk now refuses the bind entirely", addr),
+						fmt.Sprintf("the running daemon still serves %s, but %s — the config on disk now refuses "+
+							"the bind entirely", addr, safeWhy),
 						"restart the daemon so the disk posture applies: af daemon restart", true)
 				}
 			default:

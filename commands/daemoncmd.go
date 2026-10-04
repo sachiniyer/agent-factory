@@ -308,10 +308,17 @@ func listenerStatusWarning(current *config.Config, boot *daemon.DaemonBootConfig
 		// only open question.
 		switch {
 		case diskRefusal != "":
+			// Name why the socket is safe rather than attributing it to the
+			// live config: a loopback bind needs no token at all, and a
+			// pre-#5137 responder reports no BootConfig to attribute.
+			safeWhy := "under its last-applied config that socket is safe"
+			if config.IsLoopbackListenAddr(boundAddr) {
+				safeWhy = "it is bound to loopback, which nothing off-box can reach"
+			}
 			return fmt.Sprintf(
-				"the running daemon still serves %s, but under its last-applied config that socket is safe — "+
+				"the running daemon still serves %s, but %s — "+
 					"the config on disk now refuses the bind entirely. Restart the daemon (`af daemon restart`) "+
-					"so the disk posture applies", boundAddr)
+					"so the disk posture applies", boundAddr, safeWhy)
 		case diskExposure != "":
 			return fmt.Sprintf(
 				"the disk config opts into unauthenticated network serving, but the running daemon still serves "+

@@ -4241,9 +4241,9 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
     let markSaveStarted!: () => void;
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
-    // auto_update does not force the listener posture safe, so its save takes
-    // SetConfigValueGuarded — intercept the pair (same twin the daemons that
-    // enforce #5137 serve).
+    // EVERY save takes SetConfigValueGuarded under #5137 — an old daemon's
+    // write→apply gap means no key can promise its own outcome. Intercept the
+    // pair anyway so a future route split cannot slip an unmocked call through.
     for (const routePattern of ["**/v1/SetConfigValue", "**/v1/SetConfigValueGuarded"]) {
       await p.route(routePattern, async (route) => {
         const body = route.request().postDataJSON() as { key: string; value: string };
@@ -4322,10 +4322,10 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
   // applies live and would otherwise rebind this very daemon's listener. Only the
   // canned reply drives configStatus + ConfigPane.update/render.
   //
-  // "abcdef" is a non-loopback listen_addr, so #5137 routes this write through
-  // SetConfigValueGuarded — the interception below names that route and the mock
-  // failing to fire means the client's route selection regressed, not just the
-  // focus path under test.
+  // Every config write goes through SetConfigValueGuarded (#5137 — no key is
+  // provably safe against an old daemon's non-atomic write→apply), so the
+  // interception below names that route; the mock failing to fire means the
+  // client stopped guarding, not just the focus path under test.
   const ctx = await browser.newContext();
   let releaseSave: (() => void) | undefined;
   try {
@@ -4422,10 +4422,10 @@ test("config: a later save's status does not pull focus out of the field the use
   const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
   try {
     const p = await ctx.newPage();
-    // branch_prefix does not force the listener posture safe, so its write
-    // takes SetConfigValueGuarded; the loopback listen_addr keeps the plain
-    // route. Intercept the pair — the guarded twin is the route a daemon that
-    // enforces the #5137 refusal serves.
+    // BOTH writes take SetConfigValueGuarded under #5137 — an old daemon's
+    // write→apply gap means even the loopback listen_addr is not provably
+    // safe. Intercept the pair anyway so a future route split cannot slip an
+    // unmocked call through.
     for (const routePattern of ["**/v1/SetConfigValue", "**/v1/SetConfigValueGuarded"]) {
       await p.route(routePattern, async (route) => {
         const body = route.request().postDataJSON() as { key: string; value: string };

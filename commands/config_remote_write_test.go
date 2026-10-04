@@ -338,6 +338,7 @@ func TestConfigUnsetRoutesTheGlobalClearToTheTargetedDaemon(t *testing.T) {
 func TestConfigSetOfListenAddrNamesWhereTheRemoteDaemonIsListening(t *testing.T) {
 	newConfigHome(t)
 	stub := newStubDaemon(t, "1.9.0")
+	stub.refusalCapable = true // every write takes the guarded route (#5137)
 	t.Setenv("AF_DAEMON_URL", "")
 
 	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(),
@@ -395,39 +396,46 @@ func TestConfigSetSendsTheLegacyAliasAndEchoesTheCanonicalKey(t *testing.T) {
 	}
 }
 
-// requireRouteSkewRefusal pins the whole contract of the older-daemon refusal.
-// Each fragment is one thing a reader cannot act without: which daemon answered,
-// what it is missing, that its version narrows why, that nothing changed on
-// either host, and the two ways forward.
-func requireRouteSkewRefusal(t *testing.T, err error, command, route, daemonURL, version string) {
+// requirePreRefusalWriteRefusal pins the whole contract of the #5137
+// pre-refusal daemon answer. Each fragment is one thing a reader cannot act
+// without: which daemon answered, that it predates the refusal policy, that
+// nothing changed on either host, and the two ways forward (upgrade there, or
+// edit its config.toml on the host itself).
+func requirePreRefusalWriteRefusal(t *testing.T, err error, daemonURL string) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf("%s must REFUSE a daemon that does not serve %s", command, route)
+		t.Fatal("a write to a daemon that cannot enforce the refusal must be refused")
 	}
 	msg := err.Error()
-	for _, want := range []string{command, daemonURL, route, version, "Nothing was written", "daemon host"} {
+	for _, want := range []string{"predates af's unauthenticated-listener refusal", daemonURL, "nothing was written",
+		"Upgrade af on that host", "config.toml on the host"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the refusal must contain %q so the reader can act on it, got: %q", want, msg)
 		}
 	}
 	// The tempting repair is the one that must never happen.
 	if strings.Contains(msg, "local-only") {
-		t.Errorf("this is a skew refusal, not the local-only guard; got: %q", msg)
+		t.Errorf("this is a policy refusal, not the local-only guard; got: %q", msg)
 	}
 }
 
+// TestConfigSetRefusesADaemonThatDoesNotServeTheRoute covers a post-#3231
+// pre-#5137 daemon: it serves the PLAIN write route but not the guarded twin,
+// and under the every-write-guarded rule the guarded 404 is the answer —
+// including for a safe-forcing key, because the old writer's write→apply gap
+// cannot promise even that write's own outcome (#5137 review).
 func TestConfigSetRefusesADaemonThatDoesNotServeTheRoute(t *testing.T) {
 	home := newConfigHome(t)
-	stub := newStubDaemon(t, "0.9.1", "/v1/SetConfigValue")
+	stub := newStubDaemon(t, "0.9.1") // serves /v1/SetConfigValue; the guarded twin 404s
 	t.Setenv("AF_DAEMON_URL", "")
 
-	// The write must stay on the plain route to test ITS absence — only a
-	// safe-forcing value does that: an unrelated key would take the guarded
-	// twin and hit the policy refusal before route-skew handling.
 	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "network.require_token", "true")
-	requireRouteSkewRefusal(t, err, "af config set", "SetConfigValue", stub.url(), "0.9.1")
+	requirePreRefusalWriteRefusal(t, err, stub.url())
 	if strings.Contains(out, "set network.require_token") {
 		t.Errorf("a refused set must print no success line, got stdout: %q", out)
+	}
+	if got := stub.sets(); len(got) != 0 {
+		t.Errorf("the write must never reach a daemon that cannot refuse it, got %+v", got)
 	}
 	// The whole point: no fallback. A local config.toml here would be the change
 	// landing on the operator's own machine.
@@ -435,70 +443,55 @@ func TestConfigSetRefusesADaemonThatDoesNotServeTheRoute(t *testing.T) {
 }
 
 func TestConfigUnsetRefusesADaemonThatDoesNotServeTheRoute(t *testing.T) {
-	// network.listen_addr is the only unset that keeps the plain route — it
-	// restores the loopback default; every other key goes guarded and would
-	// hit the policy refusal instead of the route-skew path under test.
-	const unsettable = "network.listen_addr"
 	home := newConfigHome(t)
 	// Seed a real local value, so a fallback would have something to clear and
 	// "unchanged" is a claim with teeth rather than a vacuous one. (A loopback
 	// value only — a tokenless network listen_addr would itself be refused.)
-	seeded := seedGlobalConfig(t, home, "set", unsettable, "127.0.0.1:8443")
-	stub := newStubDaemon(t, "0.9.1", "/v1/UnsetConfigValue")
+	seeded := seedGlobalConfig(t, home, "set", "network.listen_addr", "127.0.0.1:8443")
+	stub := newStubDaemon(t, "0.9.1") // serves /v1/UnsetConfigValue; the guarded twin 404s
 	t.Setenv("AF_DAEMON_URL", "")
 
-	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "unset", unsettable)
-	requireRouteSkewRefusal(t, err, "af config unset", "UnsetConfigValue", stub.url(), "0.9.1")
+	out, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "unset", "network.listen_addr")
+	requirePreRefusalWriteRefusal(t, err, stub.url())
 	if strings.Contains(out, "cleared") {
 		t.Errorf("a refused unset must print no success line, got stdout: %q", out)
 	}
 	requireGlobalConfigUnchanged(t, home, seeded)
 }
 
-// TestConfigWriteSkewRefusalNamesAnUnreportedVersion covers the older half of
-// "older daemon". A daemon predating #1044 answers Ping with no version at all,
-// and "version " with nothing after it would read as a bug in af rather than a
-// fact about the daemon — so the refusal states the absence as the evidence it
-// is: a daemon too old to report a version is consistent with one too old to
-// serve the route.
-func TestConfigWriteSkewRefusalNamesAnUnreportedVersion(t *testing.T) {
-	newConfigHome(t)
-	stub := newStubDaemon(t, "", "/v1/SetConfigValue")
+// TestConfigWriteSkewRefusalWithoutAReportedVersion covers the older half of
+// "older daemon": a daemon predating #1044 reports no version at all. The
+// refusal cannot quote a version the 404 never carried, but it must still fire
+// whole and well-formed rather than degenerating on the missing field.
+func TestConfigWriteSkewRefusalWithoutAReportedVersion(t *testing.T) {
+	home := newConfigHome(t)
+	stub := newStubDaemon(t, "") // predates version reporting AND the refusal
 	t.Setenv("AF_DAEMON_URL", "")
 
-	// The write must stay on the PLAIN route to reach its 404 — only a
-	// safe-forcing value does that (anything else takes the guarded twin and
-	// hits the policy refusal, which is the #5137 variant of this same skew).
-	_, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "network.require_token", "true")
-	if err == nil {
-		t.Fatal("a daemon that does not serve the route must be refused")
-	}
-	if !strings.Contains(err.Error(), "predates version reporting") {
-		t.Errorf("the refusal must state the missing version as evidence, got: %q", err)
-	}
+	_, _, err := runConfigCLI(t, "--daemon-url", stub.url(), "set", "default_program", "codex")
+	requirePreRefusalWriteRefusal(t, err, stub.url())
+	requireGlobalConfigUnchanged(t, home, nil)
 }
 
-// TestConfigWriteSkewRefusalHonorsJSON keeps the automation contract on the new
-// refusal: an automation caller learns its write did not happen from the shared
-// envelope, never by parsing a bare Go error.
+// TestConfigWriteSkewRefusalHonorsJSON keeps the automation contract on the
+// refusal: an automation caller learns its write did not happen from the
+// shared envelope, never by parsing a bare Go error.
 func TestConfigWriteSkewRefusalHonorsJSON(t *testing.T) {
 	newConfigHome(t)
-	stub := newStubDaemon(t, "0.9.1", "/v1/SetConfigValue")
+	stub := newStubDaemon(t, "0.9.1")
 	t.Setenv("AF_DAEMON_URL", "")
 
-	// Safe-forcing write for the same reason: the plain route is the one whose
-	// absence the skew refusal reports.
 	_, errOut, err := runConfigCLI(t, "--daemon-url", stub.url(),
 		"set", "network.require_token", "true", "--json")
 	if err == nil {
-		t.Fatal("the skew refusal must fail under --json too")
+		t.Fatal("the pre-refusal refusal must fail under --json too")
 	}
 	var env apiproto.Envelope
 	if jsonErr := json.Unmarshal([]byte(errOut), &env); jsonErr != nil {
 		t.Fatalf("--json refusal is not a parseable envelope: %v\ngot: %q", jsonErr, errOut)
 	}
-	if env.Error == nil || !strings.Contains(env.Error.Message, "does not serve the SetConfigValue route") {
-		t.Errorf("the envelope must carry the skew refusal, got: %q", errOut)
+	if env.Error == nil || !strings.Contains(env.Error.Message, "predates af's unauthenticated-listener refusal") {
+		t.Errorf("the envelope must carry the policy refusal, got: %q", errOut)
 	}
 }
 
@@ -582,12 +575,12 @@ func TestConfigSetRoutesExposureWriteToACapableDaemon(t *testing.T) {
 	requireGlobalConfigUnchanged(t, home, nil)
 }
 
-// TestConfigSetRoutesUnrelatedWritesToTheGuardedRoute pins the widened rule:
-// an old daemon answers EVERY accepted write with a whole-file ApplyConfig, so
-// an unrelated key on a file already holding the refused posture binds it just
-// the same. Only writes that force the listener safe by themselves keep the
-// plain route — everything else is guarded, end to end.
-func TestConfigSetRoutesUnrelatedWritesToTheGuardedRoute(t *testing.T) {
+// TestConfigSetRoutesAllWritesToTheGuardedRoute pins the widest rule: an old
+// daemon answers EVERY accepted write with a whole-file ApplyConfig, and its
+// write→apply gap is not atomic, so NO key or value can promise a safe result
+// on the far side — safe-forcing keys included. Every write takes the guarded
+// twin, end to end; the plain routes only remain for older clients.
+func TestConfigSetRoutesAllWritesToTheGuardedRoute(t *testing.T) {
 	home := newConfigHome(t)
 	stub := newStubDaemon(t, "1.10.0")
 	stub.refusalCapable = true
@@ -596,32 +589,38 @@ func TestConfigSetRoutesUnrelatedWritesToTheGuardedRoute(t *testing.T) {
 	for _, args := range [][]string{
 		{"set", "default_program", "codex"},
 		{"set", "network.allow_unauthenticated_network", "false"},
+		{"set", "network.require_token", "true"},
+		{"set", "network.listen_addr", "127.0.0.1:8443"},
+		{"set", "network.listen_addr", ""},
 		{"unset", "network.preview_listen_addr"},
+		{"unset", "network.listen_addr"},
 	} {
 		if _, _, err := runConfigCLI(t, args...); err != nil {
 			t.Fatalf("%v: %v", args, err)
 		}
 	}
 	sets, unsets := stub.setRoutes(), stub.unsetRoutes()
-	if len(sets) != 2 {
-		t.Fatalf("both sets must have landed, got %v", sets)
+	if len(sets) != 5 || len(unsets) != 2 {
+		t.Fatalf("all writes must have landed, got sets=%v unsets=%v", sets, unsets)
 	}
 	for _, route := range append(sets, unsets...) {
 		if !strings.HasSuffix(route, "Guarded") {
-			t.Errorf("every non-safe-forcing write takes the guarded route, got %q", route)
+			t.Errorf("EVERY write takes the guarded route — safe-forcing keys included, got %q", route)
 		}
 	}
 	requireGlobalConfigUnchanged(t, home, nil)
 }
 
-// TestConfigSetRoutesSafeWritesToAPreRefusalDaemon pins the remediation
-// direction: writes that cannot create the refused posture — the token coming
-// ON, listen_addr back to loopback — are exactly the fixes an operator applies
-// to a stale daemon, so they keep the plain route an old daemon does serve.
-func TestConfigSetRoutesSafeWritesToAPreRefusalDaemon(t *testing.T) {
+// TestConfigSetRefusesSafeWritesToAPreRefusalDaemon pins the second half of
+// the widened rule: the remediation direction is refused too, because an old
+// daemon's write→apply gap can swap the safe value out of the file before the
+// apply reads it. The way to fix a stale daemon is to upgrade and restart it —
+// or edit its config.toml on the host — not to write to it.
+func TestConfigSetRefusesSafeWritesToAPreRefusalDaemon(t *testing.T) {
 	for _, args := range [][]string{
 		{"set", "network.require_token", "true"},
 		{"set", "network.listen_addr", "127.0.0.1:8443"},
+		{"unset", "network.listen_addr"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			home := newConfigHome(t)
@@ -629,12 +628,9 @@ func TestConfigSetRoutesSafeWritesToAPreRefusalDaemon(t *testing.T) {
 			t.Setenv("AF_DAEMON_URL", stub.url())
 
 			_, _, err := runConfigCLI(t, args...)
-			if err != nil {
-				t.Fatalf("the remediation write must reach a daemon that can apply it safely: %v", err)
-			}
-			got := stub.setRoutes()
-			if len(got) != 1 || got[0] != "/v1/SetConfigValue" {
-				t.Fatalf("a write that cannot create the posture keeps the plain route, got %v", got)
+			requirePreRefusalWriteRefusal(t, err, stub.url())
+			if got := stub.setRoutes(); len(got)+len(stub.unsetRoutes()) != 0 {
+				t.Errorf("the write must never reach a daemon that cannot refuse it, got %v", got)
 			}
 			requireGlobalConfigUnchanged(t, home, nil)
 		})

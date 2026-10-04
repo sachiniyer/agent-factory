@@ -441,7 +441,7 @@ func TestListenerStatusWarningBoundUnderRefusedPosture(t *testing.T) {
 		TCPBound: true, TCPBoundAddr: "127.0.0.1:8443",
 	}
 	liveNetwork := &daemon.DaemonBootConfig{ListenAddr: "0.0.0.0:8443", RequireToken: false}
-	require.Contains(t, listenerStatusWarning(refused, liveNetwork, loopbackBound), "socket is safe",
+	require.Contains(t, listenerStatusWarning(refused, liveNetwork, loopbackBound), "bound to loopback",
 		"a socket bound on loopback is not network-reachable even if the config names a network addr")
 
 	// The refused case: nothing bound — the refusal itself is the report.

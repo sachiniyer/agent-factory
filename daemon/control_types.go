@@ -753,13 +753,13 @@ type PingResponse struct {
 	// capability: a daemon reports true only when its config writer and its
 	// listener reconcile enforce the #5137 refusal of a tokenless
 	// non-loopback control bind. A daemon that predates the policy omits the
-	// field — decoding false — which tells a NEWER client it must not route an
-	// exposure-capable listener write to it (config.ListenerPostureWriteExposure):
-	// that daemon's writer has no listenerWriteRefusal, so it would accept the
-	// write and bind the very listener this build refuses. The unix-socket
-	// client gates on this field (daemon/config_save_client.go); the HTTP
-	// client instead sends exposure-capable writes to the /v1/*ConfigValueGuarded
-	// routes, whose absence on an old daemon fails the write request itself.
+	// field — decoding false — which tells a NEWER client it must not send it
+	// ANY config write: that daemon's writer has no listenerWriteRefusal, and
+	// its write→apply gap is not atomic, so even a safe-forcing write can bind
+	// whatever posture a concurrent file edit leaves. The unix-socket client
+	// gates on this field (daemon/config_save_client.go); the HTTP client
+	// instead posts every write to the /v1/*ConfigValueGuarded routes, whose
+	// absence on an old daemon fails the write request itself.
 	RefusesUnauthenticatedNetworkListener bool `json:"refuses_unauthenticated_network_listener,omitempty"`
 	// Version is the af build version the responding daemon is running, so a
 	// client can compare it against its own and detect skew (#1044). It rides

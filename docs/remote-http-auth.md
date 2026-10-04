@@ -523,21 +523,24 @@ name the posture and the fixes.
 The mixed-version window — an older daemon still running while the CLI is
 newer — is covered on three sides:
 
-- A write that could *create* the refused posture — `network.listen_addr` to
-  a non-loopback address, or `network.require_token` off — sent by a newer
-  `af` to a daemon that predates the refusal is declined by the **client**,
-  which names the daemon restart that arms the gate. For a remote target
+- **Every** config write sent by a newer `af` to a daemon that predates the
+  refusal is declined by the **client**, which names the daemon restart that
+  arms the gate. The key does not matter: an old daemon's writer ends in a
+  whole-file `ApplyConfig` whose write→apply gap is not atomic, so even a
+  safe-forcing write — the token coming on, the address back to loopback —
+  can be swapped on disk before the apply reads it, and nothing the client
+  sent can promise the outcome. For a remote target
   (`--daemon-url` / `AF_DAEMON_URL`) the check is the request itself:
-  exposure-capable writes go to `/v1/SetConfigValueGuarded` /
+  every write goes to `/v1/SetConfigValueGuarded` /
   `/v1/UnsetConfigValueGuarded`, routes only refusal-capable daemons serve, so
   an older daemon's 404 is the refusal — the capability proof and the write
   arrive in one request and cannot be split by a daemon swap. The web config
   form selects the same guarded route, so a stale browser tab writing through
   a rollback or a mixed-version proxy fails closed the same way. Remote writes
   never fall back to your local config.
-- Safe writes — the token on, the address back to loopback — keep the plain
-  routes, since an older daemon applies them safely and they are exactly the
-  remediation.
+- The remediation for a stale daemon is to upgrade and restart it — or to edit
+  its `config.toml` on the host directly, which the refusal deliberately does
+  not guard. Writing to it is not one of the options.
 - `af daemon status` and `af doctor` pointed at a stale daemon that is *still
   serving* the tokenless network listener report the live exposure and the
   restart, not the refusal the new code would apply.

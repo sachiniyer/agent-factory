@@ -373,13 +373,14 @@ var httpRoutes = []HTTPRoute{
 	},
 	// Guarded twins of the write pair (#5137): the same request types and the
 	// same handlers, registered under names a pre-#5137 daemon does not serve.
-	// The route's EXISTENCE is the refusal-capability proof — a client that must
-	// not hand an exposure-capable listener write to a daemon whose writer lacks
-	// the listenerWriteRefusal gate sends it to the guarded path, where an old
-	// daemon's catch-all 404 is an atomic fail-closed answer in the same request
-	// as the write itself. A health-then-write preflight cannot promise that: a
-	// restart or a mixed-version replica set could move the second request onto
-	// an old daemon.
+	// The route's EXISTENCE is the refusal-capability proof — EVERY write from
+	// a refusal-aware client goes to the guarded path, because an old daemon's
+	// writer ends in a whole-file ApplyConfig whose write→apply gap is not
+	// atomic, so no key's own direction is provable on the far side. The old
+	// daemon's catch-all 404 is then an atomic fail-closed answer in the same
+	// request as the write itself. A health-then-write preflight cannot promise
+	// that: a restart or a mixed-version replica set could move the second
+	// request onto an old daemon.
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValueGuarded",

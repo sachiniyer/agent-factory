@@ -317,9 +317,10 @@ func (c *preRefusalControl) UnsetConfigValue(req UnsetConfigValueRequest, resp *
 }
 
 // TestListenerWriteGateRefusesAPreRefusalDaemon is the local-socket half of the
-// #5137 version-skew protection: an exposure-capable write — a non-loopback
-// listen_addr or the token coming off — sent to a daemon whose Ping does not
-// advertise the refusal capability would be ACCEPTED and bound unauthenticated.
+// #5137 version-skew protection: EVERY write sent to a daemon whose Ping does
+// not advertise the refusal capability is unsafe — the old writer ends in a
+// whole-file ApplyConfig whose write→apply gap is not atomic, so even a
+// safe-forcing key cannot promise the apply binds what the write intended.
 // The client refuses before the write is sent, names the restart, and writes
 // nothing.
 func TestListenerWriteGateRefusesAPreRefusalDaemon(t *testing.T) {
@@ -340,15 +341,28 @@ func TestListenerWriteGateRefusesAPreRefusalDaemon(t *testing.T) {
 			return err
 		}},
 		// The widened rule (#5137 review): an old daemon answers EVERY accepted
-		// write with a whole-file ApplyConfig, so an unrelated key on a file
-		// already in the refused posture binds it just the same. Only writes
-		// that force the listener safe by themselves stay ungated.
+		// write with a whole-file ApplyConfig — an unrelated key on a file
+		// already in the refused posture binds it just the same, and the
+		// write→apply gap means the safe-forcing keys cannot promise their own
+		// outcome either. Nothing is ungated.
 		{name: "set an unrelated key", call: func(c *preRefusalControl) error {
 			_, err := SetGlobalConfigValue("default_program", "codex")
 			return err
 		}},
 		{name: "unset an unrelated key", call: func(c *preRefusalControl) error {
 			_, err := UnsetGlobalConfigValue("network.preview_listen_addr")
+			return err
+		}},
+		{name: "set require_token true", call: func(c *preRefusalControl) error {
+			_, err := SetGlobalConfigValue("network.require_token", "true")
+			return err
+		}},
+		{name: "set loopback listen_addr", call: func(c *preRefusalControl) error {
+			_, err := SetGlobalConfigValue("network.listen_addr", "127.0.0.1:8443")
+			return err
+		}},
+		{name: "unset listen_addr", call: func(c *preRefusalControl) error {
+			_, err := UnsetGlobalConfigValue("network.listen_addr")
 			return err
 		}},
 	} {
@@ -374,8 +388,10 @@ func TestListenerWriteGateRefusesAPreRefusalDaemon(t *testing.T) {
 // TestListenerWriteGateRoutesToACapableDaemon is the same write to a daemon
 // that DOES advertise the capability — it routes, because the daemon's own
 // writer carries the refusal (and would refuse an unsafe resulting posture
-// itself). A safe-direction write to a pre-refusal daemon also routes: turning
-// the token ON is the remediation, and an old daemon applies it safely.
+// itself). No write routes to a pre-refusal daemon: the write→apply gap is
+// not atomic on the old writer, so even the token coming ON could be swapped
+// out of the file before the apply reads it — remediation there is a daemon
+// restart, not a write.
 func TestListenerWriteGateRoutesToACapableDaemon(t *testing.T) {
 	t.Run("exposure-capable write to a refusal-capable daemon", func(t *testing.T) {
 		configClientHome(t)
@@ -386,25 +402,27 @@ func TestListenerWriteGateRoutesToACapableDaemon(t *testing.T) {
 		require.NoError(t, err, "a capable daemon gates the write itself — the client routes it")
 		require.Equal(t, 1, stub.setCalls)
 	})
-	t.Run("safe write to a pre-refusal daemon routes ungated", func(t *testing.T) {
+	t.Run("safe write to a pre-refusal daemon refuses", func(t *testing.T) {
 		configClientHome(t)
 		stub := &preRefusalControl{}
 		serveControlStub(t, stub)
 
 		_, err := SetGlobalConfigValue("network.require_token", "true")
-		require.NoError(t, err, "turning the token ON is the remediation — an old daemon applies it safely")
-		require.Equal(t, 1, stub.setCalls)
+		require.Error(t, err, "even the remediation write is refused — the old daemon's apply could land a swapped file")
+		require.Contains(t, err.Error(), "predates af's unauthenticated-listener refusal")
+		require.Equal(t, 0, stub.setCalls)
 	})
-	t.Run("safe unset to a pre-refusal daemon routes ungated", func(t *testing.T) {
+	t.Run("safe unset to a pre-refusal daemon refuses", func(t *testing.T) {
 		configClientHome(t)
 		stub := &preRefusalControl{}
 		serveControlStub(t, stub)
 
-		// Unsetting listen_addr restores the loopback default — safe under the
-		// whole-file apply regardless of what else the file holds.
+		// Unsetting listen_addr restores the loopback default, but the old
+		// daemon's whole-file apply could bind a hand edit instead.
 		_, err := UnsetGlobalConfigValue("network.listen_addr")
-		require.NoError(t, err)
-		require.Equal(t, 1, stub.unsetCalls)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "predates af's unauthenticated-listener refusal")
+		require.Equal(t, 0, stub.unsetCalls)
 	})
 	t.Run("ping failure is not a refusal — the local writer still gates", func(t *testing.T) {
 		configClientHome(t)
