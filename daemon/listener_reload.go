@@ -395,9 +395,17 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	wl.applyCarryRefusedSocket = &carries
 	// But bound must never become unauthenticated on the way through: a
 	// retained socket answering on a network address floors to the bearer token
-	// for the window rather than serving the incoming tokenless posture.
+	// for the window rather than serving the incoming tokenless posture. ARM
+	// only — the floor must not be cleared here: the live config still holds
+	// the OLD tokenless posture until applyLiveConfigAndInvalidateRootProgramDrift
+	// publishes newCfg, so a request landing between a premature clear and that
+	// swap would be served unauthenticated. Reconcile disarms it after the
+	// publish and the socket settle, where the swapped posture already demands
+	// the token on its own.
 	if carries {
-		wl.manager.probationTokenFloor.Store(wl.servingUnauthenticatedLocked(newCfg))
+		if wl.servingUnauthenticatedLocked(newCfg) {
+			wl.manager.probationTokenFloor.Store(true)
+		}
 		return
 	}
 	if refusal := config.ListenerBindRefusal(newCfg); refusal != "" {

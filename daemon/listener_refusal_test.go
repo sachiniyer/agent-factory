@@ -829,6 +829,52 @@ func TestApplyConfigExposureNoticeReadsProbationFloor(t *testing.T) {
 	}
 }
 
+// TestPreSwapNeverDisarmsTheFloorEarly pins the arm-only contract
+// (#5137 review): a candidate holding a journaled tokenless-network socket
+// under the floor then applies require_token=true. The incoming posture is no
+// longer unauthenticated, but the live config still serves the OLD tokenless
+// one until ApplyConfig publishes the swap — clearing the floor in the
+// pre-swap phase would leave the bound network socket answering
+// unauthenticated for the gap. The disarm is reconcile's, and only after the
+// published config demands the token itself.
+func TestPreSwapNeverDisarmsTheFloorEarly(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "0.0.0.0:0"
+	cfg.RequireToken = false // refused posture — the candidate carries it deferred
+	m, wl := upgradeCandidateListeners(t, cfg, "txn-arm")
+	stubUpgradeJournal(t, upgradetxn.Journal{
+		ID:     "txn-arm",
+		Daemon: upgradetxn.DaemonSnapshot{Listeners: upgradetxn.ListenerExpectation{TCPBound: true}},
+	}, nil)
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.True(t, m.probationTokenFloor.Load(), "precondition: the deferred socket is floored")
+	bound := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	require.NotEmpty(t, bound)
+	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"))
+
+	// The apply tightens to require_token=true — servingUnauthenticatedLocked
+	// answers false for the incoming posture, which used to disarm the floor
+	// HERE, before the tokened config was ever published.
+	moved := *m.Config()
+	moved.RequireToken = true
+	wl.retireWebBeforePostureSwap(&moved)
+	require.True(t, m.probationTokenFloor.Load(),
+		"the pre-swap phase may only ARM the floor — the live config still serves tokenless until the swap")
+	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
+		"the socket must still be demanding the token across the swap gap")
+
+	m.live.Store(&moved)
+	failed, err = wl.reconcile(&moved)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.False(t, m.probationTokenFloor.Load(),
+		"post-publish the swapped posture demands the token itself — reconcile disarms the floor")
+	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
+		"and the demand is unchanged: the socket now authenticates on its own posture")
+}
+
 // TestTrackerRefusesLateHijacksFromSeveredGenerations pins the generation
 // watermark (#5137 review): a WS handler whose upgrade passed the old gate
 // before a policy retire can report StateHijacked only AFTER a new listener has
