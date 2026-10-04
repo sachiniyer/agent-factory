@@ -132,23 +132,25 @@ func removeDaemonPIDFile() {
 }
 
 // removeStaleDaemonPIDFile removes a stale daemon PID file from an af-managed
-// path. Used by stopDaemonUntil's invalid-PID and FindProcess-failure branches
-// — the entry-time janitor that fires when the PID file's contents look stale,
-// NOT the teardown of a PID the daemon wrote — so it is the stop-side sibling
-// to writeDaemonPIDFile and the reach asymmetric with removeDaemonPIDFile
-// (which fires on the daemon's own SIGTERM teardown of a PID file af WROTE).
+// path. Used by stopDaemonUntil's FindProcess-failure branch — the entry-time
+// janitor that fires when the PID file's contents look stale, NOT the teardown
+// of a PID the daemon wrote — so it is the stop-side sibling to
+// writeDaemonPIDFile and the reach asymmetric with removeDaemonPIDFile (which
+// fires on the daemon's own SIGTERM teardown of a PID file af WROTE).
 //
-// The dead-PID (Signal(0)-failed) and not-a-daemon (isAgentFactoryDaemon false)
-// branches do NOT use this helper: a same-home daemon can atomically rewrite
-// daemon.pid (writeDaemonPIDFile: temp-then-rename under the sidecar lock) in
-// the window between stopDaemonUntil's single read and this cleanup, and an
-// unconditional unlink would delete that freshly written file and orphan the
-// new running daemon from the PID-file path — the TOCTOU #295 introduced and
-// #4795 closed for the daemonForeign/daemonUnverifiable branches by routing
-// them through removePIDFileIfStillNames. Those two reachable early branches
-// route through the same safe sibling (lock + re-read + compare) and only the
-// contrived invalid-PID and dead-on-Unix FindProcess-failure branches remain
-// on this unconditional helper, where the race is not realistically reachable.
+// The dead-PID (Signal(0)-failed), not-a-daemon (isAgentFactoryDaemon false),
+// and invalid-PID (pid <= 1 or pid == os.Getpid()) branches do NOT use this
+// helper: a same-home daemon can atomically rewrite daemon.pid
+// (writeDaemonPIDFile: temp-then-rename under the sidecar lock) in the window
+// between stopDaemonUntil's single read and this cleanup, and an unconditional
+// unlink would delete that freshly written file and orphan the new running
+// daemon from the PID-file path — the TOCTOU #295 introduced and #4795 closed
+// for the daemonForeign/daemonUnverifiable branches by routing them through
+// removePIDFileIfStillNames. Those three reachable early branches route through
+// the same safe sibling (lock + re-read + compare); only the dead-on-Unix
+// FindProcess-failure branch remains on this unconditional helper, where the
+// race is not realistically reachable (FindProcess never errors on Unix, so the
+// branch is never taken in production).
 //
 // It uses config.RemoveFileRefusingLink for the same reason writeDaemonPIDFile
 // and removeDaemonPIDFile do (#3672): writeDaemonPIDFile refuses to write
@@ -235,8 +237,9 @@ func StopDaemon() (bool, error) {
 }
 
 // testHookStopDaemonBeforeStaleUnlink runs between stopDaemonUntil's stale-PID
-// classification (a dead PID, or a live PID that does not look like an
-// agent-factory daemon) and the PID-file cleanup that classification triggers.
+// classification (an invalid PID, a dead PID, or a live PID that does not look
+// like an agent-factory daemon) and the PID-file cleanup that classification
+// triggers.
 // Tests substitute it to deterministically interleave a freshly-started
 // same-home daemon's atomic rewrite of daemon.pid in that window, proving the
 // cleanup re-reads under the sidecar lock (via removePIDFileIfStillNames) and
@@ -276,7 +279,16 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 	// Defensively refuse to kill our own process or obviously invalid PIDs.
 	if pid <= 1 || pid == os.Getpid() {
 		log.InfoLog.Printf("daemon PID file contained invalid PID %d", pid)
-		removeStaleDaemonPIDFile(pidFile, pid)
+		// Reclaim the stale PID file under the sidecar lock + re-read + compare
+		// (removePIDFileIfStillNames), not the unconditional unlink the early
+		// branches inherited from #295. A same-home daemon can atomically rewrite
+		// daemon.pid in the window between the read at the top of stopDaemonUntil
+		// and this cleanup; an unconditional unlink would delete that freshly
+		// written file and orphan the new running daemon from the PID-file path
+		// — the exact race the safe sibling the daemonForeign branch already
+		// uses was built to close.
+		testHookStopDaemonBeforeStaleUnlink()
+		removePIDFileIfStillNames(pidFile, pid, pidLockCleanupDeadline(deadline))
 		return false, nil
 	}
 

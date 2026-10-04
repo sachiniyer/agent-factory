@@ -148,6 +148,50 @@ func TestStopDaemonUntil_DeadPIDBranchUnlinksFreshDaemonPIDFile(t *testing.T) {
 	}
 }
 
+// TestStopDaemonUntil_InvalidPIDBranchUnlinksFreshDaemonPIDFile covers the
+// third reachable early branch: the invalid-PID branch (pid <= 1 or pid ==
+// os.Getpid()), which #295 unconditionally os.Remove'd on the same single read
+// as the other early branches. A same-home daemon can atomically rewrite
+// daemon.pid between that read and this cleanup, so the branch must re-read
+// under the sidecar lock and leave a freshly written valid PID file rather than
+// unlinking it unconditionally — the same fix as the dead-PID and not-a-daemon
+// branches above.
+func TestStopDaemonUntil_InvalidPIDBranchUnlinksFreshDaemonPIDFile(t *testing.T) {
+	tmpHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", tmpHome)
+	pidFile := filepath.Join(tmpHome, "daemon.pid")
+
+	// pid == 0 is the cheapest invalid PID the branch accepts (pid <= 1); its
+	// only role is file CONTENT for the branch under test, so it does not need
+	// to be a live or recycled process.
+	const stale = 0
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", stale)), 0600); err != nil {
+		t.Fatalf("write stale PID file: %v", err)
+	}
+
+	fresh := installFreshRewriteHook(t, pidFile, stale)
+
+	stopped, err := stopDaemonUntil(time.Time{})
+	if err != nil {
+		t.Fatalf("stopDaemonUntil: %v", err)
+	}
+	if stopped {
+		t.Fatalf("stopDaemonUntil reported stopped=true for an invalid PID %d; expected false", stale)
+	}
+
+	data, statErr := os.ReadFile(pidFile)
+	if statErr != nil {
+		t.Fatalf("stopDaemonUntil's invalid-PID branch deleted the PID file after a fresh daemon "+
+			"atomically rewrote it with PID %d (the file no longer names the invalid PID %d the "+
+			"branch read); the unconditional removeStaleDaemonPIDFile is not guarded by the sidecar "+
+			"lock + re-read that removePIDFileIfStillNames performs — the TOCTOU race the safe "+
+			"sibling was built to close", fresh, stale)
+	}
+	if got := strings.TrimSpace(string(data)); got != fmt.Sprintf("%d", fresh) {
+		t.Fatalf("PID file content = %q, want the fresh daemon's PID %d preserved", got, fresh)
+	}
+}
+
 // TestStopDaemonUntil_NotADaemonBranchUnlinksFreshDaemonPIDFile is the companion
 // covering the second reachable early branch: a live PID that is NOT an
 // agent-factory daemon (a recycled number now owned by an unrelated process, a
