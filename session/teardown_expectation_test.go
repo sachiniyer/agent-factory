@@ -89,7 +89,14 @@ func TestTeardownExpectedFromInstanceState(t *testing.T) {
 		want   bool
 	}{
 		{name: "live session, nothing in flight", mutate: func(*Instance) {}, want: false},
-		{name: "started cleared mid-teardown", mutate: func(i *Instance) { i.started = false }, want: true},
+		// Cleared started alone is NOT teardown evidence: teardownReleasePTY
+		// and MarkStartupStateUnknown clear it while retaining the runtime —
+		// a vanish there is the unexpected loss ERROR exists for.
+		{name: "started cleared without teardown", mutate: func(i *Instance) { i.started = false }, want: false},
+		{name: "startup unknown with cleared started", mutate: func(i *Instance) {
+			i.started = false
+			i.startupStateUnknown = true
+		}, want: false},
 		{name: "kill tombstone", mutate: func(i *Instance) { i.userKilled = true }, want: true},
 		{name: "OpKilling", mutate: func(i *Instance) { i.SetInFlightOpForTest(OpKilling) }, want: true},
 		{name: "OpArchiving", mutate: func(i *Instance) { i.SetInFlightOpForTest(OpArchiving) }, want: true},

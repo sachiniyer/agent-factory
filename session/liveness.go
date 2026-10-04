@@ -457,23 +457,28 @@ func (i *Instance) IsTearingDown() bool {
 
 // teardownExpected reports whether af's own state already accounts for this
 // instance's tmux session going away: the kill tombstone, an in-flight
-// kill/archive op, the started flag already cleared (teardownTabs sets it
-// before the closes run), or a recorded on_complete obligation not yet
-// discharged. The status monitor consults it — through the ExpectingTeardown
-// poll variants — when a poll finds the session gone, so a disappearance
-// anywhere in the window between af recording the teardown and close()
-// landing the generation mark classifies at INFO rather than ERROR (#5138).
-// A vanish with none of these set is genuinely unexpected and stays ERROR.
+// kill/archive op, or a recorded on_complete obligation not yet discharged.
+// The status monitor consults it — through the ExpectingTeardown poll
+// variants — when a poll finds the session gone, so a disappearance anywhere
+// in the window between af recording the teardown and close() landing the
+// generation mark classifies at INFO rather than ERROR (#5138). A vanish
+// with none of these set is genuinely unexpected and stays ERROR.
 //
-// It is deliberately narrower than HasInFlightOp: OpCreating is af BUILDING
-// the session, not tearing it down — a death there is the anomaly ERROR
-// exists for. The runtime-replacement ops (OpRestoring/OpReplacing/
+// A cleared started flag alone is deliberately NOT evidence: teardownTabs
+// only clears it inside the kill/archive fences already listed here, while
+// MarkStartupStateUnknown and the restore-failure CloseAttachOnly path clear
+// it while deliberately retaining the runtime — issuing no kill-session — so
+// a disappearance there is exactly the unexpected loss ERROR exists for.
+//
+// It is also deliberately narrower than HasInFlightOp: OpCreating is af
+// BUILDING the session, not tearing it down — a death there is the anomaly
+// ERROR exists for. The runtime-replacement ops (OpRestoring/OpReplacing/
 // OpRespawning) are left out on the same ground; their own close() calls
 // land the generation mark, which is the attribution meant for them.
 func (i *Instance) teardownExpected() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return !i.started || i.userKilled || opIsTeardown(i.inFlightOp) || i.owedOnComplete != nil
+	return i.userKilled || opIsTeardown(i.inFlightOp) || i.owedOnComplete != nil
 }
 
 // HasInFlightOp reports whether any client op is in flight (the render/gate
