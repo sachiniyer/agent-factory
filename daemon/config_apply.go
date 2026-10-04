@@ -20,14 +20,71 @@ import (
 // helpers). The network listener keys used to read m.cfg too; #2480 PR2 made them
 // applied-live (livePosture per request; network.listen_addr/network.preview_listen_addr rebind in
 // place), so they no longer do.
+// livePosturePublication is what m.live carries: the applied-live config and
+// the #5137 probation token floor as ONE atomic value. The apply sequence is
+// three ordered writes — arm the floor, publish the new config, disarm the
+// floor once the socket settled — and a request that read cfg and floor as
+// separate atomics could straddle them into a pair that never coexisted
+// (tokenless config + cleared floor → admitted unauthenticated on a socket
+// both neighboring snapshots gated). Publishing the pair makes every observed
+// (cfg, floor) a real instantaneous state.
+type livePosturePublication struct {
+	cfg          *config.Config
+	tokenFloored bool
+}
+
 func (m *Manager) Config() *config.Config {
-	if c := m.live.Load(); c != nil {
-		return c
+	if p := m.live.Load(); p != nil {
+		return p.cfg
 	}
 	// A manager built directly as &Manager{cfg: …} (some tests, and any path that
 	// skips newManagerShellForDaemon) never seeds live; fall back to the frozen
 	// startup config so Config() is never nil.
 	return m.cfg
+}
+
+// authPosturePair is the control listener's per-request read (#5137): config
+// and probation floor in ONE load — the pairing the whole livePosturePublication
+// type exists to keep un-splittable. It sits on Manager rather than webListeners
+// because Ping can read it during warm-up while startHTTPServer is still
+// writing m.webListeners — dereferencing that pointer there is a data race.
+func (m *Manager) authPosturePair() (*config.Config, bool) {
+	if p := m.live.Load(); p != nil {
+		return p.cfg, p.tokenFloored
+	}
+	return m.cfg, false
+}
+
+// tokenFloorArmed reports whether the probation floor currently demands the
+// bearer token. Sourced from the same publication the gate reads, so a caller
+// (Ping, the apply-exposure notice) can never observe a floor that has already
+// been disarmed under a stale config, or vice versa.
+func (m *Manager) tokenFloorArmed() bool {
+	if p := m.live.Load(); p != nil {
+		return p.tokenFloored
+	}
+	return false
+}
+
+// storeLivePosture publishes a new applied-live config, carrying the floor
+// forward unchanged. Writers are serialized — the apply path under
+// configApplyMu, startup before serving — so the Load→Store carry cannot lose
+// a concurrent floor write; pre-swap arms and reconcile disarms happen on the
+// same serialized apply goroutine.
+func (m *Manager) storeLivePosture(cfg *config.Config) {
+	floored := false
+	if p := m.live.Load(); p != nil {
+		floored = p.tokenFloored
+	}
+	m.live.Store(&livePosturePublication{cfg: cfg, tokenFloored: floored})
+}
+
+// setTokenFloor republishes the current config with the floor flag flipped —
+// the arm (pre-swap) and disarm (reconcile, post-settle) halves of the apply
+// sequence. Each write is a complete pair, so no reader can observe the flag
+// apart from the config it was decided under.
+func (m *Manager) setTokenFloor(armed bool) {
+	m.live.Store(&livePosturePublication{cfg: m.Config(), tokenFloored: armed})
 }
 
 // ApplyConfigResult reports the outcome of an in-place config apply (#2480), so a
@@ -233,7 +290,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	if m.webListeners != nil {
 		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
 		preReconcilePreviewAddr = m.ListenerAddress("network.preview_listen_addr")
-		preReconcileFloored = m.probationTokenFloor.Load()
+		preReconcileFloored = m.tokenFloorArmed()
 		if m.lifecycle != nil {
 			preReconcileRefusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
 		}
@@ -391,7 +448,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// later apply (or the post-adoption daemon's own bind notice) reports the
 	// now-genuine exposure.
 	servingExposed := config.ListenerServesUnauthenticatedNetwork(servingAddr,
-		newCfg.RequireToken || m.probationTokenFloor.Load())
+		newCfg.RequireToken || m.tokenFloorArmed())
 	if !wasExposed && servingExposed {
 		// ListenerExposureNotice formats the address out of cfg.ListenAddr, so
 		// build a throwaway config carrying the SERVING bound address: the notice

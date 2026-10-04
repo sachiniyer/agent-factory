@@ -80,7 +80,7 @@ func TestPing_ReportsProcessAndBootConfig(t *testing.T) {
 	live := *m.cfg
 	live.RequireToken = false
 	live.AllowUnauthenticatedNetwork = false
-	m.live.Store(&live)
+	m.storeLivePosture(&live)
 
 	var after PingResponse
 	require.NoError(t, s.Ping(PingRequest{}, &after))

@@ -31,7 +31,11 @@ type Manager struct {
 	// and threads that snapshot down — a per-use read inside one op could observe
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
-	live atomic.Pointer[config.Config]
+	// The publication also carries the #5137 upgrade-probation token floor —
+	// deliberately inside the same atomic, because the apply sequence (arm →
+	// publish → disarm) makes cfg and floor two halves of one state, and a gate
+	// that loaded them separately could observe a pair that never coexisted.
+	live atomic.Pointer[livePosturePublication]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
 	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
@@ -48,15 +52,6 @@ type Manager struct {
 	// (many tests); ApplyConfig's reconcile is a no-op then. The auth/CORS keys do
 	// NOT go through here — their handlers read live config per request.
 	webListeners *webListeners
-
-	// probationTokenFloor is the livePosture tokenFloor for the control
-	// listener while the upgrade-candidate deferral holds (#5137): the
-	// journal records TCPBound but no auth posture, so a kept-bound socket
-	// demands the bearer token for the window rather than guess. It lives on
-	// Manager, not webListeners, because Ping reads it during warm-up while
-	// startHTTPServer is still writing m.webListeners — dereferencing that
-	// pointer there is a data race.
-	probationTokenFloor atomic.Bool
 
 	// sandboxTokens holds the per-session callback credentials handed to
 	// provisioned sandboxes (#2999). In memory only and never persisted: a
@@ -821,7 +816,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 	mgr.rootAgentLayers.Store(&rootAgentLayers)
 	// Seed the hot-reloadable live config with the startup config (#2480). Config()
 	// reads it; ApplyConfig swaps it in place.
-	mgr.live.Store(cfg)
+	mgr.live.Store(&livePosturePublication{cfg: cfg})
 	// Build the usage-limit detector from the startup config; ApplyConfig rebuilds
 	// it in place when limit_patterns changes.
 	initialDetector := task.NewLimitDetector(cfg.LimitPatterns)

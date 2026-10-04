@@ -394,7 +394,7 @@ func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
 				// enforced, not as drift from a boot value that never served).
 				resp.BootConfig.ListenAddr = tcpListenAddr
 			}
-			if s.manager.probationTokenFloor.Load() {
+			if s.manager.tokenFloorArmed() {
 				// The upgrade-probation floor is enforcement OUTSIDE the file:
 				// while it holds, the control listener's gate demands the
 				// bearer token even though the loaded config reads tokenless.

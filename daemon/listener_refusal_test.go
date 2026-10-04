@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -487,7 +488,7 @@ func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 	require.Empty(t, failed)
 	addr := m.lifecycle.snapshot().listeners.TCPBoundAddr
 	require.NotEmpty(t, addr, "precondition: the deferred socket is bound")
-	require.True(t, m.probationTokenFloor.Load(), "precondition: the floor is armed")
+	require.True(t, m.tokenFloorArmed(), "precondition: the floor is armed")
 
 	// The journal then vanishes: present for the first apply's single read
 	// (socket kept bound+floored through the whole apply) and gone for the
@@ -538,7 +539,7 @@ func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 	snap := m.lifecycle.snapshot().listeners
 	require.True(t, snap.TCPBound,
 		"the carry decision governs the whole apply — a mid-apply journal loss cannot split it")
-	require.True(t, m.probationTokenFloor.Load(), "the floor rides the kept socket")
+	require.True(t, m.tokenFloorArmed(), "the floor rides the kept socket")
 
 	// Apply 2: the journal is gone for this apply's own read, so the refusal
 	// runs for real — retiring the socket while the floor still holds.
@@ -555,7 +556,7 @@ func TestUpgradeCandidateFloorHeldThroughJournalLossTeardown(t *testing.T) {
 	snap = m.lifecycle.snapshot().listeners
 	require.False(t, snap.TCPBound, "with the journal gone the refused socket retires for real")
 	require.NotEmpty(t, snap.TCPRefusalReason)
-	require.False(t, m.probationTokenFloor.Load(),
+	require.False(t, m.tokenFloorArmed(),
 		"the floor clears once the socket it protected is gone")
 }
 
@@ -580,7 +581,7 @@ func TestPingReportsServingAddrAfterFailedRebind(t *testing.T) {
 	}
 	moved := *m.Config()
 	moved.ListenAddr = "127.0.0.2:0"
-	m.live.Store(&moved)
+	m.storeLivePosture(&moved)
 	failed, err := wl.reconcile(&moved)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "still serving on the previous address",
@@ -624,7 +625,7 @@ func TestRefusalSeversHijackedWebSocketStreams(t *testing.T) {
 	// reading forever — the server stopped counting it at the upgrade.
 	revoked := *m.Config()
 	revoked.AllowUnauthenticatedNetwork = false
-	m.live.Store(&revoked)
+	m.storeLivePosture(&revoked)
 	failed, err := wl.reconcile(&revoked)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -658,7 +659,7 @@ func TestRefusalSeversWebSocketStreamsAcrossGenerations(t *testing.T) {
 	// per-generation tracker would lose.
 	moved := *m.Config()
 	moved.ListenAddr = "127.0.0.1:0"
-	m.live.Store(&moved)
+	m.storeLivePosture(&moved)
 	failed, err := wl.reconcile(&moved)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -669,7 +670,7 @@ func TestRefusalSeversWebSocketStreamsAcrossGenerations(t *testing.T) {
 	revoked := *m.Config()
 	revoked.ListenAddr = "0.0.0.0:0"
 	revoked.AllowUnauthenticatedNetwork = false
-	m.live.Store(&revoked)
+	m.storeLivePosture(&revoked)
 	failed, err = wl.reconcile(&revoked)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -702,7 +703,7 @@ func TestRefusalSeversStreamsLeftOpenByOptOut(t *testing.T) {
 	// the hijacked stream stays open in the tracker.
 	disabled := *m.Config()
 	disabled.ListenAddr = ""
-	m.live.Store(&disabled)
+	m.storeLivePosture(&disabled)
 	failed, err := wl.reconcile(&disabled)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -713,7 +714,7 @@ func TestRefusalSeversStreamsLeftOpenByOptOut(t *testing.T) {
 	refused := *m.Config()
 	refused.ListenAddr = "0.0.0.0:0"
 	refused.AllowUnauthenticatedNetwork = false
-	m.live.Store(&refused)
+	m.storeLivePosture(&refused)
 	failed, err = wl.reconcile(&refused)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -743,7 +744,7 @@ func TestPingReportsProbationTokenFloor(t *testing.T) {
 	failed, err := wl.reconcile(m.Config())
 	require.NoError(t, err)
 	require.Empty(t, failed)
-	require.True(t, m.probationTokenFloor.Load(), "precondition: the deferral floored the gate")
+	require.True(t, m.tokenFloorArmed(), "precondition: the deferral floored the gate")
 
 	var resp PingResponse
 	require.NoError(t, (&controlServer{manager: m}).Ping(PingRequest{}, &resp))
@@ -788,13 +789,13 @@ func TestUpgradeJournalLossMidApplyKeepsFloorOnRetainedSocket(t *testing.T) {
 		return nil, errors.New("forced rebind failure")
 	}
 	wl.retireWebBeforePostureSwap(&moved) // journal still present: carries
-	m.live.Store(&moved)
+	m.storeLivePosture(&moved)
 	stubUpgradeJournal(t, upgradetxn.Journal{}, errors.New("journal gone"))
 
 	failed, err = wl.reconcile(&moved)
 	require.Error(t, err)
 	require.Contains(t, failed, "network.listen_addr")
-	require.True(t, m.probationTokenFloor.Load(),
+	require.True(t, m.tokenFloorArmed(),
 		"the floor must outlive the journal's mid-apply disappearance — the socket is still serving")
 	require.Equal(t, bound, m.lifecycle.snapshot().listeners.TCPBoundAddr,
 		"the retained socket still answers on the old network address")
@@ -832,7 +833,7 @@ func TestApplyConfigExposureNoticeReadsProbationFloor(t *testing.T) {
 	result, err := m.ApplyConfig()
 	require.NoError(t, err)
 	require.Empty(t, result.FailedListenerKeys, "the opted-in bind succeeds — floored, not refused")
-	require.True(t, m.probationTokenFloor.Load(),
+	require.True(t, m.tokenFloorArmed(),
 		"precondition: the journaled-candidate floor is armed for the kept socket")
 
 	bound := m.lifecycle.snapshot().listeners.TCPBoundAddr
@@ -866,7 +867,7 @@ func TestPreSwapNeverDisarmsTheFloorEarly(t *testing.T) {
 	failed, err := wl.reconcile(m.Config())
 	require.NoError(t, err)
 	require.Empty(t, failed)
-	require.True(t, m.probationTokenFloor.Load(), "precondition: the deferred socket is floored")
+	require.True(t, m.tokenFloorArmed(), "precondition: the deferred socket is floored")
 	bound := m.lifecycle.snapshot().listeners.TCPBoundAddr
 	require.NotEmpty(t, bound)
 	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"))
@@ -877,16 +878,16 @@ func TestPreSwapNeverDisarmsTheFloorEarly(t *testing.T) {
 	moved := *m.Config()
 	moved.RequireToken = true
 	wl.retireWebBeforePostureSwap(&moved)
-	require.True(t, m.probationTokenFloor.Load(),
+	require.True(t, m.tokenFloorArmed(),
 		"the pre-swap phase may only ARM the floor — the live config still serves tokenless until the swap")
 	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
 		"the socket must still be demanding the token across the swap gap")
 
-	m.live.Store(&moved)
+	m.storeLivePosture(&moved)
 	failed, err = wl.reconcile(&moved)
 	require.NoError(t, err)
 	require.Empty(t, failed)
-	require.False(t, m.probationTokenFloor.Load(),
+	require.False(t, m.tokenFloorArmed(),
 		"post-publish the swapped posture demands the token itself — reconcile disarms the floor")
 	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
 		"and the demand is unchanged: the socket now authenticates on its own posture")
@@ -953,4 +954,76 @@ func TestClosedWebSocketUnregistersFromTracker(t *testing.T) {
 	require.Eventually(t, func() bool { return tracked() == 0 },
 		5*time.Second, 10*time.Millisecond,
 		"a closed stream must unregister itself — the tracker may not hold it for the daemon's life")
+}
+
+// TestLivePosturePublicationNeverPairsTokenlessConfigWithAClearedFloor is the
+// regression for the Codex finding on the upgrade-probation gate. The apply
+// sequence is three ordered writes — arm the floor, publish the new config,
+// disarm once the socket settles — and a request that read cfg and floor as
+// two independent atomics could straddle the last two into a pair no real
+// state ever held: the OLD tokenless config observed before the publish with
+// the floor observed after its clear, admitting the request unauthenticated
+// on a socket every neighboring snapshot gated. m.live now carries the pair
+// as one atomic.Pointer[livePosturePublication], so the property below is met
+// by construction: every Load returns a complete publication, and this
+// writer's sequence never publishes a tokenless config unfloored, so no
+// reader may observe one.
+func TestLivePosturePublicationNeverPairsTokenlessConfigWithAClearedFloor(t *testing.T) {
+	tokenless := config.DefaultConfig()
+	tokenless.RequireToken = false
+	tokened := *tokenless
+	tokened.RequireToken = true
+
+	m := &Manager{cfg: tokenless}
+	// Seed already-armed, mirroring production: the floor goes up BEFORE the
+	// first posture that needs it can be published, so a tokenless config
+	// exists in the publication only under the floor.
+	m.live.Store(&livePosturePublication{cfg: tokenless, tokenFloored: true})
+
+	// The sequential half pins the carry: arming pairs the flag with the
+	// config it was decided under, and publishing a new config must carry the
+	// armed floor forward rather than silently clearing it.
+	c, floored := m.authPosturePair()
+	require.Same(t, tokenless, c)
+	require.True(t, floored)
+	m.storeLivePosture(&tokened)
+	c, floored = m.authPosturePair()
+	require.Same(t, &tokened, c)
+	require.True(t, floored, "a config publish must carry the armed floor forward")
+	m.setTokenFloor(false)
+	c, floored = m.authPosturePair()
+	require.Same(t, &tokened, c)
+	require.False(t, floored)
+	m.setTokenFloor(true)
+
+	// The concurrent half reproduces the straddle: a writer cycling
+	// publish→disarm→arm→publish while readers demand that a tokenless config
+	// is never observed with the floor cleared. The sequence never writes a
+	// tokenless unfloored pair — that is the state the gate must never serve —
+	// so any observed instance is a torn read of two atomics, i.e. this bug.
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			m.storeLivePosture(&tokened)
+			m.setTokenFloor(false)
+			m.setTokenFloor(true)
+			m.storeLivePosture(tokenless)
+		}
+	}()
+
+	for i := 0; i < 20000; i++ {
+		c, floored := m.authPosturePair()
+		require.True(t, c.RequireToken || floored,
+			"tokenless config + cleared floor is the phantom pair the gate used to admit")
+	}
+	close(stop)
+	wg.Wait()
 }

@@ -202,8 +202,10 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 	floor := carries && wl.servingUnauthenticatedLocked(newCfg)
 	if floor {
 		// Armed BEFORE any bind or retire below: a deferred bind must never
-		// answer unfloored, and the gate reads the floor per request.
-		wl.manager.probationTokenFloor.Store(true)
+		// answer unfloored, and the gate reads the floor per request — inside
+		// the paired livePosturePublication, so the armed bit can never
+		// be observed apart from the config it was decided under.
+		wl.manager.setTokenFloor(true)
 	}
 	if deferral {
 		if wl.webConfigAddr != newCfg.ListenAddr || wl.webHandle == nil {
@@ -229,8 +231,10 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 		// retire is what actually removes a refused socket, and a request
 		// landing between a premature clear and that retire would read the
 		// already-swapped tokenless config with no floor — served
-		// unauthenticated on a socket still bound.
-		wl.manager.probationTokenFloor.Store(false)
+		// unauthenticated on a socket still bound. Clearing republishes the
+		// pair, so the cleared flag is only ever observed alongside the
+		// post-publish config it was decided against.
+		wl.manager.setTokenFloor(false)
 	}
 	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
 		(newCfg.PreviewListenAddr == "" && wl.previewHandle != nil) ||
@@ -298,7 +302,7 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 //   - It is bound but NOT unauthenticated: the journal records TCPBound only —
 //     no auth posture — so a candidate loading a refused file cannot tell
 //     "the old daemon was already exposed" from "the old daemon was tokened
-//     and the file was hand-edited". probationTokenFloor makes the answer
+//     and the file was hand-edited". The probation token floor makes the answer
 //     safe either way: the deferred socket demands the bearer token for the
 //     whole window.
 //   - It ends with the journal: after Cleanup the transaction no longer loads,
@@ -404,7 +408,7 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 	// the token on its own.
 	if carries {
 		if wl.servingUnauthenticatedLocked(newCfg) {
-			wl.manager.probationTokenFloor.Store(true)
+			wl.manager.setTokenFloor(true)
 		}
 		return
 	}
@@ -543,7 +547,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// network.require_loopback_token live per request, so this value never enforces auth.
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
-	if wl.manager.probationTokenFloor.Load() {
+	if wl.manager.tokenFloorArmed() {
 		// The upgrade-probation floor means this bind serves WITH the token no
 		// matter what the (refused) config says — the exposure notice and the
 		// "NO token" line would both be lies about what is bound.
@@ -601,7 +605,7 @@ func (wl *webListeners) webBind(bindAddr string) (*tcpListenerHandle, tcpListene
 			snapshot:         wl.manager.Config,
 			policyFromConfig: true,
 			sandboxTokens:    &wl.manager.sandboxTokens,
-			tokenFloor:       wl.manager.probationTokenFloor.Load,
+			posturePair:      wl.manager.authPosturePair,
 		}, wl.webTracker, wl.listenTCP)
 }
 

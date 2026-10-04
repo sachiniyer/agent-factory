@@ -550,7 +550,7 @@ func TestStartUpdateDriver_JoinsAndReleasesTheDaemonWaitGroup(t *testing.T) {
 	t.Cleanup(func() { updateDriverWakeInterval = originalWake })
 
 	manager := &Manager{}
-	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelStable})
+	manager.storeLivePosture(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelStable})
 
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
@@ -579,12 +579,12 @@ func TestStartUpdateDriver_JoinsAndReleasesTheDaemonWaitGroup(t *testing.T) {
 // running daemon (Manager.ApplyConfig) reaches it without a restart.
 func TestNewUpdateDriverReadsTheLiveConfig(t *testing.T) {
 	manager := &Manager{}
-	manager.live.Store(&config.Config{AutoUpdate: false, UpdateChannel: config.UpdateChannelPreview})
+	manager.storeLivePosture(&config.Config{AutoUpdate: false, UpdateChannel: config.UpdateChannelPreview})
 
 	driver := newUpdateDriver(manager, func() {})
 	require.False(t, driver.config().AutoUpdate)
 
-	manager.live.Store(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelPreview})
+	manager.storeLivePosture(&config.Config{AutoUpdate: true, UpdateChannel: config.UpdateChannelPreview})
 	require.True(t, driver.config().AutoUpdate, "the driver must re-read the live config, not a snapshot")
 	require.Equal(t, config.UpdateChannelPreview, driver.config().UpdateChannel)
 }
@@ -941,7 +941,7 @@ func TestUpdateDriver_NoExecutableBaselineBlocksActivation(t *testing.T) {
 // one this process exec'd from — later is too late.
 func TestNewUpdateDriver_CapturesTheExecutableBaselineAtStart(t *testing.T) {
 	manager := &Manager{}
-	manager.live.Store(&config.Config{AutoUpdate: true})
+	manager.storeLivePosture(&config.Config{AutoUpdate: true})
 
 	driver := newUpdateDriver(manager, func() {})
 	if driver.baselineErr != nil {
