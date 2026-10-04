@@ -2397,6 +2397,9 @@
         "cli": {
           "apply": {
             "ok": "Reached by sessionsPruneCmd after the dry-run plan renders and the optional TTY confirm answers yes (api/sessions_prune.go assigns req.Apply post-literal). The CLI AST derivation recognizes composite-literal fields but not post-literal assignment, so it conservatively reports the field as absent."
+          },
+          "only": {
+            "ok": "Reached by sessionsPruneCmd only on the TTY-confirmed apply path: it binds the delete to the exact identities the dry-run plan showed (api/sessions_prune.go assigns req.Only post-literal inside the IsTerminal branch). The CLI AST derivation recognizes composite-literal fields but not post-literal assignment, so it conservatively reports the field as absent."
           }
         }
       }

@@ -167,6 +167,29 @@ func TestPruneSessions_SkipsIneligibleRows(t *testing.T) {
 	assert.True(t, exists(archivedYoung), "a too-recent archive must be left alone")
 }
 
+// TestPruneSessions_RefusesRecycledPathOccupant: the record's pathname is not
+// identity — if the archived worktree was removed out-of-band and an
+// unrelated directory now occupies the path, apply must refuse rather than
+// delete the replacement (#5136 review).
+func TestPruneSessions_RefusesRecycledPathOccupant(t *testing.T) {
+	manager, repoID, _, inst, archivedPath := seedPrunableArchive(t, "recycled-row")
+
+	// Delete the real archive and park a foreign directory at its pathname.
+	require.NoError(t, os.RemoveAll(archivedPath))
+	require.NoError(t, os.MkdirAll(filepath.Join(archivedPath, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(archivedPath, "sub", "keep.txt"), []byte("not af's"), 0o644))
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "could not be verified")
+
+	assert.True(t, exists(filepath.Join(archivedPath, "sub", "keep.txt")),
+		"the foreign occupant must be left untouched")
+	assert.True(t, inst.PrunedAt().IsZero(), "nothing was deleted, so no tombstone may be stamped")
+}
+
 // TestPruneSessions_ConcurrentArchiveIsSkipped: a session mid-archive (its
 // in-flight op legitimately raised by BeginArchive) is exactly the race the
 // op gate exists for — prune must report it, not delete underneath it.
@@ -254,6 +277,12 @@ func TestPruneSessions_RequiresScopeAndDuration(t *testing.T) {
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{OlderThan: "1ms", Apply: true})
 	require.ErrorContains(t, err, "a scope is required")
+
+	// Both scopes set: the control-RPC contract matches the CLI's mutual
+	// exclusion rather than silently applying to one repo while reporting
+	// cross-repo skips.
+	_, err = manager.PruneSessions(PruneSessionsRequest{RepoID: "x", All: true, OlderThan: "1ms", Apply: true})
+	require.ErrorContains(t, err, "mutually exclusive")
 }
 
 // TestPruneSessions_TombstoneSurvivesSnapshot: a pruned row still reads back

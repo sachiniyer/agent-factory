@@ -2,11 +2,14 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -61,6 +64,20 @@ type PruneSessionsRequest struct {
 	// Apply performs the deletion. False is the dry run: the same candidates
 	// are listed with the bytes they would reclaim and nothing is changed.
 	Apply bool `json:"apply,omitempty"`
+	// Only, when non-empty, restricts the run to those session identities —
+	// the confirmed-plan binding the CLI sends on a TTY-confirmed apply, so
+	// the operator's yes covers exactly the rows the dry run showed and a
+	// session that became eligible while the prompt was open cannot be
+	// deleted unreviewed. Repo-qualified because titles collide across an
+	// --all run. Empty means unrestricted (the non-TTY apply, which
+	// intentionally plans and applies in one step).
+	Only []PrunePlanRef `json:"only,omitempty"`
+}
+
+// PrunePlanRef names one session the operator confirmed for pruning.
+type PrunePlanRef struct {
+	RepoID string `json:"repo_id"`
+	Title  string `json:"title"`
 }
 
 // PrunedSessionEntry is one session the run pruned (apply) or would prune
@@ -139,6 +156,9 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	}
 	resp.OlderThan = olderThan
 	resp.ArchivedBefore = time.Now().Add(-duration)
+	if req.RepoID != "" && req.All {
+		return resp, fmt.Errorf("repo_id and all are mutually exclusive — the same scopes the CLI refuses to combine")
+	}
 	if req.RepoID == "" && !req.All {
 		return resp, fmt.Errorf("a scope is required: pass repo_id for one project or all=true for every project")
 	}
@@ -214,12 +234,26 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	warnings = append(warnings, ghostWarns...)
 	skipped = append(skipped, ghosts...)
 
+	var confirmed map[string]bool
+	if len(req.Only) > 0 {
+		confirmed = make(map[string]bool, len(req.Only))
+		for _, ref := range req.Only {
+			confirmed[daemonInstanceKey(ref.RepoID, ref.Title)] = true
+		}
+	}
+
 	var candidates []pruneCandidate
 	for _, row := range rows {
 		if deleting[row.repoID] {
 			continue
 		}
 		data := row.instance.ToInstanceData()
+		if confirmed != nil && !confirmed[daemonInstanceKey(row.repoID, data.Title)] {
+			// Outside the confirmed set: not reported at all — the plan the
+			// operator answered named it, so this run treats it as out of
+			// scope rather than as a refusal needing a reason.
+			continue
+		}
 		if reason := session.PruneSkipReason(data, cutoff); reason != "" {
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
 			continue
@@ -298,20 +332,17 @@ func (m *Manager) pruneOneSession(cand pruneCandidate, cutoff time.Time) ([]stri
 	}
 	defer opLock.Unlock()
 
-	// Re-verify under the op-lock: the row the scan classified may have moved
-	// while this waited.
+	// Re-verify identity AND claim in ONE m.mu section: a create reusing this
+	// archived title could otherwise slip between the checks — it holds m.mu,
+	// sees no killsInFlight, renames/rekeys the row and relocates its worktree
+	// — and prune would then act on the pre-rename path and stamp a tombstone
+	// on the renamed row.
 	m.mu.Lock()
 	current := m.instances[key]
-	m.mu.Unlock()
 	if current != instance {
+		m.mu.Unlock()
 		return warnings, false, fmt.Errorf("session %q changed state before prune could start", data.Title)
 	}
-	live := instance.ToInstanceData()
-	if reason := session.PruneSkipReason(live, cutoff); reason != "" {
-		return warnings, false, fmt.Errorf("no longer eligible: %s", reason)
-	}
-
-	m.mu.Lock()
 	if _, busy := m.killsInFlight[key]; busy {
 		m.mu.Unlock()
 		return warnings, false, fmt.Errorf("an operation is already in progress for session %q", data.Title)
@@ -324,6 +355,13 @@ func (m *Manager) pruneOneSession(cand pruneCandidate, cutoff time.Time) ([]stri
 		m.mu.Unlock()
 	}()
 
+	// Re-verify eligibility against the CURRENT record under the claim: the
+	// scan's candidate may have moved while the op-lock wait above blocked.
+	live := instance.ToInstanceData()
+	if reason := session.PruneSkipReason(live, cutoff); reason != "" {
+		return warnings, false, fmt.Errorf("no longer eligible: %s", reason)
+	}
+
 	// (1) The archived worktree. RemoveWorktreeDir owns the ownership gate, the
 	// bounded git calls, the `git worktree prune` that clears the repo's stale
 	// registration, and the deregistration verify. It deletes NO branch. Its
@@ -332,8 +370,37 @@ func (m *Manager) pruneOneSession(cand pruneCandidate, cutoff time.Time) ([]stri
 	if repoPath == "" {
 		repoPath = live.Path
 	}
-	if _, err := sessiongit.RemoveWorktreeDir(repoPath, live.Worktree.WorktreePath); err != nil {
-		return warnings, true, fmt.Errorf("removing archived worktree %s: %w", live.Worktree.WorktreePath, err)
+	wtPath := live.Worktree.WorktreePath
+
+	// Verify the path still names THIS session's worktree before letting
+	// rm -rf near it: out-of-band moves leave the record's pathname free for
+	// an unrelated replacement directory, and the record's say-so is not
+	// identity. A missing path needs no proof — there is nothing to delete
+	// (RemoveWorktreeDir still clears the stale registration below). This is
+	// the same bidirectional evidence the kill path requires (#3278): the
+	// repo-present check binds the occupant's `.git` pointer into this
+	// origin's metadata AND the registration's backpointer back to the
+	// occupant; the repo-gone check requires the archive's own
+	// linked-worktree pointer shape.
+	if _, statErr := os.Stat(wtPath); statErr == nil {
+		var verifyErr error
+		switch probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath); {
+		case probeErr == nil:
+			verifyErr = sessiongit.VerifyRegisteredWorktreeOccupant(wtPath, repoPath)
+		case errors.Is(probeErr, sessiongit.ErrRepoGone):
+			verifyErr = sessiongit.VerifyArchivedWorktreePointer(wtPath)
+		default:
+			verifyErr = fmt.Errorf("could not establish whether repo %s is present: %w", repoPath, probeErr)
+		}
+		if verifyErr != nil {
+			return warnings, false, fmt.Errorf("refusing to delete %s: it could not be verified as this session's worktree: %w", wtPath, verifyErr)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return warnings, false, fmt.Errorf("could not inspect %s before deletion: %w", wtPath, statErr)
+	}
+
+	if _, err := sessiongit.RemoveWorktreeDir(repoPath, wtPath); err != nil {
+		return warnings, true, fmt.Errorf("removing archived worktree %s: %w", wtPath, err)
 	}
 
 	// (2) The tombstone, persisted and announced in the repo-ordered critical
@@ -341,13 +408,18 @@ func (m *Manager) pruneOneSession(cand pruneCandidate, cutoff time.Time) ([]stri
 	// already gone, so a failure here is reported loudly: the row stays
 	// eligible and a re-run finishes the marker (every deletion above is
 	// idempotent), which is exactly what makes delete-then-stamp safe.
+	prevUpdatedAt := live.UpdatedAt
 	instance.MarkPruned(time.Now())
 	if err := m.persistAndPublishInstanceErr(cand.repoID, instance); err != nil {
 		// The durable tombstone did not land, so the in-memory marker must not
 		// claim it did: roll it back or the retry this error prescribes would
 		// skip the row as "already pruned" and leave the marker unwritten
-		// forever.
-		instance.MarkPruned(time.Time{})
+		// forever. Restoring updated_at keeps the archive-time fallback honest
+		// for pre-upgrade rows, and the re-published projection puts the false
+		// tombstone (and its suppressed restore affordance) back for clients
+		// that already rendered the failed write's event.
+		instance.UnmarkPruned(prevUpdatedAt)
+		m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 		return warnings, true, fmt.Errorf("files were deleted but the pruned marker could not be persisted; re-run `af sessions prune --apply` to finish: %w", err)
 	}
 	return warnings, false, nil

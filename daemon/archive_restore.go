@@ -83,15 +83,9 @@ func (m *Manager) RestoreArchived(req RestoreArchivedRequest) (string, session.I
 func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, title string) (string, error) {
 	req := RestoreArchivedRequest{ID: instance.ID, Title: title, RepoID: repoID}
 	// A pruned tombstone is not restorable: its worktree was deleted on
-	// purpose (#5136). Refuse before any admission gate and NAME
-	// the branch that still holds the work — it is the only way back.
-	if prunedAt := instance.PrunedAt(); !prunedAt.IsZero() {
-		if branch := pruneBranchFor(instance.ToInstanceData()); branch != "" {
-			return "", fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree was deleted; the branch %q was kept, so recreate the work from that branch",
-				title, prunedAt.Format(time.RFC3339), branch)
-		}
-		return "", fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree was deleted",
-			title, prunedAt.Format(time.RFC3339))
+	// purpose (#5136). Refuse before any admission gate.
+	if err := prunedRestoreRefusal(title, instance); err != nil {
+		return "", err
 	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
@@ -173,7 +167,13 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Re-run the shared runtime-entry guard under the operation lock, before the
 	// worktree move. A durable kill tombstone is terminal intent: restoring
 	// around it would appear to succeed, then finishUserKill would reap the
-	// replacement on the next poll (#2208).
+	// replacement on the next poll (#2208). The prune marker is re-checked here
+	// for the same reason: a concurrent --apply that won the op-lock wait could
+	// have deleted the worktree and stamped pruned_at since the pre-lock check
+	// above, and the shared guard does not inspect it.
+	if err := prunedRestoreRefusal(req.Title, instance); err != nil {
+		return "", err
+	}
 	if err := instance.ValidateRuntimeAction(session.RuntimeActionRestoreArchived); err != nil {
 		return "", fmt.Errorf("cannot restore: %w", err)
 	}
@@ -359,4 +359,23 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 	m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return restoredArchiveResult(instance, worktreePath)
+}
+
+// prunedRestoreRefusal is the prune-tombstone refusal shared by both of
+// restoreArchivedInstance's checks — the pre-lock refuse and the under-lock
+// re-verify. A pruned row is not restorable because its worktree was deleted
+// on purpose (#5136); the message NAMES the branch that still holds the work —
+// it is the only way back — resolved through the same record-level fallback
+// the prune tombstone reports (top-level branch, then the worktree's branch).
+func prunedRestoreRefusal(title string, instance *session.Instance) error {
+	prunedAt := instance.PrunedAt()
+	if prunedAt.IsZero() {
+		return nil
+	}
+	if branch := pruneBranchFor(instance.ToInstanceData()); branch != "" {
+		return fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree was deleted; the branch %q was kept, so recreate the work from that branch",
+			title, prunedAt.Format(time.RFC3339), branch)
+	}
+	return fmt.Errorf("cannot restore session %q: it was pruned at %s — its archived worktree was deleted",
+		title, prunedAt.Format(time.RFC3339))
 }

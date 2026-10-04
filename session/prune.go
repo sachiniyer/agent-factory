@@ -45,10 +45,9 @@ func (i *Instance) IsPruned() bool {
 // inside the same critical section the tombstone persist follows:
 // the marker must never lead the physical deletion, or a crash could leave a
 // tombstoned row whose files still exist — unrestorable AND undeletable by a
-// later run, since prune skips already-marked rows. Passing the zero time
-// clears the marker — the rollback for a tombstone persist that failed after
-// the stamp was set, so the row stays eligible for the retry the error
-// prescribes.
+// later run, since prune skips already-marked rows. UnmarkPruned is the
+// rollback for a tombstone persist that failed after the stamp was set, so
+// the row stays eligible for the retry the error prescribes.
 func (i *Instance) MarkPruned(at time.Time) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -56,11 +55,26 @@ func (i *Instance) MarkPruned(at time.Time) {
 	i.touchLocked()
 }
 
+// UnmarkPruned rolls a tombstone write back after its persistence failed:
+// clears the marker AND restores updated_at, which MarkPruned advanced.
+// ArchiveTimeFor falls back to updated_at for pre-upgrade rows, so leaving
+// the stamp's time would mis-date the archive on the retry the error
+// prescribes — the row would report "archived too recently" and the
+// tombstone could never be finished.
+func (i *Instance) UnmarkPruned(restoreUpdatedAt time.Time) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.prunedAt = time.Time{}
+	i.UpdatedAt = restoreUpdatedAt
+}
+
 // ArchiveTimeFor resolves the timestamp the prune cutoff measures from: the
 // recorded archive commit, or for rows written before archived_at existed the
 // record's UpdatedAt — the best surviving approximation of when the archive
 // happened (see InstanceData.ArchivedAt for why the fallback can only
-// under-delete). CreatedAt is the floor for a record with neither.
+// under-delete). CreatedAt remains only as a degenerate floor for display —
+// PruneSkipReason refuses rows with no provable archive time before this is
+// ever consulted on a candidate.
 func ArchiveTimeFor(data InstanceData) time.Time {
 	switch {
 	case !data.ArchivedAt.IsZero():
@@ -115,6 +129,17 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 	}
 	if data.Worktree.WorktreePath == "" {
 		return "record carries no archived worktree path"
+	}
+	// A row with neither archived_at nor a genuine updated_at cannot prove
+	// when it was archived. FromInstanceData synthesizes updated_at from
+	// created_at on records that predate the field, and creation time is not
+	// archive time: a session created long ago but archived recently would
+	// pass a long cutoff on a fabricated age — exactly the rows a prune must
+	// NOT delete early. Skip; the record needs an archived_at-bearing rewrite
+	// (re-archive, or a daemon stamp) before it can be eligible.
+	if data.ArchivedAt.IsZero() &&
+		(data.UpdatedAt.IsZero() || data.UpdatedAt.Equal(data.CreatedAt)) {
+		return "archive time cannot be proven — record predates archived_at and updated_at"
 	}
 	if at := ArchiveTimeFor(data); at.IsZero() || !at.Before(archivedBefore) {
 		return fmt.Sprintf("archived too recently (%s)", ArchiveTimeFor(data).Format(time.RFC3339))

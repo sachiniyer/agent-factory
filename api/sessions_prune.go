@@ -98,6 +98,15 @@ it proceeds on the flag alone.`,
 			if !ok {
 				return jsonOut(map[string]any{"ok": false, "aborted": true, "applied": false})
 			}
+			// Bind the apply to the plan the operator just confirmed:
+			// without the identity list the daemon would re-scan, and a
+			// session that became eligible while the prompt sat open could
+			// be deleted unreviewed. Rows the plan showed under skipped were
+			// not confirmed, so they stay out too.
+			req.Only = make([]daemon.PrunePlanRef, 0, len(plan.Pruned))
+			for _, entry := range plan.Pruned {
+				req.Only = append(req.Only, daemon.PrunePlanRef{RepoID: entry.RepoID, Title: entry.Title})
+			}
 		}
 		req.Apply = true
 		resp, err := pruneSessionsViaDaemon(req)

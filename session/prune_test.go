@@ -104,6 +104,26 @@ func TestPruneSkipReason_LegacyRowFallsBackToUpdatedAt(t *testing.T) {
 		"a legacy row whose UpdatedAt is old must be eligible on the fallback")
 }
 
+// TestPruneSkipReason_UnprovableArchiveTime pins the conservative edge the
+// CreatedAt fallback cannot cover: a row that predates BOTH archived_at and
+// updated_at has its archive age synthesized from creation time — which is
+// not archive time at all, so the row must never become eligible on it.
+func TestPruneSkipReason_UnprovableArchiveTime(t *testing.T) {
+	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+
+	data := pruneEligibleData(t)
+	data.ArchivedAt = time.Time{}
+	data.UpdatedAt = data.CreatedAt // FromInstanceData's synthesized legacy shape
+	reason := PruneSkipReason(data, cutoff)
+	require.NotEmpty(t, reason, "a created==updated legacy row has no provable archive time")
+	assert.Contains(t, reason, "archive time cannot be proven")
+
+	data.UpdatedAt = time.Time{}
+	reason = PruneSkipReason(data, cutoff)
+	assert.Contains(t, reason, "archive time cannot be proven",
+		"a row with no updated_at at all cannot prove its archive age either")
+}
+
 // TestArchiveCommitStampsArchivedAt proves the single tkCommitArchive edge —
 // which every archive route converges on — records the durable timestamp the
 // cutoff measures from, and that a re-archive replaces it rather than keeping

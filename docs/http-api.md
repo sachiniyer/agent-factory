@@ -250,7 +250,10 @@ deletion and stamps `pruned_at` on each entry. `skipped` entries
 anything was touched; `incomplete` entries started deleting but could not be
 confirmed finished and need operator attention or a re-run. `older_than` is
 required and must be a positive Go duration measured from each session's
-archive time, and the request needs a scope — `repo_id` or `all: true`;
+archive time; the request needs a scope — `repo_id` or `all: true`, which are
+mutually exclusive; and `only: [{"repo_id", "title"}…]` optionally restricts
+the run to those confirmed identities (the CLI's TTY-confirm apply sends the
+dry-run plan's set);
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a

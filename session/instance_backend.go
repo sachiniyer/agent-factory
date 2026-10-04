@@ -668,6 +668,25 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 		return fmt.Errorf("cannot rename session %q: it is not archived", i.Title)
 	}
 	gw := i.gitWorktree
+	if i.IsPruned() {
+		// A pruned tombstone has no worktree to relocate — prune deleted it
+		// (#5136). Only the record's title and the still-kept branch move
+		// aside so the new session can take both names.
+		if newBranch != "" && gw != nil {
+			if err := gw.RenameBranch(newBranch); err != nil {
+				return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
+			}
+		}
+		if i.Title != newTitle {
+			i.Title = newTitle
+			i.touchLocked()
+		}
+		if gw != nil && i.Branch != gw.GetBranchName() {
+			i.Branch = gw.GetBranchName()
+			i.touchLocked()
+		}
+		return nil
+	}
 	if gw == nil {
 		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
 	}
