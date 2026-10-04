@@ -287,35 +287,37 @@ func TestStartClearsBoundMarkWhenGenerationSurvives(t *testing.T) {
 		"the bound generation answering live proves the teardown did not take")
 }
 
-// TestCloseDoesNotMarkAGenerationThatLostTheName is the next finding: the
-// bound session exited on its own and a replacement already owns the name, so
-// close()'s name-targeted kill-session will hit the replacement. Marking the
-// bound generation anyway would read its unrequested death as the teardown af
-// just asked for.
-func TestCloseDoesNotMarkAGenerationThatLostTheName(t *testing.T) {
+// TestCloseMarksAGenerationThatLostTheName pins the #5138 rule for a bound
+// generation whose name was taken over before close() ran: the bound session
+// exited on its own and a replacement already owns the name, so close()'s
+// name-targeted kill-session hits the replacement. The mark still lands —
+// close() is af's recorded teardown op, and the monitor going silent inside
+// it is the expected end of a teardown af initiated. (The unrequested death
+// that preceded the close would already have reported at ERROR had a poll
+// observed it; what follows is only the monitor retiring on schedule.)
+func TestCloseMarksAGenerationThatLostTheName(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
 	m.nameGen.Store("$9 999 888") // the name now answers for another generation
 
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.False(t, session.teardownInitiated(),
-		"the kill targets the name's owner, which is not the bound generation — its mark must not land")
+	require.True(t, session.teardownInitiated(),
+		"close() is af's recorded teardown — the mark lands whatever the name resolves to (#5138)")
 
-	// The bound generation's earlier, unrequested death then reports as the
-	// anomaly it was — not as the request close() just made.
+	// The bound monitor going silent inside af's own teardown is the expected
+	// end of that teardown, so it reports at INFO.
 	m.captureOK.Store(false)
 	infos := captureInfoLog(t)
 	errs := captureErrorLog(t)
 	session.HasUpdated()
-	require.Contains(t, errs.String(), "going silent")
-	require.NotContains(t, infos.String(), "going silent")
+	require.Contains(t, infos.String(), "going silent")
+	require.NotContains(t, errs.String(), "going silent")
 }
 
-// TestCloseMarksTheGenerationTheNameStillResolvesTo is the counterpart: while
-// the name answers for the polled generation, close() marks it exactly as
-// before — the resolution only vetoes a mark that could not describe the
-// session kill-session will reach.
+// TestCloseMarksTheGenerationTheNameStillResolvesTo is the ordinary case:
+// the name answers for the polled generation and close() marks it — the
+// resolution only ever vetoed the mark on a non-answer.
 func TestCloseMarksTheGenerationTheNameStillResolvesTo(t *testing.T) {
 	gen := &tmuxGeneration{sessionID: "$5", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
@@ -566,13 +568,13 @@ func TestCloseWedgedIdentityProbeSpendsNoFurtherBudget(t *testing.T) {
 		"kill-session must not run after the identity probe consumed the budget")
 }
 
-// TestCloseDoesNotMarkAbsentGeneration is the definitive-absence half of the
-// target-binding rule: the bound session crashed before Close ran, so the
-// name probe answers an empty session context — an ANSWERED nothing, not a
-// wedge. kill-session cannot retire a generation already gone, so marking it
-// would launder the unrequested crash into af's request and quiet the next
-// poll to INFO (Codex on #4473).
-func TestCloseDoesNotMarkAbsentGeneration(t *testing.T) {
+// TestCloseMarksAbsentGeneration is the definitive-absence half of the
+// #5138 rule: the bound session crashed before Close ran, so the name probe
+// answers an empty session context — an ANSWERED nothing, not a wedge. The
+// mark still lands — close() is af's recorded teardown, and killing an
+// already-dead session is the routine shape of archive/kill/on_complete
+// teardowns, whose monitor silence must not read as an unexpected vanish.
+func TestCloseMarksAbsentGeneration(t *testing.T) {
 	shortTmuxTimeout(t, markTestTimeout)
 	gen := &tmuxGeneration{sessionID: "$6", serverPID: "111", created: "222"}
 	session, m := boundSession(t, gen)
@@ -583,9 +585,17 @@ func TestCloseDoesNotMarkAbsentGeneration(t *testing.T) {
 
 	_, err := session.Close()
 	require.NoError(t, err)
-	require.False(t, monitorMark(t, session),
-		"the generation vanished without af asking — marking it would attribute the unrequested crash to af")
-	require.False(t, gen.teardownInitiated)
+	require.True(t, monitorMark(t, session),
+		"af asked for this session's teardown — that fact is recorded whatever the name resolves to (#5138)")
+
+	// The monitor's silence is the expected end of af's teardown — INFO, not
+	// the ERROR reserved for a vanish af's own state does not explain.
+	m.captureOK.Store(false)
+	infos := captureInfoLog(t)
+	errs := captureErrorLog(t)
+	session.HasUpdated()
+	require.Contains(t, infos.String(), "going silent")
+	require.NotContains(t, errs.String(), "going silent")
 }
 
 // TestWedgedExistenceProbeSkipsGenerationLookup keeps the rebind inside the
