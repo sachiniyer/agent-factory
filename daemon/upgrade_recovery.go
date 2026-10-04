@@ -162,24 +162,47 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	// PhaseCommitted in memory and ourTransaction is true, so without a post-run
 	// check it would hand off — stopping the daemon the new transaction has just
 	// recorded as its previous daemon, after which the replacement sees the new
-	// active journal and defers startup. Re-load the active journal and skip the
-	// hand-off if a DIFFERENT transaction now owns it. A missing journal is the
-	// normal post-commit state (Cleanup removed ours); our own ID is harmless.
-	// A read error other than "no active transaction" is not proof a newer
-	// transaction took over, and the hand-off is still id-guarded above, so we
-	// proceed rather than strand a committed upgrade whose arming already ran.
-	if newer, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
-		if newer.Journal().ID != invocation.TransactionID {
-			log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal is now for transaction %s; a newer transaction took over before the post-upgrade hand-off, so the committed daemon was not replaced",
-				invocation.TransactionID, newer.Journal().ID)
-			return nil
+	// active journal and defers startup (runDaemon's entrypoint gate,
+	// daemon/daemon.go). A re-load ALONE only narrows that window: Load takes no
+	// preparation lock, so a Prepare can publish between the re-load returning and
+	// the hand-off stopping the committed candidate, with the same daemonless
+	// result. Hold the SAME preparation lock Prepare takes (install_lock.go:
+	// WithInstallLock) across the re-load and the hand-off, so a Prepare that
+	// arrives mid-hand-off blocks until the replacement has bound the socket and
+	// a later journal no longer affects a running daemon. Inside the lock: re-load
+	// and skip the hand-off if a DIFFERENT transaction now owns the journal. A
+	// missing journal is the normal post-commit state (Cleanup removed ours); our
+	// own ID is harmless. A read error other than "no active transaction" is not
+	// proof a newer transaction took over, and the hand-off is still id-guarded
+	// above, so we proceed rather than strand a committed upgrade whose arming
+	// already ran.
+	handOff := func() {
+		if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
+			log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
 		}
-	} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
-		log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal could not be re-read after commit (%v); proceeding with the hand-off under the id-guarded phase gate",
-			invocation.TransactionID, loadErr)
 	}
-	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
-		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
+	if lockErr := upgradetxn.WithInstallLock(invocation.HomeDir, canonicalExecPath, func() error {
+		if newer, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
+			if newer.Journal().ID != invocation.TransactionID {
+				log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal is now for transaction %s; a newer transaction took over before the post-upgrade hand-off, so the committed daemon was not replaced",
+					invocation.TransactionID, newer.Journal().ID)
+				return nil
+			}
+		} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+			log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal could not be re-read after commit (%v); proceeding with the hand-off under the id-guarded phase gate",
+				invocation.TransactionID, loadErr)
+		}
+		handOff()
+		return nil
+	}); lockErr != nil {
+		// A lock acquisition failure unwinds the serialization but not a
+		// committed upgrade: the hand-off is id-guarded and phase-gated above, and
+		// the lock only narrows a race window. Proceed without it rather than strand
+		// a committed upgrade whose arming already ran — this is the pre-serialization
+		// path, not a worse one.
+		log.WarningLog.Printf("upgrade committed for transaction %s but the post-upgrade hand-off could not serialize against a concurrent Prepare (%v); proceeding under the id-guarded phase gate",
+			invocation.TransactionID, lockErr)
+		handOff()
 	}
 	return nil
 }

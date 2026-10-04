@@ -678,3 +678,116 @@ func TestRunUpgradeRecoveryActor_DoesNotAdoptAfterNewerTransactionTakesOver(t *t
 		t.Fatal("hand-off fired after a newer transaction took over the active journal; expected no adoption")
 	}
 }
+
+// TestRunUpgradeRecoveryActor_HandoffSerializedAgainstPrepare guards that the
+// re-load + hand-off hold the preparation lock Prepare takes (install_lock.go:
+// WithInstallLock), closing the window the one-shot re-load left open. A re-load
+// alone cannot stop a second `af upgrade` from publishing a new active.json
+// between the check and adoptAfterUpgradeCommitFn: Load takes no preparation
+// lock, so a Prepare landing in that window records the committed candidate as
+// the new transaction's previous daemon and the replacement this actor starts
+// then exits at runDaemon's entrypoint gate (an in-progress upgrade), leaving the
+// home daemonless. Holding the lock across the hand-off serializes the Publish
+// after it. The test drives a real Prepare against a second executable while the
+// hand-off is mid-flight (the adopt stub blocks on a channel) and asserts the
+// Prepare is still blocked — proving the lock is held — then lets the hand-off
+// complete and asserts the Prepare publishes only after the lock is released.
+func TestRunUpgradeRecoveryActor_HandoffSerializedAgainstPrepare(t *testing.T) {
+	home := stubForwardEnv(t)
+	exe := filepath.Join(t.TempDir(), "af")
+	if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatalf("write fake previous binary: %v", err)
+	}
+	systemdJob := upgradetxn.RecoveryJob{
+		Kind:     upgradetxn.RecoveryJobSystemd,
+		Name:     "agent-factory-upgrade-recovery-txn-1.service",
+		UnitPath: "/tmp/agent-factory-upgrade-recovery-txn-1.service",
+	}
+	if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+		Daemon: upgradetxn.DaemonSnapshot{
+			WasRunning: true, BootID: "boot-1",
+			Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		},
+		RecoveryJob: systemdJob,
+	}); err != nil {
+		t.Fatalf("Prepare txn-1: %v", err)
+	}
+
+	// Simulate this transaction's commit: PhaseCommitted and lease.Cleanup removing
+	// active.json, leaving no journal for the re-load to see.
+	runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) (error, upgradetxn.Phase) {
+		_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+		return nil, upgradetxn.PhaseCommitted
+	}
+
+	// Block the hand-off mid-flight so the test can race a real Prepare against the
+	// lock the hand-off holds. adoptStarted signals the hand-off is running (the
+	// preparation lock is held); adoptRelease lets it complete.
+	adoptStarted := make(chan struct{})
+	adoptRelease := make(chan struct{})
+	adopted := false
+	adoptAfterUpgradeCommitFn = func(string, string) error {
+		adopted = true
+		close(adoptStarted)
+		<-adoptRelease
+		return nil
+	}
+
+	actorErr := make(chan error, 1)
+	go func() {
+		actorErr <- RunUpgradeRecoveryActor(context.Background(),
+			upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"})
+	}()
+
+	// The hand-off is now running under the preparation lock.
+	<-adoptStarted
+
+	// A concurrent Prepare for a second transaction must block on that lock. A
+	// different executable keeps the staged-binary artifacts in separate
+	// directories so txn-2's Prepare does not see txn-1's as a blocking foreign
+	// artifact; the only contention is the home-wide prepare.lock.
+	newerExe := filepath.Join(t.TempDir(), "af-newer")
+	if err := os.WriteFile(newerExe, []byte("newer-previous-binary"), 0o755); err != nil {
+		t.Fatalf("write newer fake previous binary: %v", err)
+	}
+	prepareDone := make(chan error, 1)
+	go func() {
+		_, err := upgradetxn.Prepare(upgradetxn.Plan{
+			ID: "txn-2", HomeDir: home, ExecutablePath: newerExe,
+			FromVersion: "1.0.200", ToVersion: "1.0.300", Candidate: []byte("newer-candidate"),
+			Daemon: upgradetxn.DaemonSnapshot{
+				WasRunning: true, BootID: "boot-2",
+				Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionAdHoc},
+			},
+			RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached},
+		})
+		prepareDone <- err
+	}()
+
+	// The hand-off holds the lock, so the Prepare cannot have published yet.
+	select {
+	case err := <-prepareDone:
+		t.Fatalf("Prepare completed while the hand-off holds the preparation lock; the race is not serialized: %v", err)
+	case <-time.After(time.Second):
+		// Still blocked — the preparation lock is held for the duration of the hand-off.
+	}
+
+	// Let the hand-off finish. Releasing the lock lets the queued Prepare publish.
+	close(adoptRelease)
+	if err := <-actorErr; err != nil {
+		t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+	}
+	if !adopted {
+		t.Fatal("hand-off did not run; expected the committed candidate to be adopted")
+	}
+	select {
+	case err := <-prepareDone:
+		if err != nil {
+			t.Fatalf("Prepare txn-2 after the hand-off released the lock: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Prepare txn-2 did not complete after the hand-off released the preparation lock")
+	}
+}
