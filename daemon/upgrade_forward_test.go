@@ -608,3 +608,73 @@ func TestRunUpgradeRecoveryActor_DoesNotAdoptAfterRollback(t *testing.T) {
 		t.Fatal("hand-off fired after a successful rollback; expected no adoption")
 	}
 }
+
+// TestRunUpgradeRecoveryActor_DoesNotAdoptAfterNewerTransactionTakesOver guards
+// the post-run active-journal check: the phase gate (ourTransaction &&
+// PhaseCommitted) rules out rollback and abort, but NOT a newer transaction that
+// races in after our commit. Our Cleanup() removes active.json, and
+// upgradetxn.Prepare is NOT serialized by the recovery lease (it accepts the
+// now-absent journal), so a second `af upgrade` can publish a new active.json
+// in the window between Cleanup and the hand-off. Without the re-load, this
+// old actor still holds PhaseCommitted in memory and would stop the daemon the
+// new transaction has just recorded as its previous daemon. The re-load finds the
+// newer transaction's journal (a different ID) and skips the hand-off.
+func TestRunUpgradeRecoveryActor_DoesNotAdoptAfterNewerTransactionTakesOver(t *testing.T) {
+	home := stubForwardEnv(t)
+	exe := filepath.Join(t.TempDir(), "af")
+	if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatalf("write fake previous binary: %v", err)
+	}
+	systemdJob := upgradetxn.RecoveryJob{
+		Kind:     upgradetxn.RecoveryJobSystemd,
+		Name:     "agent-factory-upgrade-recovery-txn-1.service",
+		UnitPath: "/tmp/agent-factory-upgrade-recovery-txn-1.service",
+	}
+	if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+		Daemon: upgradetxn.DaemonSnapshot{
+			WasRunning: true, BootID: "boot-1",
+			Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		},
+		RecoveryJob: systemdJob,
+	}); err != nil {
+		t.Fatalf("Prepare txn-1: %v", err)
+	}
+
+	runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) (error, upgradetxn.Phase) {
+		// Simulate this transaction's lease.Cleanup removing active.json...
+		_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+		// ...then a newer transaction's Prepare publishing a new active.json
+		// before this actor reaches the hand-off. Prepare is not serialized by
+		// the recovery lease, so it accepts the now-absent journal. A different
+		// executable keeps the staged-binary artifacts in separate directories
+		// so txn-2's Prepare does not see txn-1's as a blocking foreign artifact.
+		newerExe := filepath.Join(t.TempDir(), "af")
+		if err := os.WriteFile(newerExe, []byte("newer-previous-binary"), 0o755); err != nil {
+			t.Fatalf("write newer fake previous binary: %v", err)
+		}
+		if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+			ID: "txn-2", HomeDir: home, ExecutablePath: newerExe,
+			FromVersion: "1.0.200", ToVersion: "1.0.300", Candidate: []byte("newer-candidate"),
+			Daemon: upgradetxn.DaemonSnapshot{
+				WasRunning: true, BootID: "boot-2",
+				Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionAdHoc},
+			},
+			RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached},
+		}); err != nil {
+			t.Fatalf("Prepare txn-2: %v", err)
+		}
+		return nil, upgradetxn.PhaseCommitted
+	}
+	adopted := false
+	adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
+
+	if err := RunUpgradeRecoveryActor(context.Background(),
+		upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {
+		t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+	}
+	if adopted {
+		t.Fatal("hand-off fired after a newer transaction took over the active journal; expected no adoption")
+	}
+}

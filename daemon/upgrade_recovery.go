@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -152,6 +153,30 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	// committed candidate.
 	if !ourTransaction || phase != upgradetxn.PhaseCommitted {
 		return nil
+	}
+	// The phase gate rules out rollback and abort, but NOT a NEWER transaction
+	// that races in after our commit: our Cleanup() removes active.json, and
+	// upgradetxn.Prepare is NOT serialized by the recovery lease (it accepts the
+	// now-absent journal), so a second `af upgrade` can publish a new active.json
+	// in the window between Cleanup and this branch. This old actor still holds
+	// PhaseCommitted in memory and ourTransaction is true, so without a post-run
+	// check it would hand off — stopping the daemon the new transaction has just
+	// recorded as its previous daemon, after which the replacement sees the new
+	// active journal and defers startup. Re-load the active journal and skip the
+	// hand-off if a DIFFERENT transaction now owns it. A missing journal is the
+	// normal post-commit state (Cleanup removed ours); our own ID is harmless.
+	// A read error other than "no active transaction" is not proof a newer
+	// transaction took over, and the hand-off is still id-guarded above, so we
+	// proceed rather than strand a committed upgrade whose arming already ran.
+	if newer, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
+		if newer.Journal().ID != invocation.TransactionID {
+			log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal is now for transaction %s; a newer transaction took over before the post-upgrade hand-off, so the committed daemon was not replaced",
+				invocation.TransactionID, newer.Journal().ID)
+			return nil
+		}
+	} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+		log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal could not be re-read after commit (%v); proceeding with the hand-off under the id-guarded phase gate",
+			invocation.TransactionID, loadErr)
 	}
 	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
 		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
