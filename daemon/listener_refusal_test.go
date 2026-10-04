@@ -785,6 +785,50 @@ func TestUpgradeJournalLossMidApplyKeepsFloorOnRetainedSocket(t *testing.T) {
 		"a retained network socket under a tokenless apply keeps demanding the bearer token")
 }
 
+// TestApplyConfigExposureNoticeReadsProbationFloor pins the classification gap
+// (#5137 review): an upgrade candidate whose journal expects the socket bound
+// floors every kept-bound listener to the bearer token — including a bind the
+// apply itself just made for an OPTED-IN tokenless network posture. The socket
+// answers 401, so the apply-time exposure notice must classify the EFFECTIVE
+// posture (require_token OR floor), not the file's tokenless request —
+// otherwise ApplyConfig warns "serves its full control API … with no
+// authentication" about a socket that authenticates every caller.
+func TestApplyConfigExposureNoticeReadsProbationFloor(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.RequireToken = true
+	m, wl := upgradeCandidateListeners(t, cfg, "txn-floor")
+	stubUpgradeJournal(t, upgradetxn.Journal{
+		ID:     "txn-floor",
+		Daemon: upgradetxn.DaemonSnapshot{Listeners: upgradetxn.ListenerExpectation{TCPBound: true}},
+	}, nil)
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+
+	// The operator opts in to the tokenless network listener mid-upgrade. The
+	// apply binds it — floored, because the journal window is open.
+	tomlPath := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), config.TomlConfigFileName)
+	require.NoError(t, os.WriteFile(tomlPath,
+		[]byte("[network]\nlisten_addr = '0.0.0.0:0'\nrequire_token = false\nallow_unauthenticated_network = true\n"), 0600))
+
+	result, err := m.ApplyConfig()
+	require.NoError(t, err)
+	require.Empty(t, result.FailedListenerKeys, "the opted-in bind succeeds — floored, not refused")
+	require.True(t, m.probationTokenFloor.Load(),
+		"precondition: the journaled-candidate floor is armed for the kept socket")
+
+	bound := m.lifecycle.snapshot().listeners.TCPBoundAddr
+	require.NotEmpty(t, bound)
+	require.Equal(t, http.StatusUnauthorized, getStatus(t, bound, "/v1/health"),
+		"precondition: the floored socket demands the bearer token despite the tokenless file")
+
+	for _, w := range result.Warnings {
+		require.NotContains(t, w, "af serves its",
+			"the exposure notice must not claim unauthenticated service while the floor gates it: %q", w)
+	}
+}
+
 // TestTrackerRefusesLateHijacksFromSeveredGenerations pins the generation
 // watermark (#5137 review): a WS handler whose upgrade passed the old gate
 // before a policy retire can report StateHijacked only AFTER a new listener has

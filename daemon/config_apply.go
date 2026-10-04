@@ -223,9 +223,17 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	preReconcileServingAddr := old.ListenAddr
 	preReconcilePreviewAddr := old.PreviewListenAddr
 	preReconcileRefusal := ""
+	// The probation token floor (upgrade-candidate window) makes the EFFECTIVE
+	// token demand stricter than either config generation says: a candidate
+	// keeping a journaled socket bound answers 401 even under a tokenless
+	// apply. wasExposed must read the pre-apply floor — retireWebBeforePostureSwap
+	// itself may arm it — and servingExposed the post-reconcile one, so the
+	// notice's transition test tracks real exposure rather than the file.
+	preReconcileFloored := false
 	if m.webListeners != nil {
 		preReconcileServingAddr = m.ListenerAddress("network.listen_addr")
 		preReconcilePreviewAddr = m.ListenerAddress("network.preview_listen_addr")
+		preReconcileFloored = m.probationTokenFloor.Load()
 		if m.lifecycle != nil {
 			preReconcileRefusal = m.lifecycle.snapshot().listeners.TCPRefusalReason
 		}
@@ -370,12 +378,20 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// daemon that has been continuously exposed since the prior apply, causing the
 	// transition gate to fire — and the notice to re-emit — on every subsequent
 	// unrelated save.
-	wasExposed := config.ListenerServesUnauthenticatedNetwork(preReconcileServingAddr, old.RequireToken)
+	wasExposed := config.ListenerServesUnauthenticatedNetwork(preReconcileServingAddr,
+		old.RequireToken || preReconcileFloored)
 	servingAddr := newCfg.ListenAddr
 	if m.webListeners != nil {
 		servingAddr = m.ListenerAddress("network.listen_addr")
 	}
-	servingExposed := config.ListenerServesUnauthenticatedNetwork(servingAddr, newCfg.RequireToken)
+	// The floor is part of the serving posture: an upgrade candidate holding a
+	// journaled socket demands the bearer token even though newCfg says
+	// tokenless, so the notice must not claim an unauthenticated service that
+	// answers 401. The transition still fires the moment probation ends — a
+	// later apply (or the post-adoption daemon's own bind notice) reports the
+	// now-genuine exposure.
+	servingExposed := config.ListenerServesUnauthenticatedNetwork(servingAddr,
+		newCfg.RequireToken || m.probationTokenFloor.Load())
 	if !wasExposed && servingExposed {
 		// ListenerExposureNotice formats the address out of cfg.ListenAddr, so
 		// build a throwaway config carrying the SERVING bound address: the notice
