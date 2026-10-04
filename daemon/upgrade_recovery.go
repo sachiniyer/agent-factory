@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -25,6 +24,10 @@ var (
 // without a real service manager, a spawned daemon, or a live control socket.
 // upgradeRecoveryHealthFn drives validatePreviousDaemon's readiness sequence;
 // the start hooks let startPreviousDaemon's owner dispatch be tested hermetically.
+// runRecoveryActorFn returns the supervisor's terminal Phase alongside its exit
+// code so RunUpgradeRecoveryActor can gate the post-commit hand-off on
+// PhaseCommitted rather than on the journal-gone signal, which fires identically
+// after commit, rollback, and abort (all three remove the journal).
 var (
 	upgradeRecoveryHealthFn = Health
 	startPreviousViaUnitFn  = RestartAutostartUnit
@@ -120,23 +123,35 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	}
 
 	supervisor := upgradetxn.Supervisor{Operations: productionSupervisorOperations()}
-	if err := runRecoveryActorFn(ctx, invocation, supervisor); err != nil {
-		return err
+	runErr, phase := runRecoveryActorFn(ctx, invocation, supervisor)
+	if runErr != nil {
+		return runErr
 	}
 
-	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil for
-	// a clean stand-down (a foreign/stale transaction we had no authority over),
-	// ErrRecoveryActive, and a terminal rollback (which restores the previous daemon
-	// under its own owner). Hand off ONLY on a positive commit signal — this was OUR
-	// transaction AND its journal is now gone (Cleanup ran). rollback_failed
-	// deliberately RETAINS the journal, and a newer transaction leaves a different one
-	// — both leave a journal, so both are excluded here. The hand-off is additionally
-	// id-guarded so it can only ever stop our own committed candidate.
-	if !ourTransaction {
+	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil
+	// for a clean stand-down (a foreign/stale transaction we had no authority
+	// over, ErrRecoveryActive, no active transaction) and for terminal rollback
+	// and abort. PhaseRolledBack and PhaseAborted both call lease.Cleanup() —
+	// removing the journal, the same signal a commit produces — and have their
+	// sentinels (ErrUpgradeRolledBack / ErrUpgradeAborted) converted to nil so
+	// the recovery job exits 0, so all three of commit, rollback, and abort
+	// present "nil + journal gone" to this caller. Gating on "journal gone"
+	// (the old predicate) fired the hand-off after rollback and abort, emitting
+	// "committed upgrade candidate" WARNINGs for a candidate that does not
+	// exist.
+	//
+	// Hand off ONLY on a positive commit signal: this was OUR transaction AND
+	// the supervisor's terminal phase is PhaseCommitted. The phase is the durable
+	// verdict the supervisor persisted before Cleanup removed the journal; it
+	// survives Cleanup in-memory (storage.go cleanup never mutates
+	// txn.journal.Phase), so runRecoveryActorWith returns it alongside the
+	// exit-0 nil. rollback_failed does NOT remove the journal and returns
+	// PhaseRollbackFailed; a newer/foreign transaction stands down before
+	// supervise (empty phase); both are excluded here. The hand-off is
+	// additionally id-guarded (ourTransaction) so it can only ever stop our own
+	// committed candidate.
+	if !ourTransaction || phase != upgradetxn.PhaseCommitted {
 		return nil
-	}
-	if _, loadErr := upgradetxn.Load(invocation.HomeDir); !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
-		return nil // a journal is still present — not a completed commit of our transaction
 	}
 	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
 		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
