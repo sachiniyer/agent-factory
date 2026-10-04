@@ -27,7 +27,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/KillSession` | `title`, `repo_id`, `id` | Tear down a session: kill its tmux/agent and remove its worktree and record. |
 | `POST` | `/v1/ArchiveSession` | `title`, `repo_id`, `id` | Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it. |
 | `POST` | `/v1/RestoreArchived` | `title`, `repo_id`, `id` | Restore an archived session: move its worktree back next to the repo and re-spawn the agent. |
-| `POST` | `/v1/PruneSessions` | `repo_id`, `all`, `older_than`, `apply` | Prune old archived sessions: dry-run lists what would be reclaimed; apply deletes archived worktrees, tombstones the records, and keeps branches. |
+| `POST` | `/v1/PruneSessions` | `repo_id`, `all`, `older_than`, `apply`, `only` | Prune old archived sessions: dry-run lists what would be reclaimed; apply deletes archived worktrees, tombstones the records, and keeps branches. |
 | `POST` | `/v1/RestoreSession` | `title`, `repo_id`, `id`, `expected_daemon_boot_id`, `force_reap` | Restore an archived, Lost, or Dead session; an optional expected daemon boot ID refuses before admission if the process changed. |
 | `POST` | `/v1/SendPrompt` | `title`, `repo_id`, `prompt`, `id` | Send a prompt to an existing session's agent. |
 | `POST` | `/v1/ResumeFromLimit` | `title`, `repo_id`, `id` | Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous. |
