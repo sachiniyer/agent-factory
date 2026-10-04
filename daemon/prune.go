@@ -13,11 +13,18 @@ import (
 )
 
 // This file owns `af sessions prune` (#5136): the manual, opt-in reclaim for
-// archived sessions whose worktrees and provider captures accumulate forever
-// (the motivating fleet measured ~146G under <AF home>/archived). The CLI is a
-// thin flag layer; everything destructive happens HERE, inside the daemon's
-// existing lifecycle fences, so a prune can never race an archive, restore,
-// kill, or reload into a half-deleted state.
+// archived sessions whose worktrees accumulate forever (the motivating fleet
+// measured ~146G under <AF home>/archived). The CLI is a thin flag layer;
+// everything destructive happens HERE, inside the daemon's existing lifecycle
+// fences, so a prune can never race an archive, restore, kill, or reload into
+// a half-deleted state.
+//
+// Prune deletes ONLY af-owned state: the archived worktree under <AF
+// home>/archived plus the repo's stale `git worktree` registration. Provider
+// homes are deliberately untouched — a session's Claude/Codex transcript
+// files belong to the agent, not af, and can be live elsewhere (a carried
+// conversation, a handoff, a manual `claude --resume`), so deleting them by
+// the record's ids would be over-deletion af cannot prove safe.
 //
 // What apply does to an eligible row, in order and per session:
 //
@@ -30,15 +37,13 @@ import (
 //      audited, bounded removal that prunes the repo's stale `git worktree`
 //      registrations and verifies deregistration afterwards. The BRANCH is
 //      deliberately untouched: it is the only thing the tombstone promises.
-//   4. Deletes the session's provider transcript/capture files, matched by
-//      the conversation ids the record carries (never by path guessing).
-//   5. Stamps pruned_at on the record and persists+publishes it — the
+//   4. Stamps pruned_at on the record and persists+publishes it — the
 //      tombstone, which keeps the row listed with title/branch/archive-time.
 //
-// Order (3)→(4)→(5) is deliberate: the durable marker always lands AFTER the
-// physical deletions it documents. A crash between them leaves an archived
+// Order (3)→(4) is deliberate: the durable marker always lands AFTER the
+// physical deletion it documents. A crash between them leaves an archived
 // row whose files are gone — a state a re-run of the same command finds still
-// eligible and finishes, since every deletion step is idempotent. The
+// eligible and finishes, since the deletion step is idempotent. The
 // inverse ordering (tombstone first) would leave files stranded behind a
 // "already pruned" skip with no restore path.
 
@@ -118,9 +123,6 @@ type pruneCandidate struct {
 	repoID   string
 	instance *session.Instance
 	entry    PrunedSessionEntry
-	// convFiles is resolved at scan time so the dry-run size and the apply
-	// deletion agree on the same file set.
-	convFiles session.PruneConversationFiles
 }
 
 // PruneSessions evaluates archived sessions against req and, when Apply is
@@ -212,12 +214,6 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	warnings = append(warnings, ghostWarns...)
 	skipped = append(skipped, ghosts...)
 
-	afHome, err := config.GetConfigDir()
-	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("cannot resolve the agent-factory home for transcript cleanup: %v", err))
-	}
-	fileIndex := session.NewPruneFileIndex(afHome)
-
 	var candidates []pruneCandidate
 	for _, row := range rows {
 		if deleting[row.repoID] {
@@ -261,20 +257,9 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 		if sizeErr != nil {
 			warnings = append(warnings, fmt.Sprintf("session %q: could not fully measure %s: %v", data.Title, data.Worktree.WorktreePath, sizeErr))
 		}
-		convFiles, convWarns := fileIndex.FilesFor(data)
-		warnings = append(warnings, convWarns...)
-		convBytes := convFiles.Bytes
-		for _, dir := range convFiles.Dirs {
-			dirBytes, dirErr := session.DirSizeBytes(dir)
-			if dirErr != nil {
-				warnings = append(warnings, fmt.Sprintf("session %q: could not fully measure %s: %v", data.Title, dir, dirErr))
-			}
-			convBytes += dirBytes
-		}
-		entry.ReclaimedBytes = worktreeBytes + convBytes
+		entry.ReclaimedBytes = worktreeBytes
 		candidates = append(candidates, pruneCandidate{
-			key: row.key, repoID: row.repoID, instance: row.instance,
-			entry: entry, convFiles: convFiles,
+			key: row.key, repoID: row.repoID, instance: row.instance, entry: entry,
 		})
 	}
 	sort.Slice(candidates, func(a, b int) bool {
@@ -351,11 +336,7 @@ func (m *Manager) pruneOneSession(cand pruneCandidate, cutoff time.Time) ([]stri
 		return warnings, true, fmt.Errorf("removing archived worktree %s: %w", live.Worktree.WorktreePath, err)
 	}
 
-	// (2) The provider transcript/capture files, resolved at scan time from
-	// the record's own conversation ids.
-	warnings = append(warnings, session.DeleteConversationFiles(cand.convFiles)...)
-
-	// (3) The tombstone, persisted and announced in the repo-ordered critical
+	// (2) The tombstone, persisted and announced in the repo-ordered critical
 	// section — the point of no return for the RECORD this time. Files are
 	// already gone, so a failure here is reported loudly: the row stays
 	// eligible and a re-run finishes the marker (every deletion above is

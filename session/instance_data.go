@@ -63,8 +63,8 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
 	}
-	// A pruned tombstone stays listed but is not restorable — its worktree and
-	// captures are gone (#5136). Suppressing the projected verb keeps the web
+	// A pruned tombstone stays listed but is not restorable — its worktree is
+	// gone (#5136). Suppressing the projected verb keeps the web
 	// action gate honest instead of advertising a Restore that must refuse.
 	if !i.prunedAt.IsZero() {
 		data.LifecycleAction = LifecycleActionNone

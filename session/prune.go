@@ -33,16 +33,16 @@ func (i *Instance) PrunedAt() time.Time {
 }
 
 // IsPruned reports whether this row is a prune tombstone: still listed, but
-// its archived worktree and capture files are gone and only its git branch
-// remains. It stays LiveArchived on the liveness axis — the tombstone is a
-// deletion marker layered on the archived state, not a new liveness.
+// its archived worktree is gone and only its git branch remains. It stays
+// LiveArchived on the liveness axis — the tombstone is a deletion marker
+// layered on the archived state, not a new liveness.
 func (i *Instance) IsPruned() bool {
 	return !i.PrunedAt().IsZero()
 }
 
-// MarkPruned records that this session's archived worktree and capture files
-// were deleted. Called only by the daemon's prune path, after the deletions
-// commit and inside the same critical section the tombstone persist follows:
+// MarkPruned records that this session's archived worktree was deleted.
+// Called only by the daemon's prune path, after the deletion commits and
+// inside the same critical section the tombstone persist follows:
 // the marker must never lead the physical deletion, or a crash could leave a
 // tombstoned row whose files still exist — unrestorable AND undeletable by a
 // later run, since prune skips already-marked rows. Passing the zero time
@@ -102,7 +102,7 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 		return "reserved session title"
 	}
 	if !data.UsesLocalTmux() {
-		return "remote session — no local worktree or captures to reclaim"
+		return "remote session — no local worktree to reclaim"
 	}
 	if data.Worktree.ExternalWorktree {
 		return "external (in-place) worktree is user-owned"
@@ -157,39 +157,4 @@ func DirSizeBytes(root string) (int64, error) {
 		return nil
 	})
 	return total, firstErr
-}
-
-// RecordedConversations collects every provider conversation identity a record
-// carries: the Agent tab's current conversation, every tab's recorded
-// conversation, and every completed handoff's outgoing conversation. Those ids
-// are what prune uses to find the session's transcript files — the ids are
-// uuids embedded in provider file names, so a conversation copied across
-// account homes by an account swap is still found by name rather than by a
-// path af would have to re-derive (#5136).
-func RecordedConversations(data InstanceData) []AgentConversationData {
-	seen := make(map[string]struct{})
-	var out []AgentConversationData
-	add := func(conv AgentConversationData) {
-		if !conv.HasID() {
-			return
-		}
-		key := conv.Agent + "\x00" + conv.ID
-		if _, dup := seen[key]; dup {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, conv)
-	}
-	if data.AgentConversation != nil {
-		add(*data.AgentConversation)
-	}
-	for _, tab := range data.Tabs {
-		if tab.Conversation != nil {
-			add(*tab.Conversation)
-		}
-		for _, h := range tab.Handoffs {
-			add(h.From)
-		}
-	}
-	return out
 }

@@ -324,11 +324,11 @@ type Instance struct {
 	archivedAt time.Time
 
 	// prunedAt records when `af sessions prune --apply` deleted this archived
-	// session's files — its archived worktree and its provider transcript/
-	// capture files — and turned the record into a tombstone (#5136). A row
-	// carrying prunedAt keeps only title, branch, and timestamps: it stays
-	// listed, restore refuses naming the kept branch, and the row is finally
-	// removable by kill. Zero on every unpruned row. Persisted; guarded by mu.
+	// session's archived worktree and turned the record into a tombstone
+	// (#5136). A row carrying prunedAt keeps only title, branch, and
+	// timestamps: it stays listed, restore refuses naming the kept branch,
+	// and the row is finally removable by kill. Zero on every unpruned row.
+	// Persisted; guarded by mu.
 	prunedAt time.Time
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).

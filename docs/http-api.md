@@ -282,7 +282,7 @@ RFC 3339 timestamps:
 | `created_at` | When the session was created. |
 | `updated_at` | When the session state last mutated: lifecycle, identity, prompt delivery, tab roster, or pane activity. Reads, serialization, and cache refreshes do not advance it. |
 | `archived_at` | When the session's archive move committed; `--older-than` for `PruneSessions` is measured from it. Omitted on live sessions; records archived before the field existed report nothing and prune falls back to `updated_at`. |
-| `pruned_at` | When `PruneSessions --apply` deleted the session's archived worktree and captures and tombstoned the record. Present only on pruned tombstones: the row stays listed, restore refuses naming the kept branch, and `lifecycle_action` is suppressed so no client advertises restore. |
+| `pruned_at` | When `PruneSessions --apply` deleted the session's archived worktree and tombstoned the record. Present only on pruned tombstones: the row stays listed, restore refuses naming the kept branch, and `lifecycle_action` is suppressed so no client advertises restore. |
 
 `updated_at` survives saves and restarts. Older records retain their last save
 time; a missing or zero stored value falls back to `created_at` when loaded.

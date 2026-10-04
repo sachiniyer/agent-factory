@@ -203,11 +203,11 @@ func TestPruneSessions_KillsInFlightClaimIsSkipped(t *testing.T) {
 	assert.True(t, inst.PrunedAt().IsZero())
 }
 
-// TestPruneSessions_DeletesProviderCaptures: apply removes the session's
-// recorded transcript files from the provider home, while a foreign
-// conversation sharing the project directory is untouched — the index-by-id
-// rule that keeps prune from over-deleting.
-func TestPruneSessions_DeletesProviderCaptures(t *testing.T) {
+// TestPruneSessions_PreservesProviderFiles: provider transcript files belong
+// to the agent, not af — a pruned session's conversation may be live
+// elsewhere via a carry, a handoff, or a manual resume (#5136 review).
+// Apply must leave every byte of the provider home untouched.
+func TestPruneSessions_PreservesProviderFiles(t *testing.T) {
 	manager, repoID, _, inst, _ := seedPrunableArchive(t, "captured-row")
 
 	claudeHome := t.TempDir()
@@ -223,18 +223,17 @@ func TestPruneSessions_DeletesProviderCaptures(t *testing.T) {
 	projectDir := filepath.Join(claudeHome, "projects", "-some-encoded-path")
 	require.NoError(t, os.MkdirAll(projectDir, 0o755))
 	transcript := filepath.Join(projectDir, convID+".jsonl")
-	foreign := filepath.Join(projectDir, "00000000-0000-0000-0000-00000000beef.jsonl")
 	require.NoError(t, os.WriteFile(transcript, []byte("captures"), 0o644))
-	require.NoError(t, os.WriteFile(foreign, []byte("other session"), 0o644))
+	before, err := os.ReadFile(transcript)
+	require.NoError(t, err)
 
 	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
 	require.NoError(t, err)
 	require.Len(t, resp.Pruned, 1)
 
-	_, err = os.Stat(transcript)
-	assert.True(t, os.IsNotExist(err), "the session's own transcript must be deleted")
-	_, err = os.Stat(foreign)
-	require.NoError(t, err, "a foreign conversation in the same project dir must remain")
+	after, err := os.ReadFile(transcript)
+	require.NoError(t, err, "provider transcript files belong to the agent — prune must not delete them")
+	assert.Equal(t, before, after, "the provider file must be byte-identical after prune")
 }
 
 // TestPruneSessions_RequiresScopeAndDuration: the validation that keeps the

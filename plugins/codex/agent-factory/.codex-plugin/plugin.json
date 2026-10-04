@@ -1,6 +1,6 @@
 {
   "name": "agent-factory",
-  "version": "3.18.2950264072+sha256.afd97508371edfb2",
+  "version": "3.19.1363933226+sha256.514bf82ab28f806a",
   "description": "Run and schedule AI coding agents in isolated git worktrees with the Agent Factory (af) CLI",
   "author": {
     "name": "Agent Factory",

@@ -22,9 +22,9 @@ var (
 )
 
 // `af sessions prune` is the manual, opt-in reclaim for archived sessions
-// (#5136): the archive keeps every shelved worktree and provider capture
-// forever, and the fleet that motivated it measured ~146G under the archive
-// root. The command is deliberately NOT a retention policy — it deletes only
+// (#5136): the archive keeps every shelved worktree forever, and the fleet
+// that motivated it measured ~146G under the archive root. The command is
+// deliberately NOT a retention policy — it deletes only
 // what an explicit --apply asks for, keeps each session's branch and a small
 // tombstone record, and leaves restore to refuse with a pointer back to the
 // branch rather than a silent failure.
@@ -36,10 +36,10 @@ session's archive time.
 
 Without --apply this is a dry run: it lists each archived session it would
 prune (title, archive time, bytes reclaimed) plus a total, and changes
-nothing. With --apply it deletes those sessions' archived worktrees and
-provider conversation captures, runs 'git worktree prune' for the repo, and
-tombstones each record — the row stays listed in 'af sessions list --all'
-with its title, branch, archive time and prune time.
+nothing. With --apply it deletes those sessions' archived worktrees, runs
+'git worktree prune' for the repo, and tombstones each record — the row
+stays listed in 'af sessions list --all' with its title, branch, archive
+time and prune time.
 
 Pruning never deletes a branch. 'af sessions restore' on a pruned session
 refuses and names the kept branch, so the work can be recreated from it.
@@ -120,7 +120,7 @@ func confirmPruneApply(out io.Writer, in io.Reader, plan daemon.PruneSessionsRes
 	if len(plan.Skipped) > 0 {
 		fmt.Fprintf(out, "%d session(s) skipped (see dry-run output for reasons).\n", len(plan.Skipped))
 	}
-	fmt.Fprint(out, "Delete their archived worktrees and conversation captures? Branches and tombstone records are kept. [y/N] ")
+	fmt.Fprint(out, "Delete their archived worktrees? Branches and tombstone records are kept. [y/N] ")
 	answer, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil && err != io.EOF {
 		return false, fmt.Errorf("reading confirmation: %w", err)

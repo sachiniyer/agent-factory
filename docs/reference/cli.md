@@ -2048,10 +2048,10 @@ session's archive time.
 
 Without --apply this is a dry run: it lists each archived session it would
 prune (title, archive time, bytes reclaimed) plus a total, and changes
-nothing. With --apply it deletes those sessions' archived worktrees and
-provider conversation captures, runs 'git worktree prune' for the repo, and
-tombstones each record — the row stays listed in 'af sessions list --all'
-with its title, branch, archive time and prune time.
+nothing. With --apply it deletes those sessions' archived worktrees, runs
+'git worktree prune' for the repo, and tombstones each record — the row
+stays listed in 'af sessions list --all' with its title, branch, archive
+time and prune time.
 
 Pruning never deletes a branch. 'af sessions restore' on a pruned session
 refuses and names the kept branch, so the work can be recreated from it.

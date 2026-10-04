@@ -193,36 +193,3 @@ func TestDirSizeBytes(t *testing.T) {
 	require.NoError(t, err, "a root deleted out-of-band is already reclaimed, not an error")
 	assert.Zero(t, missing)
 }
-
-// TestRecordedConversations proves the index collects EVERY identity the
-// record carries — the mirrored agent conversation, per-tab conversations,
-// and each handoff's outgoing side — deduplicated, because a carried
-// conversation legitimately appears in two of those places.
-func TestRecordedConversations(t *testing.T) {
-	convA := AgentConversationData{Agent: tmux.ProgramClaude, ID: "aaaaaaaa-0000-0000-0000-000000000001"}
-	convB := AgentConversationData{Agent: tmux.ProgramCodex, ID: "bbbbbbbb-0000-0000-0000-000000000002"}
-	convC := AgentConversationData{Agent: tmux.ProgramClaude, ID: "cccccccc-0000-0000-0000-000000000003"}
-
-	data := InstanceData{
-		AgentConversation: &convA,
-		Tabs: []TabData{{
-			Conversation: &convA, // same id as the mirror: dedup must win
-			Handoffs: []AgentHandoff{
-				{From: convB},
-				{From: convC},
-			},
-		}, {
-			Conversation: &AgentConversationData{Agent: tmux.ProgramClaude}, // no id: not a conversation
-		}},
-	}
-
-	convs := RecordedConversations(data)
-	ids := make(map[string]bool)
-	for _, c := range convs {
-		ids[c.Agent+"/"+c.ID] = true
-	}
-	require.Len(t, convs, 3)
-	assert.True(t, ids["claude/"+convA.ID])
-	assert.True(t, ids["codex/"+convB.ID])
-	assert.True(t, ids["claude/"+convC.ID])
-}
