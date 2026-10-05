@@ -9484,6 +9484,180 @@ test("#4975: a passing head never pays for the per-run decision read", async () 
     "a head whose newest decision succeeded has no blocked source to recover");
 });
 
+// Codex on #5073: the head's stored check-run array is last-writer-wins across
+// the open PRs sharing it, and each pull's page carries the SAME rollup, so a
+// hydration written per pull survives only for the last PR on the head. Every
+// consumer reads output.summary or output.text, and neither rides the page any
+// longer — the transient lane's marker lives only in text, so an unhydrated
+// decision is invisible there no matter what its title says.
+test("#5073: every PR sharing a head keeps its own decision output", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const checkRunGets = [];
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [
+        reconciliationPull(1465, HEAD_SHA),
+        reconciliationPull(1466, HEAD_SHA),
+      ],
+      checksByHead: {
+        [HEAD_SHA]: [
+          transientDecision({
+            prNumber: 1465,
+            headSha: HEAD_SHA,
+            evaluatedAt: minutesBeforeTransientNow(40),
+          }),
+          transientDecision({
+            prNumber: 1466,
+            headSha: HEAD_SHA,
+            evaluatedAt: minutesBeforeTransientNow(30),
+          }),
+        ],
+      },
+      checkRunGets,
+    }),
+    context,
+    core: fakeCore(),
+    reconciliationNowMs: TRANSIENT_NOW,
+  });
+  assert.deepEqual(
+    checkRunGets.slice().sort((left, right) => left - right),
+    [1465, 1466],
+    "each PR's decision output is read back by run id, not just the last pull's",
+  );
+  assert.deepEqual(targets, [
+    { prNumber: 1465, headSha: HEAD_SHA, decisionKey: `pr-1465-head-${HEAD_SHA}` },
+    { prNumber: 1466, headSha: HEAD_SHA, decisionKey: `pr-1466-head-${HEAD_SHA}` },
+  ], "oldest first; both transient blocks must survive the shared-head overwrite");
+});
+
+// #4975 follow-up, and run 37329001725's exact shape: api.github.com's edge
+// answered the GraphQL page read with an HTML error page, which octokit puts
+// on the error as its message. A document where a JSON envelope belonged is a
+// transport defect, so it is retried under the read schedule — and once the
+// retries exhaust, the pass ends quietly because the schedule re-runs it
+// (#5064/#5065's rule), not red.
+test("#4975: a non-JSON reconciliation page is retried, and its exhaustion ends quietly", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const github = scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [] },
+  });
+  let calls = 0;
+  github.graphql = async () => {
+    calls += 1;
+    throw new Error("<html><head><title>Bad gateway</title></head><body>502</body></html>");
+  };
+  const core = fakeCore();
+  const targets = await autoGate.resolveTargets({ github, context, core });
+  assert.equal(calls, 3, "an unparseable page is a transport defect: retry the read");
+  assert.deepEqual(targets, [], "a sweep that could not read its scan selects nothing");
+  assert.match(core.warnings.join("\n"), /required-check reconciliation/i,
+    "the quiet exit still says why the pass did nothing");
+});
+
+test("#4975: the observed 5xx-with-HTML failure ends the scheduled pass quietly too", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const github = scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [] },
+  });
+  let calls = 0;
+  github.graphql = async () => {
+    calls += 1;
+    throw Object.assign(new Error("<html>"), { status: 502 });
+  };
+  const core = fakeCore();
+  const targets = await autoGate.resolveTargets({ github, context, core });
+  assert.equal(calls, 3, "the retryable status already bounded the read");
+  assert.deepEqual(targets, [], "a skipped sweep is a quiet exit, not a red run");
+});
+
+test("#4975: a dispatched reconciliation pass ends quietly the same way", async () => {
+  const context = {
+    ...fakeContext(),
+    eventName: "repository_dispatch",
+    payload: { action: "auto-gate-reconcile", client_payload: {} },
+  };
+  const github = scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [] },
+  });
+  github.graphql = async () => {
+    throw Object.assign(new Error("<html>"), { status: 502 });
+  };
+  const targets = await autoGate.resolveTargets({ github, context, core: fakeCore() });
+  assert.deepEqual(targets, [], "the dispatch is one pass; the schedule remains the backstop");
+});
+
+// Same exits driven through the real workflow body: a scheduled reconcile run
+// carries no event heads, so nothing downstream marks anything — the pass must
+// end green, where it used to take the catch's setFailed.
+test("#4975: the reconcile workflow body stays green when the page read exhausts", async () => {
+  const github = scheduledReconciliationGithub({
+    pulls: [reconciliationPull(1465, HEAD_SHA)],
+    checksByHead: { [HEAD_SHA]: [] },
+  });
+  github.graphql = async () => {
+    throw Object.assign(new Error("<html>"), { status: 502 });
+  };
+  const { outputs, failures, thrown } = await runFailingRecoveryResolver(github, {
+    context: { ...fakeContext(), eventName: "schedule" },
+  });
+  assert.equal(thrown, null, "an exhausted sweep read is not an error the step rethrows");
+  assert.deepEqual(failures, [], "nor a setFailed — the next pass is the re-evaluation");
+  assert.deepEqual(JSON.parse(outputs.targets), []);
+  assert.deepEqual(JSON.parse(outputs.aggregate_heads), []);
+});
+
+// The same unreadable body on a PR-triggered evaluation is the opposite exit:
+// there IS a head to mark, so the failure reports BLOCKED and the run stays
+// green for the downstream UNKNOWN write.
+test("#4975: a PR-triggered evaluation still reports BLOCKED on a non-JSON read", async () => {
+  const github = fakeGateGithub();
+  const graphql = github.graphql;
+  let calls = 0;
+  github.graphql = async (query, variables) => {
+    if (variables?.number === 1465) {
+      calls += 1;
+      throw new Error("<html><body>Bad gateway</body></html>");
+    }
+    return graphql(query, variables);
+  };
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(calls, 3, "the PR read retries a non-JSON body the same way");
+  assert.equal(result.readFailure, true, "exhaustion is still the read failure the workflow marks");
+  assert.match(result.summary, /^BLOCKED: auto-gate evaluation error/);
+});
+
+test("#4975: the workflow body marks the PR event's head UNKNOWN on the same failure", async () => {
+  const github = fakeGateGithub();
+  github.graphql = async () => {
+    throw new Error("<html><body>Bad gateway</body></html>");
+  };
+  const { outputs, failures, thrown } = await runFailingRecoveryResolver(github, {
+    context: {
+      ...fakeContext(),
+      eventName: "pull_request_target",
+      payload: {
+        action: "labeled",
+        pull_request: { number: 1465, head: { sha: HEAD_SHA } },
+      },
+    },
+  });
+  assert.equal(thrown, null, "a read failure does not rethrow once heads are marked");
+  assert.deepEqual(failures, [], "a head was carried, so the run stays green");
+  assert.deepEqual(JSON.parse(outputs.targets), []);
+  const heads = JSON.parse(outputs.aggregate_heads);
+  assert.equal(heads.length, 1);
+  assert.equal(heads[0].head_sha, HEAD_SHA);
+  assert.match(heads[0].read_failure, /^BLOCKED: auto-gate evaluation error/);
+});
 
 test("scheduled reconciliation keeps a queued rerun inside an existing suite ahead of the generation it replaces", async () => {
   const context = { ...fakeContext(), eventName: "schedule" };

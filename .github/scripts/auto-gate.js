@@ -787,7 +787,10 @@ function isRetryableGitHubError(error) {
 // at the edge, it surfaces from octokit as a bare SyntaxError ("Unterminated
 // string in JSON", "Unexpected end of JSON input") carrying neither a status
 // nor a GraphQL errors array, so the classifiers above cannot see it for what
-// it is: a transport defect, not a verdict (#4975). It is admitted only for
+// it is: a transport defect, not a verdict (#4975). The same defect's other
+// spelling is a body that arrives whole but is not JSON at all — the edge
+// answering an HTML error page for api.github.com, which octokit reports as
+// that document (run 37329001725 died on `<html>`). It is admitted only for
 // READS, via retryTransient's readFailure flag — a truncated write response
 // can mean the write committed, and replaying it is the ambiguity #4763 routes
 // through reconcileAmbiguousCreate instead.
@@ -796,9 +799,25 @@ function isUnreadableResponseBody(error) {
     return true;
   }
   const detail = `${error?.name || ""} ${error?.message || ""}`;
-  return /Unterminated string|Unexpected end of JSON input|Unexpected token.*JSON|JSON\.parse|invalid json/i.test(
-    detail,
-  );
+  if (
+    /Unterminated string|Unexpected end of JSON input|Unexpected token.*JSON|JSON\.parse|invalid json/i.test(
+      detail,
+    )
+  ) {
+    return true;
+  }
+  // Markup where a JSON envelope belonged is the edge answering, not the API.
+  // The body lands on the error as its message — or under response.data when
+  // octokit parsed far enough to attach one — and a document leads with `<`,
+  // which no verdict text from these endpoints does. A false positive here
+  // costs a read one bounded retry; a miss reclassifies an outage as a verdict.
+  const data = error?.response?.data;
+  const bodies = [error?.message, typeof data === "string" ? data : data?.message];
+  if (bodies.some((body) => /^\s*</.test(String(body || "")))) {
+    return true;
+  }
+  const contentType = error?.response?.headers?.["content-type"];
+  return /text\/html|application\/xhtml/i.test(String(contentType || ""));
 }
 
 function isRetryableGraphQLError(error) {
@@ -5732,47 +5751,6 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
             }),
         );
       }
-      // The decision run's output carries the stamped evaluation, the
-      // blocked-source summary, and the required-check snapshot every
-      // reevaluation consumer reads — up to ~128 KiB of summary+text. It is
-      // the ONLY run on the head those consumers open, so the GraphQL page no
-      // longer selects output fields for every context of every PR: one
-      // truncated page then cost the whole snapshot (#4975). A completed
-      // non-success decision is the one that needs them, and it is read back
-      // per-run over REST instead.
-      const prNumber = Number(pull?.number);
-      const identity = Number.isSafeInteger(prNumber) && prNumber > 0
-        ? decisionIdentity(prNumber, headSha)
-        : null;
-      const decision = identity && newestCheckGeneration(
-        checkRuns.filter(
-          (run) =>
-            run.name === identity.checkName &&
-            run.external_id === identity.externalId &&
-            run.app?.id === GITHUB_ACTIONS_APP_ID,
-        ),
-      );
-      if (
-        decision &&
-        decision.status === "completed" &&
-        decision.conclusion !== "success" &&
-        Number.isSafeInteger(decision.id)
-      ) {
-        const detail = await retryRead(
-          `could not read the decision check run at ${headSha}`,
-          () =>
-            github.rest.checks.get({
-              owner,
-              repo,
-              check_run_id: decision.id,
-            }),
-        );
-        decision.output = {
-          title: detail?.data?.output?.title ?? decision.output?.title,
-          summary: detail?.data?.output?.summary,
-          text: detail?.data?.output?.text,
-        };
-      }
       pulls.push(pull);
       checkRunsByHead.set(headSha, checkRuns);
       statusesByHead.set(headSha, statuses);
@@ -5784,6 +5762,56 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
       throw new Error("Required-check reconciliation pagination did not advance");
     }
     after = connection.pageInfo.endCursor;
+  }
+  // The decision run's output carries the stamped evaluation, the
+  // blocked-source summary, and the required-check snapshot every
+  // reevaluation consumer reads — up to ~128 KiB of summary+text. It is
+  // the ONLY run on the head those consumers open, so the GraphQL page no
+  // longer selects output fields for every context of every PR: one
+  // truncated page then cost the whole snapshot (#4975). A completed
+  // non-success decision is the one that needs them, and it is read back
+  // per-run over REST instead.
+  //
+  // Hydrate the array the map KEEPS, and only once pagination settles: open
+  // PRs can share a head, each pull's node carries the same rollup, and the
+  // last writer's array is the one stored — hydrating inside the pull loop
+  // would keep output for the last PR on a shared head and silently drop it
+  // for every earlier one (Codex on #5073).
+  for (const pull of pulls) {
+    const headSha = normalizeHeadSha(pull?.headRefOid);
+    const prNumber = Number(pull?.number);
+    const identity = Number.isSafeInteger(prNumber) && prNumber > 0 && headSha
+      ? decisionIdentity(prNumber, headSha)
+      : null;
+    const decision = identity && newestCheckGeneration(
+      (checkRunsByHead.get(headSha) || []).filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      ),
+    );
+    if (
+      decision &&
+      decision.status === "completed" &&
+      decision.conclusion !== "success" &&
+      Number.isSafeInteger(decision.id)
+    ) {
+      const detail = await retryRead(
+        `could not read the decision check run at ${headSha}`,
+        () =>
+          github.rest.checks.get({
+            owner,
+            repo,
+            check_run_id: decision.id,
+          }),
+      );
+      decision.output = {
+        title: detail?.data?.output?.title ?? decision.output?.title,
+        summary: detail?.data?.output?.summary,
+        text: detail?.data?.output?.text,
+      };
+    }
   }
   return { pulls, checkRunsByHead, statusesByHead, pages };
 }
@@ -5863,7 +5891,25 @@ async function listRequiredCheckReevaluationTargets({ github, context, core, now
   // makes every open PR eligible on every sweep without one REST read per head,
   // wall-clock page assignment, or mutable cursor state. A truncated rollup is
   // skipped fail-closed rather than combined with incomplete evidence.
-  const snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+  let snapshot;
+  try {
+    snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+  } catch (error) {
+    // The pass exists to wake decisions nothing else revisits, and the schedule
+    // re-runs the whole scan whether or not this pass finished — so a
+    // retry-exhausted transient read is a skipped sweep, not a gate failure
+    // (#5064/#5065's rule; run 37329001725 reddened master on an edge's HTML
+    // error page). Anything that is NOT an exhausted read — a malformed page,
+    // a stuck cursor — is a defect in the scan itself and stays loud.
+    if (!isReadFailure(error)) {
+      throw error;
+    }
+    core.warning(
+      `Skipped the required-check reconciliation pass: ${formatError(error)}. ` +
+        "A later pass re-runs the whole scan.",
+    );
+    return [];
+  }
   const stale = requiredCheckReevaluationCandidates({
     pulls: snapshot.pulls,
     checkRunsByHead: snapshot.checkRunsByHead,
