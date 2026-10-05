@@ -26,7 +26,7 @@ func TestKillConfirmSetsOffItsConsequenceClauseWithADash(t *testing.T) {
 	}
 }
 
-// The pane header flattened `instance · tab — selected: instance · tab` into
+// The pane header flattened `instance · tab — cursor: instance · tab` into
 // four indistinguishable fragments. That trailing clause is the ONLY signal
 // that the workspace is not showing the row under the cursor, so nothing
 // marking where the pane's identity ends actively costs comprehension. The
@@ -52,8 +52,8 @@ func TestPaneHeaderSetsOffItsClausesWithADash(t *testing.T) {
 
 	h.cancelPanePreview(false)
 	view = h.View()
-	assert.Contains(t, view, "alpha · Agent — selected: beta · Agent",
+	assert.Contains(t, view, "alpha · Agent — cursor: beta · Agent",
 		"the clause boundary must be a dash so the identity and the clause read apart")
-	assert.NotContains(t, view, "· selected: ",
+	assert.NotContains(t, view, "· cursor: ",
 		"the selection clause must not read as another identity fragment")
 }
