@@ -212,9 +212,10 @@ func TestAutomationsStripKeyRouting(t *testing.T) {
 }
 
 // TestAutomationsTitleWidthAware pins the #1096 play-test fix: the header's
-// hint segments drop right-to-left (hooks first) and the name shrinks with an
-// ellipsis so the manage affordance survives even the 22-col rail minimum —
-// never a bare hard clamp.
+// hint segments drop right-to-left (hooks first) and the manage affordance
+// survives even the 22-col rail minimum — never a bare hard clamp. Since
+// #5153 the noun renders whole or not at all: below the full header's fit the
+// header speaks the compact counts vocabulary instead of ellipsizing the noun.
 func TestAutomationsTitleWidthAware(t *testing.T) {
 	tasks := stripTasks()
 	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
@@ -239,7 +240,8 @@ func TestAutomationsTitleWidthAware(t *testing.T) {
 	out = narrow.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "22-col section")
 	assert.Contains(t, out, manageHint, "22-col rail still shows the manage affordance")
-	assert.Contains(t, out, "…", "the shrunk name marks its cut with an ellipsis")
+	assert.NotContains(t, out, "…", "the noun is kept whole or dropped — never shrunk mid-token")
+	assert.Contains(t, out, "2 (1 on)", "the narrow form keeps both counts")
 
 	// The 1-line degraded summary applies the same policy.
 	compact := newTestAutomations(tasks)
@@ -368,7 +370,9 @@ func TestAutomationsHeaderNeverEllipsizesIntoTheSeparator(t *testing.T) {
 // The header's only information is how many tasks exist. The width fallback used
 // to replace the whole title with an ellipsized constant, so at every width below
 // 110 columns the header with two tasks was byte-identical to the header with
-// none (#3630).
+// none (#3630). The count itself may change spelling across rungs — "(2)", the
+// compact "2 (2 on)", or the bare primary "2" (#5153) — but it never truncates
+// and it never disappears.
 func TestAutomationsHeaderKeepsTheCountAtEveryWidth(t *testing.T) {
 	for w := 8; w <= 45; w++ {
 		empty := railHeaderLine(t, nil, w)
@@ -376,7 +380,7 @@ func TestAutomationsHeaderKeepsTheCountAtEveryWidth(t *testing.T) {
 		require.NotEqualf(t, empty, busy,
 			"width %d: a header that cannot say how many tasks exist is the same line either way: %q", w, busy)
 		if w >= 15 {
-			require.Containsf(t, busy, "(2)",
+			require.Containsf(t, busy, "2",
 				"width %d: the count survives every form down to the rail minimum — it is the only information the header carries: %q", w, busy)
 		}
 	}
@@ -384,8 +388,9 @@ func TestAutomationsHeaderKeepsTheCountAtEveryWidth(t *testing.T) {
 
 // The ladder itself: what is shed, and in what order. The manage affordance is
 // the last thing cut — the shipped contract TestAutomationsTitleWidthAware pins
-// — so at the 22-column rail minimum the noun ellipsizes beside it, with the
-// separator and the count both intact.
+// — and the noun is whole-or-omitted (#5153): below the full header's fit the
+// section falls to the compact counts vocabulary rather than an ellipsized
+// noun, and below THAT to the bare count.
 func TestAutomationsHeaderDegradationOrder(t *testing.T) {
 	for _, tc := range []struct {
 		w    int
@@ -395,14 +400,73 @@ func TestAutomationsHeaderDegradationOrder(t *testing.T) {
 		{37, " Automations (2) · m manage · e hooks"}, // exactly
 		{36, " Automations (2) · m manage"},           // hooks drops first
 		{27, " Automations (2) · m manage"},           // exactly
-		{26, " Automatio… (2) · m manage"},            // then the noun shrinks, counts intact
-		{22, " Autom… (2) · m manage"},                // the 22-col rail minimum (#1090)
-		{20, " Aut… (2) · m manage"},                  // …and it keeps shrinking
-		{15, " (2) · m manage"},                       // the noun goes, counts and hint stay
+		{26, " 2 (2 on) · m manage"},                  // then the noun goes whole, compact counts
+		{22, " 2 (2 on) · m manage"},                  // the 22-col rail minimum (#1090)
+		{20, " 2 (2 on) · m manage"},                  // exactly
+		{19, " 2 · m manage"},                         // then the secondary count goes
+		{15, " 2 · m manage"},                         // the bare count and the affordance are the floor
 	} {
 		require.Equalf(t, tc.want, railHeaderLine(t, nSimpleTasks(2), tc.w),
 			"rail width %d", tc.w)
 	}
+}
+
+// TestAutomationsRailFieldsAreWholeOrOmitted is #5153's property at every rail
+// width the grid can produce (TreeMinWidth–TreeMaxWidth, clamp(22,25%·W,36)):
+// the header and the expanded row's detail show each field whole or omit it
+// entirely — a timestamp is never cut to "Oct…" and the noun never becomes
+// "Autom…". The issue's 80x24 example is the w=22 endpoint: "last Oct 05
+// 11:56" alone under the narrow header.
+func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
+	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
+	next := time.Date(2026, time.October, 6, 3, 0, 0, 0, time.UTC)
+	last := time.Date(2026, time.October, 5, 11, 56, 0, 0, time.UTC)
+	proj := store.NewProjection()
+	proj.SetTasks([]task.Task{{
+		ID: "t", Name: "hello-cron", CronExpr: "0 3 * * *", Enabled: true,
+		Arming: task.ArmingArmed, NextRunAt: &next, LastRunAt: &last,
+	}})
+	pane := NewAutomationsPane(proj)
+	pane.SetNowForTest(func() time.Time { return now })
+	pane.Focus()
+
+	wholeFields := []string{"next Oct 06 03:00", "last Oct 05 11:56", "0 3 * * *"}
+	for w := 22; w <= 36; w++ {
+		pane.SetRect(layout.Rect{W: w, H: 4})
+		out := stripANSI(pane.View())
+		lines := strings.Split(out, "\n")
+		header := strings.TrimRight(lines[0], " ")
+		detail := strings.TrimSpace(lines[2])
+
+		require.NotContainsf(t, out, "…", "width %d: a field is cut mid-token:\n%s", w, out)
+		if w >= 27 {
+			require.Containsf(t, header, "Automations (1)",
+				"width %d: the full header fits, so it shows: %q", w, header)
+		} else {
+			require.Containsf(t, header, "1 (1 on)",
+				"width %d: the narrow header keeps both counts whole: %q", w, header)
+		}
+		require.Containsf(t, header, "m manage",
+			"width %d: the manage affordance is the last thing cut: %q", w, header)
+
+		// Every surviving piece of the detail line is one of the complete
+		// fields; nothing partial ever renders.
+		for _, piece := range strings.Split(detail, " · ") {
+			require.Containsf(t, wholeFields, piece,
+				"width %d: the detail shows only whole fields: %q", w, detail)
+		}
+		if strings.Contains(detail, "next") {
+			require.Containsf(t, detail, "last",
+				"width %d: next-run must shed before last-run: %q", w, detail)
+		}
+	}
+
+	// The reported frame itself: at the 22-col rail the detail is the last run
+	// alone — the most useful field — and the header is the narrow form.
+	pane.SetRect(layout.Rect{W: 22, H: 4})
+	lines := strings.Split(stripANSI(pane.View()), "\n")
+	require.Equal(t, " 1 (1 on) · m manage", strings.TrimRight(lines[0], " "))
+	require.Equal(t, "last Oct 05 11:56", strings.TrimSpace(lines[2]))
 }
 
 // The compact one-liner (#2.6, <80 cols) rides the same ladder and keeps its own
