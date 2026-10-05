@@ -32,9 +32,10 @@ import (
 //     an actionable "--repo is required" rather than guessing.
 //     - Listing spans every project, because breadth is honest here, not a
 //     guess. `--all` asks for that breadth explicitly from inside a repo.
-//     - A command taking a handle (session title, task id) resolves it across
-//     projects, but refuses to pick when the handle is held by several — the
-//     #1814 ambiguity rule, extended to tasks by this change.
+//     - A command taking a handle (session title, task id or name) resolves it
+//     across projects, but refuses to pick when the handle is held by several —
+//     the #1814 ambiguity rule, extended to tasks by this change and to task
+//     names by #4676.
 //
 // Rule 3 is what keeps `af` usable from a systemd unit or a CI step, where
 // there is no cwd repo; it never guesses, because "unique across all projects"
@@ -214,7 +215,8 @@ func sessionRepoID(data *session.InstanceData) string {
 	return ""
 }
 
-// requireTaskInScope enforces the contract on a task command that takes an id.
+// requireTaskInScope enforces the contract on a task command that takes an id
+// or a name (#4676): both resolve through resolveTaskArg to the same check.
 //
 // Task ids are globally unique, so this is not an ambiguity guard — it is a
 // blast-radius guard. Without it, an id is a capability to mutate ANY project's

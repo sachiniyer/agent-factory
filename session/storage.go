@@ -208,6 +208,15 @@ type InstanceData struct {
 	// this evidence existed; callers must treat absence as unknown, never infer it
 	// from Program's requested label.
 	RuntimeProgram string `json:"runtime_program,omitempty"`
+	// RuntimePID and RuntimeStartID are the pane-root process identity captured
+	// at the same boundary that recorded RuntimeProgram (#5066): the pair
+	// proctree.SameIdentity treats as one process instance (PID plus the
+	// kernel's start stamp, which defeats pid reuse). On reattach a matching
+	// pair proves the pane is still the launch af made, so the claim survives a
+	// daemon restart; a mismatch or an unanswerable probe retires it. Zero on
+	// records predating the evidence.
+	RuntimePID     int    `json:"runtime_pid,omitempty"`
+	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
 	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the
@@ -467,22 +476,33 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	// The compatibility projection must capture original values before either it
+	// or the relocation fence below overwrites them. The live archiveReportSource
+	// block above already stamps the fence pre-projection; on the disk-reload path
+	// (archiveReportSource == nil) the recapture below would otherwise run after
+	// projectPending{AccountSwap,Handoff}ForPreviousRelease set
+	// d.StartupStateUnknown = true and snapshot the projected value as the
+	// "original". Snapshot the fence now and reuse it at recapture, exactly as the
+	// live block does. Guarded to the recapture path so the live path pays nothing.
+	var fenceSnapshot *git.ArchiveRollbackFence
+	if d.archiveReportSource == nil && d.ArchiveReport != nil && !d.ArchiveReport.Empty() && d.ArchiveReport.RollbackFence == nil {
+		fenceSnapshot = archiveRollbackFence(d)
+	}
 	d = d.restoreMissingHandoffMissionEvidence()
 	d = d.restoreMissingAccountSwapMissionEvidence()
 	d = d.projectPendingAccountSwapForPreviousRelease()
 	d = d.projectPendingHandoffForPreviousRelease()
-	// The compatibility projection must capture original values before either it
-	// or the relocation fence below overwrites them. Older binaries ignore
-	// ArchiveReport, but the previous release understands the inert/ownership
-	// fields and relocation recovery. Together they refuse restore and explicit
-	// kill instead of publishing an incomplete tree or deleting the report's row.
+	// Older binaries ignore ArchiveReport, but the previous release understands
+	// the inert/ownership fields and relocation recovery. Together they refuse
+	// restore and explicit kill instead of publishing an incomplete tree or
+	// deleting the report's row.
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		report := *d.ArchiveReport
 		if !reportDetached {
 			report = d.ArchiveReport.Clone()
 		}
 		if report.RollbackFence == nil {
-			report.RollbackFence = archiveRollbackFence(d)
+			report.RollbackFence = fenceSnapshot
 		}
 		d.ArchiveReport = &report
 		d.StartupStateUnknown = true

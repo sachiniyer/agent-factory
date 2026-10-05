@@ -31,7 +31,7 @@ import (
 const showTimeFormat = "2006-01-02 15:04"
 
 var tasksShowCmd = &cobra.Command{
-	Use:   "show <id>",
+	Use:   "show <id-or-name>",
 	Short: "Show one task's schedule health and audit trail",
 	Long: "Show one task in the current project: its trigger, whether the running " +
 		"daemon has it armed, when it will next fire, whether it has missed " +
@@ -49,7 +49,8 @@ var tasksShowCmd = &cobra.Command{
 		"state is reported as unknown rather than guessed.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Outside a git repository there is no " +
-		"project context and the id resolves globally.\n\n" +
+		"project context and the id or name resolves globally.\n\n" +
+		taskIDOrNameDoc + "\n\n" +
 		"Pass --json for the same record `af tasks get` returns, in the {data,error} " +
 		"envelope.\n\n" +
 		"With --daemon-url/AF_DAEMON_URL set, the task is read from that daemon, a " +
@@ -57,31 +58,15 @@ var tasksShowCmd = &cobra.Command{
 		"the one the DAEMON derived — a cron expression is evaluated in the " +
 		"scheduler's timezone, and re-deriving it here would answer in this " +
 		"terminal's. There is no project context against a remote daemon, so the id " +
-		"resolves across its projects and --repo is refused.",
+		"or name resolves across its projects and --repo is refused.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
-		if err := task.ValidateTaskID(args[0]); err != nil {
-			return jsonError(err)
-		}
-
-		// Scope first, for the same reason `get` resolves it first: an invalid
-		// --repo must report the path it could not resolve rather than be masked
-		// by a not-found for the id.
-		scope, err := resolveProjectScope(false)
+		t, _, err := resolveTaskArg("af tasks show", args[0])
 		if err != nil {
 			return jsonError(err)
-		}
-		t, err := getTaskByID("af tasks show", args[0])
-		if err != nil {
-			return jsonError(fmt.Errorf("failed to get task: %w", err))
-		}
-		if scope.Repo != nil {
-			if err := requireTaskInScope(t, scope); err != nil {
-				return jsonError(err)
-			}
 		}
 
 		if envelopeOutput {
