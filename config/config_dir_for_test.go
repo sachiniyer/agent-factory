@@ -241,7 +241,14 @@ func TestAccountLookup_RelativeHomeRefusesBeforeSelected(t *testing.T) {
 			// so the lookup would SUCCEED against the planted account if the
 			// home were accepted. The fix must refuse before that happens.
 			t.Chdir(cwd)
-			relHome := ".af"
+			// Use a unique relative home per subtest rather than the fixed
+			// ".af": this subtest runs from both the repo directory and
+			// os.TempDir() and removes the planted tree on cleanup, so a fixed
+			// name could clobber a real .af a developer placed in either. The
+			// name only needs to be relative for the refusal to exercise the
+			// account-lookup path; it never resolves on disk because the home
+			// is refused first.
+			relHome := filepath.Base(t.TempDir())
 			planted := filepath.Join(relHome, "accounts", "codex", "work")
 			require.NoError(t, os.MkdirAll(planted, 0o700))
 			// A marker file a real agent's auth.json would occupy; the agent
