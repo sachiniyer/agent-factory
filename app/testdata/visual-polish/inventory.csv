@@ -647,7 +647,7 @@ ui/tabbed_window.go,521,39,tabbed window failed to scroll down: %v
 ui/tabbed_window.go,598,19, %s · %s · Preview 
 ui/tabbed_window.go,601,9, %s · %s 
 ui/tabbed_window.go,602,0,
-ui/tabbed_window.go,603,24, %s · %s — selected: %s 
+ui/tabbed_window.go,603,24, %s · %s — cursor: %s 
 ui/tabbed_window.go,606,21, No session selected 
 ui/tabbed_window.go,609,1, 
 ui/tabbed_window.go,609,12, · Keyboard 
