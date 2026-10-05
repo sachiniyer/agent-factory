@@ -175,11 +175,13 @@ An **all-whitespace** `target_session` means the same thing as an empty one — 
 
 Run this from the git repository the task should work on. The add command
 returns JSON containing the task's `id` and `project_path`; check the project,
-then replace `<id>` below with that returned id (without angle brackets).
+then replace `<id>` below with that returned id — or just use the task's name
+(`"Daily triage"` here), which every id-taking verb also accepts.
 
 ```bash
 af tasks add --name "Daily triage" --prompt "Triage open issues" --cron "0 9 * * 1-5"
 af tasks trigger <id>     # run a cron task immediately
+af tasks trigger "Daily triage"   # same thing, by name
 ```
 
 `af tasks trigger` (and the TUI `r` key) work for cron tasks only — a watch task has no event line to render its prompt with, so manual triggers are refused.
@@ -397,7 +399,7 @@ Watch tasks are never overdue: they fire when their command emits a line, which 
 **Every mutation leaves a line.** `audit` records who created, updated, enabled, or disabled the task, when, and which fields moved, bounded to the last 20 entries. The store writes it inside the same locked operation that commits the change, diffed against the record actually replaced, so it cannot describe a change that did not happen.
 
 ```bash
-af tasks show <id>              # trigger, arming, next run, overdue verdict, audit trail
+af tasks show <id-or-name>      # trigger, arming, next run, overdue verdict, audit trail
 af tasks list | jq '.[] | select(.overdue)'   # --json wraps this in {data,error}: use .data[]
 af doctor                       # WARN row naming overdue and unarmed tasks
 ```
@@ -434,15 +436,17 @@ Versions before #791 installed one systemd timer / launchd plist **per task** (`
 af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
-af tasks get <id>
-af tasks show <id>             # human-readable: schedule health and audit trail
-af tasks update <id> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
-af tasks restart <id>          # enabled watch tasks only; reloads an edited script
-af tasks trigger <id>          # cron tasks only
-af tasks remove <id>
+af tasks get <id-or-name>
+af tasks show <id-or-name>     # human-readable: schedule health and audit trail
+af tasks update <id-or-name> [--cron …|--watch-cmd …] [--prompt …|--prompt-file <path>] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks restart <id-or-name>  # enabled watch tasks only; reloads an edited script
+af tasks trigger <id-or-name>  # cron tasks only
+af tasks remove <id-or-name>
 ```
 
-Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
+`<id-or-name>` accepts a task's id or its exact name. An id match always wins — a name that collides with another task's id still resolves to the id — while a name resolves only when exactly one task in scope carries it: several in-scope matches are refused with their ids listed, so a shared name can never act on a task at random.
+
+Every subcommand is scoped to one project — the current directory's, or the one `--repo` names — so `tasks list` shows this project's tasks (`--all` spans every project) and an id or name belonging to another project is refused rather than acted on. `tasks add` binds the task to the resolved project and reports it as `project_path`. On `tasks update`, `--repo` authorizes the task in its current project while `--project-path` moves it to a new project and working directory. See [Project scoping](cli.md#project-scoping) for the full contract.
 
 On `update`, setting one trigger clears the other (switching watch→cron requires a prompt when the resulting cron task is enabled). `--target-session ""` explicitly reverts to create-per-run; omitting the flag leaves it untouched. `--max-concurrent-runs 0` explicitly reverts to unlimited; omitting the flag leaves the current cap untouched. `--on-complete keep` explicitly reverts to leaving sessions in place; omitting the flag leaves the current policy untouched. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 

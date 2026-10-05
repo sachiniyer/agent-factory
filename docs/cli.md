@@ -17,7 +17,7 @@ Like the TUI and the web UI, **every `af sessions` and `af tasks` command is sco
 3. Outside a git repository there is no project context:
     - `sessions create` and `tasks add` **require** `--repo` — a new binding is never guessed.
     - Listing spans every project.
-    - A `<title>` or task `<id>` resolves across projects, but a title held by several projects is ambiguous and errors rather than picking one.
+    - A `<title>` or task `<id-or-name>` resolves across projects, but a title — or a task name — held by several is ambiguous and errors rather than picking one.
 
 Acting on another project always takes an explicit `--repo`. The read-only list
 commands also accept `--all` as an explicit opt-in to span every project.
@@ -146,13 +146,15 @@ Tasks deliver a prompt to an agent automatically — on a cron schedule or whene
 af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>]
-af tasks get <id>
-af tasks show <id>             # human-readable: schedule health and audit trail
-af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--project-path <repo>] [--program <agent>] [--enabled true|false]
-af tasks restart <id>          # reload an edited watch script (watch tasks only)
-af tasks trigger <id>          # run a cron task immediately (cron tasks only)
-af tasks remove <id>
+af tasks get <id-or-name>
+af tasks show <id-or-name>     # human-readable: schedule health and audit trail
+af tasks update <id-or-name> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--project-path <repo>] [--program <agent>] [--enabled true|false]
+af tasks restart <id-or-name>  # reload an edited watch script (watch tasks only)
+af tasks trigger <id-or-name>  # run a cron task immediately (cron tasks only)
+af tasks remove <id-or-name>
 ```
+
+`<id-or-name>` accepts a task's id or its exact name — the same name `af tasks list` and the UIs display. An exact id match always wins: a name that collides with another task's id still resolves to the id, so it can never redirect the command to the wrong task. Otherwise the name resolves only when exactly one task in scope carries it. A name shared by several in-scope tasks is refused and the error lists each match's id — pass one of those. A name held only by another project's tasks is refused and names the `--repo` that would reach it.
 
 `af tasks show` answers "is this thing actually running?": the trigger, whether the daemon has it armed, when the live scheduler entry fires next, whether it has missed scheduled runs and how many, and the bounded audit trail of who created, updated, enabled, or disabled it. The same facts ride `af tasks list`/`get` as the `overdue`, `missed_occurrences`, `next_run_at`, `arming` and `audit` fields, and `af doctor` raises a WARN row for any task that has stopped firing. See [tasks.md](tasks.md#is-it-actually-firing).
 
@@ -160,7 +162,7 @@ Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigg
 
 ### Project binding
 
-A task is bound to exactly one project when it is created, and every run's worktree is created inside it. The binding comes from `--repo`, or from the current directory's project. The two flags on `update` do different jobs: `--repo` scopes *which* task may be edited and never re-binds one, while `--project-path <repo>` moves the task to another existing git repository — that path becomes both its new working directory and its project binding. So `af tasks update <id> --repo /repos/alpha --project-path /repos/beta` authorizes the task in alpha and moves it to beta.
+A task is bound to exactly one project when it is created, and every run's worktree is created inside it. The binding comes from `--repo`, or from the current directory's project. The two flags on `update` do different jobs: `--repo` scopes *which* task may be edited and never re-binds one, while `--project-path <repo>` moves the task to another existing git repository — that path becomes both its new working directory and its project binding. So `af tasks update <id-or-name> --repo /repos/alpha --project-path /repos/beta` authorizes the task in alpha and moves it to beta.
 
 The project a task belongs to is recorded as an id resolved when the task is bound, not re-derived from its path on each read. This is why deleting a directory a task points at — a subdirectory or a linked worktree — never hides the task from its own project.
 
