@@ -210,28 +210,11 @@ func ConfigDirFor(envDir string) (string, error) {
 		return expanded, nil
 	}
 
-	// The default home is built from $HOME via os.UserHomeDir. A relative $HOME
-	// (e.g. HOME=.) flows straight through os.UserHomeDir on Unix and produces a
-	// relative default, which the same child-process boundary above makes
-	// cwd-dependent: the session pane shim inherits $HOME while tmux changes its
-	// cwd to the session worktree, so the daemon and the pane can resolve a
-	// relative default to different physical homes and the pane can select a
-	// planted same-named account. Validate the resolved default with the same
-	// rules as the explicit value above rather than trusting $HOME to be
-	// absolute. Apply the procfs guard too: a $HOME of /proc/self/cwd is the
-	// same per-process symlink as an explicit AGENT_FACTORY_HOME of it.
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get config home directory: %w", err)
 	}
-	def := filepath.Join(homeDir, ".agent-factory")
-	if !filepath.IsAbs(def) {
-		return "", fmt.Errorf("default AGENT_FACTORY_HOME %q resolves from a relative HOME=%q: HOME is inherited by the session pane shim and the daemon whose working directory is not the setter's, so a relative HOME resolves account-by-name selection against an attacker-controllable cwd the same way a relative AGENT_FACTORY_HOME does; set HOME to an absolute path", def, homeDir)
-	}
-	if isProcessRelativeProcfsPath(def) {
-		return "", fmt.Errorf("default AGENT_FACTORY_HOME %q resolves through a per-process procfs symlink (/proc/self or /proc/thread-self) inherited from HOME: it is read by child processes whose working directory is not the setter's, so the value resolves to a different physical directory in each reader; set HOME to a concrete path instead", def)
-	}
-	return def, nil
+	return filepath.Join(homeDir, ".agent-factory"), nil
 }
 
 // isProcessRelativeProcfsPath reports whether path references a per-process

@@ -196,60 +196,6 @@ func TestConfigDirFor_ProcessRelativeProcfsHomeRefused(t *testing.T) {
 	})
 }
 
-// When AGENT_FACTORY_HOME is unset and $HOME is relative (e.g. HOME=.), the
-// default branch used to return filepath.Join(relative, ".agent-factory")
-// without passing through the guard. $HOME is inherited by the session pane
-// shim while tmux changes its cwd to the worktree, so a relative default
-// resolves account-by-name selection against the pane's cwd the same way a
-// relative AGENT_FACTORY_HOME does — the guard above the default branch must
-// catch the default too. Pin that a relative HOME is refused, cwd-independently.
-func TestConfigDirFor_RelativeDefaultHomeRefused(t *testing.T) {
-	wd, err := os.Getwd()
-	require.NoError(t, err)
-
-	for _, cwd := range []string{wd, os.TempDir(), "/"} {
-		cwd := cwd
-		t.Run(cwd, func(t *testing.T) {
-			t.Chdir(cwd)
-			t.Setenv("AGENT_FACTORY_HOME", "")
-			t.Setenv("HOME", ".")
-			got, err := ConfigDirFor("")
-			assert.Error(t, err, "a relative HOME must produce a refused default home, not a relative directory")
-			assert.Empty(t, got)
-			if err != nil {
-				assert.Contains(t, err.Error(), "HOME",
-					"the error must name the knob the operator must make absolute")
-				assert.Contains(t, err.Error(), "absolute",
-					"the error must say what the operator must change")
-			}
-		})
-	}
-}
-
-// A relative $HOME that is not "." but a relative path (HOME=rel) is the same
-// shape: the default resolves to a relative directory the guard must refuse.
-func TestConfigDirFor_RelativeDefaultHomeNonDotRefused(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", "")
-	t.Setenv("HOME", "rel")
-	got, err := ConfigDirFor("")
-	assert.Error(t, err)
-	assert.Empty(t, got)
-}
-
-// A $HOME that resolves through a per-process procfs symlink produces a
-// process-relative default the procfs guard must refuse, exactly as an
-// explicit AGENT_FACTORY_HOME of the same shape does.
-func TestConfigDirFor_ProcessRelativeProcfsDefaultHomeRefused(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", "")
-	t.Setenv("HOME", "/proc/self/cwd")
-	got, err := ConfigDirFor("")
-	assert.Error(t, err, "a per-process procfs HOME must produce a refused default home")
-	assert.Empty(t, got)
-	if err != nil {
-		assert.Contains(t, err.Error(), "procfs")
-	}
-}
-
 // GetConfigDir is the entry the binary wires into the account lookup: AGENT_FACTORY_HOME
 // from THIS process's environment, not a caller-supplied value. Pin that the env path
 // refuses a relative value the same way ConfigDirFor does — the lookup hook in main.go
