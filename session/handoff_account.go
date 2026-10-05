@@ -399,3 +399,38 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
+
+// ParkAutomaticAccountSwapAtLimit attributes a readiness wall to the incoming
+// replacement identity without releasing the account transaction's fence. It is
+// the automatic-account-swap twin of ParkManualAccountSwapAtLimit: the incoming
+// identity is already committed (commitNewAccountSwapIdentity ran before
+// settleReplacementRuntime), so both i.Account and resetAt belong to the incoming
+// identity — the same invariant under which attributeLimitIdentityLocked and
+// recordAccountLimitObservationLocked are correct.
+//
+// The live LimitIdentity and the durable accountLimitObservations ledger must
+// carry the incoming wall so limitedAccountsForSwap excludes the incoming
+// account from future candidate selection for the wall window. Without
+// attribution the row hetero-binds (outgoing identity + incoming window) and the
+// ledger never gains the incoming entry, so a sibling session may re-admit the
+// still-exhausted incoming account and waste a swap cycle.
+//
+// Deliberately does NOT flip pendingAccountSwap.MissionDeliveryStatus: that
+// non-delivery marker is consulted only on the manual path
+// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
+// swap is not manual), and the automatic resume path retries after the recorded
+// reset unconditionally, with no operator-delivery step.
+func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
+		return fmt.Errorf("automatic account limit requires the pending replacement fence")
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+	i.attributeLimitIdentityLocked()
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
+}
