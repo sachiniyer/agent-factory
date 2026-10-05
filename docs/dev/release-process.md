@@ -36,10 +36,14 @@ and is unit-tested in `scripts/release_scripts_test.go`.
 
 The [`auto-release.yml`](https://github.com/sachiniyer/agent-factory/blob/master/.github/workflows/auto-release.yml) workflow runs
 every 3 hours (and on manual dispatch). When `master` has new commits since
-the last tag, it runs the release preflight (gofmt, vet, race tests, build),
-tags `v1.x.y-preview-z`, builds the four platform tarballs with the version
-stamped via `-ldflags "-X main.version=..."`, and publishes a GitHub
-**prerelease**.
+the last release, it runs the release preflight (gofmt, vet, race tests,
+build), computes `v1.x.y-preview-z`, builds the four platform tarballs from
+the validated commit with the version stamped via
+`-ldflags "-X main.version=..."`, and publishes a GitHub **prerelease** —
+which creates the tag. The tag exists on origin only with its published
+release (#5159): nothing pushes it ahead of the build matrix, a failed or
+cancelled run leaves no tag behind, and "last release" is computed from tags
+with a published release so one stranded tag can never wedge the schedule.
 
 Previews never commit to `master` — the old per-release
 "chore: bump version" commits are gone. The `version` var in `main.go` is
@@ -55,9 +59,11 @@ validates the version (well-formed, untagged, strictly greater than the
 latest stable — see
 [`.github/scripts/validate-stable-version.sh`](https://github.com/sachiniyer/agent-factory/blob/master/.github/scripts/validate-stable-version.sh)),
 runs the same preflight, and builds all four artifacts **before mutating
-anything**; only then does it commit the version bump to `main.go`, tag,
-and publish the release marked **latest**. A failed preflight or build
-therefore never leaves a dangling commit or tag on `master`.
+anything**; only then does it commit and push the version bump to `main.go`
+and publish the release marked **latest** — creating the tag at the bump
+commit in the same call. A failed preflight or build therefore never leaves a
+dangling commit or tag on `master`, and a failure mid-publish leaves at most
+an untagged bump commit, never a tag with no release (#5159).
 
 Releasing the current preview base as-is (e.g. `1.0.138` while
 `1.0.138-preview-9` exists) is supported — it "promotes" what the preview

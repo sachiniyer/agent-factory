@@ -174,15 +174,20 @@ func TestValidateStableVersionScript(t *testing.T) {
 	}
 }
 
-// --- release-bump-and-tag.sh: the #1927 mid-build merge race ---------------
+// --- release-bump.sh: the #1927 mid-build merge race ------------------------
 //
-// The stable-release "Tag and publish" job checks out github.sha, builds for
+// The stable-release "Bump and publish" job checks out github.sha, builds for
 // ~4 minutes, then bumps main.go and pushes to master. master advances during
 // that window (the auto-gate squash-merges CI-green PRs continuously), so a
 // plain `git push origin HEAD:master` races that traffic and dies
 // non-fast-forward after four good builds (#1927). These tests stand up a real
 // bare "remote" + working checkout, land a commit on master mid-window, and
 // assert the release still lands the bump on the moved tip.
+//
+// The script no longer tags (#5159): `gh release create --target` creates the
+// tag atomically with the published release, so the tests assert the bump is
+// pushed and HEAD — the sha the workflow tags — sits on origin's master tip,
+// with NO tag on the remote either way.
 
 // isolatedGitEnv returns an environment that pins git to a throwaway HOME (no
 // user/system config — no signing, no hooks) and a deterministic identity, so
@@ -263,9 +268,9 @@ func writeFile(t *testing.T, path, content string) {
 // the moved tip instead of aborting non-fast-forward.
 func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("release-bump-and-tag.sh is POSIX sh; not run on Windows")
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
 	}
-	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump-and-tag.sh")
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump.sh")
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
 	env := isolatedGitEnv(home)
@@ -288,7 +293,7 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 	cmd.Dir = work
 	cmd.Env = env
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("release-bump-and-tag.sh failed on a mid-build merge (#1927): %v\n%s", err, out)
+		t.Fatalf("release-bump.sh failed on a mid-build merge (#1927): %v\n%s", err, out)
 	}
 
 	// The bump landed on the NEW tip: master carries both commits, main.go is
@@ -307,30 +312,35 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 		t.Fatalf("concurrent file content missing from master: %q", got)
 	}
 
-	// The tag points at the released commit and is reachable from master, so a
-	// tag never dangles ahead of what shipped.
-	if tag, tip := gitOutEnv(t, origin, env, "rev-list", "-n", "1", "v1.0.1"),
-		gitOutEnv(t, origin, env, "rev-parse", "master"); tag != tip {
-		t.Fatalf("tag v1.0.1 (%s) does not point at master tip (%s)", tag, tip)
+	// HEAD is exactly what landed on master — the sha the workflow passes to
+	// `gh release create --target` — and NO tag was pushed: the tag is created
+	// atomically with the release (#5159).
+	if head, tip := gitOutEnv(t, work, env, "rev-parse", "HEAD"),
+		gitOutEnv(t, origin, env, "rev-parse", "master"); head != tip {
+		t.Fatalf("HEAD (%s) does not match landed master tip (%s)", head, tip)
+	}
+	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
+		t.Fatalf("a tag was pushed — tagging moved to the release itself (#5159): %q", tags)
 	}
 }
 
 // TestReleaseBumpIdempotentWhenBumpAlreadyLanded covers re-running the job after
-// a previous run landed the bump commit on master but died before pushing the
-// tag: the re-run must converge (drop its duplicate bump, tag the landed
-// commit) rather than double-bump or abort.
+// a previous run landed the bump commit on master but died before the release
+// was published: the re-run must converge (drop its duplicate bump, report the
+// landed commit) rather than double-bump or abort.
 func TestReleaseBumpIdempotentWhenBumpAlreadyLanded(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("release-bump-and-tag.sh is POSIX sh; not run on Windows")
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
 	}
-	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump-and-tag.sh")
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump.sh")
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
 	env := isolatedGitEnv(home)
 
 	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
 
-	// A previous release run already landed the bump on master (no tag pushed).
+	// A previous release run already landed the bump on master (no release
+	// published — e.g. the run died between push and publish).
 	// Give it a fixed EARLIER date so its commit hash differs from the re-run's
 	// bump — otherwise both bumps collide to one object and the rebase-drop
 	// path is never exercised.
@@ -350,11 +360,12 @@ func TestReleaseBumpIdempotentWhenBumpAlreadyLanded(t *testing.T) {
 	cmd.Env = isolatedGitEnv(home,
 		"GIT_AUTHOR_DATE=2020-12-31T00:00:00", "GIT_COMMITTER_DATE=2020-12-31T00:00:00")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("release-bump-and-tag.sh failed on an idempotent re-run: %v\n%s", err, out)
+		t.Fatalf("release-bump.sh failed on an idempotent re-run: %v\n%s", err, out)
 	}
 
-	// Exactly one bump commit on master (no double-bump), and the tag lands on
-	// the already-published commit.
+	// Exactly one bump commit on master (no double-bump), HEAD sits on that
+	// landed commit, and no tag was pushed — tagging happens at release
+	// publish (#5159).
 	masterLog := gitOutEnv(t, origin, env, "log", "--format=%s", "master")
 	if n := strings.Count(masterLog, "chore: release v1.0.1"); n != 1 {
 		t.Fatalf("expected exactly one bump commit on master, got %d:\n%s", n, masterLog)
@@ -362,19 +373,22 @@ func TestReleaseBumpIdempotentWhenBumpAlreadyLanded(t *testing.T) {
 	if got := gitOutEnv(t, origin, env, "show", "master:main.go"); !strings.Contains(got, `version = "1.0.1"`) {
 		t.Fatalf("main.go on master is not 1.0.1:\n%s", got)
 	}
-	if tag, tip := gitOutEnv(t, origin, env, "rev-list", "-n", "1", "v1.0.1"),
-		gitOutEnv(t, origin, env, "rev-parse", "master"); tag != tip {
-		t.Fatalf("tag v1.0.1 (%s) does not point at master tip (%s)", tag, tip)
+	if head, tip := gitOutEnv(t, work, env, "rev-parse", "HEAD"),
+		gitOutEnv(t, origin, env, "rev-parse", "master"); head != tip {
+		t.Fatalf("HEAD (%s) does not match landed master tip (%s)", head, tip)
+	}
+	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
+		t.Fatalf("a tag was pushed — tagging moved to the release itself (#5159): %q", tags)
 	}
 }
 
-// runReleaseScript runs release-bump-and-tag.sh under a hard timeout so a
+// runReleaseScript runs release-bump.sh under a hard timeout so a
 // regressed unbounded retry loop is killed and reported rather than hanging the
 // whole suite. Returns combined output, whether the deadline was hit, and the
 // run error.
 func runReleaseScript(t *testing.T, dir string, env []string, version string) (out string, timedOut bool, err error) {
 	t.Helper()
-	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump-and-tag.sh")
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump.sh")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, script, version)
@@ -392,7 +406,7 @@ func runReleaseScript(t *testing.T, dir string, env []string, version string) (o
 // reintroduces an unbounded loop (the run would hang and hit the timeout).
 func TestReleaseBumpBoundsRetriesOnPersistentReject(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("release-bump-and-tag.sh is POSIX sh; not run on Windows")
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
 	}
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
@@ -435,7 +449,7 @@ func TestReleaseBumpBoundsRetriesOnPersistentReject(t *testing.T) {
 // another release.
 func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("release-bump-and-tag.sh is POSIX sh; not run on Windows")
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
 	}
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
@@ -475,6 +489,264 @@ func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
 	}
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed despite the conflict: %q", tags)
+	}
+}
+
+// --- latest-released-tag.sh: a stranded tag is not a baseline (#5159) -------
+//
+// The auto-release check resolves "latest" as the nearest tag with a
+// PUBLISHED release, not the nearest tag on origin. A tag stranded without
+// its release shipped no binaries, so commits must be counted from the last
+// tag that actually shipped. These tests build a real repo whose tip tags are
+// absent from the released-tags file (standing in for a pushed-but-released-
+// never-happened tag) and assert the script walks past them.
+
+// seedTagRepo creates a repo where commit i carries the tags tagsAt[i].
+func seedTagRepo(t *testing.T, base string, env []string, commits []string, tagsAt map[int][]string) string {
+	t.Helper()
+	repo := filepath.Join(base, "repo")
+	runGitEnv(t, base, env, "init", "-b", "master", repo)
+	for i, msg := range commits {
+		writeFile(t, filepath.Join(repo, "file.txt"), msg+"\n")
+		runGitEnv(t, repo, env, "add", "file.txt")
+		runGitEnv(t, repo, env, "commit", "-m", msg)
+		for _, tag := range tagsAt[i] {
+			runGitEnv(t, repo, env, "tag", tag)
+		}
+	}
+	return repo
+}
+
+func runLatestReleasedTag(t *testing.T, repo string, env []string, released []string) (string, error) {
+	t.Helper()
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "latest-released-tag.sh")
+	releasedFile := filepath.Join(t.TempDir(), "released-tags.txt")
+	content := ""
+	if len(released) > 0 {
+		content = strings.Join(released, "\n") + "\n"
+	}
+	writeFile(t, releasedFile, content)
+	cmd := exec.Command(script, releasedFile)
+	cmd.Dir = repo
+	cmd.Env = env
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+func TestLatestReleasedTag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("latest-released-tag.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	env := isolatedGitEnv(home)
+
+	cases := []struct {
+		name     string
+		commits  []string
+		tagsAt   map[int][]string
+		released []string
+		want     string
+	}{
+		{
+			// The #5159 stranding: the tip carries a tag with no release. The
+			// baseline must be the last tag that actually shipped.
+			name:     "orphan tag at tip is skipped",
+			commits:  []string{"c1", "c2"},
+			tagsAt:   map[int][]string{0: {"v1.0.1"}, 1: {"v1.0.2-preview-1"}},
+			released: []string{"v1.0.1"},
+			want:     "v1.0.1",
+		},
+		{
+			name:     "released tag at tip wins",
+			commits:  []string{"c1", "c2"},
+			tagsAt:   map[int][]string{0: {"v1.0.1"}, 1: {"v1.0.2-preview-1"}},
+			released: []string{"v1.0.1", "v1.0.2-preview-1"},
+			want:     "v1.0.2-preview-1",
+		},
+		{
+			name:     "stacked orphans are all walked past",
+			commits:  []string{"c1", "c2", "c3"},
+			tagsAt:   map[int][]string{0: {"v1.0.1"}, 1: {"v1.0.2-preview-1"}, 2: {"v1.0.2-preview-2"}},
+			released: []string{"v1.0.1"},
+			want:     "v1.0.1",
+		},
+		{
+			name:     "no released tags means no baseline",
+			commits:  []string{"c1"},
+			tagsAt:   map[int][]string{0: {"v1.0.1"}},
+			released: nil,
+			want:     "",
+		},
+		{
+			name:     "no tags at all",
+			commits:  []string{"c1"},
+			released: []string{"v1.0.1"},
+			want:     "",
+		},
+	}
+	for _, c := range cases {
+		repo := seedTagRepo(t, t.TempDir(), env, c.commits, c.tagsAt)
+		got, err := runLatestReleasedTag(t, repo, env, c.released)
+		if err != nil {
+			t.Errorf("%s: script failed: %v", c.name, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: latest released tag = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// --- release-forget-version.sh: forget drafts and orphan refs, never --------
+// --- published releases ------------------------------------------------------
+//
+// The publish jobs call this before `gh release create` (self-heal after a
+// cancelled run) and on failure (leave nothing behind). It must delete a
+// leftover draft release and an orphaned tag ref — but never a tag backed by
+// a published release. A fake `gh` on PATH serves the release/ref lookups and
+// records the DELETE calls.
+
+// fakeGHEnv builds a fake `gh` executable on PATH answering the three calls
+// release-forget-version.sh makes: the release-list lookup (fixture lines are
+// "tag_name id draft"), the git-ref probe (names in refs exist; others 404),
+// and any DELETE (recorded in callsFile).
+func fakeGHEnv(t *testing.T, base string, releasesFixture, refs string) (env []string, callsFile string) {
+	t.Helper()
+	fakeBin := filepath.Join(base, "fakebin")
+	fixture := filepath.Join(base, "releases.txt")
+	callsFile = filepath.Join(base, "gh-calls")
+	writeFile(t, fixture, releasesFixture)
+	writeFile(t, callsFile, "")
+	writeExecutable(t, filepath.Join(fakeBin, "gh"), `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_CALLS"
+[ "$1" = "api" ] || exit 2
+shift
+case "$*" in
+	"-X DELETE"*)
+		exit 0
+		;;
+	*"git/ref/tags/"*)
+		tag="${*##*tags/}"
+		for r in $FAKE_GH_TAG_REFS; do
+			if [ "$r" = "$tag" ]; then
+				printf '{"ref":"refs/tags/%s"}\n' "$tag"
+				exit 0
+			fi
+		done
+		echo "gh: Not Found (HTTP 404)" >&2
+		exit 1
+		;;
+	*"releases?per_page="*)
+		# The caller's --jq selects one tag_name and prints "id draft"; the
+		# fixture is "tag_name id draft" per line, so emit the matching tail.
+		tag=$(printf '%s\n' "$*" | sed -n 's/.*tag_name == "\([^"]*\)".*/\1/p')
+		awk -v t="$tag" '$1 == t { print $2, $3 }' "$FAKE_GH_RELEASES"
+		;;
+	*)
+		exit 2
+		;;
+esac
+`)
+	return append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_GH_CALLS="+callsFile,
+		"FAKE_GH_RELEASES="+fixture,
+		"FAKE_GH_TAG_REFS="+refs,
+		"GH_REPO=owner/repo",
+		"GH_TOKEN=fake",
+	), callsFile
+}
+
+func TestReleaseForgetVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-forget-version.sh is POSIX sh; not run on Windows")
+	}
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-forget-version.sh")
+
+	cases := []struct {
+		name       string
+		version    string
+		fixture    string // "tag_name id draft" lines the fake API lists
+		refs       string // space-separated tag names that exist as git refs
+		wantDelete []string
+		wantLog    string // substring expected on stdout, "" for none
+	}{
+		{
+			name:    "published release is left entirely alone",
+			version: "1.0.1",
+			fixture: "v1.0.1 777 false\n",
+			refs:    "v1.0.1",
+			wantLog: "nothing to forget",
+		},
+		{
+			name:       "leftover draft release is deleted",
+			version:    "1.0.2-preview-1",
+			fixture:    "v1.0.2-preview-1 888 true\n",
+			wantDelete: []string{"releases/888"},
+			wantLog:    "Deleting leftover draft",
+		},
+		{
+			// tag_name is not unique across drafts — every matching draft
+			// must go, or the leftover still collides with the create.
+			name:       "several drafts sharing a tag are all deleted",
+			version:    "1.0.2-preview-1",
+			fixture:    "v1.0.2-preview-1 888 true\nv1.0.2-preview-1 889 true\n",
+			wantDelete: []string{"releases/888", "releases/889"},
+		},
+		{
+			name:       "orphaned tag ref with no release is deleted",
+			version:    "1.0.2-preview-1",
+			refs:       "v1.0.2-preview-1",
+			wantDelete: []string{"git/refs/tags/v1.0.2-preview-1"},
+			wantLog:    "Deleting orphaned tag ref",
+		},
+		{
+			name:       "draft plus stray ref deletes both",
+			version:    "1.0.3",
+			fixture:    "v1.0.3 999 true\n",
+			refs:       "v1.0.3",
+			wantDelete: []string{"releases/999", "git/refs/tags/v1.0.3"},
+		},
+		{
+			name:    "no release and no ref is a no-op",
+			version: "1.0.4",
+		},
+		{
+			// The fixture carries other tags; only v1.0.5 is touched.
+			name:       "only the named version is forgotten",
+			version:    "1.0.5",
+			fixture:    "v1.0.5 555 true\nv1.0.4 444 false\n",
+			refs:       "v1.0.4 v1.0.5",
+			wantDelete: []string{"releases/555", "git/refs/tags/v1.0.5"},
+		},
+	}
+	for _, c := range cases {
+		base := t.TempDir()
+		env, callsFile := fakeGHEnv(t, base, c.fixture, c.refs)
+		cmd := exec.Command(script, c.version)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Errorf("%s: script failed: %v\n%s", c.name, err, out)
+			continue
+		}
+		if c.wantLog != "" && !strings.Contains(string(out), c.wantLog) {
+			t.Errorf("%s: output missing %q:\n%s", c.name, c.wantLog, out)
+		}
+		calls, err := os.ReadFile(callsFile)
+		if err != nil {
+			t.Fatalf("%s: read calls file: %v", c.name, err)
+		}
+		for _, want := range c.wantDelete {
+			if !strings.Contains(string(calls), "-X DELETE") ||
+				!strings.Contains(string(calls), want) {
+				t.Errorf("%s: expected DELETE %s; calls:\n%s", c.name, want, calls)
+			}
+		}
+		if len(c.wantDelete) == 0 && strings.Contains(string(calls), "-X DELETE") {
+			t.Errorf("%s: unexpected DELETE call:\n%s", c.name, calls)
+		}
 	}
 }
 
