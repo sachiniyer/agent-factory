@@ -102,12 +102,20 @@ func TestReconcileWorktreeMissing_ChangeDetection(t *testing.T) {
 	assert.Empty(t, reason)
 }
 
+// The flag and reason survive the durable record and the client projection.
+// The row is archived before it is serialized so FromInstanceData loads it
+// inert: a live local record makes the loader reattach or respawn a real tmux
+// session running the agent, which ties the test to that program existing on
+// the runner (it did not on macOS CI). The round-trip under test does not
+// depend on liveness — the archived row is the shape the archive-gone route
+// persists anyway.
 func TestWorktreeMissing_SerializationRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wt")
 	inst := worktreeMissingInstance(t, path)
 	_, changed := inst.RefreshWorktreeMissing()
 	require.True(t, changed)
 	_, wantReason := inst.WorktreeMissing()
+	inst.liveness = LiveArchived
 
 	data := inst.ToInstanceData()
 	assert.True(t, data.Worktree.Missing)
@@ -119,6 +127,8 @@ func TestWorktreeMissing_SerializationRoundTrip(t *testing.T) {
 
 	restored, err := FromInstanceData(data.ForStorage())
 	require.NoError(t, err)
+	require.Equal(t, LiveArchived, restored.GetLiveness(), "premise: the row loads inert, with no runtime launched")
+	require.False(t, restored.Started())
 	missing, reason := restored.WorktreeMissing()
 	assert.True(t, missing, "a restart must come back still knowing the worktree is gone")
 	assert.Equal(t, wantReason, reason)
