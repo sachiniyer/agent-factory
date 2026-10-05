@@ -390,6 +390,24 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
 	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
 	// that arrives already fenced.
+	//
+	// An adopted landed move was proven before the commit above, and the respawn
+	// starts an agent in whatever directory sits at that path. Re-confirm it is
+	// still the directory git proved — device and inode, not the name — at the
+	// last point before anything launches there (#5102).
+	if adoptedPath != "" {
+		if err := instance.ReconfirmAdoptedWorktreeLocation(); err != nil {
+			if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+				// The record is now fenced against respawn and cleanup; it must
+				// reach disk before the refusal does, or a restart forgets it.
+				if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+					return "", fmt.Errorf("cannot restore session %q: %w — and its fenced worktree record could not be written to disk (%v); inspect %s before restarting the daemon", req.Title, err, perr, adoptedPath)
+				}
+				return "", fmt.Errorf("cannot restore session %q: %w — its worktree record is fenced, so af will not start an agent in or remove %s; inspect that path, then retry the restore", req.Title, err, adoptedPath)
+			}
+			return "", fmt.Errorf("cannot restore session %q: the worktree it adopted at %s is no longer usable: %w — retry the restore to rebuild it from the branch", req.Title, adoptedPath, err)
+		}
+	}
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,

@@ -58,6 +58,16 @@ type onArchiveHookContext struct {
 	repoRoot    string
 	worktree    string
 	archivePath string
+	// worktreeGone marks the archive of a session whose worktree was deleted
+	// outside af (#5102). worktree still names the recorded, now-absent path
+	// (AF_WORKTREE_PATH) and archivePath is empty, because nothing lands in the
+	// archive. The command cannot run with a deleted directory as its cwd, and
+	// it must not inherit the repo root instead: a hook is written to act on
+	// the session's own checkout — the documented node_modules prune would then
+	// sweep the user's main checkout. It runs in an empty scratch directory, so
+	// any hook that does external cleanup by AF_SESSION_ID still runs, and any
+	// that prunes "." finds nothing.
+	worktreeGone bool
 }
 
 // runOnArchiveHook resolves the command at operation time and runs it at the
@@ -144,6 +154,14 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	program, argv := systemdunit.UnboundScopeArgv(scopeUnit, "sh", "-c", command)
 	cmd := exec.CommandContext(ctx, program, argv...)
 	cmd.Dir = hookCtx.worktree
+	if hookCtx.worktreeGone {
+		scratch, err := os.MkdirTemp("", "af-on-archive-")
+		if err != nil {
+			return fmt.Errorf("create a working directory for the on-archive hook of a session whose worktree is gone: %w", err)
+		}
+		defer os.RemoveAll(scratch)
+		cmd.Dir = scratch
+	}
 	cmd.Env = append(
 		sessionenv.Filter(os.Environ(), "", resolved.SessionEnvPassthrough),
 		"AF_SESSION_ID="+hookCtx.sessionID,

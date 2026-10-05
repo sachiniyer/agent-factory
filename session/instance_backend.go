@@ -3,7 +3,6 @@ package session
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -508,104 +507,6 @@ func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationCla
 	return hookErr, archiveErr
 }
 
-// ArchiveTeardownWorktreeGone is the archive teardown for a session whose
-// tracked worktree was confirmed absent — a conclusive ENOENT with no af
-// relocation outstanding (#5102). The tmux teardown is identical to
-// ArchiveTeardownWithClaim's; the worktree step re-verifies the absence and
-// performs no move, since there is nothing left to relocate and the branch is
-// what restore rebuilds from. trustLiveGeneration carries the same lock contract.
-//
-// adopted selects the sibling route for a previous archive whose move landed
-// before the daemon could record it: the record already names the archived
-// location, and the worktree step re-verifies it is still present instead.
-func (i *Instance) ArchiveTeardownWorktreeGone(beforeMove func() error, trustLiveGeneration, adopted bool) (hookErr, archiveErr error) {
-	mode := teardownArchive{
-		worktreeGone: !adopted, worktreeAdopted: adopted,
-		beforeMove: beforeMove, hookErr: &hookErr, trustLiveGeneration: trustLiveGeneration,
-	}
-	archiveErr = i.teardownTabs(mode)
-	return hookErr, archiveErr
-}
-
-// AdoptLandedArchiveMove re-aims an archiving session's record at dest once git
-// proves an earlier archive's move landed there (#5102); see
-// git.AdoptLandedWorktreeMove. The caller holds the OpArchiving fence.
-func (i *Instance) AdoptLandedArchiveMove(dest string) error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot archive %q: instance has no worktree", i.Title)
-	}
-	return gw.AdoptLandedWorktreeMove(dest)
-}
-
-// LiveBranchCheckout reports where git has this session's branch checked out
-// at a path that exists right now. live is false when git registers the branch
-// nowhere, or only at a path that no longer exists — the stale, prunable entry
-// a deletion outside af leaves behind. An error means the listing or the path
-// could not be read, and nothing may be concluded from it.
-func (i *Instance) LiveBranchCheckout() (path string, live bool, err error) {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return "", false, fmt.Errorf("session %q has no worktree", i.Title)
-	}
-	return liveBranchCheckout(gw)
-}
-
-func liveBranchCheckout(gw *git.GitWorktree) (string, bool, error) {
-	registered, listed, err := gw.RegisteredPathForBranch()
-	if err != nil || !listed {
-		return "", false, err
-	}
-	if _, statErr := git.BoundedLstat(registered); errors.Is(statErr, os.ErrNotExist) {
-		return "", false, nil
-	} else if statErr != nil {
-		return "", false, fmt.Errorf("cannot inspect %s, where git registers this session's branch: %w", registered, statErr)
-	}
-	return registered, true, nil
-}
-
-// AdoptLandedRestoreMove is restore's counterpart: when the archived worktree
-// is gone, it asks git where this session's branch is checked out. A registered
-// location that exists on disk, at a path restore itself could have chosen, is
-// where an earlier restore's move landed before the daemon could record it, and
-// the record is re-aimed there after the same proof (#5102). adopted is false
-// when git registers the branch nowhere that exists — including the stale,
-// prunable entry an outside deletion leaves — which is the genuine-deletion case
-// the caller rebuilds from the branch. A live checkout of the branch anywhere
-// else is the user's, not af's: adopting it would hand it to kill's cleanup, and
-// rebuilding past it would fail on git's one-checkout rule, so that refuses.
-func (i *Instance) AdoptLandedRestoreMove(repoPath, title, branch string) (path string, adopted bool, err error) {
-	i.mu.RLock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchivedFenced); err != nil {
-		i.mu.RUnlock()
-		return "", false, err
-	}
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return "", false, fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
-	}
-	registered, live, err := liveBranchCheckout(gw)
-	if err != nil || !live {
-		return "", false, err
-	}
-	placement, err := git.IsRestorePlacement(repoPath, title, branch, registered)
-	if err != nil {
-		return "", false, fmt.Errorf("cannot tell whether %s, where git has this session's branch checked out, is af's restore location: %w", registered, err)
-	}
-	if !placement {
-		return "", false, fmt.Errorf("git has this session's branch checked out at %s, which is not a location af restores to, so af will not adopt it — remove that checkout (git worktree remove) to let restore rebuild the session's worktree, or kill the session", registered)
-	}
-	if err := gw.AdoptLandedWorktreeMove(registered); err != nil {
-		return "", false, fmt.Errorf("git registers this session's branch at %s, but it could not be adopted as the restored worktree: %w", registered, err)
-	}
-	return registered, true, nil
-}
-
 // SetArchived flips the instance into the inert Archived state atomically:
 // started=false (no tmux binding backs it) and liveness=Archived, clearing any
 // in-flight op. Called by the daemon after a successful archive move.
@@ -663,26 +564,6 @@ func (i *Instance) restoreArchivedWorktree(dest string, claim git.RelocationClai
 		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
 	}
 	return gw.RestoreWorktreeToWithClaim(dest, claim)
-}
-
-// RepointAbsentWorktreeForRestore is the restore-side step for an archived row
-// whose worktree was deleted outside af (#5102): there is nothing to move back,
-// so the record is re-aimed at dest and the respawn's RebuildFromExistingBranch
-// recreates the worktree there from the kept branch. It requires the held
-// restore fence, like RestoreArchivedWorktreeHeldFencedWithClaim, and has no
-// claim to preserve on refusal because the gone route never took one.
-func (i *Instance) RepointAbsentWorktreeForRestore(dest string) error {
-	i.mu.RLock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchivedFenced); err != nil {
-		i.mu.RUnlock()
-		return err
-	}
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
-	}
-	return gw.RepointAbsentWorktreePath(dest)
 }
 
 // ArchivedBranchForReclaim reports the branch an archived session is holding
@@ -790,12 +671,9 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
 	}
-	oldBranch := gw.GetBranchName()
-	if newBranch != "" && newBranch != oldBranch {
-		if err := gw.RenameBranch(newBranch); err != nil {
-			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
-		}
-	}
+	// Decide how the record follows the rename BEFORE renaming the branch, so a
+	// refusal leaves the branch and any checkout of it exactly as they were.
+	//
 	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
 	// updates gw's stored worktree path — all under i.mu here, matching how
 	// ToInstanceData reads the worktree path under i.mu.RLock.
@@ -807,13 +685,33 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	// restore then rebuilds there from the kept branch. Only a conclusive Absent
 	// takes this route: Unknown falls through to the move, which refuses on its
 	// own terms rather than letting a guess discard a worktree that may exist.
+	//
+	// Absent is also what a user's own `git worktree move` of the archive looks
+	// like from the recorded path, and that checkout is intact where git now
+	// registers the branch. Re-aiming the record (and renaming the branch under
+	// it) would orphan it, and restore would later refuse it as a foreign
+	// placement. So the repoint is taken only when git has the branch live
+	// nowhere; a live checkout, or a listing that cannot be read, refuses.
 	var relocate func(string) error = gw.MoveWorktree
 	if gw.ProbeWorktreePresence() == git.WorktreePresenceAbsent {
+		moved, live, err := liveBranchCheckout(gw)
+		if err != nil {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w", i.Title, gw.GetWorktreePath(), err)
+		}
+		if live {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s, remove it with 'git worktree remove', or kill the session", i.Title, moved, gw.GetWorktreePath())
+		}
 		relocate = func(dest string) error {
 			if err := gw.RepointAbsentWorktreePath(dest); err != nil {
 				return fmt.Errorf("cannot rename archived session %q: its missing worktree path could not be repointed: %w", i.Title, err)
 			}
 			return nil
+		}
+	}
+	oldBranch := gw.GetBranchName()
+	if newBranch != "" && newBranch != oldBranch {
+		if err := gw.RenameBranch(newBranch); err != nil {
+			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
 		}
 	}
 	if err := relocate(dest); err != nil {

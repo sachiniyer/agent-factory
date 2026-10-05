@@ -137,19 +137,21 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	// AF_ARCHIVE_PATH names where the worktree's bytes land in the archive. On
 	// the adopted route they are already there — the adopted path IS the archive
 	// destination — so the hook gets it exactly as the relocating route passes
-	// its dest. A deletion lands nothing anywhere, so it stays empty there rather
-	// than naming a directory that will never exist.
+	// its dest, and runs in it. A deletion lands nothing anywhere, so it stays
+	// empty there rather than naming a directory that will never exist, and the
+	// hook runs in a scratch directory (see onArchiveHookContext.worktreeGone).
 	archivePath := ""
 	if adopted {
 		archivePath = origPath
 	}
 	hookErr, err := archiveGoneTeardown(instance, func() error {
 		return runOnArchiveHook(onArchiveHookContext{
-			sessionID:   instance.ID,
-			title:       title,
-			repoRoot:    instance.GetRepoPath(),
-			worktree:    origPath,
-			archivePath: archivePath,
+			sessionID:    instance.ID,
+			title:        title,
+			repoRoot:     instance.GetRepoPath(),
+			worktree:     origPath,
+			archivePath:  archivePath,
+			worktreeGone: !adopted,
 		})
 	}, true, adopted)
 	if err != nil {

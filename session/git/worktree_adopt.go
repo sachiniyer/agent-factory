@@ -190,3 +190,21 @@ func requireSameDirectory(path string, want pathIdentity) error {
 	}
 	return nil
 }
+
+// FenceUnverifiedWorktree records that the directory now at the recorded path
+// has not been verified as this session's worktree: an identity-unknown
+// stalled record, the same fence a timed-out relocation probe installs (#5102).
+// Respawn and destructive cleanup refuse while it stands; the next archive or
+// restore claim re-resolves the path, and the record settles by itself if the
+// path turns out absent after all. A record already present is kept — it is
+// at least as current. The returned error joins cause with
+// ErrRelocateStateUnknown so callers persist the fence before reporting.
+func (g *GitWorktree) FenceUnverifiedWorktree(cause error) error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.relocationRecovery == nil && g.activeRelocationClaim == nil {
+		g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+	}
+	g.adoptedWorktree = nil
+	return errors.Join(cause, ErrRelocateStateUnknown)
+}
