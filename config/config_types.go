@@ -173,6 +173,24 @@ func ConfigDirFor(envDir string) (string, error) {
 		if strings.HasPrefix(envDir, "~") && expanded == envDir {
 			return "", fmt.Errorf("failed to expand home directory in AGENT_FACTORY_HOME %q", envDir)
 		}
+		// AGENT_FACTORY_HOME must be absolute (a real path or ~/…). It does
+		// not stay in this process: it is read by child processes — the daemon
+		// and the session pane shim — whose working directory is not the
+		// setter's, so a relative value survives into those children and is
+		// resolved against whichever cwd they happen to run in. For account
+		// scoping that means `--account work` resolves the account directory
+		// (and thus the injected CODEX_HOME / CLAUDE_CONFIG_DIR /
+		// GEMINI_CLI_HOME credential root) against an attacker-controllable
+		// cwd, silently substituting a planted same-named account for the
+		// operator's real one. Refusing the relative spelling at the source
+		// closes both the daemon/pane-cwd disagreement and the run-af-from-
+		// inside-the-clone shapes; a boundary-site filepath.Abs cannot (the
+		// pane's cwd is the hostile worktree, so absolutizing there bakes the
+		// planted path). Same boundary class as ResolveDaemonHostPath below,
+		// and the sibling accountMountSource / vscodeSocketPath defenses.
+		if !filepath.IsAbs(expanded) {
+			return "", fmt.Errorf("AGENT_FACTORY_HOME %q must be an absolute path (or start with ~/): it is read by child processes (the session pane shim, the daemon) whose working directory is not the setter's, so a relative value silently resolves account-by-name selection against an attacker-controllable cwd and substitutes a planted same-named account", envDir)
+		}
 		return expanded, nil
 	}
 
