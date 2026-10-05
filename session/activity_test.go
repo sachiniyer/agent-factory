@@ -234,38 +234,3 @@ func TestLifecycleViewRaceFree(t *testing.T) {
 	}
 	<-done
 }
-
-// A worktree deleted outside af must not read as idle: `af sessions watch` exits
-// on idle and its automation would prompt a session send-prompt refuses (#5102).
-func TestClassifyActivityWorktreeMissing(t *testing.T) {
-	missing := func(lv Liveness, external bool) InstanceData {
-		return InstanceData{Liveness: lv, Worktree: GitWorktreeData{Missing: true, ExternalWorktree: external}}
-	}
-	for _, lv := range []Liveness{LiveReady, LiveRunning, LiveLost, LiveDead, LiveLimitReached} {
-		got, reason := ClassifyActivity(missing(lv, false))
-		require.Equal(t, ActivityTerminal, got, "liveness %v", lv)
-		require.Contains(t, reason, "deleted outside af")
-		require.Contains(t, reason, "af sessions archive")
-		require.Contains(t, reason, "af sessions kill")
-	}
-
-	got, reason := ClassifyActivity(missing(LiveReady, true))
-	require.Equal(t, ActivityTerminal, got)
-	require.Contains(t, reason, "af sessions kill")
-	require.NotContains(t, reason, "af sessions archive",
-		"an in-place session cannot be archived, so archive is not a remedy to offer")
-
-	_, archivedReason := ClassifyActivity(InstanceData{Liveness: LiveArchived})
-	got, reason = ClassifyActivity(missing(LiveArchived, false))
-	require.Equal(t, ActivityTerminal, got)
-	require.Equal(t, archivedReason, reason, "an archived row keeps the archived clause")
-
-	got, _ = ClassifyActivity(InstanceData{Liveness: LiveReady})
-	require.Equal(t, ActivityIdle, got, "an unflagged ready row is still idle")
-
-	got, _ = ClassifyActivity(InstanceData{Liveness: LiveReady, InFlightOp: OpArchiving, Worktree: GitWorktreeData{Missing: true}})
-	require.Equal(t, ActivityPending, got, "an in-flight op is still motion")
-
-	got, _ = ClassifyActivity(missing(Liveness(9999), false))
-	require.Equal(t, ActivityPending, got, "an unrecognized liveness keeps the fail-safe default")
-}

@@ -690,11 +690,6 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
 		changed = true
 	}
-	// A worktree deleted outside af is daemon-probed and can appear or clear
-	// while liveness stays Ready (#5102), so it is mirrored on its own axis too.
-	if inst.ReconcileWorktreeMissing(d.Worktree.Missing, d.Worktree.MissingReason) {
-		changed = true
-	}
 	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
 	// that durable terminal axis independently so an already-open TUI surfaces the
 	// reason immediately rather than only after cold-start materialization.

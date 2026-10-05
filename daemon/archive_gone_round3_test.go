@@ -47,7 +47,7 @@ func TestArchiveSession_RefusesAWorktreeTheUserMoved(t *testing.T) {
 
 // A flag set by a probe that raced af's own move is stale the moment af commits
 // a row whose worktree it placed: an ordinary archive must not carry it, or the
-// row refuses prompts forever after a later restore (#5102).
+// row stays flagged as missing forever after a later restore (#5102).
 func TestArchiveSession_MovedArchiveClearsAStaleMissingFlag(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "stale-flag")

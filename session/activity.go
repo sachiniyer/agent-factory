@@ -127,19 +127,6 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	if data.InFlightOp != OpNone {
 		return ActivityPending, ""
 	}
-	// A tracked worktree confirmed deleted outside af overrides every live
-	// liveness value (#5102): a Ready row still reads as idle, so a watcher would
-	// exit 0 and its automation would prompt a session send-prompt refuses. The
-	// positive set is named rather than "anything but Archived" so an archived
-	// row keeps its own clause and an unrecognized liveness still falls through
-	// to the fail-safe pending default below.
-	if data.Worktree.Missing {
-		switch data.Liveness {
-		case LiveRunning, LiveReady, LiveLost, LiveDead, LiveLimitReached:
-			return ActivityTerminal, "session's tracked worktree was deleted outside af; it cannot receive prompts — " +
-				WorktreeMissingRemedy(data.Worktree.ExternalWorktree)
-		}
-	}
 
 	switch data.Liveness {
 	case LiveReady:

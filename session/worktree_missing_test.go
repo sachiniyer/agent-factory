@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // worktreeMissingInstance returns an instance whose recorded worktree path is
@@ -87,19 +89,6 @@ func TestRefreshWorktreeMissing_NoWorktreeLeavesFlag(t *testing.T) {
 	missing, changed := inst.RefreshWorktreeMissing()
 	assert.True(t, missing)
 	assert.False(t, changed)
-}
-
-func TestReconcileWorktreeMissing_ChangeDetection(t *testing.T) {
-	inst, err := NewInstance(InstanceOptions{Title: "reconcile", Path: t.TempDir(), Program: "claude"})
-	require.NoError(t, err)
-	assert.False(t, inst.ReconcileWorktreeMissing(false, ""))
-	assert.True(t, inst.ReconcileWorktreeMissing(true, "gone"))
-	assert.False(t, inst.ReconcileWorktreeMissing(true, "gone"))
-	assert.True(t, inst.ReconcileWorktreeMissing(true, "gone at a new path"))
-	assert.True(t, inst.ReconcileWorktreeMissing(false, ""))
-	missing, reason := inst.WorktreeMissing()
-	assert.False(t, missing)
-	assert.Empty(t, reason)
 }
 
 // The flag and reason survive the durable record and the client projection.
@@ -219,7 +208,7 @@ func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 // the relocation snapshot stays clean mid-move and the probe reads ENOENT for
 // af's move. The operation fence is what sees it: a probe answered while an op
 // is in flight must not stamp the flag, or a successful archive leaves a row
-// that refuses prompts forever (#5102).
+// that stays flagged as missing forever (#5102).
 func TestRefreshWorktreeMissing_InFlightOpNeverStamps(t *testing.T) {
 	for _, op := range []InFlightOp{OpArchiving, OpRestoring, OpKilling, OpCreating} {
 		inst := worktreeMissingInstance(t, filepath.Join(t.TempDir(), "wt"))
@@ -229,5 +218,74 @@ func TestRefreshWorktreeMissing_InFlightOpNeverStamps(t *testing.T) {
 		assert.False(t, changed, "op %v", op)
 		flag, _ := inst.WorktreeMissing()
 		assert.False(t, flag, "op %v", op)
+	}
+}
+
+// A row loaded flagged worktree-missing whose tmux session is gone must load
+// inert and stay listed: re-spawning into the missing directory either fails —
+// and a failed load drops the row, taking its archive/kill remedies with it — or
+// rebuilds the worktree behind the user's back (#5102).
+func TestFromInstanceData_FlaggedRowWithoutTmuxLoadsInert(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+
+	var commands []string
+	inner := nameKeyedExec(map[string]bool{}) // no tmux session exists
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, c.String())
+			return inner.Run(c)
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			commands = append(commands, c.String())
+			return inner.Output(c)
+		},
+	}
+	previous := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, persistPtyFactory{t: t, cmdExec: cmdExec}, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previous })
+
+	repoRoot := initTempGitRepo(t)
+	gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+	gitOut(t, repoRoot, "config", "user.name", "test")
+	gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	const branch = "af/flagged-load"
+	gitOut(t, repoRoot, "branch", branch)
+	worktreePath := filepath.Join(t.TempDir(), "deleted-worktree")
+	branchCreatedByUs := true
+	const agentName = "af_flagged_load"
+
+	restored, err := FromInstanceData(InstanceData{
+		Title:    "flagged-load",
+		Path:     repoRoot,
+		Branch:   branch,
+		Program:  "claude",
+		Status:   Ready,
+		TmuxName: agentName,
+		Tabs:     []TabData{{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName}},
+		Worktree: GitWorktreeData{
+			RepoPath:          repoRoot,
+			WorktreePath:      worktreePath,
+			SessionName:       "flagged-load",
+			BranchName:        branch,
+			BranchCreatedByUs: &branchCreatedByUs,
+			Missing:           true,
+			MissingReason:     "tracked worktree path " + worktreePath + " does not exist (deleted outside af)",
+		},
+	})
+	require.NoError(t, err, "a flagged row must load, not be dropped")
+	require.NotNil(t, restored)
+	assert.True(t, restored.Started(), "loaded like a recorded Lost row: bound, listed, killable")
+	missing, _ := restored.WorktreeMissing()
+	assert.True(t, missing)
+	assert.Equal(t, worktreePath, restored.GetWorktreePath())
+	_, statErr := os.Lstat(worktreePath)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "load must not rebuild the deleted worktree")
+	for _, c := range commands {
+		assert.NotContains(t, c, "new-session", "load must not re-spawn the agent")
 	}
 }

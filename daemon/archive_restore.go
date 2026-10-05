@@ -3,10 +3,8 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
-	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
@@ -216,20 +214,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// path-only `worktree remove` cannot make atomic by itself.
 
 	// Resolve relocation ownership before reading repo-derived restore context.
-	//
-	// A record-free ENOENT is the one claim failure restore can proceed past: the
-	// archived worktree was deleted outside af (#5102), so there is nothing to
-	// move back and the kept branch is what the respawn rebuilds from. A
-	// recovery-path claim error joins ErrRelocateStateUnknown and only formats its
-	// candidates, so it never reads as a bare ENOENT — the second test is a belt
-	// against that ever changing. No claim exists on this route, so there is none
-	// to preserve on the way out.
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
-	worktreeGone := errors.Is(err, os.ErrNotExist) && !errors.Is(err, sessiongit.ErrRelocateStateUnknown)
-	if err != nil && !worktreeGone {
+	if err != nil {
 		return "", err
 	}
-	claimTransferred := worktreeGone
+	claimTransferred := false
 	defer func() {
 		if !claimTransferred {
 			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
@@ -243,17 +232,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
 	// need the origin repo, so surface the actionable message (archive left
 	// intact) before either fails with a generic error.
-	if worktreeGone {
-		// guardRepoGoneRestore stages cleanup authority over the claimed archive
-		// directory; with no directory and no claim there is nothing for it to
-		// fence, and with no repo there is nothing to rebuild from either.
-		if err := sessiongit.CheckRepoPresentForRelocation(repoPath); errors.Is(err, sessiongit.ErrRepoGone) {
-			return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone and its tracked worktree was already deleted outside af — nothing rebuildable remains; remove the session with %s",
-				req.Title, repoPath, shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, req.Title))
-		} else if err != nil {
-			return "", fmt.Errorf("cannot establish origin repo state for %s for session %q: %w", repoPath, req.Title, err)
-		}
-	} else if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
+	if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
 		claimTransferred = repoGone
 		return "", err
 	}
@@ -261,35 +240,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// does (#1540): a subdirectory user's worktree is restored under
 	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
 	// needed only for subdirectory placement.
-	//
-	// A gone archive may not be gone at all: an earlier restore can have moved it
-	// to its restore location and died before recording that (#5102). Git's
-	// registration follows the move, so ask it before rebuilding — a rebuild would
-	// fail on the branch's live checkout anyway, and the bytes there are the
-	// session's work.
-	adoptedPath := ""
-	if worktreeGone {
-		landed, adopted, err := instance.AdoptLandedRestoreMove(repoPath, req.Title, instance.GetBranch())
-		if err != nil {
-			return "", fmt.Errorf("cannot restore session %q: its archived worktree %s is gone, and af could not rule out that an earlier interrupted restore already moved it: %w",
-				req.Title, instance.GetWorktreePath(), err)
-		}
-		if adopted {
-			adoptedPath = landed
-			m.info().Printf("restore of session %q: its archived worktree was gone and git proves an earlier interrupted restore moved it to %s; adopting that location", req.Title, landed)
-		}
-	}
-	dest := adoptedPath
-	if dest == "" {
-		beforeRestoreWorktreePath()
-		dest, err = sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
-		if err != nil {
-			if worktreeGone {
-				return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
-			}
-			claimTransferred = true
-			return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
-		}
+	beforeRestoreWorktreePath()
+	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
+	if err != nil {
+		claimTransferred = true
+		return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
 	beforeRestoreWorktreeUse()
 
@@ -297,21 +252,8 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
 	claimTransferred = true
-	if worktreeGone {
-		// Nothing to relocate: re-aim the record at the restore destination so
-		// the respawn's RebuildFromExistingBranch recreates the worktree there
-		// from the kept branch (#5102) — or, for an adopted landed move, it
-		// already names the bytes. A refusal changed nothing on disk or in the
-		// record, so it returns plainly — none of the move route's recovery
-		// bookkeeping below applies to a claim that was never taken.
-		if adoptedPath == "" {
-			if err := instance.RepointAbsentWorktreeForRestore(dest); errors.Is(err, sessiongit.ErrRepointDestinationOccupied) {
-				return "", fmt.Errorf("cannot restore session %q: its archived worktree is gone and restore location %s is already occupied — a previous restore's move may have landed there before the daemon could record it; inspect %s and remove it or move it aside, then retry: %w", req.Title, dest, dest, err)
-			} else if err != nil {
-				return "", fmt.Errorf("cannot restore session %q: its worktree was deleted outside af and could not be re-aimed at %s for a rebuild: %w", req.Title, dest, err)
-			}
-		}
-	} else if err := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim); err != nil {
+	restoreWorktreeErr := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim)
+	if err := restoreWorktreeErr; err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
 		}
@@ -334,12 +276,10 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		}
 		return "", m.persistUnresolvedRestoreFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
-	// Every route that reaches here left the record naming a worktree af placed:
-	// moved back, proved by git, or about to be rebuilt by the respawn. A
-	// worktree-missing flag is therefore stale — set at archive time for a
-	// deletion, or by a probe that raced an earlier move — and the commit below
-	// must not carry it (#5102). If a rebuild never materializes the path, the
-	// poll re-derives it from the new path.
+	// The worktree is back where af put it, so a worktree-missing flag on this
+	// row is stale — most plausibly a probe that raced an earlier move — and the
+	// commit below must not carry it (#5102). The flag is sticky by design: only
+	// af re-placing the worktree clears it, and this is such a placement.
 	instance.ClearWorktreeMissing()
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
@@ -390,24 +330,6 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
 	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
 	// that arrives already fenced.
-	//
-	// An adopted landed move was proven before the commit above, and the respawn
-	// starts an agent in whatever directory sits at that path. Re-confirm it is
-	// still the directory git proved — device and inode, not the name — at the
-	// last point before anything launches there (#5102).
-	if adoptedPath != "" {
-		if err := instance.ReconfirmAdoptedWorktreeLocation(); err != nil {
-			if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
-				// The record is now fenced against respawn and cleanup; it must
-				// reach disk before the refusal does, or a restart forgets it.
-				if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-					return "", fmt.Errorf("cannot restore session %q: %w — and its fenced worktree record could not be written to disk (%v); inspect %s before restarting the daemon", req.Title, err, perr, adoptedPath)
-				}
-				return "", fmt.Errorf("cannot restore session %q: %w — its worktree record is fenced, so af will not start an agent in or remove %s; inspect that path, then retry the restore", req.Title, err, adoptedPath)
-			}
-			return "", fmt.Errorf("cannot restore session %q: the worktree it adopted at %s is no longer usable: %w — retry the restore to rebuild it from the branch", req.Title, adoptedPath, err)
-		}
-	}
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,
@@ -428,10 +350,6 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
 	}
-	if worktreeGone {
-		m.info().Printf("restored session %q (repo %s): worktree rebuilt at %s from its kept branch (it had been deleted outside af), agent re-spawned", req.Title, repoID, worktreePath)
-	} else {
-		m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
-	}
+	m.info().Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return restoredArchiveResult(instance, worktreePath)
 }

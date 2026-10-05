@@ -12143,21 +12143,13 @@ var DEAD_ICON = "circle";
 var LOST_ICON = "circle-dashed";
 var ARCHIVED_ICON = "archive";
 var LIMIT_ICON = "diamond";
-var WORKTREE_GONE_ICON = "triangle-alert";
-var WORKTREE_GONE = { icon: WORKTREE_GONE_ICON, kind: "lost", label: "Worktree gone" };
 var WORKING = { icon: null, kind: null, label: ROW_KIND_LABELS.working };
 function rowStatus(s) {
   const op = s.in_flight_op ?? InFlightOp.None;
   if (op !== InFlightOp.None) {
     return WORKING;
   }
-  if (isWorktreeGone(s)) {
-    return WORKTREE_GONE;
-  }
   return dotForLiveness(livenessOf(s));
-}
-function isWorktreeGone(s) {
-  return s.worktree?.missing === true && livenessOf(s) !== Liveness.Archived;
 }
 function isWorking(s) {
   return rowStatus(s).kind === null;
@@ -12310,9 +12302,6 @@ function rowTitle(s) {
   }
   if (archiveWarningText(s) !== "") {
     title = "[archive incomplete] " + title;
-  }
-  if (isWorktreeGone(s)) {
-    title = "[worktree gone] " + title;
   }
   if (s.model_change) {
     title = "[model changed] " + title;

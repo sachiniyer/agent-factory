@@ -10,44 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
-
-// A restore that adopts a landed earlier restore move must re-confirm the
-// proven directory by device/inode before the respawn launches an agent in it.
-// A swap after the adoption is refused, the record fenced, and the real bytes
-// left untouched (#5102).
-func TestRestoreArchived_AdoptedDirectorySwappedBeforeRespawnIsRefused(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	inst, _ := seedArchivedSession(t, manager, repoID, repoPath, "swap-restore", "swap-restore")
-	archivedPath := inst.GetWorktreePath()
-	restoreDest, err := sessiongit.RestoreWorktreePath(repoPath, "swap-restore", inst.GetBranch())
-	require.NoError(t, err)
-	moveWorktreeForTest(t, repoPath, archivedPath, restoreDest)
-	realDir := restoreDest + ".real"
-
-	prev := beforeRestoreWorktreeUse
-	beforeRestoreWorktreeUse = func() {
-		// Runs after the adoption proof, before the respawn.
-		require.Equal(t, restoreDest, inst.GetWorktreePath(), "premise: the restore adopted the landed move")
-		require.NoError(t, os.Rename(restoreDest, realDir))
-		require.NoError(t, os.Mkdir(restoreDest, 0o755))
-	}
-	t.Cleanup(func() { beforeRestoreWorktreeUse = prev })
-
-	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "swap-restore", RepoID: repoID})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fenced")
-	assert.Equal(t, session.LiveArchived, inst.GetLiveness(), "no agent may have been started")
-	_, _, unresolved := inst.GetWorktreeRelocationCandidates()
-	assert.True(t, unresolved)
-	rec := recordFor(t, repoID, "swap-restore")
-	require.NotNil(t, rec)
-	assert.NotNil(t, rec.Worktree.RelocationRecovery, "the fence must be durable")
-	dirty, err := os.ReadFile(filepath.Join(realDir, "dirty.txt"))
-	require.NoError(t, err)
-	assert.Equal(t, "uncommitted-swap-restore", string(dirty))
-}
 
 // A deleted worktree that reappears during the gone route's teardown holds an
 // unverified directory. The archive fails as unknown and the record is fenced,

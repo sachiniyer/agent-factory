@@ -43,9 +43,9 @@ type GitWorktreeData struct {
 	RelocationRecovery *GitWorktreeRelocationRecoveryData `json:"relocation_recovery,omitempty"`
 	// Missing records that WorktreePath was conclusively absent (ENOENT, with no
 	// af relocation owning it) the last time the daemon probed it: the worktree
-	// was deleted outside af (#5102). Listing surfaces render it instead of
-	// "ready", send-prompt refuses, and archive takes the no-move route. It is
-	// additive and omitempty, so an older binary ignores it on read and drops it
+	// was deleted outside af (#5102). It is passive record state: the projection
+	// carries it to every listing surface, and archive takes the no-move route
+	// for such a row. It is additive and omitempty, so an older binary ignores it on read and drops it
 	// on write — which only costs one poll interval before a current daemon
 	// re-derives it.
 	Missing bool `json:"missing,omitempty"`

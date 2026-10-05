@@ -66,33 +66,6 @@ func TestAdoptLandedWorktreeMove(t *testing.T) {
 	})
 }
 
-// Restore adopts a landed move only where restore itself could have put it, so
-// a checkout of the branch the user made elsewhere is never claimed as af's.
-func TestIsRestorePlacement(t *testing.T) {
-	_, repoRoot, _ := archiveTestWorktree(t)
-	base, err := RestoreWorktreePath(repoRoot, "my-session", "af/my-session")
-	require.NoError(t, err)
-
-	for _, tc := range []struct {
-		name      string
-		candidate string
-		want      bool
-	}{
-		{"the placement base", base, true},
-		{"a collision variant", base + "-3", true},
-		{"a non-numeric suffix", base + "-old", false},
-		{"suffix 1 is never chosen", base + "-1", false},
-		{"a different parent", filepath.Join(t.TempDir(), filepath.Base(base)), false},
-		{"a different leaf", filepath.Join(filepath.Dir(base), "elsewhere"), false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := IsRestorePlacement(repoRoot, "my-session", "af/my-session", tc.candidate)
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
 // The adoption proof is about one directory. Between it and the archive commit
 // the caller tears down editors, hooks and tmux; a directory swapped in under
 // the same name in that window must be caught by device/inode, and must fence

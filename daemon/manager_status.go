@@ -397,6 +397,15 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepRemoteLossStates()
 	m.sweepPausedPollState()
 
+	// Worktree presence first, on its own bounded fan-out (#5102): it is a
+	// filesystem probe, not a tmux one, and running it inline here would let one
+	// stalled mount cost a deadline per session on it, serially.
+	probes := make([]worktreeProbeTarget, 0, len(entries))
+	for _, e := range entries {
+		probes = append(probes, worktreeProbeTarget{repoID: e.repoID, instance: e.instance})
+	}
+	m.refreshWorktreesMissing(probes)
+
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
 	}
@@ -480,13 +489,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	if !instance.Started() {
-		// Archived rows are inert, but their recorded worktree path is still
-		// tracked: an archive directory deleted outside af must flag the row so
-		// restore knows it is rebuilding from the branch rather than moving bytes
-		// back (#5102). One bounded lstat, no tmux.
-		if instance.GetInFlightOp() == session.OpNone {
-			m.refreshWorktreeMissing(repoID, instance)
-		}
 		return
 	}
 	if instance.GetInFlightOp() != session.OpNone {
@@ -498,14 +500,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.clearRemoteLoss(key)
 		return
 	}
-	// A worktree deleted outside af leaves liveness reading Ready — the pane and
-	// the agent are still up — while the agent's cwd is gone (#5102). Probe it
-	// here, behind the in-flight-op gate so af's own archive/restore move is
-	// never mistaken for an outside deletion (the probe also defers to any
-	// relocation claim or recovery record itself), and ahead of the paused skip
-	// below: a bounded lstat does not contend with an attached TUI the way the
-	// tmux probe does, and an attached operator is exactly who should see it.
-	m.refreshWorktreeMissing(repoID, instance)
 	if instance.GetLiveness() == session.LiveArchived {
 		// Archived (#1028): no tmux to probe, inert (started=false) so already
 		// skipped by !Started above — belt-and-suspenders against a future change.
@@ -726,18 +720,3 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 // instances.json there is no competing snapshot to reconcile, so this is no
 // longer a merge. Every mutation already persists through a targeted writer
 // (appendInstanceData / persistInstanceData / DeleteInstanceByStableID) as it happens; this
-
-// refreshWorktreeMissing folds one presence probe of the tracked worktree into
-// the row's worktree-missing flag and, on a transition only, persists and
-// publishes it so every listing surface picks it up (#5102). Steady state costs
-// one bounded lstat and no write.
-func (m *Manager) refreshWorktreeMissing(repoID string, instance *session.Instance) {
-	missing, changed := instance.RefreshWorktreeMissing()
-	if !changed {
-		return
-	}
-	if missing {
-		m.warn().Printf("session %q: tracked worktree %s is gone (deleted outside af); flagging it — prompts are refused until it is archived or killed", instance.Title, instance.GetWorktreePath())
-	}
-	m.persistAndPublishInstance(repoID, instance)
-}

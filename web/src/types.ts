@@ -264,12 +264,6 @@ export interface WorktreeData {
   external_worktree?: boolean;
   /** Daemon branch ownership; absent legacy flags preserve the branch. */
   branch_created_by_us?: boolean;
-  /** The tracked worktree path was conclusively absent at the daemon's last
-   *  probe — deleted outside af (#5102). Prompts are refused until it is
-   *  archived or killed. */
-  missing?: boolean;
-  /** Operator-facing explanation behind `missing`. */
-  missing_reason?: string;
 }
 
 /** The Snapshot RPC response (daemon/snapshot.go: SnapshotResponse). */

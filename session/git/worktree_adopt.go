@@ -8,8 +8,8 @@ import (
 )
 
 // A bare ENOENT from ClaimRelocationSource normally means the worktree was
-// deleted outside af (#5102) — but not always. Archive and restore move the
-// worktree first and persist the new path second, and a daemon that dies between
+// deleted outside af (#5102) — but not always. Archive moves the worktree first
+// and persists the new path second, and a daemon that dies between
 // the two leaves a durable record naming the vacated source while the bytes sit,
 // fully registered with git, at the move's destination. No recovery record
 // describes that window, so the claim cannot tell it apart from a deletion.
@@ -53,11 +53,11 @@ func (g *GitWorktree) VerifyLandedMove(dest string) error {
 }
 
 // RegisteredPathForBranch reports where git registers this session's branch as
-// checked out, if anywhere. Restore uses it to find a landed move: its
-// destination is not deterministic (an occupied candidate gets a collision
-// suffix), but git's registration follows the move. listed is false when no
-// worktree has the branch checked out; an error means the listing could not be
-// read completely and nothing may be concluded.
+// checked out, if anywhere. git's registration follows any `git worktree move`,
+// af's or the user's, so it is how archive and rename tell a worktree that was
+// moved from one that was deleted. listed is false when no worktree has the
+// branch checked out; an error means the listing could not be read completely
+// and nothing may be concluded.
 func (g *GitWorktree) RegisteredPathForBranch() (path string, listed bool, err error) {
 	branch := strings.TrimSpace(g.GetBranchName())
 	if branch == "" {

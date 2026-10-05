@@ -233,11 +233,20 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// a tmux session without a gitWorktree), pass empty string.
 		i.mu.RLock()
 		gw := i.gitWorktree
+		worktreeMissing := i.worktreeMissing
 		i.mu.RUnlock()
 		var workDir string
-		if gw != nil {
+		if gw != nil && !worktreeMissing {
 			workDir = gw.GetWorktreePath()
 		}
+		// A row flagged worktree-missing (#5102) has no directory to re-spawn
+		// into, so workDir stays empty: Restore may only REATTACH a session that
+		// is still alive, never re-spawn one. Re-spawning would either fail —
+		// and a failed load drops the row, taking with it the archive and kill
+		// that are its remedies — or quietly rebuild the worktree at load time,
+		// behind the user's back. A session that is gone is kept the way a
+		// recorded Lost one is below: bound, killable, archivable, re-confirmed
+		// by the poll.
 		// Re-inject the system prompt so a lazy re-spawn (tmux server died
 		// across a reboot, see #386/#444) starts the agent with the same
 		// program string as the original first-time launch — most
@@ -253,6 +262,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
+		if err != nil && worktreeMissing && !retainsInertInstance(err) {
+			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row inert so it stays archivable and killable", i.Title, err)
+			return nil
+		}
 		if err != nil {
 			preserveAgentHandle = retainsInertInstance(err)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
