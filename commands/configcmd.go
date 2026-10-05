@@ -575,7 +575,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates); a global-only key
 is rejected with the location it actually belongs to. One caveat: a
 per-project branch_prefix is accepted and stored but ignored for now — the
 global prefix applies to every project until #4539 lands the real feature.
@@ -784,8 +784,10 @@ still a present, winning override.
 
 With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
---project, it clears one migrated global backend setting: docker.mount_agent_credentials,
-ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+--project, it clears one migrated global setting — a network.* key
+(listen_addr, preview_listen_addr, require_token, require_loopback_token,
+cors_allowed_origins) or a backend key (docker.mount_agent_credentials,
+ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when

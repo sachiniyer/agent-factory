@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -38,6 +39,15 @@ import (
 // #767 failure this guard exists to prevent. Indeterminate therefore leaves
 // the files in place, the same stance refuseIndeterminateReap takes for an
 // unreachable sandbox: unreachable is not gone.
+//
+// The PID file removal uses config.RemoveFileRefusingLink, the same policy
+// writeDaemonPIDFile and removeDaemonPIDFile apply (#3672): a symlinked
+// daemon.pid is left in place rather than unlinked, because writeDaemonPIDFile
+// refused to write through one so af cannot have written it. The teardown
+// pair already enforced this on the daemon's own SIGTERM path; this stop-side
+// cleanup used os.Remove and is the asymmetry the policy was meant to guard
+// against. The control socket is not an af-managed regular file — it is the
+// listener's bind path — so its os.Remove is unrelated to the link policy.
 func cleanupDaemonRuntimeFiles(pidFile string, deadline time.Time) {
 	switch err := pingDaemonUntil(deadline); {
 	case err == nil:
@@ -47,8 +57,12 @@ func cleanupDaemonRuntimeFiles(pidFile string, deadline time.Time) {
 		log.WarningLog.Printf("could not determine whether a daemon is still answering on the control socket (%v); leaving its runtime files in place rather than unlinking a socket that may be live", err)
 		return
 	}
-	if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
+	if err := config.RemoveFileRefusingLink(pidFile); err != nil {
+		if errors.Is(err, config.ErrManagedFileSymlink) {
+			log.InfoLog.Printf("daemon PID file is a symlink af did not write through; leaving it in place")
+		} else if !os.IsNotExist(err) {
+			log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
+		}
 	}
 	if socketPath, socketErr := DaemonSocketPath(); socketErr == nil {
 		_ = os.Remove(socketPath)

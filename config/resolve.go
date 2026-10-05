@@ -27,6 +27,13 @@ var legacyDeprecationLogged sync.Map
 // pre-#3358 parent-keyed config to once per corrected repository identity.
 var retainedLegacyBareRepoConfigLogged sync.Map
 
+// resetRetainedLegacyBareRepoConfigWarnings clears that memo. captureLog calls
+// it so a test asserting the warning is not silenced by an earlier test in the
+// same process that happened to use the same repo and legacy identity.
+func resetRetainedLegacyBareRepoConfigWarnings() {
+	retainedLegacyBareRepoConfigLogged.Clear()
+}
+
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
@@ -231,7 +238,13 @@ func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
 		return nil, fmt.Errorf("encode global config snapshot: %w", err)
 	}
 	snapshot := snapshotConfig(global)
-	snapshot.source.builtIn = snapshotConfig(global)
+	// Use the compiled-in defaults, not DefaultConfig(), as the built-in
+	// provenance baseline: DefaultConfig() reruns the machine-dependent claude
+	// probe and would reintroduce the auto-detected ProgramOverrides the
+	// operator may have cleared, changing the effective snapshot. The
+	// auto-detected override lives in the handed-off global layer, not the
+	// built-in baseline (#5113).
+	snapshot.source.builtIn = snapshotConfig(staticDefaultConfig())
 	if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
 		return nil, fmt.Errorf("describe global config snapshot: %w", err)
 	}
@@ -701,7 +714,7 @@ func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
 		if os.IsNotExist(err) {
 			return
 		}
-		key := repo.ID + "|" + legacyID
+		key := repo.ID + "|" + legacyID + "|inspect-error"
 		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
 			return
 		}

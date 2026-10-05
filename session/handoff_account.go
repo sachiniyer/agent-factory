@@ -233,10 +233,20 @@ func (i *Instance) pendingManualAccountSwapDeliveryUnconfirmedLocked() bool {
 // CanRetryPendingManualAccountSwapDelivery reports whether an operator can
 // inspect a known replacement pane and explicitly override ambiguous delivery.
 // Startup-unknown is inert because there is no confirmed runtime to inspect.
+//
+// The limit wall is admitted here even though it is excluded from the
+// agent-handoff twin (CanRetryPendingHandoffMissionDelivery): the daemon's
+// manual-swap ResumeFromLimit fork re-pastes the pending mission
+// (deliverManualAccountMission), so the row's restart IS a resend. Admitting
+// LiveLimitReached routes the row to the honest "Retry send — submit the
+// pending mission again" picker label instead of the agent-handoff-twin's
+// "Resume from limit — the pending mission is not resent" label, which is
+// true only for the agent-handoff arm whose daemon sends the session goal
+// (SendPromptWithEvidence) without resending.
 func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
 	return knownLive && i.inFlightOp == OpNone && !i.startupStateUnknown && !i.userKilled &&
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
@@ -377,14 +387,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
-	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-		i.limitAgent = agent
-		i.touchLocked()
-	}
-	if i.limitAccount != i.Account {
-		i.limitAccount = i.Account
-		i.touchLocked()
-	}
+	i.attributeLimitIdentityLocked()
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
 	// earlier ambiguity so the scheduler may resume it after the recorded reset.
@@ -392,6 +395,41 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return nil
+}
+
+// ParkAutomaticAccountSwapAtLimit attributes a readiness wall to the incoming
+// replacement identity without releasing the account transaction's fence. It is
+// the automatic-account-swap twin of ParkManualAccountSwapAtLimit: the incoming
+// identity is already committed (commitNewAccountSwapIdentity ran before
+// settleReplacementRuntime), so both i.Account and resetAt belong to the incoming
+// identity — the same invariant under which attributeLimitIdentityLocked and
+// recordAccountLimitObservationLocked are correct.
+//
+// The live LimitIdentity and the durable accountLimitObservations ledger must
+// carry the incoming wall so limitedAccountsForSwap excludes the incoming
+// account from future candidate selection for the wall window. Without
+// attribution the row hetero-binds (outgoing identity + incoming window) and the
+// ledger never gains the incoming entry, so a sibling session may re-admit the
+// still-exhausted incoming account and waste a swap cycle.
+//
+// Deliberately does NOT flip pendingAccountSwap.MissionDeliveryStatus: that
+// non-delivery marker is consulted only on the manual path
+// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
+// swap is not manual), and the automatic resume path retries after the recorded
+// reset unconditionally, with no operator-delivery step.
+func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
+		return fmt.Errorf("automatic account limit requires the pending replacement fence")
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.liveness = LiveLimitReached
+	i.limitResetAt = resetAt
+	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil

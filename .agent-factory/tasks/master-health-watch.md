@@ -62,6 +62,11 @@ Check these four things, in order:
 
 4. STALE BRANCHES from merged PRs, and PRs whose branch was deleted underneath
    them.
+   POST ONLY ON CHANGE (added 2026-10-03 by Captain Claude): before commenting on an
+   existing tracking issue (e.g. #4672), read your own last comment there. If the set
+   you found is the same, post NOTHING; an unchanged sweep is silent. Comment only
+   when a branch appeared, disappeared, or its classification changed, and say what
+   changed. This applies to every recurring census in this prompt.
 
 DEDUPE BEFORE FILING — this is not optional, and it is where previous runs
 failed (#3556 duplicated #3435; #3573 and #3575 duplicated #3553 and #3555,

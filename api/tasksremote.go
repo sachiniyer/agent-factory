@@ -95,8 +95,9 @@ func remoteListTasks(verb string) ([]task.Task, error) {
 }
 
 // remoteTaskByID selects one of the targeted daemon's tasks. The not-found
-// wording matches the local path's (task.GetTask / getTaskByID) so the only
-// thing that differs between transports is WHICH store was searched.
+// wording matches the local path's (task.GetTask / findTaskByIDOrName's id
+// pass) so the only thing that differs between transports is WHICH store was
+// searched.
 func remoteTaskByID(verb, id string) (*task.Task, error) {
 	tasks, err := remoteListTasks(verb)
 	if err != nil {
@@ -281,18 +282,16 @@ func addProjectBinding() (*config.RepoContext, string, error) {
 	return repo, repo.Root, nil
 }
 
-// updateTaskRecord reads the record `af tasks update` needs from the host the
-// update will land on — twice: once before the write, for the cross-field
-// pre-checks, and once after a COMMITTED-but-unreported write, to recover the
-// output.
+// updateTaskRecord re-reads the record `af tasks update` needs after a
+// COMMITTED-but-unreported write on the host the update landed on, to recover
+// the output.
 //
 // Locally that is task.GetTask, the disk read the command has always done.
 // Against a remote target it is that daemon's own record, because reading this
-// machine's store there would pre-check a remote patch against a local task's
-// prompt and trigger — and, on the committed path, print a LOCAL task as the
-// value a remote write produced. It also keeps the local branch on task.GetTask
-// rather than on getTaskByID, so the local error wording is byte-identical to
-// what it was before routing.
+// machine's store there would print a LOCAL task as the value a remote write
+// produced. The pre-write record the cross-field checks read comes from
+// resolveTaskArg instead, which already fetched the task while resolving the
+// id-or-name argument (#4676).
 func updateTaskRecord(id string) (*task.Task, error) {
 	if apiclient.IsRemoteTarget() {
 		return remoteTaskByID("af tasks update", id)

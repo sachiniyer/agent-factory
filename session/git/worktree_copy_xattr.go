@@ -64,6 +64,24 @@ var errXattrValueTooLarge = errors.New("extended attribute value exceeds the cop
 // caller stops attempting the rest of the tree rather than re-learning it per file.
 var errXattrUnsupportedDestination = errors.New("destination filesystem does not support extended attributes")
 
+// errXattrPathTooLong tells copySymlinkEntry to skip the path-based prune and route
+// recheck for a link. Its original meaning is a route the path-based L* xattr family
+// cannot address because the textual path exceeds the kernel's PATH_MAX: the
+// descriptor-anchored F* family the file and directory paths use has no such limit
+// (it takes an fd), but the symlink path has no *at variant in golang.org/x/sys/unix
+// (v0.47.0), so a tree the copier reaches component-by-component through directory
+// descriptors can carry a link whose route is too long for L* even though the walker
+// itself copied it. The sentinel is also returned when the filesystem-wide latch
+// (holdsNone, set by a file/dir copy that proved the destination holds no xattrs at
+// all) is already set: no L* call ran through the path, so there is nothing for the
+// route recheck to verify and nothing for the prune to remove, and a link whose
+// route exceeds PATH_MAX would abort the recheck's Lstat even though the latch
+// already settled the question. It is non-fatal — the #2919 invariant the file and
+// directory paths follow is "log the loss, do not abort the archive" — so the caller
+// skips the link's xattr copy, prune, and route recheck and continues, rather than
+// aborting a cross-device move of a tree the descriptor-anchored walker copied.
+var errXattrPathTooLong = errors.New("symlink path too long for the L* xattr family")
+
 func copySourceXattrs(sourceFD, destinationFD int, destinationPath, kind string, acl bool) error {
 	names, err := listXattrNames(sourceFD)
 	if err != nil {
@@ -181,6 +199,445 @@ func copyXattrPhase(support *xattrDestination, sourceFD, destinationFD int, dest
 		return nil
 	}
 	return err
+}
+
+// copySymlinkXattrs is the symlink analogue of copyNonACLXattrs/copyACLXattrs. A
+// symlink yields no descriptor the F* xattr syscalls can target — O_NOFOLLOW on a
+// link returns ELOOP, and the only fd a symlink gives is O_PATH|O_NOFOLLOW, which
+// makes Flistxattr/Fgetxattr return EBADF — so the descriptor-anchored
+// copySourceXattrs cannot reach a link's own attributes. The path-based L* family
+// (Llistxattr/Lgetxattr/Lsetxattr) does not follow the link, so it addresses the
+// link itself; there is no *at xattr variant in golang.org/x/sys/unix (v0.47.0) to
+// match the UtimesNanoAt trick the mtime stamp relies on, so the path is the only
+// handle.
+//
+// The per-attribute failure policy mirrors copySourceXattrs, with one
+// load-bearing exception: a refused namespace (EPERM/EACCES — on Linux user.*
+// cannot be set on a symlink and only security.* / trusted.* live on links in
+// production, neither settable without SELinux or root) is LOGGED and skipped
+// rather than failing the archive, which is the #2919 invariant the silent drop
+// violated; anything else fails the copy. ACLs are not split out:
+// system.posix_acl_* does not apply to symlinks, so the file/dir ordering around
+// the mode has no analogue here.
+//
+// The exception is the filesystem-wide latch. copySourceXattrs latches
+// holdsNone when Flistxattr on a real descriptor proves the destination FILESYSTEM
+// holds no attributes at all, which is correct for a file or directory because the
+// probe reaches the filesystem's own xattr code path. A symlink probe cannot make
+// that claim: Llistxattr on a link reports EOPNOTSUPP on filesystems that store
+// attributes on files and directories fine — the kernel's symlink-xattr handler
+// is a separate code path — so latching holdsNone from a symlink would let an
+// early link in iteration order silently drop every later file's and directory's
+// attributes on a destination that can hold them. The symlink path therefore
+// never latches: a destination link that holds no attributes is logged and
+// scoped to that link, and the file and directory paths keep sole authority over
+// the filesystem-wide latch.
+//
+// When holdsNone was latched by a file/dir copy, this returns errXattrPathTooLong
+// rather than nil. copySymlinkEntry treats the sentinel as "no L* call ran; skip
+// the path-based prune and route recheck," which is correct for the latched case:
+// the destination holds no attributes so prune has nothing to remove, no L* call
+// read or wrote the path so there is nothing for the route recheck to verify, and a
+// link whose route exceeds PATH_MAX would abort the recheck's Lstat even though the
+// latch already settled the question. Returning nil would run those path-based
+// operations and, for a too-long route, abort a cross-device move the
+// descriptor-anchored F* paths copy fine.
+func copySymlinkXattrs(support *xattrDestination, sourcePath, destinationPath string) error {
+	if support.holdsNone {
+		// See the doc comment above: no L* call ran (the destination holds no
+		// xattrs at all), so the path-based prune and route recheck in
+		// copySymlinkEntry must be skipped. A too-long route would otherwise abort
+		// the move via the recheck's Lstat, the very thing errXattrPathTooLong
+		// exists to prevent.
+		return errXattrPathTooLong
+	}
+	err := copySymlinkSourceXattrs(sourcePath, destinationPath)
+	if errors.Is(err, errXattrUnsupportedDestination) {
+		// Do NOT latch holdsNone: the EOPNOTSUPP is a property of the link, not
+		// the filesystem (see the doc comment above). The warning inside
+		// copySymlinkSourceXattrs already recorded the link-local refusal, so
+		// this is logged, not silent (#2919).
+		return nil
+	}
+	if errors.Is(err, errXattrPathTooLong) {
+		// The link's route exceeds PATH_MAX, so the L* family cannot address it and
+		// the descriptor-anchored F* paths cannot reach a symlink either — there is
+		// no *at xattr variant. copySymlinkEntry recognizes the sentinel and skips
+		// the prune and the route recheck (which Lstat the same too-long path), so
+		// the cross-device move continues for a tree the walker already copied. The
+		// loss is logged here, not silent (#2919).
+		log.WarningLog.Printf(
+			"archive: could not reproduce extended attributes on symlink %s because its path is too long for the L* xattr family (no *at variant exists); the attributes are left in place: %v",
+			sourcePath, err,
+		)
+		return err
+	}
+	return err
+}
+
+// copySymlinkSourceXattrs is the path-based twin of copySourceXattrs, reading the
+// source link's own attributes with Lgetxattr and writing them to the destination
+// link with Lsetxattr. Neither call follows the link.
+func copySymlinkSourceXattrs(sourcePath, destinationPath string) error {
+	names, err := listSymlinkXattrNames(sourcePath)
+	if err != nil {
+		if isXattrUnsupported(err) {
+			// The source filesystem has no xattr support, so nothing is carried
+			// from the source; but the destination route can still exceed PATH_MAX
+			// when the roots have different lengths, and no L* call ran on it here
+			// to surface that. copySymlinkEntry's path-based prune and route recheck
+			// would Lstat that too-long destination and abort a cross-device move the
+			// descriptor-anchored F* paths copy fine — the same abort the empty-names
+			// path below surfaces errXattrPathTooLong for. Probe the destination route
+			// here too, since this branch returns before the probe below runs.
+			return probeDestinationRouteTooLong(destinationPath)
+		}
+		if errors.Is(err, unix.ENAMETOOLONG) {
+			// The L* family has no *at form, so the link's path is the full textual
+			// route. A tree the walker reaches component-by-component through directory
+			// descriptors can carry a link whose route exceeds PATH_MAX, and Llistxattr
+			// then returns ENAMETOOLONG even for a link with no attributes — which would
+			// abort a cross-device move the descriptor-anchored F* paths copy fine. There
+			// is no descriptor-relative L* variant to fall back to, so the attribute loss
+			// is reported and the copy continues, the #2919 invariant the per-attribute
+			// refusal follows.
+			return errXattrPathTooLong
+		}
+		return fmt.Errorf(
+			"cannot move worktree across filesystems: failed to list extended attributes for destination symlink %s: %w",
+			destinationPath, err,
+		)
+	}
+	// When the source link has no attributes, the loop below makes no L* call on
+	// the destination, so a destination route exceeding PATH_MAX is never detected
+	// by an Lsetxattr ENAMETOOLONG the way a source with attributes would surface
+	// it. copySymlinkEntry's path-based prune and route recheck would then Lstat
+	// the same too-long destination and abort a cross-device move the
+	// descriptor-anchored F* paths copy fine — the exact abort errXattrPathTooLong
+	// exists to prevent. A source route shorter than PATH_MAX but a destination
+	// that is not is a valid cross-device copy when the roots have different
+	// lengths, so probe the destination with the same L* family here to surface
+	// the sentinel, matching the source-side and holdsNone paths.
+	if len(names) == 0 {
+		// No L* call below will touch the destination, so a too-long destination
+		// route is not surfaced by an Lsetxattr the way a source with attributes
+		// would surface it; probe it here so copySymlinkEntry skips the path-based
+		// prune and route recheck the same way the unsupported-source branch does.
+		if err := probeDestinationRouteTooLong(destinationPath); err != nil {
+			return err
+		}
+	}
+	// destinationProbed tracks whether an L* call on the destination proved its
+	// route is within PATH_MAX. The L* family has no *at form, so Lsetxattr is
+	// the first L* call that touches the destination; any Lsetxattr that does not
+	// return ENAMETOOLONG (a success, an EPERM/EACCES refusal, or an
+	// EOPNOTSUPP/ENOTSUP namespace refusal) proves the route was addressable at
+	// that point. A later Lsetxattr that then returns ENAMETOOLONG means the
+	// route was diverted mid-copy (an ancestor was replaced with a symlink whose
+	// expansion exceeds PATH_MAX), not that it was always too long — the route
+	// recheck exists to detect exactly that diversion, but it cannot run on a
+	// too-long path (its Lstat would also fail), so a late ENAMETOOLONG refuses
+	// rather than skip the recheck and risk publishing attributes the earlier L*
+	// calls wrote through the diverted route. Only a first-call ENAMETOOLONG (no
+	// prior L* call on the destination) is the length-limit case errXattrPathTooLong
+	// exists for, so the nonfatal path is taken there and only there.
+	// sourceProbed tracks whether a source Lgetxattr has already succeeded,
+	// proving the source route was within PATH_MAX at that point — the
+	// destination-side twin of destinationProbed. A link with multiple attributes
+	// is read one Lgetxattr at a time, and a concurrent writer that diverts
+	// sourcePath (an ancestor replaced with a symlink whose expansion exceeds
+	// PATH_MAX) after an earlier Lgetxattr/Lsetxattr pair succeeded can make a
+	// later Lgetxattr return ENAMETOOLONG. Returning errXattrPathTooLong for that
+	// late failure would make copySymlinkEntry skip the route recheck, so a writer
+	// that restores the source route before the descriptor-anchored re-identity
+	// could publish xattr values the earlier L* calls read through the diverted
+	// route. The route recheck cannot run on a too-long path (its Lstat would
+	// also fail), so a late source ENAMETOOLONG refuses rather than skip it. Only
+	// the first Lgetxattr (no prior source L* call succeeded) keeps the non-fatal
+	// errXattrPathTooLong, matching the destination-side first-call path: that is
+	// the genuine length-limit case the sentinel exists for.
+	var sourceProbed bool
+	var destinationProbed bool
+	for _, name := range names {
+		value, err := readSymlinkXattrValue(sourcePath, name)
+		if err != nil {
+			if isXattrVanished(err) {
+				log.WarningLog.Printf(
+					"archive: extended attribute %q vanished from symlink %s while it was being copied",
+					name, destinationPath,
+				)
+				continue
+			}
+			if errors.Is(err, errXattrValueTooLarge) {
+				log.WarningLog.Printf(
+					"archive: extended attribute %q on symlink %s is too large to copy (%d byte limit); not reproduced",
+					name, destinationPath, maxXattrValueBytes,
+				)
+				continue
+			}
+			if errors.Is(err, unix.ENAMETOOLONG) {
+				if sourceProbed {
+					// A prior Lgetxattr proved the source route was within
+					// PATH_MAX, so a later ENAMETOOLONG means the route was
+					// diverted mid-copy (an ancestor was replaced with a symlink
+					// whose expansion exceeds PATH_MAX), not that it was always
+					// too long. The route recheck cannot run on a too-long path
+					// (its Lstat would also fail), so refuse rather than skip it
+					// and risk publishing attributes the earlier L* calls read
+					// through the diverted route.
+					return fmt.Errorf(
+						"cannot move worktree across filesystems: source symlink %s route exceeded PATH_MAX after an earlier L* call succeeded (possible path diversion): %w",
+						sourcePath, err,
+					)
+				}
+				// The first L* call on the source is the Lgetxattr above; the
+				// source route was too long from the start (no prior L* call proved
+				// it addressable), so this is not a diversion but a length limit.
+				// See errXattrPathTooLong.
+				return errXattrPathTooLong
+			}
+			return fmt.Errorf(
+				"cannot move worktree across filesystems: failed to read extended attribute %q from symlink %s: %w",
+				name, destinationPath, err,
+			)
+		}
+		sourceProbed = true
+		if err := unix.Lsetxattr(destinationPath, name, value, 0); err != nil {
+			switch {
+			case errors.Is(err, unix.ENAMETOOLONG):
+				if destinationProbed {
+					// A prior Lsetxattr proved the destination route was within
+					// PATH_MAX, so a later ENAMETOOLONG means the route was
+					// diverted mid-copy (an ancestor was replaced with a symlink
+					// whose expansion exceeds PATH_MAX), not that it was always
+					// too long. The route recheck cannot run on a too-long path
+					// (its Lstat would also fail), so refuse rather than skip it
+					// and risk publishing attributes the earlier L* calls wrote
+					// through the diverted route.
+					return fmt.Errorf(
+						"cannot move worktree across filesystems: destination symlink %s route exceeded PATH_MAX after an earlier L* call succeeded (possible path diversion): %w",
+						destinationPath, err,
+					)
+				}
+				// The first L* call on the destination is the Lsetxattr above; the
+				// destination route was too long from the start (no prior L* call
+				// proved it addressable), so this is not a diversion but a length
+				// limit. See errXattrPathTooLong.
+				return errXattrPathTooLong
+			case isXattrUnsupported(err):
+				if !destinationSymlinkRejectsAllXattrs(destinationPath) {
+					log.WarningLog.Printf(
+						"archive: extended attribute %q not reproduced on symlink %s (this destination does not implement that namespace): %v",
+						name, destinationPath, err,
+					)
+					destinationProbed = true
+					continue
+				}
+				log.WarningLog.Printf(
+					"archive: symlink %s cannot hold extended attributes on this filesystem; none were copied",
+					destinationPath,
+				)
+				return errXattrUnsupportedDestination
+			case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
+				log.WarningLog.Printf(
+					"archive: extended attribute %q not reproduced on symlink %s (needs privilege): %v",
+					name, destinationPath, err,
+				)
+			default:
+				return fmt.Errorf(
+					"cannot move worktree across filesystems: failed to set extended attribute %q on destination symlink %s: %w",
+					name, destinationPath, err,
+				)
+			}
+		}
+		destinationProbed = true
+	}
+	// When every source value was skipped (vanished or too large), the loop made
+	// no Lsetxattr on the destination, so a too-long destination route was never
+	// probed by an Lsetxattr ENAMETOOLONG the way a source with a reproduced
+	// attribute would surface it. len(names) is nonzero here, so the empty-names
+	// probe above did not run either. copySymlinkEntry's assertPathResolvesToVerifiedLeaf
+	// would then Lstat the too-long destination and abort a cross-device move the
+	// descriptor-anchored F* paths copy fine — the exact abort errXattrPathTooLong
+	// exists to prevent. Probe the destination route so the caller skips the
+	// path-based prune and route recheck the same way the empty-names and
+	// unsupported-source paths do.
+	if len(names) > 0 && !destinationProbed {
+		if err := probeDestinationRouteTooLong(destinationPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// probeDestinationRouteTooLong reports whether the L* xattr family cannot address
+// destinationPath because the route exceeds PATH_MAX. The L* family has no *at form,
+// so the link's path is the full textual route; a tree the copier reaches
+// component-by-component through directory descriptors can carry a link whose route
+// exceeds PATH_MAX even when the walker's descriptor-anchored F* xattr paths copy it
+// fine. When the source has nothing to copy (an unsupported source filesystem, or a
+// source link with no attributes) the copy loop makes no L* call on the destination,
+// so a too-long destination route is not surfaced by an Lsetxattr the way a source
+// with attributes would surface it. copySymlinkEntry's path-based prune and route
+// recheck would then Lstat that too-long destination and abort the cross-device move
+// — the exact abort errXattrPathTooLong exists to prevent. This probe surfaces the
+// sentinel so the caller can skip those path-based operations. The path need not
+// exist: the kernel rejects a route longer than PATH_MAX before resolving it.
+func probeDestinationRouteTooLong(destinationPath string) error {
+	if _, err := unix.Llistxattr(destinationPath, nil); err != nil && errors.Is(err, unix.ENAMETOOLONG) {
+		return errXattrPathTooLong
+	}
+	return nil
+}
+
+// listSymlinkXattrNames is the path-based twin of listXattrNames: Llistxattr does not
+// follow the link, so it lists the link's own attributes rather than the target's.
+func listSymlinkXattrNames(path string) ([]string, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		size, err := unix.Llistxattr(path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		buffer := make([]byte, size)
+		read, err := unix.Llistxattr(path, buffer)
+		if err != nil {
+			if errors.Is(err, unix.ERANGE) {
+				continue
+			}
+			return nil, err
+		}
+		names := make([]string, 0, 4)
+		for _, name := range bytes.Split(buffer[:read], []byte{0}) {
+			if len(name) > 0 {
+				names = append(names, string(name))
+			}
+		}
+		return names, nil
+	}
+	return nil, fmt.Errorf("extended attribute list kept growing while it was read")
+}
+
+// readSymlinkXattrValue is the path-based twin of readXattrValue: Lgetxattr does not
+// follow the link, so it reads the link's own attribute rather than the target's.
+func readSymlinkXattrValue(path, name string) ([]byte, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		size, err := unix.Lgetxattr(path, name, nil)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		if size > maxXattrValueBytes {
+			return nil, errXattrValueTooLarge
+		}
+		value := make([]byte, size)
+		read, err := unix.Lgetxattr(path, name, value)
+		if err != nil {
+			if errors.Is(err, unix.ERANGE) {
+				continue
+			}
+			return nil, err
+		}
+		return value[:read], nil
+	}
+	return nil, fmt.Errorf("extended attribute %q kept growing while it was read", name)
+}
+
+// destinationSymlinkRejectsAllXattrs is the path-based twin of
+// destinationRejectsAllXattrs: Llistxattr on the freshly created link reports whether
+// the destination filesystem holds attributes at all, so a single refused namespace
+// is not mistaken for a filesystem that has none.
+func destinationSymlinkRejectsAllXattrs(path string) bool {
+	_, err := unix.Llistxattr(path, nil)
+	return isXattrUnsupported(err)
+}
+
+// pruneSymlinkXattrs is the path-based twin of pruneDestinationXattrs: a freshly
+// created destination link can carry an attribute the source lacks — an
+// SELinux-enabled destination assigns security.selinux during symlinkat while the
+// source filesystem is unlabeled, and the file and directory paths remove exactly
+// such an inherited attribute via pruneDestinationXattrs. The link path was the
+// one node class that did not, so this lists the destination link's own attributes
+// with Llistxattr and Lremovexattr's any the source link does not carry. Failures
+// are warnings, matching pruneDestinationXattrs: an archive that refuses to run
+// is worse than one that reports what it could not normalise.
+func pruneSymlinkXattrs(sourcePath, destinationPath string) {
+	destinationNames, err := listSymlinkXattrNames(destinationPath)
+	if err != nil {
+		// A destination that holds no attributes at all has nothing to normalise
+		// and is not worth a warning. Anything else means the check did not happen,
+		// and staying silent is how an inherited attribute rides along while the
+		// archive reports success.
+		if !isXattrUnsupported(err) {
+			log.WarningLog.Printf(
+				"archive: could not list extended attributes on symlink %s to check for inherited ones; any the destination added are left in place: %v",
+				destinationPath, err,
+			)
+		}
+		return
+	}
+	if len(destinationNames) == 0 {
+		return
+	}
+	sourceNames, err := listSymlinkXattrNames(sourcePath)
+	if err != nil && !isXattrUnsupported(err) {
+		log.WarningLog.Printf(
+			"archive: could not list the source's extended attributes while normalising symlink %s; any the destination inherited are left in place: %v",
+			destinationPath, err,
+		)
+		return
+	}
+	fromSource := make(map[string]struct{}, len(sourceNames))
+	for _, name := range sourceNames {
+		fromSource[name] = struct{}{}
+	}
+	for _, name := range destinationNames {
+		if _, ok := fromSource[name]; ok {
+			continue
+		}
+		if err := unix.Lremovexattr(destinationPath, name); err != nil && !isXattrVanished(err) {
+			log.WarningLog.Printf(
+				"archive: symlink %s inherited extended attribute %q that the source did not have, and it could not be removed: %v",
+				destinationPath, name, err,
+			)
+		}
+	}
+}
+
+// assertPathResolvesToVerifiedLeaf detects that a textual path the L* xattr
+// family read or wrote through was diverted from the node a held descriptor
+// anchors. The L* family has no *at form in golang.org/x/sys/unix (v0.47.0), so
+// copySymlinkXattrs reads sourcePath and writes destinationPath through the
+// filesystem root rather than the source/destination descriptors the walk
+// validated. A descriptor-anchored recheck (statAt(parent, name)) proves the
+// LEAF in the held parent did not change, but it does not prove the textual path
+// still resolves through the same ANCESTORS to that leaf: a same-UID process that
+// renames an ancestor and installs a replacement at the same name during the L*
+// calls reads the replacement's attributes (or writes the source's onto the
+// replacement) while the held parent's name still resolves to the original — and
+// the final tree validation re-walks by descriptor, so it misses the swap too.
+//
+// Lstat re-derives the path through its ancestors without following the final
+// component, so for a symlink path it addresses the link itself. A leaf the path
+// reaches that is not the leaf the held descriptor reached means an ancestor was
+// swapped, and the archive refuses rather than publish a transient node's
+// attributes. A swap that is restored before this check is the residual the
+// *at-less API leaves, the same detection-only standard the mtime stamp in
+// copySymlinkEntry already applies; the loss stays LOGGED (#2919) rather than
+// silent.
+func assertPathResolvesToVerifiedLeaf(path string, verified *unix.Stat_t) error {
+	var resolved unix.Stat_t
+	if err := unix.Lstat(path, &resolved); err != nil {
+		return err
+	}
+	if !identityFromStat(verified).same(identityFromStat(&resolved)) {
+		return fmt.Errorf("path %s resolves to a different node than the verified descriptor", path)
+	}
+	return nil
 }
 
 // pruneDestinationXattrs removes attributes the destination has and the source does

@@ -80,6 +80,11 @@ options:
 					marker, replaceMarker = value, value
 				} else if attached {
 					marker, markerKnown = "{}", true
+				} else {
+					// A bare --replace defaults to {} too, so a preceding -I
+					// marker (e.g. -I@) or dynamic -I "$M" does not leak through
+					// the newly defaulted {}.
+					marker, markerKnown = "{}", true
 				}
 				words = words[1:]
 			case "arg-file", "delimiter", "max-args", "max-procs", "max-chars":
@@ -139,6 +144,11 @@ options:
 					replaceCancelled, replaceMarker = false, "{}"
 					if idx+1 < len(flags) {
 						marker, replaceMarker = flags[idx+1:], flags[idx+1:]
+					} else {
+						// A bare -i defaults to {} too, so a preceding -I marker
+						// (e.g. -I@) or dynamic -I "$M" does not leak through the
+						// newly defaulted {}.
+						marker, markerKnown = "{}", true
 					}
 					idx = len(flags)
 				case 'a', 'd', 'E', 'I', 'L', 'n', 'P', 's':
