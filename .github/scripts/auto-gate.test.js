@@ -9378,6 +9378,11 @@ test("#4975: a truncated reconciliation page is retried, not fatal", async () =>
   const realGraphql = github.graphql;
   let calls = 0;
   github.graphql = async (query, variables) => {
+    // The read-back hydration is a second, unrelated graphql call — count
+    // only the paginated pull-request scan this test injects failure into.
+    if (/\bnodes\s*\(/.test(query)) {
+      return realGraphql(query, variables);
+    }
     calls += 1;
     if (calls === 1) {
       throw new SyntaxError("Unterminated string in JSON at position 219220");
@@ -9422,9 +9427,10 @@ test("#4975: the reconciliation page does not select check-run summary or text",
     "title stays: the stale-aggregate WAITING scan reads it, and it is bounded small");
 });
 
-test("#4975: a blocked decision's output is read back over REST, once", async () => {
+test("#4975: a blocked decision's output is read back in one batched read", async () => {
   const context = { ...fakeContext(), eventName: "schedule" };
   const checkRunGets = [];
+  const decisionOutputReads = [];
   const blockedDecision = reconciliationDecision({
     prNumber: 1465,
     headSha: HEAD_SHA,
@@ -9441,6 +9447,7 @@ test("#4975: a blocked decision's output is read back over REST, once", async ()
         ],
       },
       checkRunGets,
+      decisionOutputReads,
     }),
     context,
     core: fakeCore(),
@@ -9449,14 +9456,55 @@ test("#4975: a blocked decision's output is read back over REST, once", async ()
     prNumber: 1465,
     headSha: HEAD_SHA,
     decisionKey: `pr-1465-head-${HEAD_SHA}`,
-  }], "the blocked-source summary and required-check snapshot must arrive via the per-run read");
+  }], "the blocked-source summary and required-check snapshot must arrive via the read-back");
+  assert.deepEqual(decisionOutputReads, [[blockedDecision.node_id]],
+    "the decision run's output is fetched once, by node id, not carried by every context on the page");
+  assert.deepEqual(checkRunGets, [],
+    "a node-id-addressable run rides the batch, never the per-run REST read");
+});
+
+test("#4975: a decision the page gave no node id still hydrates over REST", async () => {
+  const context = { ...fakeContext(), eventName: "schedule" };
+  const checkRunGets = [];
+  const decisionOutputReads = [];
+  const blockedDecision = {
+    ...reconciliationDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: "2026-07-09T21:00:52Z",
+    }),
+    node_id: undefined,
+  };
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls: [reconciliationPull(1465, HEAD_SHA)],
+      checksByHead: {
+        [HEAD_SHA]: [
+          blockedDecision,
+          reconciliationRequiredCheck("Build", "2026-07-09T21:02:32Z"),
+          reconciliationRequiredCheck("Lint", "2026-07-09T21:02:33Z"),
+        ],
+      },
+      checkRunGets,
+      decisionOutputReads,
+    }),
+    context,
+    core: fakeCore(),
+  });
+  assert.deepEqual(targets, [{
+    prNumber: 1465,
+    headSha: HEAD_SHA,
+    decisionKey: `pr-1465-head-${HEAD_SHA}`,
+  }], "a decision without a node id is still hydrated, not stranded");
   assert.deepEqual(checkRunGets, [blockedDecision.id],
-    "the decision run's output is fetched once, by id, not carried by every context on the page");
+    "the per-run REST read stays as the fallback the batch cannot address");
+  assert.deepEqual(decisionOutputReads, []);
 });
 
 test("#4975: a passing head never pays for the per-run decision read", async () => {
   const context = { ...fakeContext(), eventName: "schedule" };
   const checkRunGets = [];
+  const decisionOutputReads = [];
   const passingDecision = {
     ...reconciliationDecision({
       prNumber: 1465,
@@ -9475,11 +9523,13 @@ test("#4975: a passing head never pays for the per-run decision read", async () 
         ],
       },
       checkRunGets,
+      decisionOutputReads,
     }),
     context,
     core: fakeCore(),
   });
   assert.deepEqual(targets, []);
+  assert.deepEqual(decisionOutputReads, []);
   assert.deepEqual(checkRunGets, [],
     "a head whose newest decision succeeded has no blocked source to recover");
 });
@@ -9492,7 +9542,7 @@ test("#4975: a passing head never pays for the per-run decision read", async () 
 // decision is invisible there no matter what its title says.
 test("#5073: every PR sharing a head keeps its own decision output", async () => {
   const context = { ...fakeContext(), eventName: "schedule" };
-  const checkRunGets = [];
+  const decisionOutputReads = [];
   const targets = await autoGate.resolveTargets({
     github: scheduledReconciliationGithub({
       pulls: [
@@ -9513,21 +9563,61 @@ test("#5073: every PR sharing a head keeps its own decision output", async () =>
           }),
         ],
       },
-      checkRunGets,
+      decisionOutputReads,
     }),
     context,
     core: fakeCore(),
     reconciliationNowMs: TRANSIENT_NOW,
   });
   assert.deepEqual(
-    checkRunGets.slice().sort((left, right) => left - right),
-    [1465, 1466],
-    "each PR's decision output is read back by run id, not just the last pull's",
+    decisionOutputReads.flat().sort(),
+    ["CR_decision_1465", "CR_decision_1466"],
+    "each PR's decision output is read back, not just the last pull's on the head",
   );
   assert.deepEqual(targets, [
     { prNumber: 1465, headSha: HEAD_SHA, decisionKey: `pr-1465-head-${HEAD_SHA}` },
     { prNumber: 1466, headSha: HEAD_SHA, decisionKey: `pr-1466-head-${HEAD_SHA}` },
   ], "oldest first; both transient blocks must survive the shared-head overwrite");
+});
+
+// Codex P2 on the revive: one checks.get per blocked PR would put ~84+ REST
+// calls inside a pass the token budget cannot afford. The output read-back is
+// batched by node id instead — 26 blocked decisions cost two nodes() calls and
+// no per-run reads at all.
+test("#5073: decision hydration is batched within the workflow's API budget", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 26; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [transientDecision({
+      prNumber: number,
+      headSha: sha(number),
+      evaluatedAt: minutesBeforeTransientNow(30 + number),
+    })];
+  }
+  const checkRunGets = [];
+  const decisionOutputReads = [];
+  const targets = await autoGate.resolveTargets({
+    github: scheduledReconciliationGithub({
+      pulls,
+      checksByHead,
+      checkRunGets,
+      decisionOutputReads,
+    }),
+    context: { ...fakeContext(), eventName: "schedule" },
+    core: fakeCore(),
+    reconciliationNowMs: TRANSIENT_NOW,
+  });
+  assert.equal(decisionOutputReads.length, 2, "26 blocked decisions hydrate in ceil(26/25) calls");
+  assert.equal(decisionOutputReads[0].length, 25);
+  assert.equal(decisionOutputReads[1].length, 1);
+  assert.deepEqual(checkRunGets, [], "no per-run REST reads at all");
+  assert.deepEqual(
+    targets.map((target) => target.prNumber),
+    [26, 25, 24, 23, 22],
+    "the transient lane still selects the five oldest, capped per pass",
+  );
 });
 
 // #4975 follow-up, and run 37329001725's exact shape: api.github.com's edge
@@ -17782,6 +17872,7 @@ function reconciliationDecision({
   evaluatedAt,
   reason = `required check Build (app ${ACTIONS_APP_ID}) is missing on ${headSha}`,
   snapshotVersion = 1,
+  nodeId = `CR_decision_${prNumber}`,
   observedChecks = [{
     name: "Build",
     appId: ACTIONS_APP_ID,
@@ -17790,6 +17881,7 @@ function reconciliationDecision({
 }) {
   return {
     id: prNumber,
+    node_id: nodeId,
     name: decisionName(prNumber, headSha),
     external_id: decisionExternalId(prNumber, headSha),
     app: { id: ACTIONS_APP_ID, slug: "github-actions" },
@@ -17814,6 +17906,7 @@ function scheduledReconciliationGithub({
   statusReads = [],
   checkRunReads = [],
   checkRunGets = [],
+  decisionOutputReads = [],
   inspectedHeads = [],
   graphqlReads = [],
   truncatedHeads = [],
@@ -17836,9 +17929,12 @@ function scheduledReconciliationGithub({
     }
     return { data: [...latestByName.values()] };
   };
-  // checkRunGets records every REST checks.get by run id. Since #4975 the
-  // decision run's summary/text no longer ride the GraphQL page; the snapshot
-  // reads them back per-run for the newest completed non-success decision.
+  // checkRunGets records every REST checks.get by run id, and
+  // decisionOutputReads every ids[] carried by one nodes() batch call. Since
+  // #4975 the decision run's summary/text no longer ride the GraphQL page;
+  // the snapshot reads them back for the newest completed non-success
+  // decision — batched by node id, with checks.get only for a run the page
+  // could not name one for.
   const getCheckRun = async ({ check_run_id }) => {
     checkRunGets.push(check_run_id);
     for (const runs of Object.values(checksByHead)) {
@@ -17857,7 +17953,38 @@ function scheduledReconciliationGithub({
       checks: { listForRef, get: getCheckRun },
     },
     paginate: async (operation, options) => (await operation(options)).data,
-    graphql: async (query, { after }) => {
+    graphql: async (query, variables = {}) => {
+      const { after } = variables;
+      // The decision-output hydration reads CheckRun fields off the global
+      // nodes() lookup — batched by node id, DECISION_OUTPUT_BATCH_SIZE at a
+      // time. It is tracked separately so graphqlReads still counts only the
+      // paginated pull-request scans.
+      if (/\bnodes\s*\(\s*ids\s*:/.test(query)) {
+        decisionOutputReads.push([...(variables.ids || [])]);
+        const byNodeId = new Map();
+        for (const runs of Object.values(checksByHead)) {
+          for (const run of runs || []) {
+            if (run?.node_id) {
+              byNodeId.set(run.node_id, run);
+            }
+          }
+        }
+        return {
+          nodes: (variables.ids || []).map((id) => {
+            const run = byNodeId.get(id);
+            if (!run) {
+              return null;
+            }
+            return {
+              __typename: "CheckRun",
+              id,
+              title: run.output?.title,
+              summary: run.output?.summary,
+              text: run.output?.text,
+            };
+          }),
+        };
+      }
       graphqlReads.push(after);
       const requestsCheckRunNodeId = /\.\.\. on CheckRun\s*\{\s*id(?:\s|$)/.test(query);
       // Field selection is scoped to the CheckRun fragment's own braces: an

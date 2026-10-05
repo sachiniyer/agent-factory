@@ -3565,6 +3565,12 @@ const GATE_WORKFLOW = "auto-gate.yml";
 // evaluations.
 const REQUIRED_CHECK_REEVALUATION_LIMIT = 10;
 const REQUIRED_CHECK_RECONCILIATION_PAGE_SIZE = 100;
+// Decision outputs are hydrated off one nodes() call per this many runs, not
+// one REST checks.get per blocked PR: a sweep over a repository full of failed
+// decisions must stay inside the workflow token's hourly budget (Codex on the
+// #5073 revive). 25 × the ~128 KiB output ceiling is also a bounded page,
+// ~50× smaller than the rollup page #4975 shrank.
+const DECISION_OUTPUT_BATCH_SIZE = 25;
 // A pass runs on the schedule, or as the one repository_dispatch type
 // auto-gate.yml subscribes to. GitHub delivers the */5 schedule every two to
 // five hours (#4571), so ordinary runs request the dispatch, at most once per
@@ -5568,6 +5574,23 @@ const REQUIRED_CHECK_RECONCILIATION_QUERY = `
   }
 `;
 
+// The same CheckRun output fields the reconciliation page stopped selecting,
+// read back for only the decision runs that need them — by node id, which the
+// mapped runs carry as node_id and REST check runs carry natively.
+const DECISION_OUTPUT_QUERY = `
+  query DecisionCheckRunOutputs($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      __typename
+      ... on CheckRun {
+        id
+        title
+        summary
+        text
+      }
+    }
+  }
+`;
+
 function reconciliationCheckRunDatabaseID(run) {
   if (Number.isSafeInteger(run.databaseId) && run.databaseId > 0) {
     return run.databaseId;
@@ -5769,14 +5792,17 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
   // the ONLY run on the head those consumers open, so the GraphQL page no
   // longer selects output fields for every context of every PR: one
   // truncated page then cost the whole snapshot (#4975). A completed
-  // non-success decision is the one that needs them, and it is read back
-  // per-run over REST instead.
+  // non-success decision is the one that needs them.
   //
   // Hydrate the array the map KEEPS, and only once pagination settles: open
   // PRs can share a head, each pull's node carries the same rollup, and the
   // last writer's array is the one stored — hydrating inside the pull loop
   // would keep output for the last PR on a shared head and silently drop it
-  // for every earlier one (Codex on #5073).
+  // for every earlier one (Codex on #5073). The reads are batched by node id
+  // for the same reason: one nodes() call per DECISION_OUTPUT_BATCH_SIZE
+  // decisions instead of one REST checks.get per blocked PR, which on a busy
+  // repository would outrun the workflow token's hourly budget.
+  const blockedDecisions = [];
   for (const pull of pulls) {
     const headSha = normalizeHeadSha(pull?.headRefOid);
     const prNumber = Number(pull?.number);
@@ -5794,24 +5820,60 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
     if (
       decision &&
       decision.status === "completed" &&
-      decision.conclusion !== "success" &&
-      Number.isSafeInteger(decision.id)
+      decision.conclusion !== "success"
     ) {
-      const detail = await retryRead(
-        `could not read the decision check run at ${headSha}`,
-        () =>
-          github.rest.checks.get({
-            owner,
-            repo,
-            check_run_id: decision.id,
-          }),
-      );
-      decision.output = {
-        title: detail?.data?.output?.title ?? decision.output?.title,
-        summary: detail?.data?.output?.summary,
-        text: detail?.data?.output?.text,
-      };
+      blockedDecisions.push(decision);
     }
+  }
+  const nodeAddressable = blockedDecisions.filter(
+    (run) => typeof run.node_id === "string" && run.node_id !== "",
+  );
+  for (let at = 0; at < nodeAddressable.length; at += DECISION_OUTPUT_BATCH_SIZE) {
+    const batch = nodeAddressable.slice(at, at + DECISION_OUTPUT_BATCH_SIZE);
+    const response = await retryRead(
+      "could not read decision check-run outputs",
+      () =>
+        github.graphql(DECISION_OUTPUT_QUERY, {
+          ids: batch.map((run) => run.node_id),
+        }),
+    );
+    const hydrated = new Map(
+      (response?.nodes || [])
+        .filter((node) => node?.__typename === "CheckRun" && node.id)
+        .map((node) => [node.id, node]),
+    );
+    for (const run of batch) {
+      const node = hydrated.get(run.node_id);
+      if (node) {
+        run.output = {
+          title: node.title ?? run.output?.title,
+          summary: node.summary,
+          text: node.text,
+        };
+      }
+    }
+  }
+  // A run the page gave no node id cannot ride the batch — the REST check-run
+  // read stays as the per-run fallback for it.
+  const batched = new Set(nodeAddressable);
+  for (const run of blockedDecisions) {
+    if (batched.has(run) || !Number.isSafeInteger(run.id)) {
+      continue;
+    }
+    const detail = await retryRead(
+      `could not read the decision check run ${run.id}`,
+      () =>
+        github.rest.checks.get({
+          owner,
+          repo,
+          check_run_id: run.id,
+        }),
+    );
+    run.output = {
+      title: detail?.data?.output?.title ?? run.output?.title,
+      summary: detail?.data?.output?.summary,
+      text: detail?.data?.output?.text,
+    };
   }
   return { pulls, checkRunsByHead, statusesByHead, pages };
 }
