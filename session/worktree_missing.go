@@ -56,7 +56,7 @@ func (i *Instance) RefreshWorktreeMissing() (missing bool, changed bool) {
 	}
 	if !i.worktreeMissing {
 		i.worktreeMissing = true
-		i.worktreeMissingReason = worktreeMissingReasonForms[0].render(probed)
+		i.worktreeMissingReason = WorktreeMissingDeletedReason(probed)
 		i.touchLocked()
 		changed = true
 	}
@@ -114,6 +114,13 @@ var worktreeMissingReasonForms = [...]worktreeMissingReasonForm{
 	{prefix: "tracked worktree path ", suffix: " does not exist (deleted outside af)"},
 	// Stamped by the archive route that found the worktree already gone.
 	{prefix: "worktree was already absent at ", suffix: " when archived (deleted outside af)"},
+}
+
+// WorktreeMissingDeletedReason is the reason recorded when the tracked worktree
+// at path is found deleted outside af — by the probe, or by an archive that
+// proved the same absence through its relocation claim.
+func WorktreeMissingDeletedReason(path string) string {
+	return worktreeMissingReasonForms[0].render(path)
 }
 
 // WorktreeMissingArchivedReason is the reason an archive stamps on a row whose

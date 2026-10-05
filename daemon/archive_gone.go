@@ -126,6 +126,14 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	}
 
 	origPath := instance.GetWorktreePath()
+	if !adopted {
+		// The claim just proved the tracked path absent with no relocation behind
+		// it — the probe's own evidence — so record it now, before teardown,
+		// rather than only at the commit. If teardown then finds a directory back
+		// at the path and fences the row, the flag is what makes every retry
+		// refuse that unverified directory instead of moving it (#5102).
+		instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(origPath))
+	}
 	// What the outcome messages say happened to the worktree.
 	whereabouts := fmt.Sprintf("its worktree was already absent at %s", origPath)
 	if adopted {

@@ -533,6 +533,9 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 	if gw.CleanupRetryPending() {
 		return teardownKill{}, noop, fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
 	}
+	// Same discharge as kill admission (#5102): it may have run before the
+	// tombstone, but the path's absence is re-proven here at teardown.
+	gw.SettleAbsentIdentityUnknownStall()
 	_, recovery, unresolved := gw.RelocationSnapshot()
 	if !unresolved {
 		// Record-free archived teardown re-establishes the origin at the point
