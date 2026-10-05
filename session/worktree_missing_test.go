@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -60,15 +61,23 @@ func TestRefreshWorktreeMissing_SetClearKeep(t *testing.T) {
 	assert.False(t, missing)
 	assert.False(t, changed)
 
-	// A rebuilt path clears the flag.
-	rebuilt := worktreeMissingInstance(t, filepath.Join(t.TempDir(), "wt"))
-	rebuilt.SetWorktreeMissing("stale")
-	require.NoError(t, os.Mkdir(rebuilt.gitWorktree.GetWorktreePath(), 0o755))
-	missing, changed = rebuilt.RefreshWorktreeMissing()
-	assert.False(t, missing)
-	assert.True(t, changed)
-	_, reason = rebuilt.WorktreeMissing()
-	assert.Empty(t, reason)
+	// A recreated pathname does NOT clear the flag: the agent's cwd is still the
+	// unlinked inode, so only af rebuilding the worktree and respawning the agent
+	// into it (ClearWorktreeMissing) makes the row deliverable again.
+	recreated := worktreeMissingInstance(t, filepath.Join(t.TempDir(), "wt"))
+	_, changed = recreated.RefreshWorktreeMissing()
+	require.True(t, changed)
+	require.NoError(t, os.Mkdir(recreated.gitWorktree.GetWorktreePath(), 0o755))
+	missing, changed = recreated.RefreshWorktreeMissing()
+	assert.True(t, missing, "Present must not clear a set flag")
+	assert.False(t, changed)
+	_, reason = recreated.WorktreeMissing()
+	assert.Contains(t, reason, "deleted outside af")
+
+	recreated.ClearWorktreeMissing()
+	missing, changed = recreated.RefreshWorktreeMissing()
+	assert.False(t, missing, "once af cleared it, a present path keeps it clear")
+	assert.False(t, changed)
 }
 
 func TestRefreshWorktreeMissing_NoWorktreeLeavesFlag(t *testing.T) {
@@ -151,4 +160,47 @@ func TestRenameArchived_GoneWorktreeRepointsWithoutMove(t *testing.T) {
 	_, statErr := os.Lstat(dest)
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "no move was attempted, so nothing exists at the new path")
 	runRenameGit(t, repoRoot, "show-ref", "--verify", "refs/heads/af/old-title-renamed")
+}
+
+// The respawn path is where af re-materializes a deleted worktree, so it is where
+// the flag clears — but only when it actually rebuilt the path and started a fresh
+// pane there. A respawn into a path that already existed (someone mkdir'd it)
+// proves nothing about the worktree and must leave the flag set (#5102).
+func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	for _, tc := range []struct {
+		name        string
+		precreate   bool
+		wantMissing bool
+	}{
+		{name: "rebuilt and respawned clears", precreate: false, wantMissing: false},
+		{name: "respawn into an existing path keeps it", precreate: true, wantMissing: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := initTempGitRepo(t)
+			gitOut(t, repoRoot, "config", "user.email", "test@test.com")
+			gitOut(t, repoRoot, "config", "user.name", "test")
+			gitOut(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+			const branch = "af/wt-missing-recover"
+			gitOut(t, repoRoot, "branch", branch)
+
+			const agentName = "af_wt_missing_recover"
+			shellName := agentName + tmuxTabSeparator + shellTabName
+			worktreePath := filepath.Join(t.TempDir(), "worktree")
+			if tc.precreate {
+				require.NoError(t, os.Mkdir(worktreePath, 0o755))
+			}
+			instance := accountLostInstanceForRecover(
+				t, repoRoot, worktreePath, branch, agentName, shellName, nameKeyedExec(map[string]bool{}),
+			)
+			instance.SetWorktreeMissing("tracked worktree path " + worktreePath + " does not exist (deleted outside af)")
+
+			require.NoError(t, instance.Recover())
+			require.DirExists(t, worktreePath)
+			missing, _ := instance.WorktreeMissing()
+			assert.Equal(t, tc.wantMissing, missing)
+		})
+	}
 }

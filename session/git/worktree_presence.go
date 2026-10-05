@@ -43,11 +43,25 @@ func (g *GitWorktree) ProbeWorktreePresence() WorktreePresence {
 	case err == nil:
 		return WorktreePresencePresent
 	case errors.Is(err, os.ErrNotExist):
+		// The snapshot and the lstat are two moments, and relocationMu is not held
+		// across a filesystem call. An archive or restore can claim the path and
+		// move it away in between, so ENOENT here may be af's own move. Re-read the
+		// ownership: Absent stands only if no relocation became unresolved and the
+		// record still names the path that was stat'd.
+		after, _, unresolvedAfter := g.RelocationSnapshot()
+		if unresolvedAfter || after != path {
+			return WorktreePresenceUnknown
+		}
 		return WorktreePresenceAbsent
 	default:
 		return WorktreePresenceUnknown
 	}
 }
+
+// ErrRepointDestinationOccupied is RepointAbsentWorktreePath's refusal for a
+// destination something already occupies. Restore distinguishes it because an
+// occupant there may be the bytes of its own interrupted earlier attempt.
+var ErrRepointDestinationOccupied = errors.New("destination occupied")
 
 // RepointAbsentWorktreePath rewrites the recorded worktree path to dest when the
 // recorded path is conclusively absent — the restore/rename counterpart of a
@@ -80,7 +94,7 @@ func (g *GitWorktree) RepointAbsentWorktreePath(dest string) error {
 		return fmt.Errorf("cannot confirm worktree %s absent: %w", current, err)
 	}
 	if _, err := BoundedLstat(dest); err == nil {
-		return fmt.Errorf("cannot repoint worktree to %s: destination occupied", dest)
+		return fmt.Errorf("cannot repoint worktree to %s: %w", dest, ErrRepointDestinationOccupied)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("cannot confirm repoint destination %s free: %w", dest, err)
 	}

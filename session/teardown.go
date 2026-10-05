@@ -787,6 +787,12 @@ type teardownArchive struct {
 	// (#5102): the tabs tear down exactly as usual, but there is nothing to
 	// relocate, so handleWorktree only re-confirms the absence. claim is nil.
 	worktreeGone bool
+	// worktreeAdopted is the other no-move route: an earlier archive's move
+	// landed at the destination before the daemon could record it, and the
+	// record was re-aimed there after git proved it (#5102). The bytes are
+	// already where the archive puts them, so handleWorktree only re-confirms
+	// they are still there. claim is nil.
+	worktreeAdopted bool
 }
 
 // closeTab waits for the pane to exit before handleWorktree relocates the
@@ -865,6 +871,15 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 			return stateKnown, fmt.Errorf("archive %q: worktree %s reappeared before the move step; refusing the missing-worktree archive route — retry to relocate it", title, path)
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return stateUnknown, fmt.Errorf("archive %q: could not confirm worktree %s absent: %w", title, path, statErr)
+		}
+		return stateKnown, nil
+	}
+	if m.worktreeAdopted {
+		path := gw.GetWorktreePath()
+		if _, statErr := git.BoundedLstat(path); errors.Is(statErr, os.ErrNotExist) {
+			return stateKnown, fmt.Errorf("archive %q: adopted worktree %s vanished before the archive could commit", title, path)
+		} else if statErr != nil {
+			return stateUnknown, fmt.Errorf("archive %q: could not confirm adopted worktree %s still present: %w", title, path, statErr)
 		}
 		return stateKnown, nil
 	}

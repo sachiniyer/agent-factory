@@ -261,14 +261,35 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// does (#1540): a subdirectory user's worktree is restored under
 	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
 	// needed only for subdirectory placement.
-	beforeRestoreWorktreePath()
-	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
-	if err != nil {
-		if worktreeGone {
-			return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
+	//
+	// A gone archive may not be gone at all: an earlier restore can have moved it
+	// to its restore location and died before recording that (#5102). Git's
+	// registration follows the move, so ask it before rebuilding — a rebuild would
+	// fail on the branch's live checkout anyway, and the bytes there are the
+	// session's work.
+	adoptedPath := ""
+	if worktreeGone {
+		landed, adopted, err := instance.AdoptLandedRestoreMove(repoPath, req.Title, instance.GetBranch())
+		if err != nil {
+			return "", fmt.Errorf("cannot restore session %q: its archived worktree %s is gone, and af could not rule out that an earlier interrupted restore already moved it: %w",
+				req.Title, instance.GetWorktreePath(), err)
 		}
-		claimTransferred = true
-		return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
+		if adopted {
+			adoptedPath = landed
+			m.info().Printf("restore of session %q: its archived worktree was gone and git proves an earlier interrupted restore moved it to %s; adopting that location", req.Title, landed)
+		}
+	}
+	dest := adoptedPath
+	if dest == "" {
+		beforeRestoreWorktreePath()
+		dest, err = sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
+		if err != nil {
+			if worktreeGone {
+				return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
+			}
+			claimTransferred = true
+			return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
+		}
 	}
 	beforeRestoreWorktreeUse()
 
@@ -279,15 +300,20 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if worktreeGone {
 		// Nothing to relocate: re-aim the record at the restore destination so
 		// the respawn's RebuildFromExistingBranch recreates the worktree there
-		// from the kept branch (#5102). A refusal changed nothing on disk or in
-		// the record, so it returns plainly — none of the move route's recovery
+		// from the kept branch (#5102) — or, for an adopted landed move, it
+		// already names the bytes. A refusal changed nothing on disk or in the
+		// record, so it returns plainly — none of the move route's recovery
 		// bookkeeping below applies to a claim that was never taken.
-		if err := instance.RepointAbsentWorktreeForRestore(dest); err != nil {
-			return "", fmt.Errorf("cannot restore session %q: its worktree was deleted outside af and could not be re-aimed at %s for a rebuild: %w", req.Title, dest, err)
+		if adoptedPath == "" {
+			if err := instance.RepointAbsentWorktreeForRestore(dest); errors.Is(err, sessiongit.ErrRepointDestinationOccupied) {
+				return "", fmt.Errorf("cannot restore session %q: its archived worktree is gone and restore location %s is already occupied — a previous restore's move may have landed there before the daemon could record it; inspect %s and remove it or move it aside, then retry: %w", req.Title, dest, dest, err)
+			} else if err != nil {
+				return "", fmt.Errorf("cannot restore session %q: its worktree was deleted outside af and could not be re-aimed at %s for a rebuild: %w", req.Title, dest, err)
+			}
 		}
-		// The record now names a path af is about to build, not the one that was
-		// deleted. If the rebuild does not materialize it, the poll re-derives the
-		// flag from the new path.
+		// The record now names a path af is about to build (or one it just
+		// proved holds the worktree), not the one that was deleted. If the
+		// rebuild does not materialize it, the poll re-derives the flag.
 		instance.ClearWorktreeMissing()
 	} else if err := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {

@@ -316,6 +316,16 @@ func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (t
 // repo. The base path is validated to sit strictly inside worktreeDir (#461) and
 // a numeric suffix is appended when it is already occupied.
 func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
+	basePath, err := worktreePlacementBase(cfg, repoRoot, worktreeDir, sessionName, branchName)
+	if err != nil {
+		return "", err
+	}
+	return firstFreeWorktreePath(basePath)
+}
+
+// worktreePlacementBase is resolveWorktreePlacement before collision handling:
+// the path a session's worktree takes when nothing occupies it.
+func worktreePlacementBase(cfg *config.Config, repoRoot, worktreeDir, sessionName, branchName string) (string, error) {
 	var basePath string
 	if cfg != nil && cfg.WorktreeRoot == config.WorktreeRootSubdirectory {
 		// Subdirectory mode nests the branch name under the worktrees root. A
@@ -359,7 +369,7 @@ func resolveWorktreePlacement(cfg *config.Config, repoRoot, worktreeDir, session
 	if !pathutil.IsStrictlyInside(absBase, absDir) {
 		return "", fmt.Errorf("invalid session name %q: would place worktree outside %s", sessionName, worktreeDir)
 	}
-	return firstFreeWorktreePath(basePath)
+	return basePath, nil
 }
 
 // DerivedWorktreePathTitleSegment returns the user-title-derived part of the

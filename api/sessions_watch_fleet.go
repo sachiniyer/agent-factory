@@ -417,7 +417,8 @@ func classifyWatchStop(d session.InstanceData) (watchStopReason, string) {
 		switch d.Liveness {
 		case session.LiveRunning, session.LiveReady, session.LiveLost,
 			session.LiveDead, session.LiveLimitReached:
-			return watchStopWorktreeGone, "its tracked worktree was deleted outside af; it cannot receive prompts — archive it ('af sessions archive') or remove it ('af sessions kill')"
+			return watchStopWorktreeGone, "its tracked worktree was deleted outside af; it cannot receive prompts — " +
+				session.WorktreeMissingRemedy(d.Worktree.ExternalWorktree)
 		}
 	}
 

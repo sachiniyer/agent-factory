@@ -1,7 +1,7 @@
 package session
 
 import (
-	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/session/git"
 )
@@ -11,13 +11,17 @@ import (
 // flag's resulting value and whether this call changed it, so the daemon poll
 // persists and publishes only on a transition.
 //
-// Only a conclusive answer moves the flag. Present clears it — a worktree the
-// user rebuilt by hand is deliverable again. Absent sets it. Unknown (a stat
-// error other than ENOENT, a bounded-probe timeout, or an af-owned relocation
-// in flight) leaves it exactly as it was: an unanswerable path that was last
-// seen absent is still not somewhere a prompt can land, and one last seen
-// present must not be flagged on a guess. The probe runs outside i.mu because
-// it is a filesystem call, bounded or not.
+// The probe can only ever SET the flag. Absent sets it; Unknown (a stat error
+// other than ENOENT, a bounded-probe timeout, or an af-owned relocation in
+// flight) never moves it, so a path that cannot be answered is never flagged on
+// a guess. Present does not clear it either, and that asymmetry is the point:
+// once the directory was deleted, the agent's cwd is bound to the unlinked
+// inode, and a pathname recreated by anything else — a mkdir, an unrelated `git
+// worktree add` — leaves that pane exactly as undeliverable as before. The flag
+// clears only through ClearWorktreeMissing, at the sites where af itself
+// re-materializes the worktree and starts the agent in it: the respawn rebuild
+// and the restore repoint. The probe runs outside i.mu because it is a
+// filesystem call, bounded or not.
 //
 // Only a local worktree is probed. An off-box session's workspace lives in its
 // sandbox or remote host, so a local lstat of its recorded path answers nothing
@@ -29,31 +33,21 @@ func (i *Instance) RefreshWorktreeMissing() (missing bool, changed bool) {
 	local := i.capabilitiesLocked().Workspace == WorkspaceLocalWorktree
 	flag := i.worktreeMissing
 	i.mu.RUnlock()
-	if gw == nil || !local {
+	if gw == nil || !local || flag {
 		return flag, false
 	}
-	presence := gw.ProbeWorktreePresence()
+	if gw.ProbeWorktreePresence() != git.WorktreePresenceAbsent {
+		return false, false
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	switch presence {
-	case git.WorktreePresenceAbsent:
-		if !i.worktreeMissing {
-			i.worktreeMissing = true
-			i.worktreeMissingReason = fmt.Sprintf(
-				"tracked worktree path %s does not exist (deleted outside af)", gw.GetWorktreePath(),
-			)
-			i.touchLocked()
-			changed = true
-		}
-	case git.WorktreePresencePresent:
-		if i.worktreeMissing {
-			i.worktreeMissing = false
-			i.worktreeMissingReason = ""
-			i.touchLocked()
-			changed = true
-		}
+	if !i.worktreeMissing {
+		i.worktreeMissing = true
+		i.worktreeMissingReason = worktreeMissingReasonForms[0].render(gw.GetWorktreePath())
+		i.touchLocked()
+		changed = true
 	}
-	return i.worktreeMissing, changed
+	return true, changed
 }
 
 // WorktreeMissing reports the worktree-missing flag and its operator-facing
@@ -84,9 +78,12 @@ func (i *Instance) SetWorktreeMissing(reason string) {
 	i.touchLocked()
 }
 
-// ClearWorktreeMissing drops the flag once af has re-aimed the record at a
-// location it is about to rebuild. If the rebuild does not materialize the
-// path, the next poll re-derives the flag.
+// ClearWorktreeMissing drops the flag. It is the only way the flag clears (the
+// probe never does — see RefreshWorktreeMissing), so it is called only where af
+// itself re-materializes the worktree: a respawn that rebuilt it and started a
+// fresh pane there, and restore re-aiming the record at the location the
+// respawn is about to rebuild. If that rebuild does not materialize the path,
+// the next poll re-derives the flag.
 func (i *Instance) ClearWorktreeMissing() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -111,4 +108,58 @@ func (i *Instance) ReconcileWorktreeMissing(missing bool, reason string) bool {
 	i.worktreeMissing = missing
 	i.worktreeMissingReason = reason
 	return true
+}
+
+// WorktreeMissingRemedy is the one operator instruction every surface gives for
+// a worktree deleted outside af — send-prompt's refusal, `af sessions watch`,
+// and the fleet watch — so they cannot drift into different advice (#5102).
+//
+// external selects the in-place (`--here`) shape. ArchiveSession refuses an
+// external worktree outright — the checkout is the user's own, not af's to
+// shelve — so recommending archive there would send the operator into a second
+// refusal; kill is the only remedy af can carry out, and it removes nothing of
+// the user's.
+func WorktreeMissingRemedy(external bool) string {
+	if external {
+		return "remove it with 'af sessions kill' (an in-place session cannot be archived)"
+	}
+	return "archive it with 'af sessions archive' to keep its branch for a later restore, or remove it with 'af sessions kill'"
+}
+
+// worktreeMissingReasonForm is one af-authored MissingReason sentence: fixed
+// prose around exactly one path. Every reason af writes comes from this table,
+// which is what lets a bug report rewrite the path inside it and keep the
+// sentence (RewriteWorktreeMissingReasonPath).
+type worktreeMissingReasonForm struct{ prefix, suffix string }
+
+func (f worktreeMissingReasonForm) render(path string) string { return f.prefix + path + f.suffix }
+
+var worktreeMissingReasonForms = [...]worktreeMissingReasonForm{
+	// Set by the probe on a live (or archived) row.
+	{prefix: "tracked worktree path ", suffix: " does not exist (deleted outside af)"},
+	// Stamped by the archive route that found the worktree already gone.
+	{prefix: "worktree was already absent at ", suffix: " when archived (deleted outside af)"},
+}
+
+// WorktreeMissingArchivedReason is the reason an archive stamps on a row whose
+// worktree it found already deleted at path.
+func WorktreeMissingArchivedReason(path string) string {
+	return worktreeMissingReasonForms[1].render(path)
+}
+
+// RewriteWorktreeMissingReasonPath rebuilds an af-authored MissingReason with
+// its path passed through rewrite, keeping the prose. ok is false for text that
+// is not one of af's forms — a record from a binary with different wording, or
+// a hand edit — which a caller that must not leak it should drop whole.
+func RewriteWorktreeMissingReasonPath(reason string, rewrite func(string) string) (string, bool) {
+	for _, form := range worktreeMissingReasonForms {
+		if len(reason) < len(form.prefix)+len(form.suffix) {
+			continue
+		}
+		if strings.HasPrefix(reason, form.prefix) && strings.HasSuffix(reason, form.suffix) {
+			path := reason[len(form.prefix) : len(reason)-len(form.suffix)]
+			return form.render(rewrite(path)), true
+		}
+	}
+	return "", false
 }
