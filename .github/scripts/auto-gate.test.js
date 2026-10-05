@@ -10567,6 +10567,9 @@ function reconciliationRequestApi({
         id: 9_000_000 + runs.length,
         workflow_id: "auto-gate.yml",
         event: "repository_dispatch",
+        // The dispatch only queues the successor — it is live until it runs,
+        // so it still binds a handoff inside the same window.
+        status: "queued",
         created_at: new Date(clock()).toISOString().replace(/\.\d{3}Z$/, "Z"),
         payload: { action: params.event_type, client_payload: params.client_payload },
       });
@@ -10782,6 +10785,7 @@ test("#5160: the handoff's rate window excludes the pass's own run", async () =>
   const dispatches = [];
   const self = {
     id: 42, workflow_id: "auto-gate.yml", event: "repository_dispatch",
+    status: "in_progress",
     created_at: new Date(DISPATCH_NOW).toISOString(),
   };
   let targets = await autoGate.resolveTargets({
@@ -10794,10 +10798,30 @@ test("#5160: the handoff's rate window excludes the pass's own run", async () =>
   assert.equal(targets.length, 10);
   assert.equal(dispatches.length, 1, "a pass must not count its own run inside the window");
 
+  // A completed predecessor does not bind either: it already spent its coverage
+  // — that is exactly why B is running — so its leftovers are still owed one
+  // successor (Codex P1 on the first cut of the handoff).
+  const predecessorDone = [];
+  const completedA = {
+    id: 41, workflow_id: "auto-gate.yml", event: "repository_dispatch",
+    status: "completed", conclusion: "success",
+    created_at: new Date(DISPATCH_NOW - 3 * 60 * 1000).toISOString(),
+  };
+  targets = await autoGate.resolveTargets({
+    github: dispatchedPass([self, completedA]).github(predecessorDone),
+    context: dispatchedPass([self, completedA]).context,
+    core: fakeCore(),
+    sleep: async () => {},
+    reconciliationNowMs: DISPATCH_NOW,
+  });
+  assert.equal(targets.length, 10);
+  assert.equal(predecessorDone.length, 1, "a finished predecessor covers nothing still left over");
+
   // Another pass already started inside the window holds the rate limit.
   const blocked = [];
   const another = {
     id: 43, workflow_id: "auto-gate.yml", event: "repository_dispatch",
+    status: "queued",
     created_at: new Date(DISPATCH_NOW - 60 * 1000).toISOString(),
   };
   targets = await autoGate.resolveTargets({
@@ -10808,7 +10832,24 @@ test("#5160: the handoff's rate window excludes the pass's own run", async () =>
     reconciliationNowMs: DISPATCH_NOW,
   });
   assert.equal(targets.length, 10);
-  assert.equal(blocked.length, 0, "a sibling pass's dispatch still binds the handoff");
+  assert.equal(blocked.length, 0, "a live sibling pass's dispatch still binds the handoff");
+
+  // The completed-run exemption is scoped to the handoff. An ordinary run in
+  // the same window must still see pass A: for it the window is the throttle,
+  // and a pass that already ran is the reason not to request another yet.
+  const ordinaryDispatches = [];
+  const refused = await autoGate.requestRequiredCheckReconciliation({
+    github: withReconciliationRequests(
+      { rest: {} },
+      reconciliationRequestApi({ clock: () => DISPATCH_NOW, runs: [completedA], dispatches: ordinaryDispatches }),
+    ),
+    context: { ...fakeContext({ issue: { number: 4060 } }), eventName: "issue_comment" },
+    core: fakeCore(),
+    now: DISPATCH_NOW,
+  });
+  assert.equal(refused.requested, false);
+  assert.equal(refused.reason, "rate-limited");
+  assert.deepEqual(ordinaryDispatches, [], "an ordinary request still counts a completed pass");
 });
 
 // And the wait itself is bounded: pending work that keeps not maturing — a lane

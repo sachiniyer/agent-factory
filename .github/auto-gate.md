@@ -633,12 +633,15 @@ the same pass the schedule runs. Two guards bound this:
 
 - **No open-ended recursion.** A pass requests a pass only as a handoff: when
   its own bounded wait still leaves not-yet-eligible or capped work behind, it
-  sends one dispatch through the rate window, excluding its own run from the
-  recency check since a dispatched pass would otherwise always count itself.
-  The request step skips `schedule` and `repository_dispatch` runs, and the
-  helper refuses those events on the ordinary path, so no pass ever starts the
-  chain. Runs that a pass causes, such as update-branch recovery dispatches,
-  can request one, but only through the rate window.
+  sends one dispatch through the rate window. Two shapes in that window cannot
+  cover the leftover work and so cannot hold it: the pass's own run (a
+  dispatched pass would otherwise always count itself) and completed
+  predecessor passes (a finished A is why B is running at all — its coverage
+  was already spent). A sibling still queued or running does bind. The request
+  step skips `schedule` and `repository_dispatch` runs, and the helper refuses
+  those events on the ordinary path, so no pass ever starts the chain. Runs
+  that a pass causes, such as update-branch recovery dispatches, can request
+  one, but only through the rate window.
 - **At most one request per five minutes.** The marker is the creation time of
   Auto Gate's newest `repository_dispatch` run, read with one REST request
   (`event=repository_dispatch`, `created>=` the window start, one short page so
@@ -664,7 +667,10 @@ drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
 skipped fail-closed rather than treated as complete.
 
 The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
-dispatched passes to about 12 an hour, and scheduled passes add a few more.
+ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
+by pass completion instead — one running pass plus one pending successor in the
+shared group, each link capped at ten evaluations — and a scheduled pass adds a
+few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
 threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
 does no per-head REST reads except when a queued check run faces a dated

@@ -6133,13 +6133,15 @@ function isRequiredCheckReconciliationDispatch(context) {
 //   repository_dispatch runs return before any read UNLESS the caller is the
 //   pass itself handing off work it could not finish (forPass): work a stranded
 //   transaction leaves behind is owed a wakeup, and only the pass knows it is
-//   owed (#5160). The rate window below bounds the handoff the same way it
-//   bounds every other request, so a chain of passes still costs at most one
-//   dispatch per window.
+//   owed (#5160). The window below still binds the handoff against a sibling
+//   pass that is queued or running, so a chain advances one link per completed
+//   pass — never a queue of them.
 // - The rate window. The marker is the creation time of this workflow's newest
 //   repository_dispatch run — the caller's own run excluded, since a pass
 //   triggered by a dispatch would otherwise always see itself inside the
-//   window and could never hand off. The listing is one short page rather
+//   window and could never hand off. Completed predecessors are excluded for
+//   the handoff only: a finished pass already spent its coverage, which is why
+//   the next one is running at all. The listing is one short page rather
 //   than the single newest run so the exclusion cannot hide a sibling pass
 //   that is still holding the window. Every requested pass is such a run, so
 //   a pass that selected nothing is recorded too, and GitHub stores the
@@ -6194,9 +6196,18 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
   // ignored. An unreadable time counts as recent, so it cannot cause a dispatch.
   // The caller's own run is not a marker: for a dispatched pass it is always
   // inside the window, and counting it would deadlock every follow-up request.
+  // For that same handoff a COMPLETED predecessor is not a marker either: pass
+  // A's run sits in successor B's window having already spent its coverage, and
+  // counting it would strand B's leftovers (#5160). Only a sibling still queued
+  // or running can cover them, so only those bind a pass. Ordinary requests
+  // keep counting completed passes — the window is their throttle, and a pass
+  // that already ran is exactly the reason not to ask for another one yet.
   const self = String(context.runId || "");
   const recent = runs.find(
-    (run) => String(run?.id) !== self && !(Date.parse(run?.created_at) < cutoff),
+    (run) =>
+      String(run?.id) !== self &&
+      !(Date.parse(run?.created_at) < cutoff) &&
+      !(forPass && String(run?.status) === "completed"),
   );
   if (recent) {
     core.info(
