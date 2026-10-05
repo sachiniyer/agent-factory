@@ -519,10 +519,9 @@ bypass because that non-session path updates the release commit directly.
 Every run follows this dependency graph:
 
 ```text
-auto-gate (resolve event heads)
-  -> invalidate-gate (ungrouped, including retries)
-    -> apply-gate (one reusable-workflow call per invalidated head)
-      -> aggregate transaction (head-serialized evaluation/report/merge)
+auto-gate (resolve event heads, then invalidate each selected aggregate)
+  -> apply-gate (one reusable-workflow call per invalidated head)
+    -> aggregate transaction (head-serialized evaluation/report/merge)
 ```
 
 A concurrency group keeps at most one running and one pending run; a newer
@@ -536,9 +535,22 @@ review events coalesce per PR; check-suite, status, and workflow-run events
 coalesce per named commit; the remaining pull_request_target actions coalesce
 per (PR, payload head); synchronize stays keyed to its exact (before, after)
 transition and workflow_dispatch to its (PR, previous head), because those two
-carry coverage no later run reproduces. `cancel-in-progress` is `false`
-everywhere, so an active resolve, invalidation, or transaction always finishes
-uninterrupted.
+carry coverage no later run reproduces.
+
+`cancel-in-progress` is `false` everywhere, so a queued run can never interrupt
+an active transaction — but it governs only pending-run replacement. The
+platform itself can cancel jobs inside an ACTIVE run: during GitHub's
+2026-10-05 hosted-runner incident, jobs queued inside running transactions for
+~15 minutes were cancelled without executing a step, and runs that had already
+resolved their coverage died before invalidating it (#5160). Selection and
+invalidation therefore share one job: a run whose evaluate step committed has
+no queued job boundary left between its selected heads and the WAITING
+aggregate marker that makes them recoverable. A head left at that marker is
+re-evaluated by the next required-check reconciliation pass once it is 15
+minutes old, and ordinary runs request a pass at most once per five minutes —
+no human action needed. Heads a mid-job cancellation never reached stand where
+an undelivered event leaves them; the pass's stale-decision coverage is the
+backstop for both.
 
 Inside each surviving run nothing changed: neither the resolver nor
 invalidation waits on a grouped job, every event still invalidates before any

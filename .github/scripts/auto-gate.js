@@ -2369,11 +2369,11 @@ async function blockAggregateEvaluation({
 // the ruleset sees it.
 //
 // - The newest generation is non-passing. This is the ordinary case: the
-//   pre-lane job published a WAITING marker for this same event before the lane
-//   began. The commit is unmergeable whether or not this create landed — one
-//   that did land is itself a WAITING generation — so the transaction ends as
-//   #4461's could-not-evaluate: UNKNOWN, concluded AGGREGATE_NOT_PASSING, never
-//   neutral.
+//   pre-lane invalidation step published a WAITING marker for this same event
+//   before the lane began. The commit is unmergeable whether or not this create
+//   landed — one that did land is itself a WAITING generation — so the
+//   transaction ends as #4461's could-not-evaluate: UNKNOWN, concluded
+//   AGGREGATE_NOT_PASSING, never neutral.
 // - The newest generation satisfies the ruleset, none is visible, or the read
 //   failed too. Nothing proves the head unmergeable: a stale PASS may be what the
 //   ruleset reads, and this transaction could not replace it. The original error

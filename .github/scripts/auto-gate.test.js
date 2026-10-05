@@ -584,17 +584,37 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     /^concurrency:\n  group: >-\n    auto-gate-\$\{\{[\s\S]*?\}\}\n  cancel-in-progress: false$/m,
     "the workflow-level group must never cancel a run mid-transaction",
   );
-  const jobs = Object.fromEntries([...workflow.matchAll(
+  const jobs = Object.fromEntries([...workflow.slice(workflow.indexOf("\njobs:")).matchAll(
     /^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm,
   )].map((match) => [match[1], match[2]]));
   assert.doesNotMatch(jobs["auto-gate"], /^    (?:concurrency|needs|if):/m);
   assert.match(jobs["auto-gate"], /autoGate\.resolveAggregateHeads\(\{ context, targets \}\)/);
   assert.match(jobs["auto-gate"], /payload\.before/);
-  assert.doesNotMatch(jobs["invalidate-gate"], /^    concurrency:/m);
-  assert.match(jobs["invalidate-gate"], /^    needs: auto-gate$/m);
-  assert.match(jobs["invalidate-gate"], /always\(\)/);
-  assert.match(jobs["apply-gate"], /^    needs: \[auto-gate, invalidate-gate\]$/m);
-  assert.match(jobs["apply-gate"], /fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\)/);
+  // Selection and invalidation are one job: a second job queued between them is
+  // exactly what the platform cancelled mid-transaction in #5160, stranding the
+  // committed selection with no marker the reconciliation pass could see.
+  assert.deepEqual(
+    Object.keys(jobs).sort(),
+    ["apply-gate", "auto-gate"],
+    "no job may sit between the resolver and the serialized lanes",
+  );
+  const resolver = jobs["auto-gate"];
+  assert.ok(
+    resolver.indexOf("id: evaluate") > -1 &&
+      resolver.indexOf("id: evaluate") < resolver.indexOf("id: invalidate") &&
+      resolver.indexOf("id: invalidate") < resolver.indexOf("id: sweep"),
+    "invalidation is a step of the resolver job, right after evaluation",
+  );
+  assert.match(
+    resolver,
+    /- name: Make the aggregate non-green immediately\n\s+id: invalidate\n\s+if: >-\s+always\(\) &&\s+steps\.evaluate\.outputs\.aggregate_heads != ''\s+&&\s+steps\.evaluate\.outputs\.aggregate_heads != '\[\]'/,
+  );
+  assert.match(
+    resolver,
+    /invalidated_heads: \$\{\{ steps\.invalidate\.outputs\.invalidated_heads \}\}/,
+  );
+  assert.match(jobs["apply-gate"], /^    needs: auto-gate$/m);
+  assert.match(jobs["apply-gate"], /fromJSON\(needs\.auto-gate\.outputs\.invalidated_heads\)/);
   assert.match(jobs["apply-gate"], /uses: \.\/\.github\/workflows\/auto-gate-aggregate.yml/);
   assert.match(jobs["apply-gate"], /head_sha: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
   assert.match(jobs["apply-gate"], /targets_json: \$\{\{ needs\.auto-gate\.outputs\.targets \|\| '\[\]' \}\}/);
@@ -721,11 +741,11 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /strategy:\s+fail-fast: false\s+matrix:\s+aggregate:/);
   assert.match(
     workflow,
-    /invalidate-gate:[\s\S]*?await autoGate\.invalidateAggregateDecision\([\s\S]*?apply-gate:[\s\S]*?needs: \[auto-gate, invalidate-gate\]/,
+    /  auto-gate:\n[\s\S]*?await autoGate\.invalidateAggregateDecision\([\s\S]*?  apply-gate:\n[\s\S]*?needs: auto-gate\n/,
   );
   assert.match(
     workflow,
-    /invalidate-gate:[\s\S]*?outputs:\s+invalidated_heads: \$\{\{ steps\.invalidate\.outputs\.invalidated_heads \}\}/,
+    /  auto-gate:\n[\s\S]*?invalidated_heads: \$\{\{ steps\.invalidate\.outputs\.invalidated_heads \}\}/,
   );
   assert.match(
     workflow,
@@ -733,9 +753,9 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /apply-gate:[\s\S]*?needs\.invalidate-gate\.outputs\.invalidated_heads != ''[\s\S]*?matrix:\s+aggregate: \$\{\{ fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\) \}\}/,
+    /apply-gate:[\s\S]*?needs\.auto-gate\.outputs\.invalidated_heads != ''[\s\S]*?matrix:\s+aggregate: \$\{\{ fromJSON\(needs\.auto-gate\.outputs\.invalidated_heads\) \}\}/,
   );
-  assert.doesNotMatch(workflow, /needs\.invalidate-gate\.result == 'success'/);
+  assert.doesNotMatch(workflow, /invalidate-gate/);
   assert.match(workflow, /HEAD_SHA: \$\{\{ inputs\.head_sha \}\}/);
   assert.match(workflow, /TARGETS_JSON: \$\{\{ inputs\.targets_json \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
@@ -774,7 +794,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /readFailureReason: process\.env\.READ_FAILURE/);
   assert.match(
     workflow,
-    /if: >-\s+always\(\) &&\s+needs\.auto-gate\.outputs\.aggregate_heads != '' &&\s+needs\.auto-gate\.outputs\.aggregate_heads != '\[\]'/,
+    /if: >-\s+always\(\) &&\s+steps\.evaluate\.outputs\.aggregate_heads != ''\s+&&\s+steps\.evaluate\.outputs\.aggregate_heads != '\[\]'/,
   );
   assert.match(workflow, /aggregate_heads: \$\{\{ steps\.evaluate\.outputs\.aggregate_heads \}\}/);
   assert.doesNotMatch(workflow, /^  (?:begin-aggregate|aggregate-gate|merge-gate):/m);
@@ -3213,8 +3233,8 @@ test("a non-rate-limit apply-gate transaction error still fails the run", async 
 //
 // The fixtures below are the incident's shape: the create is REJECTED (it never
 // lands, so no reconcile window of any length can find it), and the head already
-// carries the WAITING marker the pre-lane invalidate job published for this same
-// event — which is what makes the commit provably unmergeable without this
+// carries the WAITING marker the pre-lane invalidation step published for this
+// same event — which is what makes the commit provably unmergeable without this
 // transaction's write.
 function serverError503() {
   const error = new Error("Server Error");
@@ -10347,6 +10367,43 @@ test("#4782: reconciliation selects aged transient-only blocks and stale refresh
   ], "oldest first; the aggregate re-apply runs through the same per-PR target");
 });
 
+// #5160. During GitHub's 2026-10-05 hosted-runner incident the platform
+// cancelled queued jobs inside ACTIVE runs — including a run that had already
+// resolved its coverage, whose whole transaction then died before applying.
+// Nothing a dead run knew survives it, so the heal must key on what it left
+// behind: the WAITING aggregate marker. Selection and invalidation are now one
+// job (asserted in the dedupe test), so every committed selection reaches this
+// marker, and the pass re-evaluates it once it outlives a live transaction's
+// lease — even beside a PASS decision, the stale-green case that cannot wait.
+test("#5160: a head left invalidated-but-never-applied is re-evaluated by the next pass", async () => {
+  const checks = (markerAgeMinutes) => [
+    transientDecision({
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      evaluatedAt: minutesBeforeTransientNow(60),
+      conclusion: "success",
+      marked: false,
+    }),
+    aggregateCheck({
+      headSha: HEAD_SHA,
+      title: AGGREGATE_REFRESHING_TITLE,
+      completedAt: minutesBeforeTransientNow(markerAgeMinutes),
+    }),
+  ];
+  const pulls = [reconciliationPull(1465, HEAD_SHA)];
+
+  assert.deepEqual(
+    await reconcileTransient(pulls, { [HEAD_SHA]: checks(14) }),
+    [],
+    "a fresher marker may still belong to a live transaction — the age is the bound",
+  );
+  assert.deepEqual(
+    await reconcileTransient(pulls, { [HEAD_SHA]: checks(16) }),
+    [{ prNumber: 1465, headSha: HEAD_SHA, decisionKey: `pr-1465-head-${HEAD_SHA}` }],
+    "the stranded head is selected on the next pass, decision PASS or not",
+  );
+});
+
 test("#4782: transient retries are bounded per pass and never displace a PR Validation wake", async () => {
   const sha = (number) => number.toString(16).padStart(40, "0");
   const pulls = [];
@@ -10472,7 +10529,7 @@ async function requestReconciliation({ github, context, core = fakeCore(), now }
 
 function autoGateResolverJob() {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
-  return workflow.slice(workflow.indexOf("  auto-gate:"), workflow.indexOf("  invalidate-gate:"));
+  return workflow.slice(workflow.indexOf("  auto-gate:"), workflow.indexOf("  apply-gate:"));
 }
 
 test("a decision frozen before PR Validation concluded is re-evaluated by the next non-schedule run", async () => {
@@ -10894,7 +10951,7 @@ for (const state of ["action_required", "queued", "in_progress"]) {
 // be turned into a failure by its consumer again.
 async function runRecoveryResolver(github, { core = fakeCore(), outputs = {}, context = recoveryContext() } = {}) {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
-  const match = workflow.match(/- name: Evaluate gate[\s\S]*?script: \|\n([\s\S]*?)(?=\n      # A keep)/);
+  const match = workflow.match(/- name: Evaluate gate[\s\S]*?script: \|\n([\s\S]*?)(?=\n      (?:- name:|#))/);
   assert.ok(match);
   const script = match[1].split("\n").map((line) => line.replace(/^ {12}/, "")).join("\n");
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -15546,11 +15603,11 @@ test("the gate runs the sweep once per non-reconciliation run", () => {
   // decisions.
   const resolver = workflow.slice(
     workflow.indexOf("  auto-gate:"),
-    workflow.indexOf("  invalidate-gate:"),
+    workflow.indexOf("  apply-gate:"),
   );
   assert.match(resolver, /await autoGate\.sweepMergedHeadRefs\(\{/);
   assert.doesNotMatch(
-    workflow.slice(workflow.indexOf("  invalidate-gate:")),
+    workflow.slice(workflow.indexOf("  apply-gate:")),
     /sweepMergedHeadRefs/,
     "one sweep per run, not one per aggregate head",
   );
@@ -16161,11 +16218,11 @@ async function evaluateGate(options = {}) {
   });
 }
 
-// invalidateGateScript extracts the invalidate-gate step's inline script from
-// the workflow and compiles it the way actions/github-script does: an async
-// function receiving github/context/core/require, with process reachable in
-// scope. Executing the real step body is the point — a text-level assertion on
-// the YAML stays green when the control flow inverts (#3224).
+// invalidateGateScript extracts the resolver job's invalidation step script
+// from the workflow and compiles it the way actions/github-script does: an
+// async function receiving github/context/core/require, with process reachable
+// in scope. Executing the real step body is the point — a text-level assertion
+// on the YAML stays green when the control flow inverts (#3224).
 function invalidateGateScript() {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const step = workflow.match(
@@ -16217,7 +16274,7 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
     if (id === helperPath) {
       return helper;
     }
-    throw new Error(`unexpected require(${JSON.stringify(id)}) in the invalidate-gate step`);
+    throw new Error(`unexpected require(${JSON.stringify(id)}) in the invalidation step`);
   };
   const outputs = {};
   const warnings = [];
