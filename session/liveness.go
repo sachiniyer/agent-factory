@@ -580,6 +580,18 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.attributeLimitIdentityLocked()
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return true
+}
+
+// attributeLimitIdentityLocked publishes which runtime's identity produced the
+// recorded limit wall — its agent namespace and account label — so the wall is
+// never observable without its attribution (account-swap admission reads the
+// pair). Each field is written, and the row touched, only when it changes.
+// Caller holds i.mu.
+func (i *Instance) attributeLimitIdentityLocked() {
 	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
@@ -588,9 +600,6 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 		i.limitAccount = i.Account
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
-	i.noteStateChangeLocked(lv, op, prevReset)
-	return true
 }
 
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time) {

@@ -387,14 +387,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
-	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-		i.limitAgent = agent
-		i.touchLocked()
-	}
-	if i.limitAccount != i.Account {
-		i.limitAccount = i.Account
-		i.touchLocked()
-	}
+	i.attributeLimitIdentityLocked()
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
 	// earlier ambiguity so the scheduler may resume it after the recorded reset.
