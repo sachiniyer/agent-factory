@@ -10189,6 +10189,9 @@ test("scheduled reconciliation caps one sweep at ten PRs", async () => {
 const TRANSIENT_BLOCK_MARKER = "<!-- auto-gate-transient-block -->";
 const AGGREGATE_REFRESHING_TITLE = "WAITING: refreshing every PR/head decision at this commit";
 const TRANSIENT_NOW = Date.parse("2026-09-25T21:30:00Z");
+// The reconcile clock for the pass-handoff tests: the incident day itself, so
+// a run listed at DISPATCH_NOW is always inside the five-minute window.
+const DISPATCH_NOW = Date.parse("2026-10-05T16:00:00Z");
 const minutesBeforeTransientNow = (minutes) =>
   new Date(TRANSIENT_NOW - minutes * 60 * 1000).toISOString();
 
@@ -10222,13 +10225,27 @@ function aggregateCheck({ headSha, title, completedAt, id = 70000 }) {
   };
 }
 
-async function reconcileTransient(pulls, checksByHead) {
-  return autoGate.resolveTargets({
-    github: scheduledReconciliationGithub({ pulls, checksByHead }),
+async function reconcileTransient(pulls, checksByHead, { sleep, dispatches, reconcileRuns } = {}) {
+  // Instant sleep: the pass retains not-yet-eligible work by waiting (#5160),
+  // and the wait is logical — effectiveNow advances by the slept amount — so a
+  // zero-time sleep still exercises every retention iteration.
+  const waits = [];
+  const github = withReconciliationRequests(
+    scheduledReconciliationGithub({ pulls, checksByHead }),
+    reconciliationRequestApi({
+      clock: () => TRANSIENT_NOW,
+      runs: reconcileRuns || [],
+      dispatches: dispatches || [],
+    }),
+  );
+  const targets = await autoGate.resolveTargets({
+    github,
     context: { ...fakeContext(), eventName: "schedule" },
     core: fakeCore(),
     reconciliationNowMs: TRANSIENT_NOW,
+    sleep: sleep || (async (ms) => waits.push(ms)),
   });
+  return { targets, waits };
 }
 
 async function evaluateAndReport(options) {
@@ -10299,19 +10316,32 @@ test("#4782: the written transient decision is what the reconciliation pass sele
     completed_at: stamp,
     output: written.output,
   };
-  const at = (nowMs) => autoGate.resolveTargets({
-    github: scheduledReconciliationGithub({
-      pulls: [reconciliationPull(1465, HEAD_SHA)],
-      checksByHead: { [HEAD_SHA]: [decision] },
-    }),
+  const at = (nowMs, sleep) => autoGate.resolveTargets({
+    github: withReconciliationRequests(
+      scheduledReconciliationGithub({
+        pulls: [reconciliationPull(1465, HEAD_SHA)],
+        checksByHead: { [HEAD_SHA]: [decision] },
+      }),
+      reconciliationRequestApi({ clock: () => nowMs, dispatches: [] }),
+    ),
     context: { ...fakeContext(), eventName: "schedule" },
     core: fakeCore(),
     reconciliationNowMs: nowMs,
+    sleep: sleep || (async () => {}),
   });
   const evaluatedAt = Date.parse(stamp);
-  assert.deepEqual(await at(evaluatedAt + 60 * 1000), [], "a fresh transient decision is left alone");
+  // A pass that lands before the retry boundary no longer leaves the decision
+  // for a later run: it retains it, waits the window out inside its own run
+  // (#5160), and selects it the moment it ages — the evaluation still happens
+  // only at the boundary.
+  const retained = await at(evaluatedAt + 60 * 1000, async () => {});
   assert.deepEqual(
-    (await at(evaluatedAt + 11 * 60 * 1000)).map((target) => target.prNumber),
+    retained.map((target) => target.prNumber),
+    [1465],
+    "a fresh transient decision is retained by the pass, then evaluated at its retry boundary",
+  );
+  assert.deepEqual(
+    (await at(evaluatedAt + 11 * 60 * 1000, async () => {})).map((target) => target.prNumber),
     [1465],
     "an aged transient decision is re-evaluated without any other event",
   );
@@ -10327,7 +10357,8 @@ test("#4782: reconciliation selects aged transient-only blocks and stale refresh
   };
   // Selected: transient-only, evaluated 30 minutes ago.
   add(1, [transientDecision({ prNumber: 1, headSha: sha(1), evaluatedAt: minutesBeforeTransientNow(30) })]);
-  // Not yet: transient-only, evaluated two minutes ago. This is the spacing.
+  // Retained: transient-only, evaluated two minutes ago. The pass waits out its
+  // spacing and selects it at the boundary instead of leaving it for a later run.
   add(2, [transientDecision({ prNumber: 2, headSha: sha(2), evaluatedAt: minutesBeforeTransientNow(2) })]);
   // Never: permanent blocks, however old.
   add(3, [transientDecision({
@@ -10349,7 +10380,8 @@ test("#4782: reconciliation selects aged transient-only blocks and stale refresh
     }),
     aggregateCheck({ headSha: sha(6), title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(40) }),
   ]);
-  // Not yet: a refreshing aggregate a live transaction may still own.
+  // Retained: a refreshing aggregate a live transaction may still own — the pass
+  // waits for the lease to lapse, then selects it.
   add(7, [aggregateCheck({
     headSha: sha(7), title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(5),
   })]);
@@ -10360,11 +10392,20 @@ test("#4782: reconciliation selects aged transient-only blocks and stale refresh
     completedAt: minutesBeforeTransientNow(300),
   })]);
 
-  const targets = await reconcileTransient(pulls, checksByHead);
+  const { targets, waits } = await reconcileTransient(pulls, checksByHead);
   assert.deepEqual(targets, [
     { prNumber: 6, headSha: sha(6), decisionKey: `pr-6-head-${sha(6)}` },
     { prNumber: 1, headSha: sha(1), decisionKey: `pr-1-head-${sha(1)}` },
-  ], "oldest first; the aggregate re-apply runs through the same per-PR target");
+    { prNumber: 7, headSha: sha(7), decisionKey: `pr-7-head-${sha(7)}` },
+    { prNumber: 2, headSha: sha(2), decisionKey: `pr-2-head-${sha(2)}` },
+  ], "oldest first; the aggregate re-apply runs through the same per-PR target, " +
+     "and the two young items were still evaluated only once they aged — the wait is the spacing");
+  assert.ok(waits.length > 0, "the pass retained the young items inside its own run");
+  assert.equal(
+    waits.reduce((total, ms) => total + ms, 0),
+    10 * 60 * 1000,
+    "the pass waited exactly until the last pending item's lease lapsed",
+  );
 });
 
 // #5160. During GitHub's 2026-10-05 hosted-runner incident the platform
@@ -10373,9 +10414,11 @@ test("#4782: reconciliation selects aged transient-only blocks and stale refresh
 // Nothing a dead run knew survives it, so the heal must key on what it left
 // behind: the WAITING aggregate marker. Selection and invalidation are now one
 // job (asserted in the dedupe test), so every committed selection reaches this
-// marker, and the pass re-evaluates it once it outlives a live transaction's
-// lease — even beside a PASS decision, the stale-green case that cannot wait.
-test("#5160: a head left invalidated-but-never-applied is re-evaluated by the next pass", async () => {
+// marker. And the heal does not wait for a later run: a pass that sees the
+// marker still inside a live transaction's lease retains it, re-scanning inside
+// its own run until the lease lapses — the request that spawned the pass fired
+// while the marker was fresh, and a cancelled lane schedules nothing.
+test("#5160: a head left invalidated-but-never-applied is retained by the pass that saw it", async () => {
   const checks = (markerAgeMinutes) => [
     transientDecision({
       prNumber: 1465,
@@ -10391,17 +10434,42 @@ test("#5160: a head left invalidated-but-never-applied is re-evaluated by the ne
     }),
   ];
   const pulls = [reconciliationPull(1465, HEAD_SHA)];
+  const stranded = { prNumber: 1465, headSha: HEAD_SHA, decisionKey: `pr-1465-head-${HEAD_SHA}` };
 
+  // A marker already past the lease is selected with no wait at all.
+  const aged = await reconcileTransient(pulls, { [HEAD_SHA]: checks(16) });
+  assert.deepEqual(aged.targets, [stranded], "an aged marker is selected, decision PASS or not");
+  assert.deepEqual(aged.waits, [], "an aged marker needs no retention");
+
+  // The incident's shape: the pass arrives one minute before the marker's
+  // lease lapses. The pass waits out the boundary inside its own run and then
+  // selects it — no second event, no human, no hours-late schedule.
+  const young = await reconcileTransient(pulls, { [HEAD_SHA]: checks(14) });
   assert.deepEqual(
-    await reconcileTransient(pulls, { [HEAD_SHA]: checks(14) }),
-    [],
-    "a fresher marker may still belong to a live transaction — the age is the bound",
+    young.targets,
+    [stranded],
+    "a still-young marker is retained until its lease lapses, then selected",
   );
-  assert.deepEqual(
-    await reconcileTransient(pulls, { [HEAD_SHA]: checks(16) }),
-    [{ prNumber: 1465, headSha: HEAD_SHA, decisionKey: `pr-1465-head-${HEAD_SHA}` }],
-    "the stranded head is selected on the next pass, decision PASS or not",
+  assert.equal(
+    young.waits.reduce((total, ms) => total + ms, 0),
+    60 * 1000,
+    "the wait ended exactly at the fifteen-minute boundary",
   );
+
+  // A marker whose lane was in fact alive resolves mid-wait: the live
+  // transaction overwrote it with a verdict, and there is nothing to select.
+  const resolving = { [HEAD_SHA]: checks(14) };
+  const live = await reconcileTransient(pulls, resolving, {
+    sleep: async () => {
+      resolving[HEAD_SHA] = [aggregateCheck({
+        headSha: HEAD_SHA,
+        title: "PASS: every PR decision at this commit is green",
+        completedAt: new Date(TRANSIENT_NOW).toISOString(),
+      })];
+    },
+  });
+  assert.deepEqual(live.targets, [], "a marker a live lane resolved is never re-evaluated");
+  assert.ok(live.waits.length <= 1, "the pass stopped waiting once nothing was pending");
 });
 
 test("#4782: transient retries are bounded per pass and never displace a PR Validation wake", async () => {
@@ -10417,7 +10485,7 @@ test("#4782: transient retries are bounded per pass and never displace a PR Vali
       evaluatedAt: minutesBeforeTransientNow(20 + number),
     })];
   }
-  const onlyTransient = await reconcileTransient(pulls, checksByHead);
+  const { targets: onlyTransient } = await reconcileTransient(pulls, checksByHead);
   assert.deepEqual(
     onlyTransient.map((target) => target.prNumber),
     [12, 11, 10, 9, 8],
@@ -10431,7 +10499,7 @@ test("#4782: transient retries are bounded per pass and never displace a PR Vali
       reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
     ];
   }
-  const mixed = await reconcileTransient(pulls, checksByHead);
+  const { targets: mixed } = await reconcileTransient(pulls, checksByHead);
   assert.equal(mixed.length, 10, "the pass-wide cap of ten still holds");
   assert.deepEqual(
     mixed.map((target) => target.prNumber),
@@ -10648,6 +10716,144 @@ test("a reconciliation-dispatched run does not request another reconciliation", 
   );
 });
 
+// #5160's second half. A pass is still not a client of the ordinary request —
+// but a pass that MUST leave work behind (more than its caps, or still-pending
+// work at its bounded wait's end) owes that work a wakeup, because the lane
+// that died left no other event. So the pass itself hands it to exactly one
+// successor, through the same five-minute window every request shares.
+test("#5160: a pass that leaves unmet work requests exactly one successor pass", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  // Twelve stale heads and a ten-head cap: two cannot be evaluated this pass.
+  for (let number = 1; number <= 12; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [
+      reconciliationDecision({ prNumber: number, headSha: sha(number), evaluatedAt: "2026-07-09T20:00:00Z" }),
+      reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+    ];
+  }
+  const dispatches = [];
+  const targets = await autoGate.resolveTargets({
+    github: withReconciliationRequests(
+      scheduledReconciliationGithub({ pulls, checksByHead }),
+      reconciliationRequestApi({ clock: () => DISPATCH_NOW, dispatches }),
+    ),
+    context: { ...fakeContext(), eventName: "schedule", runId: 777 },
+    core: fakeCore(),
+    sleep: async () => {},
+    reconciliationNowMs: DISPATCH_NOW,
+  });
+  assert.equal(targets.length, 10);
+  assert.equal(dispatches.length, 1, "the leftovers are owed exactly one wakeup");
+  assert.equal(dispatches[0].event_type, RECONCILIATION_DISPATCH);
+  assert.equal(dispatches[0].client_payload.source_run_id, "777",
+    "the handoff names the pass that owed it");
+});
+
+// The one wrinkle in reusing the rate window: a dispatched pass's own run is
+// always inside it. Counting self would refuse every handoff, so the window
+// excludes the caller's run id — while still holding against a pass another
+// run already started.
+test("#5160: the handoff's rate window excludes the pass's own run", async () => {
+  const sha = (number) => number.toString(16).padStart(40, "0");
+  const pulls = [];
+  const checksByHead = {};
+  for (let number = 1; number <= 12; number += 1) {
+    pulls.push(reconciliationPull(number, sha(number)));
+    checksByHead[sha(number)] = [
+      reconciliationDecision({ prNumber: number, headSha: sha(number), evaluatedAt: "2026-07-09T20:00:00Z" }),
+      reconciliationRequiredCheck("Build", "2026-07-09T21:00:00Z"),
+    ];
+  }
+  const dispatchedPass = (runs) => ({
+    context: {
+      ...fakeContext({ action: RECONCILIATION_DISPATCH, client_payload: { source_run_id: "1" } }),
+      eventName: "repository_dispatch",
+      runId: 42,
+    },
+    github: (dispatches) => withReconciliationRequests(
+      scheduledReconciliationGithub({ pulls, checksByHead }),
+      reconciliationRequestApi({ clock: () => DISPATCH_NOW, runs, dispatches }),
+    ),
+  });
+
+  // The window holds only this pass's own run — excluded — so the handoff fires.
+  const dispatches = [];
+  const self = {
+    id: 42, workflow_id: "auto-gate.yml", event: "repository_dispatch",
+    created_at: new Date(DISPATCH_NOW).toISOString(),
+  };
+  let targets = await autoGate.resolveTargets({
+    github: dispatchedPass([self]).github(dispatches),
+    context: dispatchedPass([self]).context,
+    core: fakeCore(),
+    sleep: async () => {},
+    reconciliationNowMs: DISPATCH_NOW,
+  });
+  assert.equal(targets.length, 10);
+  assert.equal(dispatches.length, 1, "a pass must not count its own run inside the window");
+
+  // Another pass already started inside the window holds the rate limit.
+  const blocked = [];
+  const another = {
+    id: 43, workflow_id: "auto-gate.yml", event: "repository_dispatch",
+    created_at: new Date(DISPATCH_NOW - 60 * 1000).toISOString(),
+  };
+  targets = await autoGate.resolveTargets({
+    github: dispatchedPass([self, another]).github(blocked),
+    context: dispatchedPass([self, another]).context,
+    core: fakeCore(),
+    sleep: async () => {},
+    reconciliationNowMs: DISPATCH_NOW,
+  });
+  assert.equal(targets.length, 10);
+  assert.equal(blocked.length, 0, "a sibling pass's dispatch still binds the handoff");
+});
+
+// And the wait itself is bounded: pending work that keeps not maturing — a lane
+// that is alive but slow, writing a fresh marker under the pass — is handed to
+// the successor instead of holding the reconciliation group forever.
+test("#5160: pending work still young at the bounded wait's end hands off, never hangs", async () => {
+  const headSha = HEAD_SHA;
+  const checksByHead = {
+    [headSha]: [
+      transientDecision({
+        prNumber: 1465, headSha, evaluatedAt: minutesBeforeTransientNow(60),
+        conclusion: "success", marked: false,
+      }),
+      aggregateCheck({ headSha, title: AGGREGATE_REFRESHING_TITLE, completedAt: minutesBeforeTransientNow(14) }),
+    ],
+  };
+  const dispatches = [];
+  const waits = [];
+  let elapsed = 0;
+  const { targets } = await reconcileTransient(
+    [reconciliationPull(1465, headSha)],
+    checksByHead,
+    {
+      dispatches,
+      // Each rescan finds the marker freshly rewritten — a live transaction's
+      // own churn. The pass can never catch up, so the deadline must end it.
+      sleep: async (ms) => {
+        waits.push(ms);
+        elapsed += ms;
+        checksByHead[headSha] = [aggregateCheck({
+          headSha, title: AGGREGATE_REFRESHING_TITLE,
+          completedAt: new Date(TRANSIENT_NOW + elapsed).toISOString(),
+        })];
+      },
+    },
+  );
+  assert.deepEqual(targets, [], "a marker that never ages is never selected");
+  assert.equal(
+    waits.reduce((total, ms) => total + ms, 0),
+    16 * 60 * 1000,
+    "the pass waited exactly the stale-lease window plus one poll, then stopped",
+  );
+  assert.equal(dispatches.length, 1, "what it could not finish is owed to one successor");
+});
+
 test("two ordinary runs inside the rate window request one reconciliation", async () => {
   for (const honorCreatedFilter of [true, false]) {
     const label = honorCreatedFilter ? "server-filtered listing" : "unfiltered listing";
@@ -10682,12 +10888,14 @@ test("two ordinary runs inside the rate window request one reconciliation", asyn
     assert.equal(dispatches.length, 2, label);
 
     // The marker is one cheap read: this workflow's newest repository_dispatch
-    // run, filtered to the window, one result.
+    // runs, filtered to the window, one short page. The page reaches past a
+    // single run because a pass's own run — itself always inside the window —
+    // is excluded client-side (#5160).
     assert.equal(listReads.length, 4, label);
     for (const read of listReads) {
       assert.equal(read.workflow_id, "auto-gate.yml");
       assert.equal(read.event, "repository_dispatch");
-      assert.equal(read.per_page, 1);
+      assert.equal(read.per_page, 10);
     }
     assert.equal(listReads[3].created, ">=2026-09-17T16:00:01Z");
   }
@@ -18006,7 +18214,11 @@ function scheduledReconciliationGithub({
   };
   return {
     rest: {
-      repos: { listCommitStatusesForRef },
+      // A pass that leaves work behind may hand it to one successor (#5160), so
+      // the dispatch endpoints exist on every reconciliation pass fixture;
+      // tests asserting on them override via withReconciliationRequests.
+      actions: { listWorkflowRuns: async () => ({ data: { total_count: 0, workflow_runs: [] } }) },
+      repos: { listCommitStatusesForRef, createDispatchEvent: async () => ({ status: 204 }) },
       checks: { listForRef, get: getCheckRun },
     },
     paginate: async (operation, options) => (await operation(options)).data,

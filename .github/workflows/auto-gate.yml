@@ -45,8 +45,10 @@ on:
   # batches PR heads/check rollups and at most ten reevaluations start (#4242).
   # GitHub delivers this schedule every two to five hours, not every five minutes
   # (#4571), so it is only the backstop. Every other run requests the same pass as
-  # the repository_dispatch below, at most once per five minutes. A pass never
-  # requests another.
+  # the repository_dispatch below, at most once per five minutes. A pass retains
+  # work it sees too young to select, re-scanning inside its own run until it
+  # matures or resolves, and requests one successor only if it must still leave
+  # work behind — the same window bounds that handoff (#5160).
   schedule:
     - cron: "*/5 * * * *"
   repository_dispatch:
@@ -85,13 +87,15 @@ permissions:
 # it (#5160). Target selection and aggregate invalidation are therefore steps
 # of the SAME job below: a run whose evaluate step committed has no queued job
 # boundary left between its selected heads and the WAITING aggregate marker
-# that makes them recoverable. A head left at that marker is re-evaluated by
-# the next required-check reconciliation pass once it is 15 minutes old
-# (STALE_AGGREGATE_WAITING_AFTER_MS), and ordinary runs request a pass at most
-# once per five minutes, so healing needs no human action. Heads a mid-job
-# cancellation never reached stand exactly where an event GitHub never
-# delivered leaves them; the pass's stale-decision coverage is the backstop
-# for both.
+# that makes them recoverable. A head left at that marker is re-evaluated once
+# it outlives a live transaction's 15-minute lease
+# (STALE_AGGREGATE_WAITING_AFTER_MS) — and a pass that sees the marker while it
+# is still young retains it, re-scanning inside its own run until it matures or
+# resolves, with one rate-windowed successor request if anything is left over.
+# Healing needs no human action and never waits on the schedule's real
+# delivery cadence. Heads a mid-job cancellation never reached stand exactly
+# where an event GitHub never delivered leaves them; the pass's
+# stale-decision coverage is the backstop for both.
 #
 # Each group is keyed so that guarantee holds:
 #
@@ -466,10 +470,13 @@ jobs:
 
       # Liveness for frozen decisions (#4571). The helper sends one
       # repository_dispatch per five-minute window, and that run is a full
-      # scheduled pass. A pass never requests another: this condition skips both
-      # pass events, and the helper refuses them too. always() is not used
-      # because a cancelled run should not request a pass. A failed evaluation
-      # above should still request one, since the pass does not depend on it.
+      # scheduled pass. This condition skips both pass events because a pass
+      # does not ask for a follow-up here: it retains not-yet-eligible work by
+      # re-scanning inside its own run, and the helper hands any remainder to
+      # exactly one successor through the same window (#5160). always() is not
+      # used because a cancelled run should not request a pass. A failed
+      # evaluation above should still request one, since the pass does not
+      # depend on it.
       - name: Request stale-decision reconciliation
         if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'repository_dispatch' }}
         uses: actions/github-script@v8

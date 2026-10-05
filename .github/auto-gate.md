@@ -546,11 +546,13 @@ resolved their coverage died before invalidating it (#5160). Selection and
 invalidation therefore share one job: a run whose evaluate step committed has
 no queued job boundary left between its selected heads and the WAITING
 aggregate marker that makes them recoverable. A head left at that marker is
-re-evaluated by the next required-check reconciliation pass once it is 15
-minutes old, and ordinary runs request a pass at most once per five minutes —
-no human action needed. Heads a mid-job cancellation never reached stand where
-an undelivered event leaves them; the pass's stale-decision coverage is the
-backstop for both.
+re-evaluated once it outlives a live transaction's 15-minute lease — and a pass
+that sees the marker while it is still young retains it, re-scanning inside its
+own run until it matures or resolves, with one rate-windowed successor request
+if anything is left over. Healing needs no human action and never waits on the
+schedule's real delivery cadence. Heads a mid-job cancellation never reached
+stand where an undelivered event leaves them; the pass's stale-decision
+coverage is the backstop for both.
 
 Inside each surviving run nothing changed: neither the resolver nor
 invalidation waits on a grouped job, every event still invalidates before any
@@ -606,7 +608,10 @@ synchronization reevaluates both the new head and the previous head because the
 set of associated PRs changed for both commits. After a successful merge, the
 same transaction explicitly makes the old-head aggregate non-green; it does not
 depend on a `closed` event that GitHub may suppress for token-authenticated
-writes.
+writes. A transaction that dies between invalidation and application — a
+platform cancellation, not a decision — leaves the head at that non-green
+marker; the reconciliation pass below re-evaluates it once it outlives a live
+transaction's lease.
 
 GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
@@ -626,13 +631,18 @@ Auto Gate run therefore ends by requesting a pass: it sends one
 `repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
 the same pass the schedule runs. Two guards bound this:
 
-- **No recursion.** A pass never requests a pass. The request step skips
-  `schedule` and `repository_dispatch` runs, and the helper refuses them before
-  any read. Runs that a pass causes, such as update-branch recovery dispatches,
+- **No open-ended recursion.** A pass requests a pass only as a handoff: when
+  its own bounded wait still leaves not-yet-eligible or capped work behind, it
+  sends one dispatch through the rate window, excluding its own run from the
+  recency check since a dispatched pass would otherwise always count itself.
+  The request step skips `schedule` and `repository_dispatch` runs, and the
+  helper refuses those events on the ordinary path, so no pass ever starts the
+  chain. Runs that a pass causes, such as update-branch recovery dispatches,
   can request one, but only through the rate window.
 - **At most one request per five minutes.** The marker is the creation time of
   Auto Gate's newest `repository_dispatch` run, read with one REST request
-  (`event=repository_dispatch`, `created>=` the window start, `per_page=1`).
+  (`event=repository_dispatch`, `created>=` the window start, one short page so
+  the caller's own run — excluded client-side — cannot hide a sibling).
   Every requested pass is such a run, so a pass that selected nothing still
   counts. GitHub stores the marker, so the gate writes no variable, ref, or
   check run. A failed or unreadable read sends nothing, and the schedule
@@ -692,6 +702,17 @@ the decision stamp, so one PR costs at most one evaluation per ten minutes,
 however long the state lasts. Transient retries take only the slots that
 PR Validation wakes leave under the pass's ten-evaluation cap, and at most five.
 The oldest go first, so a backlog drains instead of starving.
+
+A pass does not leave either shape to luck when it sees them too young. The
+request that spawned the pass fired while the marker or decision was fresh, and
+a platform-cancelled lane schedules nothing at all, so the pass retains the
+pending work itself (#5160): it re-scans inside its own run, once a minute,
+until each item matures — and is then selected — or resolves because its live
+lane finished first. The wait is bounded at sixteen minutes; anything still
+unmet then, or pushed past the caps, is handed to exactly one successor
+dispatch through the same five-minute window. A stranded head is therefore
+re-evaluated at its fifteen-minute boundary plus one poll, not at the
+schedule's real delivery cadence.
 
 **A head with no PR Validation run at all gets one dispatched (#4581).**
 Reconciliation wakes a decision when Build or Lint completes, so it cannot help
