@@ -247,8 +247,13 @@ func TestAccountLookup_RelativeHomeRefusesBeforeSelected(t *testing.T) {
 			// name could clobber a real .af a developer placed in either. The
 			// name only needs to be relative for the refusal to exercise the
 			// account-lookup path; it never resolves on disk because the home
-			// is refused first.
-			relHome := filepath.Base(t.TempDir())
+			// is refused first. filepath.Base(t.TempDir()) alone is just the
+			// per-test sequence (e.g. "001"), which is not unique across a
+			// developer's real directories either, so carry the parent's base —
+			// it bears t.TempDir()'s random suffix — to make the relative home
+			// unique and keep the cleanup from removing a real directory.
+			tmp := t.TempDir()
+			relHome := filepath.Join(filepath.Base(filepath.Dir(tmp)), filepath.Base(tmp))
 			planted := filepath.Join(relHome, "accounts", "codex", "work")
 			require.NoError(t, os.MkdirAll(planted, 0o700))
 			// A marker file a real agent's auth.json would occupy; the agent
