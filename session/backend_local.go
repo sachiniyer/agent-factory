@@ -815,7 +815,7 @@ func (b *LocalBackend) HasUpdated(i *Instance) (updated bool, hasPrompt bool, co
 	if !s || ts == nil {
 		return false, false, ""
 	}
-	return ts.HasUpdated()
+	return ts.HasUpdatedExpectingTeardown(i.teardownExpected)
 }
 
 func (b *LocalBackend) SendPromptCommand(i *Instance, prompt string) error {
