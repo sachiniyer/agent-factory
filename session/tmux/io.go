@@ -83,12 +83,15 @@ type tmuxGeneration struct {
 	sessionID string
 	serverPID string
 	created   string
-	// teardownInitiated records that af itself asked for this generation's
+	// teardownInitiated records that af itself asked for this session's
 	// teardown — set by close() before kill-session runs so the
 	// ErrSessionGone branch can tell "af asked" (INFO) from "vanished on its
-	// own" (ERROR) (#4472). It clears only on tmux ANSWERING that the SAME
-	// generation is live — a live name is not proof, since the name may
-	// already belong to a replacement — see the clear sites in close(),
+	// own" (ERROR) (#4472). close() IS af's recorded teardown op, so the mark
+	// lands whatever the name resolves to: a monitor whose session was
+	// already gone when close() ran is still going silent inside an
+	// af-initiated teardown (#5138). It clears only on tmux ANSWERING that
+	// the SAME generation is live — a live name is not proof, since the name
+	// may already belong to a replacement — see the clear sites in close(),
 	// Start, and ClosedConclusivelyAndStillAbsent — except on an unanswered
 	// rebind, where the generation object itself is carried to the
 	// replacement monitor because a wedged probe is no evidence the request
@@ -136,11 +139,15 @@ func newReattachStatusMonitor() *statusMonitor {
 // for a different generation this request is aimed at the replacement, not at
 // the bound session that vanished on its own — and marking the bound
 // generation would launder that unrequested death into af's request (Codex on
-// #4473). An answered probe reporting nothing at the name is the same
+// #4473, #5138). An answered probe reporting nothing at the name is the same
 // refusal in the other direction: the bound generation already vanished
 // without af asking, kill-session cannot target it, and marking it would
-// launder that unrequested death into af's request at the next poll (Codex
-// on #4473). A probe that never answers is different again: no mark lands
+// launder that unrequested death into af's request at the next poll. The
+// archive/kill/on_complete window those already-gone teardowns produce is
+// covered instead by the instance-level expectation poll supplies through
+// the ExpectingTeardown variants — af's own op fence and kill tombstone —
+// which says "tearing down" without claiming this close caused the death
+// (#5138). A probe that never answers is different again: no mark lands
 // and probeAnswered reports false, because a server wedged enough to refuse
 // the probe will fail the kill the same way — close() reports the run
 // unknown there rather than paying a second and third command budget for
@@ -262,10 +269,29 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	return updated, hasPrompt, content
 }
 
+// HasUpdatedExpectingTeardown is HasUpdated plus the caller's own
+// af-initiated-teardown predicate — the instance's lifecycle state carried
+// into the tmux layer. It is consulted at exactly one place: a poll that
+// finds the session gone. The generation's teardown mark covers only the
+// window after close() lands it; the predicate covers the window before —
+// from af recording the teardown (kill tombstone, archiving/killing op,
+// cleared started, an owed on_complete) to close() reaching the mark
+// (#5138). nil for callers with no instance state to consult.
+func (t *TmuxSession) HasUpdatedExpectingTeardown(expectGone func() bool) (updated bool, hasPrompt bool, content string) {
+	updated, hasPrompt, content, _ = t.HasUpdatedWithBaselineExpectingTeardown(expectGone)
+	return updated, hasPrompt, content
+}
+
 // HasUpdatedWithBaseline also reports the first successful capture after a
 // reattach. That capture seeds comparison state: it proves neither pane churn
 // nor idleness, so daemon observations must preserve the distinction.
 func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, content string, baseline bool) {
+	return t.HasUpdatedWithBaselineExpectingTeardown(nil)
+}
+
+// HasUpdatedWithBaselineExpectingTeardown is HasUpdatedWithBaseline plus the
+// af-initiated-teardown predicate described at HasUpdatedExpectingTeardown.
+func (t *TmuxSession) HasUpdatedWithBaselineExpectingTeardown(expectGone func() bool) (updated bool, hasPrompt bool, content string, baseline bool) {
 	// A nil monitor means Restore never ran for this session: a persisted Dead
 	// instance is loaded with started=true but LocalBackend.Start returns before
 	// Restore (which is the only place monitor is initialized) so the corpse is
@@ -362,17 +388,20 @@ func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, co
 		// CapturePaneContent has already probed ExistsOrUnknown on the
 		// error path, so use the wrapped sentinel rather than re-probing.
 		if errors.Is(err, ErrSessionGone) {
-			// af-initiated teardown (kill, archive, task completion, handoff
-			// swap, root reap) routes through close(), which marks the
-			// GENERATION before kill-session runs — that disappearance is the
-			// request completing, not an anomaly, and at ~5,800 lines per log
-			// rotation it buried the errors that matter (#4472). The mark is
-			// read off the snapshotted monitor's generation: a poll in flight
-			// across a same-object restart still attributes the OLD session's
-			// death to the teardown af asked for (Codex on #4473), and a
-			// vanish af never asked for stays at ERROR.
+			// Expectedness is decided from af's own state, never from timing
+			// or the error text (#5138). Two records count. The generation's
+			// teardown mark — this object's close() ran — which the
+			// snapshotted monitor reads so a poll in flight across a
+			// same-object restart still attributes the OLD session's death to
+			// the teardown af asked for (Codex on #4473). And the caller's
+			// predicate — the instance's own lifecycle state (kill tombstone,
+			// archiving/killing op, cleared started, an owed on_complete) —
+			// covering the whole window between af recording the teardown and
+			// close() landing the mark. Neither present means the session
+			// vanished unexpectedly — the ERROR is what the level exists for.
+			expected := expectGone != nil && expectGone()
 			t.monitorMu.Lock()
-			initiated := mon.generation != nil && mon.generation.teardownInitiated
+			initiated := expected || (mon.generation != nil && mon.generation.teardownInitiated)
 			mon.dead = true
 			t.monitorMu.Unlock()
 			if initiated {
