@@ -1,8 +1,10 @@
 package git
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -108,5 +110,103 @@ func TestReconfirmAdoptedWorktree(t *testing.T) {
 	t.Run("no adoption on record is an error, not a pass", func(t *testing.T) {
 		gw, _, _ := archiveTestWorktree(t)
 		assert.Error(t, gw.ReconfirmAdoptedWorktree())
+	})
+}
+
+// FenceUnverifiedWorktree's identity-unknown stall must settle once the path is
+// conclusively absent — otherwise every later claim (archive, restore) and every
+// cleanup (kill) refuses on the same unknown and the row is stranded for good —
+// and must keep fencing while the path exists or cannot be answered (#5102).
+func TestIdentityUnknownStallSettlesOnlyOnProvenAbsence(t *testing.T) {
+	fenced := func(t *testing.T) (*GitWorktree, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "wt")
+		require.NoError(t, os.Mkdir(path, 0o755))
+		gw := presenceTestWorktree(t, path)
+		require.ErrorIs(t, gw.FenceUnverifiedWorktree(errors.New("reappeared")), ErrRelocateStateUnknown)
+		require.True(t, gw.HasUnresolvedRelocation())
+		return gw, path
+	}
+
+	t.Run("absent path: the claim discharges the fence and answers plain ENOENT", func(t *testing.T) {
+		gw, path := fenced(t)
+		require.NoError(t, os.Remove(path))
+		_, err := gw.ClaimRelocationSource()
+		require.ErrorIs(t, err, os.ErrNotExist)
+		assert.NotErrorIs(t, err, ErrRelocateStateUnknown, "the gone route must be reachable again")
+		assert.False(t, gw.HasUnresolvedRelocation())
+	})
+
+	t.Run("absent path: the discharge cleanup shares clears the fence", func(t *testing.T) {
+		gw, path := fenced(t)
+		require.NoError(t, os.Remove(path))
+		gw.relocationMu.Lock()
+		assert.True(t, gw.settleAbsentIdentityUnknownStallLocked())
+		gw.relocationMu.Unlock()
+		assert.False(t, gw.HasUnresolvedRelocation())
+	})
+
+	t.Run("present path keeps fencing", func(t *testing.T) {
+		gw, _ := fenced(t)
+		gw.relocationMu.Lock()
+		assert.False(t, gw.settleAbsentIdentityUnknownStallLocked())
+		gw.relocationMu.Unlock()
+		assert.True(t, gw.HasUnresolvedRelocation())
+	})
+
+	t.Run("unanswerable path keeps fencing", func(t *testing.T) {
+		gw, path := fenced(t)
+		require.NoError(t, os.Remove(path))
+		stubPresenceLstat(t, path, &os.PathError{Op: "lstat", Path: path, Err: syscall.EACCES})
+		_, err := gw.ClaimRelocationSource()
+		require.Error(t, err)
+		assert.True(t, gw.HasUnresolvedRelocation(), "only a proven absence may discharge the fence")
+	})
+
+	t.Run("an identity-qualified record is never discharged this way", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wt")
+		gw := presenceTestWorktree(t, path)
+		require.NoError(t, gw.RestoreRelocationRecovery(RelocationRecovery{
+			State: RelocationRecoveryStalled, IdentityKnown: true, Device: 1, Inode: 2,
+		}))
+		gw.relocationMu.Lock()
+		assert.False(t, gw.settleAbsentIdentityUnknownStallLocked())
+		gw.relocationMu.Unlock()
+		assert.True(t, gw.HasUnresolvedRelocation())
+	})
+}
+
+// A refused claim on an unverified directory must not record that directory's
+// identity as the worktree's: removing it afterwards would then read as a
+// vanished identity and strand the row. Returned unverified, the fence stays
+// identity-unknown and settles once the path is gone (#5102).
+func TestReturnClaimUnverifiedKeepsTheFenceSettleable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, os.Mkdir(path, 0o755))
+	gw := presenceTestWorktree(t, path)
+	require.ErrorIs(t, gw.FenceUnverifiedWorktree(errors.New("reappeared")), ErrRelocateStateUnknown)
+
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err, "premise: the stalled fence re-resolves a present path")
+	gw.ReturnClaimUnverified(claim)
+	recovery, fenced := gw.GetRelocationRecovery()
+	require.True(t, fenced)
+	assert.Equal(t, RelocationRecoveryStalled, recovery.State)
+	assert.False(t, recovery.IdentityKnown, "the unverified directory's identity must not be recorded")
+
+	require.NoError(t, os.Remove(path))
+	_, err = gw.ClaimRelocationSource()
+	require.ErrorIs(t, err, os.ErrNotExist)
+	assert.NotErrorIs(t, err, ErrRelocateStateUnknown)
+	assert.False(t, gw.HasUnresolvedRelocation())
+
+	t.Run("a record-free claim leaves no record", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "wt")
+		require.NoError(t, os.Mkdir(path, 0o755))
+		gw := presenceTestWorktree(t, path)
+		claim, err := gw.ClaimRelocationSource()
+		require.NoError(t, err)
+		gw.ReturnClaimUnverified(claim)
+		assert.False(t, gw.HasUnresolvedRelocation())
 	})
 }

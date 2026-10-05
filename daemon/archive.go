@@ -316,6 +316,22 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			req.Title, err,
 		)
 	}
+	// A persisted worktree-missing flag means the directory af tracked was
+	// deleted (#5102). A claim that now succeeds found SOMETHING at that path, but
+	// nothing proves it is the session's worktree — a mkdir, an unrelated
+	// checkout, a restore from backup all look the same from here. The moving
+	// route would run the on-archive hook inside it and relocate its bytes into
+	// the archive, so refuse closed instead: once the path is cleared, the retry
+	// takes the deletion route and archives with the branch kept. The flag is
+	// sticky exactly so a reappearing path cannot quietly re-qualify the row.
+	if missing, _ := instance.WorktreeMissing(); missing {
+		_ = instance.Transition(session.CancelArchive())
+		instance.ReturnWorktreeClaimUnverified(relocationClaim)
+		m.persistInstance(repoID, instance)
+		return "", session.InstanceData{}, fmt.Errorf(
+			"cannot archive session %q: its tracked worktree %s was recorded as deleted outside af, and the directory now at that path is not one af can verify is the session's — af will not run the on-archive hook in it or move it into the archive; inspect %s, remove it or move it aside if it is not the session's work, then retry (the session archives with its branch kept)",
+			req.Title, relocationClaim.Path, relocationClaim.Path)
+	}
 	// The pre-archive worktree location, captured before the move, so a persist
 	// failure after the commit can roll the worktree back home (#1538).
 	origPath := relocationClaim.Path

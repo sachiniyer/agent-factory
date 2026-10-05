@@ -208,3 +208,21 @@ func (g *GitWorktree) FenceUnverifiedWorktree(cause error) error {
 	g.adoptedWorktree = nil
 	return errors.Join(cause, ErrRelocateStateUnknown)
 }
+
+// ReturnClaimUnverified gives back a claim that resolved to a directory the
+// caller refuses to treat as the session's worktree (#5102) — an archive of a
+// row flagged worktree-missing that found something back at the path. The
+// ordinary PreserveRelocationClaim would record that directory's identity as
+// the worktree's, which is precisely the claim being refused, and a later
+// removal of the directory would then read as a vanished worktree identity and
+// strand the row. Instead a claim that consumed a record goes back to the
+// identity-unknown stalled fence it came from, which settles on its own once the
+// path is conclusively absent; a record-free claim owns nothing to give back.
+func (g *GitWorktree) ReturnClaimUnverified(claim RelocationClaim) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	g.releaseRelocationClaimLocked(&claim)
+	if claim.recoveryOwned && g.relocationRecovery == nil {
+		g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+	}
+}

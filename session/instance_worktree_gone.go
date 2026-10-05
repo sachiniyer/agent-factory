@@ -73,3 +73,15 @@ func liveBranchCheckout(gw *git.GitWorktree) (string, bool, error) {
 	}
 	return registered, true, nil
 }
+
+// ReturnWorktreeClaimUnverified hands back an archive claim on a path whose
+// worktree-missing flag says its occupant is not the session's; see
+// git.ReturnClaimUnverified.
+func (i *Instance) ReturnWorktreeClaimUnverified(claim git.RelocationClaim) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		gw.ReturnClaimUnverified(claim)
+	}
+}

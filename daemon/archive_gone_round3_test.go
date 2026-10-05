@@ -45,20 +45,42 @@ func TestArchiveSession_RefusesAWorktreeTheUserMoved(t *testing.T) {
 	assert.Equal(t, "uncommitted", string(dirty))
 }
 
-// A flag set by a probe that raced af's own move is stale the moment af commits
-// a row whose worktree it placed: an ordinary archive must not carry it, or the
-// row stays flagged as missing forever after a later restore (#5102).
-func TestArchiveSession_MovedArchiveClearsAStaleMissingFlag(t *testing.T) {
+// A persisted worktree-missing flag means the directory af tracked is gone. A
+// directory that appears at that path later is an unverified replacement, not
+// the session's bytes: archive refuses closed rather than running the on-archive
+// hook in it or moving it into the archive, and leaves it untouched. Once the
+// path is cleared, the same archive takes the deletion route (#5102).
+func TestArchiveSession_FlaggedRowWithARecreatedPathRefusesThenArchivesOnceCleared(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
-	inst, _ := registerArchivable(t, manager, repoID, repoPath, "stale-flag")
-	inst.SetWorktreeMissing("tracked worktree path /x does not exist (deleted outside af)")
+	inst, wtPath := registerGoneWorktree(t, manager, repoID, repoPath, "recreated")
+	manager.RefreshStatuses()
+	missing, _ := inst.WorktreeMissing()
+	require.True(t, missing, "premise: the poll flagged the deleted worktree")
 
-	_, data, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "stale-flag", RepoID: repoID})
+	require.NoError(t, os.Mkdir(wtPath, 0o755))
+	stranger := filepath.Join(wtPath, "not-the-session.txt")
+	require.NoError(t, os.WriteFile(stranger, []byte("someone else's"), 0o644))
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	writeOnArchiveCommand(t, fmt.Sprintf("printf ran > %q", marker))
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "recreated", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded as deleted outside af")
+	assert.Contains(t, err.Error(), wtPath)
+	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness())
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
+	assert.Equal(t, wtPath, inst.GetWorktreePath(), "nothing was moved")
+	_, statErr := os.Stat(marker)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "the hook must not run in an unverified directory")
+	data, err := os.ReadFile(stranger)
 	require.NoError(t, err)
-	assert.False(t, data.Worktree.Missing)
-	rec := recordFor(t, repoID, "stale-flag")
-	require.NotNil(t, rec)
-	assert.False(t, rec.Worktree.Missing, "the committed record must not carry the stale flag")
+	assert.Equal(t, "someone else's", string(data))
+
+	require.NoError(t, os.RemoveAll(wtPath))
+	_, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "recreated", RepoID: repoID})
+	require.NoError(t, err)
+	assert.Equal(t, session.LiveArchived, archived.Liveness)
+	assert.True(t, archived.Worktree.Missing)
 }
 
 // The restore-side twin: a moved-back worktree is one af placed, so a flag on
