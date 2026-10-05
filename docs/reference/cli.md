@@ -2541,7 +2541,8 @@ archived sessions, which are inert by construction and cannot change on their ow
 
 Each reported session carries a reason a driver can act on: idle, usage-limited
 (af resumes it automatically — do not prompt it), lost, dead, worktree-gone (its
-worktree was deleted outside af — archive or kill it), archived, killed, gone, or
+worktree was deleted outside af — archive or kill it; an in-place session can
+only be killed), archived, killed, gone, or
 unknown. "idle" covers both "finished its work" and "waiting on input":
 af records both as the same state and does not distinguish them, so neither does
 this. A session af cannot classify reports "unknown" and is never reported as

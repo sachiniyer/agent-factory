@@ -37,6 +37,21 @@ func stubPresenceLstat(t *testing.T, path string, err error) {
 	t.Cleanup(func() { boundedLstatPath = original })
 }
 
+// stubPresenceLstatHook runs during an lstat of path, before it reports
+// ENOENT — the window between the probe's ownership snapshot and its answer.
+func stubPresenceLstatHook(t *testing.T, path string, during func()) {
+	t.Helper()
+	original := boundedLstatPath
+	boundedLstatPath = func(p string) (os.FileInfo, error) {
+		if p == path {
+			during()
+			return nil, &os.PathError{Op: "lstat", Path: p, Err: syscall.ENOENT}
+		}
+		return original(p)
+	}
+	t.Cleanup(func() { boundedLstatPath = original })
+}
+
 func TestProbeWorktreePresence(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -85,6 +100,30 @@ func TestProbeWorktreePresence(t *testing.T) {
 			assert.Equal(t, tt.want, gw.ProbeWorktreePresence())
 		})
 	}
+
+	// An af move that claims (or re-aims) the path between the probe's snapshot
+	// and its lstat must not be reported as an outside deletion.
+	t.Run("relocation claimed during the lstat is unknown", func(t *testing.T) {
+		path := filepath.Join(testguard.CanonicalTempDir(t), "wt")
+		gw := presenceTestWorktree(t, path)
+		stubPresenceLstatHook(t, path, func() {
+			gw.relocationMu.Lock()
+			gw.activeRelocationClaim = &RelocationClaim{Path: path}
+			gw.relocationMu.Unlock()
+		})
+		assert.Equal(t, WorktreePresenceUnknown, gw.ProbeWorktreePresence())
+	})
+	t.Run("record re-aimed during the lstat is unknown", func(t *testing.T) {
+		root := testguard.CanonicalTempDir(t)
+		path := filepath.Join(root, "wt")
+		gw := presenceTestWorktree(t, path)
+		stubPresenceLstatHook(t, path, func() {
+			gw.relocationMu.Lock()
+			gw.setWorktreeLocationLocked(filepath.Join(root, "moved"))
+			gw.relocationMu.Unlock()
+		})
+		assert.Equal(t, WorktreePresenceUnknown, gw.ProbeWorktreePresence())
+	})
 
 	t.Run("empty path is unknown", func(t *testing.T) {
 		assert.Equal(t, WorktreePresenceUnknown, (&GitWorktree{}).ProbeWorktreePresence())

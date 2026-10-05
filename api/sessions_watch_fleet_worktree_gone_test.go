@@ -35,6 +35,22 @@ func TestClassifyWatchStop_WorktreeGone(t *testing.T) {
 		})
 	}
 
+	t.Run("remedy names archive for an af worktree", func(t *testing.T) {
+		_, detail := classifyWatchStop(gone(session.LiveReady))
+		require.Contains(t, detail, "af sessions archive")
+		require.Contains(t, detail, "af sessions kill")
+	})
+
+	t.Run("an in-place session is offered kill only", func(t *testing.T) {
+		d := gone(session.LiveReady)
+		d.Worktree.ExternalWorktree = true
+		reason, detail := classifyWatchStop(d)
+		require.Equal(t, watchStopWorktreeGone, reason)
+		require.Contains(t, detail, "af sessions kill")
+		require.NotContains(t, detail, "af sessions archive",
+			"ArchiveSession refuses an external worktree, so archive is no remedy")
+	})
+
 	t.Run("an in-flight op is still motion", func(t *testing.T) {
 		d := gone(session.LiveReady)
 		d.InFlightOp = session.OpArchiving

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -37,6 +39,44 @@ func RestoreWorktreePath(repoPath, title, branchName string) (string, error) {
 		return "", err
 	}
 	return resolveWorktreePlacement(cfg, repoRoot, worktreeDir, title, branchName)
+}
+
+// IsRestorePlacement reports whether candidate is a path restore could have
+// chosen for this session: its placement base, or one of the "-N" collision
+// variants firstFreeWorktreePath derives from it. Restore adopts a landed move
+// only at such a path (#5102), so a checkout the user made of the branch
+// somewhere else is never mistaken for af's own worktree — kill would delete
+// what it adopts.
+func IsRestorePlacement(repoPath, title, branchName, candidate string) (bool, error) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return false, fmt.Errorf("failed to load config: %w", err)
+	}
+	repoRoot, err := findGitRepoRoot(repoPath)
+	if err != nil {
+		return false, err
+	}
+	worktreeDir, err := getWorktreeDirectoryForRepoWithConfig(cfg, repoRoot)
+	if err != nil {
+		return false, err
+	}
+	base, err := worktreePlacementBase(cfg, repoRoot, worktreeDir, title, branchName)
+	if err != nil {
+		return false, err
+	}
+	if pathutil.ResolveForCompare(filepath.Dir(candidate)) != pathutil.ResolveForCompare(filepath.Dir(base)) {
+		return false, nil
+	}
+	leaf, baseLeaf := filepath.Base(candidate), filepath.Base(base)
+	if leaf == baseLeaf {
+		return true, nil
+	}
+	suffix, ok := strings.CutPrefix(leaf, baseLeaf+"-")
+	if !ok {
+		return false, nil
+	}
+	n, err := strconv.Atoi(suffix)
+	return err == nil && n >= 2 && strconv.Itoa(n) == suffix, nil
 }
 
 // ErrRepoGone is returned by RestoreWorktreeTo when the origin repository this

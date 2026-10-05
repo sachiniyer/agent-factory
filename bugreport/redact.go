@@ -520,6 +520,19 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.LostRestoreFailure != nil {
 		d.LostRestoreFailure.Error = r.scrubDiagnostic(d.LostRestoreFailure.Error)
 	}
+	// Worktree.MissingReason is af-minted prose around the worktree path that
+	// vanished (#5102) — the same user-meaningful path WorktreePath carries, in a
+	// sentence. Rebuild it from af's own forms with that path given the
+	// WorktreePath treatment, so triage still reads which shape of disappearance
+	// it was. Text that is not one of af's forms has no known structure to keep
+	// and collapses whole, as an unparseable ArchiveWarning does.
+	if d.Worktree.MissingReason != "" {
+		if rebuilt, ok := session.RewriteWorktreeMissingReasonPath(d.Worktree.MissingReason, r.collapsePathField); ok {
+			d.Worktree.MissingReason = rebuilt
+		} else {
+			d.Worktree.MissingReason = redactedMarker
+		}
+	}
 	// ArchiveWarning is the bounded projection of ArchiveReport.Warning, and that
 	// renderer prints the user-chosen names of the files af could not read.
 	// #3554 closed the LOG path for exactly this text, but scrubArchiveWarningPaths

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -513,12 +514,73 @@ func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationCla
 // ArchiveTeardownWithClaim's; the worktree step re-verifies the absence and
 // performs no move, since there is nothing left to relocate and the branch is
 // what restore rebuilds from. trustLiveGeneration carries the same lock contract.
-func (i *Instance) ArchiveTeardownWorktreeGone(beforeMove func() error, trustLiveGeneration bool) (hookErr, archiveErr error) {
+//
+// adopted selects the sibling route for a previous archive whose move landed
+// before the daemon could record it: the record already names the archived
+// location, and the worktree step re-verifies it is still present instead.
+func (i *Instance) ArchiveTeardownWorktreeGone(beforeMove func() error, trustLiveGeneration, adopted bool) (hookErr, archiveErr error) {
 	mode := teardownArchive{
-		worktreeGone: true, beforeMove: beforeMove, hookErr: &hookErr, trustLiveGeneration: trustLiveGeneration,
+		worktreeGone: !adopted, worktreeAdopted: adopted,
+		beforeMove: beforeMove, hookErr: &hookErr, trustLiveGeneration: trustLiveGeneration,
 	}
 	archiveErr = i.teardownTabs(mode)
 	return hookErr, archiveErr
+}
+
+// AdoptLandedArchiveMove re-aims an archiving session's record at dest once git
+// proves an earlier archive's move landed there (#5102); see
+// git.AdoptLandedWorktreeMove. The caller holds the OpArchiving fence.
+func (i *Instance) AdoptLandedArchiveMove(dest string) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot archive %q: instance has no worktree", i.Title)
+	}
+	return gw.AdoptLandedWorktreeMove(dest)
+}
+
+// AdoptLandedRestoreMove is restore's counterpart: when the archived worktree
+// is gone, it asks git where this session's branch is checked out. A registered
+// location that exists on disk, at a path restore itself could have chosen, is
+// where an earlier restore's move landed before the daemon could record it, and
+// the record is re-aimed there after the same proof (#5102). adopted is false
+// when git registers the branch nowhere that exists — including the stale,
+// prunable entry an outside deletion leaves — which is the genuine-deletion case
+// the caller rebuilds from the branch. A live checkout of the branch anywhere
+// else is the user's, not af's: adopting it would hand it to kill's cleanup, and
+// rebuilding past it would fail on git's one-checkout rule, so that refuses.
+func (i *Instance) AdoptLandedRestoreMove(repoPath, title, branch string) (path string, adopted bool, err error) {
+	i.mu.RLock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchivedFenced); err != nil {
+		i.mu.RUnlock()
+		return "", false, err
+	}
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return "", false, fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
+	}
+	registered, listed, err := gw.RegisteredPathForBranch()
+	if err != nil || !listed {
+		return "", false, err
+	}
+	if _, statErr := git.BoundedLstat(registered); errors.Is(statErr, os.ErrNotExist) {
+		return "", false, nil
+	} else if statErr != nil {
+		return "", false, fmt.Errorf("cannot inspect %s, where git registers this session's branch: %w", registered, statErr)
+	}
+	placement, err := git.IsRestorePlacement(repoPath, title, branch, registered)
+	if err != nil {
+		return "", false, fmt.Errorf("cannot tell whether %s, where git has this session's branch checked out, is af's restore location: %w", registered, err)
+	}
+	if !placement {
+		return "", false, fmt.Errorf("git has this session's branch checked out at %s, which is not a location af restores to, so af will not adopt it — remove that checkout (git worktree remove) to let restore rebuild the session's worktree, or kill the session", registered)
+	}
+	if err := gw.AdoptLandedWorktreeMove(registered); err != nil {
+		return "", false, fmt.Errorf("git registers this session's branch at %s, but it could not be adopted as the restored worktree: %w", registered, err)
+	}
+	return registered, true, nil
 }
 
 // SetArchived flips the instance into the inert Archived state atomically:
