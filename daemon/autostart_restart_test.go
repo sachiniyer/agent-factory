@@ -274,6 +274,28 @@ func TestInstallAutostartDoesNotMaskRetainedFailedUnitLinux(t *testing.T) {
 	}
 }
 
+// TestInstallAutostartRefusesRelativeAFHomeLinux mirrors the macOS branch's
+// config.GetConfigDir call: a relative AGENT_FACTORY_HOME is captured verbatim
+// into the unit's Environment= line, and config.ConfigDirFor now refuses it, so
+// the daemon the unit starts would reject it and Restart=on-failure would flap a
+// unit that can never come up. The install must fail fast with a clear error
+// rather than write that unit — the same refusal the macOS branch already
+// surfaces via its configDir-for-logPath call.
+func TestInstallAutostartRefusesRelativeAFHomeLinux(t *testing.T) {
+	dir := withAutostartTestEnv(t, "linux")
+	stubAutostartStopDaemon(t, true, nil)
+	stubAutostartUnitCommand(t, nil)
+	t.Setenv("AGENT_FACTORY_HOME", "af-home") // relative, as an operator may write it
+
+	if _, err := InstallAutostart(); err == nil {
+		t.Fatalf("InstallAutostart accepted a relative AGENT_FACTORY_HOME; ConfigDirFor should refuse it " +
+			"before the unit is written")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, autostartUnitName)); !os.IsNotExist(statErr) {
+		t.Fatalf("unit file written despite a relative AGENT_FACTORY_HOME; stat err = %v", statErr)
+	}
+}
+
 // TestInstallAutostartRemovesPlistWhenLoadFailsDarwin is the macOS cleanup
 // variant: a hard launchctl bootstrap failure must not leave an orphaned plist.
 func TestInstallAutostartRemovesPlistWhenLoadFailsDarwin(t *testing.T) {
