@@ -72,17 +72,9 @@ func (i *Instance) WorktreeMissing() (bool, string) {
 	return i.worktreeMissing, i.worktreeMissingReason
 }
 
-// WorktreeMissingFlag is WorktreeMissing without the reason, for renderers that
-// only choose a glyph.
-func (i *Instance) WorktreeMissingFlag() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.worktreeMissing
-}
-
 // SetWorktreeMissing records a worktree as gone with reason. The archive route
-// for a deleted worktree uses it to stamp the archived row with what it found,
-// so restore knows it is rebuilding rather than moving.
+// for a deleted worktree uses it to stamp the archived row with what it found:
+// the archived record names a path that holds nothing.
 func (i *Instance) SetWorktreeMissing(reason string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -94,11 +86,10 @@ func (i *Instance) SetWorktreeMissing(reason string) {
 // ClearWorktreeMissing drops the flag. It is the only way the flag clears (the
 // probe never does — see RefreshWorktreeMissing), so it is called only where af
 // itself has just placed the worktree the record names: a respawn that rebuilt
-// it and started a fresh pane there, every completed restore (moved back,
-// adopted, or re-aimed for the respawn to rebuild), and an archive that moved or
-// adopted it. At the archive and restore commits a set flag can only be stale —
-// most plausibly a probe that raced af's own move. If a rebuild does not
-// materialize the path, the next poll re-derives the flag.
+// it and started a fresh pane there, a completed restore that moved it back,
+// and an archive that moved or adopted it. At the archive and restore commits a
+// set flag can only be stale — most plausibly a probe that raced af's own move.
+// If the path is gone after all, the next poll re-derives the flag.
 func (i *Instance) ClearWorktreeMissing() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -108,37 +99,6 @@ func (i *Instance) ClearWorktreeMissing() {
 	i.worktreeMissing = false
 	i.worktreeMissingReason = ""
 	i.touchLocked()
-}
-
-// ReconcileWorktreeMissing mirrors the daemon's worktree-missing flag onto an
-// existing client projection, as ReconcileArchiveWarning does for the archive
-// notice. Clients never probe the filesystem themselves — the daemon's answer is
-// authoritative — so this only copies, and reports whether anything changed.
-func (i *Instance) ReconcileWorktreeMissing(missing bool, reason string) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if i.worktreeMissing == missing && i.worktreeMissingReason == reason {
-		return false
-	}
-	i.worktreeMissing = missing
-	i.worktreeMissingReason = reason
-	return true
-}
-
-// WorktreeMissingRemedy is the one operator instruction every surface gives for
-// a worktree deleted outside af — send-prompt's refusal, `af sessions watch`,
-// and the fleet watch — so they cannot drift into different advice (#5102).
-//
-// external selects the in-place (`--here`) shape. ArchiveSession refuses an
-// external worktree outright — the checkout is the user's own, not af's to
-// shelve — so recommending archive there would send the operator into a second
-// refusal; kill is the only remedy af can carry out, and it removes nothing of
-// the user's.
-func WorktreeMissingRemedy(external bool) string {
-	if external {
-		return "remove it with 'af sessions kill' (an in-place session cannot be archived)"
-	}
-	return "archive it with 'af sessions archive' to keep its branch for a later restore, or remove it with 'af sessions kill'"
 }
 
 // worktreeMissingReasonForm is one af-authored MissingReason sentence: fixed

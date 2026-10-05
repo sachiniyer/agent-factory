@@ -506,24 +506,6 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 		releaseObservationFence()
 		return session.PromptCouldNotConfirm, notAttempted(livenessErr)
 	}
-	// A tracked worktree confirmed absent means the agent's cwd is gone even while
-	// liveness still reads Ready: delivering would paste work into a session whose
-	// working directory no longer exists (#5102). Probe here rather than trusting
-	// the poll, so a worktree deleted since the last tick is refused now. The probe
-	// only ever sets the flag — a recreated pathname does not give the pane its cwd
-	// back — so once flagged this refuses until af rebuilds and respawns it.
-	// Nothing was sent, so notAttempted keeps the #2501 refund contract. An
-	// Archived target never reaches here: the liveness gate above refuses it as
-	// the more fundamental state.
-	if missing, changed := instance.RefreshWorktreeMissing(); missing {
-		releaseObservationFence()
-		if changed {
-			m.persistAndPublishInstance(repoID, instance)
-		}
-		return session.PromptCouldNotConfirm, notAttempted(fmt.Errorf(
-			"target session %q's tracked worktree %s is gone (deleted outside af); prompt not delivered — %s",
-			req.Title, instance.GetWorktreePath(), worktreeMissingRemedyCommands(req.Title, instance.IsExternalWorktree())))
-	}
 	// Deliver through the agent-server (#1592 Phase 2 PR4), not the tmux-shaped
 	// Backend method — the daemon's delivery path is runtime-agnostic. SendPrompt
 	// is the reliable command path automated deliveries need. This crosses the
@@ -913,18 +895,4 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	m.instances[key] = instance
 	m.mu.Unlock()
 	return instance, rid, data, nil
-}
-
-// worktreeMissingRemedyCommands is session.WorktreeMissingRemedy with the
-// commands spelled for this title, so a title that needs quoting pastes
-// correctly. An in-place session names only kill: ArchiveSession refuses an
-// external worktree, and offering archive would walk the operator into a second
-// refusal (#5102).
-func worktreeMissingRemedyCommands(title string, external bool) string {
-	kill := shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, title)
-	if external {
-		return fmt.Sprintf("remove it (%s); an in-place session cannot be archived", kill)
-	}
-	return fmt.Sprintf("archive it (%s) to shelve the session and keep its branch, or kill it (%s) to remove it",
-		shellsuggest.PositionalCommand("af", []string{"sessions", "archive"}, title), kill)
 }

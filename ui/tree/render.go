@@ -61,14 +61,6 @@ const archivedIcon = "▧ "
 // (Refines the provisional ◒ slot Phase 1e stubbed for #1204.)
 const limitIcon = "◆ "
 
-// worktreeGoneIcon marks a live session whose tracked worktree was deleted
-// outside af (#5102). Liveness can still read Ready — the pane and agent are up —
-// so without it the row would wear the green ready dot while every prompt is
-// refused. An amber bang (lost's colour, a shape no other state uses) says
-// "needs you" rather than "waiting for input", paired with the [worktree gone]
-// title prefix for the same contrast/colour-blindness reason as the other glyphs.
-const worktreeGoneIcon = "! "
-
 // expandedArrow/collapsedArrow mark an instance row whose tab children are
 // shown/hidden; nonExpandableArrow keeps transient rows (never expandable, see
 // Expandable) aligned with their siblings.
@@ -357,9 +349,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// dot; every working/busy state renders blankIcon so the columns stay aligned.
 	liveness := i.GetLiveness()
 	op := i.GetInFlightOp()
-	// Archived rows keep their ▧ glyph: restore already knows how to rebuild a
-	// worktree that is gone, so the flag changes nothing the user must act on.
-	worktreeGone := liveness != session.LiveArchived && i.WorktreeMissingFlag()
 	var join string
 	switch {
 	case op != session.OpNone:
@@ -373,10 +362,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// Kill/archive keep their [deleting] title prefix below (create/restore add
 		// no prefix — a bare, clean loading row).
 		join = blankIcon
-	case worktreeGone:
-		// Second only to the op mask: a confirmed-absent worktree overrides every
-		// live liveness glyph, since none of them can receive work (#5102).
-		join = lostStyle.Render(worktreeGoneIcon)
 	default:
 		switch liveness {
 		case session.LiveRunning:
@@ -469,11 +454,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// are derived on every render from the live snapshot, so they cannot expire.
 	if archiveWarning != "" {
 		titleText = "[archive incomplete] " + titleText
-	}
-	// A worktree deleted outside af is the reason prompts are refused, so it
-	// outranks the lifecycle context beneath it on a narrow rail (#5102).
-	if worktreeGone {
-		titleText = "[worktree gone] " + titleText
 	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
 	// session can keep working and otherwise look healthy. Add it LAST so it is

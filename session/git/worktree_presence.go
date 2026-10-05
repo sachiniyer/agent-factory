@@ -8,7 +8,7 @@ import (
 
 // WorktreePresence is the tri-state answer to "is the tracked worktree
 // directory at its recorded path right now?" (#5102). It is deliberately not a
-// bool: a session flagged as having lost its worktree refuses prompts and
+// bool: a session flagged as having lost its worktree is reported as such and
 // routes archive down a no-move path, so only a conclusive answer may produce
 // Absent. Everything af cannot prove collapses to Unknown, which callers treat
 // as "leave whatever was last established alone".
@@ -70,21 +70,16 @@ func (g *GitWorktree) ProbeWorktreePresenceAt() (WorktreePresence, string) {
 	}
 }
 
-// ErrRepointDestinationOccupied is RepointAbsentWorktreePath's refusal for a
-// destination something already occupies. Restore distinguishes it because an
-// occupant there may be the bytes of its own interrupted earlier attempt.
-var ErrRepointDestinationOccupied = errors.New("destination occupied")
-
 // RepointAbsentWorktreePath rewrites the recorded worktree path to dest when the
-// recorded path is conclusively absent — the restore/rename counterpart of a
+// recorded path is conclusively absent — the archived-rename counterpart of a
 // move for a worktree deleted outside af (#5102): nothing exists to relocate,
-// only the record to aim at the rebuild location. It refuses while any
-// relocation claim or recovery record is outstanding (that owner decides where
-// the worktree is), while the recorded path still exists (that is a move, not a
-// repoint), and when dest is occupied or unanswerable (the rebuild must not
-// adopt or collide with a directory af did not create). Both probes run under
-// relocationMu so no claim can be activated between the absence check and the
-// rewrite.
+// only the record to re-aim so its basename claims the new title. It refuses
+// while any relocation claim or recovery record is outstanding (that owner
+// decides where the worktree is), while the recorded path still exists (that
+// is a move, not a repoint), and when dest is occupied or unanswerable (a later
+// rebuild there must not adopt or collide with a directory af did not create).
+// Both probes run under relocationMu so no claim can be activated between the
+// absence check and the rewrite.
 func (g *GitWorktree) RepointAbsentWorktreePath(dest string) error {
 	if dest == "" {
 		return fmt.Errorf("cannot repoint worktree: destination path is empty")
@@ -106,7 +101,7 @@ func (g *GitWorktree) RepointAbsentWorktreePath(dest string) error {
 		return fmt.Errorf("cannot confirm worktree %s absent: %w", current, err)
 	}
 	if _, err := BoundedLstat(dest); err == nil {
-		return fmt.Errorf("cannot repoint worktree to %s: %w", dest, ErrRepointDestinationOccupied)
+		return fmt.Errorf("cannot repoint worktree to %s: destination occupied", dest)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("cannot confirm repoint destination %s free: %w", dest, err)
 	}
