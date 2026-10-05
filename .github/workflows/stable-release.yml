@@ -133,9 +133,13 @@ jobs:
     needs: [validate, build]
     runs-on: ubuntu-latest
     steps:
+    # Full history is required: release-bump.sh rebases the bump commit onto
+    # whatever master became during the build (#1927), and a rebase has no
+    # merge-base to find in a one-commit checkout.
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
+        fetch-depth: 0
         ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
     # Fetch the artifacts before touching git so a failed download cannot

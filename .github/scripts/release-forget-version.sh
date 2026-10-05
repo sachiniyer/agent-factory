@@ -20,19 +20,20 @@ repo="${GH_REPO:?set GH_REPO to owner/name}"
 # Release state first: drafts store tag_name but create no git ref (they sit
 # as untagged-* until publish), yet still collide with a fresh
 # `gh release create`, so they are deleted by id — find-by-tag can miss an
-# untagged draft. A published release means the tag legitimately exists and
-# the whole version is off-limits.
-release=$(gh api "repos/${repo}/releases?per_page=100" --paginate \
+# untagged draft. tag_name is not unique across drafts, so every matching
+# release is handled, not just the first. A published release means the tag
+# legitimately exists and the whole version is off-limits.
+releases=$(gh api "repos/${repo}/releases?per_page=100" --paginate \
 	--jq '.[] | select(.tag_name == "'"${tag}"'") | "\(.id) \(.draft)"')
-if [ -n "$release" ]; then
-	id=${release%% *}
-	draft=${release##* }
-	if [ "$draft" = "false" ]; then
-		echo "${tag} has a published release; nothing to forget"
-		exit 0
-	fi
-	echo "Deleting leftover draft release ${tag} (id ${id})"
-	gh api -X DELETE "repos/${repo}/releases/${id}" --silent
+if printf '%s\n' "$releases" | grep -q ' false$'; then
+	echo "${tag} has a published release; nothing to forget"
+	exit 0
+fi
+if [ -n "$releases" ]; then
+	printf '%s\n' "$releases" | while read -r id _draft; do
+		echo "Deleting leftover draft release ${tag} (id ${id})"
+		gh api -X DELETE "repos/${repo}/releases/${id}" --silent
+	done
 fi
 
 # Reaching here means no published release carries ${tag}, so any surviving

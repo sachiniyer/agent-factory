@@ -687,6 +687,14 @@ func TestReleaseForgetVersion(t *testing.T) {
 			wantLog:    "Deleting leftover draft",
 		},
 		{
+			// tag_name is not unique across drafts — every matching draft
+			// must go, or the leftover still collides with the create.
+			name:       "several drafts sharing a tag are all deleted",
+			version:    "1.0.2-preview-1",
+			fixture:    "v1.0.2-preview-1 888 true\nv1.0.2-preview-1 889 true\n",
+			wantDelete: []string{"releases/888", "releases/889"},
+		},
+		{
 			name:       "orphaned tag ref with no release is deleted",
 			version:    "1.0.2-preview-1",
 			refs:       "v1.0.2-preview-1",
