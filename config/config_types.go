@@ -191,14 +191,68 @@ func ConfigDirFor(envDir string) (string, error) {
 		if !filepath.IsAbs(expanded) {
 			return "", fmt.Errorf("AGENT_FACTORY_HOME %q must be an absolute path (or start with ~/): it is read by child processes (the session pane shim, the daemon) whose working directory is not the setter's, so a relative value silently resolves account-by-name selection against an attacker-controllable cwd and substitutes a planted same-named account", envDir)
 		}
+		// Syntactic absoluteness is not enough: a per-process procfs magic
+		// symlink such as /proc/self/cwd is absolute to filepath.IsAbs yet
+		// resolves relative to the READING process. AGENT_FACTORY_HOME is read
+		// by the daemon and the session pane shim (which tmux starts in the
+		// session worktree), so each child resolves /proc/self/cwd against its
+		// own cwd — re-introducing the cwd-dependence the IsAbs guard above
+		// closes. An operator who sets AGENT_FACTORY_HOME=/proc/self/cwd/.af
+		// from the operator's directory resolves the real account there, while
+		// the pane resolves the same accepted value to an attacker-controlled
+		// <worktree>/.af and injects a planted same-named account — the same
+		// silent substitution a relative home enables. /proc/<pid>/cwd with a
+		// concrete pid is stable and stays valid; only the per-process
+		// /proc/self and /proc/thread-self aliases are rejected here.
+		if isProcessRelativeProcfsPath(expanded) {
+			return "", fmt.Errorf("AGENT_FACTORY_HOME %q resolves through a per-process procfs symlink (/proc/self or /proc/thread-self): it is read by child processes whose working directory is not the setter's, so the value resolves to a different physical directory in each reader and re-introduces the cwd-dependence the absolute-path guard closes; use a concrete path or /proc/<pid>/cwd instead", envDir)
+		}
 		return expanded, nil
 	}
 
+	// The default home is built from $HOME via os.UserHomeDir. A relative $HOME
+	// (e.g. HOME=.) flows straight through os.UserHomeDir on Unix and produces a
+	// relative default, which the same child-process boundary above makes
+	// cwd-dependent: the session pane shim inherits $HOME while tmux changes its
+	// cwd to the session worktree, so the daemon and the pane can resolve a
+	// relative default to different physical homes and the pane can select a
+	// planted same-named account. Validate the resolved default with the same
+	// rules as the explicit value above rather than trusting $HOME to be
+	// absolute. Apply the procfs guard too: a $HOME of /proc/self/cwd is the
+	// same per-process symlink as an explicit AGENT_FACTORY_HOME of it.
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get config home directory: %w", err)
 	}
-	return filepath.Join(homeDir, ".agent-factory"), nil
+	def := filepath.Join(homeDir, ".agent-factory")
+	if !filepath.IsAbs(def) {
+		return "", fmt.Errorf("default AGENT_FACTORY_HOME %q resolves from a relative HOME=%q: HOME is inherited by the session pane shim and the daemon whose working directory is not the setter's, so a relative HOME resolves account-by-name selection against an attacker-controllable cwd the same way a relative AGENT_FACTORY_HOME does; set HOME to an absolute path", def, homeDir)
+	}
+	if isProcessRelativeProcfsPath(def) {
+		return "", fmt.Errorf("default AGENT_FACTORY_HOME %q resolves through a per-process procfs symlink (/proc/self or /proc/thread-self) inherited from HOME: it is read by child processes whose working directory is not the setter's, so the value resolves to a different physical directory in each reader; set HOME to a concrete path instead", def)
+	}
+	return def, nil
+}
+
+// isProcessRelativeProcfsPath reports whether path references a per-process
+// procfs magic symlink — /proc/self or /proc/thread-self on Linux — that
+// resolves relative to the process reading it rather than to a stable
+// directory. Such a path is syntactically absolute (filepath.IsAbs accepts
+// it) but is not stable across the child-process boundary ConfigDirFor
+// protects: the daemon and the session pane shim both read AGENT_FACTORY_HOME
+// from different processes (the pane runs in the session worktree), so each
+// resolves /proc/self/cwd/... against its own cwd and lands on a different
+// physical directory. A concrete /proc/<pid>/cwd is stable for a given pid
+// and is NOT rejected; only the per-process self/thread-self aliases are.
+func isProcessRelativeProcfsPath(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "/proc/self" || strings.HasPrefix(clean, "/proc/self/") {
+		return true
+	}
+	if clean == "/proc/thread-self" || strings.HasPrefix(clean, "/proc/thread-self/") {
+		return true
+	}
+	return false
 }
 
 // Config represents the application configuration. Every field carries both
