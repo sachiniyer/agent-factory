@@ -47,8 +47,10 @@ on:
   # (#4571), so it is only the backstop. Every other run requests the same pass as
   # the repository_dispatch below, at most once per five minutes. A pass retains
   # work it sees too young to select, re-scanning inside its own run until it
-  # matures or resolves, and requests one successor only if it must still leave
-  # work behind — the same window bounds that handoff (#5160).
+  # matures or resolves, and requests one successor whenever it saw work at all:
+  # unmet leftovers are owed a wakeup, and selected work is applied by
+  # apply-gate — a queued job the platform can still cancel — so a pass that
+  # selected anything hands its own lane to one follower too (#5160).
   schedule:
     - cron: "*/5 * * * *"
   repository_dispatch:
@@ -472,11 +474,12 @@ jobs:
       # repository_dispatch per five-minute window, and that run is a full
       # scheduled pass. This condition skips both pass events because a pass
       # does not ask for a follow-up here: it retains not-yet-eligible work by
-      # re-scanning inside its own run, and the helper hands any remainder to
-      # exactly one successor through the same window (#5160). always() is not
-      # used because a cancelled run should not request a pass. A failed
-      # evaluation above should still request one, since the pass does not
-      # depend on it.
+      # re-scanning inside its own run, and the helper hands any remainder —
+      # and a guard for its own apply lane, which a platform cancel can still
+      # strand — to exactly one successor through the same window (#5160).
+      # always() is not used because a cancelled run should not request a pass.
+      # A failed evaluation above should still request one, since the pass does
+      # not depend on it.
       - name: Request stale-decision reconciliation
         if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'repository_dispatch' }}
         uses: actions/github-script@v8

@@ -10444,7 +10444,8 @@ test("#5160: a head left invalidated-but-never-applied is retained by the pass t
   // The incident's shape: the pass arrives one minute before the marker's
   // lease lapses. The pass waits out the boundary inside its own run and then
   // selects it — no second event, no human, no hours-late schedule.
-  const young = await reconcileTransient(pulls, { [HEAD_SHA]: checks(14) });
+  const followUp = [];
+  const young = await reconcileTransient(pulls, { [HEAD_SHA]: checks(14) }, { dispatches: followUp });
   assert.deepEqual(
     young.targets,
     [stranded],
@@ -10455,11 +10456,19 @@ test("#5160: a head left invalidated-but-never-applied is retained by the pass t
     60 * 1000,
     "the wait ended exactly at the fifteen-minute boundary",
   );
+  // And selecting is not the end of the pass's debt: the marker it leaves on
+  // this head is re-applied by apply-gate — itself a queued job the platform
+  // can cancel — so the pass owes its own stranded lane one successor too
+  // (Codex P1 on the second cut). The successor sees the fresh marker young,
+  // retains it through the same wait, and re-applies it if the lane died.
+  assert.equal(followUp.length, 1, "a pass that selected work still owes one successor");
 
   // A marker whose lane was in fact alive resolves mid-wait: the live
   // transaction overwrote it with a verdict, and there is nothing to select.
   const resolving = { [HEAD_SHA]: checks(14) };
+  const noFollowUp = [];
   const live = await reconcileTransient(pulls, resolving, {
+    dispatches: noFollowUp,
     sleep: async () => {
       resolving[HEAD_SHA] = [aggregateCheck({
         headSha: HEAD_SHA,
@@ -10470,6 +10479,7 @@ test("#5160: a head left invalidated-but-never-applied is retained by the pass t
   });
   assert.deepEqual(live.targets, [], "a marker a live lane resolved is never re-evaluated");
   assert.ok(live.waits.length <= 1, "the pass stopped waiting once nothing was pending");
+  assert.equal(noFollowUp.length, 0, "a pass that saw nothing owes nothing — the chain ends");
 });
 
 test("#4782: transient retries are bounded per pass and never displace a PR Validation wake", async () => {

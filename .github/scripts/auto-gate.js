@@ -3596,8 +3596,11 @@ const TRANSIENT_BLOCK_REEVALUATION_LIMIT = 5;
 // see was fresh, a platform-cancelled lane leaves no dispatch at all (#5160),
 // and the schedule delivers hours late (#4571). Work the scan saw but could not
 // select — a transient block inside its retry window, or a WAITING aggregate a
-// live transaction may still own — is therefore retained: the pass re-scans on
-// this cadence until each item matures or resolves.
+// live transaction may still own — is therefore retained: the pass re-scans
+// until each item matures or resolves. It probes once on this cadence — a live
+// lane usually resolves a marker within a minute, and noticing early is worth
+// one extra read — and after that sleeps straight to the next maturity point
+// instead of replaying the whole repository scan every minute.
 const REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS = 60 * 1000;
 // The wait is bounded by the stale-aggregate window plus one poll: every marker
 // already written when the scan ran matures inside that bound. Anything still
@@ -6011,19 +6014,21 @@ async function listRequiredCheckReevaluationTargets({
   // window, or a WAITING aggregate a live transaction may still own — retains
   // it instead of assuming a later pass exists: the request that spawned this
   // one fired while the marker was fresh, and a platform-cancelled lane
-  // schedules nothing at all (#5160). The pass re-scans on a poll until the
-  // youngest item matures (selected on that rescan) or resolves (a live lane
-  // overwrote it — the pending entry simply vanishes), bounded by
-  // REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS so one run cannot hold the
-  // reconciliation group forever. Whatever is still unmet when the wait ends —
-  // pending leftovers, or work past the per-pass caps — is handed to one
-  // successor through the ordinary rate window below.
+  // schedules nothing at all (#5160). The pass probes once on a short cadence —
+  // a live lane usually resolves its marker within a minute — then sleeps
+  // straight to each item's maturity point, until the youngest item matures
+  // (selected on that rescan) or resolves (the pending entry simply vanishes),
+  // bounded by REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS so one run cannot
+  // hold the reconciliation group forever. Whatever is still unmet when the
+  // wait ends — pending leftovers, or work past the per-pass caps — is handed
+  // to one successor through the ordinary rate window below.
   const deadline = now + REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS;
   let effectiveNow = now;
   let result = [];
   let unmet = 0;
   let stale = [];
   let transient = [];
+  let probed = false;
   for (;;) {
     stale = requiredCheckReevaluationCandidates({
       pulls: snapshot.pulls,
@@ -6047,18 +6052,24 @@ async function listRequiredCheckReevaluationTargets({
       .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
     // A pending item on a head this pass already selected is this run's own
     // work — the lane it spawns rewrites that marker — so only uncovered heads
-    // can keep the wait alive.
+    // can keep the wait alive. And pending work that could never fit the
+    // selection even once mature — every slot is already taken — is unmet now:
+    // waiting would change nothing, so it goes to the successor without one.
     const coveredHeads = new Set([...targets, ...transientTargets].map((target) => target.headSha));
     const outstanding = pending.filter((item) => !coveredHeads.has(item.headSha));
     unmet = stale.length - targets.length + (transient.length - transientTargets.length);
     result = [...targets, ...transientTargets];
+    if (transientTargets.length >= transientSlots && outstanding.length > 0) {
+      unmet += outstanding.length;
+      break;
+    }
     if (outstanding.length === 0) {
       break;
     }
     const earliest = Math.min(...outstanding.map((item) => item.eligibleAt));
     const waitMs = Math.min(
       earliest - effectiveNow,
-      REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS,
+      probed ? Infinity : REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS,
       deadline - effectiveNow,
     );
     if (waitMs <= 0) {
@@ -6072,6 +6083,7 @@ async function listRequiredCheckReevaluationTargets({
     );
     await sleep(waitMs);
     effectiveNow += waitMs;
+    probed = true;
     try {
       snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
     } catch (error) {
@@ -6105,10 +6117,19 @@ async function listRequiredCheckReevaluationTargets({
       `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s) and ` +
       `${transient.length} transient block(s), and selected ${result.length}.`,
   );
-  // One successor, through the same five-minute window an ordinary run uses:
-  // a pass that leaves unmet work owes it a wakeup, because nothing else —
-  // not the lane that died, not the schedule — is certain to provide one.
-  if (unmet > 0) {
+  // One successor, through the same five-minute window an ordinary run uses,
+  // whenever this pass saw work at all:
+  //
+  // - Unmet work — pending leftovers, or more than the caps — is owed a wakeup,
+  //   because nothing else, not the lane that died and not the schedule, is
+  //   certain to provide one.
+  // - Selected work is owed one too: applying it happens in apply-gate, a
+  //   queued job the platform can still cancel (#5160). The successor sees the
+  //   fresh WAITING markers while they are young, retains them through the wait
+  //   above, and either watches them resolve under a healthy apply lane or
+  //   re-applies them itself once the lease lapses. When nothing died it finds
+  //   an empty scan and asks for nothing — the handoff costs one pass.
+  if (unmet > 0 || result.length > 0) {
     await requestRequiredCheckReconciliation({ github, context, core, now: effectiveNow, forPass: true });
   }
   return result;

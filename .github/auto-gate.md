@@ -548,9 +548,11 @@ no queued job boundary left between its selected heads and the WAITING
 aggregate marker that makes them recoverable. A head left at that marker is
 re-evaluated once it outlives a live transaction's 15-minute lease — and a pass
 that sees the marker while it is still young retains it, re-scanning inside its
-own run until it matures or resolves, with one rate-windowed successor request
-if anything is left over. Healing needs no human action and never waits on the
-schedule's real delivery cadence. Heads a mid-job cancellation never reached
+own run until it matures or resolves. A pass that saw work at all requests one
+rate-windowed successor — leftovers are owed the wakeup, and selected work is
+applied by apply-gate, a queued job the platform can still cancel after the
+pass ends. Healing needs no human action and never waits on the schedule's real
+delivery cadence. Heads a mid-job cancellation never reached
 stand where an undelivered event leaves them; the pass's stale-decision
 coverage is the backstop for both.
 
@@ -632,16 +634,19 @@ Auto Gate run therefore ends by requesting a pass: it sends one
 the same pass the schedule runs. Two guards bound this:
 
 - **No open-ended recursion.** A pass requests a pass only as a handoff: when
-  its own bounded wait still leaves not-yet-eligible or capped work behind, it
-  sends one dispatch through the rate window. Two shapes in that window cannot
-  cover the leftover work and so cannot hold it: the pass's own run (a
-  dispatched pass would otherwise always count itself) and completed
-  predecessor passes (a finished A is why B is running at all — its coverage
-  was already spent). A sibling still queued or running does bind. The request
-  step skips `schedule` and `repository_dispatch` runs, and the helper refuses
-  those events on the ordinary path, so no pass ever starts the chain. Runs
-  that a pass causes, such as update-branch recovery dispatches, can request
-  one, but only through the rate window.
+  it saw work at all — leftovers its bounded wait could not finish or the caps
+  deferred, and the work it did select, whose application in apply-gate is a
+  queued job the platform can still cancel — it sends one dispatch through the
+  rate window. Two shapes in that window cannot cover the leftover work and so
+  cannot hold it: the pass's own run (a dispatched pass would otherwise always
+  count itself) and completed predecessor passes (a finished A is why B is
+  running at all — its coverage was already spent). A sibling still queued or
+  running does bind. A pass that scans an empty repository asks for nothing, so
+  every chain ends. The request step skips `schedule` and `repository_dispatch`
+  runs, and the helper refuses those events on the ordinary path, so no pass
+  ever starts the chain on the public lane. Runs that a pass causes, such as
+  update-branch recovery dispatches, can request one, but only through the
+  rate window.
 - **At most one request per five minutes.** The marker is the creation time of
   Auto Gate's newest `repository_dispatch` run, read with one REST request
   (`event=repository_dispatch`, `created>=` the window start, one short page so
@@ -712,13 +717,19 @@ The oldest go first, so a backlog drains instead of starving.
 A pass does not leave either shape to luck when it sees them too young. The
 request that spawned the pass fired while the marker or decision was fresh, and
 a platform-cancelled lane schedules nothing at all, so the pass retains the
-pending work itself (#5160): it re-scans inside its own run, once a minute,
-until each item matures — and is then selected — or resolves because its live
-lane finished first. The wait is bounded at sixteen minutes; anything still
-unmet then, or pushed past the caps, is handed to exactly one successor
-dispatch through the same five-minute window. A stranded head is therefore
-re-evaluated at its fifteen-minute boundary plus one poll, not at the
-schedule's real delivery cadence.
+pending work itself (#5160): it re-scans inside its own run — one early probe a
+minute in, then straight to each item's maturity point instead of a scan a
+minute — until each item matures and is selected, or resolves because its live
+lane finished first. The wait is bounded at sixteen minutes. A pass then hands
+exactly one successor dispatch through the same five-minute window whenever it
+saw work at all: unmet leftovers — still-pending items, or work the caps
+deferred — are owed the wakeup, and *selected* work is owed one too, because
+applying it is apply-gate's job and the platform can cancel that queued job
+after the pass ends. The successor sees the fresh markers young, retains them
+through the same wait, and re-applies them if the lane died; when nothing died
+it scans an empty repository and asks for nothing, so the handoff costs one
+quiet pass. A stranded head is therefore re-evaluated at its fifteen-minute
+boundary plus one probe, not at the schedule's real delivery cadence.
 
 **A head with no PR Validation run at all gets one dispatched (#4581).**
 Reconciliation wakes a decision when Build or Lint completes, so it cannot help
