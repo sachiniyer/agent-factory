@@ -28,33 +28,45 @@ const (
 )
 
 // ProbeWorktreePresence answers WorktreePresence for the recorded worktree path
-// with one bounded lstat. While af itself is relocating the worktree (an active
-// claim) or a prior relocation left a durable recovery record, the recorded path
-// can legitimately be absent mid-move; that state already has an owner which
-// resolves it, so the probe defers to it with Unknown rather than flagging af's
-// own move as an outside deletion.
+// with one bounded lstat. See ProbeWorktreePresenceAt.
 func (g *GitWorktree) ProbeWorktreePresence() WorktreePresence {
+	presence, _ := g.ProbeWorktreePresenceAt()
+	return presence
+}
+
+// ProbeWorktreePresenceAt is ProbeWorktreePresence that also returns the path it
+// answered for, so a caller can confirm the record still names that path when
+// it acts on the answer.
+//
+// A durable recovery record or an activated relocation claim makes the answer
+// Unknown: that state already has an owner which resolves it. This is NOT a
+// complete fence against af's own moves — an ordinary archive or restore takes a
+// record-free claim that is never activated, so the relocation snapshot stays
+// clean for the whole move. Callers that turn Absent into state must therefore
+// also check their own in-flight-operation fence and the path under the lock
+// that guards that state, as Instance.RefreshWorktreeMissing does.
+func (g *GitWorktree) ProbeWorktreePresenceAt() (WorktreePresence, string) {
 	path, _, unresolved := g.RelocationSnapshot()
 	if unresolved || path == "" {
-		return WorktreePresenceUnknown
+		return WorktreePresenceUnknown, path
 	}
 	_, err := BoundedLstat(path)
 	switch {
 	case err == nil:
-		return WorktreePresencePresent
+		return WorktreePresencePresent, path
 	case errors.Is(err, os.ErrNotExist):
 		// The snapshot and the lstat are two moments, and relocationMu is not held
-		// across a filesystem call. An archive or restore can claim the path and
-		// move it away in between, so ENOENT here may be af's own move. Re-read the
-		// ownership: Absent stands only if no relocation became unresolved and the
-		// record still names the path that was stat'd.
+		// across a filesystem call. A recovery-owned relocation can begin, or the
+		// record be re-aimed, in between. Re-read the ownership: Absent stands only
+		// if no relocation became unresolved and the record still names the path
+		// that was stat'd.
 		after, _, unresolvedAfter := g.RelocationSnapshot()
 		if unresolvedAfter || after != path {
-			return WorktreePresenceUnknown
+			return WorktreePresenceUnknown, path
 		}
-		return WorktreePresenceAbsent
+		return WorktreePresenceAbsent, path
 	default:
-		return WorktreePresenceUnknown
+		return WorktreePresenceUnknown, path
 	}
 }
 

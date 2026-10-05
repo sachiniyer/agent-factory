@@ -978,4 +978,6 @@ func (g *GitWorktree) checkpointRelocationPublication(
 func (g *GitWorktree) setWorktreeLocationLocked(dest string) {
 	g.worktreePath = dest
 	g.worktreeDir = filepath.Dir(dest)
+	// A proof about the previous location says nothing about this one.
+	g.adoptedWorktree = nil
 }

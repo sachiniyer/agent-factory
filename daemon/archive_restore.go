@@ -311,10 +311,6 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 				return "", fmt.Errorf("cannot restore session %q: its worktree was deleted outside af and could not be re-aimed at %s for a rebuild: %w", req.Title, dest, err)
 			}
 		}
-		// The record now names a path af is about to build (or one it just
-		// proved holds the worktree), not the one that was deleted. If the
-		// rebuild does not materialize it, the poll re-derives the flag.
-		instance.ClearWorktreeMissing()
 	} else if err := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
@@ -338,6 +334,13 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		}
 		return "", m.persistUnresolvedRestoreFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
+	// Every route that reaches here left the record naming a worktree af placed:
+	// moved back, proved by git, or about to be rebuilt by the respawn. A
+	// worktree-missing flag is therefore stale — set at archive time for a
+	// deletion, or by a probe that raced an earlier move — and the commit below
+	// must not carry it (#5102). If a rebuild never materializes the path, the
+	// poll re-derives it from the new path.
+	instance.ClearWorktreeMissing()
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
 	// it exists only in memory, exactly as on the cut-off branch above.

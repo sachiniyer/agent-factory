@@ -15,7 +15,9 @@ import (
 // histories produce that, and they must not be confused:
 //
 //   - The worktree was deleted outside af. There is nothing to move; the row is
-//     archived as missing and restore rebuilds from the kept branch.
+//     archived as missing and restore rebuilds from the kept branch. (A user's
+//     own `git worktree move` elsewhere looks the same from here, so the
+//     branch's live registration is checked before concluding deletion.)
 //   - An earlier archive's move landed at dest, and the daemon died before it
 //     recorded the new path. The bytes are all at dest. Archiving that as
 //     "missing" would commit a row pointing at nothing and orphan them.
@@ -41,6 +43,24 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 	source := instance.GetWorktreePath()
 	info, err := sessiongit.BoundedLstat(dest)
 	if errors.Is(err, os.ErrNotExist) {
+		// Source and destination both absent is also exactly the footprint of a
+		// user's own `git worktree move` to some other path, and that worktree is
+		// intact: archiving it as missing would strand it, and restore would then
+		// refuse it as a foreign checkout. git's registration follows such a move,
+		// so ask where the branch lives before calling this a deletion. A
+		// deletion leaves either no registration or a stale one at a path that
+		// no longer exists; an unreadable listing is no answer at all.
+		moved, live, lerr := instance.LiveBranchCheckout()
+		if lerr != nil {
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree path %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w",
+				title, source, lerr))
+		}
+		if live {
+			return refuse(fmt.Errorf(
+				"cannot archive session %q: its worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s, remove it with 'git worktree remove', or kill the session",
+				title, moved, source))
+		}
 		return m.archiveSessionWorktreeGone(repoID, title, instance, false)
 	}
 	if err != nil {
@@ -114,12 +134,22 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	// Trusting, for the same reason as the relocating route: the op-lock and
 	// killsInFlight claim held by ArchiveSession rule out a same-name
 	// replacement mid-teardown (#3413).
+	// AF_ARCHIVE_PATH names where the worktree's bytes land in the archive. On
+	// the adopted route they are already there — the adopted path IS the archive
+	// destination — so the hook gets it exactly as the relocating route passes
+	// its dest. A deletion lands nothing anywhere, so it stays empty there rather
+	// than naming a directory that will never exist.
+	archivePath := ""
+	if adopted {
+		archivePath = origPath
+	}
 	hookErr, err := archiveGoneTeardown(instance, func() error {
 		return runOnArchiveHook(onArchiveHookContext{
-			sessionID: instance.ID,
-			title:     title,
-			repoRoot:  instance.GetRepoPath(),
-			worktree:  origPath,
+			sessionID:   instance.ID,
+			title:       title,
+			repoRoot:    instance.GetRepoPath(),
+			worktree:    origPath,
+			archivePath: archivePath,
 		})
 	}, true, adopted)
 	if err != nil {
@@ -134,12 +164,24 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 				"failed to archive session %q AND could not record its recovered state on disk (%v); %s: %w",
 				title, perr, whereabouts, err), hookErr))
 		}
+		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
+			// The adopted directory could not be re-confirmed as the one git
+			// proved, and the teardown fenced the record: recovery will not start
+			// an agent there or clean it up until a retry re-establishes it.
+			return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
+				"failed to archive session %q: %w — its worktree record is fenced, so af will not start an agent in or remove %s; inspect that path, then retry the archive",
+				title, err, origPath), hookErr))
+		}
 		return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
 			"failed to archive session %q (its agent will be restored in place): %w", title, err), hookErr))
 	}
 
 	_ = instance.Transition(session.CommitArchive())
-	if !adopted {
+	if adopted {
+		// git proved the bytes are at the path the record now names; any flag
+		// a probe set while the record still named the vacated source is stale.
+		instance.ClearWorktreeMissing()
+	} else {
 		instance.SetWorktreeMissing(session.WorktreeMissingArchivedReason(origPath))
 	}
 	// Revocation follows the committed state exactly as on the relocating route

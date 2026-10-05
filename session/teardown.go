@@ -841,6 +841,14 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 			return stateUnknown, fmt.Errorf("archive %q: worktree identity changed before on-archive hook: %w", title, err)
 		}
 	}
+	if m.worktreeAdopted {
+		// The adoption proof was about one directory, and editor and tmux
+		// teardown have run since. Re-confirm it before the operator hook runs
+		// in it, not only before commit (#5102).
+		if state, err := reconfirmAdoptedForArchive(gw, title); err != nil {
+			return state, err
+		}
+	}
 	if m.beforeMove != nil {
 		// Cleanup policy is deliberately best-effort. Record its failure for the
 		// daemon to surface after the archive commits, then always relocate the
@@ -861,27 +869,11 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 		}
 	}
 	if m.worktreeGone {
-		// The daemon chose this route from a conclusive ENOENT taken before pane
-		// teardown, so re-confirm it at the use boundary. A path that reappeared
-		// in the meantime has bytes to preserve and belongs to the moving route;
-		// an unanswerable lstat refuses closed, and stateUnknown keeps the record
-		// recoverable so a retry can decide again.
-		path := gw.GetWorktreePath()
-		if _, statErr := git.BoundedLstat(path); statErr == nil {
-			return stateKnown, fmt.Errorf("archive %q: worktree %s reappeared before the move step; refusing the missing-worktree archive route — retry to relocate it", title, path)
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return stateUnknown, fmt.Errorf("archive %q: could not confirm worktree %s absent: %w", title, path, statErr)
-		}
-		return stateKnown, nil
+		return confirmGoneForArchive(gw, title)
 	}
 	if m.worktreeAdopted {
-		path := gw.GetWorktreePath()
-		if _, statErr := git.BoundedLstat(path); errors.Is(statErr, os.ErrNotExist) {
-			return stateKnown, fmt.Errorf("archive %q: adopted worktree %s vanished before the archive could commit", title, path)
-		} else if statErr != nil {
-			return stateUnknown, fmt.Errorf("archive %q: could not confirm adopted worktree %s still present: %w", title, path, statErr)
-		}
-		return stateKnown, nil
+		// And again after the hook, which can run for minutes.
+		return reconfirmAdoptedForArchive(gw, title)
 	}
 	// The move is now BOUNDED, which is the case this comment used to reserve:
 	// "if the move is ever bounded, a tripped deadline must return stateUnknown
