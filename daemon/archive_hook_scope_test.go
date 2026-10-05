@@ -8,13 +8,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -299,18 +299,8 @@ func startStubHookLauncher(t *testing.T, unit, body string) {
 			"systemd-run", "-c", fmt.Sprintf("printf '%%s' \"$$\" > %q; %s", pidFile, body),
 			"--user", "--scope", "--quiet", "--collect", "--unit=" + unit, "--", "sh", "-c", "make dev_install",
 		},
-		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	}
-	require.NoError(t, cmd.Start())
-	reaped := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(reaped)
-	}()
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-reaped
-	})
+	testguard.StartGroupProcess(t, cmd)
 	// Until execve completes the child's /proc entry still carries the TEST
 	// binary's argv, so the sweep must not start before the pid file appears.
 	deadline := time.Now().Add(20 * time.Second)
@@ -348,7 +338,7 @@ func TestArchiveHookWaitsForALauncherThatHasNotRegisteredItsScope(t *testing.T) 
 	// that sleeps starts its own clock before the test can observe it, so an
 	// "at least N seconds" assertion is short by that gap and flakes.
 	gate := filepath.Join(t.TempDir(), "release")
-	startStubHookLauncher(t, prefix+"-g0-0.scope", fmt.Sprintf("while [ ! -f %q ]; do sleep 1; done", gate))
+	startStubHookLauncher(t, prefix+"-g0-0.scope", testguard.BoundedGateWait(gate, time.Second, 5*time.Minute))
 
 	marker := filepath.Join(t.TempDir(), "hook-ran")
 	writeOnArchiveCommand(t, "touch "+marker)

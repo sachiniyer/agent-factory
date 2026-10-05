@@ -655,8 +655,9 @@ func spawnSessionWaitingToStartHelper(t *testing.T, name, home string) (trigger,
 	dir := t.TempDir()
 	trigger = filepath.Join(dir, "start-helper")
 	pidFile = filepath.Join(dir, "late-helper.pid")
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"nohup sleep 300 >/dev/null 2>&1 & %s; exec sleep 300", trigger, recordPIDShell("$!", pidFile))
+	script := fmt.Sprintf("%s; "+
+		"nohup sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute), recordPIDShell("$!", pidFile))
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
@@ -943,9 +944,9 @@ func spawnSessionWaitingToStartUnmarkedHelper(t *testing.T, name, home string) (
 	dir := t.TempDir()
 	trigger = filepath.Join(dir, "start-helper")
 	pidFile = filepath.Join(dir, "unmarked-helper.pid")
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+	script := fmt.Sprintf("%s; "+
 		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
-		trigger, recordPIDShell("$!", pidFile))
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute), recordPIDShell("$!", pidFile))
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
@@ -984,11 +985,12 @@ func spawnSessionWaitingToForkUnmarkedHelper(t *testing.T, name, home string) (t
 	recorder := filepath.Join(dir, "record-child-pid.sh")
 	require.NoError(t, os.WriteFile(recorder, []byte("#!/bin/sh\n"+
 		recordPIDShell("$$", "$1")+"\nexec sleep 300\n"), 0o700))
-	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+	script := fmt.Sprintf("%s; "+
 		"nohup sh -c '%s; sleep 0.1; "+
 		"nohup env -u AF_SESSION -u AF_HOME setsid sh %s %s >/dev/null 2>&1 & exec sleep 300' "+
 		">/dev/null 2>&1 & exec sleep 300",
-		trigger, recordPIDShell("$$", parentPIDFile), recorder, childPIDFile)
+		testguard.BoundedGateWait(trigger, 10*time.Millisecond, 5*time.Minute),
+		recordPIDShell("$$", parentPIDFile), recorder, childPIDFile)
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)

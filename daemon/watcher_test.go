@@ -330,7 +330,7 @@ func TestWatcherGroupKillsGrandchildren(t *testing.T) {
 // grace instead of blocking daemon shutdown forever.
 func TestWatcherStopEscalatesToGroupKill(t *testing.T) {
 	dir := t.TempDir()
-	script := `trap '' TERM; echo $$; while true; do sleep 0.1; done`
+	script := `trap '' TERM; echo $$; ` + testguard.BoundedSpin(100*time.Millisecond, 5*time.Minute)
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("ffff0001", script, dir)))
 
 	if err := s.Reload(); err != nil {
@@ -856,7 +856,7 @@ func TestFailureSummaryUTF8(t *testing.T) {
 func TestWatcherShutdownSigtermIsNotAFailure(t *testing.T) {
 	warn, errBuf := captureWatcherLogs(t)
 	dir := t.TempDir()
-	script := `echo $$; while true; do sleep 0.1; done`
+	script := `echo $$; ` + testguard.BoundedSpin(100*time.Millisecond, 5*time.Minute)
 	s, rec := newTestSupervisor(t, staticTasks(watchTask("ab970003", script, dir)))
 
 	if err := s.Reload(); err != nil {

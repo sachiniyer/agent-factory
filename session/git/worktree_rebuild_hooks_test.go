@@ -5,13 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
 
@@ -47,16 +47,12 @@ const (
 )
 
 func boundedFileGate(path, timedOutDir string, pollLimit int, pollInterval time.Duration) string {
-	quotedPath := shellquote.Quote(path)
-	intervalSeconds := strconv.FormatFloat(pollInterval.Seconds(), 'f', -1, 64)
-	timeoutAction := ""
+	timeoutAction := "exit 124"
 	if timedOutDir != "" {
-		timeoutAction = "touch " + shellquote.Quote(timedOutDir) + "/$$; "
+		timeoutAction = "touch " + shellquote.Quote(timedOutDir) + "/$$; " + timeoutAction
 	}
-	return "_af_gate_i=0; while [ ! -f " + quotedPath + " ] && " +
-		"[ \"$_af_gate_i\" -lt " + strconv.Itoa(pollLimit) + " ]; do " +
-		"sleep " + intervalSeconds + "; _af_gate_i=$((_af_gate_i + 1)); done; " +
-		"if [ ! -f " + quotedPath + " ]; then " + timeoutAction + "exit 124; fi"
+	return testguard.BoundedGatePoll(path, pollInterval, time.Duration(pollLimit)*pollInterval) +
+		" || { " + timeoutAction + "; }"
 }
 
 func gatedHookRepo(t *testing.T) (repoRoot, startedDir, releaseFile, doneDir, timedOutDir string) {
@@ -359,7 +355,8 @@ func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *test
 	repoID := config.RepoIDFromRoot(repoRoot)
 	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
 		PostWorktreeCommands: []string{
-			`d="$PWD"; failed=; while true; do if ! echo "$$" >> "$d/hook-touched"; then if [ -z "$failed" ]; then echo "$$" > ` + shellquote.Quote(writeFailed) + `; failed=1; fi; fi; sleep 0.01; done`,
+			`d="$PWD"; failed=; ` + testguard.BoundedLoop(10*time.Millisecond, 10*time.Minute,
+				`if ! echo "$$" >> "$d/hook-touched"; then if [ -z "$failed" ]; then echo "$$" > `+shellquote.Quote(writeFailed)+`; failed=1; fi; fi; sleep 0.01`),
 		},
 	})
 	cfg := config.DefaultConfig()

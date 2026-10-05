@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/hooklog"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestHookProgressUnclaimedLauncherFailureAdvancesSuffix(t *testing.T) {
@@ -162,7 +163,7 @@ func TestHookProgressScopeProbeDoesNotHoldPublicationLock(t *testing.T) {
 	entered := filepath.Join(t.TempDir(), "probe-entered")
 	release := filepath.Join(t.TempDir(), "probe-release")
 	installSurvivorSystemctl(t, `: > `+shellQuoteForShim(entered)+`
-while [ ! -f `+shellQuoteForShim(release)+` ]; do sleep 1; done
+`+testguard.BoundedGateWait(release, time.Second, 5*time.Minute)+`
 exit 0
 `)
 	pruneDone := make(chan struct{})
