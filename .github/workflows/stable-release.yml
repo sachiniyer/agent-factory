@@ -24,6 +24,12 @@ on:
         required: true
         type: string
 
+# One run at a time, never cancelled: two dispatches can share a version, and
+# cancelling mid-publish is exactly how drafts and tags get stranded (#5159).
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
