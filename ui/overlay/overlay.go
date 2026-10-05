@@ -345,8 +345,8 @@ func PlaceOverlay(
 	}
 
 	// Clamp coordinates to ensure foreground fits within background
-	placeX = clamp(placeX, 0, bgWidth-fgWidth)
-	placeY = clamp(placeY, 0, bgHeight-fgHeight)
+	placeX = layout.ClampInt(placeX, 0, bgWidth-fgWidth)
+	placeY = layout.ClampInt(placeY, 0, bgHeight-fgHeight)
 
 	ws := &whitespace{}
 
@@ -464,24 +464,6 @@ func PlaceOverlay(
 	}
 
 	return b.String()
-}
-
-func clamp(v, lower, upper int) int {
-	return min(max(v, lower), upper)
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 type whitespace struct {
