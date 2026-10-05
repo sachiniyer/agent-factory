@@ -214,3 +214,20 @@ func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 		})
 	}
 }
+
+// af's own ordinary archive or restore takes a record-free relocation claim, so
+// the relocation snapshot stays clean mid-move and the probe reads ENOENT for
+// af's move. The operation fence is what sees it: a probe answered while an op
+// is in flight must not stamp the flag, or a successful archive leaves a row
+// that refuses prompts forever (#5102).
+func TestRefreshWorktreeMissing_InFlightOpNeverStamps(t *testing.T) {
+	for _, op := range []InFlightOp{OpArchiving, OpRestoring, OpKilling, OpCreating} {
+		inst := worktreeMissingInstance(t, filepath.Join(t.TempDir(), "wt"))
+		inst.inFlightOp = op
+		missing, changed := inst.RefreshWorktreeMissing()
+		assert.False(t, missing, "op %v", op)
+		assert.False(t, changed, "op %v", op)
+		flag, _ := inst.WorktreeMissing()
+		assert.False(t, flag, "op %v", op)
+	}
+}

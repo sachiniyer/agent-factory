@@ -439,6 +439,12 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// a crash there — is inherent without a write-ahead journal; the reproducible
 	// persist-error cause this issue reports is fully closed.)
 	_ = instance.Transition(session.CommitArchive())
+	// af just placed the worktree itself, so a worktree-missing flag on this row
+	// is stale by construction — most plausibly a probe that raced this very
+	// move (#5102). Drop it before the durable write so the committed record
+	// says what af knows. The rollbacks below go through restore, which clears
+	// it on the same grounds.
+	instance.ClearWorktreeMissing()
 	archivedPath := instance.GetWorktreePath()
 	// Revocation of this session's sandbox callback credential (#2999) follows the
 	// COMMITTED STATE, not any one exit path (#3012 review).

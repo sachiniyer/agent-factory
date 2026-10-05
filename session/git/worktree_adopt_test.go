@@ -92,3 +92,48 @@ func TestIsRestorePlacement(t *testing.T) {
 		})
 	}
 }
+
+// The adoption proof is about one directory. Between it and the archive commit
+// the caller tears down editors, hooks and tmux; a directory swapped in under
+// the same name in that window must be caught by device/inode, and must fence
+// the record so recovery does not act on what may be unrelated files (#5102).
+func TestReconfirmAdoptedWorktree(t *testing.T) {
+	adopt := func(t *testing.T) (*GitWorktree, string) {
+		t.Helper()
+		gw, repoRoot, src := archiveTestWorktree(t)
+		dest := filepath.Join(filepath.Dir(repoRoot), "landed")
+		runGitInPlaceTest(t, repoRoot, "worktree", "move", src, dest)
+		require.NoError(t, gw.AdoptLandedWorktreeMove(dest))
+		return gw, dest
+	}
+
+	t.Run("the proven directory reconfirms", func(t *testing.T) {
+		gw, _ := adopt(t)
+		require.NoError(t, gw.ReconfirmAdoptedWorktree())
+		assert.False(t, gw.HasUnresolvedRelocation())
+	})
+
+	t.Run("a swapped directory is refused and fenced", func(t *testing.T) {
+		gw, dest := adopt(t)
+		require.NoError(t, os.Rename(dest, dest+".real"))
+		require.NoError(t, os.Mkdir(dest, 0o755))
+		err := gw.ReconfirmAdoptedWorktree()
+		require.ErrorIs(t, err, ErrRelocateStateUnknown)
+		assert.True(t, gw.HasUnresolvedRelocation(),
+			"the record must be fenced so respawn and cleanup refuse the swapped directory")
+		assert.Error(t, gw.ReconfirmAdoptedWorktree(), "the proof is spent once it failed")
+	})
+
+	t.Run("a vanished directory is reported without a fence", func(t *testing.T) {
+		gw, dest := adopt(t)
+		require.NoError(t, os.Rename(dest, dest+".moved"))
+		err := gw.ReconfirmAdoptedWorktree()
+		require.ErrorIs(t, err, os.ErrNotExist)
+		assert.False(t, gw.HasUnresolvedRelocation())
+	})
+
+	t.Run("no adoption on record is an error, not a pass", func(t *testing.T) {
+		gw, _, _ := archiveTestWorktree(t)
+		assert.Error(t, gw.ReconfirmAdoptedWorktree())
+	})
+}

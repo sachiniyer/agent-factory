@@ -540,6 +540,34 @@ func (i *Instance) AdoptLandedArchiveMove(dest string) error {
 	return gw.AdoptLandedWorktreeMove(dest)
 }
 
+// LiveBranchCheckout reports where git has this session's branch checked out
+// at a path that exists right now. live is false when git registers the branch
+// nowhere, or only at a path that no longer exists — the stale, prunable entry
+// a deletion outside af leaves behind. An error means the listing or the path
+// could not be read, and nothing may be concluded from it.
+func (i *Instance) LiveBranchCheckout() (path string, live bool, err error) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return "", false, fmt.Errorf("session %q has no worktree", i.Title)
+	}
+	return liveBranchCheckout(gw)
+}
+
+func liveBranchCheckout(gw *git.GitWorktree) (string, bool, error) {
+	registered, listed, err := gw.RegisteredPathForBranch()
+	if err != nil || !listed {
+		return "", false, err
+	}
+	if _, statErr := git.BoundedLstat(registered); errors.Is(statErr, os.ErrNotExist) {
+		return "", false, nil
+	} else if statErr != nil {
+		return "", false, fmt.Errorf("cannot inspect %s, where git registers this session's branch: %w", registered, statErr)
+	}
+	return registered, true, nil
+}
+
 // AdoptLandedRestoreMove is restore's counterpart: when the archived worktree
 // is gone, it asks git where this session's branch is checked out. A registered
 // location that exists on disk, at a path restore itself could have chosen, is
@@ -561,14 +589,9 @@ func (i *Instance) AdoptLandedRestoreMove(repoPath, title, branch string) (path 
 	if gw == nil {
 		return "", false, fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
 	}
-	registered, listed, err := gw.RegisteredPathForBranch()
-	if err != nil || !listed {
+	registered, live, err := liveBranchCheckout(gw)
+	if err != nil || !live {
 		return "", false, err
-	}
-	if _, statErr := git.BoundedLstat(registered); errors.Is(statErr, os.ErrNotExist) {
-		return "", false, nil
-	} else if statErr != nil {
-		return "", false, fmt.Errorf("cannot inspect %s, where git registers this session's branch: %w", registered, statErr)
 	}
 	placement, err := git.IsRestorePlacement(repoPath, title, branch, registered)
 	if err != nil {

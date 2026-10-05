@@ -19,9 +19,10 @@ import (
 // inode, and a pathname recreated by anything else — a mkdir, an unrelated `git
 // worktree add` — leaves that pane exactly as undeliverable as before. The flag
 // clears only through ClearWorktreeMissing, at the sites where af itself
-// re-materializes the worktree and starts the agent in it: the respawn rebuild
-// and the restore repoint. The probe runs outside i.mu because it is a
-// filesystem call, bounded or not.
+// re-materializes or places the worktree: the respawn rebuild, restore, and an
+// archive that moved or adopted it. The probe runs outside i.mu because it is a
+// filesystem call, bounded or not; its answer is re-qualified under i.mu
+// before it is written.
 //
 // Only a local worktree is probed. An off-box session's workspace lives in its
 // sandbox or remote host, so a local lstat of its recorded path answers nothing
@@ -36,14 +37,26 @@ func (i *Instance) RefreshWorktreeMissing() (missing bool, changed bool) {
 	if gw == nil || !local || flag {
 		return flag, false
 	}
-	if gw.ProbeWorktreePresence() != git.WorktreePresenceAbsent {
+	presence, probed := gw.ProbeWorktreePresenceAt()
+	if presence != git.WorktreePresenceAbsent {
 		return false, false
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	// The probe cannot see af's own ordinary archive or restore: those take a
+	// record-free relocation claim that leaves the relocation snapshot clean, so
+	// an lstat that lands mid-move reads ENOENT for af's own move. The operation
+	// fence is what does see it. BeginArchive/BeginRestore set it before the move
+	// can make the path absent, and both writes serialize on i.mu, so an op that
+	// caused this ENOENT is visible here. An op that already finished re-aimed the
+	// record, which the path comparison catches. Either way the answer is about a
+	// path af owns, not one the user deleted (#5102).
+	if i.inFlightOp != OpNone || i.gitWorktree != gw || gw.GetWorktreePath() != probed {
+		return i.worktreeMissing, false
+	}
 	if !i.worktreeMissing {
 		i.worktreeMissing = true
-		i.worktreeMissingReason = worktreeMissingReasonForms[0].render(gw.GetWorktreePath())
+		i.worktreeMissingReason = worktreeMissingReasonForms[0].render(probed)
 		i.touchLocked()
 		changed = true
 	}
@@ -80,10 +93,12 @@ func (i *Instance) SetWorktreeMissing(reason string) {
 
 // ClearWorktreeMissing drops the flag. It is the only way the flag clears (the
 // probe never does — see RefreshWorktreeMissing), so it is called only where af
-// itself re-materializes the worktree: a respawn that rebuilt it and started a
-// fresh pane there, and restore re-aiming the record at the location the
-// respawn is about to rebuild. If that rebuild does not materialize the path,
-// the next poll re-derives the flag.
+// itself has just placed the worktree the record names: a respawn that rebuilt
+// it and started a fresh pane there, every completed restore (moved back,
+// adopted, or re-aimed for the respawn to rebuild), and an archive that moved or
+// adopted it. At the archive and restore commits a set flag can only be stale —
+// most plausibly a probe that raced af's own move. If a rebuild does not
+// materialize the path, the next poll re-derives the flag.
 func (i *Instance) ClearWorktreeMissing() {
 	i.mu.Lock()
 	defer i.mu.Unlock()

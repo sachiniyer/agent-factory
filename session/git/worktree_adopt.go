@@ -92,6 +92,12 @@ func (g *GitWorktree) boundedWorktreeListing() (string, error) {
 	return listing, nil
 }
 
+// adoptedWorktreeIdentity pins the directory AdoptLandedWorktreeMove proved.
+type adoptedWorktreeIdentity struct {
+	path     string
+	identity pathIdentity
+}
+
 // AdoptLandedWorktreeMove re-aims the record at dest after proving a previous
 // archive or restore move landed there (see VerifyLandedMove). It never touches
 // the bytes at either path. It refuses while any relocation claim or recovery
@@ -100,10 +106,21 @@ func (g *GitWorktree) boundedWorktreeListing() (string, error) {
 // relocationMu after the proof, which spawns git and so runs unlocked, and the
 // recorded path must be unchanged across the two, so nothing is adopted on a
 // stale answer.
+//
+// The proof is bound to one directory, not to a name: dest's device and inode
+// are captured before the proof runs and must be unchanged when the record is
+// re-aimed, so a directory swapped in while git was being asked is refused. The
+// captured identity is kept for ReconfirmAdoptedWorktree, because the caller
+// still has editor, hook and tmux teardown to run before it commits, and a name
+// can be swapped under it again in that window.
 func (g *GitWorktree) AdoptLandedWorktreeMove(dest string) error {
 	before := g.GetWorktreePath()
 	if before == dest {
 		return nil
+	}
+	proved, err := boundedRelocationPathIdentity(dest)
+	if err != nil {
+		return fmt.Errorf("cannot adopt %s: %w", dest, err)
 	}
 	if err := g.VerifyLandedMove(dest); err != nil {
 		return err
@@ -123,9 +140,53 @@ func (g *GitWorktree) AdoptLandedWorktreeMove(dest string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("cannot confirm recorded worktree %s absent: %w", before, err)
 	}
-	if _, err := BoundedLstat(dest); err != nil {
+	if err := requireSameDirectory(dest, proved); err != nil {
 		return fmt.Errorf("cannot adopt %s: %w", dest, err)
 	}
 	g.setWorktreeLocationLocked(dest)
+	g.adoptedWorktree = &adoptedWorktreeIdentity{path: dest, identity: proved}
+	return nil
+}
+
+// ReconfirmAdoptedWorktree checks that the directory AdoptLandedWorktreeMove
+// proved is still the one at the recorded path — device and inode equal to what
+// was proven, not merely something existing under that name.
+//
+// A vanished directory returns an error wrapping os.ErrNotExist: nothing is at
+// the path, so there is nothing to protect. A different directory at the path,
+// or a check that cannot be answered (a stalled mount), is worse: the record
+// names a path that may hold unrelated files, and a recovery that starts an
+// agent there or a cleanup that removes it would act on them. So those install a
+// claim_stale recovery record carrying the PROVEN identity before returning an
+// error joined with ErrRelocateStateUnknown. That record is what makes respawn
+// refuse to start an agent and cleanup refuse to delete until a retry
+// re-establishes which directory is the session's.
+func (g *GitWorktree) ReconfirmAdoptedWorktree() error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	adopted := g.adoptedWorktree
+	current := g.worktreePath
+	if adopted == nil || adopted.path != current {
+		return fmt.Errorf("no adopted worktree identity is recorded for %s", current)
+	}
+	err := requireSameDirectory(current, adopted.identity)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if g.relocationRecovery == nil {
+		g.recordStaleClaimLocked(RelocationClaim{Path: current, identity: adopted.identity})
+	}
+	g.adoptedWorktree = nil
+	return errors.Join(err, ErrRelocateStateUnknown)
+}
+
+func requireSameDirectory(path string, want pathIdentity) error {
+	got, err := boundedRelocationPathIdentity(path)
+	if err != nil {
+		return err
+	}
+	if !got.same(want) {
+		return fmt.Errorf("%s is no longer the directory that was proven to be this session's worktree (device/inode changed)", path)
+	}
 	return nil
 }
