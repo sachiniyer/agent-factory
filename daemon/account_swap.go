@@ -696,7 +696,9 @@ func (m *Manager) settleReplacementRuntime(
 			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
 			m.accountLimitMu.Unlock()
 		} else {
-			parkErr = m.reparkLimitUnderResumeFence(instance, limitErr.ResetAt)
+			m.accountLimitMu.Lock()
+			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt)
+			m.accountLimitMu.Unlock()
 		}
 		return false, errors.Join(
 			fmt.Errorf("account replacement for %q reached a usage limit on the incoming identity before its runtime became usable: %w", requestedTitle, err),
