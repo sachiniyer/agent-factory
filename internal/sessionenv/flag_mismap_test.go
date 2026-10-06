@@ -732,6 +732,33 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"bash combined -cv", "bash -cv 'claude'", true},
 		{"bash combined -vuc", "bash -vuc 'claude'", true},
 		{"bash combined -vxn", "bash -vxn 'claude'", false},
+		// `exec` carries its own options before the command it runs — bash's
+		// `help exec` documents `exec [-cl] [-a name] [command ...]` — and
+		// stripExecPrefix consumes only the `exec` keyword and an optional
+		// `--`, so `exec -a af /bin/sh -c 'claude'` left `-a` as the first
+		// word and no interpreter wrapper was recognized. Injection then
+		// yields `exec -a af /bin/sh -c claude --plugin-dir …`, where the
+		// inner shell assigns the appended flag to `$0`, silently losing
+		// the plugin, so the wrapper now warns. `-c`/`-l` are argument-free
+		// and `-a` consumes the next word as argv[0]; the options are peeled
+		// before the known-shell check (#5167 review: "Parse `exec` options
+		// before checking interpreter wrappers").
+		{"exec -a name sh -c script", "exec -a af /bin/sh -c 'claude'", true},
+		{"exec -a name bash -c script", "exec -a af bash -c 'claude'", true},
+		{"exec -c then sh -c script", "exec -c /bin/sh -c 'claude'", true},
+		{"exec -l then sh -c script", "exec -l /bin/sh -c 'claude'", true},
+		{"exec -cl then sh -c script", "exec -cl /bin/sh -c 'claude'", true},
+		{"exec -lc then sh -c script", "exec -lc /bin/sh -c 'claude'", true},
+		{"exec -ca name sh -c script", "exec -ca af /bin/sh -c 'claude'", true},
+		{"exec -cla name sh -c script", "exec -cla af /bin/sh -c 'claude'", true},
+		{"exec -a name then -c exec opt sh -c script", "exec -a af -c /bin/sh -c 'claude'", true},
+		{"exec -a name env -- sh -c script", "exec -a af env -- /bin/sh -c 'claude'", true},
+		// An attached `-a` argument (`-afoo`, where `a` is not the last flag)
+		// is not a form the documented grammar covers, so the peel stops and
+		// the prior no-warning behavior stays — the safe direction for a
+		// warning predicate.
+		{"exec -afoo sh -c script stays conservative", "exec -afoo /bin/sh -c 'claude'", false},
+		{"exec -x sh -c script unknown flag stays conservative", "exec -x /bin/sh -c 'claude'", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandInvokesAgentViaInterpreter(tc.command, "claude")

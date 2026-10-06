@@ -36,6 +36,18 @@ func CommandInvokesAgentViaInterpreter(command, agent string) bool {
 		return false
 	}
 	words, _ := stripExecPrefix(call.Args)
+	// `exec` carries its own options before the command it runs — bash's
+	// `help exec` documents `exec [-cl] [-a name] [command [argument ...]]` —
+	// and stripExecPrefix consumes only the `exec` keyword and an optional
+	// `--`, so `exec -a af /bin/sh -c 'claude'` leaves `-a` as the first word
+	// and the known-shell check below returns false. Injection then yields
+	// `exec -a af /bin/sh -c claude --plugin-dir …`, where the inner shell
+	// assigns the appended flag to `$0` instead of passing it to claude, so
+	// the plugin is silently lost. Peel exec's own options so the interpreter
+	// — not the option that names it — is what the shell check runs on
+	// (#5167 review: "Parse `exec` options before checking interpreter
+	// wrappers").
+	words = skipExecOptions(words)
 	// An `env` (or argv-passthrough wrapper) prefix can sit in front of the
 	// interpreter: `env sh -c 'claude'` reaches Claude detection because
 	// DetectAgentFromCommand scans through `env` to the interpreter, but a
@@ -383,4 +395,77 @@ func shellShortClusterHasC(word string) bool {
 		}
 	}
 	return false
+}
+
+// skipExecOptions drops a leading `exec` builtin's own options — the `-c`
+// and `-l` argument-free flags, the `-a name` form that sets argv[0], and the
+// `--` that ends them — so the interpreter check locates the command `exec`
+// runs rather than the option that names it. Bash's `help exec` documents
+// `exec [-cl] [-a name] [command [argument ...]]`: `-c` and `-l` take no
+// argument, `-a` consumes the next word as the argv[0] name, and `--` ends
+// the options. Without this peel, `exec -a af /bin/sh -c 'claude'` leaves
+// `-a` as the first word, so no interpreter wrapper is recognized even though
+// injection yields `exec -a af /bin/sh -c claude --plugin-dir …` and the
+// inner shell assigns the appended flag to `$0`, silently losing the af
+// plugin (#5167 review: "Parse `exec` options before checking interpreter
+// wrappers").
+//
+// Scoped to the interpreter-wrapper warning rather than the shared
+// stripExecPrefix tokenizer: the account boundary's refusal of `exec --`
+// turns on portability across /bin/sh implementations, and consuming `-a`
+// there would change which shapes it refuses, which is outside this
+// warning's diff. A cluster the documented grammar does not cover — an
+// attached `-a` argument such as `-afoo`, an `a` that is not the last flag,
+// or any unknown flag — stops the peel so the prior no-warning behavior
+// stays, the safe direction for a warning predicate.
+func skipExecOptions(words []*syntax.Word) []*syntax.Word {
+	for len(words) > 0 {
+		lit, ok := literalShellWord(words[0])
+		if !ok {
+			return words
+		}
+		if lit == "--" {
+			return words[1:]
+		}
+		if len(lit) < 2 || lit[0] != '-' || lit[1] == '-' {
+			return words
+		}
+		flags := lit[1:]
+		aIndex := strings.IndexByte(flags, 'a')
+		switch {
+		case aIndex < 0:
+			// `-c`, `-l`, or a cluster of only those flags: all argument-free.
+			if !onlyExecFlags(flags) {
+				return words
+			}
+			words = words[1:]
+		case aIndex == len(flags)-1:
+			// `a` is the last flag, so the next word is the argv[0] name; the
+			// flags before it must be only `c`/`l`. Both words are dropped.
+			if aIndex > 0 && !onlyExecFlags(flags[:aIndex]) {
+				return words
+			}
+			if len(words) < 2 {
+				return words[1:]
+			}
+			words = words[2:]
+		default:
+			// `a` is not last (an attached-arg form such as `-afoo`): the
+			// documented grammar does not cover it, so stop conservatively.
+			return words
+		}
+	}
+	return words
+}
+
+// onlyExecFlags reports whether flags contains only the argument-free `exec`
+// options `c` and `l`. An empty flags string is true so the bare `-a` form
+// (no preceding flags) peels its name argument.
+func onlyExecFlags(flags string) bool {
+	for _, r := range flags {
+		if r != 'c' && r != 'l' {
+			return false
+		}
+	}
+	return true
 }
