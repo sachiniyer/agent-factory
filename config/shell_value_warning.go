@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -143,24 +144,116 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 	sort.Slice(affected, func(i, j int) bool { return affected[i].key < affected[j].key })
 	for _, value := range affected {
 		lead := fmt.Sprintf("Config issue in %s: %s", prettyPath, value.key)
-		// Once per (source, key, value). A config load is not a rare event — the
-		// daemon issues ~10 per session-create, and `af config set` re-parses the
-		// file twice around its own write — and #2496 already paid for the
-		// version of this that said the same thing on every one of them. Keying
-		// on the value keeps a LATER edit that reintroduces the shape audible.
-		if _, seen := shellValueWarned.LoadOrStore(lead+"\x00"+value.value, struct{}{}); seen {
-			continue
-		}
-		log.WarningLog.Printf(
-			"%s begins with `exec --`, and af runs that value through /bin/sh, where the separator is not "+
+		warnShellValueOnce(lead, "exec-separator", value.value,
+			" begins with `exec --`, and af runs that value through /bin/sh, where the separator is not "+
 				"portable; dash — /bin/sh on Debian and Ubuntu — gives its exec builtin no options, so it takes "+
 				"`--` as the command name and the command exits 127 with `exec: --: not found`. Remove the "+
 				"`--`: af runs the same command written `exec <program> …`. This is a warning, not an error — "+
 				"bash (/bin/sh on macOS), busybox ash and zsh in sh mode all accept the separator, so the value "+
 				"is correct as written on those shells, and a docker or ssh backend runs it on another machine's "+
-				"shell entirely.%s",
-			lead, value.note)
+				"shell entirely.",
+			value.note)
 	}
+}
+
+// warnLaunchFlagMismap warns on agent-program values that would misroute the flags
+// injectSystemPrompt appends to the END of the resolved program string:
+//
+//   - a trailing lone `--` end-of-options terminator (claude: `--plugin-dir`,
+//     aider: `--read`), which silently demotes the appended flag to a positional
+//     so the agent starts without af's guidance — for claude the af plugin does
+//     not register and the `/af-*` slash commands are unavailable, with no
+//     diagnostic. This is the silent-failure surface the warning is about: the
+//     scoped account boundary refuses the shape, but an UNSCOPED session skips
+//     that boundary, so the mis-positioned flag reaches `/bin/sh -c` unchanged.
+//
+//   - a shell control operator (|, &&, ||, ;, &) or compound construct, which
+//     routes the appended flag to the wrong command in the pipeline rather than
+//     to the agent.
+//
+// Like warnExecSeparator it is a WARNING, never a refusal: program_overrides is
+// owner config, and af does not rewrite the value. It applies only to keys
+// whose values reach injectSystemPrompt as the resolved agent command
+// (isAgentProgramKey); the plain shell-command keys (on_archive_command,
+// post_worktree_commands, sandbox.ssh) run their values verbatim through a
+// shell, where a trailing `--` or a pipe is a correct use of the language.
+func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
+	type flagged struct {
+		shellValue
+		kind string
+		body string
+	}
+	var affected []flagged
+	for _, value := range s {
+		if !isAgentProgramKey(value.key) {
+			continue
+		}
+		switch {
+		case sessionenv.CommandEndsOptionsTerminator(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "trailing-terminator", body: "" +
+				" ends with a lone `--` end-of-options terminator. af appends its agent-specific flags " +
+				"(e.g. claude's `--plugin-dir`) to the end of this value, and everything after a `--` is a " +
+				"positional argument rather than a flag — so the injected flag would be silently ignored and " +
+				"the agent would start without af's guidance (for claude the af plugin does not register and " +
+				"the `/af-*` slash commands are unavailable, with no error). Remove the trailing `--`. This is a " +
+				"warning, not an error"})
+		case sessionenv.CommandHasControlOperator(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "control-operator", body: "" +
+				" contains a shell control operator (|, &&, ||, ;, &), so af's appended agent-specific flag " +
+				"(e.g. claude's `--plugin-dir`) would be routed to the wrong command rather than to the agent. " +
+				"Use a single command for the agent. This is a warning, not an error"})
+		}
+	}
+	sort.Slice(affected, func(i, j int) bool {
+		if affected[i].key != affected[j].key {
+			return affected[i].key < affected[j].key
+		}
+		return affected[i].kind < affected[j].kind
+	})
+	for _, f := range affected {
+		lead := fmt.Sprintf("Config issue in %s: %s", prettyPath, f.key)
+		warnShellValueOnce(lead, f.kind, f.value, f.body, f.note)
+	}
+}
+
+// isAgentProgramKey reports whether key names an agent launch command whose value
+// reaches injectSystemPrompt as the resolved program — the values af appends
+// agent-specific flags to — as opposed to a plain shell-command key
+// (on_archive_command, post_worktree_commands, sandbox.ssh) af runs verbatim,
+// where a trailing `--` or a pipe is a correct use of the shell language.
+func isAgentProgramKey(key string) bool {
+	if strings.HasPrefix(key, "program_overrides.") {
+		return true
+	}
+	if key == "root_agent.program" {
+		return true
+	}
+	if strings.HasPrefix(key, "root_agents[") {
+		return true
+	}
+	return false
+}
+
+// warnShellValueOnce logs one warning for (lead, kind, value) if it has not
+// already been logged in this process. The kind discriminator lets the
+// exec-separator and launch-flag-mismap warnings BOTH fire on a value that
+// triggers both (e.g. `exec -- claude --`): they describe different problems
+// with different fixes, so suppressing either would hide a real issue.
+//
+// Body is the fixed part of the message (beginning with the space that separates
+// it from the lead), and note is the per-value qualifier (the detected-claude
+// alias clause) appended at the end, matching the shape warnExecSeparator used
+// before the kind was threaded in.
+func warnShellValueOnce(lead, kind, value, body, note string) {
+	// Once per (source, key, kind, value). A config load is not a rare event —
+	// the daemon issues ~10 per session-create, and `af config set` re-parses
+	// the file twice around its own write — and #2496 already paid for the
+	// version of this that said the same thing on every one of them. Keying
+	// on the value keeps a LATER edit that reintroduces the shape audible.
+	if _, seen := shellValueWarned.LoadOrStore(lead+"\x00"+kind+"\x00"+value, struct{}{}); seen {
+		return
+	}
+	log.WarningLog.Printf("%s%s%s", lead, body, note)
 }
 
 // warnGlobalShellValues is the global file's set. It is a named function rather
@@ -180,6 +273,7 @@ func warnGlobalShellValues(config *Config, prettyConfigPath string) {
 	values.add("root_agent.program", config.RootAgent.Program)
 	values.addRootAgents(config.RootAgents)
 	values.warnExecSeparator(prettyConfigPath)
+	values.warnLaunchFlagMismap(prettyConfigPath)
 }
 
 // shellValueWarned memoizes the (source, key, value) triples already warned

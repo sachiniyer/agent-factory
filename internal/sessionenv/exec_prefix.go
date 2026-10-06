@@ -1,6 +1,10 @@
 package sessionenv
 
-import "mvdan.cc/sh/v3/syntax"
+import (
+	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
+)
 
 // stripExecPrefix removes a leading `exec` builtin from a command's words and
 // reports whether an `exec --` separator was present.
@@ -66,4 +70,72 @@ func CommandUsesExecSeparator(command string) bool {
 	}
 	_, separator := stripExecPrefix(call.Args)
 	return separator
+}
+
+// CommandEndsOptionsTerminator reports whether command is a single simple call
+// (redirections ignored) whose last argument word is a literal `--`
+// end-of-options terminator.
+//
+// injectSystemPrompt appends agent-specific flags to the END of the resolved
+// program string — claude gains `--plugin-dir`, aider gains `--read`. A trailing
+// `--` makes everything after it a positional argument rather than a flag, so
+// the appended flag is silently ignored and the agent launches without af's
+// guidance: for claude the af plugin does not register and the `/af-*` slash
+// commands are unavailable, with no error or diagnostic. The scoped account
+// boundary refuses this shape (the leftover `--` is reported as undeclared), but
+// an UNSCOPED session skips that boundary, so the mis-positioned flag reaches
+// `/bin/sh -c` unchanged — the config-load warning is what makes this surface
+// loud. Exported for the config loaders on the same precedent as
+// CommandUsesExecSeparator.
+//
+// A leading `exec --` is consumed by stripExecPrefix first, so `exec -- claude`
+// (which CommandUsesExecSeparator already warns about) does not false-positive
+// here; `exec -- claude --` correctly does, because the trailing `--` is a
+// separate terminator behind the exec separator. Redirections are ignored
+// because they do not affect whether the last word is `--`.
+func CommandEndsOptionsTerminator(command string) bool {
+	call, ok := singleCallIgnoringRedirections(command)
+	if !ok {
+		return false
+	}
+	words, _ := stripExecPrefix(call.Args)
+	if len(words) == 0 {
+		return false
+	}
+	last, ok := literalShellWord(words[len(words)-1])
+	return ok && last == "--"
+}
+
+// CommandHasControlOperator reports whether command parses as valid shell but is
+// NOT a single simple call — i.e. it contains a shell control operator (|, &&,
+// ||, ;, &) or a compound construct (subshell, if, for, …) that would route
+// af's appended agent-specific flag to the wrong command rather than to the
+// agent. `claude | tee /tmp/log` becomes `claude | tee /tmp/log --plugin-dir '…'`
+// and the flag reaches tee, not claude.
+//
+// Redirections (>, <) do NOT misroute the flag — the agent still receives an
+// appended flag regardless of where a redirect appears in a simple call — so a
+// single call with redirects is not flagged here. Negation (`! cmd`) is not a
+// control operator in the shell sense and does not misroute either, so it is not
+// flagged. A parse error is not flagged: such a command fails loudly at launch
+// for a different reason. Exported for the config loaders.
+func CommandHasControlOperator(command string) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return false
+	}
+	if len(file.Stmts) == 0 {
+		return false // empty / whitespace-only: no command, no control operator
+	}
+	if len(file.Stmts) != 1 {
+		return true // ;, &, and newline-separated multi-statement commands
+	}
+	stmt := file.Stmts[0]
+	if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return true // trailing & background
+	}
+	if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
+		return true // |, &&, || (BinaryCmd), (subshell), if/for/while, …
+	}
+	return false
 }
