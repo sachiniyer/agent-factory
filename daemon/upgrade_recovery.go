@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -101,44 +100,44 @@ func HandleUpgradeRecoveryExec() {
 // upgradetxn cannot import without a cycle; SupervisorOperations is injectable
 // precisely to cross that boundary.
 func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.RecoveryInvocation) error {
-	// Capture, BEFORE the supervisor runs, whether OUR transaction (id-matched, not
-	// a foreign or stale one that happens to be active) is the one recovering, and
-	// the canonical path its committed candidate occupies — a successful commit
-	// removes the journal during Cleanup, taking both with it. EVERY owner needs the
-	// post-commit hand-off, not just unit-owned homes: the candidate ran ad-hoc
-	// through probation and is parked in runDaemon's probation branch, so on an
-	// ad-hoc home the parked process would otherwise be the permanent post-upgrade
-	// daemon with its scheduler/watchers/session-restore never armed (#2212 R2a).
-	ourTransaction := false
-	var canonicalExecPath string
-	if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
-		journal := txn.Journal()
-		if journal.ID == invocation.TransactionID {
-			ourTransaction = true
-			canonicalExecPath = journal.ExecutablePath
-		}
-	}
-
 	supervisor := upgradetxn.Supervisor{Operations: productionSupervisorOperations()}
-	if err := runRecoveryActorFn(ctx, invocation, supervisor); err != nil {
+	result, err := runRecoveryActorFn(ctx, invocation, supervisor)
+	if err != nil {
 		return err
 	}
 
-	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil for
-	// a clean stand-down (a foreign/stale transaction we had no authority over),
-	// ErrRecoveryActive, and a terminal rollback (which restores the previous daemon
-	// under its own owner). Hand off ONLY on a positive commit signal — this was OUR
-	// transaction AND its journal is now gone (Cleanup ran). rollback_failed
-	// deliberately RETAINS the journal, and a newer transaction leaves a different one
-	// — both leave a journal, so both are excluded here. The hand-off is additionally
-	// id-guarded so it can only ever stop our own committed candidate.
-	if !ourTransaction {
+	// The hand-off is gated SOLELY on the actor's positive commit signal, not on
+	// any journal read performed here. result.Committed is true ONLY when the
+	// actor loaded OUR transaction (its journal.ID matched invocation.TransactionID
+	// at the supervisor's own authoritative Load) and Supervisor.Run returned nil
+	// — the PhaseCommitted path that ran lease.Cleanup and durably removed the
+	// journal. result.JournalID / result.ExecutablePath come from that SAME
+	// in-memory *Transaction the supervisor supervised, so the hand-off is
+	// parameterized without any second journal read.
+	//
+	// This replaces two non-durable, non-retried upgradetxn.Load reads the prior
+	// code gated this irreversible hand-off on: a pre-actor capture of an
+	// ourTransaction flag and a post-actor confirmation that the journal was gone.
+	// Either could silently strand a committed candidate in
+	// DaemonPhaseHandoffPending forever when a transient read failure (EIO/ESTALE,
+	// which internal/projects itself treats as "often transient") hit during the
+	// window between that read and the supervisor's own Load — the recovery job is
+	// already disabled by commit and the parked candidate holds the home lock, so
+	// nothing re-invokes adoptAfterUpgradeCommit. Deriving the signal from the
+	// supervisor's own transaction removes the entire race class: there is no read
+	// here to fail.
+	//
+	// A nil error is NOT proof of commit — the actor also returns (Committed=false,
+	// nil) for a clean stand-down (a foreign/stale transaction, ErrRecoveryActive,
+	// ErrNoActiveTransaction) and for a terminal abort or rollback (which restore
+	// the previous daemon under their own owner). All of those correctly skip the
+	// hand-off. The hand-off is additionally id-guarded: adoptAfterUpgradeCommit's
+	// confirmCommittedCandidate rejects any daemon whose transaction id does not
+	// match, so a false-positive signal could not adopt someone else's commit.
+	if !result.Committed {
 		return nil
 	}
-	if _, loadErr := upgradetxn.Load(invocation.HomeDir); !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
-		return nil // a journal is still present — not a completed commit of our transaction
-	}
-	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
+	if err := adoptAfterUpgradeCommitFn(result.JournalID, result.ExecutablePath); err != nil {
 		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
 	}
 	return nil

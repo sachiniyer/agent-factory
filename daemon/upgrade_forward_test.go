@@ -479,13 +479,17 @@ func TestAdoptAfterUpgradeCommit_ReplacesParkedCandidateUnderEveryOwner(t *testi
 	}
 }
 
-// RunUpgradeRecoveryActor arms the post-upgrade daemon ONLY on a positive commit
-// signal: OUR transaction whose journal is gone afterward. A nil return from a
-// stand-down (journal still present) must NOT trigger the hand-off — that
-// conflation would let a stale recovery job kill a live daemon from a different,
-// in-flight transaction (the P1-b failure). Both owner kinds hand off on commit:
-// the ad-hoc candidate is parked in probation and must be respawned too, not just
-// unit-owned homes.
+// RunUpgradeRecoveryActor arms the post-upgrade daemon ONLY on the actor's
+// positive commit signal — not on any journal read RunUpgradeRecoveryActor
+// performs itself. The prior code gated the irreversible hand-off on TWO
+// non-retried upgradetxn.Load reads (a pre-actor ourTransaction capture and a
+// post-actor journal-absence confirmation); a transient read failure at either
+// gate silently stranded a committed candidate in DaemonPhaseHandoffPending
+// forever. The fix derives the signal from the supervisor's own already-loaded
+// transaction, so the table below DECOUPLES the commit signal (committed) from
+// the on-disk journal state (journalGone) to prove the signal is the sole driver:
+// adoption follows committed regardless of whether a racy read would still see
+// the journal.
 func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 	systemdJob := upgradetxn.RecoveryJob{
 		Kind:     upgradetxn.RecoveryJobSystemd,
@@ -497,12 +501,25 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 		ownerKind   upgradetxn.SupervisionKind
 		serviceName string
 		recoveryJob upgradetxn.RecoveryJob
-		committed   bool // whether the actor removed the journal (a real commit)
+		committed   bool // the actor's positive commit signal
+		journalGone bool // whether the actor removed the on-disk journal (Cleanup)
 		wantAdopt   bool
 	}{
-		{"systemd owner, committed", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true, true},
-		{"systemd owner, stand-down (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, false, false},
-		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, true, true},
+		{"systemd owner, committed", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true, true, true},
+		// Regression guard for the post-actor gate: the old code re-Load()ed the
+		// journal after the actor returned and skipped the hand-off whenever it
+		// was still present, even on a real commit. The positive commit signal
+		// must drive adoption regardless of a racy journal read — committed=true
+		// with the journal STILL ON DISK must adopt.
+		{"systemd owner, committed but journal still present (racy post-actor read)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, true, false, true},
+		{"systemd owner, stand-down (journal retained)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, false, false, false},
+		// Regression guard for the pre-actor gate: the old code captured an
+		// ourTransaction flag via a single pre-supervisor Load; a transient
+		// failure left it false, skipping the hand-off even after a real commit.
+		// The signal — not a racy pre-actor read, and not journal absence — gates
+		// the hand-off, so journal absence ALONE (Committed=false) must NOT adopt.
+		{"systemd owner, stand-down with journal already gone (no false adopt)", upgradetxn.SupervisionSystemd, "agent-factory-daemon.service", systemdJob, false, true, false},
+		{"ad-hoc owner, committed", upgradetxn.SupervisionAdHoc, "", upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobDetached}, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := stubForwardEnv(t)
@@ -522,15 +539,29 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 				t.Fatalf("Prepare: %v", err)
 			}
 
-			runRecoveryActorFn = func(context.Context, upgradetxn.RecoveryInvocation, upgradetxn.Supervisor) error {
-				if tc.committed {
-					// Simulate the commit path's lease.Cleanup() removing the journal.
+			// The stub is the actor. It returns the positive commit signal
+			// (committed) AND optionally simulates lease.Cleanup removing the
+			// journal (journalGone). The two are DECOUPLED so the test proves
+			// RunUpgradeRecoveryActor gates adoption on the signal, not on a
+			// journal read it performs itself — the race that stranded a
+			// committed candidate when a transient I/O failure hit either Load.
+			runRecoveryActorFn = func(_ context.Context, _ upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) (upgradetxn.RecoveryActorResult, error) {
+				if tc.journalGone {
 					_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
 				}
-				return nil
+				if tc.committed {
+					return upgradetxn.RecoveryActorResult{Committed: true, JournalID: "txn-1", ExecutablePath: exe}, nil
+				}
+				return upgradetxn.RecoveryActorResult{}, nil
 			}
 			adopted := false
-			adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
+			var adoptTxn, adoptExec string
+			adoptAfterUpgradeCommitFn = func(txnID, execPath string) error {
+				adopted = true
+				adoptTxn = txnID
+				adoptExec = execPath
+				return nil
+			}
 
 			if err := RunUpgradeRecoveryActor(context.Background(),
 				upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {
@@ -538,6 +569,19 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 			}
 			if adopted != tc.wantAdopt {
 				t.Fatalf("hand-off: got adopted=%v want %v (%s)", adopted, tc.wantAdopt, tc.name)
+			}
+			// When adoption happens, the hand-off must be parameterized from the
+			// commit SIGNAL (the supervisor's own transaction identity + canonical
+			// path), not from a racy pre-actor Load RunUpgradeRecoveryActor ran
+			// itself. Assert both the transaction id and the executable path
+			// reach adoptAfterUpgradeCommit from the result.
+			if tc.wantAdopt {
+				if adoptTxn != "txn-1" {
+					t.Fatalf("hand-off used transaction %q, want the committed journal id %q", adoptTxn, "txn-1")
+				}
+				if adoptExec != exe {
+					t.Fatalf("hand-off used executable %q, want the canonical path from the commit signal %q", adoptExec, exe)
+				}
 			}
 		})
 	}
