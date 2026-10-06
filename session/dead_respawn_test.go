@@ -20,12 +20,16 @@ import (
 // countingExec is nameKeyedExec with a new-session counter. Sessions named in
 // `alive` report existing immediately; others are absent until their
 // new-session call (which bumps *newSessions), so a test can assert exactly
-// whether a missing session was re-spawned during restore.
+// whether a missing session was re-spawned during restore. It also records
+// each spawn's `-c` argument and reports it back on the pane_start_path
+// query — exactly what a real tmux stores for a session it created — so the
+// post-spawn start-directory check reads the same answer a live server gives.
 func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec {
 	existing := map[string]bool{}
 	for k, v := range alive {
 		existing[k] = v
 	}
+	startDirs := map[string]string{}
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
 			switch {
@@ -54,14 +58,26 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 			case strings.Contains(s, "new-session"):
 				*newSessions++
 				existing[n] = true
+				for i, a := range cmd.Args {
+					if a == "-c" && i+1 < len(cmd.Args) {
+						startDirs[n] = cmd.Args[i+1]
+					}
+				}
 				return nil
 			case strings.Contains(s, "kill-session"):
 				delete(existing, n)
+				delete(startDirs, n)
 				return nil
 			}
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				if d, ok := startDirs[nameOf(cmd)]; ok {
+					return []byte(d), nil
+				}
+				return nil, fmt.Errorf("no recorded start path for session %q", nameOf(cmd))
+			}
 			return []byte("content"), nil
 		},
 	}
@@ -73,6 +89,10 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 func deadInstanceData(t *testing.T, status Status, agentName, shellName string) InstanceData {
 	t.Helper()
 	const repoPath = "/tmp/dead-respawn-repo"
+	// The record describes a live worktree, and the spawn seam now refuses a
+	// missing start directory (#5172) — so the dir must exist for re-spawn.
+	worktreePath := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, os.MkdirAll(worktreePath, 0755))
 	return InstanceData{
 		Title:    "dead-respawn",
 		Path:     repoPath,
@@ -85,7 +105,7 @@ func deadInstanceData(t *testing.T, status Status, agentName, shellName string) 
 		},
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"), // non-empty: enables re-spawn
+			WorktreePath: worktreePath, // non-empty: enables re-spawn
 			SessionName:  "dead-respawn",
 			BranchName:   "dead-branch",
 		},

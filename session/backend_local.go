@@ -236,7 +236,18 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		i.mu.RUnlock()
 		var workDir string
 		if gw != nil {
-			workDir = gw.GetWorktreePath()
+			var unresolved bool
+			workDir, _, unresolved = gw.RelocationSnapshot()
+			if unresolved {
+				// af's own relocation of this worktree is in flight, so the
+				// recorded path is not authoritative — the same refusal
+				// respawn keeps. Spawning into either candidate could land
+				// the agent in a stale or replaced directory. A plain error
+				// (not the missing verdict) drops the row so a later refresh
+				// pass retries once the claim has settled (#5172).
+				setupErr = fmt.Errorf("failed to restore existing session: worktree relocation for %q is unresolved", i.Title)
+				return setupErr
+			}
 		}
 		// Re-inject the system prompt so a lazy re-spawn (tmux server died
 		// across a reboot, see #386/#444) starts the agent with the same
@@ -254,6 +265,22 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
+			if errors.Is(err, tmux.ErrSpawnDirMissing) {
+				// The tmux name is positively absent AND the persisted
+				// worktree is unusable — respawning would have landed the
+				// pane in tmux's fallback cwd (the daemon's own directory)
+				// under a row reporting ready (#5172). Load the row as Lost
+				// instead: the lost-restore loop owns this case — it rebuilds
+				// the worktree from its surviving branch when it can and
+				// records WORKTREE_MISSING_DETECTED when it cannot. Returning
+				// nil lets the deferred block still mark the row started, so
+				// it stays killable and restore-eligible.
+				i.mu.Lock()
+				i.liveness = LiveLost
+				i.touchLocked()
+				i.mu.Unlock()
+				return nil
+			}
 			preserveAgentHandle = retainsInertInstance(err)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
@@ -513,6 +540,13 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+		}
+		if errors.Is(err, tmux.ErrSpawnDirMissing) {
+			// Same verdict as the os.Stat gate above, reached on the TOCTOU
+			// between it and the spawn (or on the post-spawn pane-dir check):
+			// surface the typed missing-worktree error so the swap's caller
+			// sees a lost worktree, not a generic launch failure (#5172).
+			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -21,8 +22,19 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
+
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
+	baseOutput := cmdExec.OutputFunc
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
+		if strings.Contains(cmd.String(), "pane_start_path") {
+			// Defer to raceHookExec's recorded spawn dir, which is what a real
+			// tmux reports (#5172).
+			return baseOutput(cmd)
+		}
 		if strings.Contains(cmd.String(), "display-message") {
 			return []byte("7 11 1 1 0 1 0 0 1 0 80 24"), nil
 		}
@@ -37,7 +49,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 	repoPath := "/tmp/preview-tab-identity-" + agentName
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, worktreeDir, agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 

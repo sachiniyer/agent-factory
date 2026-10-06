@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,11 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 	for k, v := range alive {
 		existing[k] = v
 	}
+	// startDirs records each spawn's -c argument and reports it back on the
+	// pane_start_path query — exactly what a real tmux stores for a session it
+	// created — so Start's post-spawn dir check (#5172) reads the same answer
+	// a live server gives.
+	startDirs := map[string]string{}
 	nameOf := func(cmd *exec.Cmd) string {
 		for i, a := range cmd.Args {
 			switch {
@@ -79,14 +85,26 @@ func nameKeyedExecWithFinishedPanes(alive map[string]bool, finished map[string]f
 				return assertNoSession
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
+				for i, a := range cmd.Args {
+					if a == "-c" && i+1 < len(cmd.Args) {
+						startDirs[n] = cmd.Args[i+1]
+					}
+				}
 				return nil
 			case strings.Contains(s, "kill-session"):
 				delete(existing, n)
+				delete(startDirs, n)
 				return nil
 			}
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				if d, ok := startDirs[nameOf(cmd)]; ok {
+					return []byte(d), nil
+				}
+				return nil, fmt.Errorf("no recorded start path for session %q", nameOf(cmd))
+			}
 			if pane, ok := finished[tmuxTarget(cmd)]; ok && existing[tmuxTarget(cmd)] {
 				if answer, ok := pane.answer(cmd); ok {
 					return []byte(answer), nil
@@ -135,8 +153,12 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 	origExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	pty := persistPtyFactory{t: t, cmdExec: origExec}
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "restart",
+		repoPath, worktreeDir, "restart",
 		"restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -218,8 +240,12 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-restart",
+		repoPath, worktreeDir, "account-restart",
 		"account-restart-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -312,8 +338,12 @@ func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
 		return baseRun(cmd)
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-respawn",
+		repoPath, worktreeDir, "account-respawn",
 		"account-respawn-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -363,8 +393,12 @@ func TestRestartSurvival_AccountScopedLiveTabRefusesUnconfirmedStop(t *testing.T
 	}
 	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
 
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), "account-refusal",
+		repoPath, worktreeDir, "account-refusal",
 		"account-refusal-branch", "", false, true)
 	require.NoError(t, err)
 
@@ -423,7 +457,7 @@ func TestRestartSurvival_BackCompatSynthesizesTabs(t *testing.T) {
 		TmuxName: legacyName, // legacy single-session field; NO Tabs
 		Worktree: GitWorktreeData{
 			RepoPath:     repoPath,
-			WorktreePath: filepath.Join(t.TempDir(), "wt"),
+			WorktreePath: t.TempDir(), // live worktree: reattach path (#5172)
 			SessionName:  "legacy",
 			BranchName:   "legacy-branch",
 		},

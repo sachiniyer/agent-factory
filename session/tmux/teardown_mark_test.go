@@ -84,6 +84,10 @@ type teardownMarkTmux struct {
 	// stages a resolution that STRADDLES a close: the probe has already begun
 	// when close() settles its mark (#4473 review).
 	duringNameProbe func()
+	// spawnDir is the -c argument of the latest new-session, recorded by
+	// liveOnSpawn — what a real server reports back on the pane_start_path
+	// query Start's post-spawn dir check issues (#5172).
+	spawnDir atomic.Value
 }
 
 func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
@@ -119,6 +123,12 @@ func (m *teardownMarkTmux) run(c *exec.Cmd) ([]byte, error) {
 			return []byte(v.(string)), nil
 		}
 		return nil, nil
+	case strings.Contains(args, "pane_start_path"):
+		// Start's post-spawn dir check: tmux records the -c it was handed.
+		if v := m.spawnDir.Load(); v != nil {
+			return []byte(v.(string) + "\n"), nil
+		}
+		return nil, errors.New("no recorded start path")
 	case strings.Contains(args, "display-message") && strings.Contains(args, "session_id"):
 		// confirmedGeneration's name-targeted bind probe.
 		m.nameProbeCalls.Add(1)
@@ -181,6 +191,11 @@ type liveOnSpawn struct {
 func (f liveOnSpawn) Start(c *exec.Cmd) (*os.File, error) {
 	file, err := f.inner.Start(c)
 	if err == nil {
+		for i, a := range c.Args {
+			if a == "-c" && i+1 < len(c.Args) {
+				f.m.spawnDir.Store(c.Args[i+1])
+			}
+		}
 		f.m.alive.Store(true)
 	}
 	return file, err

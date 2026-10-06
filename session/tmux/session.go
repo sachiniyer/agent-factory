@@ -321,6 +321,28 @@ var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 // launch still never ran, which is a launch failure, not a finished flow.
 var ErrSessionNameTaken = errors.New("tmux session already exists")
 
+// ErrSpawnDirMissing marks a spawn refused or reverted because the requested
+// start directory is unusable: an empty path, a path that does not exist, a
+// path that is not a directory, or — checked after the spawn — a pane whose
+// recorded start directory is not the requested one. tmux answers an unusable
+// `new-session -c` by silently starting the pane in the SERVER's cwd instead of
+// failing, so an unchecked spawn can land an agent in the daemon's own working
+// directory while the session row reports ready (#5172). os.ErrNotExist rides
+// in the chain when the path is conclusively absent — that is what the daemon's
+// WORKTREE_MISSING classification keys on — and ErrSessionNotStarted rides
+// alongside whenever the spawn was refused outright or the misplaced pane was
+// conclusively killed.
+var ErrSpawnDirMissing = errors.New("spawn start directory missing")
+
+// ErrSpawnDirUnknown marks a spawn refused or reverted because the requested
+// start directory could not be positively verified: a stat error other than
+// ENOENT, or a post-spawn pane-start-path query tmux would not answer. Absence
+// is not proven — a permission or I/O failure is not evidence the worktree is
+// gone — so callers must hold the row and retry rather than declare it missing.
+// ErrSessionNotStarted still rides alongside when the spawn was refused before
+// new-session ran or its pane was conclusively removed.
+var ErrSpawnDirUnknown = errors.New("spawn start directory state unknown")
+
 // ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped
 // session environment or default command could not be upgraded in place.
 var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment refresh failed")

@@ -195,6 +195,7 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// the existence check at the top of Start). After tmux new-session runs via
 	// the PTY factory, subsequent has-session calls report exists so Start's
 	// poll loop and the inner Restore("") call can succeed.
+	workdir := t.TempDir()
 	hasSessionCalls := 0
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -210,11 +211,13 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
 				return nil, fmt.Errorf("no server running")
 			}
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				return []byte(workdir + "\n"), nil
+			}
 			return []byte("output"), nil
 		},
 	}
 
-	workdir := t.TempDir()
 	session := newTmuxSession(toTmuxName("missing", ""), "claude", ptyFactory, cmdExec)
 
 	result, err := session.RestoreWithResult(workdir)
@@ -263,6 +266,7 @@ func TestStartTmuxSession(t *testing.T) {
 	forceSessionEnvExecutable(t, "/test/af")
 	ptyFactory := NewMockPtyFactory(t)
 
+	workdir := t.TempDir()
 	created := false
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -276,11 +280,13 @@ func TestStartTmuxSession(t *testing.T) {
 			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
 				return nil, fmt.Errorf("no server running")
 			}
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				return []byte(workdir + "\n"), nil
+			}
 			return []byte("output"), nil
 		},
 	}
 
-	workdir := t.TempDir()
 	session := newTmuxSession(toTmuxName("test-session", ""), "claude", ptyFactory, cmdExec)
 
 	err := session.Start(workdir)

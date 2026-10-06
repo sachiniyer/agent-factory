@@ -41,6 +41,21 @@ func (t *TmuxSession) Start(workDir string) error {
 		t.clearTeardownMarkForConfirmedGeneration()
 		return fmt.Errorf("%w: %w: %s", ErrSessionNotStarted, ErrSessionNameTaken, t.sanitizedName)
 	}
+
+	// Refuse to spawn a pane af cannot prove will start in the requested
+	// directory. tmux answers an unusable `new-session -c` by falling back to
+	// the SERVER's cwd — no error — which is how a restore once landed an
+	// agent in the daemon's own working directory while the row reported
+	// ready (#5172). The check lives here at the single spawn seam every
+	// route (create, restore, recover, swap, tab) funnels through, so no
+	// caller can bypass it. Same proven boundary as the env-preparation
+	// failures below: nothing has run new-session, so a name determinately
+	// absent proves no pane exists.
+	if spawnDirErr := checkSpawnDir(workDir); spawnDirErr != nil {
+		t.proveNoPaneIfDeterminatelyAbsent()
+		return spawnDirErr
+	}
+
 	// The name is positively absent, so any Start from here creates a new pane
 	// process. Drop diagnostics owned by the prior process at that proven runtime
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
@@ -234,6 +249,14 @@ func (t *TmuxSession) Start(workDir string) error {
 		}
 	}
 	ptmx.Close()
+
+	// The existence poll answered — but that only proves the SESSION exists.
+	// Verify the pane actually started in the requested directory before
+	// configuring anything: a pane af cannot place there is torn down, never
+	// left running under a row that will report ready (#5172).
+	if verr := t.verifySpawnedPaneDir(workDir); verr != nil {
+		return verr
+	}
 
 	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for
 	// more history). Bounded like every other tmux command in this package (#1917/

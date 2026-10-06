@@ -83,6 +83,8 @@ func TestLocalBackendPrepareAgentSwapSnapshotsCommandSpecificCodexHome(t *testin
 
 func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
 	ptyFactory := &recordingPtyFactory{t: t}
 	killed := false
 	cmdExec := cmd_test.MockCmdExec{
@@ -100,15 +102,16 @@ func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
+			if strings.Contains(joined, "display-message") {
 				return nil, errors.New("pane pid unavailable")
 			}
 			return nil, nil
 		},
 	}
-
-	repoRoot := initTempGitRepo(t)
-	worktreePath := t.TempDir()
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-broker", "handoff-broker-branch", "", false, false)
 	require.NoError(t, err)
 	ts := tmux.NewTmuxSessionWithDeps("handoff-broker", tmux.ProgramClaude, ptyFactory, cmdExec)
@@ -163,6 +166,8 @@ func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
 	cfg.ProgramOverrides = map[string]string{tmux.ProgramGemini: geminiBin}
 	require.NoError(t, config.SaveConfig(cfg))
 
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
 	ptyFactory := &recordingPtyFactory{t: t}
 	killed := false
 	cmdExec := cmd_test.MockCmdExec{
@@ -180,15 +185,17 @@ func TestLocalBackendSwapAgentRecordsRuntimeProgram(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
+			if strings.Contains(joined, "display-message") {
 				return nil, errors.New("pane pid unavailable")
 			}
 			return nil, nil
 		},
 	}
 
-	repoRoot := initTempGitRepo(t)
-	worktreePath := t.TempDir()
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-records", "handoff-records-branch", "", false, false)
 	require.NoError(t, err)
 	ts := tmux.NewTmuxSessionWithDeps("handoff-records", tmux.ProgramClaude, ptyFactory, cmdExec)
@@ -250,6 +257,10 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 
 	ptyFactory := &recordingPtyFactory{t: t}
 
+	repoRoot := initTempGitRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "worktree-511")
+	require.NoError(t, os.MkdirAll(worktreePath, 0755))
+
 	// First two has-session calls report missing (the outer Restore check, then
 	// the existence check at the top of Start). After tmux new-session runs,
 	// subsequent has-session calls report exists so Start's poll loop and the
@@ -266,12 +277,13 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(c.String(), "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
 			return []byte("output"), nil
 		},
 	}
 
-	repoRoot := initTempGitRepo(t)
-	worktreePath := filepath.Join(t.TempDir(), "worktree-511")
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "respawn-511", "respawn-511-branch", "", false, false)
 	require.NoError(t, err)
 

@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -42,6 +44,9 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 		return ""
 	}
 	fired := false
+	// startDirs records each spawn's -c argument and reports it back on the
+	// pane_start_path query, as a real tmux does (#5172).
+	startDirs := map[string]string{}
 	exec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
@@ -54,6 +59,11 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 				return assertNoSession
 			case strings.Contains(s, "new-session"):
 				existing[n] = true
+				for i, a := range cmd.Args {
+					if a == "-c" && i+1 < len(cmd.Args) {
+						startDirs[n] = cmd.Args[i+1]
+					}
+				}
 				// Simulate Kill racing in after the spawn but before the append.
 				if !fired && onNewSession != nil {
 					fired = true
@@ -62,11 +72,18 @@ func raceHookExec(alive map[string]bool, onNewSession func()) (cmd_test.MockCmdE
 				return nil
 			case strings.Contains(s, "kill-session"):
 				delete(existing, n)
+				delete(startDirs, n)
 				return nil
 			}
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				if d, ok := startDirs[nameOf(cmd)]; ok {
+					return []byte(d), nil
+				}
+				return nil, fmt.Errorf("no recorded start path for session %q", nameOf(cmd))
+			}
 			return []byte("content"), nil
 		},
 	}
@@ -87,8 +104,12 @@ func raceMockInstance(t *testing.T, agentName string, onNewSession func()) (*Ins
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 
 	repoPath := "/tmp/tab-kill-race-" + agentName
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, worktreeDir, agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 

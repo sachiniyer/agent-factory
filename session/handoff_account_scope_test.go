@@ -222,6 +222,8 @@ func TestInstanceSwapAgent_RefusesUnsettledAccount(t *testing.T) {
 // reapplied under a name the target cannot use" (#4428).
 func TestLocalBackendSwapAgent_LaunchesAmbientAfterScopeDrop(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	worktreePath := t.TempDir()
 	ptyFactory := &recordingPtyFactory{t: t}
 	killed := false
 	cmdExec := cmd_test.MockCmdExec{
@@ -239,15 +241,17 @@ func TestLocalBackendSwapAgent_LaunchesAmbientAfterScopeDrop(t *testing.T) {
 			return nil
 		},
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
-			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "pane_start_path") {
+				return []byte(worktreePath), nil
+			}
+			if strings.Contains(joined, "display-message") {
 				return nil, errors.New("pane pid unavailable")
 			}
 			return nil, nil
 		},
 	}
 
-	repoRoot := initTempGitRepo(t)
-	worktreePath := t.TempDir()
 	gw, err := git.NewGitWorktreeFromStorage(repoRoot, worktreePath, "handoff-descope", "handoff-descope-branch", "", false, false)
 	require.NoError(t, err)
 	ts := tmux.NewTmuxSessionWithDeps("handoff-descope", tmux.ProgramClaude, ptyFactory, cmdExec)
