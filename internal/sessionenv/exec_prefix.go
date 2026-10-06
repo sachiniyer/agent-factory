@@ -110,12 +110,7 @@ func CommandEndsOptionsTerminator(command string) bool {
 	}
 	words, _ := stripExecPrefix(call.Args)
 	words = skipEnvWrapperTerminator(words)
-	for _, w := range words {
-		if lit, ok := literalShellWord(w); ok && lit == "--" {
-			return true
-		}
-	}
-	return false
+	return wordsContainOptionsTerminator(words)
 }
 
 // skipEnvWrapperTerminator drops a leading `env` wrapper's own `--` (and its
@@ -136,25 +131,35 @@ func CommandEndsOptionsTerminator(command string) bool {
 // purely structural, and an unsafe peel (a dynamic or unprovable form) falls back
 // to the unpeeled words so the scan stays on the safe side of its prior behavior
 // (#5167 review: "Recognize env terminators behind wrappers").
+//
+// env can also sit in front of ANOTHER wrapper: `env -- nice -- claude` leaves
+// `nice -- claude` after env's own `--` is consumed, and nice's `--` is nice's own
+// terminator (GNU nice passes the appended flag through to claude), so the scan
+// would otherwise warn on a `--` that does not belong to the agent. The peel and
+// the env consumption run in a loop so a wrapper chain (env behind a wrapper, a
+// wrapper behind env, nested env) is fully unwrapped before the terminator scan
+// sees the words (#5167 review: "Continue unwrapping wrappers after `env`").
 func skipEnvWrapperTerminator(words []*syntax.Word) []*syntax.Word {
-	if len(words) == 0 {
-		return words
+	for {
+		if len(words) == 0 {
+			return words
+		}
+		if peeled, unsafe := unwrapAccountCommand(words, map[string]struct{}{}, newOperandTailMemo()); !unsafe {
+			words = peeled
+		}
+		if len(words) == 0 || !wordBaseEquals(words[0], "env") {
+			return words
+		}
+		args, ok := literalCommandArgs(words[1:])
+		if !ok {
+			return words
+		}
+		invocation, err := envcommand.Parse(args, envcommand.Policy{AllowAssignments: true})
+		if err != nil || invocation.CommandIndex < 0 || 1+invocation.CommandIndex >= len(words) {
+			return words
+		}
+		words = words[1+invocation.CommandIndex:]
 	}
-	if peeled, unsafe := unwrapAccountCommand(words, map[string]struct{}{}, newOperandTailMemo()); !unsafe {
-		words = peeled
-	}
-	if len(words) == 0 || !wordBaseEquals(words[0], "env") {
-		return words
-	}
-	args, ok := literalCommandArgs(words[1:])
-	if !ok {
-		return words
-	}
-	invocation, err := envcommand.Parse(args, envcommand.Policy{AllowAssignments: true})
-	if err != nil || invocation.CommandIndex < 0 || 1+invocation.CommandIndex >= len(words) {
-		return words
-	}
-	return words[1+invocation.CommandIndex:]
 }
 
 // CommandHasControlOperator reports whether command parses as valid shell but is
@@ -192,6 +197,27 @@ func skipEnvWrapperTerminator(words []*syntax.Word) []*syntax.Word {
 // command is the agent"). A non-agent caller passes an empty agent to keep the
 // prior behavior of flagging every compound.
 //
+// A multi-statement command (`;`- or newline-separated) appends the flag to the
+// END of the value, which is the LAST statement, so the same tail-agent analysis
+// applies: `true; claude` routes the flag to claude and is not a misroute, while
+// `claude; echo hi` routes it to echo and is. The last statement is evaluated
+// comprehensively (agent name, `--`, trailing comment, heredoc, terminator,
+// trailing backslash) because the single-call predicates
+// (CommandEndsOptionsTerminator, CommandHasTrailingComment, CommandHasHeredoc)
+// only inspect a one-statement value, so a `--`/comment/heredoc on the last
+// statement of a multi-statement value would otherwise go unwarned (#5167 review:
+// "Exempt terminal agents in statement sequences"). A non-agent caller passes
+// an empty agent to keep the prior behavior of flagging every multi-statement.
+//
+// A single simple call that ends with an odd run of bare backslashes (and no
+// trailing newline) also misroutes the flag: injection concatenates a leading
+// space, and the trailing backslash escapes that space, so `claude \` becomes
+// `claude \ --plugin-dir …` and the `\ ` joins the injected flag into one literal
+// word ` --plugin-dir` (with a leading space) rather than the `--plugin-dir`
+// option, so claude starts without the plugin. An even run leaves a literal
+// backslash arg and the injected space splits normally, so it is not flagged
+// (#5167 review: "Flag a trailing escaped append separator").
+//
 // A parse error is not flagged unless the value ends with a trailing
 // operator that appending a word completes: `claude |` is a parse error on its
 // own, but injectSystemPrompt appends `--plugin-dir` to the END of the value, so
@@ -202,7 +228,12 @@ func skipEnvWrapperTerminator(words []*syntax.Word) []*syntax.Word {
 // appending does not complete is still not flagged, because the value fails loudly
 // at launch for a different reason. Exported for the config loaders.
 func CommandHasControlOperator(command, agent string) bool {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	// Comments are kept so a trailing `#` on the last command of a compound or a
+	// multi-statement value (the single-call CommandHasTrailingComment does not
+	// see those) can be detected: the comment swallows the appended flag the same
+	// way it does on a single call, and the comment is on the parsed statement
+	// only when KeepComments is set.
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX), syntax.KeepComments(true)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		// A trailing operator that appending a word completes is a misroute: the
 		// injected flag supplies the missing right side of a pipe, the target of a
@@ -215,43 +246,22 @@ func CommandHasControlOperator(command, agent string) bool {
 		return false // empty / whitespace-only: no command, no control operator
 	}
 	if len(file.Stmts) != 1 {
-		return true // ;, &, and newline-separated multi-statement commands
+		// A multi-statement command appends to the LAST statement. A non-agent
+		// caller (agent == "") keeps the prior behavior of flagging every
+		// multi-statement; otherwise the last statement is evaluated for the
+		// same tail-agent exemption a binary command gets (#5167 review:
+		// "Exempt terminal agents in statement sequences").
+		if agent == "" {
+			return true
+		}
+		return stmtMismapsTail(file.Stmts[len(file.Stmts)-1], agent, command)
 	}
 	stmt := file.Stmts[0]
 	if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Disown {
 		return true // trailing & background
 	}
 	if bin, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
-		// A compound (|, &&, ||) appends to the rightmost command. When that
-		// command is the detected agent the flag reaches it, so the compound is
-		// not a misroute; otherwise the flag is routed to a non-agent command and
-		// the compound is flagged. A non-agent caller (agent == "") keeps the
-		// prior behavior of flagging every compound.
-		if agent == "" || binaryTailAgentName(bin) != agent {
-			return true
-		}
-		// The tail-agent exemption only holds when the appended flag actually
-		// reaches the agent. A `--` end-of-options terminator inside the final
-		// call demotes the appended flag to a positional, so `true && claude --`
-		// becomes `true && claude -- --plugin-dir …` and claude starts without
-		// the plugin even though the agent is the last command. CommandEndsOptions
-		// Terminator only inspects a single simple call, so a binary command's
-		// tail `--` would otherwise go unwarned (#5167 review: "Inspect terminal
-		// `--` inside compound commands").
-		if binaryTailHasOptionsTerminator(bin) {
-			return true
-		}
-		// A compound whose final command is the agent still misroutes an
-		// appended flag when the compound statement itself is terminated: `true
-		// && claude;` becomes `true && claude; --plugin-dir …` and the flag runs
-		// as its own command. This branch returns before the Semicolon/trailing-
-		// newline checks below, so a terminated compound would otherwise be
-		// exempted and the silent flag loss would go unwarned (#5167 review:
-		// "Check terminators before accepting a terminal compound agent").
-		if stmt.Semicolon.IsValid() {
-			return true
-		}
-		return hasTrailingNewline(command)
+		return binaryMismaps(bin, stmt, agent, command)
 	}
 	if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
 		return true // (subshell), if/for/while, …
@@ -259,11 +269,147 @@ func CommandHasControlOperator(command, agent string) bool {
 	// A single simple call terminated by `;` (or a trailing newline, which the
 	// parser folds into one Stmt without setting Semicolon) still misroutes an
 	// appended flag: `claude;` becomes `claude; --plugin-dir …` and the flag runs
-	// as its own command. A `&`/`|&` terminator already returned true above.
+	// as its own command. A `&`/`|&` terminator already returned true above. A
+	// `--`/comment/heredoc on a single simple call is handled by the dedicated
+	// predicates (CommandEndsOptionsTerminator, CommandHasTrailingComment,
+	// CommandHasHeredoc), so this path does not re-check them; a trailing odd
+	// backslash run has no dedicated predicate and is checked here.
 	if stmt.Semicolon.IsValid() {
 		return true
 	}
-	return hasTrailingNewline(command)
+	if hasTrailingNewline(command) {
+		return true
+	}
+	return endsWithOddBackslashRun(command)
+}
+
+// binaryMismaps reports whether a binary command (|, &&, ||) misroutes the
+// appended flag given the detected agent. It is the shared evaluation behind the
+// single-statement binary branch and the multi-statement last-statement branch
+// (when the last statement is itself a binary command). The flag is appended to
+// the END of the value, which is the rightmost command of the chain, so the
+// compound is a misroute only when that command is not the agent or the flag
+// cannot reach it: a `--` inside the tail call, a trailing comment after the
+// tail, a heredoc on the tail, a statement terminator (`;`/newline) after the
+// compound, or a trailing odd backslash run that escapes the injected separator.
+// A non-agent caller (agent == "") keeps the prior behavior of flagging every
+// compound.
+func binaryMismaps(bin *syntax.BinaryCmd, stmt *syntax.Stmt, agent, command string) bool {
+	if agent == "" || binaryTailAgentName(bin) != agent {
+		return true
+	}
+	if binaryTailHasOptionsTerminator(bin) {
+		return true
+	}
+	if binaryTailHasTrailingComment(bin, stmt, command) {
+		return true
+	}
+	if binaryTailHasHeredoc(bin, command) {
+		return true
+	}
+	if stmt.Semicolon.IsValid() {
+		return true
+	}
+	if hasTrailingNewline(command) {
+		return true
+	}
+	return endsWithOddBackslashRun(command)
+}
+
+// stmtMismapsTail reports whether the last statement of a multi-statement command
+// misroutes the appended flag given the detected agent. The flag is appended to
+// the END of the value, which is the last statement, so the analysis is the same
+// as a single statement's: a backgrounded/structured (non-call, non-binary)
+// statement misroutes; a binary last statement is evaluated by binaryMismaps; a
+// simple call is checked comprehensively (agent name, `--`, trailing comment,
+// heredoc, terminator, trailing backslash) because the single-call predicates
+// only inspect a one-statement value and a `--`/comment/heredoc on the last
+// statement of a multi-statement value would otherwise go unwarned.
+func stmtMismapsTail(stmt *syntax.Stmt, agent, command string) bool {
+	if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return true
+	}
+	if bin, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+		return binaryMismaps(bin, stmt, agent, command)
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return true // (subshell), if/for/while, …
+	}
+	words, _ := stripExecPrefix(call.Args)
+	words = skipEnvWrapperTerminator(words)
+	if agent == "" || firstWordAgentName(words) != agent {
+		return true
+	}
+	if wordsContainOptionsTerminator(words) {
+		return true
+	}
+	if stmtTrailingComment(stmt, words, command) {
+		return true
+	}
+	if stmtHasHeredocRedirect(stmt, command) {
+		return true
+	}
+	if stmt.Semicolon.IsValid() {
+		return true
+	}
+	if hasTrailingNewline(command) {
+		return true
+	}
+	return endsWithOddBackslashRun(command)
+}
+
+// endsWithOddBackslashRun reports whether command ends with an odd run of bare
+// backslashes and no trailing newline, the shape that escapes the leading space
+// injectSystemPrompt concatenates onto the value. `claude \` becomes
+// `claude \ --plugin-dir …`: the `\ ` escapes the space, joining the injected
+// flag into one literal word ` --plugin-dir` (leading space) rather than the
+// `--plugin-dir` option, so the agent starts without the plugin. An even run
+// leaves a literal backslash arg and the injected space splits the flag into its
+// own word, so it is not flagged. A trailing newline is a statement terminator
+// (handled by hasTrailingNewline) or a line continuation (an odd run before it),
+// neither of which this check is for, so a value that ends with a newline is not
+// flagged here. Trailing whitespace after the backslash already separates the
+// injected flag, so only a value whose final character is a backslash is checked
+// (#5167 review: "Flag a trailing escaped append separator").
+func endsWithOddBackslashRun(command string) bool {
+	if strings.HasSuffix(command, "\n") {
+		return false
+	}
+	backs := 0
+	for i := len(command) - 1; i >= 0 && command[i] == '\\'; i-- {
+		backs++
+	}
+	return backs%2 == 1
+}
+
+// firstWordAgentName returns the base name of the first word of a simple call
+// (after peeling), lowercased, or "" when the first word is not a literal. It is
+// the shared name extraction behind binaryTailAgentName (the rightmost command of
+// a binary chain) and the multi-statement tail check (the last statement).
+func firstWordAgentName(words []*syntax.Word) string {
+	if len(words) == 0 {
+		return ""
+	}
+	lit, ok := literalShellWord(words[0])
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(filepath.Base(lit))
+}
+
+// wordsContainOptionsTerminator reports whether words hold a literal `--`
+// end-of-options terminator anywhere in the list. It is the shared scan behind
+// CommandEndsOptionsTerminator (a single simple call) and the binary/multi-statement
+// tail checks: the appended flag is positional after a `--`, so a `--` anywhere
+// in the command that receives the flag demotes it.
+func wordsContainOptionsTerminator(words []*syntax.Word) bool {
+	for _, w := range words {
+		if lit, ok := literalShellWord(w); ok && lit == "--" {
+			return true
+		}
+	}
+	return false
 }
 
 // binaryTailAgentName returns the base name of the first word of the rightmost
@@ -276,15 +422,7 @@ func CommandHasControlOperator(command, agent string) bool {
 // command reached through a wrapper (`true && exec claude`, `true && env claude`)
 // is named the same way DetectAgentFromCommand would name it.
 func binaryTailAgentName(bin *syntax.BinaryCmd) string {
-	words := binaryTailCallWords(bin)
-	if len(words) == 0 {
-		return ""
-	}
-	lit, ok := literalShellWord(words[0])
-	if !ok {
-		return ""
-	}
-	return strings.ToLower(filepath.Base(lit))
+	return firstWordAgentName(binaryTailCallWords(bin))
 }
 
 // binaryTailCallWords returns the words of the rightmost simple call in a binary
@@ -324,16 +462,59 @@ func binaryTailCallWords(bin *syntax.BinaryCmd) []*syntax.Word {
 // command's tail `--` would otherwise be exempted by the tail-agent check and go
 // unwarned (#5167 review: "Inspect terminal `--` inside compound commands").
 func binaryTailHasOptionsTerminator(bin *syntax.BinaryCmd) bool {
+	return wordsContainOptionsTerminator(binaryTailCallWords(bin))
+}
+
+// binaryTailStmt returns the rightmost Stmt of a binary chain (|, &&, ||), the
+// statement whose command receives the appended flag and whose redirects/comments
+// govern whether the flag actually reaches the agent. A chain is left-
+// associative, so the rightmost command is reached by following Y.
+func binaryTailStmt(bin *syntax.BinaryCmd) *syntax.Stmt {
+	if bin.Y == nil {
+		return nil
+	}
+	stmt := bin.Y
+	for {
+		next, ok := stmt.Cmd.(*syntax.BinaryCmd)
+		if !ok {
+			return stmt
+		}
+		stmt = next.Y
+	}
+}
+
+// binaryTailHasTrailingComment reports whether a `#` shell comment on the
+// enclosing statement follows the rightmost simple call's last word and is the
+// final content on the last line. A trailing comment swallows the appended flag
+// (`true && claude # note` becomes `true && claude # note --plugin-dir …`, and
+// the flag lands inside the comment), so a compound whose tail is the agent still
+// misroutes the flag when a comment follows that tail. CommandHasTrailingComment
+// only inspects a single simple call, so a binary command's tail comment would
+// otherwise be exempted by the tail-agent check and go unwarned (#5167 review:
+// "Scan tail comments in terminal compounds").
+func binaryTailHasTrailingComment(bin *syntax.BinaryCmd, stmt *syntax.Stmt, command string) bool {
 	words := binaryTailCallWords(bin)
-	if words == nil {
+	if len(words) == 0 {
 		return false
 	}
-	for _, w := range words {
-		if lit, ok := literalShellWord(w); ok && lit == "--" {
-			return true
-		}
+	return stmtTrailingComment(stmt, words, command)
+}
+
+// binaryTailHasHeredoc reports whether the rightmost statement of a binary chain
+// carries a here-document redirect whose body is the last content on the last
+// line. The appended flag lands inside the here-document (or breaks the closing
+// delimiter), so a compound whose tail is the agent still misroutes the flag when
+// that tail has a heredoc: `true && claude <<EOF\nprompt\nEOF` becomes
+// `true && claude <<EOF\nprompt\nEOF --plugin-dir …` and claude starts without
+// the plugin. CommandHasHeredoc only inspects a single simple call, so a binary
+// command's tail heredoc would otherwise be exempted by the tail-agent check
+// and go unwarned (#5167 review: "Scan tail heredocs in terminal compounds").
+func binaryTailHasHeredoc(bin *syntax.BinaryCmd, command string) bool {
+	tail := binaryTailStmt(bin)
+	if tail == nil {
+		return false
 	}
-	return false
+	return stmtHasHeredocRedirect(tail, command)
 }
 
 // stripTrailingLineContinuation removes a trailing backslash-newline (a shell
@@ -396,6 +577,29 @@ func endsWithIncompleteOperator(command string) bool {
 	return false
 }
 
+// stmtTrailingComment reports whether a `#` shell comment on stmt follows the
+// last word of words and is the final content on the last line of command. It is
+// the shared scan behind CommandHasTrailingComment (a single simple call) and
+// the binary/multi-statement tail checks. A trailing newline after the comment
+// starts a new statement that carries the flag, which CommandHasControlOperator
+// already warns about, so a comment is only a misroute when nothing follows it
+// on the last line.
+func stmtTrailingComment(stmt *syntax.Stmt, words []*syntax.Word, command string) bool {
+	if len(words) == 0 || len(stmt.Comments) == 0 {
+		return false
+	}
+	if hasTrailingNewline(command) {
+		return false
+	}
+	lastEnd := words[len(words)-1].End().Offset()
+	for _, cm := range stmt.Comments {
+		if cm.Hash.Offset() > lastEnd {
+			return true
+		}
+	}
+	return false
+}
+
 // CommandHasTrailingComment reports whether command is a single simple call
 // (redirections ignored) whose last word is followed by a `#` shell comment that
 // is the final thing on its line. injectSystemPrompt appends its agent-specific
@@ -430,26 +634,8 @@ func CommandHasTrailingComment(command string) bool {
 	if !ok || len(call.Args) == 0 {
 		return false
 	}
-	if len(stmt.Comments) == 0 {
-		return false
-	}
 	words, _ := stripExecPrefix(call.Args)
-	if len(words) == 0 {
-		return false
-	}
-	lastEnd := words[len(words)-1].End().Offset()
-	// A trailing newline after the comment starts a new statement that carries
-	// the flag, which CommandHasControlOperator already warns about; the comment
-	// only swallows the flag when it is the final content on the last line.
-	if hasTrailingNewline(command) {
-		return false
-	}
-	for _, cm := range stmt.Comments {
-		if cm.Hash.Offset() > lastEnd {
-			return true
-		}
-	}
-	return false
+	return stmtTrailingComment(stmt, words, command)
 }
 
 // CommandInvokesAgentViaInterpreter reports whether command runs the agent through
@@ -553,6 +739,25 @@ func shellShortClusterHasC(word string) bool {
 	return false
 }
 
+// stmtHasHeredocRedirect reports whether stmt carries a here-document redirect
+// (`<<`/`<<-`) whose body is the last content on the last line of command. It is
+// the shared scan behind CommandHasHeredoc (a single simple call) and the
+// binary/multi-statement tail checks. A trailing newline after the closing
+// delimiter starts a new statement that carries the flag, which
+// CommandHasControlOperator already warns about, so a heredoc is only a misroute
+// when its body is the final content on the last line.
+func stmtHasHeredocRedirect(stmt *syntax.Stmt, command string) bool {
+	if hasTrailingNewline(command) {
+		return false
+	}
+	for _, r := range stmt.Redirs {
+		if r.Op == syntax.Hdoc || r.Op == syntax.DashHdoc {
+			return true
+		}
+	}
+	return false
+}
+
 // CommandHasHeredoc reports whether command is a single simple call with a
 // here-document redirect (`<<` or `<<-`) whose body is the last content on the
 // last line. injectSystemPrompt appends its flag to the END of the value, so the
@@ -581,16 +786,7 @@ func CommandHasHeredoc(command string) bool {
 	if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
 		return false
 	}
-	for _, r := range stmt.Redirs {
-		if r.Op == syntax.Hdoc || r.Op == syntax.DashHdoc {
-			// A trailing newline after the closing delimiter starts a new statement
-			// that carries the flag, which CommandHasControlOperator already warns
-			// about; the heredoc only swallows the flag when its body is the last
-			// content on the last line (no trailing newline).
-			return !hasTrailingNewline(command)
-		}
-	}
-	return false
+	return stmtHasHeredocRedirect(stmt, command)
 }
 
 // hasTrailingNewline reports whether command ends in a newline that the shell

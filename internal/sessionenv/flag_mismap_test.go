@@ -77,6 +77,21 @@ func TestCommandEndsOptionsTerminator(t *testing.T) {
 		{"ionice wrapper then env then agent's own terminator mid-command", "ionice -c 3 env -- claude -- --resume", true},
 		{"nice wrapper's own terminator is not the agent's", "nice -- claude", false},
 		{"nice wrapper then agent's own terminator", "nice -- claude --", true},
+
+		// env can sit in front of ANOTHER argv-passthrough wrapper: `env -- nice
+		// -- claude` leaves `nice -- claude` once env's own `--` is consumed, and
+		// nice's `--` is nice's own terminator (GNU nice passes the appended flag
+		// through to claude), so the `--` is not the agent's and must not warn.
+		// `env -- nice -- claude --` still has claude's own trailing `--`, which is
+		// the agent's terminator. The peel continues past env so a wrapper chain
+		// (env behind a wrapper, a wrapper behind env, nested env) is fully
+		// unwrapped before the terminator scan (#5167 review: "Continue
+		// unwrapping wrappers after `env`").
+		{"env then nice wrapper's own terminator is not the agent's", "env -- nice -- claude", false},
+		{"env then nice wrapper then agent's own terminator", "env -- nice -- claude --", true},
+		{"env behind ionice then nice wrapper's own terminator", "ionice -c 3 env -- nice -- claude", false},
+		{"nested env wrappers' terminators are not the agent's", "env -- env -- claude", false},
+		{"nested env wrapper then agent's own terminator", "env -- env -- claude --", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandEndsOptionsTerminator(tc.command)
@@ -183,6 +198,22 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"unbalanced quote is a parse error appending does not complete", "claude '", false},
 		{"unbalanced subshell is a parse error appending does not complete", "claude (", false},
 		{"empty string", "", false},
+
+		// A single simple call ending in an odd run of bare backslashes (no
+		// trailing newline) escapes the leading space injection concatenates, so
+		// `claude \` becomes `claude \ --plugin-dir …` and the `\ ` joins the
+		// injected flag into one literal word ` --plugin-dir` rather than the
+		// `--plugin-dir` option, so claude starts without the plugin. An even run
+		// leaves a literal backslash arg and the injected space splits the flag
+		// into its own word, so it is not flagged; trailing whitespace after the
+		// backslash already separates the flag, so it is not flagged either
+		// (#5167 review: "Flag a trailing escaped append separator").
+		{"trailing odd backslash escapes the injected separator", "claude \\", true},
+		{"trailing odd backslash after flags escapes the separator", "claude --model opus \\", true},
+		{"trailing even backslash is a literal arg, not a separator", "claude \\\\", false},
+		{"trailing odd run of three backslashes escapes the separator", "claude \\\\\\", true},
+		{"trailing backslash then whitespace does not escape the separator", "claude \\ ", false},
+		{"trailing backslash then newline is a continuation", "claude \\\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandHasControlOperator(tc.command, "")
@@ -266,6 +297,103 @@ func TestCommandHasControlOperatorAgentLast(t *testing.T) {
 		{"and with agent last and trailing newline", "true && claude\n", "claude", true},
 		{"pipe with agent last and trailing newline", "tee | claude\n", "claude", true},
 		{"and with agent last and trailing newline after flags", "true && claude --resume\n", "claude", true},
+		// A compound whose tail is the agent still misroutes the flag when a `#`
+		// shell comment follows that tail on the last line: the appended flag
+		// lands inside the comment. CommandHasTrailingComment only inspects a
+		// single simple call, so a binary command's tail comment would otherwise
+		// be exempted by the tail-agent check and go unwarned (#5167 review:
+		// "Scan tail comments in terminal compounds").
+		{"and with agent last and trailing comment", "true && claude # note", "claude", true},
+		{"pipe with agent last and trailing comment", "tee | claude # note", "claude", true},
+		{"and with agent last and comment behind env", "true && env -- claude # note", "claude", true},
+		// A trailing newline after the comment starts a new statement that
+		// carries the flag, which is already a control operator; the comment is
+		// not the misroute on its own.
+		{"and with agent last and comment then trailing newline", "true && claude # note\n", "claude", true},
+		// A compound whose tail is the agent still misroutes the flag when that
+		// tail has a here-document redirect whose body is the last content on the
+		// last line: the appended flag lands inside the here-document (or breaks
+		// the closing delimiter). CommandHasHeredoc only inspects a single simple
+		// call, so a binary command's tail heredoc would otherwise be exempted by
+		// the tail-agent check and go unwarned (#5167 review: "Scan tail heredocs
+		// in terminal compounds").
+		{"and with agent last and trailing heredoc", "true && claude <<EOF\nprompt\nEOF", "claude", true},
+		{"pipe with agent last and trailing heredoc", "tee | claude <<EOF\nprompt\nEOF", "claude", true},
+		// A trailing newline after the closing delimiter starts a new statement
+		// that carries the flag, which is already a control operator; the heredoc
+		// is not the misroute on its own.
+		{"and with agent last and heredoc then trailing newline", "true && claude <<EOF\nprompt\nEOF\n", "claude", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CommandHasControlOperator(tc.command, tc.agent)
+			require.Equalf(t, tc.want, got, "CommandHasControlOperator(%q, %q)", tc.command, tc.agent)
+		})
+	}
+}
+
+// TestCommandHasControlOperatorMultiStatement pins the multi-statement tail-agent
+// exemption (#5167 review: "Exempt terminal agents in statement sequences"): a
+// `;`- or newline-separated sequence appends the flag to the END of the value,
+// which is the LAST statement, so the flag is misrouted only when the last
+// statement is not the agent or the flag cannot reach it (a `--` in the last
+// call, a trailing comment, a heredoc, a terminator after it, or a trailing odd
+// backslash run). `true; claude` routes the flag to claude and is not a misroute,
+// while `claude; echo hi` routes it to echo and is. The single-call predicates
+// (CommandEndsOptionsTerminator, CommandHasTrailingComment, CommandHasHeredoc)
+// only inspect a one-statement value, so the last statement is evaluated
+// comprehensively here: a `--`/comment/heredoc on the last statement of a
+// multi-statement value would otherwise go unwarned. An empty agent keeps the
+// prior behavior of flagging every multi-statement.
+func TestCommandHasControlOperatorMultiStatement(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		agent   string
+		want    bool
+	}{
+		// The agent is the last statement, so the appended flag reaches it — not a
+		// misroute.
+		{"semicolon with agent last", "true; claude", "claude", false},
+		{"newline with agent last", "true\nclaude", "claude", false},
+		{"semicolon with agent last after flags", "true; claude --resume", "claude", false},
+		{"semicolon with agent last behind exec", "true; exec claude", "claude", false},
+		{"semicolon with agent last behind env", "true; env -- claude", "claude", false},
+		{"two statements then agent last", "echo one; echo two; claude", "claude", false},
+		// The agent is the first statement but not the last, so the flag is routed
+		// to a non-agent command — a misroute.
+		{"semicolon with agent first", "claude; echo hi", "claude", true},
+		{"newline with agent first", "claude\necho hi", "claude", true},
+		// A backgrounded statement before the agent still routes the flag to the
+		// last (agent) statement.
+		{"background then agent last", "echo hi & claude", "claude", false},
+		// The last statement is a compound whose tail is the agent, so the flag
+		// reaches it through the compound — not a misroute.
+		{"semicolon then compound with agent last", "echo one; true && claude", "claude", false},
+		{"semicolon then pipe with agent last", "echo one; tee | claude", "claude", false},
+		// A `--` in the last call demotes the appended flag even when the last
+		// statement is the agent: the single-call predicate does not see a
+		// multi-statement value, so the tail `--` is checked here.
+		{"semicolon with agent last and trailing terminator", "true; claude --", "claude", true},
+		{"semicolon with agent last and mid-command terminator", "true; claude -- --resume", "claude", true},
+		// A trailing comment on the last statement swallows the appended flag.
+		{"semicolon with agent last and trailing comment", "true; claude # note", "claude", true},
+		// A heredoc on the last statement swallows the appended flag.
+		{"semicolon with agent last and trailing heredoc", "true; claude <<EOF\nprompt\nEOF", "claude", true},
+		// A terminator after the last agent still misroutes: `true; claude;`
+		// becomes `true; claude; --plugin-dir …` and the flag runs as its own
+		// command.
+		{"semicolon with agent last and trailing semicolon", "true; claude;", "claude", true},
+		{"newline with agent last and trailing newline", "true; claude\n", "claude", true},
+		// A trailing odd backslash on the last statement escapes the injected
+		// separator, so the flag does not reach the agent.
+		{"semicolon with agent last and trailing backslash", "true; claude \\", "claude", true},
+		// The last statement is not a simple call (a subshell), so the flag is
+		// routed to a command that is not the agent — a misroute.
+		{"semicolon with subshell last", "claude; (claude)", "claude", true},
+		// An empty agent keeps the prior behavior: every multi-statement is
+		// flagged, even when the last statement would be the agent.
+		{"empty agent flags semicolon with agent last", "true; claude", "", true},
+		{"empty agent flags newline with agent last", "true\nclaude", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandHasControlOperator(tc.command, tc.agent)
