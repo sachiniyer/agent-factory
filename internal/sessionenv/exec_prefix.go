@@ -517,8 +517,8 @@ func binaryTailHasHeredoc(bin *syntax.BinaryCmd, command string) bool {
 	return stmtHasHeredocRedirect(tail, command)
 }
 
-// stripTrailingLineContinuation removes a trailing backslash-newline (a shell
-// line continuation) from command so a suffix check sees the operator the
+// stripTrailingLineContinuation removes trailing backslash-newline (shell line
+// continuation) runs from command so a suffix check sees the operator the
 // continuation was hiding. `claude |\<newline>` joins to `claude |` in the shell,
 // so the incomplete `|` is what the value ends in once the continuation is gone;
 // without the strip a bare suffix check sees the newline, not the `|`, and misses
@@ -528,22 +528,32 @@ func binaryTailHasHeredoc(bin *syntax.BinaryCmd, command string) bool {
 // second-to-last), leaving a real terminator that is NOT a continuation, so it is
 // left in place. Whitespace after the newline is trimmed first so a `\<newline>`
 // at the very end is found (#5167 review: "Handle incomplete operators followed
-// by a continued newline").
+// by a continued newline"). A value can end in MORE than one continued physical
+// line, such as `claude |\<newline>\<newline>`, which the shell joins to `claude |`;
+// the strip is therefore run in a loop so every trailing continuation is removed
+// before the suffix check runs, not just the final one (#5167 review: "Strip
+// every trailing line continuation before checking operators").
 func stripTrailingLineContinuation(command string) string {
-	trimmed := strings.TrimRight(command, " \t")
-	if !strings.HasSuffix(trimmed, "\n") {
-		return command
+	for {
+		trimmed := strings.TrimRight(command, " \t")
+		if !strings.HasSuffix(trimmed, "\n") {
+			return command
+		}
+		body := trimmed[:len(trimmed)-1]
+		backs := 0
+		for len(body) > 0 && body[len(body)-1] == '\\' {
+			backs++
+			body = body[:len(body)-1]
+		}
+		if backs%2 == 0 {
+			return command
+		}
+		next := strings.TrimRight(body, " \t")
+		if next == command {
+			return command
+		}
+		command = next
 	}
-	body := trimmed[:len(trimmed)-1]
-	backs := 0
-	for len(body) > 0 && body[len(body)-1] == '\\' {
-		backs++
-		body = body[:len(body)-1]
-	}
-	if backs%2 == 0 {
-		return command
-	}
-	return strings.TrimRight(body, " \t")
 }
 
 // endsWithIncompleteOperator reports whether command ends with a shell operator
@@ -557,7 +567,15 @@ func stripTrailingLineContinuation(command string) string {
 // a parse error and parses as a single call with a literal word.
 func endsWithIncompleteOperator(command string) bool {
 	command = stripTrailingLineContinuation(command)
-	trimmed := strings.TrimRight(command, " \t")
+	// The shell permits an unescaped newline after an incomplete list/pipeline
+	// operator (`claude &&\<newline>`, including spaces before that newline) and
+	// completes it with the appended command, so the trailing newline is trimmed
+	// (with any whitespace around it) before the suffix check — otherwise the
+	// suffix sees the newline rather than the `&&`/`||`/`|` and the misroute goes
+	// unwarned (#5167 review: "Recognize incomplete operators ending with a
+	// newline"). This is only reached on the parse-error path, so a trailing
+	// newline here always accompanies an incomplete operator.
+	trimmed := strings.TrimRight(command, " \t\r\n")
 	if trimmed == "" {
 		return false
 	}
@@ -568,6 +586,12 @@ func endsWithIncompleteOperator(command string) bool {
 		return true
 	case strings.HasSuffix(trimmed, "&&"):
 		// `&&` is an incomplete and: appending supplies the second command.
+		return true
+	case strings.HasSuffix(trimmed, "<<-"), strings.HasSuffix(trimmed, "<<"):
+		// A bare `<<`/`<<-` is an unterminated here-document: appending supplies
+		// the delimiter word, so the flag becomes the delimiter (and the rest of
+		// the line its body) rather than a flag to the agent
+		// (#5167 review: "Flag an unterminated `<<-` here-document").
 		return true
 	case strings.HasSuffix(trimmed, ">"), strings.HasSuffix(trimmed, "<"):
 		// A bare `>`/`<`/`>>` is an incomplete redirection: appending supplies the

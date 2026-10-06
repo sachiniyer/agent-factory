@@ -193,6 +193,42 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"trailing redirect in then line continuation", "claude <\\\n", true},
 		{"trailing append redirect then line continuation", "claude >>\\\n", true},
 
+		// A value ending in more than one continued physical line joins to the
+		// operator the continuations were hiding: `claude |\<newline>\<newline>`
+		// joins to `claude |`, and injectSystemPrompt appends `--plugin-dir`, so
+		// `claude |\<newline>\<newline> --plugin-dir` is a valid pipe whose right
+		// side is the flag rather than an argument to claude. Every trailing
+		// continuation is stripped before the suffix check, not only the final one
+		// (#5167 review: "Strip every trailing line continuation before checking
+		// operators").
+		{"trailing pipe then two line continuations", "claude |\\\n\\\n", true},
+		{"trailing and then two line continuations", "claude &&\\\n\\\n", true},
+		{"trailing or then two line continuations", "claude ||\\\n\\\n", true},
+		{"trailing redirect then two line continuations", "claude >\\\n\\\n", true},
+
+		// The shell permits an unescaped newline after an incomplete
+		// list/pipeline operator and completes it with the appended command, so
+		// `claude &&\<newline>` (including spaces before that newline) becomes
+		// `claude && --plugin-dir …` and the flag runs as the second command
+		// rather than as an argument to claude. The trailing newline (with any
+		// surrounding whitespace) is trimmed before the suffix check so the
+		// operator, not the newline, is what the check sees (#5167 review:
+		// "Recognize incomplete operators ending with a newline").
+		{"trailing and then newline", "claude &&\n", true},
+		{"trailing or then newline", "claude ||\n", true},
+		{"trailing pipe then newline", "claude |\n", true},
+		{"trailing and then spaces before newline", "claude &&  \n", true},
+		{"trailing pipe then spaces before newline", "claude | \n", true},
+
+		// An unterminated here-document (`<<`/`<<-`) is a parse error whose
+		// appended flag supplies the delimiter word, so the flag becomes the
+		// delimiter (and the rest of the line its body) rather than a flag to the
+		// agent: `claude <<- --plugin-dir <path>` uses `--plugin-dir` as the
+		// here-document delimiter and claude starts without the injected option
+		// (#5167 review: "Flag an unterminated `<<-` here-document").
+		{"unterminated dash heredoc", "claude <<-", true},
+		{"unterminated heredoc", "claude <<", true},
+
 		// A parse error that appending does not complete (an unbalanced quote, an
 		// open subshell) still fails loudly at launch and is not a misroute.
 		{"unbalanced quote is a parse error appending does not complete", "claude '", false},
