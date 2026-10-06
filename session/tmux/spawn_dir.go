@@ -68,8 +68,8 @@ func checkSpawnDir(workDir string) error {
 }
 
 // spawnedPaneDirUnusableLogged logs the post-spawn check's skip once per
-// process — tmux < 3.4 answers pane_start_path with an empty string, so a
-// daemon on an older tmux would otherwise repeat it on every spawn.
+// process — an environment where no source answers would otherwise repeat
+// it on every spawn.
 var spawnedPaneDirUnusableLogged sync.Once
 
 // verifySpawnedPaneDir asks tmux where the freshly spawned pane is running and
@@ -78,18 +78,21 @@ var spawnedPaneDirUnusableLogged sync.Once
 // known-present: "the session exists" is not proof the pane started in workDir.
 //
 // Information that is merely unavailable never tears anything down — a tmux
-// that cannot say where the pane is (pane_start_path is empty before tmux
-// 3.4) or an answer that does not resolve is skipped in favour of the next
-// source, and if every source is silent the check is skipped with a one-time
-// INFO log. Sources, in order:
+// that cannot say where the pane is or an answer that does not resolve is
+// skipped in favour of the next source, and if every source is silent the
+// check is skipped with a one-time INFO log. Sources, in order:
 //
-//   - #{pane_start_path}: the directory tmux recorded at spawn, never
-//     rewritten, so a program that immediately chdirs cannot mask it —
-//     empty on tmux < 3.4.
-//   - /proc/<#{pane_pid}>/cwd: the pane root's live cwd, readable through
-//     procfs even after the directory itself was unlinked (Linux).
+//   - /proc/<#{pane_pid}>/cwd: the pane root's live cwd — the kernel's own
+//     record of where the process runs, readable through procfs even after
+//     the directory itself was unlinked (Linux). The strongest source:
+//     it cannot echo the request and cannot be rewritten by tmux.
 //   - #{pane_current_path}: where the pane is now; every supported tmux
 //     answers it, at the price of an early-chdir program moving the answer.
+//   - #{pane_start_path}: weakest, kept last. On tmux >= 3.4 it records the
+//     -c tmux was HANDED, not where the pane landed — the #5174 play-test
+//     showed it echoing the requested worktree while the process actually
+//     ran in the fallback cwd — so it can only confirm the request, never
+//     contradict it. On tmux < 3.4 it expands empty.
 //
 // ErrSessionNotStarted joins a returned error only when teardown of the
 // misplaced pane is conclusive, the same contract the readiness-timeout
@@ -126,9 +129,9 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string) error {
 		name string
 		read func() string
 	}{
-		{"pane_start_path", func() string { return t.paneFormatField("#{pane_start_path}") }},
 		{"proc-cwd", t.paneProcCwd},
 		{"pane_current_path", func() string { return t.paneFormatField("#{pane_current_path}") }},
+		{"pane_start_path", func() string { return t.paneFormatField("#{pane_start_path}") }},
 	}
 	for _, source := range sources {
 		actual := source.read()
@@ -176,8 +179,9 @@ var procfsRoot = "/proc"
 
 // paneProcCwd returns /proc/<pane_pid>/cwd for the freshly spawned pane, or ""
 // off Linux or when the pane pid is unknown. Stat-ing the path resolves
-// procfs's symlink to the directory's identity, so it still proves a match
-// even when the worktree itself was unlinked after the spawn.
+// procfs's symlink to the directory's identity — the kernel's record of where
+// the process actually runs, not the -c it was asked for — so it still proves
+// the truth even when the worktree itself was unlinked after the spawn.
 func (t *TmuxSession) paneProcCwd() string {
 	if runtime.GOOS != "linux" {
 		return ""

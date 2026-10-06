@@ -148,20 +148,37 @@ func TestStartRefusesUnverifiableWorkDir(t *testing.T) {
 	assert.False(t, killed)
 }
 
-// TestStartTearsDownPaneInWrongDir is the belt-and-braces half of #5172: even
-// when new-session reports success, a pane whose recorded start path is not
-// the requested directory — tmux fell back to the server's cwd — is killed,
-// and the outcome reports the same missing class as a refused spawn.
+// TestStartTearsDownPaneInWrongDir is the belt-and-braces half of #5172, in
+// the shape the #5174 play-test measured on real tmux 3.4: pane_start_path
+// ECHOES the -c it was handed — the requested worktree — while the pane
+// actually started in tmux's fallback cwd. Trusting the echo first means
+// never asking where the pane is; the check must consult the kernel
+// (/proc/<pane_pid>/cwd) or pane_current_path, see the real directory, and
+// tear the session down. On the previous source order this test fails:
+// the echo matches, the check returns early, and the misplaced pane lives.
 func TestStartTearsDownPaneInWrongDir(t *testing.T) {
 	workDir := t.TempDir()
 	fallback := t.TempDir() // where tmux "fell back" to — any dir that is not workDir
+
+	const pid = "424243"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
+	require.NoError(t, os.Symlink(fallback, filepath.Join(procRoot, pid, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
 
 	var killed bool
 	sessionName := toTmuxName("wrong-dir", "")
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory,
-		liveAfterSpawnExec(t, sessionName,
-			map[string]string{"pane_start_path": fallback}, &killed))
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			// What tmux >= 3.4 really answers: the request echoed back,
+			// alongside the truth in the pane's live cwd.
+			"pane_start_path":   workDir,
+			"pane_pid":          pid,
+			"pane_current_path": fallback,
+		}, &killed))
 
 	err := session.Start(workDir)
 
@@ -174,10 +191,10 @@ func TestStartTearsDownPaneInWrongDir(t *testing.T) {
 		"new-session DID run — the bug shape is a spawn tmux accepted and misplaced")
 }
 
-// TestStartTearsDownPaneInWrongDirViaFallback: the positive-mismatch verdict is
-// not pane_start_path's private property — when tmux cannot answer that field
-// but #{pane_current_path} proves the pane landed outside the requested dir,
-// the session is still torn down with the same missing class.
+// TestStartTearsDownPaneInWrongDirViaFallback: on tmux < 3.4 pane_start_path
+// expands empty and pane_pid may be unanswered too — #{pane_current_path}
+// alone proves the pane landed outside the requested dir, and the session is
+// still torn down with the same missing class.
 func TestStartTearsDownPaneInWrongDirViaFallback(t *testing.T) {
 	workDir := t.TempDir()
 	fallback := t.TempDir()
@@ -197,17 +214,29 @@ func TestStartTearsDownPaneInWrongDirViaFallback(t *testing.T) {
 }
 
 // TestStartSucceedsWhenPaneDirMatches is the unchanged normal path: a spawn
-// into an existing directory whose pane records that same directory reports
-// success and tears nothing down.
+// into an existing directory whose live cwd agrees — proven by the strongest
+// available source, not by the pane_start_path echo — reports success and
+// tears nothing down.
 func TestStartSucceedsWhenPaneDirMatches(t *testing.T) {
 	workDir := t.TempDir()
+
+	const pid = "424244"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
+	require.NoError(t, os.Symlink(workDir, filepath.Join(procRoot, pid, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
 
 	var killed bool
 	sessionName := toTmuxName("right-dir", "")
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory,
-		liveAfterSpawnExec(t, sessionName,
-			map[string]string{"pane_start_path": workDir}, &killed))
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_start_path":   workDir, // the >= 3.4 echo
+			"pane_pid":          pid,
+			"pane_current_path": workDir,
+		}, &killed))
 
 	require.NoError(t, session.Start(workDir))
 	assert.False(t, killed, "a correctly placed pane is never torn down")
@@ -237,9 +266,9 @@ func TestStartSucceedsWhenPaneStartPathEmpty(t *testing.T) {
 }
 
 // TestStartSucceedsViaProcCwd: on Linux the pane root's /proc/<pid>/cwd is the
-// preferred fallback — a symlink that resolves to the pane's live cwd, proved
-// here with a procfs fixture so the test does not depend on the host's process
-// table.
+// strongest source — the kernel's record of the pane's live cwd, proved here
+// with a procfs fixture so the test does not depend on the host's process
+// table. It is consulted before either tmux format field.
 func TestStartSucceedsViaProcCwd(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("procfs fallback is Linux-only")

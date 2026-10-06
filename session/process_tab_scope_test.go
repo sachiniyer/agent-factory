@@ -537,6 +537,10 @@ func TestAddProcessTabWaitsForTheLaunchShimBeforeWatching(t *testing.T) {
 	// that exec fails, which reads as the pane having left the shim.
 	launcher := exec.Command("/bin/sh", "-c",
 		"echo ready; read line; : "+sessionenv.AccountEnvironmentExecMarker+" claude 0 work '' 0 ./slow.sh")
+	// The post-spawn cwd check reads /proc/<pane_pid>/cwd before the tmux
+	// fields — the shim is a real process standing in for the pane root, so it
+	// must actually run inside the worktree it pretends to have spawned into.
+	launcher.Dir = inst.GetWorktreePath()
 	launcher.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	hold, err := launcher.StdinPipe()
 	require.NoError(t, err)
