@@ -110,12 +110,14 @@ func TestExecSeparatorWarning_ProjectPersonalConfig(t *testing.T) {
 
 // TestExecSeparatorWarning_LeavesEveryOtherValueAlone pins the negative side.
 // The warning fires on ONE shape; a plain `exec` prefix is the very rewrite the
-// message asks for, and must not be warned about in turn.
+// message asks for, and must not be warned about in turn. A literal `--` as an
+// arg (`claude -- --resume`) is NOT here: that trips the launch-flag-mismap
+// terminator warning (a `--` anywhere after the program demotes the appended
+// flag), covered by TestLaunchFlagMismap_TerminatorInTheMiddle.
 func TestExecSeparatorWarning_LeavesEveryOtherValueAlone(t *testing.T) {
 	for name, value := range map[string]string{
 		"plain command":             "claude --resume",
 		"exec without a separator":  "exec claude --resume",
-		"a literal -- as an arg":    "claude -- --resume",
 		"exec of a path":            "exec /usr/local/bin/claude",
 		"separator inside a string": "claude --system-prompt 'exec -- x'",
 	} {
@@ -384,13 +386,14 @@ func TestExecSeparatorWarning_FirstRunMaterializationIsInspected(t *testing.T) {
 // a trailing `--` or a pipe is a correct use of the shell language.
 
 // assertTrailingTerminatorWarning asserts that out carries the load-time warning
-// for a trailing lone `--`, and that it stayed a warning.
+// for a lone `--` end-of-options terminator (trailing or in the middle), and
+// that it stayed a warning.
 func assertTrailingTerminatorWarning(t *testing.T, out, key string) {
 	t.Helper()
 	require.Contains(t, out, key, "the warning must name the key the operator has to edit")
-	require.Contains(t, out, "ends with a lone `--`", "the warning must name the shape it found")
+	require.Contains(t, out, "contains a lone `--`", "the warning must name the shape it found")
 	require.Contains(t, out, "positional argument rather than a flag",
-		"the warning must explain WHY a trailing -- loses the injected flag — that is the bug")
+		"the warning must explain WHY a -- loses the injected flag — that is the bug")
 	require.Contains(t, out, "warning, not an error",
 		"a value that is the operator's config must not read as a rejection")
 }
@@ -420,17 +423,143 @@ func TestLaunchFlagMismap_TrailingTerminator(t *testing.T) {
 	assert.Contains(t, warnings.String(), "global.toml", "the warning must name the file to edit")
 }
 
+// TestLaunchFlagMismap_TerminatorInTheMiddle pins that a `--` end-of-options
+// marker ANYWHERE after the program (not only the last word) demotes the appended
+// flag to a positional: `claude -- --resume` appends `--plugin-dir` after
+// `--resume`, but the `--` already made `--resume` positional, so the appended
+// flag is positional too and claude starts without the af plugin. This is the
+// shape a "trailing only" predicate misses.
+func TestLaunchFlagMismap_TerminatorInTheMiddle(t *testing.T) {
+	for name, value := range map[string]string{
+		"terminator before a flag":        "claude -- --resume",
+		"terminator before several flags": "claude -- --resume --model opus",
+		"terminator after exec prefix":    "exec -- claude -- --resume",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			assertTrailingTerminatorWarning(t, warnings.String(), "program_overrides.claude")
+		})
+	}
+}
+
+// TestLaunchFlagMismap_StatementTerminator pins the loud-misrouting shapes a
+// single-call predicate would miss: a single CallExpr terminated by a `;` (or a
+// trailing newline) is not split into two statements by the parser, so without
+// inspecting the terminator it reads as a "plain call" and slips past the
+// control-operator check. But injectSystemPrompt appends at the end, so
+// `claude ;` becomes `claude ; --plugin-dir …` and the flag runs as its own
+// command; a trailing newline splits the same way. These values keep the agent
+// name as its own token (a space before the terminator) so
+// tmux.DetectAgentFromCommand still resolves the agent and enters the
+// flag-appending branch — the glued forms (`claude;`, `claude<newline>`) where
+// the terminator sticks to the name detect no agent and append no flag, so they
+// cannot misroute one (covered by TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn).
+func TestLaunchFlagMismap_StatementTerminator(t *testing.T) {
+	for name, value := range map[string]string{
+		"trailing semicolon":              "claude ;",
+		"trailing semicolon after a flag": "claude --resume;",
+		"trailing newline after a flag":   "claude arg\n",
+		"trailing newline with space":     "claude \n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			assertControlOperatorWarning(t, warnings.String(), "program_overrides.claude")
+		})
+	}
+}
+
+// TestLaunchFlagMismap_OnlyFlagAppendingAgentsWarn pins that the warning fires
+// only when the resolved command actually enters a flag-appending injectSystemPrompt
+// branch. isAgentProgramKey names the keys whose values reach injectSystemPrompt,
+// but the resolved command's agent selects the branch: claude (--plugin-dir),
+// aider (--read), and devin (the workspace-trust flag) append at the end and can
+// misroute the flag; codex/gemini/amp use a file or env seam, and a key whose
+// value resolves to a non-agent (e.g. `program_overrides.claude = "bash --"`)
+// gets no injected flag at all. A trailing `--` or a control operator on those
+// values is not a launch-flag mismap, and warning about it would be a false
+// positive.
+func TestLaunchFlagMismap_OnlyFlagAppendingAgentsWarn(t *testing.T) {
+	// claude appends --plugin-dir: a trailing `--` and a control operator both warn.
+	t.Run("claude trailing terminator", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = \"claude --\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertTrailingTerminatorWarning(t, warnings.String(), "program_overrides.claude")
+	})
+	t.Run("claude control operator", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = \"claude | tee /tmp/log\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertControlOperatorWarning(t, warnings.String(), "program_overrides.claude")
+	})
+	// aider appends --read: same shapes warn.
+	t.Run("aider trailing terminator", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\naider = \"aider --\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertTrailingTerminatorWarning(t, warnings.String(), "program_overrides.aider")
+	})
+	t.Run("aider control operator", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\naider = \"aider | tee /tmp/log\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertControlOperatorWarning(t, warnings.String(), "program_overrides.aider")
+	})
+}
+
+// TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn pins the other half of
+// the resolved-agent gate: a key whose value does NOT resolve to a flag-appending
+// agent gets no injected flag, so a trailing `--` or control operator there
+// cannot misroute one. codex/gemini/amp launch via a file or env seam (no
+// end-appended flag), and a program_overrides.claude value that resolves to a
+// non-agent binary (`bash --`) is not flagged either. A value whose terminator
+// glues to the agent name (`claude;`, `claude<newline>`) or wraps the agent in a
+// subshell (`(claude --resume)`) is not detected as the agent at all, so
+// injectSystemPrompt appends no flag and the value cannot misroute one. Warning
+// about these would be a false positive (#5167 review: "Gate warnings on a
+// flag-injecting resolved agent").
+func TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn(t *testing.T) {
+	for name, body := range map[string]string{
+		"codex trailing terminator (file seam)":      "[program_overrides]\ncodex = \"codex --\"\n",
+		"gemini trailing terminator (file seam)":     "[program_overrides]\ngemini = \"gemini --\"\n",
+		"amp trailing terminator (file seam)":        "[program_overrides]\namp = \"amp --\"\n",
+		"codex control operator (file seam)":         "[program_overrides]\ncodex = \"codex | tee /tmp/log\"\n",
+		"claude key resolved to bash (no injection)": "[program_overrides]\nclaude = \"bash --\"\n",
+		"claude key resolved to bash control op":     "[program_overrides]\nclaude = \"bash | tee /tmp/log\"\n",
+		"glued semicolon detects no agent":           "[program_overrides]\nclaude = \"claude;\"\n",
+		"glued newline detects no agent":             "[program_overrides]\nclaude = \"claude\\n\"\n",
+		"subshell detects no agent":                  "[program_overrides]\nclaude = \"(claude --resume)\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte(body), "global.toml")
+			require.NoError(t, err)
+			out := warnings.String()
+			assert.NotContains(t, out, "contains a lone `--`",
+				"a non-flag-appending agent cannot misroute an appended flag, so the terminator warning must not fire")
+			assert.NotContains(t, out, "shell control operator",
+				"a non-flag-appending agent cannot misroute an appended flag, so the control-operator warning must not fire")
+		})
+	}
+}
+
 // TestLaunchFlagMismap_ControlOperator covers the loud-misrouting shapes from the
 // report's evidence table: a pipe, a chain, and a semicolon. The appended
-// --plugin-dir is routed to the wrong command in each.
+// --plugin-dir is routed to the wrong command in each. Each value resolves to a
+// flag-appending agent (claude), so the warning applies; a subshell like
+// `(claude --resume)` does not (the agent is not detected, so no flag is appended
+// to misroute) and is covered by TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn.
 func TestLaunchFlagMismap_ControlOperator(t *testing.T) {
 	for name, value := range map[string]string{
-		"pipe":     "claude --dangerously-skip-permissions | tee /tmp/log",
-		"and":      "claude foo && claude bar",
-		"or":       "claude foo || claude bar",
-		"semi":     "claude --resume; echo done",
-		"bg":       "claude &",
-		"subshell": "(claude --resume)",
+		"pipe": "claude --dangerously-skip-permissions | tee /tmp/log",
+		"and":  "claude foo && claude bar",
+		"or":   "claude foo || claude bar",
+		"semi": "claude --resume; echo done",
+		"bg":   "claude &",
 	} {
 		t.Run(name, func(t *testing.T) {
 			warnings := captureLog(t, &aflog.WarningLog)
@@ -458,7 +587,7 @@ func TestLaunchFlagMismap_RedirectIsNotAMismap(t *testing.T) {
 			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
 			require.NoError(t, err)
 			out := warnings.String()
-			assert.NotContains(t, out, "ends with a lone `--`",
+			assert.NotContains(t, out, "contains a lone `--`",
 				"a redirect does not end the command in a -- terminator")
 			assert.NotContains(t, out, "shell control operator",
 				"a redirect is not a control operator that misroutes the flag")
@@ -469,22 +598,24 @@ func TestLaunchFlagMismap_RedirectIsNotAMismap(t *testing.T) {
 // TestLaunchFlagMismap_LeavesWellFormedAgentProgramsAlone pins that ordinary
 // program_overrides values — the documentation's actual shapes — load silently.
 // A false positive here would warn the vast majority of well-configured users.
+// A `--` in the middle (`claude -- --resume`) is NOT here: the first `--` makes
+// everything after it positional, so an appended flag is positional too — that
+// shape is covered by TestLaunchFlagMismap_TerminatorInTheMiddle.
 func TestLaunchFlagMismap_LeavesWellFormedAgentProgramsAlone(t *testing.T) {
 	for name, value := range map[string]string{
-		"bare name":                 "claude",
-		"path":                      "/usr/local/bin/claude",
-		"path with flags":           "/opt/claude-next/bin/claude --model opus",
-		"env prefix":                "CLAUDE_CODE_USE_BEDROCK=1 claude",
-		"flag after a -- in middle": "claude -- --resume",
-		"exec prefix":               "exec claude",
-		"exec separator":            "exec -- claude",
+		"bare name":       "claude",
+		"path":            "/usr/local/bin/claude",
+		"path with flags": "/opt/claude-next/bin/claude --model opus",
+		"env prefix":      "CLAUDE_CODE_USE_BEDROCK=1 claude",
+		"exec prefix":     "exec claude",
+		"exec separator":  "exec -- claude",
 	} {
 		t.Run(name, func(t *testing.T) {
 			warnings := captureLog(t, &aflog.WarningLog)
 			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
 			require.NoError(t, err)
 			out := warnings.String()
-			assert.NotContains(t, out, "ends with a lone `--`",
+			assert.NotContains(t, out, "contains a lone `--`",
 				"%q is a well-formed override and must not trip the terminator warning", value)
 			assert.NotContains(t, out, "shell control operator",
 				"%q is a well-formed override and must not trip the control-operator warning", value)
@@ -517,7 +648,7 @@ func TestLaunchFlagMismap_OnlyAgentProgramKeysWarned(t *testing.T) {
 				require.NoError(t, err)
 			}
 			out := warnings.String()
-			assert.NotContains(t, out, "ends with a lone `--`",
+			assert.NotContains(t, out, "contains a lone `--`",
 				"a plain shell-command key must not trip the agent-program warning")
 		})
 	}
@@ -648,14 +779,14 @@ func TestLaunchFlagMismap_SaysItOncePerSourceKindAndValue(t *testing.T) {
 		_, err := parseConfigTOML(body, "global.toml")
 		require.NoError(t, err)
 	}
-	assert.Equal(t, 1, strings.Count(warnings.String(), "ends with a lone `--`"),
+	assert.Equal(t, 1, strings.Count(warnings.String(), "contains a lone `--`"),
 		"five loads of one unchanged file must produce one line, not five")
 
 	// A LATER edit that reintroduces the shape is a different value, and stays
 	// audible.
 	_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = \"claude --model opus --\"\n"), "global.toml")
 	require.NoError(t, err)
-	assert.Equal(t, 2, strings.Count(warnings.String(), "ends with a lone `--`"),
+	assert.Equal(t, 2, strings.Count(warnings.String(), "contains a lone `--`"),
 		"a changed value is a new fact and must be reported")
 }
 
@@ -706,6 +837,6 @@ func TestLaunchFlagMismap_FirstRunMaterializationInspectsAgentPrograms(t *testin
 	// is that it COULD have: warnLaunchFlagMismap ran on this value, and a
 	// trailing-terminator shape in a value the detector might one day produce
 	// would be caught here.
-	assert.NotContains(t, out, "ends with a lone `--`",
+	assert.NotContains(t, out, "contains a lone `--`",
 		"the probe never produces a trailing -- (it appends --dangerously-skip-permissions)")
 }

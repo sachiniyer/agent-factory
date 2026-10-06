@@ -8,11 +8,13 @@ import (
 
 // CommandEndsOptionsTerminator and CommandHasControlOperator are the two shapes
 // that misroute the flags injectSystemPrompt appends to the END of the resolved
-// program string. The first (a trailing lone --) is the SILENT failure surface
-// the bug is about; the second (a shell control operator) is a loud misrouting.
-// These tables pin them against the same mvdan.cc/sh parser the account boundary
-// uses, so the warning and the refusal can never come to different conclusions
-// about the same string (the same invariant CommandUsesExecSeparator keeps).
+// program string. The first (a `--` end-of-options terminator, anywhere after an
+// optional `exec` prefix) is the SILENT failure surface the bug is about; the
+// second (a shell control operator, including a statement terminator) is a loud
+// misrouting. These tables pin them against the same mvdan.cc/sh parser the
+// account boundary uses, so the warning and the refusal can never come to
+// different conclusions about the same string (the same invariant
+// CommandUsesExecSeparator keeps).
 
 func TestCommandEndsOptionsTerminator(t *testing.T) {
 	for _, tc := range []struct {
@@ -24,17 +26,26 @@ func TestCommandEndsOptionsTerminator(t *testing.T) {
 		{"agent with flags", "claude --model opus", false},
 		{"trailing terminator", "claude --", true},
 		{"trailing terminator after flags", "claude --model opus --", true},
-		{"terminator in the middle is not trailing", "claude -- --resume", false},
+		// A `--` ANYWHERE after the program demotes the appended flag to a
+		// positional, not only the last word: `claude -- --resume` appends
+		// `--plugin-dir` after `--resume`, but the `--` already made `--resume`
+		// positional, so the appended flag is positional too.
+		{"terminator in the middle demotes the appended flag", "claude -- --resume", true},
+		{"terminator before a flag", "claude -- --resume --model opus", true},
+		{"terminator as the only flag", "claude --model opus --resume", false},
 		{"absolute path trailing terminator", "/usr/local/bin/claude --", true},
-		{"exec prefix stripped, no trailing terminator", "exec -- claude", false},
-		{"exec prefix stripped, trailing terminator remains", "exec -- claude --", true},
+		{"exec prefix stripped, no terminator", "exec -- claude", false},
+		{"exec prefix stripped, terminator remains", "exec -- claude --", true},
+		{"exec prefix stripped, terminator in the middle", "exec -- claude -- --resume", true},
 		{"double-quoted terminator is literal", `claude "--"`, true},
 		{"single-quoted terminator is literal", "claude '--'", true},
-		{"non-literal trailing word is not a terminator", "claude --$FOO", false},
-		{"redirect is ignored, trailing terminator seen", "claude > /tmp/log --", true},
-		{"stderr redirect ignored, trailing terminator seen", "claude 2>/dev/null --", true},
-		{"pipe is not a single call so not a trailing terminator", "claude -- | tee", false},
-		{"env-prefixed agent with trailing terminator", "CLAUDE_CODE_USE_BEDROCK=1 claude --", true},
+		{"non-literal word is not a terminator", "claude --$FOO", false},
+		{"non-literal flag value is not a terminator", "claude --model=--", false},
+		{"redirect is ignored, terminator seen", "claude > /tmp/log --", true},
+		{"stderr redirect ignored, terminator seen", "claude 2>/dev/null --", true},
+		{"pipe is not a single call so not a terminator", "claude -- | tee", false},
+		{"env-prefixed agent with terminator", "CLAUDE_CODE_USE_BEDROCK=1 claude --", true},
+		{"env-prefixed agent with terminator in the middle", "CLAUDE_CODE_USE_BEDROCK=1 claude -- --resume", true},
 		{"only terminator word", "--", true},
 		{"empty string", "", false},
 	} {
@@ -70,6 +81,19 @@ func TestCommandHasControlOperator(t *testing.T) {
 		// misroute the flag.
 		{"negation", "! claude", false},
 
+		// A single simple call terminated by a statement separator (`;` or a
+		// trailing newline) still misroutes an appended flag: `claude;` becomes
+		// `claude; --plugin-dir …` and the flag runs as its own command. A `;` is
+		// exposed on stmt.Semicolon (a `&`/`|&` is already caught above as
+		// Background/Coprocess); a trailing newline is the other statement
+		// terminator the parser folds into a single Stmt without a Semicolon, so
+		// it is detected on the raw value.
+		{"trailing semicolon", "claude;", true},
+		{"trailing semicolon after flags", "claude --model opus;", true},
+		{"trailing newline", "claude\n", true},
+		{"trailing newline with flags", "claude --model opus\n", true},
+		{"trailing whitespace then newline", "claude \t\n ", true},
+
 		// Actual control operators / compound constructs — misroute the flag.
 		{"pipe", "claude | tee /tmp/log", true},
 		{"and", "claude foo && claude bar", true},
@@ -93,13 +117,17 @@ func TestCommandHasControlOperator(t *testing.T) {
 	}
 }
 
-// The two predicates are mutually exclusive on a single command: a trailing
-// terminator requires a single simple call, while a control operator requires
-// NOT a single simple call. The one exception is the exec-prefix family, where
-// the exec builtin is a call even with the separator — and that is already
-// covered by CommandUsesExecSeparator. This pins the invariant so a future edit
-// cannot accidentally make both fire on the same plain value, which would
-// produce two confusing warnings for one problem.
+// The two predicates are mutually exclusive on the shapes the warning pairs them
+// on: a terminator requires a single simple call (a `--` word the parser would
+// otherwise route into a compound), while a control operator requires NOT a
+// single simple call (a `|`/`&&`/subshell) or a single call terminated by a `;`
+// or newline (which has no `--` word). The one exception is the exec-prefix
+// family, where the exec builtin is a call even with the separator — and that is
+// already covered by CommandUsesExecSeparator. warnLaunchFlagMismap's switch
+// takes the first matching kind, so even a value that trips both (a single call
+// with a `--` AND a `;`, like `claude --;`) emits one warning, not two. This
+// pins the invariant on the shapes the two predicates are paired on, so a future
+// edit cannot accidentally make both fire on the same plain value.
 func TestEndsOptionsTerminatorAndControlOperatorAreMutuallyExclusive(t *testing.T) {
 	for _, command := range []string{
 		"claude",

@@ -73,37 +73,40 @@ func CommandUsesExecSeparator(command string) bool {
 }
 
 // CommandEndsOptionsTerminator reports whether command is a single simple call
-// (redirections ignored) whose last argument word is a literal `--`
-// end-of-options terminator.
+// (redirections ignored) that contains a literal `--` end-of-options terminator
+// after an optional `exec` prefix.
 //
 // injectSystemPrompt appends agent-specific flags to the END of the resolved
-// program string — claude gains `--plugin-dir`, aider gains `--read`. A trailing
-// `--` makes everything after it a positional argument rather than a flag, so
-// the appended flag is silently ignored and the agent launches without af's
-// guidance: for claude the af plugin does not register and the `/af-*` slash
-// commands are unavailable, with no error or diagnostic. The scoped account
-// boundary refuses this shape (the leftover `--` is reported as undeclared), but
-// an UNSCOPED session skips that boundary, so the mis-positioned flag reaches
-// `/bin/sh -c` unchanged — the config-load warning is what makes this surface
-// loud. Exported for the config loaders on the same precedent as
-// CommandUsesExecSeparator.
+// program string — claude gains `--plugin-dir`, aider gains `--read`. The first
+// `--` after the program makes every word after it a positional argument rather
+// than a flag, so a `--` ANYWHERE in the command (not only the last word)
+// demotes the appended flag: `claude -- --resume` appends `--plugin-dir` after
+// `--resume`, but the `--` already made `--resume` positional, and the appended
+// flag is positional too, so claude starts without the af plugin and the
+// `/af-*` slash commands are unavailable with no error or diagnostic. The scoped
+// account boundary refuses this shape (the leftover `--` is reported as
+// undeclared), but an UNSCOPED session skips that boundary, so the
+// mis-positioned flag reaches `/bin/sh -c` unchanged — the config-load warning
+// is what makes this surface loud. Exported for the config loaders on the same
+// precedent as CommandUsesExecSeparator.
 //
 // A leading `exec --` is consumed by stripExecPrefix first, so `exec -- claude`
 // (which CommandUsesExecSeparator already warns about) does not false-positive
 // here; `exec -- claude --` correctly does, because the trailing `--` is a
 // separate terminator behind the exec separator. Redirections are ignored
-// because they do not affect whether the last word is `--`.
+// because they do not affect whether a `--` appears among the words.
 func CommandEndsOptionsTerminator(command string) bool {
 	call, ok := singleCallIgnoringRedirections(command)
 	if !ok {
 		return false
 	}
 	words, _ := stripExecPrefix(call.Args)
-	if len(words) == 0 {
-		return false
+	for _, w := range words {
+		if lit, ok := literalShellWord(w); ok && lit == "--" {
+			return true
+		}
 	}
-	last, ok := literalShellWord(words[len(words)-1])
-	return ok && last == "--"
+	return false
 }
 
 // CommandHasControlOperator reports whether command parses as valid shell but is
@@ -112,6 +115,17 @@ func CommandEndsOptionsTerminator(command string) bool {
 // af's appended agent-specific flag to the wrong command rather than to the
 // agent. `claude | tee /tmp/log` becomes `claude | tee /tmp/log --plugin-dir '…'`
 // and the flag reaches tee, not claude.
+//
+// A single simple call that is TERMINATED by a statement separator is also a
+// mismap: `claude;` is one CallExpr (the `;` is a terminator, not a separator
+// that splits it into two statements), so it reaches the `return false` below
+// and looks like a plain call. But injectSystemPrompt appends at the end, so
+// `claude;` becomes `claude; --plugin-dir …` and the flag runs as a separate
+// command. The `;` is exposed on stmt.Semicolon; a trailing newline is the other
+// statement terminator the parser folds into a single Stmt without a Semicolon,
+// so it is checked on the raw value (`claude\n` appends as `claude\n --plugin-dir`
+// and the newline starts a new statement just as a `;` would). A `&`/`|&` is
+// already caught by stmt.Background/Coprocess above.
 //
 // Redirections (>, <) do NOT misroute the flag — the agent still receives an
 // appended flag regardless of where a redirect appears in a simple call — so a
@@ -137,5 +151,23 @@ func CommandHasControlOperator(command string) bool {
 	if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
 		return true // |, &&, || (BinaryCmd), (subshell), if/for/while, …
 	}
-	return false
+	// A single simple call terminated by `;` (or a trailing newline, which the
+	// parser folds into one Stmt without setting Semicolon) still misroutes an
+	// appended flag: `claude;` becomes `claude; --plugin-dir …` and the flag runs
+	// as its own command. A `&`/`|&` terminator already returned true above.
+	if stmt.Semicolon.IsValid() {
+		return true
+	}
+	return hasTrailingNewline(command)
+}
+
+// hasTrailingNewline reports whether command ends in a newline that the shell
+// parser folds into a single Stmt (it does not set Semicolon for a newline, so
+// CommandHasControlOperator has to inspect the raw value). Such a newline
+// terminates the command, so appending a flag after it starts a new statement:
+// `claude\n` becomes `claude\n --plugin-dir` and the flag runs on its own.
+// Trailing spaces/tabs are trimmed first; a newline inside a quoted word is not
+// at the end of the value, so it does not trigger this (the closing quote is).
+func hasTrailingNewline(command string) bool {
+	return strings.HasSuffix(strings.TrimRight(command, " \t"), "\n")
 }

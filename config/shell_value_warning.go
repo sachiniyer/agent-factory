@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Operator-authored config values that af hands to `/bin/sh -c`, warned about at
@@ -159,24 +160,33 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 // warnLaunchFlagMismap warns on agent-program values that would misroute the flags
 // injectSystemPrompt appends to the END of the resolved program string:
 //
-//   - a trailing lone `--` end-of-options terminator (claude: `--plugin-dir`,
-//     aider: `--read`), which silently demotes the appended flag to a positional
-//     so the agent starts without af's guidance — for claude the af plugin does
-//     not register and the `/af-*` slash commands are unavailable, with no
-//     diagnostic. This is the silent-failure surface the warning is about: the
-//     scoped account boundary refuses the shape, but an UNSCOPED session skips
-//     that boundary, so the mis-positioned flag reaches `/bin/sh -c` unchanged.
+//   - a `--` end-of-options terminator anywhere after an optional `exec` prefix
+//     (claude: `--plugin-dir`, aider: `--read`), which silently demotes the
+//     appended flag to a positional so the agent starts without af's guidance —
+//     for claude the af plugin does not register and the `/af-*` slash commands
+//     are unavailable, with no diagnostic. This is the silent-failure surface the
+//     warning is about: the scoped account boundary refuses the shape, but an
+//     UNSCOPED session skips that boundary, so the mis-positioned flag reaches
+//     `/bin/sh -c` unchanged. The first `--` after the program makes everything
+//     after it positional, so a `--` in the middle (`claude -- --resume`) is as
+//     bad as a trailing one: injection always appends at the end.
 //
 //   - a shell control operator (|, &&, ||, ;, &) or compound construct, which
 //     routes the appended flag to the wrong command in the pipeline rather than
-//     to the agent.
+//     to the agent. A statement terminator on an otherwise single call (`claude;`
+//     or `claude<newline>`) is included: appending after it starts a new
+//     statement, so the flag runs on its own.
 //
 // Like warnExecSeparator it is a WARNING, never a refusal: program_overrides is
 // owner config, and af does not rewrite the value. It applies only to keys
 // whose values reach injectSystemPrompt as the resolved agent command
-// (isAgentProgramKey); the plain shell-command keys (on_archive_command,
-// post_worktree_commands, sandbox.ssh) run their values verbatim through a
-// shell, where a trailing `--` or a pipe is a correct use of the language.
+// (isAgentProgramKey) AND whose resolved command actually enters a
+// flag-appending injection branch (commandAppendsLaunchFlag): the plain
+// shell-command keys (on_archive_command, post_worktree_commands, sandbox.ssh)
+// run their values verbatim through a shell, where a trailing `--` or a pipe is
+// a correct use of the language, and an agent whose launch seam does not append
+// at the end (codex/gemini/amp use a file or env seam, opencode prefixes an
+// env var) cannot misroute an appended flag because there is none.
 func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
 	type flagged struct {
 		shellValue
@@ -188,14 +198,17 @@ func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
 		if !isAgentProgramKey(value.key) {
 			continue
 		}
+		if !commandAppendsLaunchFlag(value.value) {
+			continue
+		}
 		switch {
 		case sessionenv.CommandEndsOptionsTerminator(value.value):
-			affected = append(affected, flagged{shellValue: value, kind: "trailing-terminator", body: "" +
-				" ends with a lone `--` end-of-options terminator. af appends its agent-specific flags " +
+			affected = append(affected, flagged{shellValue: value, kind: "options-terminator", body: "" +
+				" contains a lone `--` end-of-options terminator. af appends its agent-specific flags " +
 				"(e.g. claude's `--plugin-dir`) to the end of this value, and everything after a `--` is a " +
 				"positional argument rather than a flag — so the injected flag would be silently ignored and " +
 				"the agent would start without af's guidance (for claude the af plugin does not register and " +
-				"the `/af-*` slash commands are unavailable, with no error). Remove the trailing `--`. This is a " +
+				"the `/af-*` slash commands are unavailable, with no error). Remove the `--`. This is a " +
 				"warning, not an error"})
 		case sessionenv.CommandHasControlOperator(value.value):
 			affected = append(affected, flagged{shellValue: value, kind: "control-operator", body: "" +
@@ -232,6 +245,34 @@ func isAgentProgramKey(key string) bool {
 		return true
 	}
 	return false
+}
+
+// appendLaunchFlagAgents are the agents injectSystemPrompt launches by appending
+// an agent-specific flag to the END of the resolved program string (claude gets
+// --plugin-dir, aider gets --read, devin gets the workspace-trust flag). A
+// trailing `--` or a control operator in such a value misroutes the appended flag;
+// agents launched by other seams (codex/gemini/amp use a file or env seam,
+// opencode prefixes an env var) do not append at the end, so their values cannot
+// misroute an appended flag. The source of truth is session.injectSystemPrompt;
+// this list mirrors it, and the resolved command is classified with the same
+// tmux.DetectAgentFromCommand injectSystemPrompt uses, so the warning and the
+// injection agree on which agent a value runs.
+var appendLaunchFlagAgents = map[string]bool{
+	tmux.ProgramClaude: true,
+	tmux.ProgramAider:  true,
+	tmux.ProgramDevin:  true,
+}
+
+// commandAppendsLaunchFlag reports whether the resolved command value reaches an
+// injectSystemPrompt branch that appends an agent-specific flag to the END of the
+// value — the only shapes warnLaunchFlagMismap can misroute. A program_overrides
+// key names one agent but its value may resolve to another (e.g.
+// `program_overrides.claude = "bash --"` runs bash, which gets no appended flag,
+// and `program_overrides.codex = "codex --"` runs codex, whose seam is a file not
+// an appended flag), so the key alone is not enough: the resolved value must enter
+// a flag-appending branch for the warning to apply.
+func commandAppendsLaunchFlag(resolved string) bool {
+	return appendLaunchFlagAgents[tmux.DetectAgentFromCommand(resolved)]
 }
 
 // warnShellValueOnce logs one warning for (lead, kind, value) if it has not
