@@ -334,13 +334,15 @@ var ErrSessionNameTaken = errors.New("tmux session already exists")
 // conclusively killed.
 var ErrSpawnDirMissing = errors.New("spawn start directory missing")
 
-// ErrSpawnDirUnknown marks a spawn refused or reverted because the requested
-// start directory could not be positively verified: a stat error other than
-// ENOENT, or a post-spawn pane-start-path query tmux would not answer. Absence
-// is not proven — a permission or I/O failure is not evidence the worktree is
-// gone — so callers must hold the row and retry rather than declare it missing.
-// ErrSessionNotStarted still rides alongside when the spawn was refused before
-// new-session ran or its pane was conclusively removed.
+// ErrSpawnDirUnknown marks a spawn refused because the requested start
+// directory could not be positively verified: a stat error other than ENOENT.
+// Absence is not proven — a permission or I/O failure is not evidence the
+// worktree is gone — so callers must hold the row and retry rather than
+// declare it missing. ErrSessionNotStarted still rides alongside, since the
+// refusal happens before new-session runs. (The post-spawn pane-dir check is
+// deliberately NOT part of this class: a tmux that cannot report where the
+// pane is — pane_start_path is empty before tmux 3.4 — is skipped, never
+// torn down, per #5174 review.)
 var ErrSpawnDirUnknown = errors.New("spawn start directory state unknown")
 
 // ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -33,10 +34,13 @@ func absentSessionExec() cmd_test.MockCmdExec {
 
 // liveAfterSpawnExec models a server where the session appears by the time the
 // existence poll probes it (has-session fails on the pre-spawn probe, then
-// answers), reports paneStart on the post-spawn #{pane_start_path} query — the
-// answer a healthy tmux records for the -c it was handed — and is killed by
-// kill-session, which flips *killed and makes every later probe report absent.
-func liveAfterSpawnExec(t *testing.T, sessionName, paneStart string, killed *bool) cmd_test.MockCmdExec {
+// answers) and is killed by kill-session, which flips *killed and makes every
+// later probe report absent. fields maps each display-message format the
+// post-spawn dir check may ask (pane_start_path, pane_pid, pane_current_path)
+// to the answer a healthy tmux gives — a healthy tmux >= 3.4 records the -c it
+// was handed as pane_start_path. A field absent from the map answers empty,
+// tmux's "unsupported" expansion.
+func liveAfterSpawnExec(t *testing.T, sessionName string, fields map[string]string, killed *bool) cmd_test.MockCmdExec {
 	t.Helper()
 	probed := false
 	return cmd_test.MockCmdExec{
@@ -60,8 +64,13 @@ func liveAfterSpawnExec(t *testing.T, sessionName, paneStart string, killed *boo
 			switch {
 			case strings.Contains(s, "show-options"):
 				return nil, fmt.Errorf("no server running")
-			case strings.Contains(s, "pane_start_path"):
-				return []byte(paneStart + "\n"), nil
+			case strings.Contains(s, "display-message"):
+				for field, answer := range fields {
+					if answer != "" && strings.Contains(s, "#{"+field+"}") {
+						return []byte(answer + "\n"), nil
+					}
+				}
+				return nil, nil
 			case strings.Contains(s, "list-panes"):
 				return nil, tmuxCantFindSessionError(t, sessionName)
 			}
@@ -133,7 +142,8 @@ func TestStartRefusesUnverifiableWorkDir(t *testing.T) {
 	statSpawnDir = prev
 	var killed bool
 	session2 := newTmuxSession(toTmuxName("unverifiable-dir-retry", ""), "claude",
-		NewMockPtyFactory(t), liveAfterSpawnExec(t, "af_unverifiable-dir-retry", workDir, &killed))
+		NewMockPtyFactory(t), liveAfterSpawnExec(t, "af_unverifiable-dir-retry",
+			map[string]string{"pane_start_path": workDir}, &killed))
 	require.NoError(t, session2.Start(workDir))
 	assert.False(t, killed)
 }
@@ -150,7 +160,8 @@ func TestStartTearsDownPaneInWrongDir(t *testing.T) {
 	sessionName := toTmuxName("wrong-dir", "")
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory,
-		liveAfterSpawnExec(t, sessionName, fallback, &killed))
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_start_path": fallback}, &killed))
 
 	err := session.Start(workDir)
 
@@ -163,6 +174,28 @@ func TestStartTearsDownPaneInWrongDir(t *testing.T) {
 		"new-session DID run — the bug shape is a spawn tmux accepted and misplaced")
 }
 
+// TestStartTearsDownPaneInWrongDirViaFallback: the positive-mismatch verdict is
+// not pane_start_path's private property — when tmux cannot answer that field
+// but #{pane_current_path} proves the pane landed outside the requested dir,
+// the session is still torn down with the same missing class.
+func TestStartTearsDownPaneInWrongDirViaFallback(t *testing.T) {
+	workDir := t.TempDir()
+	fallback := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("wrong-dir-fallback", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_current_path": fallback}, &killed))
+
+	err := session.Start(workDir)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed, "a pane proven misplaced by any source must be torn down")
+	require.ErrorIs(t, err, ErrSessionNotStarted)
+}
+
 // TestStartSucceedsWhenPaneDirMatches is the unchanged normal path: a spawn
 // into an existing directory whose pane records that same directory reports
 // success and tears nothing down.
@@ -173,10 +206,82 @@ func TestStartSucceedsWhenPaneDirMatches(t *testing.T) {
 	sessionName := toTmuxName("right-dir", "")
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory,
-		liveAfterSpawnExec(t, sessionName, workDir, &killed))
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_start_path": workDir}, &killed))
 
 	require.NoError(t, session.Start(workDir))
 	assert.False(t, killed, "a correctly placed pane is never torn down")
+	assert.Len(t, ptyFactory.cmds, 1)
+}
+
+// TestStartSucceedsWhenPaneStartPathEmpty is the tmux < 3.4 regression the
+// #5174 review caught: pane_start_path expands to an EMPTY answer on tmux 3.2a
+// (Ubuntu 22.04) and 3.3a (Debian 12), which the first cut read as "no usable
+// start path" and tore every spawn down. An empty field means "this tmux
+// cannot tell us" — the check falls through to a source every supported tmux
+// has, here #{pane_current_path}, and the spawn succeeds.
+func TestStartSucceedsWhenPaneStartPathEmpty(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("oldtmux-dir", "")
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory,
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_current_path": workDir}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"an empty pane_start_path (tmux < 3.4) must not kill an otherwise good spawn")
+	assert.False(t, killed)
+	assert.Len(t, ptyFactory.cmds, 1)
+}
+
+// TestStartSucceedsViaProcCwd: on Linux the pane root's /proc/<pid>/cwd is the
+// preferred fallback — a symlink that resolves to the pane's live cwd, proved
+// here with a procfs fixture so the test does not depend on the host's process
+// table.
+func TestStartSucceedsViaProcCwd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs fallback is Linux-only")
+	}
+	workDir := t.TempDir()
+	const pid = "424242"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
+	require.NoError(t, os.Symlink(workDir, filepath.Join(procRoot, pid, "cwd")))
+
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
+
+	var killed bool
+	sessionName := toTmuxName("proc-cwd-dir", "")
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory,
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_pid": pid}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"the /proc/<pid>/cwd fallback proves the pane landed in the requested dir")
+	assert.False(t, killed)
+	assert.Len(t, ptyFactory.cmds, 1)
+}
+
+// TestStartSucceedsWhenNoPaneDirSource: when tmux will not report the pane's
+// directory by ANY source — the whole post-check is skipped (logged once at
+// INFO), never treated as a mismatch. Unavailability is not evidence.
+func TestStartSucceedsWhenNoPaneDirSource(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("silent-dir", "")
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory,
+		liveAfterSpawnExec(t, sessionName, map[string]string{}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a server that cannot report the pane dir must not kill the spawn")
+	assert.False(t, killed, "nothing is torn down when no source can answer")
 	assert.Len(t, ptyFactory.cmds, 1)
 }
 
@@ -215,10 +320,9 @@ func TestCheckSpawnDirClassifications(t *testing.T) {
 	}
 }
 
-// TestVerifySpawnedPaneDirUnknownOnWedgedServer: when tmux will not answer the
-// start-path query at all, the pane's dir is unknown — still torn down, still
-// not a missing-worktree verdict.
-func TestVerifySpawnedPaneDirUnknownOnWedgedServer(t *testing.T) {
+// TestStartSucceedsOnWedgedDirQuery: a display-message that errors entirely is
+// silence, not a mismatch — the spawn survives with no teardown and no verdict.
+func TestStartSucceedsOnWedgedDirQuery(t *testing.T) {
 	workDir := t.TempDir()
 
 	var killed bool
@@ -245,7 +349,7 @@ func TestVerifySpawnedPaneDirUnknownOnWedgedServer(t *testing.T) {
 			switch {
 			case strings.Contains(s, "show-options"):
 				return nil, fmt.Errorf("no server running")
-			case strings.Contains(s, "pane_start_path"):
+			case strings.Contains(s, "display-message"):
 				return nil, errors.New("display-message exploded")
 			case strings.Contains(s, "list-panes"):
 				return nil, tmuxCantFindSessionError(t, sessionName)
@@ -256,10 +360,7 @@ func TestVerifySpawnedPaneDirUnknownOnWedgedServer(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory, cmdExec)
 
-	err := session.Start(workDir)
-	require.Error(t, err)
-	require.ErrorIs(t, err, ErrSpawnDirUnknown)
-	require.NotErrorIs(t, err, ErrSpawnDirMissing,
-		"an unreadable answer is not proof the worktree is missing")
-	assert.True(t, killed, "an unverifiable pane is still torn down")
+	require.NoError(t, session.Start(workDir),
+		"unavailable information is never a reason to tear down")
+	assert.False(t, killed, "an unanswered pane-dir query kills nothing")
 }
