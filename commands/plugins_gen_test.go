@@ -339,6 +339,32 @@ func TestPreflightHookReportsHealthyAf(t *testing.T) {
 	}
 }
 
+// TestPreflightHookReportsAfThatEmitsThenFails locks the present-but-broken branch
+// for the case a `|| true` would have masked: a wrapper or partially broken
+// `af version` that prints a version-looking first line and then exits non-zero.
+// The hook must not report that as healthy — the non-zero exit means the CLI is
+// unusable, so the hook reports the broken state and fails closed. The whole
+// `af version` output is captured first (no `head` in the pipe), so its exit
+// status rather than a masked pipeline decides the branch.
+func TestPreflightHookReportsAfThatEmitsThenFails(t *testing.T) {
+	// Emits a plausible version line, then exits non-zero (the failure the old
+	// `|| true` turned into a healthy report).
+	fake := []byte("#!/usr/bin/env bash\necho \"agent-factory version v9.9.9\"\nexit 1\n")
+	report, code := runPreflightHook(t, fake, false)
+	if code == 0 {
+		t.Fatalf("preflight hook exited %d for an af that emits then fails, want non-zero (fail closed, not open)", code)
+	}
+	if !strings.Contains(report, "af is on PATH but failed to execute") {
+		t.Errorf("preflight hook report for an af that emits then fails = %q, want it to name the broken state, not the version line", report)
+	}
+	if strings.Contains(report, "v9.9.9 is available.") {
+		t.Errorf("preflight hook reported a failing af as healthy (version line in report): %q", report)
+	}
+	if !strings.Contains(report, session.AfInstallCommand) {
+		t.Errorf("preflight hook report for an af that emits then fails = %q, want it to print the reinstall command", report)
+	}
+}
+
 // TestPreflightHookReportsMissingAf locks the missing-af branch: when af is not on
 // PATH at all the hook prints the install command and exits 0. The path is
 // isolated to the (af-less) temp dir so a system-installed af cannot satisfy
