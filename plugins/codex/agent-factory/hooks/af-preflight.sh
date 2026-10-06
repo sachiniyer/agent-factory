@@ -3,14 +3,17 @@
 #
 # Report whether the af CLI is on PATH. Read-only on purpose: this hook never
 # downloads or installs anything (see docs/agent-plugins.md).
-set -euo pipefail
+set -uo pipefail
 
-if command -v af >/dev/null 2>&1; then
-	# `af version` can print a second "an upgrade is available" line; the
-	# hook only wants the version itself.
-	version=$(af version 2>/dev/null | head -n 1)
-	echo "${version:-af (version unknown)} is available."
-else
+if ! command -v af >/dev/null 2>&1; then
 	echo "af is not installed. Install it with:"
 	echo "  curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh"
+elif version=$(af version 2>/dev/null | head -n 1) && [ -n "$version" ]; then
+	# `af version` can print a second "an upgrade is available" line; the
+	# hook only wants the version itself.
+	echo "${version} is available."
+else
+	echo "af is on PATH but failed to execute. Reinstall it with:"
+	echo "  curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh"
+	exit 1
 fi

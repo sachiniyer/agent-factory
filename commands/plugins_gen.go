@@ -86,6 +86,7 @@ var pluginReleaseDigests = []string{
 	"acae86681aa0448958ad9e9cd4a6c7ffe06e59c5e6331aad52d6606e125daa3a", // 3.21 — prune ships its strictly read-only dry run first; no --apply yet (#5136)
 	"8d6e2863cbfc360a858b43c07376b0c7fa82dd6ecb9dc917dec21c39d505ff96", // 3.22 — prune's dry-run claim narrows to "af writes nothing" (#5136)
 	"787978c996f9632b42e5bfd4dfc78a2adabcbd0b81c77f122e83154ec38edea1", // 3.23 — shared scope rule names both cross-project opt-ins (#5136)
+	"ca10714bc001c83f445fb003d5beb39990db2784c1cfe2abbe08a652191cb636", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -346,22 +347,37 @@ func codexHooks() map[string]any {
 // against corruption rather than a compromised publisher or channel.
 // Fetch-and-execute from inside an agent session remains the wrong shape at any
 // convenience — see #2172 and #2174. Detect and instruct.
+//
+// The hook has three branches, so it reports in every state: af missing → print
+// the install command; af healthy → print its version; af on PATH but failing
+// to exec (corrupt/wrong-architecture binary, missing shebang interpreter) →
+// print the reinstall command and exit non-zero. set -e is intentionally absent:
+// the version-capture pipeline runs under pipefail, and a present-but-unexecutable
+// af makes it exit non-zero. With set -e the assignment would abort the script
+// before the report echo, and the 2>/dev/null on the capture would also swallow
+// bash's own exec-failure diagnostic — leaving the hook with no stdout, no
+// stderr, and only an opaque non-zero exit, which is not a report. The version
+// capture sits inside an elif condition, so the failing pipeline just falls
+// through to the else branch instead.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +
 		"# " + pluginGenBanner + "\n" +
 		"#\n" +
 		"# Report whether the af CLI is on PATH. Read-only on purpose: this hook never\n" +
 		"# downloads or installs anything (see docs/agent-plugins.md).\n" +
-		"set -euo pipefail\n" +
+		"set -uo pipefail\n" +
 		"\n" +
-		"if command -v af >/dev/null 2>&1; then\n" +
-		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
-		"\t# hook only wants the version itself.\n" +
-		"\tversion=$(af version 2>/dev/null | head -n 1)\n" +
-		"\techo \"${version:-af (version unknown)} is available.\"\n" +
-		"else\n" +
+		"if ! command -v af >/dev/null 2>&1; then\n" +
 		"\techo \"af is not installed. Install it with:\"\n" +
 		"\techo \"  " + session.AfInstallCommand + "\"\n" +
+		"elif version=$(af version 2>/dev/null | head -n 1) && [ -n \"$version\" ]; then\n" +
+		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
+		"\t# hook only wants the version itself.\n" +
+		"\techo \"${version} is available.\"\n" +
+		"else\n" +
+		"\techo \"af is on PATH but failed to execute. Reinstall it with:\"\n" +
+		"\techo \"  " + session.AfInstallCommand + "\"\n" +
+		"\texit 1\n" +
 		"fi\n"
 }
 
