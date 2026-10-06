@@ -239,6 +239,33 @@ func TestCommandHasControlOperatorAgentLast(t *testing.T) {
 		// is conservatively flagged: the flag after the subshell is not the
 		// agent invocation.
 		{"and with subshell last", "claude && (claude)", "claude", true},
+		// The tail-agent exemption only holds when the appended flag reaches the
+		// agent. A `--` end-of-options terminator inside the final call demotes
+		// the appended flag to a positional, so `true && claude --` becomes
+		// `true && claude -- --plugin-dir …` and claude starts without the plugin
+		// even though the agent is the last command (#5167 review: "Inspect
+		// terminal `--` inside compound commands").
+		{"and with agent last and trailing terminator", "true && claude --", "claude", true},
+		{"or with agent last and trailing terminator", "true || claude --", "claude", true},
+		{"pipe with agent last and trailing terminator", "tee | claude --", "claude", true},
+		{"and with agent last and mid-command terminator", "true && claude -- --resume", "claude", true},
+		{"and with agent last and terminator behind exec", "true && exec claude --", "claude", true},
+		{"and with agent last and terminator behind env", "true && env -- claude --", "claude", true},
+		{"and with agent last and env terminator only is not the agent's", "true && env -- claude", "claude", false},
+		// A compound statement terminated by `;` or a trailing newline still
+		// misroutes an appended flag even when the last command is the agent:
+		// `true && claude;` becomes `true && claude; --plugin-dir …` and the flag
+		// runs as its own command. The binary branch returns before the
+		// Semicolon/trailing-newline checks, so a terminated compound would
+		// otherwise be exempted (#5167 review: "Check terminators before
+		// accepting a terminal compound agent").
+		{"and with agent last and trailing semicolon", "true && claude;", "claude", true},
+		{"or with agent last and trailing semicolon", "true || claude;", "claude", true},
+		{"pipe with agent last and trailing semicolon", "tee | claude;", "claude", true},
+		{"and with agent last and trailing semicolon after flags", "true && claude --model opus;", "claude", true},
+		{"and with agent last and trailing newline", "true && claude\n", "claude", true},
+		{"pipe with agent last and trailing newline", "tee | claude\n", "claude", true},
+		{"and with agent last and trailing newline after flags", "true && claude --resume\n", "claude", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandHasControlOperator(tc.command, tc.agent)

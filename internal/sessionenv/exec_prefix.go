@@ -230,7 +230,28 @@ func CommandHasControlOperator(command, agent string) bool {
 		if agent == "" || binaryTailAgentName(bin) != agent {
 			return true
 		}
-		return false
+		// The tail-agent exemption only holds when the appended flag actually
+		// reaches the agent. A `--` end-of-options terminator inside the final
+		// call demotes the appended flag to a positional, so `true && claude --`
+		// becomes `true && claude -- --plugin-dir …` and claude starts without
+		// the plugin even though the agent is the last command. CommandEndsOptions
+		// Terminator only inspects a single simple call, so a binary command's
+		// tail `--` would otherwise go unwarned (#5167 review: "Inspect terminal
+		// `--` inside compound commands").
+		if binaryTailHasOptionsTerminator(bin) {
+			return true
+		}
+		// A compound whose final command is the agent still misroutes an
+		// appended flag when the compound statement itself is terminated: `true
+		// && claude;` becomes `true && claude; --plugin-dir …` and the flag runs
+		// as its own command. This branch returns before the Semicolon/trailing-
+		// newline checks below, so a terminated compound would otherwise be
+		// exempted and the silent flag loss would go unwarned (#5167 review:
+		// "Check terminators before accepting a terminal compound agent").
+		if stmt.Semicolon.IsValid() {
+			return true
+		}
+		return hasTrailingNewline(command)
 	}
 	if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
 		return true // (subshell), if/for/while, …
@@ -255,8 +276,25 @@ func CommandHasControlOperator(command, agent string) bool {
 // command reached through a wrapper (`true && exec claude`, `true && env claude`)
 // is named the same way DetectAgentFromCommand would name it.
 func binaryTailAgentName(bin *syntax.BinaryCmd) string {
-	if bin.Y == nil {
+	words := binaryTailCallWords(bin)
+	if len(words) == 0 {
 		return ""
+	}
+	lit, ok := literalShellWord(words[0])
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(filepath.Base(lit))
+}
+
+// binaryTailCallWords returns the words of the rightmost simple call in a binary
+// chain after an exec prefix and the known argv-passthrough wrappers, or nil
+// when the rightmost command is not a simple call. It is the shared walk behind
+// binaryTailAgentName (the agent name is the first word) and
+// binaryTailHasOptionsTerminator (the terminator scan needs the full tail).
+func binaryTailCallWords(bin *syntax.BinaryCmd) []*syntax.Word {
+	if bin.Y == nil {
+		return nil
 	}
 	cmd := bin.Y.Cmd
 	for {
@@ -268,18 +306,34 @@ func binaryTailAgentName(bin *syntax.BinaryCmd) string {
 	}
 	call, ok := cmd.(*syntax.CallExpr)
 	if !ok || len(call.Args) == 0 {
-		return ""
+		return nil
 	}
 	words, _ := stripExecPrefix(call.Args)
 	words = skipEnvWrapperTerminator(words)
-	if len(words) == 0 {
-		return ""
+	return words
+}
+
+// binaryTailHasOptionsTerminator reports whether the rightmost simple call in a
+// binary chain contains a literal `--` end-of-options terminator after an
+// optional exec prefix and an env wrapper's own terminator. The appended flag
+// is positional after a `--`, so a compound whose rightmost command is the agent
+// but carries its own `--` still misroutes the flag even though the compound's
+// tail is the agent: `true && claude --` becomes
+// `true && claude -- --plugin-dir …` and claude starts without the plugin.
+// CommandEndsOptionsTerminator only inspects a single simple call, so a binary
+// command's tail `--` would otherwise be exempted by the tail-agent check and go
+// unwarned (#5167 review: "Inspect terminal `--` inside compound commands").
+func binaryTailHasOptionsTerminator(bin *syntax.BinaryCmd) bool {
+	words := binaryTailCallWords(bin)
+	if words == nil {
+		return false
 	}
-	lit, ok := literalShellWord(words[0])
-	if !ok {
-		return ""
+	for _, w := range words {
+		if lit, ok := literalShellWord(w); ok && lit == "--" {
+			return true
+		}
 	}
-	return strings.ToLower(filepath.Base(lit))
+	return false
 }
 
 // stripTrailingLineContinuation removes a trailing backslash-newline (a shell
