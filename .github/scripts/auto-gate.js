@@ -2369,11 +2369,11 @@ async function blockAggregateEvaluation({
 // the ruleset sees it.
 //
 // - The newest generation is non-passing. This is the ordinary case: the
-//   pre-lane job published a WAITING marker for this same event before the lane
-//   began. The commit is unmergeable whether or not this create landed — one
-//   that did land is itself a WAITING generation — so the transaction ends as
-//   #4461's could-not-evaluate: UNKNOWN, concluded AGGREGATE_NOT_PASSING, never
-//   neutral.
+//   pre-lane invalidation step published a WAITING marker for this same event
+//   before the lane began. The commit is unmergeable whether or not this create
+//   landed — one that did land is itself a WAITING generation — so the
+//   transaction ends as #4461's could-not-evaluate: UNKNOWN, concluded
+//   AGGREGATE_NOT_PASSING, never neutral.
 // - The newest generation satisfies the ruleset, none is visible, or the read
 //   failed too. Nothing proves the head unmergeable: a stale PASS may be what the
 //   ruleset reads, and this transaction could not replace it. The original error
@@ -3591,6 +3591,23 @@ const STALE_AGGREGATE_WAITING_AFTER_MS = 15 * 60 * 1000;
 // the slots a PR Validation blocker left free, and never more than this many. The
 // oldest go first, so a backlog drains instead of starving.
 const TRANSIENT_BLOCK_REEVALUATION_LIMIT = 5;
+// A pass cannot assume a later run lands where not-yet-eligible work becomes
+// eligible: the request that spawned it fired while every marker it is about to
+// see was fresh, a platform-cancelled lane leaves no dispatch at all (#5160),
+// and the schedule delivers hours late (#4571). Work the scan saw but could not
+// select — a transient block inside its retry window, or a WAITING aggregate a
+// live transaction may still own — is therefore retained: the pass re-scans
+// until each item matures or resolves. It probes once on this cadence — a live
+// lane usually resolves a marker within a minute, and noticing early is worth
+// one extra read — and after that sleeps straight to the next maturity point
+// instead of replaying the whole repository scan every minute.
+const REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS = 60 * 1000;
+// The wait is bounded by the stale-aggregate window plus one poll: every marker
+// already written when the scan ran matures inside that bound. Anything still
+// unmet when it ends — younger churn, or work past the per-pass caps — is handed
+// to exactly one successor through the ordinary request's rate window.
+const REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS =
+  STALE_AGGREGATE_WAITING_AFTER_MS + REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS;
 
 // Reruns the successor of an accepted update, whichever lane failed to finish
 // it. Safe to repeat: the resolver re-reads the PR and approves only what is
@@ -5881,8 +5898,13 @@ async function requiredCheckReconciliationSnapshot({ github, context, core }) {
 // Decisions blocked only by transient state, and heads whose fixed aggregate was
 // left at "WAITING: refreshing", each old enough to retry (#4782). Everything it
 // reads is in the reconciliation snapshot already, so it costs no API call.
+// The candidates are eligible now; the pending entries are the same two shapes
+// observed inside their retry/stale window, carrying the moment each becomes
+// selectable. A stranded marker's lane may be dead (#5160), so pending work is
+// the pass's own responsibility to retain or hand off — see the caller.
 function transientBlockReevaluationCandidates({ pulls, checkRunsByHead, now }) {
   const candidates = [];
+  const pending = [];
   for (const pull of pulls || []) {
     const headSha = normalizeHeadSha(pull?.head?.sha || pull?.headRefOid);
     const baseRefName = pull?.base?.ref || pull?.baseRefName;
@@ -5918,10 +5940,12 @@ function transientBlockReevaluationCandidates({ pulls, checkRunsByHead, now }) {
       decisionIsTransientOnlyBlock(decision)
     ) {
       const evaluatedAt = decisionEvaluatedAt(decision) ?? 0;
-      if (now - evaluatedAt >= TRANSIENT_BLOCK_RETRY_AFTER_MS) {
+      const eligibleAt = evaluatedAt + TRANSIENT_BLOCK_RETRY_AFTER_MS;
+      if (now >= eligibleAt) {
         candidates.push({ prNumber, headSha, decisionKey: identity.key, since: evaluatedAt });
         continue;
       }
+      pending.push({ prNumber, headSha, eligibleAt });
     }
 
     const aggregate = newestCheckGeneration(
@@ -5938,17 +5962,29 @@ function transientBlockReevaluationCandidates({ pulls, checkRunsByHead, now }) {
       String(aggregate.output?.title || aggregate.title || "").startsWith(AGGREGATE_WAITING_TITLE)
     ) {
       const writtenAt = parseTimestamp(aggregate.completed_at || aggregate.started_at) ?? 0;
-      if (now - writtenAt >= STALE_AGGREGATE_WAITING_AFTER_MS) {
+      const eligibleAt = writtenAt + STALE_AGGREGATE_WAITING_AFTER_MS;
+      if (now >= eligibleAt) {
         candidates.push({ prNumber, headSha, decisionKey: identity.key, since: writtenAt });
+      } else {
+        pending.push({ prNumber, headSha, eligibleAt });
       }
     }
   }
-  return candidates.sort(
-    (left, right) => left.since - right.since || left.prNumber - right.prNumber,
-  );
+  return {
+    candidates: candidates.sort(
+      (left, right) => left.since - right.since || left.prNumber - right.prNumber,
+    ),
+    pending,
+  };
 }
 
-async function listRequiredCheckReevaluationTargets({ github, context, core, now = Date.now() }) {
+async function listRequiredCheckReevaluationTargets({
+  github,
+  context,
+  core,
+  now = Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
   // One GraphQL page carries 100 PRs and each head's current check rollup. This
   // makes every open PR eligible on every sweep without one REST read per head,
   // wall-clock page assignment, or mutable cursor state. A truncated rollup is
@@ -5972,44 +6008,131 @@ async function listRequiredCheckReevaluationTargets({ github, context, core, now
     );
     return [];
   }
-  const stale = requiredCheckReevaluationCandidates({
-    pulls: snapshot.pulls,
-    checkRunsByHead: snapshot.checkRunsByHead,
-    statusesByHead: snapshot.statusesByHead,
-  });
-  const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
-  if (stale.length > targets.length) {
+
+  // Selection always runs against the freshest scan the pass has. A scan that
+  // sees work which is not yet eligible — a transient block inside its retry
+  // window, or a WAITING aggregate a live transaction may still own — retains
+  // it instead of assuming a later pass exists: the request that spawned this
+  // one fired while the marker was fresh, and a platform-cancelled lane
+  // schedules nothing at all (#5160). The pass probes once on a short cadence —
+  // a live lane usually resolves its marker within a minute — then sleeps
+  // straight to each item's maturity point, until the youngest item matures
+  // (selected on that rescan) or resolves (the pending entry simply vanishes),
+  // bounded by REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS so one run cannot
+  // hold the reconciliation group forever. Whatever is still unmet when the
+  // wait ends — pending leftovers, or work past the per-pass caps — is handed
+  // to one successor through the ordinary rate window below.
+  const deadline = now + REQUIRED_CHECK_RECONCILIATION_PENDING_WAIT_MS;
+  let effectiveNow = now;
+  let result = [];
+  let unmet = 0;
+  let stale = [];
+  let transient = [];
+  let probed = false;
+  for (;;) {
+    stale = requiredCheckReevaluationCandidates({
+      pulls: snapshot.pulls,
+      checkRunsByHead: snapshot.checkRunsByHead,
+      statusesByHead: snapshot.statusesByHead,
+    });
+    const targets = stale.slice(0, REQUIRED_CHECK_REEVALUATION_LIMIT);
+    const selected = new Set(targets.map((target) => target.prNumber));
+    const { candidates, pending } = transientBlockReevaluationCandidates({
+      pulls: snapshot.pulls,
+      checkRunsByHead: snapshot.checkRunsByHead,
+      now: effectiveNow,
+    });
+    transient = candidates.filter((candidate) => !selected.has(candidate.prNumber));
+    const transientSlots = Math.max(
+      0,
+      Math.min(TRANSIENT_BLOCK_REEVALUATION_LIMIT, REQUIRED_CHECK_REEVALUATION_LIMIT - targets.length),
+    );
+    const transientTargets = transient
+      .slice(0, transientSlots)
+      .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
+    // A pending item on a head this pass already selected is this run's own
+    // work — the lane it spawns rewrites that marker — so only uncovered heads
+    // can keep the wait alive. And pending work that could never fit the
+    // selection even once mature — every slot is already taken — is unmet now:
+    // waiting would change nothing, so it goes to the successor without one.
+    const coveredHeads = new Set([...targets, ...transientTargets].map((target) => target.headSha));
+    const outstanding = pending.filter((item) => !coveredHeads.has(item.headSha));
+    unmet = stale.length - targets.length + (transient.length - transientTargets.length);
+    result = [...targets, ...transientTargets];
+    if (transientTargets.length >= transientSlots && outstanding.length > 0) {
+      unmet += outstanding.length;
+      break;
+    }
+    if (outstanding.length === 0) {
+      break;
+    }
+    const earliest = Math.min(...outstanding.map((item) => item.eligibleAt));
+    const waitMs = Math.min(
+      earliest - effectiveNow,
+      probed ? Infinity : REQUIRED_CHECK_RECONCILIATION_PENDING_POLL_MS,
+      deadline - effectiveNow,
+    );
+    if (waitMs <= 0) {
+      unmet += outstanding.length;
+      break;
+    }
+    core.notice(
+      `Required-check reconciliation is retaining ${outstanding.length} not-yet-eligible ` +
+        `item(s), the first maturing in ${Math.ceil((earliest - effectiveNow) / 60000)} minute(s); ` +
+        `re-scanning in ${Math.ceil(waitMs / 60000)} minute(s).`,
+    );
+    await sleep(waitMs);
+    effectiveNow += waitMs;
+    probed = true;
+    try {
+      snapshot = await requiredCheckReconciliationSnapshot({ github, context, core });
+    } catch (error) {
+      if (!isReadFailure(error)) {
+        throw error;
+      }
+      core.warning(
+        `Required-check reconciliation could not re-scan its pending work: ${formatError(error)}. ` +
+          "The last good selection still applies, and the work counts as unmet.",
+      );
+      unmet += outstanding.length;
+      break;
+    }
+  }
+  if (stale.length > Math.min(stale.length, REQUIRED_CHECK_REEVALUATION_LIMIT)) {
     core.warning(
-      `Required-check reconciliation deferred ${stale.length - targets.length} stale PR(s); ` +
+      `Required-check reconciliation deferred ${stale.length - REQUIRED_CHECK_REEVALUATION_LIMIT} stale PR(s); ` +
         `each sweep wakes at most ${REQUIRED_CHECK_REEVALUATION_LIMIT}.`,
     );
   }
-  const selected = new Set(targets.map((target) => target.prNumber));
-  const transient = transientBlockReevaluationCandidates({
-    pulls: snapshot.pulls,
-    checkRunsByHead: snapshot.checkRunsByHead,
-    now,
-  }).filter((candidate) => !selected.has(candidate.prNumber));
-  const transientSlots = Math.max(
-    0,
-    Math.min(TRANSIENT_BLOCK_REEVALUATION_LIMIT, REQUIRED_CHECK_REEVALUATION_LIMIT - targets.length),
-  );
-  const transientTargets = transient
-    .slice(0, transientSlots)
-    .map(({ prNumber, headSha, decisionKey }) => ({ prNumber, headSha, decisionKey }));
-  if (transient.length > transientTargets.length) {
+  const selectedKeys = new Set(result.map((target) => target.decisionKey));
+  const deferredTransient = transient.filter((candidate) => !selectedKeys.has(candidate.decisionKey));
+  if (deferredTransient.length > 0) {
     core.warning(
-      `Required-check reconciliation deferred ${transient.length - transientTargets.length} ` +
+      `Required-check reconciliation deferred ${deferredTransient.length} ` +
         "transiently blocked PR(s) to a later sweep.",
     );
   }
   core.notice(
     `Required-check reconciliation read ${snapshot.pulls.length} PR(s) in ` +
       `${snapshot.pages} GraphQL page(s), found ${stale.length} stale decision(s) and ` +
-      `${transient.length} transient block(s), and selected ` +
-      `${targets.length + transientTargets.length}.`,
+      `${transient.length} transient block(s), and selected ${result.length}.`,
   );
-  return [...targets, ...transientTargets];
+  // One successor, through the same five-minute window an ordinary run uses,
+  // whenever this pass saw work at all:
+  //
+  // - Unmet work — pending leftovers, or more than the caps — is owed a wakeup,
+  //   because nothing else, not the lane that died and not the schedule, is
+  //   certain to provide one.
+  // - Selected work is owed one too: applying it happens in apply-gate, a
+  //   queued job the platform can still cancel (#5160). The successor sees the
+  //   fresh WAITING markers while they are young, retains them through the wait
+  //   above, and either watches them resolve under a healthy apply lane or
+  //   re-applies them itself once the lease lapses. When nothing died it finds
+  //   an empty scan and asks for nothing — the handoff costs one pass.
+  if (unmet > 0 || result.length > 0) {
+    await requestRequiredCheckReconciliation({ github, context, core, now: effectiveNow, forPass: true });
+  }
+  return result;
 }
 
 function isRequiredCheckReconciliationDispatch(context) {
@@ -6027,24 +6150,34 @@ function isRequiredCheckReconciliationDispatch(context) {
 //
 // Two guards keep this from fanning out:
 //
-// - A pass never requests a pass. Schedule and repository_dispatch runs return
-//   before any read. The runs a pass causes can request one, but only through
-//   the rate window below, so the total stays bounded however many there are.
+// - A pass never requests a pass — with one exception. Schedule and
+//   repository_dispatch runs return before any read UNLESS the caller is the
+//   pass itself handing off work it could not finish (forPass): work a stranded
+//   transaction leaves behind is owed a wakeup, and only the pass knows it is
+//   owed (#5160). The window below still binds the handoff against a sibling
+//   pass that is queued or running, so a chain advances one link per completed
+//   pass — never a queue of them.
 // - The rate window. The marker is the creation time of this workflow's newest
-//   repository_dispatch run. Every requested pass is such a run, so a pass that
-//   selected nothing is recorded too, and GitHub stores the marker: there is no
-//   variable, ref, or check run to write or leave stale. It costs one REST read
-//   of one result, and filtering on the event keeps the dozens of ordinary runs
-//   an hour out of that result. Two runs that read before either dispatch is
-//   visible can both request. The shared group then holds one running pass and
-//   one pending pass, and a newer pending pass replaces the older one, so the
-//   race costs at most one extra scan.
+//   repository_dispatch run — the caller's own run excluded, since a pass
+//   triggered by a dispatch would otherwise always see itself inside the
+//   window and could never hand off. Completed predecessors are excluded for
+//   the handoff only: a finished pass already spent its coverage, which is why
+//   the next one is running at all. The listing is one short page rather
+//   than the single newest run so the exclusion cannot hide a sibling pass
+//   that is still holding the window. Every requested pass is such a run, so
+//   a pass that selected nothing is recorded too, and GitHub stores the
+//   marker: there is no variable, ref, or check run to write or leave stale.
+//   It costs one REST read, and filtering on the event keeps the dozens of
+//   ordinary runs an hour out of that result. Two runs that read before
+//   either dispatch is visible can both request. The shared group then holds
+//   one running pass and one pending pass, and a newer pending pass replaces
+//   the older one, so the race costs at most one extra scan.
 //
 // Every failure falls back to not dispatching, which leaves the schedule as the
 // backstop. That is the safe direction. A missed request delays a green PR, but
 // an unbounded one could load the queue the reconciliation is meant to drain.
-async function requestRequiredCheckReconciliation({ github, context, core, now = Date.now() }) {
-  if (context.eventName === "schedule" || context.eventName === "repository_dispatch") {
+async function requestRequiredCheckReconciliation({ github, context, core, now = Date.now(), forPass = false }) {
+  if (!forPass && (context.eventName === "schedule" || context.eventName === "repository_dispatch")) {
     core.info(`A ${context.eventName} run does not request required-check reconciliation.`);
     return { requested: false, reason: "pass" };
   }
@@ -6054,6 +6187,9 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
   const cutoff = Math.floor((now - REQUIRED_CHECK_RECONCILIATION_INTERVAL_MS) / 1000) * 1000;
   let runs;
   try {
+    // Newest-first, one short page: the window can hold only as many dispatch
+    // runs as its length allows, and the caller's own run — excluded below —
+    // is usually the newest of them, so the page must reach past it (#5160).
     const listed = await retryRead("could not list recent required-check reconciliation runs", () =>
       github.rest.actions.listWorkflowRuns({
         owner,
@@ -6062,7 +6198,7 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
         event: "repository_dispatch",
         created: `>=${new Date(cutoff).toISOString().replace(/\.\d{3}Z$/, "Z")}`,
         exclude_pull_requests: true,
-        per_page: 1,
+        per_page: 10,
       }),
     );
     runs = listed?.data?.workflow_runs;
@@ -6079,7 +6215,21 @@ async function requestRequiredCheckReconciliation({ github, context, core, now =
   // The server applies the created filter, and the listing is newest first.
   // Checking the time again here keeps the window correct if the filter is ever
   // ignored. An unreadable time counts as recent, so it cannot cause a dispatch.
-  const recent = runs.find((run) => !(Date.parse(run?.created_at) < cutoff));
+  // The caller's own run is not a marker: for a dispatched pass it is always
+  // inside the window, and counting it would deadlock every follow-up request.
+  // For that same handoff a COMPLETED predecessor is not a marker either: pass
+  // A's run sits in successor B's window having already spent its coverage, and
+  // counting it would strand B's leftovers (#5160). Only a sibling still queued
+  // or running can cover them, so only those bind a pass. Ordinary requests
+  // keep counting completed passes — the window is their throttle, and a pass
+  // that already ran is exactly the reason not to ask for another one yet.
+  const self = String(context.runId || "");
+  const recent = runs.find(
+    (run) =>
+      String(run?.id) !== self &&
+      !(Date.parse(run?.created_at) < cutoff) &&
+      !(forPass && String(run?.status) === "completed"),
+  );
   if (recent) {
     core.info(
       `Required-check reconciliation run ${recent.id} was created at ${recent.created_at}; ` +
@@ -6117,7 +6267,7 @@ async function resolveTargets({
   reconciliationNowMs = Date.now(),
 }) {
   if (context.eventName === "schedule") {
-    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs, sleep });
   }
   if (isRequiredCheckReconciliationDispatch(context)) {
     const source = context.payload?.client_payload || {};
@@ -6127,7 +6277,7 @@ async function resolveTargets({
     if (/^[1-9][0-9]*$/.test(String(source.source_run_id)) && /^[a-z_]+$/.test(String(source.source_event))) {
       core.info(`Required-check reconciliation requested by ${source.source_event} run ${source.source_run_id}.`);
     }
-    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs });
+    return listRequiredCheckReevaluationTargets({ github, context, core, now: reconciliationNowMs, sleep });
   }
   const numbers = [];
   const payload = context.payload;

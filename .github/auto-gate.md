@@ -519,10 +519,9 @@ bypass because that non-session path updates the release commit directly.
 Every run follows this dependency graph:
 
 ```text
-auto-gate (resolve event heads)
-  -> invalidate-gate (ungrouped, including retries)
-    -> apply-gate (one reusable-workflow call per invalidated head)
-      -> aggregate transaction (head-serialized evaluation/report/merge)
+auto-gate (resolve event heads, then invalidate each selected aggregate)
+  -> apply-gate (one reusable-workflow call per invalidated head)
+    -> aggregate transaction (head-serialized evaluation/report/merge)
 ```
 
 A concurrency group keeps at most one running and one pending run; a newer
@@ -536,9 +535,26 @@ review events coalesce per PR; check-suite, status, and workflow-run events
 coalesce per named commit; the remaining pull_request_target actions coalesce
 per (PR, payload head); synchronize stays keyed to its exact (before, after)
 transition and workflow_dispatch to its (PR, previous head), because those two
-carry coverage no later run reproduces. `cancel-in-progress` is `false`
-everywhere, so an active resolve, invalidation, or transaction always finishes
-uninterrupted.
+carry coverage no later run reproduces.
+
+`cancel-in-progress` is `false` everywhere, so a queued run can never interrupt
+an active transaction — but it governs only pending-run replacement. The
+platform itself can cancel jobs inside an ACTIVE run: during GitHub's
+2026-10-05 hosted-runner incident, jobs queued inside running transactions for
+~15 minutes were cancelled without executing a step, and runs that had already
+resolved their coverage died before invalidating it (#5160). Selection and
+invalidation therefore share one job: a run whose evaluate step committed has
+no queued job boundary left between its selected heads and the WAITING
+aggregate marker that makes them recoverable. A head left at that marker is
+re-evaluated once it outlives a live transaction's 15-minute lease — and a pass
+that sees the marker while it is still young retains it, re-scanning inside its
+own run until it matures or resolves. A pass that saw work at all requests one
+rate-windowed successor — leftovers are owed the wakeup, and selected work is
+applied by apply-gate, a queued job the platform can still cancel after the
+pass ends. Healing needs no human action and never waits on the schedule's real
+delivery cadence. Heads a mid-job cancellation never reached
+stand where an undelivered event leaves them; the pass's stale-decision
+coverage is the backstop for both.
 
 Inside each surviving run nothing changed: neither the resolver nor
 invalidation waits on a grouped job, every event still invalidates before any
@@ -594,7 +610,10 @@ synchronization reevaluates both the new head and the previous head because the
 set of associated PRs changed for both commits. After a successful merge, the
 same transaction explicitly makes the old-head aggregate non-green; it does not
 depend on a `closed` event that GitHub may suppress for token-authenticated
-writes.
+writes. A transaction that dies between invalidation and application — a
+platform cancellation, not a decision — leaves the head at that non-green
+marker; the reconciliation pass below re-evaluates it once it outlives a live
+transaction's lease.
 
 GitHub suppresses `check_suite` recursion for suites created by Actions. The
 required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
@@ -614,13 +633,24 @@ Auto Gate run therefore ends by requesting a pass: it sends one
 `repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
 the same pass the schedule runs. Two guards bound this:
 
-- **No recursion.** A pass never requests a pass. The request step skips
-  `schedule` and `repository_dispatch` runs, and the helper refuses them before
-  any read. Runs that a pass causes, such as update-branch recovery dispatches,
-  can request one, but only through the rate window.
+- **No open-ended recursion.** A pass requests a pass only as a handoff: when
+  it saw work at all — leftovers its bounded wait could not finish or the caps
+  deferred, and the work it did select, whose application in apply-gate is a
+  queued job the platform can still cancel — it sends one dispatch through the
+  rate window. Two shapes in that window cannot cover the leftover work and so
+  cannot hold it: the pass's own run (a dispatched pass would otherwise always
+  count itself) and completed predecessor passes (a finished A is why B is
+  running at all — its coverage was already spent). A sibling still queued or
+  running does bind. A pass that scans an empty repository asks for nothing, so
+  every chain ends. The request step skips `schedule` and `repository_dispatch`
+  runs, and the helper refuses those events on the ordinary path, so no pass
+  ever starts the chain on the public lane. Runs that a pass causes, such as
+  update-branch recovery dispatches, can request one, but only through the
+  rate window.
 - **At most one request per five minutes.** The marker is the creation time of
   Auto Gate's newest `repository_dispatch` run, read with one REST request
-  (`event=repository_dispatch`, `created>=` the window start, `per_page=1`).
+  (`event=repository_dispatch`, `created>=` the window start, one short page so
+  the caller's own run — excluded client-side — cannot hide a sibling).
   Every requested pass is such a run, so a pass that selected nothing still
   counts. GitHub stores the marker, so the gate writes no variable, ref, or
   check run. A failed or unreadable read sends nothing, and the schedule
@@ -642,7 +672,10 @@ drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
 skipped fail-closed rather than treated as complete.
 
 The scan costs `ceil(N / 100)` GraphQL requests per pass. The rate window holds
-dispatched passes to about 12 an hour, and scheduled passes add a few more.
+ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
+by pass completion instead — one running pass plus one pending successor in the
+shared group, each link capped at ten evaluations — and a scheduled pass adds a
+few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
 threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
 does no per-head REST reads except when a queued check run faces a dated
@@ -680,6 +713,23 @@ the decision stamp, so one PR costs at most one evaluation per ten minutes,
 however long the state lasts. Transient retries take only the slots that
 PR Validation wakes leave under the pass's ten-evaluation cap, and at most five.
 The oldest go first, so a backlog drains instead of starving.
+
+A pass does not leave either shape to luck when it sees them too young. The
+request that spawned the pass fired while the marker or decision was fresh, and
+a platform-cancelled lane schedules nothing at all, so the pass retains the
+pending work itself (#5160): it re-scans inside its own run — one early probe a
+minute in, then straight to each item's maturity point instead of a scan a
+minute — until each item matures and is selected, or resolves because its live
+lane finished first. The wait is bounded at sixteen minutes. A pass then hands
+exactly one successor dispatch through the same five-minute window whenever it
+saw work at all: unmet leftovers — still-pending items, or work the caps
+deferred — are owed the wakeup, and *selected* work is owed one too, because
+applying it is apply-gate's job and the platform can cancel that queued job
+after the pass ends. The successor sees the fresh markers young, retains them
+through the same wait, and re-applies them if the lane died; when nothing died
+it scans an empty repository and asks for nothing, so the handoff costs one
+quiet pass. A stranded head is therefore re-evaluated at its fifteen-minute
+boundary plus one probe, not at the schedule's real delivery cadence.
 
 **A head with no PR Validation run at all gets one dispatched (#4581).**
 Reconciliation wakes a decision when Build or Lint completes, so it cannot help
