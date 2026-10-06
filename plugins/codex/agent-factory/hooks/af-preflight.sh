@@ -8,7 +8,7 @@ set -uo pipefail
 if ! command -v af >/dev/null 2>&1; then
 	echo "af is not installed. Install it with:"
 	echo "  curl -fsSL https://raw.githubusercontent.com/sachiniyer/agent-factory/master/install.sh | sh"
-elif version=$(af version 2>/dev/null | head -n 1) && [ -n "$version" ]; then
+elif version=$(af version 2>/dev/null | head -n 1 || true) && [ -n "$version" ]; then
 	# `af version` can print a second "an upgrade is available" line; the
 	# hook only wants the version itself.
 	echo "${version} is available."
