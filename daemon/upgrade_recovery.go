@@ -147,6 +147,19 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	// supervisor-ready transaction whose active.json is on disk but whose daemon
 	// has not answered yet, so the interlock must live here.
 	//
+	// The Load check and the destructive hand-off are held under the SAME
+	// preparation lock Prepare takes, so a successor Prepare cannot publish
+	// active.json between them. Without the lock this was a TOCTOU: the Load
+	// could return ErrNoActiveTransaction and a Prepare could land its own
+	// active.json before adoptAfterUpgradeCommitFn ran, handing the home to a
+	// fresh daemon that defers to the new journal and leaves it daemonless. The
+	// recovery actor's own recovery lease is already released (its defer ran
+	// before the actor returned), so the preparation lock is the only
+	// serialisation point left. The lock is best-effort: a failure to acquire it
+	// is an I/O error on a broken or networked home, not a reason to skip a
+	// hand-off the commit signal already authorised, so the body runs unlocked
+	// rather than stranding the candidate (the regression #5165 removed).
+	//
 	// Skip the hand-off ONLY when a *different* active transaction is present.
 	// ErrNoActiveTransaction is the clean case (our commit removed the journal
 	// and no successor started), and any other load failure is treated as
@@ -157,16 +170,30 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	// nothing would re-invoke adoptAfterUpgradeCommit. Our own id (the journal
 	// Cleanup just removed, racing this read) falls through: the committed
 	// candidate is the right thing to hand off.
-	if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
-		if loadedID := txn.Journal().ID; loadedID != invocation.TransactionID {
-			return nil // a different active transaction owns the home; do not hand off
+	handoffWithInterlock := func() error {
+		if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
+			if loadedID := txn.Journal().ID; loadedID != invocation.TransactionID {
+				return nil // a different active transaction owns the home; do not hand off
+			}
+		} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+			// Transient load failure: the commit signal is authoritative, so do not
+			// block the hand-off on a read this call does not depend on.
 		}
-	} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
-		// Transient load failure: the commit signal is authoritative, so do not
-		// block the hand-off on a read this call does not depend on.
+		return adoptAfterUpgradeCommitFn(result.JournalID, result.ExecutablePath)
 	}
-	if err := adoptAfterUpgradeCommitFn(result.JournalID, result.ExecutablePath); err != nil {
-		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
+	handoffErr := upgradetxn.WithPrepareLock(invocation.HomeDir, handoffWithInterlock)
+	if errors.Is(handoffErr, upgradetxn.ErrPrepareLockUnavailable) {
+		// The preparation lock could not be taken (a broken or symlinked upgrade
+		// root, a transient I/O failure on a networked home). The commit signal
+		// already authorised arming the post-upgrade daemon, and re-gating the
+		// irreversible hand-off on this transient read would reintroduce the
+		// stranded-candidate regression the original fix removed — so run the
+		// body unlocked rather than stranding the candidate.
+		log.WarningLog.Printf("upgrade committed but the preparation lock could not be taken; arming the post-upgrade daemon without the active-journal interlock: %v", handoffErr)
+		handoffErr = handoffWithInterlock()
+	}
+	if handoffErr != nil {
+		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", handoffErr)
 	}
 	return nil
 }

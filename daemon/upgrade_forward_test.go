@@ -700,3 +700,131 @@ func TestRunUpgradeRecoveryActor_PreservesActiveJournalInterlock(t *testing.T) {
 		})
 	}
 }
+
+// TestRunUpgradeRecoveryActor_HoldsPrepareLockAcrossHandOff proves the active-journal
+// interlock is not a TOCTOU: the Load that confirms no other active transaction owns the
+// home and the destructive adoptAfterUpgradeCommit that arms the post-upgrade daemon run
+// under the SAME preparation lock Prepare takes, so a concurrent Prepare cannot publish
+// its own active.json between them. The adopt is held open while a successor Prepare
+// races in; that Prepare must block until the hand-off releases the lock, proving the
+// two operations are serialized against transaction publication rather than read-then-act
+// on a journal a successor can land in the gap.
+func TestRunUpgradeRecoveryActor_HoldsPrepareLockAcrossHandOff(t *testing.T) {
+	home := stubForwardEnv(t)
+	exe := filepath.Join(t.TempDir(), "af")
+	if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+		t.Fatalf("write fake previous binary: %v", err)
+	}
+	if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+		ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+		FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+		Daemon: upgradetxn.DaemonSnapshot{
+			WasRunning: true, BootID: "boot-1",
+			Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+		},
+		RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobSystemd,
+			Name:     "agent-factory-upgrade-recovery-txn-1.service",
+			UnitPath: filepath.Join(t.TempDir(), "agent-factory-upgrade-recovery-txn-1.service")},
+	}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	// The actor commits: lease.Cleanup removed our active.json, and the commit
+	// signal authorises the hand-off.
+	runRecoveryActorFn = func(_ context.Context, _ upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) (upgradetxn.RecoveryActorResult, error) {
+		_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+		return upgradetxn.RecoveryActorResult{Committed: true, JournalID: "txn-1", ExecutablePath: exe}, nil
+	}
+
+	// Block the hand-off inside the prepare.lock so a concurrent Prepare can be
+	// observed racing it. adoptStarted is closed when the hand-off is running
+	// (inside the lock); adoptRelease gates its completion so the test controls
+	// when the lock is dropped.
+	adoptStarted := make(chan struct{})
+	adoptRelease := make(chan struct{})
+	adoptAfterUpgradeCommitFn = func(string, string) error {
+		close(adoptStarted)
+		<-adoptRelease
+		return nil
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- RunUpgradeRecoveryActor(context.Background(),
+			upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"})
+	}()
+
+	// Wait until the hand-off is running inside the lock before probing it.
+	<-adoptStarted
+
+	// Deterministically prove the hand-off is holding the preparation lock: a
+	// non-blocking flock on prepare.lock must report EWOULDBLOCK while the
+	// hand-off is inside adoptAfterUpgradeCommit. A read-then-act without the
+	// lock would have dropped it by now.
+	lockPath := filepath.Join(home, "upgrade", "prepare.lock")
+	probe, err := os.OpenFile(lockPath, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open prepare.lock to probe: %v", err)
+	}
+	probeErr := syscall.Flock(int(probe.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	_ = probe.Close()
+	if probeErr == nil {
+		t.Fatalf("the preparation lock was not held while the hand-off was running; the interlock did not serialize Prepare")
+	}
+
+	// A successor Prepare on the same home must block on the preparation lock the
+	// hand-off is holding, so its active.json cannot land between the Load and the
+	// adopt — the TOCTOU the interlock closes. Confirm it has not published yet.
+	successorExe := filepath.Join(t.TempDir(), "af-other")
+	if err := os.WriteFile(successorExe, []byte("previous-binary-other"), 0o755); err != nil {
+		t.Fatalf("write successor previous binary: %v", err)
+	}
+	prepareDone := make(chan error, 1)
+	go func() {
+		_, err := upgradetxn.Prepare(upgradetxn.Plan{
+			ID: "txn-other", HomeDir: home, ExecutablePath: successorExe,
+			FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate-other"),
+			Daemon: upgradetxn.DaemonSnapshot{
+				WasRunning: true, BootID: "boot-other",
+				Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+			},
+			RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobSystemd,
+				Name:     "agent-factory-upgrade-recovery-txn-other.service",
+				UnitPath: filepath.Join(t.TempDir(), "agent-factory-upgrade-recovery-txn-other.service")},
+		})
+		prepareDone <- err
+	}()
+
+	select {
+	case err := <-prepareDone:
+		t.Fatalf("successor Prepare completed while the hand-off held the preparation lock; the interlock did not serialize Prepare: %v", err)
+	case <-time.After(200 * time.Millisecond):
+		// The Prepare is blocked on the lock the hand-off holds — the interlock holds.
+	}
+
+	// Releasing the adopt lets the hand-off (and thus the lock) drop. The
+	// successor Prepare must then complete and publish its own transaction.
+	close(adoptRelease)
+
+	select {
+	case err := <-prepareDone:
+		if err != nil {
+			t.Fatalf("successor Prepare failed after the lock was released: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("successor Prepare did not complete after the lock was released")
+	}
+
+	// The home now belongs to the successor: the Load the hand-off serialized
+	// against must see the successor's transaction, not our committed one.
+	txn, err := upgradetxn.Load(home)
+	if err != nil {
+		t.Fatalf("Load after successor Prepare: %v", err)
+	}
+	if got := txn.Journal().ID; got != "txn-other" {
+		t.Fatalf("after the hand-off the active journal is %q, want the successor's txn-other", got)
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+	}
+}
