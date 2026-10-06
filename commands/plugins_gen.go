@@ -86,7 +86,7 @@ var pluginReleaseDigests = []string{
 	"acae86681aa0448958ad9e9cd4a6c7ffe06e59c5e6331aad52d6606e125daa3a", // 3.21 — prune ships its strictly read-only dry run first; no --apply yet (#5136)
 	"8d6e2863cbfc360a858b43c07376b0c7fa82dd6ecb9dc917dec21c39d505ff96", // 3.22 — prune's dry-run claim narrows to "af writes nothing" (#5136)
 	"787978c996f9632b42e5bfd4dfc78a2adabcbd0b81c77f122e83154ec38edea1", // 3.23 — shared scope rule names both cross-project opt-ins (#5136)
-	"ca10714bc001c83f445fb003d5beb39990db2784c1cfe2abbe08a652191cb636", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
+	"c0820d9b3cef409f0807375d581bac487a74ca66f96be761d307c9598215dba6", // 3.24 — Codex SessionStart preflight reports a present-but-unexecutable af instead of aborting silently (no stdout/stderr) before any echo
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it
@@ -358,7 +358,12 @@ func codexHooks() map[string]any {
 // bash's own exec-failure diagnostic — leaving the hook with no stdout, no
 // stderr, and only an opaque non-zero exit, which is not a report. The version
 // capture sits inside an elif condition, so the failing pipeline just falls
-// through to the else branch instead.
+// through to the else branch instead. The `|| true` after the pipeline masks the
+// SIGPIPE that `head -n 1` sends a healthy `af version` that prints a second
+// (upgrade-notice) line: under pipefail that SIGPIPE would otherwise make the
+// pipeline exit non-zero and drop a healthy af into the broken branch. A
+// present-but-unexecutable af produces no stdout, so version stays empty and the
+// elif's `[ -n "$version" ]` still falls through to the else branch.
 func afPreflightHook() string {
 	return "#!/usr/bin/env bash\n" +
 		"# " + pluginGenBanner + "\n" +
@@ -370,7 +375,7 @@ func afPreflightHook() string {
 		"if ! command -v af >/dev/null 2>&1; then\n" +
 		"\techo \"af is not installed. Install it with:\"\n" +
 		"\techo \"  " + session.AfInstallCommand + "\"\n" +
-		"elif version=$(af version 2>/dev/null | head -n 1) && [ -n \"$version\" ]; then\n" +
+		"elif version=$(af version 2>/dev/null | head -n 1 || true) && [ -n \"$version\" ]; then\n" +
 		"\t# `af version` can print a second \"an upgrade is available\" line; the\n" +
 		"\t# hook only wants the version itself.\n" +
 		"\techo \"${version} is available.\"\n" +
