@@ -177,6 +177,25 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 //     or `claude<newline>`) is included: appending after it starts a new
 //     statement, so the flag runs on its own.
 //
+//   - a trailing `#` shell comment that is the final content on the last line,
+//     which swallows the appended flag whole: everything after a `#` on that line
+//     is a comment, so `claude # use the default profile` becomes
+//     `claude # use the default profile --plugin-dir '…'` and claude starts
+//     without the af plugin. A trailing newline after the comment starts a new
+//     statement that carries the flag, which the control-operator case above
+//     already warns about, so the comment case fires only when the comment is the
+//     last content on the last line.
+//
+//   - a shell interpreter's `-c` flag (e.g. `sh -c 'claude'`), which makes the
+//     agent the script and the appended flag a positional to the interpreter,
+//     not an argument to the agent — the agent inside the script never sees it.
+//
+//   - a here-document redirect (`<<`/`<<-`) whose body is the last content on the
+//     last line: the appended flag lands inside the here-document (or breaks the
+//     closing delimiter, which makes the body consume it), so the agent does not
+//     receive it. A trailing newline after the closing delimiter is already a
+//     control operator; this fires only when the heredoc is the final content.
+//
 // Like warnExecSeparator it is a WARNING, never a refusal: program_overrides is
 // owner config, and af does not rewrite the value. It applies only to keys
 // whose values reach injectSystemPrompt as the resolved agent command
@@ -215,6 +234,25 @@ func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
 				" contains a shell control operator (|, &&, ||, ;, &), so af's appended agent-specific flag " +
 				"(e.g. claude's `--plugin-dir`) would be routed to the wrong command rather than to the agent. " +
 				"Use a single command for the agent. This is a warning, not an error"})
+		case sessionenv.CommandHasTrailingComment(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "trailing-comment", body: "" +
+				" ends with a `#` shell comment, and af appends its agent-specific flag (e.g. claude's " +
+				"`--plugin-dir`) to the end of this value, so the flag lands inside the comment and is " +
+				"discarded — the agent would start without af's guidance. Remove the comment or move it to " +
+				"its own line above the command. This is a warning, not an error"})
+		case sessionenv.CommandInvokesAgentViaInterpreter(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "interpreter-wrapper", body: "" +
+				" runs the agent through a shell interpreter's `-c` flag (e.g. `sh -c 'claude'`), so af's " +
+				"appended agent-specific flag (e.g. claude's `--plugin-dir`) is passed to the interpreter " +
+				"as a positional argument, not to the agent inside the script — the agent starts without af's " +
+				"guidance. Run the agent directly, not under `sh -c`. This is a warning, not an error"})
+		case sessionenv.CommandHasHeredoc(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "heredoc", body: "" +
+				" uses a here-document redirect (`<<`), and af appends its agent-specific flag (e.g. claude's " +
+				"`--plugin-dir`) to the end of this value, so the flag lands inside the here-document body (or " +
+				"breaks the closing delimiter, which makes the body consume it) and never reaches the agent. " +
+				"Remove the here-document, or move the flag the agent needs into the command before the " +
+				"here-document. This is a warning, not an error"})
 		}
 	}
 	sort.Slice(affected, func(i, j int) bool {
@@ -271,8 +309,23 @@ var appendLaunchFlagAgents = map[string]bool{
 // and `program_overrides.codex = "codex --"` runs codex, whose seam is a file not
 // an appended flag), so the key alone is not enough: the resolved value must enter
 // a flag-appending branch for the warning to apply.
+//
+// devin is the one flag-appending agent that can already carry its flag: the
+// workspace-trust flag is appended only when the command does not already set it
+// (tmux.EnsureDevinWorkspaceTrustSuppressed returns the command unchanged when it
+// does). A devin command that already carries --respect-workspace-trust gets no
+// appended flag, so a trailing `--` or control operator in it cannot misroute
+// one — warning about it would be a false positive (#5167 review: "Exclude Devin
+// commands that already set its trust flag").
 func commandAppendsLaunchFlag(resolved string) bool {
-	return appendLaunchFlagAgents[tmux.DetectAgentFromCommand(resolved)]
+	agent := tmux.DetectAgentFromCommand(resolved)
+	if !appendLaunchFlagAgents[agent] {
+		return false
+	}
+	if agent == tmux.ProgramDevin && tmux.EnsureDevinWorkspaceTrustSuppressed(resolved) == resolved {
+		return false
+	}
+	return true
 }
 
 // warnShellValueOnce logs one warning for (lead, kind, value) if it has not

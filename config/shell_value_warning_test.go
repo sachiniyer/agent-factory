@@ -410,6 +410,18 @@ func assertControlOperatorWarning(t *testing.T, out, key string) {
 		"a value that is the operator's config must not read as a rejection")
 }
 
+// assertTrailingCommentWarning asserts that out carries the load-time warning for
+// a trailing `#` shell comment that swallows the appended flag.
+func assertTrailingCommentWarning(t *testing.T, out, key string) {
+	t.Helper()
+	require.Contains(t, out, key, "the warning must name the key the operator has to edit")
+	require.Contains(t, out, "`#` shell comment", "the warning must name the shape it found")
+	require.Contains(t, out, "lands inside the comment and is discarded",
+		"the warning must explain WHY a trailing comment loses the injected flag — that is the bug")
+	require.Contains(t, out, "warning, not an error",
+		"a value that is the operator's config must not read as a rejection")
+}
+
 // TestLaunchFlagMismap_TrailingTerminator is the bug report's headline case: a
 // program_overrides.claude ending in a lone `--` silently demotes af's appended
 // --plugin-dir to a positional, so claude starts without the af plugin and the
@@ -509,6 +521,16 @@ func TestLaunchFlagMismap_OnlyFlagAppendingAgentsWarn(t *testing.T) {
 		require.NoError(t, err)
 		assertControlOperatorWarning(t, warnings.String(), "program_overrides.aider")
 	})
+	// devin appends --respect-workspace-trust (when the command does not already
+	// carry it): a control operator warns; a command that already carries the flag
+	// appends nothing, so it cannot misroute one (covered by
+	// TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn).
+	t.Run("devin control operator", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\ndevin = \"devin | tee /tmp/log\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertControlOperatorWarning(t, warnings.String(), "program_overrides.devin")
+	})
 }
 
 // TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn pins the other half of
@@ -524,15 +546,17 @@ func TestLaunchFlagMismap_OnlyFlagAppendingAgentsWarn(t *testing.T) {
 // flag-injecting resolved agent").
 func TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn(t *testing.T) {
 	for name, body := range map[string]string{
-		"codex trailing terminator (file seam)":      "[program_overrides]\ncodex = \"codex --\"\n",
-		"gemini trailing terminator (file seam)":     "[program_overrides]\ngemini = \"gemini --\"\n",
-		"amp trailing terminator (file seam)":        "[program_overrides]\namp = \"amp --\"\n",
-		"codex control operator (file seam)":         "[program_overrides]\ncodex = \"codex | tee /tmp/log\"\n",
-		"claude key resolved to bash (no injection)": "[program_overrides]\nclaude = \"bash --\"\n",
-		"claude key resolved to bash control op":     "[program_overrides]\nclaude = \"bash | tee /tmp/log\"\n",
-		"glued semicolon detects no agent":           "[program_overrides]\nclaude = \"claude;\"\n",
-		"glued newline detects no agent":             "[program_overrides]\nclaude = \"claude\\n\"\n",
-		"subshell detects no agent":                  "[program_overrides]\nclaude = \"(claude --resume)\"\n",
+		"codex trailing terminator (file seam)":                                       "[program_overrides]\ncodex = \"codex --\"\n",
+		"gemini trailing terminator (file seam)":                                      "[program_overrides]\ngemini = \"gemini --\"\n",
+		"amp trailing terminator (file seam)":                                         "[program_overrides]\namp = \"amp --\"\n",
+		"codex control operator (file seam)":                                          "[program_overrides]\ncodex = \"codex | tee /tmp/log\"\n",
+		"claude key resolved to bash (no injection)":                                  "[program_overrides]\nclaude = \"bash --\"\n",
+		"claude key resolved to bash control op":                                      "[program_overrides]\nclaude = \"bash | tee /tmp/log\"\n",
+		"glued semicolon detects no agent":                                            "[program_overrides]\nclaude = \"claude;\"\n",
+		"glued newline detects no agent":                                              "[program_overrides]\nclaude = \"claude\\n\"\n",
+		"subshell detects no agent":                                                   "[program_overrides]\nclaude = \"(claude --resume)\"\n",
+		"devin already carrying its trust flag does not append one":                   "[program_overrides]\ndevin = \"devin --respect-workspace-trust false | tee /tmp/devin.log\"\n",
+		"devin already carrying its trust flag with a terminator does not append one": "[program_overrides]\ndevin = \"devin --respect-workspace-trust false --\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			warnings := captureLog(t, &aflog.WarningLog)
@@ -560,6 +584,20 @@ func TestLaunchFlagMismap_ControlOperator(t *testing.T) {
 		"or":   "claude foo || claude bar",
 		"semi": "claude --resume; echo done",
 		"bg":   "claude &",
+		// A trailing operator that is a parse error on its own, but that
+		// appending a word completes: `claude |` fails to parse, but
+		// injectSystemPrompt appends `--plugin-dir`, so `claude | --plugin-dir …`
+		// is valid shell and the flag runs as the right side of the pipe rather than
+		// as a flag to claude. The same applies to a trailing `&&`/`||` and an
+		// incomplete redirection (`>`, `<`, `>>`): appending supplies the missing
+		// second command or the redirect target (#5167 review: "Warn when appending
+		// repairs an incomplete shell operator").
+		"trailing pipe":            "claude |",
+		"trailing and":             "claude &&",
+		"trailing or":              "claude ||",
+		"trailing redirect out":    "claude >",
+		"trailing redirect in":     "claude <",
+		"trailing append redirect": "claude >>",
 	} {
 		t.Run(name, func(t *testing.T) {
 			warnings := captureLog(t, &aflog.WarningLog)
@@ -568,6 +606,71 @@ func TestLaunchFlagMismap_ControlOperator(t *testing.T) {
 			assertControlOperatorWarning(t, warnings.String(), "program_overrides.claude")
 		})
 	}
+}
+
+// TestLaunchFlagMismap_TrailingComment pins that a trailing `#` shell comment
+// swallows the flag injectSystemPrompt appends to the END of the value: everything
+// after a `#` on that line is a comment, so `claude # use the default profile`
+// becomes `claude # use the default profile --plugin-dir '…'` and the flag is
+// discarded (#5167 review: "Warn when a trailing shell comment swallows injected
+// flags"). A `#` glued to a word (`claude#foo`) or inside quotes (`claude 'a#b'`)
+// is not a comment, and a comment that is NOT the last thing on the line — a
+// trailing newline starts a new statement that carries the flag, which the
+// control-operator case already warns about — does not trip this case.
+func TestLaunchFlagMismap_TrailingComment(t *testing.T) {
+	for name, value := range map[string]string{
+		"trailing comment":                      "claude # use the default profile",
+		"trailing comment after a flag":         "claude --model opus # use the default profile",
+		"trailing comment after exec prefix":    "exec -- claude # use the default profile",
+		"trailing comment with trailing spaces": "claude # use the default profile   ",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			assertTrailingCommentWarning(t, warnings.String(), "program_overrides.claude")
+		})
+	}
+
+	// A `#` glued to a word or inside quotes is not a comment, and a comment that
+	// is not the last content on the last line does not swallow the flag.
+	t.Run("glued hash is not a comment", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML("claude#foo")+"\n"), "global.toml")
+		require.NoError(t, err)
+		assert.NotContains(t, warnings.String(), "`#` shell comment",
+			"a `#` glued to a word is part of the word, not a comment")
+	})
+	t.Run("quoted hash is not a comment", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML("claude 'a#b'")+"\n"), "global.toml")
+		require.NoError(t, err)
+		assert.NotContains(t, warnings.String(), "`#` shell comment",
+			"a `#` inside quotes is not a comment")
+	})
+	t.Run("leading comment does not swallow the flag", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML("# comment\nclaude")+"\n"), "global.toml")
+		require.NoError(t, err)
+		out := warnings.String()
+		// The flag is appended after `claude`, not in the leading comment, so the
+		// comment case must not fire; a trailing newline would be a control
+		// operator, but `# comment\nclaude` has no trailing newline.
+		assert.NotContains(t, out, "`#` shell comment",
+			"a comment before the command does not swallow the flag appended after it")
+	})
+	t.Run("comment then trailing newline is a control operator not a comment", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML("claude # comment\n")+"\n"), "global.toml")
+		require.NoError(t, err)
+		out := warnings.String()
+		// The trailing newline starts a new statement that carries the flag, so
+		// the comment case does not fire; the control-operator case does.
+		assert.NotContains(t, out, "`#` shell comment",
+			"a comment that is not the last content on the last line does not swallow the flag")
+		assert.Contains(t, out, "shell control operator",
+			"a trailing newline after the comment starts a new statement the flag lands on")
+	})
 }
 
 // TestLaunchFlagMismap_RedirectIsNotAMismap pins the negative: a single call with
@@ -595,6 +698,87 @@ func TestLaunchFlagMismap_RedirectIsNotAMismap(t *testing.T) {
 	}
 }
 
+// TestLaunchFlagMismap_InterpreterWrapper pins the `sh -c` shape (#5167 review:
+// "Warn when an agent is invoked through `sh -c`"): the agent is the interpreter's
+// script, so the flag injectSystemPrompt appends to the END lands after the script
+// as a positional to the interpreter, not as an argument to the agent. A plain
+// `sh claude` (no `-c`) runs claude as a script FILE, a different shape this
+// predicate does not flag.
+func TestLaunchFlagMismap_InterpreterWrapper(t *testing.T) {
+	for name, value := range map[string]string{
+		"sh -c":      "sh -c 'claude'",
+		"bash -c":    "bash -c 'claude'",
+		"dash -c":    "dash -c 'claude'",
+		"zsh -c":     "zsh -c 'claude'",
+		"exec sh -c": "exec sh -c 'claude'",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			out := warnings.String()
+			require.Contains(t, out, "program_overrides.claude", "the warning must name the key the operator has to edit")
+			require.Contains(t, out, "shell interpreter's `-c` flag",
+				"the warning must name the shape it found")
+			require.Contains(t, out, "passed to the interpreter",
+				"the warning must explain WHY the flag is misrouted — that is the bug")
+			require.Contains(t, out, "warning, not an error",
+				"a value that is the operator's config must not read as a rejection")
+		})
+	}
+
+	// A plain `sh claude` (no `-c`) is not the `-c` shape and must not fire the
+	// interpreter warning.
+	t.Run("sh without -c does not fire", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML("sh claude")+"\n"), "global.toml")
+		require.NoError(t, err)
+		assert.NotContains(t, warnings.String(), "shell interpreter's `-c` flag",
+			"a plain `sh claude` (no -c) is not the interpreter `-c` shape")
+	})
+}
+
+// TestLaunchFlagMismap_Heredoc pins the here-document shape (#5167 review: "Handle
+// here-document delimiters before appending flags"): a `<<`/`<<-` redirect makes the
+// appended flag land inside the here-document body (or break the closing delimiter),
+// so the agent does not receive it. The warning fires only when the heredoc body is
+// the last content on the last line; a trailing newline after the closing delimiter
+// is a control operator that already warns.
+func TestLaunchFlagMismap_Heredoc(t *testing.T) {
+	for name, value := range map[string]string{
+		"heredoc":            "claude <<EOF\nprompt\nEOF",
+		"heredoc dash":       "claude <<-EOF\n\tprompt\nEOF",
+		"heredoc empty body": "claude <<EOF\nEOF",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			out := warnings.String()
+			require.Contains(t, out, "program_overrides.claude", "the warning must name the key the operator has to edit")
+			require.Contains(t, out, "here-document redirect",
+				"the warning must name the shape it found")
+			require.Contains(t, out, "never reaches the agent",
+				"the warning must explain WHY the flag is misrouted — that is the bug")
+			require.Contains(t, out, "warning, not an error",
+				"a value that is the operator's config must not read as a rejection")
+		})
+	}
+
+	// A trailing newline after the closing delimiter is a control operator, not a
+	// heredoc mismap: the flag lands on the new statement, not in the body.
+	t.Run("heredoc with trailing newline is a control operator", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML("claude <<EOF\nprompt\nEOF\n")+"\n"), "global.toml")
+		require.NoError(t, err)
+		out := warnings.String()
+		assert.NotContains(t, out, "here-document redirect",
+			"a trailing newline after the closing delimiter is a control operator, not a heredoc mismap")
+		assert.Contains(t, out, "shell control operator",
+			"a trailing newline after the heredoc starts a new statement the flag lands on")
+	})
+}
+
 // TestLaunchFlagMismap_LeavesWellFormedAgentProgramsAlone pins that ordinary
 // program_overrides values — the documentation's actual shapes — load silently.
 // A false positive here would warn the vast majority of well-configured users.
@@ -609,6 +793,19 @@ func TestLaunchFlagMismap_LeavesWellFormedAgentProgramsAlone(t *testing.T) {
 		"env prefix":      "CLAUDE_CODE_USE_BEDROCK=1 claude",
 		"exec prefix":     "exec claude",
 		"exec separator":  "exec -- claude",
+		// An `env` wrapper's `--` is the wrapper's end-of-options marker, not the
+		// agent's: `env -- claude` passes a trailing flag to claude normally, so it
+		// is a well-formed override and must not trip the terminator warning
+		// (#5167 review: "Distinguish wrapper option terminators from agent
+		// terminators").
+		"env wrapper terminator":          "env -- claude",
+		"env wrapper with -i":             "env -i -- claude",
+		"env wrapper with VAR assignment": "env VAR=1 claude",
+		// A backslash-newline is a shell line continuation, so the appended flag
+		// stays on the same command — it is not a statement terminator and must
+		// not warn (#5167 review: "Respect escaped trailing newlines").
+		"escaped trailing newline":            "claude \\\n",
+		"escaped trailing newline with flags": "claude --model opus \\\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			warnings := captureLog(t, &aflog.WarningLog)

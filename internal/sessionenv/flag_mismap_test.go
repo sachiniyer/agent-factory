@@ -48,6 +48,18 @@ func TestCommandEndsOptionsTerminator(t *testing.T) {
 		{"env-prefixed agent with terminator in the middle", "CLAUDE_CODE_USE_BEDROCK=1 claude -- --resume", true},
 		{"only terminator word", "--", true},
 		{"empty string", "", false},
+
+		// An `env` wrapper's `--` is env's end-of-options marker, not the command's:
+		// `env -- claude` passes a trailing `--plugin-dir` to claude normally, so the
+		// `--` is not the agent's terminator and must not warn. `env -- claude --`
+		// still has claude's own trailing `--`, which is the agent's terminator. The
+		// `--` env's VAR assignments come before is also env's (#5167 review:
+		// "Distinguish wrapper option terminators from agent terminators").
+		{"env wrapper terminator is not the agent's", "env -- claude", false},
+		{"env wrapper -i and terminator", "env -i -- claude", false},
+		{"env wrapper then agent's own terminator", "env -- claude --", true},
+		{"env wrapper with VAR then agent's own terminator", "env VAR=1 claude --", true},
+		{"env without terminator, agent's own terminator", "env VAR=1 claude -- --resume", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandEndsOptionsTerminator(tc.command)
@@ -94,6 +106,17 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"trailing newline with flags", "claude --model opus\n", true},
 		{"trailing whitespace then newline", "claude \t\n ", true},
 
+		// A backslash-newline is a shell line continuation, not a statement
+		// terminator: `claude \\\n` keeps an appended flag on the same command,
+		// so it is not a control operator (#5167 review: "Respect escaped
+		// trailing newlines"). An even run of backslashes escapes the newline's
+		// escape (the last backslash escapes the second-to-last), leaving a real
+		// terminator; an odd run is a continuation.
+		{"escaped trailing newline is a continuation", "claude \\\n", false},
+		{"escaped trailing newline with flags", "claude --model opus \\\n", false},
+		{"odd run of backslashes is a continuation", "claude \\\\\\\n", false},
+		{"even run of backslashes is a terminator", "claude \\\\\n", true},
+
 		// Actual control operators / compound constructs — misroute the flag.
 		{"pipe", "claude | tee /tmp/log", true},
 		{"and", "claude foo && claude bar", true},
@@ -105,9 +128,26 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"pipe with trailing terminator", "claude -- | tee", true},
 		{"exec separator then pipe", "exec -- claude | tee", true},
 
-		// Parse errors are not flagged: such a command fails loudly at launch for
-		// a different reason.
-		{"trailing pipe is a parse error", "claude |", false},
+		// A trailing operator that appending a word completes is a misroute, not a
+		// silent parse error: `claude |` fails to parse, but injectSystemPrompt
+		// appends `--plugin-dir`, so `claude | --plugin-dir …` is valid shell and
+		// the flag runs as the right side of the pipe rather than as a flag to
+		// claude. The same applies to an incomplete `&&`/`||` and an incomplete
+		// redirection (`>`, `<`, `>>`): appending supplies the missing second
+		// command or the redirect target (#5167 review: "Warn when appending
+		// repairs an incomplete shell operator"). A trailing `&` is a valid
+		// background operator, not a parse error, and is handled above (stmt.Background).
+		{"trailing pipe is a parse error appending completes", "claude |", true},
+		{"trailing and is a parse error appending completes", "claude &&", true},
+		{"trailing or is a parse error appending completes", "claude ||", true},
+		{"trailing redirect out is a parse error appending completes", "claude >", true},
+		{"trailing redirect in is a parse error appending completes", "claude <", true},
+		{"trailing append redirect is a parse error appending completes", "claude >>", true},
+
+		// A parse error that appending does not complete (an unbalanced quote, an
+		// open subshell) still fails loudly at launch and is not a misroute.
+		{"unbalanced quote is a parse error appending does not complete", "claude '", false},
+		{"unbalanced subshell is a parse error appending does not complete", "claude (", false},
 		{"empty string", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,5 +184,76 @@ func TestEndsOptionsTerminatorAndControlOperatorAreMutuallyExclusive(t *testing.
 		control := CommandHasControlOperator(command)
 		require.Falsef(t, trailing && control,
 			"%q matched both predicates; they are meant to be mutually exclusive", command)
+	}
+}
+
+// TestCommandHasHeredoc pins the here-document shape (#5167 review: "Handle
+// here-document delimiters before appending flags"): a `<<`/`<<-` redirect makes
+// the appended flag land inside the here-document body (or break the closing
+// delimiter), so the agent does not receive it. A trailing newline after the
+// closing delimiter is already a control operator, so this fires only when the
+// heredoc body is the last content on the last line.
+func TestCommandHasHeredoc(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"heredoc", "claude <<EOF\nprompt\nEOF", true},
+		{"heredoc with dash", "claude <<-EOF\n\tprompt\nEOF", true},
+		{"heredoc empty body", "claude <<EOF\nEOF", true},
+		// A trailing newline after the closing delimiter starts a new statement that
+		// carries the flag, which the control-operator predicate already warns about;
+		// the heredoc predicate does not fire (the flag is not in the body).
+		{"heredoc with trailing newline", "claude <<EOF\nprompt\nEOF\n", false},
+		// An ordinary input/output redirection does not misroute the flag (the agent
+		// still receives it), so it is not a heredoc.
+		{"stdout redirect", "claude > /tmp/log", false},
+		{"stdin redirect", "claude < /tmp/in", false},
+		{"bare agent", "claude", false},
+		{"pipe", "claude | tee /tmp/log", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CommandHasHeredoc(tc.command)
+			require.Equalf(t, tc.want, got, "CommandHasHeredoc(%q)", tc.command)
+		})
+	}
+}
+
+// TestCommandInvokesAgentViaInterpreter pins the interpreter `-c` shape
+// (e.g. `sh -c 'claude'`): the agent is the script, and the flag
+// injectSystemPrompt appends to the END of the value lands after the script as a
+// positional to the interpreter, not as an argument to the agent. The terminator,
+// control-operator, and comment predicates do not flag this single CallExpr, so
+// this predicate is what surfaces it (#5167 review: "Warn when an agent is
+// invoked through `sh -c`").
+func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"sh -c script", "sh -c 'claude'", true},
+		{"bash -c script", "bash -c 'claude'", true},
+		{"dash -c script", "dash -c 'claude'", true},
+		{"zsh -c script", "zsh -c 'claude'", true},
+		{"exec sh -c script", "exec sh -c 'claude'", true},
+		{"sh -c with args before the flag", "sh -c 'claude --model opus'", true},
+		// A plain `sh claude` (no `-c`) runs claude as a script FILE, not the
+		// `-c` shape this predicate is about; it is not flagged here.
+		{"sh without -c", "sh claude", false},
+		// A non-shell command with `-c` as one of its own flags is not an
+		// interpreter wrapper: claude has no `-c` flag shape that takes a script,
+		// so the predicate must not fire.
+		{"claude with -c flag", "claude -c foo", false},
+		{"bare agent", "claude", false},
+		{"agent with flags", "claude --model opus", false},
+		{"env wrapper", "env -- claude", false},
+		{"empty string", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CommandInvokesAgentViaInterpreter(tc.command)
+			require.Equalf(t, tc.want, got, "CommandInvokesAgentViaInterpreter(%q)", tc.command)
+		})
 	}
 }
