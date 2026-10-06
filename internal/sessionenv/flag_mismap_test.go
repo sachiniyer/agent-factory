@@ -452,6 +452,24 @@ func TestCommandHasControlOperatorMultiStatement(t *testing.T) {
 		// The last statement is not a simple call (a subshell), so the flag is
 		// routed to a command that is not the agent — a misroute.
 		{"semicolon with subshell last", "claude; (claude)", "claude", true},
+		// The tail-agent exemption holds only when the tail is the ONLY
+		// selected-agent invocation. injectSystemPrompt selects the FIRST
+		// agent DetectAgentFromCommand finds, so a statement list that invokes
+		// the agent earlier AND at the tail leaves the earlier (normally
+		// interactive) invocation without the flag: `claude; claude` becomes
+		// `claude; claude --plugin-dir …`, the first claude starts without the
+		// plugin, and the tail-name match would otherwise hide it. The earlier
+		// invocation that selects the agent is itself a misroute (#5167 review:
+		// "Warn when an earlier statement also invokes the agent").
+		{"semicolon with agent twice", "claude; claude", "claude", true},
+		{"newline with agent twice", "claude\nclaude", "claude", true},
+		{"semicolon with agent twice and flags", "claude --resume; claude", "claude", true},
+		{"semicolon with agent earlier behind exec", "exec claude; claude", "claude", true},
+		{"semicolon with agent earlier behind env", "env claude; claude", "claude", true},
+		{"two agents then non-agent last still warns on earlier", "claude; claude; echo hi", "claude", true},
+		// An earlier non-agent statement does not select the agent, so a tail
+		// agent still routes the flag correctly — not a misroute (covered above
+		// by "two statements then agent last").
 		// An empty agent keeps the prior behavior: every multi-statement is
 		// flagged, even when the last statement would be the agent.
 		{"empty agent flags semicolon with agent last", "true; claude", "", true},
@@ -578,6 +596,17 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"bash combined -cue", "bash -cue 'claude'", true},
 		{"bash combined -uc", "bash -uc 'claude'", true},
 		{"bash combined -eu", "bash -eu 'claude'", false},
+		// `-x` (xtrace) is an argument-free shell option for bash and dash, so a
+		// cluster such as `bash -xc 'claude'` is also a `-c` invocation: the
+		// appended flag is a positional to the shell, not an argument to the agent
+		// inside the script (#5167 review: "Recognize additional shell flags before
+		// `-c`"). `-xc`, `-cx`, and `-xuc` all flag it; a cluster without `c`
+		// (`-xe`) does not.
+		{"bash combined -xc", "bash -xc 'claude'", true},
+		{"bash combined -cx", "bash -cx 'claude'", true},
+		{"bash combined -xuc", "bash -xuc 'claude'", true},
+		{"bash combined -uxc", "bash -uxc 'claude'", true},
+		{"bash combined -xe", "bash -xe 'claude'", false},
 		// A flag that takes an argument before `c` would swallow a following `c`
 		// as its operand rather than the script flag; bash's `-O shopt_option`
 		// takes the next word, so `-Oc` is not the `-c` shape (conservative: do
@@ -628,7 +657,17 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"bash -ic exec argv pass-through", `bash -ic 'exec "$@"' bash claude`, false},
 		{"sh -c names agent without forwarding still warns", `sh -c 'claude'`, true},
 		{"sh -c exec without argv still warns", `sh -c 'exec claude'`, true},
-		{"empty string", "", false},
+		// A `$@` that is consumed by an earlier statement and not by the
+		// command that detection selects does not forward the appended flag:
+		// `echo "$@"; claude` lets `echo` consume the positionals and the
+		// hard-coded `claude` start without the plugin, so a bare substring test
+		// would suppress a real misroute. The exemption only covers a `$@` in the
+		// last statement of the script, the one the appended positional must
+		// reach (#5167 review: "Only exempt scripts that actually forward
+		// positional argv").
+		{"sh -c echo argv then agent warns", `sh -c 'echo "$@"; claude'`, true},
+		{"sh -c echo argv then exec argv last pass-through", `sh -c 'echo "$@"; exec "$@"'`, false},
+		{"sh -c exec argv last pass-through", `sh -c 'echo hi; exec "$@"'`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandInvokesAgentViaInterpreter(tc.command)

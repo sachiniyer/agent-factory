@@ -262,6 +262,23 @@ func CommandHasControlOperator(command, agent string) bool {
 		if agent == "" {
 			return true
 		}
+		// The tail-agent exemption holds only when the tail is the ONLY
+		// selected-agent invocation. injectSystemPrompt selects the FIRST agent
+		// DetectAgentFromCommand finds, so a statement list that invokes the
+		// agent earlier AND at the tail leaves the earlier (normally interactive)
+		// invocation without the flag: `claude; claude` becomes
+		// `claude; claude --plugin-dir …`, the first claude starts without the
+		// plugin, and the tail-name match would otherwise hide it. An earlier
+		// invocation that selects the agent is itself a misroute, so the statement
+		// list warns before the tail exemption applies. The tail is still
+		// evaluated after this check because a terminator/comment/`--` on the tail
+		// misroutes even when no earlier statement selects the agent (#5167
+		// review: "Warn when an earlier statement also invokes the agent").
+		for _, s := range file.Stmts[:len(file.Stmts)-1] {
+			if stmtInvokesAgent(s, agent) {
+				return true
+			}
+		}
 		return stmtMismapsTail(file.Stmts[len(file.Stmts)-1], agent, command)
 	}
 	stmt := file.Stmts[0]
@@ -802,9 +819,9 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 // scriptForwardsPositionals reports whether the `-c` script word forwards its
 // positional parameters to the command it invokes — the shape that carries af's
 // appended flag, a positional to the interpreter, through to the agent. An
-// `exec "$@"` (or any `"$@"`/`$@` reference) runs the command named in the
-// positionals with those positionals as arguments, so
-// `sh -c 'exec "$@"' sh claude` becomes `sh -c 'exec "$@"' sh claude --plugin-dir …`
+// `exec "$@"` (or any `"$@"`/`$@` reference that invokes the forwarded command)
+// runs the command named in the positionals with those positionals as arguments,
+// so `sh -c 'exec "$@"' sh claude` becomes `sh -c 'exec "$@"' sh claude --plugin-dir …`
 // and claude receives `--plugin-dir` (#5167 review: "Avoid warning for forwarding
 // `sh -c` wrappers"). Only `"$@"`/`$@` preserve the appended flag as separate argv
 // entries; quoted `"$*"` collapses the positionals into one word (so
@@ -815,12 +832,101 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 // forwarding form is single-quoted, so it reaches this check as one literal; a
 // non-literal script is not recognized and stays warned, which is the safe
 // direction.
+//
+// A bare `strings.Contains(lit, "$@")` would also exempt a script that merely
+// consumes the positionals in an earlier statement and then runs the agent
+// without them: `sh -c 'echo "$@"; claude' sh claude` lets `echo` consume the
+// positionals and the hard-coded `claude` start without the flag, yet the
+// substring test returned true. The exemption is restricted to a positional
+// expansion in the LAST statement of the script, the command that runs last and
+// the one the appended flag must reach for the agent to receive it; an earlier
+// statement that consumes `$@` does not forward it to the agent (#5167 review:
+// "Only exempt scripts that actually forward positional argv").
 func scriptForwardsPositionals(script *syntax.Word) bool {
 	lit, ok := literalShellWord(script)
 	if !ok {
 		return false
 	}
-	return strings.Contains(lit, "$@")
+	if !strings.Contains(lit, "$@") {
+		return false
+	}
+	// The script is the literal `-c` argument, so it parses as a command of its
+	// own; the appended flag is a positional to the shell, available to every
+	// statement, so the last statement that references `$@` is the one whose
+	// command receives (or execs) the forwarded positionals. A script that does
+	// not parse is left to the safe substring fallback.
+	if stmt, ok := lastScriptStmt(lit); ok {
+		return stmtReferencesAtParam(stmt)
+	}
+	return true
+}
+
+// lastScriptStmt parses the literal text of a `-c` script and returns its last
+// statement, the command that the appended positional reaches when the script
+// runs. It is the shared scan behind scriptForwardsPositionals' forwarding
+// check: a `$@` in an earlier statement is consumed there and does not reach the
+// last command, so only the last statement decides whether the positionals are
+// forwarded to the agent.
+func lastScriptStmt(script string) (*syntax.Stmt, bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(script), "")
+	if err != nil || file == nil || len(file.Stmts) == 0 {
+		return nil, false
+	}
+	return file.Stmts[len(file.Stmts)-1], true
+}
+
+// stmtReferencesAtParam reports whether stmt references the positional parameter
+// `$@` (a ParamExp whose parameter is `@`, bare or inside double quotes) in the
+// command it runs — a CallExpr or a binary command's operands. `$@` is the only
+// expansion that preserves the appended flag as separate argv entries; `$*` is
+// not forwarding and is excluded by the parameter name check. Compound constructs
+// (subshell, if/for/while) are not analyzed and report false, the conservative
+// answer for the forwarding exemption — a compound that hides a `$@` is not the
+// plain forwarding shape this guard exempts.
+func stmtReferencesAtParam(stmt *syntax.Stmt) bool {
+	if stmt == nil {
+		return false
+	}
+	switch c := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		return stmtReferencesAtParam(c.X) || stmtReferencesAtParam(c.Y)
+	case *syntax.CallExpr:
+		for _, w := range c.Args {
+			if wordReferencesAtParam(w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wordReferencesAtParam reports whether word holds a `$@` parameter expansion,
+// bare (`$@`) or quoted (`"$@"`), at any depth of double quoting. It is the
+// word-level scan behind stmtReferencesAtParam.
+func wordReferencesAtParam(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		if wordPartReferencesAtParam(part) {
+			return true
+		}
+	}
+	return false
+}
+
+func wordPartReferencesAtParam(part syntax.WordPart) bool {
+	switch p := part.(type) {
+	case *syntax.ParamExp:
+		return p.Param != nil && p.Param.Value == "@"
+	case *syntax.DblQuoted:
+		for _, nested := range p.Parts {
+			if wordPartReferencesAtParam(nested) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // wordIsKnownShell reports whether the first word is a literal invocation of a
@@ -846,12 +952,14 @@ func wordIsKnownShell(word *syntax.Word) bool {
 // as its operand (bash's `-O shopt_option`), so the scan stops at the first flag
 // not known to be argument-free for the POSIX shells; `c` itself ends the scan
 // because it consumes the next word as its script. The argument-free invocation
-// flags are `e`, `i`, `l`, `s`, `r`, `u`, and `D` (bash's `-e` errexit and dash's
-// `-e` are both argument-free, so `bash -ec 'claude'` is a `-c` form; `-u` nounset
-// is argument-free for both, so `bash -euc 'claude'` is also a `-c` form); a `c`
-// after any other flag is not claimed as the script flag, so an unknown option
-// stays conservative rather than over-warning (#5167 review: "Recognize `-e` in
-// shell `-c` option clusters", "Include `-u` in shell `-c` option clusters").
+// flags are `e`, `i`, `l`, `s`, `r`, `u`, `x`, and `D` (bash's `-e` errexit and
+// dash's `-e` are both argument-free, so `bash -ec 'claude'` is a `-c` form; `-u`
+// nounset is argument-free for both, so `bash -euc 'claude'` is also a `-c` form;
+// `-x` xtrace is argument-free for both, so `bash -xc 'claude'` is also a `-c`
+// form); a `c` after any other flag is not claimed as the script flag, so an
+// unknown option stays conservative rather than over-warning (#5167 review:
+// "Recognize `-e` in shell `-c` option clusters", "Include `-u` in shell `-c`
+// option clusters", "Recognize additional shell flags before `-c`").
 func shellShortClusterHasC(word string) bool {
 	if len(word) <= 2 || word[0] != '-' || word[1] == '-' {
 		return false
@@ -860,7 +968,7 @@ func shellShortClusterHasC(word string) bool {
 		switch flag {
 		case 'c':
 			return true
-		case 'e', 'i', 'l', 's', 'r', 'u', 'D':
+		case 'e', 'i', 'l', 's', 'r', 'u', 'x', 'D':
 			continue
 		default:
 			return false
