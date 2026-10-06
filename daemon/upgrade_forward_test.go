@@ -586,3 +586,117 @@ func TestRunUpgradeRecoveryActor_AdoptsOnlyOnCommit(t *testing.T) {
 		})
 	}
 }
+
+// TestRunUpgradeRecoveryActor_PreservesActiveJournalInterlock guards the
+// post-commit interlock the commit signal alone cannot provide: a positive
+// result.Committed proves OUR transaction committed, but not that the home is
+// still free when the hand-off runs. If the actor was descheduled after
+// lease.Cleanup removed our journal and a subsequent upgrade published its own
+// active.json, an unconditional hand-off could stop the old candidate (or start
+// a normal daemon) while the new transaction owns the home. RunUpgradeRecoveryActor
+// must skip the hand-off when a DIFFERENT active transaction is present, while
+// treating a transient Load failure as non-blocking so the stranded-candidate
+// regression the commit signal was introduced to fix does not return.
+func TestRunUpgradeRecoveryActor_PreservesActiveJournalInterlock(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		setupActive func(t *testing.T, home, exe string)
+		wantAdopt   bool
+	}{
+		{
+			// A subsequent upgrade published its own active.json with a different
+			// transaction id after our cleanup. The hand-off must be skipped: the
+			// new transaction owns the home, and confirmCommittedCandidate would
+			// not see our daemon (it has exited) and could start a fresh one that
+			// collides with the in-flight transaction.
+			name: "different active transaction present skips hand-off",
+			setupActive: func(t *testing.T, home, exe string) {
+				t.Helper()
+				// A real Prepare is the only way to publish a Load-valid journal:
+				// validateJournal checks the transaction directory, recovery-lock
+				// identity/nonce, and binary-snapshot pairing, so a hand-written
+				// active.json would not load. The successor uses a different
+				// executable so the staged-artifact guard does not refuse it as a
+				// re-stage of the committed transaction over the same binary.
+				successorExe := filepath.Join(t.TempDir(), "af-other")
+				if err := os.WriteFile(successorExe, []byte("previous-binary-other"), 0o755); err != nil {
+					t.Fatalf("write successor previous binary: %v", err)
+				}
+				if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+					ID: "txn-other", HomeDir: home, ExecutablePath: successorExe,
+					FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate-other"),
+					Daemon: upgradetxn.DaemonSnapshot{
+						WasRunning: true, BootID: "boot-other",
+						Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+					},
+					RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobSystemd,
+						Name:     "agent-factory-upgrade-recovery-txn-other.service",
+						UnitPath: filepath.Join(t.TempDir(), "agent-factory-upgrade-recovery-txn-other.service")},
+				}); err != nil {
+					t.Fatalf("Prepare successor transaction: %v", err)
+				}
+			},
+			wantAdopt: false,
+		},
+		{
+			// A transient Load failure (a malformed active.json, not the clean
+			// ErrNoActiveTransaction our cleanup produced) must NOT block the
+			// hand-off: the commit signal is authoritative, and re-gating the
+			// irreversible hand-off on a read this call does not depend on would
+			// reintroduce the stranded-candidate regression.
+			name: "transient load failure is non-blocking",
+			setupActive: func(t *testing.T, home, _ string) {
+				t.Helper()
+				// A malformed active.json makes Load return a JSON decode error
+				// (not ErrNoActiveTransaction), the cheapest hermetic transient
+				// failure.
+				if err := os.MkdirAll(filepath.Join(home, "upgrade"), 0o755); err != nil {
+					t.Fatalf("mkdir upgrade dir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(home, "upgrade", "active.json"), []byte("{not json"), 0o600); err != nil {
+					t.Fatalf("write corrupt active.json: %v", err)
+				}
+			},
+			wantAdopt: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := stubForwardEnv(t)
+			exe := filepath.Join(t.TempDir(), "af")
+			if err := os.WriteFile(exe, []byte("previous-binary"), 0o755); err != nil {
+				t.Fatalf("write fake previous binary: %v", err)
+			}
+			if _, err := upgradetxn.Prepare(upgradetxn.Plan{
+				ID: "txn-1", HomeDir: home, ExecutablePath: exe,
+				FromVersion: "1.0.100", ToVersion: "1.0.200", Candidate: []byte("candidate"),
+				Daemon: upgradetxn.DaemonSnapshot{
+					WasRunning: true, BootID: "boot-1",
+					Owner: upgradetxn.DaemonOwner{Kind: upgradetxn.SupervisionSystemd, ServiceName: "agent-factory-daemon.service"},
+				},
+				RecoveryJob: upgradetxn.RecoveryJob{Kind: upgradetxn.RecoveryJobSystemd,
+					Name:     "agent-factory-upgrade-recovery-txn-1.service",
+					UnitPath: filepath.Join(t.TempDir(), "agent-factory-upgrade-recovery-txn-1.service")},
+			}); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+
+			// The actor reports a positive commit signal: lease.Cleanup removed our
+			// active.json, then the successor state in tc.setupActive took its place.
+			runRecoveryActorFn = func(_ context.Context, _ upgradetxn.RecoveryInvocation, _ upgradetxn.Supervisor) (upgradetxn.RecoveryActorResult, error) {
+				_ = os.Remove(filepath.Join(home, "upgrade", "active.json"))
+				tc.setupActive(t, home, exe)
+				return upgradetxn.RecoveryActorResult{Committed: true, JournalID: "txn-1", ExecutablePath: exe}, nil
+			}
+			adopted := false
+			adoptAfterUpgradeCommitFn = func(string, string) error { adopted = true; return nil }
+
+			if err := RunUpgradeRecoveryActor(context.Background(),
+				upgradetxn.RecoveryInvocation{HomeDir: home, TransactionID: "txn-1"}); err != nil {
+				t.Fatalf("RunUpgradeRecoveryActor: %v", err)
+			}
+			if adopted != tc.wantAdopt {
+				t.Fatalf("hand-off: got adopted=%v want %v (%s)", adopted, tc.wantAdopt, tc.name)
+			}
+		})
+	}
+}

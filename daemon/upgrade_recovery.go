@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -106,26 +107,24 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 		return err
 	}
 
-	// The hand-off is gated SOLELY on the actor's positive commit signal, not on
-	// any journal read performed here. result.Committed is true ONLY when the
-	// actor loaded OUR transaction (its journal.ID matched invocation.TransactionID
-	// at the supervisor's own authoritative Load) and Supervisor.Run returned nil
-	// — the PhaseCommitted path that ran lease.Cleanup and durably removed the
-	// journal. result.JournalID / result.ExecutablePath come from that SAME
-	// in-memory *Transaction the supervisor supervised, so the hand-off is
-	// parameterized without any second journal read.
+	// The hand-off is gated on the actor's positive commit signal (result.Committed),
+	// which is true ONLY when the actor loaded OUR transaction (its journal.ID
+	// matched invocation.TransactionID at the supervisor's own authoritative Load)
+	// and Supervisor.Run returned nil — the PhaseCommitted path that ran
+	// lease.Cleanup and durably removed the journal. result.JournalID /
+	// result.ExecutablePath come from that SAME in-memory *Transaction the
+	// supervisor supervised, so the hand-off is parameterized without a second
+	// journal read to RE-DERIVE commit or identity.
 	//
-	// This replaces two non-durable, non-retried upgradetxn.Load reads the prior
-	// code gated this irreversible hand-off on: a pre-actor capture of an
-	// ourTransaction flag and a post-actor confirmation that the journal was gone.
-	// Either could silently strand a committed candidate in
-	// DaemonPhaseHandoffPending forever when a transient read failure (EIO/ESTALE,
-	// which internal/projects itself treats as "often transient") hit during the
-	// window between that read and the supervisor's own Load — the recovery job is
-	// already disabled by commit and the parked candidate holds the home lock, so
-	// nothing re-invokes adoptAfterUpgradeCommit. Deriving the signal from the
-	// supervisor's own transaction removes the entire race class: there is no read
-	// here to fail.
+	// This replaces the non-durable, non-retried pre-actor capture of an
+	// ourTransaction flag the prior code gated this irreversible hand-off on. That
+	// read could silently strand a committed candidate in DaemonPhaseHandoffPending
+	// forever when a transient read failure (EIO/ESTALE, which internal/projects
+	// itself treats as "often transient") hit before the supervisor's own Load —
+	// the recovery job is already disabled by commit and the parked candidate holds
+	// the home lock, so nothing re-invokes adoptAfterUpgradeCommit. Deriving the
+	// signal from the supervisor's own transaction removes that race: the commit
+	// decision no longer depends on a read this call performs.
 	//
 	// A nil error is NOT proof of commit — the actor also returns (Committed=false,
 	// nil) for a clean stand-down (a foreign/stale transaction, ErrRecoveryActive,
@@ -136,6 +135,35 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	// match, so a false-positive signal could not adopt someone else's commit.
 	if !result.Committed {
 		return nil
+	}
+	// Preserve the active-journal interlock before hand-off. result.Committed
+	// proves OUR transaction committed; it does not prove the home is still free
+	// when this call executes. If the actor was descheduled after lease.Cleanup
+	// removed our journal and a subsequent upgrade published its own active.json,
+	// an unconditional hand-off could stop the old candidate (or start a normal
+	// daemon) while the new transaction owns the home. adoptAfterUpgradeCommit's
+	// confirmCommittedCandidate only guards a currently running daemon's
+	// transaction id (via the health probe), not a newly prepared or
+	// supervisor-ready transaction whose active.json is on disk but whose daemon
+	// has not answered yet, so the interlock must live here.
+	//
+	// Skip the hand-off ONLY when a *different* active transaction is present.
+	// ErrNoActiveTransaction is the clean case (our commit removed the journal
+	// and no successor started), and any other load failure is treated as
+	// non-blocking: re-gating the irreversible hand-off on a transient I/O read
+	// (EIO/ESTALE) would reintroduce the stranded-candidate regression the
+	// commit signal was introduced to fix — the recovery job is already
+	// disabled by commit and the parked candidate holds the home lock, so
+	// nothing would re-invoke adoptAfterUpgradeCommit. Our own id (the journal
+	// Cleanup just removed, racing this read) falls through: the committed
+	// candidate is the right thing to hand off.
+	if txn, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
+		if loadedID := txn.Journal().ID; loadedID != invocation.TransactionID {
+			return nil // a different active transaction owns the home; do not hand off
+		}
+	} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+		// Transient load failure: the commit signal is authoritative, so do not
+		// block the hand-off on a read this call does not depend on.
 	}
 	if err := adoptAfterUpgradeCommitFn(result.JournalID, result.ExecutablePath); err != nil {
 		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
