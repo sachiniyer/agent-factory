@@ -1,11 +1,13 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfirmationOverlay_HandleKeyPress_CtrlC(t *testing.T) {
@@ -242,10 +244,10 @@ func overlayProse(rendered string) string {
 }
 
 // TestConfirmationOverlay_GuardedMessageIsNeverClipped: a guarded overlay (one
-// with a detail set) must render its message in full. The message carries the
-// consequences the user is consenting to; windowOverlayBody drops the TAIL, so
-// without this guarantee the last consequence silently vanishes and the user
-// confirms something the dialog never showed them (#1973).
+// with a detail set) must render its message in full at the top of the body
+// window. The message carries the consequences the user is consenting to — it
+// leads the scrollable body, so it is what the reader sees first (#1973, and
+// reachable in full since #5171).
 func TestConfirmationOverlay_GuardedMessageIsNeverClipped(t *testing.T) {
 	c := NewConfirmationOverlay("[!] Delete project 'acme'?\n1 in-place session torn down — not restorable.\n2 sessions archived — restorable.")
 	c.SetDetail("Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone. Restore an archived session to bring the project back.")
@@ -261,31 +263,31 @@ func TestConfirmationOverlay_GuardedMessageIsNeverClipped(t *testing.T) {
 		"the confirm prompt must render alongside it")
 }
 
-// TestConfirmationOverlay_ClippedDetailIsAnnounced: when the elaboration does
-// not fit, the overlay must SAY so. A bare "…" (or nothing at all) is
-// indistinguishable from "there was nothing more to say".
-func TestConfirmationOverlay_ClippedDetailIsAnnounced(t *testing.T) {
+// TestConfirmationOverlay_OverflowIsAnnouncedWithScrollKeys: when the body does
+// not fit, the overlay must SAY so — and say how to read the rest. A bare "…"
+// is indistinguishable from "there was nothing more to say", and "resize to
+// read" made the user do the work the dialog should do (#5171).
+func TestConfirmationOverlay_OverflowIsAnnouncedWithScrollKeys(t *testing.T) {
 	c := NewConfirmationOverlay("[!] Delete project 'acme'?\n1 in-place session torn down — not restorable.")
 	c.SetDetail("Line one of elaboration that will not fit. Line two of elaboration. Line three of elaboration. Line four of elaboration that keeps going for a while.")
 	c.SetWidth(50)
 	c.SetMaxSize(40, 10)
 
 	rendered := renderedText(c.Render())
-	assert.Contains(t, rendered, "resize to read",
-		"clipped detail must name itself; silence reads as completeness")
-	assert.Regexp(t, `more line`, rendered, "the notice must say how much is hidden")
+	assert.NotContains(t, rendered, "resize to read",
+		"the terminal is not the scroll affordance — the dialog pages itself")
+	assert.Regexp(t, `↓ \d+ more line`, rendered, "the notice must count what the window hides")
+	assert.Contains(t, rendered, "↑/↓ or j/k", "the notice must name the keys")
 }
 
-// TestConfirmationOverlay_TooSmallRefusesConfirm: a destructive confirm that
-// cannot render its consequences has no business collecting a 'y'. The refusal
-// must be real — the key handler rejects the confirm, not just the renderer
-// showing a warning — otherwise a blind 'y' still fires the action (#1973).
-// The trigger is realistic rather than contrived: at the declared 40x10 floor a
-// long project name wraps the title onto a second line, which pushes the split
-// past the four-line body budget. That is the backstop the guarantee needs —
-// the copy is tuned to fit typical names, and refuses rather than clips when it
-// cannot.
-func TestConfirmationOverlay_TooSmallRefusesConfirm(t *testing.T) {
+// TestConfirmationOverlay_CompactSizeScrollsNotRefuses: a destructive confirm
+// whose body is taller than the window does not hide text and does not refuse
+// — it pages. The refusal is reserved for windows that cannot show even one
+// body row (#1973's trigger, kept; its remedy is now scroll, #5171). The
+// trigger is realistic rather than contrived: at the declared 40x10 floor a
+// long project name wraps the title onto a second line, which pushes the body
+// past the four-line window.
+func TestConfirmationOverlay_CompactSizeScrollsNotRefuses(t *testing.T) {
 	c := NewConfirmationOverlay("[!] Delete project 'a-project-with-a-very-long-name-indeed'?\n3 in-place sessions torn down — not restorable.\n7 sessions archived — restorable.")
 	c.SetDetail("Elaboration that does not matter here.")
 	c.SetWidth(50)
@@ -296,30 +298,30 @@ func TestConfirmationOverlay_TooSmallRefusesConfirm(t *testing.T) {
 	cancelled := false
 	c.OnCancel = func() { cancelled = true }
 
+	require.True(t, c.Scrollable(), "the oversized body must page rather than refuse or clip")
 	rendered := overlayProse(c.Render())
-	assert.Contains(t, rendered, "Too small to confirm safely",
-		"an overlay that cannot show the consequences must say why")
-	assert.NotContains(t, rendered, "7 sessions archived",
-		"a refused dialog must not show the reassuring half either — that is the trap")
+	assert.NotContains(t, rendered, "Too small to confirm safely",
+		"one readable row is enough — the rest is reachable")
+	for i := 0; i < 50; i++ {
+		c.ScrollDown()
+	}
+	assert.Contains(t, overlayProse(c.Render()), "Elaboration",
+		"the hidden tail must be reachable by scrolling")
 
 	shouldClose := c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
-	assert.False(t, shouldClose, "the dialog must stay open so the user can resize and read it")
-	assert.False(t, confirmed, "a 'y' typed blind against an unreadable dialog must NOT confirm")
-	assert.False(t, c.Dismissed)
-
-	// Esc must always work — the user is never trapped.
-	shouldClose = c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
-	assert.True(t, shouldClose, "esc must still cancel a refused dialog")
-	assert.True(t, cancelled)
+	assert.True(t, shouldClose, "a dialog the user could read in full must confirm")
+	assert.True(t, confirmed)
+	assert.False(t, cancelled)
 }
 
 // TestConfirmationOverlay_RefusalSurvivesDegenerateSizes: the refusal must say
 // something true even when the window is far too small for its own explanation.
 // Windowing it would degrade the refusal into a bare "… N more lines" notice —
 // swallowing the reason at exactly the moment the reason is the whole point,
-// which is the same defect one level up.
+// which is the same defect one level up. It fires only where no body row fits
+// beside the prompt at all.
 func TestConfirmationOverlay_RefusalSurvivesDegenerateSizes(t *testing.T) {
-	for _, size := range [][2]int{{30, 6}, {40, 7}, {24, 5}} {
+	for _, size := range [][2]int{{40, 5}, {30, 5}, {24, 5}, {24, 6}} {
 		c := NewConfirmationOverlay("[!] Delete project 'acme'?\n2 in-place sessions torn down — not restorable.\n5 sessions archived — restorable.")
 		c.SetDetail("Elaboration.")
 		c.SetWidth(50)
@@ -337,10 +339,10 @@ func TestConfirmationOverlay_RefusalSurvivesDegenerateSizes(t *testing.T) {
 	}
 }
 
-// TestConfirmationOverlay_UnguardedKeepsConfirming: overlays with no detail (the
-// existing archive/kill confirms) keep their historical behavior — they clip
-// rather than refuse. The guarantee is opt-in via SetDetail, so this fix does
-// not silently make every confirm in the app refusable.
+// TestConfirmationOverlay_UnguardedKeepsConfirming: overlays with no detail
+// (the existing archive/kill confirms) scroll like everything else but never
+// refuse. The refusal is opt-in via SetDetail, so this fix does not silently
+// make every confirm in the app refusable.
 func TestConfirmationOverlay_UnguardedKeepsConfirming(t *testing.T) {
 	c := NewConfirmationOverlay(strings.Repeat("a long confirmation message that will certainly not fit. ", 8))
 	c.SetWidth(50)
@@ -398,5 +400,220 @@ func TestConfirmationOverlay_PendingStillCancels(t *testing.T) {
 		c.OnCancel = func() { cancelled = true }
 		assert.True(t, c.HandleKeyPress(key), "%q must close a pending dialog", key.String())
 		assert.True(t, cancelled)
+	}
+}
+
+// overflowingConfirm builds the #5171 shape — a destructive headline followed
+// by more warning lines than the window can hold — at the given terminal size.
+// Each warning leads with a unique short token ("Warning NN") so an assertion
+// can prove it reached the screen without depending on the wrap.
+func overflowingConfirm(warnings int, termW, termH int) *ConfirmationOverlay {
+	lines := make([]string, 0, warnings+1)
+	lines = append(lines, "[!] Delete session 'risky'?")
+	for i := 1; i <= warnings; i++ {
+		lines = append(lines, fmt.Sprintf("Warning %02d — consequences that must not be hidden.", i))
+	}
+	c := NewConfirmationOverlay(strings.Join(lines, "\n"))
+	c.SetDetail("Final elaboration line every reader must reach.")
+	c.SetWidth(50)
+	c.SetMaxSize(termW, termH)
+	return c
+}
+
+// TestConfirmationOverlay_EveryBodyLineReachable is the #5171 property: at the
+// ordinary sizes the bug was reported against, a destructive confirmation must
+// be able to bring EVERY line of its body on screen — the risk text, the
+// elaboration, all of it — while the confirm prompt stays put.
+func TestConfirmationOverlay_EveryBodyLineReachable(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {60, 20}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			c := overflowingConfirm(12, size[0], size[1])
+			require.True(t, c.Scrollable(), "the body must overflow at %dx%d", size[0], size[1])
+
+			var prose []string
+			for i := 0; i < 100; i++ {
+				frame := overlayProse(c.Render())
+				prose = append(prose, frame)
+				assert.Contains(t, frame, "confirm", "the prompt must stay pinned at scroll %d", c.scroll)
+				assert.Contains(t, frame, "cancel", "the prompt must stay pinned at scroll %d", c.scroll)
+				c.ScrollDown()
+			}
+			joined := strings.Join(prose, " ")
+			for i := 1; i <= 12; i++ {
+				assert.Contains(t, joined, fmt.Sprintf("Warning %02d", i),
+					"warning %d must be reachable by scrolling at %dx%d", i, size[0], size[1])
+			}
+			assert.Contains(t, joined, "Final elaboration",
+				"the detail tail must be reachable by scrolling")
+		})
+	}
+}
+
+// TestConfirmationOverlay_ScrollNoticeTracksPosition: the footer must tell the
+// truth about which directions hide content — "↓ N more" while anything sits
+// below the window, "↑ N more" once scrolling has passed lines, and neither
+// direction it does not apply to.
+func TestConfirmationOverlay_ScrollNoticeTracksPosition(t *testing.T) {
+	c := overflowingConfirm(12, 80, 24)
+
+	top := renderedText(c.Render())
+	assert.Regexp(t, `↓ \d+ more lines`, top, "a fresh overflow advertises what is hidden below")
+	assert.Contains(t, top, "↑/↓ or j/k", "the notice must name the keys")
+	assert.NotRegexp(t, `↑ \d+ more lines`, top, "nothing is hidden above at scroll 0")
+
+	for i := 0; i < 6; i++ {
+		c.ScrollDown()
+	}
+	mid := renderedText(c.Render())
+	assert.Regexp(t, `↑ \d+ more lines`, mid, "scrolled-down content must be announced")
+	assert.Regexp(t, `↓ \d+ more lines`, mid, "content still below must still be announced")
+
+	for i := 0; i < 100; i++ {
+		c.ScrollDown()
+	}
+	bottom := renderedText(c.Render())
+	assert.Regexp(t, `↑ \d+ more lines`, bottom, "the passed content stays announced at the bottom")
+	assert.NotRegexp(t, `↓ \d+ more lines`, bottom, "the bottom must stop advertising more content below")
+}
+
+// TestConfirmationOverlay_ScrollKeysPageTheBody: every scrolling input the
+// task names must move the body window — and none of them may close the
+// dialog. The keys are checked through HandleKeyPress because that is the
+// path app/handle_overlay.go forwards.
+func TestConfirmationOverlay_ScrollKeysPageTheBody(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		msg   tea.KeyMsg
+		delta func(budget int) int
+	}{
+		{"up", tea.KeyMsg{Type: tea.KeyUp}, func(int) int { return -1 }},
+		{"k", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")}, func(int) int { return -1 }},
+		{"down", tea.KeyMsg{Type: tea.KeyDown}, func(int) int { return 1 }},
+		{"j", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, func(int) int { return 1 }},
+		{"pgup", tea.KeyMsg{Type: tea.KeyPgUp}, func(b int) int { return -(b - 1) }},
+		{"pgdown", tea.KeyMsg{Type: tea.KeyPgDown}, func(b int) int { return b - 1 }},
+		{"ctrl+u", tea.KeyMsg{Type: tea.KeyCtrlU}, func(b int) int { return -(b / 2) }},
+		{"ctrl+d", tea.KeyMsg{Type: tea.KeyCtrlD}, func(b int) int { return b / 2 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := overflowingConfirm(12, 80, 24)
+			_, budget := c.scrollContent()
+			for i := 0; i < 5; i++ {
+				c.ScrollDown()
+			}
+			before := c.scroll
+
+			closed := c.HandleKeyPress(tc.msg)
+			assert.False(t, closed, "%s must not close the dialog", tc.name)
+			assert.False(t, c.Dismissed, "%s must not dismiss the dialog", tc.name)
+
+			want := before + tc.delta(budget)
+			if max := len(c.bodyLines(c.textRect().W)) - budget; want > max {
+				want = max
+			}
+			if want < 0 {
+				want = 0
+			}
+			assert.Equal(t, want, c.scroll, "%s must move the body window", tc.name)
+		})
+	}
+}
+
+// TestConfirmationOverlay_ScrollKeysClamp: the window cannot scroll past
+// either end — pasting the same key forever parks at the boundary rather than
+// drifting or wrapping.
+func TestConfirmationOverlay_ScrollKeysClamp(t *testing.T) {
+	c := overflowingConfirm(12, 80, 24)
+	_, budget := c.scrollContent()
+	max := len(c.bodyLines(c.textRect().W)) - budget
+	require.Positive(t, max, "the fixture must overflow")
+
+	for i := 0; i < 100; i++ {
+		c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	assert.Equal(t, max, c.scroll, "the window must stop at the last line")
+	for i := 0; i < 100; i++ {
+		c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	assert.Zero(t, c.scroll, "the window must stop at the first line")
+}
+
+// TestConfirmationOverlay_EscalatedKeyWinsOverScroll: on a dialog that
+// escalated to 'k' (root #1238, unmerged #2022) 'k' must keep confirming —
+// paging is what ↑ and j are for — and the scroll notice must not advertise a
+// 'k' that would dispatch the action instead.
+func TestConfirmationOverlay_EscalatedKeyWinsOverScroll(t *testing.T) {
+	c := overflowingConfirm(12, 80, 24)
+	c.SetConfirmKey("k")
+	require.True(t, c.Scrollable())
+
+	rendered := renderedText(c.Render())
+	assert.Contains(t, rendered, "↑/↓ or j",
+		"the notice must name only the keys that actually scroll")
+	assert.NotContains(t, rendered, "or k",
+		"the notice must never advertise 'k' as a scroll key on a 'k' confirm")
+
+	closed := c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	assert.False(t, closed, "the unclaimed letter still scrolls")
+	assert.Equal(t, 1, c.scroll)
+
+	confirmed := false
+	c.OnConfirm = func() { confirmed = true }
+	closed = c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	assert.True(t, closed, "the escalated key must still confirm")
+	assert.True(t, confirmed, "the claimed key confirms rather than scrolling")
+}
+
+// TestConfirmationOverlay_FittingBodyHasNoNotice: a body that fits renders
+// exactly as it always has — every line, a blank gap, the prompt — with no
+// scroll affordance and no offset for keys to move.
+func TestConfirmationOverlay_FittingBodyHasNoNotice(t *testing.T) {
+	c := NewConfirmationOverlay("Delete session 'alpha'?")
+	c.SetWidth(50)
+	c.SetMaxSize(80, 24)
+
+	assert.False(t, c.Scrollable())
+	rendered := renderedText(c.Render())
+	assert.NotContains(t, rendered, "more line", "a fitting body must not advertise a scroll")
+	assert.NotContains(t, rendered, "scroll")
+
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyDown},
+		{Type: tea.KeyRunes, Runes: []rune("j")},
+		{Type: tea.KeyPgDown},
+	} {
+		assert.False(t, c.HandleKeyPress(msg))
+	}
+	assert.Zero(t, c.scroll, "scroll keys are inert when nothing overflows")
+}
+
+// TestConfirmationOverlay_GrowResizeCollapsesScroll: a dialog that outlives
+// the resize must not reopen mid-scroll — when the window grows to fit the
+// body the offset resets so the whole thing is on screen at once.
+func TestConfirmationOverlay_GrowResizeCollapsesScroll(t *testing.T) {
+	c := overflowingConfirm(12, 40, 10)
+	for i := 0; i < 20; i++ {
+		c.ScrollDown()
+	}
+	require.Positive(t, c.scroll, "the fixture must be scrolled")
+
+	c.SetMaxSize(200, 60)
+	rendered := renderedText(c.Render())
+	assert.Zero(t, c.scroll, "a window that now fits must not render mid-scroll")
+	assert.Contains(t, rendered, "[!] Delete session 'risky'?")
+	assert.Contains(t, rendered, "Warning 12")
+	assert.NotContains(t, rendered, "more lines", "a fitting body must not advertise a scroll")
+}
+
+// TestConfirmationOverlay_ScrollKeepsFrameHeight: while the body pages, the
+// dialog's outer height must not breathe — the pinned prompt would otherwise
+// walk the confirm buttons up and down the screen.
+func TestConfirmationOverlay_ScrollKeepsFrameHeight(t *testing.T) {
+	c := overflowingConfirm(12, 80, 24)
+	want := renderedLineCount(c.Render())
+	for i := 0; i < 30; i++ {
+		c.ScrollDown()
+		assert.Equal(t, want, renderedLineCount(c.Render()),
+			"the frame must not change height at scroll %d", c.scroll)
 	}
 }
