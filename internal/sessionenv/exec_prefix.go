@@ -298,6 +298,19 @@ func binaryMismaps(bin *syntax.BinaryCmd, stmt *syntax.Stmt, agent, command stri
 	if agent == "" || binaryTailAgentName(bin) != agent {
 		return true
 	}
+	// The tail-agent exemption holds only when the tail is the ONLY
+	// selected-agent invocation. injectSystemPrompt selects the FIRST agent
+	// DetectAgentFromCommand finds, so when the agent appears earlier in the
+	// compound the selected agent is that earlier invocation, which the flag
+	// appended to the END never reaches: `claude && claude` becomes
+	// `claude && claude --plugin-dir …`, the first (normally interactive)
+	// claude starts without the plugin, and the tail-name match would otherwise
+	// hide it. Require the left of the binary to be agent-free before applying
+	// the exemption (#5167 review: "Warn when an earlier matching agent misses
+	// the appended flag").
+	if binaryLeftInvokesAgent(bin, agent) {
+		return true
+	}
 	if binaryTailHasOptionsTerminator(bin) {
 		return true
 	}
@@ -423,6 +436,42 @@ func wordsContainOptionsTerminator(words []*syntax.Word) bool {
 // is named the same way DetectAgentFromCommand would name it.
 func binaryTailAgentName(bin *syntax.BinaryCmd) string {
 	return firstWordAgentName(binaryTailCallWords(bin))
+}
+
+// binaryLeftInvokesAgent reports whether the left side of a binary command
+// (|, &&, ||) — everything except the rightmost command that receives the
+// appended flag — invokes the detected agent as the first word of a simple
+// call. binaryMismaps uses this to keep the tail-agent exemption from applying
+// when the agent appears earlier in the compound, where the flag appended to
+// the END never reaches it (#5167 review: "Warn when an earlier matching agent
+// misses the appended flag").
+func binaryLeftInvokesAgent(bin *syntax.BinaryCmd, agent string) bool {
+	return stmtInvokesAgent(bin.X, agent)
+}
+
+// stmtInvokesAgent reports whether stmt invokes the detected agent as the first
+// word of any simple call within it. It walks a binary command's both sides and
+// a simple call directly; compound constructs (subshell, if, for, while) are
+// not analyzed and report false, the conservative answer for the tail-agent
+// exemption — a compound that hides an agent is not the plain
+// repeated-invocation shape this guard is for, and the exemption already does
+// not hold when the rightmost command is itself such a compound.
+func stmtInvokesAgent(stmt *syntax.Stmt, agent string) bool {
+	if stmt == nil {
+		return false
+	}
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		return stmtInvokesAgent(cmd.X, agent) || stmtInvokesAgent(cmd.Y, agent)
+	case *syntax.CallExpr:
+		if len(cmd.Args) == 0 {
+			return false
+		}
+		words, _ := stripExecPrefix(cmd.Args)
+		words = skipEnvWrapperTerminator(words)
+		return firstWordAgentName(words) == agent
+	}
+	return false
 }
 
 // binaryTailCallWords returns the words of the rightmost simple call in a binary
@@ -706,16 +755,50 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 	// cluster as well. After injection `bash -ic 'claude' --plugin-dir …` makes
 	// the appended words the shell's `$0`/positionals, so claude starts without
 	// the plugin (#5167 review: "Detect combined shell -c options").
-	for _, w := range words[1:] {
-		lit, ok := literalShellWord(w)
+	//
+	// A script that forwards its positionals to the command it invokes, however,
+	// carries the appended flag — now a positional to the interpreter — through
+	// to the agent: `sh -c 'exec "$@"' sh claude` becomes
+	// `sh -c 'exec "$@"' sh claude --plugin-dir …` and `"$@"` runs claude with
+	// `--plugin-dir`, so claude starts WITH the plugin and the warning would be a
+	// false positive. The word after the `-c` flag (or a cluster carrying it) is
+	// the script; a script that references the positional parameters (`$@`/`$*`)
+	// is treated as a forwarding wrapper and not warned (#5167 review: "Avoid
+	// warning for forwarding `sh -c` wrappers"). A non-literal script (expansions
+	// inside double quotes) is not recognized and stays warned, the safe
+	// direction; a script that names the agent without forwarding keeps the flag
+	// from it and is still warned.
+	for i := 1; i < len(words); i++ {
+		lit, ok := literalShellWord(words[i])
 		if !ok {
 			continue
 		}
 		if lit == "-c" || shellShortClusterHasC(lit) {
+			if i+1 < len(words) && scriptForwardsPositionals(words[i+1]) {
+				return false
+			}
 			return true
 		}
 	}
 	return false
+}
+
+// scriptForwardsPositionals reports whether the `-c` script word forwards its
+// positional parameters to the command it invokes — the shape that carries af's
+// appended flag, a positional to the interpreter, through to the agent. An
+// `exec "$@"` (or any `"$@"`/`"$*"`/`$@`/`$*` reference) runs the command named
+// in the positionals with those positionals as arguments, so
+// `sh -c 'exec "$@"' sh claude` becomes `sh -c 'exec "$@"' sh claude --plugin-dir …`
+// and claude receives `--plugin-dir` (#5167 review: "Avoid warning for forwarding
+// `sh -c` wrappers"). The canonical forwarding form is single-quoted, so it
+// reaches this check as one literal; a non-literal script is not recognized and
+// stays warned, which is the safe direction.
+func scriptForwardsPositionals(script *syntax.Word) bool {
+	lit, ok := literalShellWord(script)
+	if !ok {
+		return false
+	}
+	return strings.Contains(lit, "$@") || strings.Contains(lit, "$*")
 }
 
 // wordIsKnownShell reports whether the first word is a literal invocation of a

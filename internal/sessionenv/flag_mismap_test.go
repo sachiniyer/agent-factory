@@ -359,6 +359,22 @@ func TestCommandHasControlOperatorAgentLast(t *testing.T) {
 		// that carries the flag, which is already a control operator; the heredoc
 		// is not the misroute on its own.
 		{"and with agent last and heredoc then trailing newline", "true && claude <<EOF\nprompt\nEOF\n", "claude", true},
+		// The tail-agent exemption only holds when the tail is the ONLY
+		// selected-agent invocation. injectSystemPrompt selects the FIRST agent
+		// DetectAgentFromCommand finds, so a compound that invokes the agent
+		// earlier AND at the tail leaves the earlier (normally interactive)
+		// invocation without the flag: `claude && claude` becomes
+		// `claude && claude --plugin-dir …`, the first claude starts without the
+		// plugin, and the tail-name match would otherwise hide it. The exemption
+		// requires the left of the binary to be agent-free (#5167 review: "Warn
+		// when an earlier matching agent misses the appended flag").
+		{"and with agent twice", "claude && claude", "claude", true},
+		{"or with agent twice", "claude || claude", "claude", true},
+		{"pipe with agent twice", "claude | claude", "claude", true},
+		{"and with agent twice with flags", "claude --resume && claude", "claude", true},
+		{"pipe then and with agent twice", "claude | true && claude", "claude", true},
+		{"and with agent earlier behind exec", "exec claude && claude", "claude", true},
+		{"and with agent earlier behind env", "env claude && claude", "claude", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandHasControlOperator(tc.command, tc.agent)
@@ -570,6 +586,23 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		// env in front of a non-shell command is not an interpreter wrapper: the
 		// `--plugin-dir` appended after `env claude` reaches claude normally.
 		{"env without a shell is not an interpreter", "env claude", false},
+		// A script that forwards its positionals to the command it invokes
+		// carries af's appended flag — a positional to the interpreter —
+		// through to the agent, so `sh -c 'exec "$@"' sh claude` becomes
+		// `sh -c 'exec "$@"' sh claude --plugin-dir …` and claude receives
+		// `--plugin-dir`; this is not a misroute and must not warn (#5167
+		// review: "Avoid warning for forwarding `sh -c` wrappers"). `"$@"`,
+		// `$@`, and `"$*"`/`$*` all forward the positionals; a script that
+		// names the agent without forwarding still keeps the flag from it.
+		{"sh -c exec argv pass-through", `sh -c 'exec "$@"' sh claude`, false},
+		{"bash -c exec argv pass-through", `bash -c 'exec "$@"' bash claude`, false},
+		{"sh -c unquoted argv pass-through", `sh -c 'exec $@' sh claude`, false},
+		{"sh -c star pass-through", `sh -c 'exec "$*"' sh claude`, false},
+		{"sh -c pass-through with agent in script", `sh -c 'claude "$@"' sh claude`, false},
+		{"env sh -c exec argv pass-through", `env sh -c 'exec "$@"' sh claude`, false},
+		{"bash -ic exec argv pass-through", `bash -ic 'exec "$@"' bash claude`, false},
+		{"sh -c names agent without forwarding still warns", `sh -c 'claude'`, true},
+		{"sh -c exec without argv still warns", `sh -c 'exec claude'`, true},
 		{"empty string", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

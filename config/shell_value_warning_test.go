@@ -634,6 +634,27 @@ func TestLaunchFlagMismap_ControlOperatorAgentLast(t *testing.T) {
 	}
 }
 
+// TestLaunchFlagMismap_ControlOperatorAgentTwice pins that a compound invoking the
+// detected agent earlier AND at the tail still warns: injectSystemPrompt selects
+// the FIRST agent, so `claude && claude` becomes `claude && claude --plugin-dir …`
+// and the first (normally interactive) claude starts without the plugin. The
+// tail-agent exemption requires the tail to be the only selected-agent invocation
+// (#5167 review: "Warn when an earlier matching agent misses the appended flag").
+func TestLaunchFlagMismap_ControlOperatorAgentTwice(t *testing.T) {
+	for name, value := range map[string]string{
+		"and with agent twice":  "claude && claude",
+		"or with agent twice":   "claude || claude",
+		"pipe with agent twice": "claude | claude",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			assertControlOperatorWarning(t, warnings.String(), "program_overrides.claude")
+		})
+	}
+}
+
 // TestLaunchFlagMismap_TrailingComment pins that a trailing `#` shell comment
 // swallows the flag injectSystemPrompt appends to the END of the value: everything
 // after a `#` on that line is a comment, so `claude # use the default profile`
@@ -761,6 +782,19 @@ func TestLaunchFlagMismap_InterpreterWrapper(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, warnings.String(), "shell interpreter's `-c` flag",
 			"a plain `sh claude` (no -c) is not the interpreter `-c` shape")
+	})
+
+	// A `-c` script that forwards its positionals to the command it invokes
+	// carries af's appended flag through to the agent, so it must not fire the
+	// interpreter warning (#5167 review: "Avoid warning for forwarding `sh -c`
+	// wrappers"): `sh -c 'exec "$@"' sh claude` becomes
+	// `sh -c 'exec "$@"' sh claude --plugin-dir …` and claude receives the flag.
+	t.Run("sh -c forwarding wrapper does not fire", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(`sh -c 'exec "$@"' sh claude`)+"\n"), "global.toml")
+		require.NoError(t, err)
+		assert.NotContains(t, warnings.String(), "shell interpreter's `-c` flag",
+			"a forwarding `sh -c 'exec \"$@\"'` wrapper passes the flag through to the agent")
 	})
 }
 
