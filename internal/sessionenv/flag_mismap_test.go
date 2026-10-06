@@ -60,6 +60,23 @@ func TestCommandEndsOptionsTerminator(t *testing.T) {
 		{"env wrapper then agent's own terminator", "env -- claude --", true},
 		{"env wrapper with VAR then agent's own terminator", "env VAR=1 claude --", true},
 		{"env without terminator, agent's own terminator", "env VAR=1 claude -- --resume", true},
+
+		// env can sit behind another argv-passthrough wrapper: `ionice -c 3 env --
+		// claude` is one CallExpr whose first word is `ionice`, so the prior
+		// words[0]-only check left env's `--` in the scan and warned even though
+		// env passes the appended flag to claude normally. The wrapper prefix is
+		// peeled first, so env's `--` is not mistaken for the agent's own
+		// terminator; `ionice -c 3 env -- claude --` still flags claude's trailing
+		// `--`. A wrapper's OWN `--` (nice's end-of-options) is also not the
+		// agent's terminator (#5167 review: "Recognize env terminators behind
+		// wrappers").
+		{"ionice wrapper then env terminator", "ionice -c 3 env -- claude", false},
+		{"nice wrapper then env terminator", "nice -n 5 env -- claude", false},
+		{"nohup wrapper then env terminator", "nohup env -- claude", false},
+		{"ionice wrapper then env then agent's own terminator", "ionice -c 3 env -- claude --", true},
+		{"ionice wrapper then env then agent's own terminator mid-command", "ionice -c 3 env -- claude -- --resume", true},
+		{"nice wrapper's own terminator is not the agent's", "nice -- claude", false},
+		{"nice wrapper then agent's own terminator", "nice -- claude --", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandEndsOptionsTerminator(tc.command)
@@ -239,6 +256,23 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"zsh -c script", "zsh -c 'claude'", true},
 		{"exec sh -c script", "exec sh -c 'claude'", true},
 		{"sh -c with args before the flag", "sh -c 'claude --model opus'", true},
+		// A combined short-option cluster such as `bash -ic 'claude'` also carries
+		// the `-c` flag (bash --help lists `-ilrsD or -c command`): the shell
+		// runs the next word as a script, so the appended flag is a positional to
+		// the interpreter, not an argument to the agent. `-ic`, `-ci`, and `-lc`
+		// all flag it; a cluster without `c` (`-il`) does not (#5167 review:
+		// "Detect combined shell -c options").
+		{"bash combined -ic", "bash -ic 'claude'", true},
+		{"bash combined -ci", "bash -ci 'claude'", true},
+		{"bash combined -ilc", "bash -ilc 'claude'", true},
+		{"bash combined -sc", "bash -sc 'claude'", true},
+		{"dash combined -c", "dash -c 'claude'", true},
+		{"bash combined without c", "bash -il 'claude'", false},
+		// A flag that takes an argument before `c` would swallow a following `c`
+		// as its operand rather than the script flag; bash's `-O shopt_option`
+		// takes the next word, so `-Oc` is not the `-c` shape (conservative: do
+		// not claim the script flag after an unknown flag).
+		{"bash -Oc is not a -c cluster", "bash -Oc 'claude'", false},
 		// A plain `sh claude` (no `-c`) runs claude as a script FILE, not the
 		// `-c` shape this predicate is about; it is not flagged here.
 		{"sh without -c", "sh claude", false},

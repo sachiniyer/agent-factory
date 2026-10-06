@@ -126,7 +126,23 @@ func CommandEndsOptionsTerminator(command string) bool {
 // scan then flags. An `env` invocation envcommand.Parse cannot model (an
 // unsupported option, or a split-string) is left untouched so the scan stays on
 // the safe side of its prior behavior.
+//
+// env can sit behind another argv-passthrough wrapper: `ionice -c 3 env -- claude`
+// is one CallExpr whose first word is `ionice`, so a words[0]-only check left
+// env's `--` in the scan and warned even though env passes the appended flag to
+// claude normally. The known wrapper prefixes (ionice, nice, nohup, timeout,
+// setsid, stdbuf, taskset, command, builtin, …) are peeled first with the same
+// unwrapAccountCommand the account walk uses; with no denied names its peel is
+// purely structural, and an unsafe peel (a dynamic or unprovable form) falls back
+// to the unpeeled words so the scan stays on the safe side of its prior behavior
+// (#5167 review: "Recognize env terminators behind wrappers").
 func skipEnvWrapperTerminator(words []*syntax.Word) []*syntax.Word {
+	if len(words) == 0 {
+		return words
+	}
+	if peeled, unsafe := unwrapAccountCommand(words, map[string]struct{}{}, newOperandTailMemo()); !unsafe {
+		words = peeled
+	}
 	if len(words) == 0 || !wordBaseEquals(words[0], "env") {
 		return words
 	}
@@ -320,10 +336,18 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 	}
 	// The `-c` flag means the next word is a script, so the agent the flag is
 	// appended after is the interpreter, not the agent named inside the script.
-	// A combined short flag like `-ic` is not the `-c` flag by itself, so it does
-	// not trip this predicate; the common shape is a literal `-c`.
+	// The standalone spelling is a literal `-c`; a combined short-option cluster
+	// such as `bash -ic 'claude'` also carries the `-c` flag (bash --help lists
+	// `-ilrsD or -c command`), so shellShortClusterHasC recognizes `c` in a
+	// cluster as well. After injection `bash -ic 'claude' --plugin-dir …` makes
+	// the appended words the shell's `$0`/positionals, so claude starts without
+	// the plugin (#5167 review: "Detect combined shell -c options").
 	for _, w := range words[1:] {
-		if lit, ok := literalShellWord(w); ok && lit == "-c" {
+		lit, ok := literalShellWord(w)
+		if !ok {
+			continue
+		}
+		if lit == "-c" || shellShortClusterHasC(lit) {
 			return true
 		}
 	}
@@ -341,6 +365,36 @@ func wordIsKnownShell(word *syntax.Word) bool {
 		return false
 	}
 	return knownShellName(filepath.Base(value))
+}
+
+// shellShortClusterHasC reports whether a combined short-option word (a word
+// starting with a single `-` and more than one flag character) carries the `-c`
+// flag that makes the next word a script, as in `bash -ic 'claude'`. Bash and
+// the other POSIX shells accept the compact form (`bash --help` lists `-ilrsD
+// or -c command`); the standalone `-c` is already matched by the literal scan
+// in CommandInvokesAgentViaInterpreter, so this inspects only a cluster with
+// more than one flag. A flag that takes an argument would swallow a later `c`
+// as its operand (bash's `-O shopt_option`), so the scan stops at the first flag
+// not known to be argument-free for the POSIX shells; `c` itself ends the scan
+// because it consumes the next word as its script. The argument-free invocation
+// flags are `i`, `l`, `s`, `r`, and `D`; a `c` after any other flag is not
+// claimed as the script flag, so an unknown option stays conservative rather
+// than over-warning.
+func shellShortClusterHasC(word string) bool {
+	if len(word) <= 2 || word[0] != '-' || word[1] == '-' {
+		return false
+	}
+	for _, flag := range word[1:] {
+		switch flag {
+		case 'c':
+			return true
+		case 'i', 'l', 's', 'r', 'D':
+			continue
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // CommandHasHeredoc reports whether command is a single simple call with a
