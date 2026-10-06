@@ -232,6 +232,20 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"trailing and then spaces before newline", "claude &&  \n", true},
 		{"trailing pipe then spaces before newline", "claude | \n", true},
 
+		// A trailing `#` comment on the operator's line hides the operator from
+		// the raw suffix check, but appending the flag completes the operator
+		// (the comment ends at the newline), so the operator is still stripped of
+		// the comment and the misroute is flagged: `claude | # note\n --plugin-dir
+		// …` runs the flag as the right side of the pipe while claude starts
+		// without the plugin. A `#` inside a quoted word is not a comment, so
+		// `claude "a#b" |` is unaffected (#5167 review: "Strip trailing comments
+		// before checking incomplete operators").
+		{"trailing pipe then comment", "claude | # note\n", true},
+		{"trailing and then comment", "claude && # note\n", true},
+		{"trailing pipe then comment with no newline", "claude | # note", true},
+		{"trailing pipe then comment line then another comment line", "claude | # note\n# more\n", true},
+		{"trailing pipe with quoted hash is not a comment", "claude \"a#b\" |", true},
+
 		// An unterminated here-document (`<<`/`<<-`) is a parse error whose
 		// appended flag supplies the delimiter word, so the flag becomes the
 		// delimiter (and the rest of the line its body) rather than a flag to the
@@ -672,6 +686,15 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"sh -c quoted star does not forward", `sh -c 'exec "$*"' sh claude`, true},
 		{"sh -c unquoted star does not forward", `sh -c 'exec $*' sh claude`, true},
 		{"sh -c pass-through with agent in script", `sh -c 'claude "$@"' sh claude`, false},
+		// A script that names the agent itself with `"$@"` as an argument
+		// (`claude "$@"`) invokes the agent directly, so the `$0` operand is
+		// irrelevant: even with the agent as `$0` (`sh -c 'claude "$@"' claude`),
+		// `"$@"` carries the appended flag to the hard-coded `claude` and the
+		// wrapper is safe. The placeholder check only applies when the script
+		// runs the positionals as the command (`exec "$@"`), where `$0` is the
+		// only place the agent can live (#5167 review: "Do not warn for
+		// hard-coded `$@` forwarding without `$0`").
+		{"sh -c hard-coded agent argv without $0 pass-through", `sh -c 'claude "$@"' claude`, false},
 		{"env sh -c exec argv pass-through", `env sh -c 'exec "$@"' sh claude`, false},
 		{"bash -ic exec argv pass-through", `bash -ic 'exec "$@"' bash claude`, false},
 		{"sh -c names agent without forwarding still warns", `sh -c 'claude'`, true},

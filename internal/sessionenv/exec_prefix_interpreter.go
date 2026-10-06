@@ -82,13 +82,18 @@ func CommandInvokesAgentViaInterpreter(command, agent string) bool {
 		}
 		if lit == "-c" || shellShortClusterHasC(lit) {
 			if i+1 < len(words) && scriptForwardsPositionals(words[i+1], agent) {
-				// Only the shape with a `$0` placeholder before the forwarded
-				// agent is a safe pass-through; without one the agent is `$0`
-				// and `"$@"` runs the appended flag, so it stays warned.
-				if forwardingScriptHasArgvPlaceholder(words, i, agent) {
-					return false
+				// A script that runs the forwarded argv as the command
+				// (`exec "$@"`) needs a `$0` placeholder before the agent:
+				// without one the agent is `$0` and `"$@"` runs the appended
+				// flag rather than the agent. A script that names the agent
+				// itself with `"$@"` as an argument (`claude "$@"`) invokes the
+				// agent directly, so `$0` is irrelevant and no placeholder is
+				// needed (#5167 review: "Do not warn for hard-coded `$@`
+				// forwarding without `$0`").
+				if scriptForwardsArgvAsCommand(words[i+1]) && !forwardingScriptHasArgvPlaceholder(words, i, agent) {
+					return true
 				}
-				return true
+				return false
 			}
 			return true
 		}
@@ -112,6 +117,66 @@ func forwardingScriptHasArgvPlaceholder(words []*syntax.Word, cIndex int, agent 
 		return true
 	}
 	return firstWordAgentName(words[cIndex+2:cIndex+3]) != agent
+}
+
+// scriptForwardsArgvAsCommand reports whether the `-c` script's last statement
+// runs the forwarded positional argv as the command itself (`exec "$@"` or
+// `"$@"`), the forwarding shape that needs a `$0` placeholder before the agent
+// so `"$@"` runs the agent with the appended flag rather than running the flag
+// itself. A script that names the agent with `"$@"` as an argument
+// (`claude "$@"`) invokes the agent directly and does not need a placeholder,
+// so it is not this shape and the placeholder check does not apply
+// (#5167 review: "Do not warn for hard-coded `$@` forwarding without `$0`").
+func scriptForwardsArgvAsCommand(script *syntax.Word) bool {
+	lit, ok := literalShellWord(script)
+	if !ok {
+		return false
+	}
+	if !strings.Contains(lit, "$@") {
+		return false
+	}
+	stmt, ok := lastScriptStmt(lit)
+	if !ok {
+		return false
+	}
+	return stmtRunsArgvAsCommand(stmt)
+}
+
+// stmtRunsArgvAsCommand reports whether stmt runs the positional argv `$@` as
+// its command (after an optional leading `exec`), the shape that needs a `$0`
+// placeholder before the forwarded agent. It is the command-position scan behind
+// scriptForwardsArgvAsCommand, mirroring the first branch of callForwardsArgv.
+func stmtRunsArgvAsCommand(stmt *syntax.Stmt) bool {
+	if stmt == nil {
+		return false
+	}
+	switch c := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		return stmtRunsArgvAsCommand(c.X) || stmtRunsArgvAsCommand(c.Y)
+	case *syntax.CallExpr:
+		return callRunsArgvAsCommand(c.Args)
+	}
+	return false
+}
+
+// callRunsArgvAsCommand reports whether the words of a simple call run the
+// forwarded positional argv as the command, i.e. the command word (after an
+// optional leading `exec`) is `$@`/`"$@"`. It is the call-level scan behind
+// stmtRunsArgvAsCommand; a call that names the agent with `$@` as an argument
+// (`claude "$@"`) does not run the positionals as the command and is not this
+// shape.
+func callRunsArgvAsCommand(args []*syntax.Word) bool {
+	if len(args) == 0 {
+		return false
+	}
+	cmdArgs := args
+	if lit, ok := literalShellWord(args[0]); ok && lit == "exec" {
+		cmdArgs = args[1:]
+		if len(cmdArgs) == 0 {
+			return false
+		}
+	}
+	return wordReferencesAtParam(cmdArgs[0])
 }
 
 // scriptForwardsPositionals reports whether the `-c` script word forwards its

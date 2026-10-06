@@ -697,6 +697,83 @@ func trailingBackslashRunInComment(command string, newlineEnd, backs int) bool {
 	return false
 }
 
+// stripTrailingLineComment removes a trailing `#` shell comment from command so
+// a suffix check sees the operator the comment was hiding. A `#` starts a comment
+// only at the start of a word (preceded by whitespace or a shell metacharacter,
+// or at the start of the line) and not inside quotes, so a `#` inside a quoted
+// word (`claude "a#b" |`) is left alone. The comment runs to the end of its line,
+// and the caller has already stripped line continuations, so trailing newlines and
+// any comment line after the operator's line are removed in a loop until the last
+// line has no leading comment: `claude | # note\n# more` reduces to `claude |` the
+// same way `claude | # note` does. Only the last line's comment is stripped on each
+// pass because a comment earlier in the value ends at its own newline and the
+// operator after it is already visible to the suffix check
+// (#5167 review: "Strip trailing comments before checking incomplete operators").
+func stripTrailingLineComment(command string) string {
+	for {
+		trimmed := strings.TrimRight(command, " \t\r\n")
+		if trimmed == "" {
+			return command
+		}
+		lineStart := strings.LastIndex(trimmed, "\n") + 1
+		line := trimmed[lineStart:]
+		commentStart := trailingCommentStart(line)
+		if commentStart < 0 {
+			return command
+		}
+		next := trimmed[:lineStart+commentStart]
+		if next == command {
+			return command
+		}
+		command = next
+	}
+}
+
+// trailingCommentStart returns the byte index of the `#` that starts a comment on
+// line, or -1 if the line has no comment. A `#` starts a comment only at the start
+// of a word: at the beginning of the line, or preceded by whitespace or a shell
+// operator metacharacter, and never inside quotes. A `#` inside a quoted word
+// (`claude "a#b" |`) is part of the word and is not a comment.
+func trailingCommentStart(line string) int {
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		case c == '#':
+			if i == 0 || isShellWordSeparator(line[i-1]) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// isShellWordSeparator reports whether b is a byte that ends a shell word, so a
+// following `#` begins a comment. Whitespace and the operator metacharacters
+// (`|`, `&`, `;`, `<`, `>`, `(`, `)`) delimit words; a `#` after any of them or
+// at the start of the line starts a comment, while a `#` inside a word
+// (`claude#note`) does not.
+func isShellWordSeparator(b byte) bool {
+	switch b {
+	case ' ', '\t', '|', '&', ';', '<', '>', '(', ')':
+		return true
+	}
+	return false
+}
+
 // endsWithIncompleteOperator reports whether command ends with a shell operator
 // (`|`, `&&`, `||`, `>`, `<`, `>>`) that makes it a parse error on its own but
 // that appending a word completes — so the flag injectSystemPrompt appends to the
@@ -708,6 +785,16 @@ func trailingBackslashRunInComment(command string, newlineEnd, backs int) bool {
 // a parse error and parses as a single call with a literal word.
 func endsWithIncompleteOperator(command string) bool {
 	command = stripTrailingLineContinuation(command)
+	// A trailing `#` comment on the operator's line hides the operator from the
+	// suffix check: `claude | # note` parses as an incomplete pipe, so this is
+	// the parse-error path, but the trim above leaves `# note` as the suffix and
+	// none of the operator cases match. Appending the flag completes the pipe —
+	// the comment ends at the newline and `claude | # note\n --plugin-dir …`
+	// runs the flag as the right side of the pipe — so the operator is stripped
+	// of the trailing comment first to inspect the final non-comment shell token
+	// (#5167 review: "Strip trailing comments before checking incomplete
+	// operators").
+	command = stripTrailingLineComment(command)
 	// The shell permits an unescaped newline after an incomplete list/pipeline
 	// operator (`claude &&\<newline>`, including spaces before that newline) and
 	// completes it with the appended command, so the trailing newline is trimmed
