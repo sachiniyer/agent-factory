@@ -173,10 +173,10 @@ func stmtRunsArgvAsCommand(stmt *syntax.Stmt) bool {
 
 // callRunsArgvAsCommand reports whether the words of a simple call run the
 // forwarded positional argv as the command, i.e. the command word (after an
-// optional leading `exec`) is `$@`/`"$@"`. It is the call-level scan behind
-// stmtRunsArgvAsCommand; a call that names the agent with `$@` as an argument
-// (`claude "$@"`) does not run the positionals as the command and is not this
-// shape.
+// optional leading `exec`) is a quoted, standalone `"$@"`. It is the call-level
+// scan behind stmtRunsArgvAsCommand; a call that names the agent with `"$@"` as
+// an argument (`claude "$@"`) does not run the positionals as the command and is
+// not this shape.
 func callRunsArgvAsCommand(args []*syntax.Word) bool {
 	if len(args) == 0 {
 		return false
@@ -194,13 +194,16 @@ func callRunsArgvAsCommand(args []*syntax.Word) bool {
 // scriptForwardsPositionals reports whether the `-c` script word forwards its
 // positional parameters to the command it invokes — the shape that carries af's
 // appended flag, a positional to the interpreter, through to the agent. An
-// `exec "$@"` (or any `"$@"`/`$@` reference that invokes the forwarded command)
+// `exec "$@"` (or any quoted `"$@"` reference that invokes the forwarded command)
 // runs the command named in the positionals with those positionals as arguments,
 // so `sh -c 'exec "$@"' sh claude` becomes `sh -c 'exec "$@"' sh claude --plugin-dir …`
 // and claude receives `--plugin-dir` (#5167 review: "Avoid warning for forwarding
-// `sh -c` wrappers"). Only `"$@"`/`$@` preserve the appended flag as separate argv
-// entries; quoted `"$*"` collapses the positionals into one word (so
-// `sh -c 'exec "$*"' sh claude` becomes one program name like
+// `sh -c` wrappers"). Only a quoted, standalone `"$@"` preserves the appended
+// flag as separate argv entries reliably; an unquoted `$@` field-splits when the
+// generated plugin directory contains whitespace, so `$@` is NOT treated as
+// forwarding and stays warned (#5167 review: "Require quoted full-word `$@` in
+// forwarding exemptions"); quoted `"$*"` collapses the positionals into one word
+// (so `sh -c 'exec "$*"' sh claude` becomes one program name like
 // `claude --plugin-dir /path` and fails to launch), and unquoted `$*` is
 // IFS-dependent, so `$*` is NOT treated as forwarding and stays warned (#5167
 // review: "Do not treat quoted `$*` as argv forwarding"). The canonical
@@ -234,11 +237,16 @@ func scriptForwardsPositionals(script *syntax.Word, agent string) bool {
 	// own; the appended flag is a positional to the shell, available to every
 	// statement, so the last statement that references `$@` is the one whose
 	// command receives (or execs) the forwarded positionals. A script that does
-	// not parse is left to the safe substring fallback.
+	// not parse — a Bash-specific construct such as `args=("$@"); claude` that
+	// the POSIX parser rejects — names the agent without forwarding it the
+	// positionals, and the appended flag never reaches that agent, so the safe
+	// direction is to NOT exempt it (treat parse failure as non-forwarding)
+	// rather than retaining the substring fallback (#5167 review: "Do not
+	// exempt unparseable shell scripts merely because they mention `$@`").
 	if stmt, ok := lastScriptStmt(lit); ok {
 		return stmtReferencesAtParam(stmt, agent)
 	}
-	return true
+	return false
 }
 
 // lastScriptStmt parses the literal text of a `-c` script and returns its last
@@ -256,20 +264,21 @@ func lastScriptStmt(script string) (*syntax.Stmt, bool) {
 }
 
 // stmtReferencesAtParam reports whether stmt invokes the positional parameter
-// `$@` (a ParamExp whose parameter is `@`, bare or inside double quotes) as the
-// command that receives af's appended flag — the shape that forwards the
-// interpreter's positionals through to the agent. `$@` is the only expansion
-// that preserves the appended flag as separate argv entries; `$*` is not
-// forwarding and is excluded by the parameter name check. The final statement
-// forwards only when it RUNS the forwarded argv: the command word (after an
-// optional `exec`) is itself `$@` (`exec "$@"`, `"$@"`), or the command is the
-// detected agent with `$@` among its arguments (`claude "$@"`). A call that
-// only consumes `$@` in an argument — `echo "$@"` — prints the positionals and
-// exits without launching the agent, so it does not forward and stays warned
-// (#5167 review: "Verify `$@` actually launches the forwarded command").
-// Compound constructs (subshell, if/for/while) are not analyzed and report
-// false, the conservative answer for the forwarding exemption — a compound
-// that hides a `$@` is not the plain forwarding shape this guard exempts.
+// `$@` (a quoted, standalone `"$@"`) as the command that receives af's appended
+// flag — the shape that forwards the interpreter's positionals through to the
+// agent. `"$@"` is the only expansion that preserves the appended flag as
+// separate argv entries reliably; an unquoted `$@` field-splits and `$*`
+// collapses/IFS-splits, so neither is treated as forwarding and both are excluded
+// by the parameter name and quoting check. The final statement forwards only
+// when it RUNS the forwarded argv: the command word (after an optional `exec`)
+// is itself `"$@"` (`exec "$@"`, `"$@"`), or the command is the detected agent
+// with `"$@"` among its arguments (`claude "$@"`). A call that only consumes
+// `"$@"` in an argument — `echo "$@"` — prints the positionals and exits
+// without launching the agent, so it does not forward and stays warned (#5167
+// review: "Verify `$@` actually launches the forwarded command"). Compound
+// constructs (subshell, if/for/while) are not analyzed and report false, the
+// conservative answer for the forwarding exemption — a compound that hides a
+// `"$@"` is not the plain forwarding shape this guard exempts.
 func stmtReferencesAtParam(stmt *syntax.Stmt, agent string) bool {
 	if stmt == nil {
 		return false
@@ -288,9 +297,11 @@ func stmtReferencesAtParam(stmt *syntax.Stmt, agent string) bool {
 // call-level scan behind stmtReferencesAtParam. A leading literal `exec` runs
 // the remaining words as the command, so it is peeled before the command
 // position is examined: `exec "$@"` forwards because the command (after exec)
-// is `$@`, and `exec claude "$@"` forwards because the command is the agent
-// with `$@` among its arguments. `echo "$@"` does not forward: echo is neither
-// `$@` nor the agent, so the positionals are merely printed.
+// is a quoted `"$@"`, and `exec claude "$@"` forwards because the command is
+// the agent with `"$@"` among its arguments. `echo "$@"` does not forward:
+// echo is neither `"$@"` nor the agent, so the positionals are merely printed.
+// An unquoted `$@` does not forward: it field-splits when the plugin directory
+// contains whitespace, so it is not treated as a reliable forwarding form.
 func callForwardsArgv(args []*syntax.Word, agent string) bool {
 	if len(args) == 0 {
 		return false
@@ -318,19 +329,27 @@ func callForwardsArgv(args []*syntax.Word, agent string) bool {
 	return false
 }
 
-// wordReferencesAtParam reports whether word holds a `$@` parameter expansion,
-// bare (`$@`) or quoted (`"$@"`), at any depth of double quoting. It is the
-// word-level scan behind stmtReferencesAtParam.
+// wordReferencesAtParam reports whether word is a quoted, standalone `"$@"`
+// parameter expansion — the only shape that reliably forwards the appended flag
+// to the agent as separate argv entries. An unquoted `$@` field-splits when the
+// generated plugin directory contains whitespace (`sh -c 'exec $@' sh claude`
+// becomes `claude --plugin-dir /path with spaces`, several arguments rather than
+// the intended flag/value pair), so it does not forward the flag reliably and is
+// not treated as a forwarding form; only a double-quoted, standalone `"$@"`
+// preserves the appended argv (#5167 review: "Require quoted full-word `$@` in
+// forwarding exemptions"). A `$@` glued to other text inside the same quotes
+// (`"prefix$@"`) is not a standalone `"$@"` and does not forward cleanly either,
+// so the word must be a single double-quoted `@` expansion. It is the word-level
+// scan behind stmtReferencesAtParam.
 func wordReferencesAtParam(word *syntax.Word) bool {
-	if word == nil {
+	if word == nil || len(word.Parts) != 1 {
 		return false
 	}
-	for _, part := range word.Parts {
-		if wordPartReferencesAtParam(part) {
-			return true
-		}
+	dq, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok {
+		return false
 	}
-	return false
+	return len(dq.Parts) == 1 && wordPartReferencesAtParam(dq.Parts[0])
 }
 
 func wordPartReferencesAtParam(part syntax.WordPart) bool {

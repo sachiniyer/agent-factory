@@ -418,6 +418,33 @@ func TestCommandHasControlOperatorAgentLast(t *testing.T) {
 		{"pipe then and with agent twice", "claude | true && claude", "claude", true},
 		{"and with agent earlier behind exec", "exec claude && claude", "claude", true},
 		{"and with agent earlier behind env", "env claude && claude", "claude", true},
+		// `exec` carries its own options before the command it runs — bash's
+		// `help exec` documents `exec [-cl] [-a name] [command ...]` — so
+		// `exec -a af claude && claude` launches the first claude (with argv[0]
+		// set to `af`) and the appended flag only reaches the tail claude.
+		// stripExecPrefix consumes only the `exec` keyword, so without peeling
+		// exec's own options the earlier-agent scan would read `-a` as the
+		// command and miss the earlier claude, suppressing the warning. The
+		// exec-option peel runs before the first-word agent check so the earlier
+		// invocation is detected (#5167 review: "Peel exec options before
+		// scanning earlier agent invocations").
+		{"and with agent earlier behind exec -a", "exec -a af claude && claude", "claude", true},
+		{"and with agent earlier behind exec -c", "exec -c claude && claude", "claude", true},
+		// A compound that invokes the detected agent on the left of a binary
+		// also leaves the first (detected) invocation without the flag, even
+		// though the tail is the agent: `(claude) && claude` appends the flag
+		// only to the tail claude. The earlier-agent scan walks into the
+		// subshell so the warning is not suppressed by the tail exemption
+		// (#5167 review: "Detect agent invocations inside earlier compound
+		// statements").
+		{"and with agent earlier in subshell", "(claude) && claude", "claude", true},
+		{"pipe with agent earlier in subshell", "(claude) | claude", "claude", true},
+		{"and with agent earlier in if", "if cond; then claude; fi && claude", "claude", true},
+		{"and with agent earlier in while", "while cond; do claude; done && claude", "claude", true},
+		// A compound on the left that does NOT invoke the agent keeps the tail
+		// exemption: `(true) && claude` routes the flag to the tail claude and
+		// is not a misroute.
+		{"and with non-agent earlier in subshell", "(true) && claude", "claude", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandHasControlOperator(tc.command, tc.agent)
@@ -500,6 +527,24 @@ func TestCommandHasControlOperatorMultiStatement(t *testing.T) {
 		{"semicolon with agent earlier behind exec", "exec claude; claude", "claude", true},
 		{"semicolon with agent earlier behind env", "env claude; claude", "claude", true},
 		{"two agents then non-agent last still warns on earlier", "claude; claude; echo hi", "claude", true},
+		// An earlier statement that hides the agent inside a compound also
+		// leaves the first (detected) invocation without the flag: `(claude);
+		// claude` appends the flag only to the tail claude. The earlier-agent
+		// scan walks into the compound so the warning is not suppressed by the
+		// tail exemption (#5167 review: "Detect agent invocations inside
+		// earlier compound statements").
+		{"semicolon with agent earlier in subshell", "(claude); claude", "claude", true},
+		{"semicolon with agent earlier in if", "if cond; then claude; fi; claude", "claude", true},
+		// A non-agent compound earlier does not select the agent, so a tail
+		// agent still routes the flag correctly — not a misroute.
+		{"semicolon with non-agent earlier in subshell", "(true); claude", "claude", false},
+		// `exec` carries its own options before the command it runs, so
+		// `exec -a af claude; claude` launches the first claude and the appended
+		// flag only reaches the tail. The exec-option peel runs before the
+		// earlier-agent scan so the earlier invocation is detected (#5167
+		// review: "Peel exec options before scanning earlier agent
+		// invocations").
+		{"semicolon with agent earlier behind exec -a", "exec -a af claude; claude", "claude", true},
 		// An earlier non-agent statement does not select the agent, so a tail
 		// agent still routes the flag correctly — not a misroute (covered above
 		// by "two statements then agent last").
@@ -682,7 +727,15 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		// flag from it.
 		{"sh -c exec argv pass-through", `sh -c 'exec "$@"' sh claude`, false},
 		{"bash -c exec argv pass-through", `bash -c 'exec "$@"' bash claude`, false},
-		{"sh -c unquoted argv pass-through", `sh -c 'exec $@' sh claude`, false},
+		// An unquoted `$@` field-splits when the generated plugin directory
+		// contains whitespace, so `sh -c 'exec $@' sh claude` becomes
+		// `claude --plugin-dir /path with spaces` — several arguments rather
+		// than the intended flag/value pair — and claude starts without the
+		// plugin. Only a quoted, standalone `"$@"` preserves the appended argv
+		// reliably, so the unquoted form does not forward and stays warned
+		// (#5167 review: "Require quoted full-word `$@` in forwarding
+		// exemptions").
+		{"sh -c unquoted argv does not forward", `sh -c 'exec $@' sh claude`, true},
 		{"sh -c quoted star does not forward", `sh -c 'exec "$*"' sh claude`, true},
 		{"sh -c unquoted star does not forward", `sh -c 'exec $*' sh claude`, true},
 		{"sh -c pass-through with agent in script", `sh -c 'claude "$@"' sh claude`, false},
@@ -723,6 +776,14 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		// shells").
 		{"sh -c forwarding without $0 placeholder warns", `sh -c 'exec "$@"' claude`, true},
 		{"sh -c forwarding with $0 placeholder pass-through", `sh -c 'exec "$@"' sh claude`, false},
+		// A Bash-specific script that the POSIX parser cannot parse — a Bash
+		// array assignment such as `args=("$@"); claude` — still mentions `$@`,
+		// but the hard-coded `claude` runs without the forwarded positionals, so
+		// the appended flag never reaches it. The parse-failure fallback must NOT
+		// exempt the script on the bare `$@` substring; it stays warned (#5167
+		// review: "Do not exempt unparseable shell scripts merely because they
+		// mention `$@`").
+		{"bash -c unparseable script with $@ warns", `bash -c 'args=("$@"); claude' bash claude`, true},
 		// `-v` (verbose) is an argument-free Bash shell option, so a cluster
 		// such as `bash -vc 'claude'` is also a `-c` invocation: the appended flag
 		// is a positional to the shell, not an argument to the agent inside the

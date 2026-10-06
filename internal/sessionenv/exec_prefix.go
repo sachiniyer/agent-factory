@@ -493,22 +493,30 @@ func binaryTailAgentName(bin *syntax.BinaryCmd) string {
 
 // binaryLeftInvokesAgent reports whether the left side of a binary command
 // (|, &&, ||) — everything except the rightmost command that receives the
-// appended flag — invokes the detected agent as the first word of a simple
-// call. binaryMismaps uses this to keep the tail-agent exemption from applying
-// when the agent appears earlier in the compound, where the flag appended to
-// the END never reaches it (#5167 review: "Warn when an earlier matching agent
-// misses the appended flag").
+// appended flag — invokes the detected agent, including inside a compound
+// construct (subshell, if, for, ...) on the left. binaryMismaps uses this to
+// keep the tail-agent exemption from applying when the agent appears earlier in
+// the compound, where the flag appended to the END never reaches it (#5167
+// review: "Warn when an earlier matching agent misses the appended flag"; "Detect
+// agent invocations inside earlier compound statements").
 func binaryLeftInvokesAgent(bin *syntax.BinaryCmd, agent string) bool {
 	return stmtInvokesAgent(bin.X, agent)
 }
 
 // stmtInvokesAgent reports whether stmt invokes the detected agent as the first
-// word of any simple call within it. It walks a binary command's both sides and
-// a simple call directly; compound constructs (subshell, if, for, while) are
-// not analyzed and report false, the conservative answer for the tail-agent
-// exemption — a compound that hides an agent is not the plain
-// repeated-invocation shape this guard is for, and the exemption already does
-// not hold when the rightmost command is itself such a compound.
+// word of any simple call within it, including simple calls nested inside a
+// compound construct (subshell, brace block, if/while/for/case, ...). It walks a
+// binary command's both sides, a simple call directly, and the statements held by
+// a compound construct, so an earlier agent invocation that hides inside a
+// compound is detected: `(claude) && claude` appends the flag only to the tail
+// claude and leaves the subshell's claude without the plugin, so the exemption
+// must not treat the compound as agent-free (#5167 review: "Detect agent
+// invocations inside earlier compound statements"). `exec` carries its own
+// options before the command it runs (`exec -a af claude`), and stripExecPrefix
+// consumes only the `exec` keyword, so the exec-option peel is applied before
+// the first word is read; without it, `-a` would read as the command and the
+// earlier agent call would go undetected (#5167 review: "Peel exec options
+// before scanning earlier agent invocations").
 func stmtInvokesAgent(stmt *syntax.Stmt, agent string) bool {
 	if stmt == nil {
 		return false
@@ -521,10 +529,57 @@ func stmtInvokesAgent(stmt *syntax.Stmt, agent string) bool {
 			return false
 		}
 		words, _ := stripExecPrefix(cmd.Args)
+		words = skipExecOptions(words)
 		words = skipEnvWrapperTerminator(words)
 		return firstWordAgentName(words) == agent
+	case *syntax.Subshell:
+		return stmtsInvokeAgent(cmd.Stmts, agent)
+	case *syntax.Block:
+		return stmtsInvokeAgent(cmd.Stmts, agent)
+	case *syntax.IfClause:
+		return ifClauseInvokesAgent(cmd, agent)
+	case *syntax.WhileClause:
+		return stmtsInvokeAgent(cmd.Cond, agent) || stmtsInvokeAgent(cmd.Do, agent)
+	case *syntax.ForClause:
+		return stmtsInvokeAgent(cmd.Do, agent)
+	case *syntax.CaseClause:
+		for _, item := range cmd.Items {
+			if stmtsInvokeAgent(item.Stmts, agent) {
+				return true
+			}
+		}
+		return false
+	case *syntax.CoprocClause:
+		return stmtInvokesAgent(cmd.Stmt, agent)
+	case *syntax.TimeClause:
+		return stmtInvokesAgent(cmd.Stmt, agent)
 	}
 	return false
+}
+
+// stmtsInvokeAgent reports whether any statement in stmts invokes the detected
+// agent. It is the slice-level scan behind stmtInvokesAgent's compound-construct
+// cases.
+func stmtsInvokeAgent(stmts []*syntax.Stmt, agent string) bool {
+	for _, s := range stmts {
+		if stmtInvokesAgent(s, agent) {
+			return true
+		}
+	}
+	return false
+}
+
+// ifClauseInvokesAgent reports whether an if/elif/else chain invokes the detected
+// agent in any of its condition or body statement lists. The Else field chains
+// the next elif/else as a nested IfClause, so the whole chain is walked.
+func ifClauseInvokesAgent(c *syntax.IfClause, agent string) bool {
+	if c == nil {
+		return false
+	}
+	if stmtsInvokeAgent(c.Cond, agent) || stmtsInvokeAgent(c.Then, agent) {
+		return true
+	}
+	return ifClauseInvokesAgent(c.Else, agent)
 }
 
 // binaryTailCallWords returns the words of the rightmost simple call in a binary
