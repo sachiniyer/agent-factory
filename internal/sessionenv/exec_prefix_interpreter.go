@@ -19,7 +19,18 @@ import (
 // a different shape the account boundary already refuses, so it is not flagged here.
 //
 // Exported for the config loaders on the same precedent as CommandUsesExecSeparator.
-func CommandInvokesAgentViaInterpreter(command string) bool {
+// The forwarding exemption holds only when a dummy `$0` placeholder precedes
+// the forwarded agent. The operand right after the `-c` script is the shell's
+// `$0`, so a wrapper that puts the agent there (`sh -c 'exec "$@"' claude`)
+// assigns `claude` to `$0` and `"$@"` then begins with the appended flag, so
+// `exec` runs the flag rather than claude. A placeholder before the agent
+// (`sh -c 'exec "$@"' sh claude`) makes the agent `$1` and `"$@"` runs it with
+// the flag, so only that shape is exempt (#5167 review: "Require a `$0`
+// placeholder before exempting forwarding shells"). `agent` is the agent
+// injectSystemPrompt detects in the value (lowercased basename), the same
+// `CommandHasControlOperator` receives; "" preserves the prior exempt shape
+// when no agent is detected.
+func CommandInvokesAgentViaInterpreter(command, agent string) bool {
 	call, ok := singleCallIgnoringRedirections(command)
 	if !ok {
 		return false
@@ -70,13 +81,37 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 			continue
 		}
 		if lit == "-c" || shellShortClusterHasC(lit) {
-			if i+1 < len(words) && scriptForwardsPositionals(words[i+1]) {
-				return false
+			if i+1 < len(words) && scriptForwardsPositionals(words[i+1], agent) {
+				// Only the shape with a `$0` placeholder before the forwarded
+				// agent is a safe pass-through; without one the agent is `$0`
+				// and `"$@"` runs the appended flag, so it stays warned.
+				if forwardingScriptHasArgvPlaceholder(words, i, agent) {
+					return false
+				}
+				return true
 			}
 			return true
 		}
 	}
 	return false
+}
+
+// forwardingScriptHasArgvPlaceholder reports whether the operands after a `-c`
+// script put a dummy `$0` before the forwarded agent, the shape that lets
+// `"$@"` run the agent with af's appended flag instead of running the flag
+// itself. cIndex is the index of the `-c` flag (or a cluster carrying it);
+// the script is at cIndex+1, so the `$0` operand is at cIndex+2. With no
+// operand after the script there is nothing to misroute (the no-operand
+// pass-through shape), and with no detected agent there is no agent to place
+// at `$0`, so both keep the prior exempt behavior.
+func forwardingScriptHasArgvPlaceholder(words []*syntax.Word, cIndex int, agent string) bool {
+	if agent == "" {
+		return true
+	}
+	if cIndex+2 >= len(words) {
+		return true
+	}
+	return firstWordAgentName(words[cIndex+2:cIndex+3]) != agent
 }
 
 // scriptForwardsPositionals reports whether the `-c` script word forwards its
@@ -104,8 +139,13 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 // expansion in the LAST statement of the script, the command that runs last and
 // the one the appended flag must reach for the agent to receive it; an earlier
 // statement that consumes `$@` does not forward it to the agent (#5167 review:
-// "Only exempt scripts that actually forward positional argv").
-func scriptForwardsPositionals(script *syntax.Word) bool {
+// "Only exempt scripts that actually forward positional argv"). The final
+// statement must also INVOKE the forwarded argv — `exec "$@"` or `"$@"` — or
+// run the agent itself with `$@` among its arguments — `claude "$@"`; a call
+// that merely consumes `$@` in an argument (`echo "$@"`) prints the positionals
+// and exits without launching the agent, so it does not forward and stays
+// warned (#5167 review: "Verify `$@` actually launches the forwarded command").
+func scriptForwardsPositionals(script *syntax.Word, agent string) bool {
 	lit, ok := literalShellWord(script)
 	if !ok {
 		return false
@@ -119,7 +159,7 @@ func scriptForwardsPositionals(script *syntax.Word) bool {
 	// command receives (or execs) the forwarded positionals. A script that does
 	// not parse is left to the safe substring fallback.
 	if stmt, ok := lastScriptStmt(lit); ok {
-		return stmtReferencesAtParam(stmt)
+		return stmtReferencesAtParam(stmt, agent)
 	}
 	return true
 }
@@ -138,23 +178,61 @@ func lastScriptStmt(script string) (*syntax.Stmt, bool) {
 	return file.Stmts[len(file.Stmts)-1], true
 }
 
-// stmtReferencesAtParam reports whether stmt references the positional parameter
-// `$@` (a ParamExp whose parameter is `@`, bare or inside double quotes) in the
-// command it runs — a CallExpr or a binary command's operands. `$@` is the only
-// expansion that preserves the appended flag as separate argv entries; `$*` is
-// not forwarding and is excluded by the parameter name check. Compound constructs
-// (subshell, if/for/while) are not analyzed and report false, the conservative
-// answer for the forwarding exemption — a compound that hides a `$@` is not the
-// plain forwarding shape this guard exempts.
-func stmtReferencesAtParam(stmt *syntax.Stmt) bool {
+// stmtReferencesAtParam reports whether stmt invokes the positional parameter
+// `$@` (a ParamExp whose parameter is `@`, bare or inside double quotes) as the
+// command that receives af's appended flag — the shape that forwards the
+// interpreter's positionals through to the agent. `$@` is the only expansion
+// that preserves the appended flag as separate argv entries; `$*` is not
+// forwarding and is excluded by the parameter name check. The final statement
+// forwards only when it RUNS the forwarded argv: the command word (after an
+// optional `exec`) is itself `$@` (`exec "$@"`, `"$@"`), or the command is the
+// detected agent with `$@` among its arguments (`claude "$@"`). A call that
+// only consumes `$@` in an argument — `echo "$@"` — prints the positionals and
+// exits without launching the agent, so it does not forward and stays warned
+// (#5167 review: "Verify `$@` actually launches the forwarded command").
+// Compound constructs (subshell, if/for/while) are not analyzed and report
+// false, the conservative answer for the forwarding exemption — a compound
+// that hides a `$@` is not the plain forwarding shape this guard exempts.
+func stmtReferencesAtParam(stmt *syntax.Stmt, agent string) bool {
 	if stmt == nil {
 		return false
 	}
 	switch c := stmt.Cmd.(type) {
 	case *syntax.BinaryCmd:
-		return stmtReferencesAtParam(c.X) || stmtReferencesAtParam(c.Y)
+		return stmtReferencesAtParam(c.X, agent) || stmtReferencesAtParam(c.Y, agent)
 	case *syntax.CallExpr:
-		for _, w := range c.Args {
+		return callForwardsArgv(c.Args, agent)
+	}
+	return false
+}
+
+// callForwardsArgv reports whether the words of a simple call invoke the
+// forwarded positional argv so the appended flag reaches the agent. It is the
+// call-level scan behind stmtReferencesAtParam. A leading literal `exec` runs
+// the remaining words as the command, so it is peeled before the command
+// position is examined: `exec "$@"` forwards because the command (after exec)
+// is `$@`, and `exec claude "$@"` forwards because the command is the agent
+// with `$@` among its arguments. `echo "$@"` does not forward: echo is neither
+// `$@` nor the agent, so the positionals are merely printed.
+func callForwardsArgv(args []*syntax.Word, agent string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	cmdArgs := args
+	if lit, ok := literalShellWord(args[0]); ok && lit == "exec" {
+		cmdArgs = args[1:]
+		if len(cmdArgs) == 0 {
+			return false
+		}
+	}
+	// The command position is the forwarded argv itself: `"$@"` or `exec "$@"`.
+	if wordReferencesAtParam(cmdArgs[0]) {
+		return true
+	}
+	// The command is the detected agent and `$@` is among its arguments, so the
+	// appended flag reaches the agent through that argument: `claude "$@"`.
+	if agent != "" && firstWordAgentName(cmdArgs) == agent {
+		for _, w := range cmdArgs[1:] {
 			if wordReferencesAtParam(w) {
 				return true
 			}
@@ -215,14 +293,15 @@ func wordIsKnownShell(word *syntax.Word) bool {
 // as its operand (bash's `-O shopt_option`), so the scan stops at the first flag
 // not known to be argument-free for the POSIX shells; `c` itself ends the scan
 // because it consumes the next word as its script. The argument-free invocation
-// flags are `e`, `i`, `l`, `s`, `r`, `u`, `x`, and `D` (bash's `-e` errexit and
-// dash's `-e` are both argument-free, so `bash -ec 'claude'` is a `-c` form; `-u`
-// nounset is argument-free for both, so `bash -euc 'claude'` is also a `-c` form;
-// `-x` xtrace is argument-free for both, so `bash -xc 'claude'` is also a `-c`
-// form); a `c` after any other flag is not claimed as the script flag, so an
-// unknown option stays conservative rather than over-warning (#5167 review:
-// "Recognize `-e` in shell `-c` option clusters", "Include `-u` in shell `-c`
-// option clusters", "Recognize additional shell flags before `-c`").
+// flags span every letter `bash --help` lists as argument-free shell options
+// (`-abefhkmptuvxBCEHPT` and `-ilrsD`) except `-n` (noexec, which prevents the
+// script from running at all, so the appended flag cannot misroute it); `-e`,
+// `-u`, and `-x` were the first three added (#5167 review: "Recognize `-e`/`-u`/
+// `-x` in shell `-c` option clusters"), and the rest complete the set so a
+// cluster such as `bash -vc 'claude'` is recognized the same way (#5167 review:
+// "Scan all argument-free shell flags before `-c`"). A `c` after any other flag
+// is not claimed as the script flag, so an unknown option stays conservative
+// rather than over-warning.
 func shellShortClusterHasC(word string) bool {
 	if len(word) <= 2 || word[0] != '-' || word[1] == '-' {
 		return false
@@ -231,7 +310,8 @@ func shellShortClusterHasC(word string) bool {
 		switch flag {
 		case 'c':
 			return true
-		case 'e', 'i', 'l', 's', 'r', 'u', 'x', 'D':
+		case 'a', 'b', 'e', 'f', 'h', 'i', 'k', 'l', 'm', 'p', 'r', 's',
+			't', 'u', 'v', 'x', 'D', 'B', 'C', 'E', 'H', 'P', 'T':
 			continue
 		default:
 			return false

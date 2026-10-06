@@ -39,6 +39,13 @@ func TestCommandEndsOptionsTerminator(t *testing.T) {
 		{"exec prefix stripped, terminator in the middle", "exec -- claude -- --resume", true},
 		{"double-quoted terminator is literal", `claude "--"`, true},
 		{"single-quoted terminator is literal", "claude '--'", true},
+		// Bash's dollar-quoted `$'--'` passes a literal `--` to the agent the
+		// same way an unquoted `--` does, so the appended flag lands after the
+		// end-of-options marker and the agent starts without it (#5167 review:
+		// "Parse Bash-quoted `--` terminators"). `$'\n'` carries a real C-escape
+		// and stays non-literal, so it is not a terminator.
+		{"dollar-single-quoted terminator is literal", "claude $'--'", true},
+		{"dollar-single-quoted escape is not a terminator", "claude $'\\n'", false},
 		{"non-literal word is not a terminator", "claude --$FOO", false},
 		{"non-literal flag value is not a terminator", "claude --model=--", false},
 		{"redirect is ignored, terminator seen", "claude > /tmp/log --", true},
@@ -175,6 +182,11 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"trailing redirect out is a parse error appending completes", "claude >", true},
 		{"trailing redirect in is a parse error appending completes", "claude <", true},
 		{"trailing append redirect is a parse error appending completes", "claude >>", true},
+		// `|&` is Bash's pipe-both-stdout-and-stderr operator; it ends with `&`
+		// so the trailing-`|` case does not catch it, but appending completes it
+		// the same way and routes the flag to the right side of the pipe
+		// (#5167 review: "Detect trailing `|&` pipelines before appending flags").
+		{"trailing pipe-both is a parse error appending completes", "claude |&", true},
 
 		// A trailing operator followed by a line continuation (`\<newline>`) is a
 		// parse error the shell joins to the appended flag: `claude |\<newline>`
@@ -260,6 +272,13 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"trailing odd run of three backslashes escapes the separator", "claude \\\\\\", true},
 		{"trailing backslash then whitespace does not escape the separator", "claude \\ ", false},
 		{"trailing backslash then newline is a continuation", "claude \\\n", false},
+		// A backslash before a newline inside a `#` comment cannot continue the
+		// line — the comment ends at the newline — so the newline is a real
+		// statement terminator and the appended flag starts a new command
+		// (#5167 review: "Do not treat comment backslashes as line continuations").
+		{"trailing backslash in a comment is not a continuation", "claude # note \\\n", true},
+		{"trailing backslash in a comment with flags is not a continuation", "claude --model opus # x \\\n", true},
+		{"even backslash run in a comment is a real terminator", "claude # note \\\\\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CommandHasControlOperator(tc.command, "")
@@ -668,9 +687,31 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"sh -c echo argv then agent warns", `sh -c 'echo "$@"; claude'`, true},
 		{"sh -c echo argv then exec argv last pass-through", `sh -c 'echo "$@"; exec "$@"'`, false},
 		{"sh -c exec argv last pass-through", `sh -c 'echo hi; exec "$@"'`, false},
+		// A `$@` that is only consumed by a non-agent command (`echo "$@"`)
+		// prints the positionals and exits without launching the agent, so the
+		// exemption does not apply and the wrapper still warns (#5167 review:
+		// "Verify `$@` actually launches the forwarded command").
+		{"sh -c echo argv does not forward", `sh -c 'echo "$@"' placeholder claude`, true},
+		// A forwarding wrapper that puts the agent in the `$0` position has no
+		// placeholder before it: `exec "$@"` then runs the appended flag rather
+		// than the agent, so the wrapper still warns. A placeholder before the
+		// agent (`sh -c 'exec "$@"' sh claude`) is the safe pass-through shape
+		// (#5167 review: "Require a `$0` placeholder before exempting forwarding
+		// shells").
+		{"sh -c forwarding without $0 placeholder warns", `sh -c 'exec "$@"' claude`, true},
+		{"sh -c forwarding with $0 placeholder pass-through", `sh -c 'exec "$@"' sh claude`, false},
+		// `-v` (verbose) is an argument-free Bash shell option, so a cluster
+		// such as `bash -vc 'claude'` is also a `-c` invocation: the appended flag
+		// is a positional to the shell, not an argument to the agent inside the
+		// script (#5167 review: "Scan all argument-free shell flags before
+		// `-c`").
+		{"bash combined -vc", "bash -vc 'claude'", true},
+		{"bash combined -cv", "bash -cv 'claude'", true},
+		{"bash combined -vuc", "bash -vuc 'claude'", true},
+		{"bash combined -vxn", "bash -vxn 'claude'", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := CommandInvokesAgentViaInterpreter(tc.command)
+			got := CommandInvokesAgentViaInterpreter(tc.command, "claude")
 			require.Equalf(t, tc.want, got, "CommandInvokesAgentViaInterpreter(%q)", tc.command)
 		})
 	}

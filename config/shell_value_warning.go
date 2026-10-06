@@ -241,7 +241,7 @@ func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
 				"`--plugin-dir`) to the end of this value, so the flag lands inside the comment and is " +
 				"discarded — the agent would start without af's guidance. Remove the comment or move it to " +
 				"its own line above the command. This is a warning, not an error"})
-		case sessionenv.CommandInvokesAgentViaInterpreter(value.value):
+		case sessionenv.CommandInvokesAgentViaInterpreter(value.value, agent):
 			affected = append(affected, flagged{shellValue: value, kind: "interpreter-wrapper", body: "" +
 				" runs the agent through a shell interpreter's `-c` flag (e.g. `sh -c 'claude'`), so af's " +
 				"appended agent-specific flag (e.g. claude's `--plugin-dir`) is passed to the interpreter " +

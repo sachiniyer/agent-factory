@@ -440,14 +440,42 @@ func firstWordAgentName(words []*syntax.Word) string {
 // end-of-options terminator anywhere in the list. It is the shared scan behind
 // CommandEndsOptionsTerminator (a single simple call) and the binary/multi-statement
 // tail checks: the appended flag is positional after a `--`, so a `--` anywhere
-// in the command that receives the flag demotes it.
+// in the command that receives the flag demotes it. The Bash dollar-quoted
+// spelling `$'--'` passes a literal `--` to the agent the same way, so it is
+// recognized too (#5167 review: "Parse Bash-quoted `--` terminators").
 func wordsContainOptionsTerminator(words []*syntax.Word) bool {
 	for _, w := range words {
-		if lit, ok := literalShellWord(w); ok && lit == "--" {
+		if wordIsOptionsTerminator(w) {
 			return true
 		}
 	}
 	return false
+}
+
+// wordIsOptionsTerminator reports whether word is a literal `--` end-of-options
+// terminator, including the Bash dollar-quoted spelling `$'--'`. literalShellWord
+// treats `$'...'` as non-literal (the `$` is a separate Lit and the quoted body
+// may carry C-escapes), so a plain `lit == "--"` misses `$'--'`, which Bash
+// passes to the agent as a literal `--` that demotes the appended flag exactly
+// like an unquoted `--`. Only a dollar-quoted body with no backslash escapes is
+// read as literal — `$'\n'` is a real escape and stays non-literal, the safe
+// direction.
+func wordIsOptionsTerminator(word *syntax.Word) bool {
+	if lit, ok := literalShellWord(word); ok && lit == "--" {
+		return true
+	}
+	if word == nil || len(word.Parts) != 2 {
+		return false
+	}
+	dollar, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || dollar.Value != "$" {
+		return false
+	}
+	sq, ok := word.Parts[1].(*syntax.SglQuoted)
+	if !ok {
+		return false
+	}
+	return sq.Value == "--" && !strings.Contains(sq.Value, "\\")
 }
 
 // binaryTailAgentName returns the base name of the first word of the rightmost
@@ -622,12 +650,51 @@ func stripTrailingLineContinuation(command string) string {
 		if backs%2 == 0 {
 			return command
 		}
+		// An odd backslash run inside a `#` shell comment cannot continue the
+		// line — the comment ends at the newline regardless of backslashes —
+		// so the trailing newline is a real statement terminator and is left
+		// in place for the suffix check (#5167 review: "Do not treat comment
+		// backslashes as line continuations").
+		if trailingBackslashRunInComment(command, len(trimmed)-1, backs) {
+			return command
+		}
 		next := strings.TrimRight(body, " \t")
 		if next == command {
 			return command
 		}
 		command = next
 	}
+}
+
+// trailingBackslashRunInComment reports whether the odd run of `backs` trailing
+// backslashes before the final newline of command sits inside a `#` shell
+// comment, where a backslash cannot continue the line. newlineEnd is the index
+// of that final newline within command. The POSIX parser used elsewhere joins
+// a backslash-newline inside a comment as a continuation, so the raw-text scan
+// re-parses with comments kept and treats the backslash run as in-comment when
+// a `#` on the same line precedes it; the shell itself ends the comment at the
+// newline, so the appended flag starts a new command and the value misroutes.
+func trailingBackslashRunInComment(command string, newlineEnd, backs int) bool {
+	if backs <= 0 || newlineEnd < 0 || newlineEnd >= len(command) || command[newlineEnd] != '\n' {
+		return false
+	}
+	runStart := newlineEnd - backs
+	if runStart < 0 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX), syntax.KeepComments(true)).Parse(strings.NewReader(command), "")
+	if err != nil || file == nil {
+		return false
+	}
+	for _, s := range file.Stmts {
+		for _, c := range s.Comments {
+			hash := int(c.Hash.Offset())
+			if hash <= runStart && strings.IndexByte(command[hash:runStart], '\n') < 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // endsWithIncompleteOperator reports whether command ends with a shell operator
@@ -654,6 +721,13 @@ func endsWithIncompleteOperator(command string) bool {
 		return false
 	}
 	switch {
+	case strings.HasSuffix(trimmed, "|&"):
+		// `|&` is Bash's pipe-both-stdout-and-stderr operator, incomplete on its
+		// own: appending supplies the right side of the pipe, which receives the
+		// injected flag while the agent starts without it. It ends with `&`, so
+		// the trailing-`|` case below does not catch it (#5167 review: "Detect
+		// trailing `|&` pipelines before appending flags").
+		return true
 	case strings.HasSuffix(trimmed, "|"):
 		// `|` is an incomplete pipe and `||` an incomplete or: appending supplies
 		// the right side / the second command.
@@ -820,5 +894,13 @@ func hasTrailingNewline(command string) bool {
 		backs++
 		body = body[:len(body)-1]
 	}
-	return backs%2 == 0
+	if backs%2 == 0 {
+		return true
+	}
+	// An odd run before the newline is a line continuation, except when the
+	// backslashes are inside a `#` comment: a comment ends at the newline, so
+	// the backslash cannot continue the line and the newline is a real
+	// statement terminator (#5167 review: "Do not treat comment backslashes as
+	// line continuations").
+	return trailingBackslashRunInComment(command, len(trimmed)-1, backs)
 }
