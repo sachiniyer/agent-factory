@@ -68,7 +68,7 @@ func statRepoFileSignature(path string) RepoFileSignature {
 		ino:     uint64(st.Ino),
 		size:    info.Size(),
 		mtimeNS: info.ModTime().UnixNano(),
-		ctimeNS: statCTimeNS(st),
+		ctimeNS: statCTimeNS(info),
 		perm:    uint32(info.Mode().Perm()),
 		known:   true,
 	}

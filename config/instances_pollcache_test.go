@@ -314,15 +314,32 @@ func TestInstancesArrayInCurrentEnvelope_ErrorParity(t *testing.T) {
 }
 
 // pollBenchRows builds the bare instances array (not the envelope — that is
-// SaveRepoInstances' job) holding n archived-shaped rows.
+// SaveRepoInstances' job) holding n archived-shaped rows at real-box size: a
+// persisted row carries path, worktree, branch, tabs, timestamps and task
+// fields, ~1.4 kB each, so n=3400 reproduces the ~4.7 MB instances.json the
+// #5169 profile was captured against.
 func pollBenchRows(b *testing.B, n int) json.RawMessage {
 	b.Helper()
 	items := make([]json.RawMessage, 0, n)
 	for i := 0; i < n; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(
-			`{"id":"6b1f%04d-d978-4397-9dd3-2a70dc42bd34","title":"session %d","path":"/repo/alpha",`+
-				`"branch":"siyer/session-%d","status":6,"liveness":5,"tabs":[{"kind":"agent","title":"agent"}]}`,
-			i, i, i)))
+			`{"id":"6b1f%04d-d978-4397-9dd3-2a70dc42bd34","title":"session %d","path":"/home/user/repos/agent-factory-%d",`+
+				`"worktree_path":"/home/user/repos/agent-factory-%d/.worktrees/session-%d",`+
+				`"branch":"siyer/session-%d","status":6,"liveness":5,"created_at":"2026-09-%02dT10:%02d:%02dZ",`+
+				`"updated_at":"2026-09-%02dT11:%02d:%02dZ","program":"claude","task_id":"task-%04d",`+
+				`"tabs":[{"kind":"agent","title":"agent","command":"claude --dangerously-skip-permissions"},`+
+				`{"kind":"term","title":"build","command":"go build ./..."},{"kind":"term","title":"test"}],`+
+				`"account":"primary","resume_session_id":"sess-%032d","pending_handoff_mission":"",`+
+				`"env_passthrough":["PATH","HOME","SSH_AUTH_SOCK","GH_TOKEN","AF_HOME"],`+
+				`"recovery_log":"row %d archived after task completion; checkpoint saved to %s; `+
+				`worktree clean at archive time; last agent turn ended stop_reason=end_turn; `+
+				`runtime cleanup settled; transcript retained under session dir for audit; `+
+				`daemon restored this session twice across upgrades without losing its task slot; `+
+				`final review pass landed after codex sign-off and CI green on the release branch; `+
+				`no follow-up issues filed from this session's changes; safe to prune after retention",`+
+				`"archive_reason":"task completed and merged; record kept for the retention window"}`,
+			i, i, i%90, i, i, i, i%28+1, i%60, i%60, i%28+1, i%60, i%60, i%100, i, i,
+			fmt.Sprintf("/home/user/.config/agent-factory/checkpoints/sess-%032d.json", i))))
 	}
 	raw, err := json.Marshal(items)
 	require.NoError(b, err)
@@ -330,14 +347,12 @@ func pollBenchRows(b *testing.B, n int) json.RawMessage {
 }
 
 // BenchmarkRepoInstancesFileCacheLoadAllUnchanged measures one poll tick over
-// N repos each holding M rows — the #5169 steady state, where nothing changed
-// between ticks.
+// the #5169 steady state — a ~4.7 MB instances.json holding ~3,400 archived
+// rows, unchanged between ticks.
 func BenchmarkRepoInstancesFileCacheLoadAllUnchanged(b *testing.B) {
 	b.Setenv("AGENT_FACTORY_HOME", b.TempDir())
 	raw := pollBenchRows(b, 3400)
-	for i := 0; i < 4; i++ {
-		require.NoError(b, SaveRepoInstances(fmt.Sprintf("repo-%d", i), raw))
-	}
+	require.NoError(b, SaveRepoInstances("repo-alpha", raw))
 	cache := NewRepoInstancesFileCache()
 	if _, err := cache.LoadAll(); err != nil {
 		b.Fatal(err)
@@ -357,9 +372,7 @@ func BenchmarkRepoInstancesFileCacheLoadAllUnchanged(b *testing.B) {
 func BenchmarkRepoInstancesPollLegacyBaseline(b *testing.B) {
 	b.Setenv("AGENT_FACTORY_HOME", b.TempDir())
 	raw := pollBenchRows(b, 3400)
-	for i := 0; i < 4; i++ {
-		require.NoError(b, SaveRepoInstances(fmt.Sprintf("repo-%d", i), raw))
-	}
+	require.NoError(b, SaveRepoInstances("repo-alpha", raw))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
