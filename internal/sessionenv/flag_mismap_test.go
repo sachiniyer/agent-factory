@@ -229,6 +229,16 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"unterminated dash heredoc", "claude <<-", true},
 		{"unterminated heredoc", "claude <<", true},
 
+		// A named but unclosed here-document reaches the parse-error path with
+		// the delimiter word as the suffix rather than a bare `<<`: the closing
+		// delimiter line is missing, so injectSystemPrompt's appended flag is
+		// consumed as here-document input and the agent starts without it
+		// (#5167 review: "Recognize named unterminated here-documents").
+		{"unterminated named heredoc", "claude <<EOF\n", true},
+		{"unterminated named dash heredoc", "claude <<-EOF\n", true},
+		{"unterminated named heredoc with space", "claude << EOF\n", true},
+		{"unterminated named dash heredoc with space", "claude <<- EOF\n", true},
+
 		// A parse error that appending does not complete (an unbalanced quote, an
 		// open subshell) still fails loudly at launch and is not a misroute.
 		{"unbalanced quote is a parse error appending does not complete", "claude '", false},
@@ -558,6 +568,16 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"bash combined -ce", "bash -ce 'claude'", true},
 		{"bash combined -eic", "bash -eic 'claude'", true},
 		{"bash combined -ei", "bash -ei 'claude'", false},
+		// `-u` (nounset) is an argument-free shell option for bash and dash, so a
+		// cluster such as `bash -euc 'claude'` is also a `-c` invocation: the
+		// appended flag is a positional to the shell, not an argument to the agent
+		// inside the script (#5167 review: "Include `-u` in shell `-c` option
+		// clusters"). `-euc`, `-cue`, and `-ue` all flag it; a cluster without `c`
+		// (`-eu`) does not.
+		{"bash combined -euc", "bash -euc 'claude'", true},
+		{"bash combined -cue", "bash -cue 'claude'", true},
+		{"bash combined -uc", "bash -uc 'claude'", true},
+		{"bash combined -eu", "bash -eu 'claude'", false},
 		// A flag that takes an argument before `c` would swallow a following `c`
 		// as its operand rather than the script flag; bash's `-O shopt_option`
 		// takes the next word, so `-Oc` is not the `-c` shape (conservative: do
@@ -591,13 +611,18 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		// through to the agent, so `sh -c 'exec "$@"' sh claude` becomes
 		// `sh -c 'exec "$@"' sh claude --plugin-dir …` and claude receives
 		// `--plugin-dir`; this is not a misroute and must not warn (#5167
-		// review: "Avoid warning for forwarding `sh -c` wrappers"). `"$@"`,
-		// `$@`, and `"$*"`/`$*` all forward the positionals; a script that
-		// names the agent without forwarding still keeps the flag from it.
+		// review: "Avoid warning for forwarding `sh -c` wrappers"). Only
+		// `"$@"`/`$@` preserve the appended flag as separate argv entries;
+		// quoted `"$*"` collapses the positionals into one program name and
+		// unquoted `$*` is IFS-dependent, so `$*` is NOT forwarding and stays
+		// warned (#5167 review: "Do not treat quoted `$*` as argv forwarding");
+		// a script that names the agent without forwarding still keeps the
+		// flag from it.
 		{"sh -c exec argv pass-through", `sh -c 'exec "$@"' sh claude`, false},
 		{"bash -c exec argv pass-through", `bash -c 'exec "$@"' bash claude`, false},
 		{"sh -c unquoted argv pass-through", `sh -c 'exec $@' sh claude`, false},
-		{"sh -c star pass-through", `sh -c 'exec "$*"' sh claude`, false},
+		{"sh -c quoted star does not forward", `sh -c 'exec "$*"' sh claude`, true},
+		{"sh -c unquoted star does not forward", `sh -c 'exec $*' sh claude`, true},
 		{"sh -c pass-through with agent in script", `sh -c 'claude "$@"' sh claude`, false},
 		{"env sh -c exec argv pass-through", `env sh -c 'exec "$@"' sh claude`, false},
 		{"bash -ic exec argv pass-through", `bash -ic 'exec "$@"' bash claude`, false},

@@ -2,11 +2,19 @@ package sessionenv
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
 	"mvdan.cc/sh/v3/syntax"
 )
+
+// unterminatedHeredocRe matches a here-document redirect (`<<` or `<<-`,
+// optionally followed by whitespace) whose delimiter word is the final content
+// of the value, as in `claude <<EOF` or `claude <<- EOF`. The closing delimiter
+// line is missing, so this only appears on the parse-error path; the bare
+// `<<`/`<<-` suffix (no delimiter yet) is matched separately above.
+var unterminatedHeredocRe = regexp.MustCompile(`<<-?\s*\S+$`)
 
 // stripExecPrefix removes a leading `exec` builtin from a command's words and
 // reports whether an `exec --` separator was present.
@@ -642,6 +650,14 @@ func endsWithIncompleteOperator(command string) bool {
 		// the line its body) rather than a flag to the agent
 		// (#5167 review: "Flag an unterminated `<<-` here-document").
 		return true
+	case unterminatedHeredocRe.MatchString(trimmed):
+		// A named but unclosed here-document, such as `claude <<EOF` (the
+		// closing delimiter line is missing), also reaches this parse-error
+		// path, but the suffix is the delimiter word rather than a bare `<<`.
+		// Appending supplies the next line of the body, so the flag is read as
+		// here-document input and the agent starts without it
+		// (#5167 review: "Recognize named unterminated here-documents").
+		return true
 	case strings.HasSuffix(trimmed, ">"), strings.HasSuffix(trimmed, "<"):
 		// A bare `>`/`<`/`>>` is an incomplete redirection: appending supplies the
 		// target, so the flag becomes the redirect target rather than a flag.
@@ -762,8 +778,8 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 	// `sh -c 'exec "$@"' sh claude --plugin-dir …` and `"$@"` runs claude with
 	// `--plugin-dir`, so claude starts WITH the plugin and the warning would be a
 	// false positive. The word after the `-c` flag (or a cluster carrying it) is
-	// the script; a script that references the positional parameters (`$@`/`$*`)
-	// is treated as a forwarding wrapper and not warned (#5167 review: "Avoid
+	// the script; a script that references the positional parameters (`$@`) is
+	// treated as a forwarding wrapper and not warned (#5167 review: "Avoid
 	// warning for forwarding `sh -c` wrappers"). A non-literal script (expansions
 	// inside double quotes) is not recognized and stays warned, the safe
 	// direction; a script that names the agent without forwarding keeps the flag
@@ -786,19 +802,25 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 // scriptForwardsPositionals reports whether the `-c` script word forwards its
 // positional parameters to the command it invokes — the shape that carries af's
 // appended flag, a positional to the interpreter, through to the agent. An
-// `exec "$@"` (or any `"$@"`/`"$*"`/`$@`/`$*` reference) runs the command named
-// in the positionals with those positionals as arguments, so
+// `exec "$@"` (or any `"$@"`/`$@` reference) runs the command named in the
+// positionals with those positionals as arguments, so
 // `sh -c 'exec "$@"' sh claude` becomes `sh -c 'exec "$@"' sh claude --plugin-dir …`
 // and claude receives `--plugin-dir` (#5167 review: "Avoid warning for forwarding
-// `sh -c` wrappers"). The canonical forwarding form is single-quoted, so it
-// reaches this check as one literal; a non-literal script is not recognized and
-// stays warned, which is the safe direction.
+// `sh -c` wrappers"). Only `"$@"`/`$@` preserve the appended flag as separate argv
+// entries; quoted `"$*"` collapses the positionals into one word (so
+// `sh -c 'exec "$*"' sh claude` becomes one program name like
+// `claude --plugin-dir /path` and fails to launch), and unquoted `$*` is
+// IFS-dependent, so `$*` is NOT treated as forwarding and stays warned (#5167
+// review: "Do not treat quoted `$*` as argv forwarding"). The canonical
+// forwarding form is single-quoted, so it reaches this check as one literal; a
+// non-literal script is not recognized and stays warned, which is the safe
+// direction.
 func scriptForwardsPositionals(script *syntax.Word) bool {
 	lit, ok := literalShellWord(script)
 	if !ok {
 		return false
 	}
-	return strings.Contains(lit, "$@") || strings.Contains(lit, "$*")
+	return strings.Contains(lit, "$@")
 }
 
 // wordIsKnownShell reports whether the first word is a literal invocation of a
@@ -824,11 +846,12 @@ func wordIsKnownShell(word *syntax.Word) bool {
 // as its operand (bash's `-O shopt_option`), so the scan stops at the first flag
 // not known to be argument-free for the POSIX shells; `c` itself ends the scan
 // because it consumes the next word as its script. The argument-free invocation
-// flags are `e`, `i`, `l`, `s`, `r`, and `D` (bash's `-e` errexit and dash's
-// `-e` are both argument-free, so `bash -ec 'claude'` is a `-c` form); a `c`
+// flags are `e`, `i`, `l`, `s`, `r`, `u`, and `D` (bash's `-e` errexit and dash's
+// `-e` are both argument-free, so `bash -ec 'claude'` is a `-c` form; `-u` nounset
+// is argument-free for both, so `bash -euc 'claude'` is also a `-c` form); a `c`
 // after any other flag is not claimed as the script flag, so an unknown option
 // stays conservative rather than over-warning (#5167 review: "Recognize `-e` in
-// shell `-c` option clusters").
+// shell `-c` option clusters", "Include `-u` in shell `-c` option clusters").
 func shellShortClusterHasC(word string) bool {
 	if len(word) <= 2 || word[0] != '-' || word[1] == '-' {
 		return false
@@ -837,7 +860,7 @@ func shellShortClusterHasC(word string) bool {
 		switch flag {
 		case 'c':
 			return true
-		case 'e', 'i', 'l', 's', 'r', 'D':
+		case 'e', 'i', 'l', 's', 'r', 'u', 'D':
 			continue
 		default:
 			return false
