@@ -217,7 +217,8 @@ func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
 		if !isAgentProgramKey(value.key) {
 			continue
 		}
-		if !commandAppendsLaunchFlag(value.value) {
+		agent, appends := launchFlagAgent(value.value)
+		if !appends {
 			continue
 		}
 		switch {
@@ -227,9 +228,9 @@ func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
 				"(e.g. claude's `--plugin-dir`) to the end of this value, and everything after a `--` is a " +
 				"positional argument rather than a flag — so the injected flag would be silently ignored and " +
 				"the agent would start without af's guidance (for claude the af plugin does not register and " +
-				"the `/af-*` slash commands are unavailable, with no error). Remove the `--`. This is a " +
+				" the `/af-*` slash commands are unavailable, with no error). Remove the `--`. This is a " +
 				"warning, not an error"})
-		case sessionenv.CommandHasControlOperator(value.value):
+		case sessionenv.CommandHasControlOperator(value.value, agent):
 			affected = append(affected, flagged{shellValue: value, kind: "control-operator", body: "" +
 				" contains a shell control operator (|, &&, ||, ;, &), so af's appended agent-specific flag " +
 				"(e.g. claude's `--plugin-dir`) would be routed to the wrong command rather than to the agent. " +
@@ -318,14 +319,28 @@ var appendLaunchFlagAgents = map[string]bool{
 // one — warning about it would be a false positive (#5167 review: "Exclude Devin
 // commands that already set its trust flag").
 func commandAppendsLaunchFlag(resolved string) bool {
+	_, appends := launchFlagAgent(resolved)
+	return appends
+}
+
+// launchFlagAgent is commandAppendsLaunchFlag with the detected agent returned
+// alongside the boolean, so warnLaunchFlagMismap can pass the agent to
+// CommandHasControlOperator. A compound command (|, &&, ||) appends to the
+// rightmost command, so the flag is misrouted only when that command is not the
+// agent the value resolves to — `true && claude` routes the flag to claude and is
+// not a misroute, while `claude | tee` routes it to tee and is
+// (#5167 review: "Do not flag compound commands whose final command is the
+// agent"). The agent is "" when no flag is appended, which keeps the prior
+// behavior of flagging every compound.
+func launchFlagAgent(resolved string) (string, bool) {
 	agent := tmux.DetectAgentFromCommand(resolved)
 	if !appendLaunchFlagAgents[agent] {
-		return false
+		return "", false
 	}
 	if agent == tmux.ProgramDevin && tmux.EnsureDevinWorkspaceTrustSuppressed(resolved) == resolved {
-		return false
+		return "", false
 	}
-	return true
+	return agent, true
 }
 
 // warnShellValueOnce logs one warning for (lead, kind, value) if it has not

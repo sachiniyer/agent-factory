@@ -179,7 +179,20 @@ func skipEnvWrapperTerminator(words []*syntax.Word) []*syntax.Word {
 // appended flag regardless of where a redirect appears in a simple call — so a
 // single call with redirects is not flagged here. Negation (`! cmd`) is not a
 // control operator in the shell sense and does not misroute either, so it is not
-// flagged. A parse error is not flagged unless the value ends with a trailing
+// flagged. A compound command (|, &&, ||) appends the flag to the END of the value,
+// which is the rightmost command of the chain. When that rightmost command is the
+// detected agent, the flag reaches the agent and the compound is not a misroute:
+// `true && claude` becomes `true && claude --plugin-dir …` and claude runs with
+// the flag, so it is not flagged; `claude | tee` and `claude && true` still route
+// the flag to a command that is not the agent and are flagged. The agent is the
+// first agent token DetectAgentFromCommand finds in the value (the same one the
+// config loader passes here), and the rightmost command is what receives the
+// appended flag, so the warning is restricted to compounds whose rightmost command
+// is not the agent (#5167 review: "Do not flag compound commands whose final
+// command is the agent"). A non-agent caller passes an empty agent to keep the
+// prior behavior of flagging every compound.
+//
+// A parse error is not flagged unless the value ends with a trailing
 // operator that appending a word completes: `claude |` is a parse error on its
 // own, but injectSystemPrompt appends `--plugin-dir` to the END of the value, so
 // `claude | --plugin-dir …` is valid shell and the flag runs as the right side of
@@ -188,7 +201,7 @@ func skipEnvWrapperTerminator(words []*syntax.Word) []*syntax.Word {
 // incomplete redirection (`>`, `<`, `>>`) is such a case; a parse error that
 // appending does not complete is still not flagged, because the value fails loudly
 // at launch for a different reason. Exported for the config loaders.
-func CommandHasControlOperator(command string) bool {
+func CommandHasControlOperator(command, agent string) bool {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		// A trailing operator that appending a word completes is a misroute: the
@@ -208,8 +221,19 @@ func CommandHasControlOperator(command string) bool {
 	if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Disown {
 		return true // trailing & background
 	}
+	if bin, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+		// A compound (|, &&, ||) appends to the rightmost command. When that
+		// command is the detected agent the flag reaches it, so the compound is
+		// not a misroute; otherwise the flag is routed to a non-agent command and
+		// the compound is flagged. A non-agent caller (agent == "") keeps the
+		// prior behavior of flagging every compound.
+		if agent == "" || binaryTailAgentName(bin) != agent {
+			return true
+		}
+		return false
+	}
 	if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
-		return true // |, &&, || (BinaryCmd), (subshell), if/for/while, …
+		return true // (subshell), if/for/while, …
 	}
 	// A single simple call terminated by `;` (or a trailing newline, which the
 	// parser folds into one Stmt without setting Semicolon) still misroutes an
@@ -219,6 +243,72 @@ func CommandHasControlOperator(command string) bool {
 		return true
 	}
 	return hasTrailingNewline(command)
+}
+
+// binaryTailAgentName returns the base name of the first word of the rightmost
+// command in a binary chain (|, &&, ||), after an exec prefix and the known
+// argv-passthrough wrappers, or "" when the rightmost command is not a simple
+// call. injectSystemPrompt appends to the END of the value, so the flag reaches
+// the rightmost command; CommandHasControlOperator uses this to skip the warning
+// when that command is the detected agent. The wrapper peel is the same
+// skipEnvWrapperTerminator uses (exec, env, ionice/nice/…), so a rightmost
+// command reached through a wrapper (`true && exec claude`, `true && env claude`)
+// is named the same way DetectAgentFromCommand would name it.
+func binaryTailAgentName(bin *syntax.BinaryCmd) string {
+	if bin.Y == nil {
+		return ""
+	}
+	cmd := bin.Y.Cmd
+	for {
+		next, ok := cmd.(*syntax.BinaryCmd)
+		if !ok {
+			break
+		}
+		cmd = next.Y.Cmd
+	}
+	call, ok := cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return ""
+	}
+	words, _ := stripExecPrefix(call.Args)
+	words = skipEnvWrapperTerminator(words)
+	if len(words) == 0 {
+		return ""
+	}
+	lit, ok := literalShellWord(words[0])
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(filepath.Base(lit))
+}
+
+// stripTrailingLineContinuation removes a trailing backslash-newline (a shell
+// line continuation) from command so a suffix check sees the operator the
+// continuation was hiding. `claude |\<newline>` joins to `claude |` in the shell,
+// so the incomplete `|` is what the value ends in once the continuation is gone;
+// without the strip a bare suffix check sees the newline, not the `|`, and misses
+// the misroute (injectSystemPrompt appends `--plugin-dir` to the joined value,
+// completing the pipe and routing the flag to its empty right side). An even run
+// of backslashes escapes the newline's escape (the last backslash escapes the
+// second-to-last), leaving a real terminator that is NOT a continuation, so it is
+// left in place. Whitespace after the newline is trimmed first so a `\<newline>`
+// at the very end is found (#5167 review: "Handle incomplete operators followed
+// by a continued newline").
+func stripTrailingLineContinuation(command string) string {
+	trimmed := strings.TrimRight(command, " \t")
+	if !strings.HasSuffix(trimmed, "\n") {
+		return command
+	}
+	body := trimmed[:len(trimmed)-1]
+	backs := 0
+	for len(body) > 0 && body[len(body)-1] == '\\' {
+		backs++
+		body = body[:len(body)-1]
+	}
+	if backs%2 == 0 {
+		return command
+	}
+	return strings.TrimRight(body, " \t")
 }
 
 // endsWithIncompleteOperator reports whether command ends with a shell operator
@@ -231,6 +321,7 @@ func CommandHasControlOperator(command string) bool {
 // parse error, so it is not in this set; a quoted operator (`claude "a|"`) is not
 // a parse error and parses as a single call with a literal word.
 func endsWithIncompleteOperator(command string) bool {
+	command = stripTrailingLineContinuation(command)
 	trimmed := strings.TrimRight(command, " \t")
 	if trimmed == "" {
 		return false
@@ -325,12 +416,21 @@ func CommandInvokesAgentViaInterpreter(command string) bool {
 		return false
 	}
 	words, _ := stripExecPrefix(call.Args)
+	// An `env` (or argv-passthrough wrapper) prefix can sit in front of the
+	// interpreter: `env sh -c 'claude'` reaches Claude detection because
+	// DetectAgentFromCommand scans through `env` to the interpreter, but a
+	// words[0]-only check here saw `env` and returned false, so the misroute went
+	// unwarned. Peel the same wrapper prefix skipEnvWrapperTerminator uses so the
+	// interpreter — not the wrapper — is what the shell check runs on. `env -- sh
+	// -c 'claude'` peels env's `--` too, so the interpreter is reached the same way
+	// (#5167 review: "Unwrap interpreter wrappers before checking `-c`").
+	words = skipEnvWrapperTerminator(words)
 	if len(words) < 2 {
 		return false
 	}
-	// The first word (after an optional exec) is the interpreter; it must be a
-	// known shell for the `-c` script shape to apply. `exec sh -c 'claude'` strips
-	// the exec prefix first, leaving `sh -c 'claude'`.
+	// The first word (after an optional exec and wrapper) is the interpreter; it
+	// must be a known shell for the `-c` script shape to apply. `exec sh -c
+	// 'claude'` strips the exec prefix first, leaving `sh -c 'claude'`.
 	if !wordIsKnownShell(words[0]) {
 		return false
 	}
@@ -377,9 +477,11 @@ func wordIsKnownShell(word *syntax.Word) bool {
 // as its operand (bash's `-O shopt_option`), so the scan stops at the first flag
 // not known to be argument-free for the POSIX shells; `c` itself ends the scan
 // because it consumes the next word as its script. The argument-free invocation
-// flags are `i`, `l`, `s`, `r`, and `D`; a `c` after any other flag is not
-// claimed as the script flag, so an unknown option stays conservative rather
-// than over-warning.
+// flags are `e`, `i`, `l`, `s`, `r`, and `D` (bash's `-e` errexit and dash's
+// `-e` are both argument-free, so `bash -ec 'claude'` is a `-c` form); a `c`
+// after any other flag is not claimed as the script flag, so an unknown option
+// stays conservative rather than over-warning (#5167 review: "Recognize `-e` in
+// shell `-c` option clusters").
 func shellShortClusterHasC(word string) bool {
 	if len(word) <= 2 || word[0] != '-' || word[1] == '-' {
 		return false
@@ -388,7 +490,7 @@ func shellShortClusterHasC(word string) bool {
 		switch flag {
 		case 'c':
 			return true
-		case 'i', 'l', 's', 'r', 'D':
+		case 'e', 'i', 'l', 's', 'r', 'D':
 			continue
 		default:
 			return false

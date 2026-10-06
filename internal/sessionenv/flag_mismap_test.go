@@ -161,6 +161,23 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"trailing redirect in is a parse error appending completes", "claude <", true},
 		{"trailing append redirect is a parse error appending completes", "claude >>", true},
 
+		// A trailing operator followed by a line continuation (`\<newline>`) is a
+		// parse error the shell joins to the appended flag: `claude |\<newline>`
+		// joins to `claude |`, and injectSystemPrompt appends `--plugin-dir`, so
+		// `claude |\<newline> --plugin-dir` is a valid pipe whose right side is the
+		// flag rather than an argument to claude. The same applies to an incomplete
+		// `&&`/`||` and an incomplete redirection (`>`, `<`, `>>`) behind a
+		// continuation; an even run of backslashes is a real terminator, not a
+		// continuation, so `claude \\\\` (a literal backslash arg) is unaffected
+		// (#5167 review: "Handle incomplete operators followed by a continued
+		// newline").
+		{"trailing pipe then line continuation", "claude |\\\n", true},
+		{"trailing and then line continuation", "claude &&\\\n", true},
+		{"trailing or then line continuation", "claude ||\\\n", true},
+		{"trailing redirect out then line continuation", "claude >\\\n", true},
+		{"trailing redirect in then line continuation", "claude <\\\n", true},
+		{"trailing append redirect then line continuation", "claude >>\\\n", true},
+
 		// A parse error that appending does not complete (an unbalanced quote, an
 		// open subshell) still fails loudly at launch and is not a misroute.
 		{"unbalanced quote is a parse error appending does not complete", "claude '", false},
@@ -168,8 +185,64 @@ func TestCommandHasControlOperator(t *testing.T) {
 		{"empty string", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := CommandHasControlOperator(tc.command)
+			got := CommandHasControlOperator(tc.command, "")
 			require.Equalf(t, tc.want, got, "CommandHasControlOperator(%q)", tc.command)
+		})
+	}
+}
+
+// TestCommandHasControlOperatorAgentLast pins the compound-command refinement
+// (#5167 review: "Do not flag compound commands whose final command is the
+// agent"): a compound (|, &&, ||) appends the flag to the END of the value, which
+// is the rightmost command, so the flag is misrouted only when that command is not
+// the detected agent. `true && claude` routes the flag to claude (the last command)
+// and is not a misroute, so it is not flagged with the agent passed; `claude | tee`
+// and `claude && true` route it to a command that is not the agent and stay flagged.
+// The agent is the first agent token the config loader detects, so a compound whose
+// last command is that agent (`tee | claude`, `true && exec claude`) is not a
+// misroute, while one whose last command is not the agent is. An empty agent keeps
+// the prior behavior of flagging every compound.
+func TestCommandHasControlOperatorAgentLast(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		agent   string
+		want    bool
+	}{
+		// The agent is the last command of the compound, so the appended flag
+		// reaches it — not a misroute.
+		{"and with agent last", "true && claude", "claude", false},
+		{"or with agent last", "true || claude", "claude", false},
+		{"pipe with agent last", "tee | claude", "claude", false},
+		{"and with agent last after flags", "true && claude --resume", "claude", false},
+		{"and with agent last behind exec", "true && exec claude", "claude", false},
+		{"and with agent last behind env", "true && env claude", "claude", false},
+		{"and with agent last behind env --", "true && env -- claude", "claude", false},
+		// The agent is the first command but not the last, so the flag is
+		// routed to a non-agent command — a misroute.
+		{"and with agent first", "claude && true", "claude", true},
+		{"or with agent first", "claude || true", "claude", true},
+		{"pipe with agent first", "claude | tee /tmp/log", "claude", true},
+		// A chain whose rightmost command is itself a compound keeps the
+		// rightmost command: `a | b && c` routes the flag to c, so the agent
+		// is the last command only if c is.
+		{"pipe then and with agent last", "tee | true && claude", "claude", false},
+		{"pipe then and with agent first", "claude | tee && true", "claude", true},
+		// An agent name with a path form is detected by its base name.
+		{"and with absolute-path agent last", "true && /usr/local/bin/claude", "claude", false},
+		{"and with absolute-path agent first", "/usr/local/bin/claude && true", "claude", true},
+		// An empty agent keeps the prior behavior: every compound is flagged,
+		// even when the last command would be the agent.
+		{"empty agent flags and with agent last", "true && claude", "", true},
+		{"empty agent flags pipe with agent last", "tee | claude", "", true},
+		// A compound whose rightmost command is not a simple call (a subshell)
+		// is conservatively flagged: the flag after the subshell is not the
+		// agent invocation.
+		{"and with subshell last", "claude && (claude)", "claude", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CommandHasControlOperator(tc.command, tc.agent)
+			require.Equalf(t, tc.want, got, "CommandHasControlOperator(%q, %q)", tc.command, tc.agent)
 		})
 	}
 }
@@ -198,7 +271,7 @@ func TestEndsOptionsTerminatorAndControlOperatorAreMutuallyExclusive(t *testing.
 		"claude &",
 	} {
 		trailing := CommandEndsOptionsTerminator(command)
-		control := CommandHasControlOperator(command)
+		control := CommandHasControlOperator(command, "")
 		require.Falsef(t, trailing && control,
 			"%q matched both predicates; they are meant to be mutually exclusive", command)
 	}
@@ -268,6 +341,16 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"bash combined -sc", "bash -sc 'claude'", true},
 		{"dash combined -c", "dash -c 'claude'", true},
 		{"bash combined without c", "bash -il 'claude'", false},
+		// `-e` (errexit) is an argument-free shell option for bash and dash, so a
+		// cluster such as `bash -ec 'claude'` is also a `-c` invocation: the
+		// appended flag is a positional to the shell, not an argument to the agent
+		// inside the script (#5167 review: "Recognize `-e` in shell `-c` option
+		// clusters"). `-ec` and `-ce` both flag it; a cluster without `c` (`-ei`)
+		// does not.
+		{"bash combined -ec", "bash -ec 'claude'", true},
+		{"bash combined -ce", "bash -ce 'claude'", true},
+		{"bash combined -eic", "bash -eic 'claude'", true},
+		{"bash combined -ei", "bash -ei 'claude'", false},
 		// A flag that takes an argument before `c` would swallow a following `c`
 		// as its operand rather than the script flag; bash's `-O shopt_option`
 		// takes the next word, so `-Oc` is not the `-c` shape (conservative: do
@@ -283,6 +366,19 @@ func TestCommandInvokesAgentViaInterpreter(t *testing.T) {
 		{"bare agent", "claude", false},
 		{"agent with flags", "claude --model opus", false},
 		{"env wrapper", "env -- claude", false},
+		// A wrapper (env, or an argv-passthrough wrapper in front of env) in
+		// front of the interpreter reaches Claude detection, but a words[0]-only
+		// check saw the wrapper and returned false, so the misroute went
+		// unwarned: `env sh -c 'claude'` appends `--plugin-dir` as a positional to
+		// sh, not to the claude inside the script. The wrapper prefix is peeled so
+		// the interpreter — not the wrapper — is what the shell check runs on
+		// (#5167 review: "Unwrap interpreter wrappers before checking `-c`").
+		{"env then sh -c script", "env sh -c 'claude'", true},
+		{"env -- then sh -c script", "env -- sh -c 'claude'", true},
+		{"env with VAR then sh -c script", "env VAR=1 sh -c 'claude'", true},
+		// env in front of a non-shell command is not an interpreter wrapper: the
+		// `--plugin-dir` appended after `env claude` reaches claude normally.
+		{"env without a shell is not an interpreter", "env claude", false},
 		{"empty string", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

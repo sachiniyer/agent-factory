@@ -580,8 +580,8 @@ func TestLaunchFlagMismap_NonFlagAppendingAgentsDoNotWarn(t *testing.T) {
 func TestLaunchFlagMismap_ControlOperator(t *testing.T) {
 	for name, value := range map[string]string{
 		"pipe": "claude --dangerously-skip-permissions | tee /tmp/log",
-		"and":  "claude foo && claude bar",
-		"or":   "claude foo || claude bar",
+		"and":  "claude foo && tee bar",
+		"or":   "claude foo || tee bar",
 		"semi": "claude --resume; echo done",
 		"bg":   "claude &",
 		// A trailing operator that is a parse error on its own, but that
@@ -604,6 +604,32 @@ func TestLaunchFlagMismap_ControlOperator(t *testing.T) {
 			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
 			require.NoError(t, err)
 			assertControlOperatorWarning(t, warnings.String(), "program_overrides.claude")
+		})
+	}
+}
+
+// TestLaunchFlagMismap_ControlOperatorAgentLast pins the compound-command
+// refinement (#5167 review: "Do not flag compound commands whose final command is
+// the agent"): a compound (|, &&, ||) appends the flag to the END of the value,
+// which is the rightmost command, so a compound whose rightmost command is the
+// detected agent does not misroute the flag and is not warned. `true && claude`
+// appends `--plugin-dir` to `claude`, so the flag reaches it; `tee | claude`
+// routes it to claude the same way. A compound whose rightmost command is not the
+// agent still misroutes and is covered by TestLaunchFlagMismap_ControlOperator.
+func TestLaunchFlagMismap_ControlOperatorAgentLast(t *testing.T) {
+	for name, value := range map[string]string{
+		"and with agent last":       "true && claude",
+		"or with agent last":        "true || claude",
+		"pipe with agent last":      "tee | claude",
+		"and with agent last flags": "true && claude --resume",
+		"and with agent last exec":  "true && exec claude",
+		"and with agent last env":   "true && env claude",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			require.Empty(t, warnings.String(), "value %q routes the flag to the agent and must not warn", value)
 		})
 	}
 }
