@@ -884,26 +884,26 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			connections[conn] = struct{}{}
 			serveWG.Add(1)
 			connectionsMu.Unlock()
+			// The kernel's record of who CONNECTED — the only requester
+			// identity a teardown handler may trust (#5182). The pid is
+			// resolved to its (pid, start-stamp) instance HERE, synchronously
+			// in the accept loop while the peer provably still owns the slot:
+			// a lookup deferred even to the freshly spawned goroutine could
+			// land after the peer exited and its pid was recycled by another
+			// pane-tree process, which would then inherit an exemption meant
+			// for the dead caller (Codex on #5186). A read failure degrades to
+			// no requester (the pre-#5182 posture): the connection still works,
+			// teardown proceeds, and the caller is reaped as it always was.
+			var requester *proctree.Process
+			if peerPID, credErr := peercred.ConnPID(conn); credErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
+			} else if proc, lookupErr := proctree.Lookup(peerPID); lookupErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot resolve peer pid %d, teardown requester exemption disabled: %v", peerPID, lookupErr)
+			} else {
+				requester = &proc
+			}
 			go func() {
 				defer serveWG.Done()
-				// The kernel's record of who CONNECTED — the only requester
-				// identity a teardown handler may trust (#5182). The pid is
-				// resolved to its (pid, start-stamp) instance HERE, at accept,
-				// while the peer provably still owns the slot: a lookup
-				// deferred to the handler could land after the peer exited and
-				// its pid was recycled by another pane-tree process, which
-				// would then inherit an exemption meant for the dead caller.
-				// A read failure degrades to no requester (the pre-#5182
-				// posture): the connection still works, teardown proceeds, and
-				// the caller is reaped as it always was.
-				var requester *proctree.Process
-				if peerPID, credErr := peercred.ConnPID(conn); credErr != nil {
-					log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
-				} else if proc, lookupErr := proctree.Lookup(peerPID); lookupErr != nil {
-					log.WarningLog.Printf("daemon control connection: cannot resolve peer pid %d, teardown requester exemption disabled: %v", peerPID, lookupErr)
-				} else {
-					requester = &proc
-				}
 				connServer, err := newConnServer(requester)
 				if err != nil {
 					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)

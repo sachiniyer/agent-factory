@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
@@ -79,5 +81,22 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context) func() {
 	if requester == nil {
 		return func() {}
 	}
-	return sessiontmux.TrackTeardownRequester(*requester)
+	untrack := sessiontmux.TrackTeardownRequester(*requester)
+	// The handler returning is NOT the end of the caller's exposure: net/rpc
+	// and net/http serialize the reply AFTER the service method returns, and
+	// a concurrent teardown's signal tier could land in that gap and kill the
+	// requester while its answer is still queued (Codex on #5186). Hold the
+	// registration a bounded beat past the write path rather than trying to
+	// hook the transport's flush, which neither transport exposes. A caller
+	// that already has its reply and lingers past the hold is just another
+	// leftover for the next sweep.
+	var once sync.Once
+	return func() { once.Do(func() { time.AfterFunc(requesterReplyHold, untrack) }) }
 }
+
+// requesterReplyHold is how long a requester stays registered after its
+// handler returns — long enough for the transport to write the reply it is
+// blocked on, short enough that a requester which exited anyway leaves the
+// exemption promptly. (pid, start-stamp) identity means a recycled slot can
+// never inherit it regardless of timing.
+const requesterReplyHold = 2 * time.Second
