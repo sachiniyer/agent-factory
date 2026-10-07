@@ -46,7 +46,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		CreatedAt:                i.CreatedAt,
 		UpdatedAt:                i.UpdatedAt,
 		ArchivedAt:               i.archivedAt,
-		PrunedAt:                 i.prunedAt,
 		Program:                  i.Program,
 		RuntimeProgram:           i.runtimeProgram,
 		RuntimePID:               i.runtimePID,
@@ -62,12 +61,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		UserKilled:               i.userKilled,
 		StartupStateUnknown:      i.startupStateUnknown,
 		RootRecreateContext:      i.rootRecreateContext,
-	}
-	// A pruned tombstone stays listed but is not restorable — its worktree is
-	// gone (#5136). Suppressing the projected verb keeps the web
-	// action gate honest instead of advertising a Restore that must refuse.
-	if !i.prunedAt.IsZero() {
-		data.LifecycleAction = LifecycleActionNone
 	}
 	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
@@ -377,7 +370,6 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		CreatedAt:                data.CreatedAt,
 		UpdatedAt:                data.UpdatedAt,
 		archivedAt:               data.ArchivedAt,
-		prunedAt:                 data.PrunedAt,
 		Program:                  data.Program,
 		runtimeProgram:           data.RuntimeProgram,
 		runtimePID:               data.RuntimePID,

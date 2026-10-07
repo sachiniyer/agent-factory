@@ -54,7 +54,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions prune`](#af-sessions-prune) — Reclaim disk from old archived sessions
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -1641,7 +1641,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
-- [`af sessions prune`](#af-sessions-prune) — Reclaim disk from old archived sessions
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2041,28 +2041,28 @@ af sessions preview <title> [flags]
 
 ## af sessions prune
 
-Reclaim disk from old archived sessions
+List disk reclaimable from old archived sessions (dry run)
 
-Prune archived sessions older than --older-than, measured from each
+Report archived sessions older than --older-than, measured from each
 session's archive time.
 
-Without --apply this is a dry run: it lists each archived session it would
-prune (title, archive time, bytes reclaimed) plus a total, and changes
-nothing. With --apply it deletes those sessions' archived worktrees, runs
-'git worktree prune' for the repo, and tombstones each record — the row
-stays listed in 'af sessions list --all' with its title, branch, archive
-time and prune time.
+This is strictly a dry run: it lists each archived session a reclaim would
+remove (title, archive time, allocated bytes) plus a total, and the reasons
+every other session was skipped. It changes nothing — no deletion, no record
+update, no git mutation — so it is safe to run at any time.
 
-Pruning never deletes a branch. 'af sessions restore' on a pruned session
-refuses and names the kept branch, so the work can be recreated from it.
 Only archived sessions are eligible; live, lost, dead or in-flight sessions,
-and archives whose move is incomplete, are skipped with their reasons.
+archives whose move is incomplete, and worktrees still holding uncommitted or
+ignored files are skipped with their reasons. A session whose origin
+repository is gone is refused too: the archived tree may be the work's last
+copy, so it is reported, not counted reclaimable.
 
---apply asks for confirmation when stdin is a terminal; in scripts and pipes
-it proceeds on the flag alone.
+Bytes are ALLOCATED disk space (what rm -rf would free), not apparent file
+size — sparse holes and hard links whose other end lives outside the tree are
+not counted.
 
 ```
-af sessions prune --older-than <duration> [--repo <path> | --all] [--apply] [flags]
+af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
 ```
 
 **Flags**
@@ -2070,8 +2070,7 @@ af sessions prune --older-than <duration> [--repo <path> | --all] [--apply] [fla
 | Flag | Type | Description |
 |------|------|-------------|
 | `--all` |  | Span every project instead of only the current/--repo one |
-| `--apply` |  | Actually delete: without it, prune is a dry run that lists what it would reclaim |
-| `--older-than` | `string` | Prune sessions archived longer than this duration ago (required, for example 720h for thirty days) |
+| `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
 
 **Global flags**
 

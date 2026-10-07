@@ -9,12 +9,10 @@ import (
 )
 
 // This file holds the session-domain half of `af sessions prune` (#5136): the
-// durable archive/prune timestamps, the record-level eligibility rules, and
-// the small filesystem helpers the daemon composes under its own locks. The
-// daemon owns concurrency (per-session operation locks, the killsInFlight
-// claim, persistence ordering); everything here is deliberately a pure
-// function of an InstanceData plus the filesystem so the rules are testable
-// without a daemon and cannot drift between the dry-run and apply passes.
+// archive timestamp, the record-level eligibility rules, and the filesystem
+// helpers the daemon composes. Slice 1 is read-only, so everything here is a
+// pure function of an InstanceData plus the filesystem — testable without a
+// daemon, and incapable of drifting from what a future apply will refuse.
 
 // ArchivedAt returns when this session's archive committed. Zero for a row
 // that was never archived (or archived before the field existed, where the
@@ -23,64 +21,6 @@ func (i *Instance) ArchivedAt() time.Time {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.archivedAt
-}
-
-// PrunedAt returns when this session's files were deleted by
-// `af sessions prune --apply`. Zero means unpruned.
-func (i *Instance) PrunedAt() time.Time {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.prunedAt
-}
-
-// IsPruned reports whether this row is a prune tombstone: still listed, but
-// its archived worktree is gone and only its git branch remains. It stays
-// LiveArchived on the liveness axis — the tombstone is a deletion marker
-// layered on the archived state, not a new liveness.
-func (i *Instance) IsPruned() bool {
-	return !i.PrunedAt().IsZero()
-}
-
-// MarkPruned records that this session's archived worktree was deleted.
-// Called only by the daemon's prune path, after the deletion commits and
-// inside the same critical section the tombstone persist follows:
-// the marker must never lead the physical deletion, or a crash could leave a
-// tombstoned row whose files still exist — unrestorable AND undeletable by a
-// later run, since prune skips already-marked rows. UnmarkPruned is the
-// rollback for a tombstone persist that failed after the stamp was set, so
-// the row stays eligible for the retry the error prescribes.
-func (i *Instance) MarkPruned(at time.Time) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.prunedAt = at
-	i.touchLocked()
-}
-
-// UnmarkPruned rolls a tombstone write back after its persistence failed:
-// clears the marker AND restores updated_at, which MarkPruned advanced.
-// ArchiveTimeFor falls back to updated_at for pre-upgrade rows, so leaving
-// the stamp's time would mis-date the archive on the retry the error
-// prescribes — the row would report "archived too recently" and the
-// tombstone could never be finished.
-func (i *Instance) UnmarkPruned(restoreUpdatedAt time.Time) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.prunedAt = time.Time{}
-	i.UpdatedAt = restoreUpdatedAt
-}
-
-// ReconcilePrunedSnapshot adopts a snapshot's tombstone onto an already-open
-// row — the prune can land between polls while the TUI holds the same
-// Instance pointer. Monotonic like the kill tombstone's reconcile: a stale
-// snapshot carrying zero never un-prunes a row the daemon already marked.
-func (i *Instance) ReconcilePrunedSnapshot(prunedAt time.Time) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if prunedAt.IsZero() || !i.prunedAt.IsZero() {
-		return false
-	}
-	i.prunedAt = prunedAt
-	return true
 }
 
 // ArchiveTimeFor resolves the timestamp the prune cutoff measures from: the
@@ -104,17 +44,13 @@ func ArchiveTimeFor(data InstanceData) time.Time {
 // PruneSkipReason answers why a session record is NOT a prune candidate, or ""
 // when it is eligible for `af sessions prune` against the given archive-time
 // cutoff. It evaluates only what the record proves — the daemon additionally
-// re-checks the live claims (operation lock, killsInFlight, pending captures)
-// before applying.
+// checks the live claims (operation lock, killsInFlight, pending captures)
+// and the deletion-boundary filesystem evidence when it lists candidates.
 //
 // The order is deliberate: structural disqualifiers come before the age test
-// so a row that could never be pruned does not also report a confusing age
-// verdict, and the tombstone check comes first so a second --apply reports
-// "already pruned" rather than re-evaluating a hollowed-out record.
+// so a row that could never be reclaimed does not also report a confusing age
+// verdict.
 func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
-	if !data.PrunedAt.IsZero() {
-		return "already pruned"
-	}
 	if data.UserKilled {
 		return "kill tombstone — teardown is still owed"
 	}

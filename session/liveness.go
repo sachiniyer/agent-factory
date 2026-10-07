@@ -203,13 +203,6 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	// A pruned tombstone has no worktree to restore — suppress the verb at the
-	// domain predicate too, or a TUI row materialized via FromInstanceData (or
-	// one already open when the prune landed) offers a Restore that can only
-	// fail at the daemon (#5136 review).
-	if !i.prunedAt.IsZero() {
-		return LifecycleActionNone
-	}
 	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil)
 }
 

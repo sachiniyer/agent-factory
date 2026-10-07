@@ -81,18 +81,17 @@ func (c *Client) DeleteProject(req daemon.DeleteProjectRequest) (daemon.DeletePr
 	return resp, err
 }
 
-// PruneSessions asks the daemon to enumerate (dry run) or delete eligible
-// archived sessions (#5136). This is the remote-daemon route for
+// PruneSessions asks the daemon to enumerate reclaimable archived sessions —
+// strictly a read (#5136). This is the remote-daemon route for
 // `af sessions prune`: when --daemon-url/AF_DAEMON_URL names a remote, the
-// request must cross the wire — the local control socket would prune the
+// request must cross the wire — the local control socket would report the
 // WRONG host's archives.
 func (c *Client) PruneSessions(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
 	var resp daemon.PruneSessionsResponse
-	err := c.call("PruneSessions", req, &resp)
-	if err != nil && !IsMutationCommitted(err) {
+	if err := c.call("PruneSessions", req, &resp); err != nil {
 		return daemon.PruneSessionsResponse{}, err
 	}
-	return resp, err
+	return resp, nil
 }
 
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session

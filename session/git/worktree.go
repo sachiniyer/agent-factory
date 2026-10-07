@@ -236,16 +236,6 @@ func (g *GitWorktree) BranchCreatedByUs() bool {
 	return g.branchCreatedByUs
 }
 
-// RelinquishBranchOwnership drops this handle's authority to delete the
-// branch; Cleanup() keeps it afterward. Used when a pruned tombstone's title
-// is reused and the retained branch stays under the same name: the tombstone's
-// promise ("the branch is kept as the recovery handle") stays true, but the
-// branch now belongs to the replacement session's lifecycle, so the
-// tombstone's kill must not delete it (#5136 Codex round 4).
-func (g *GitWorktree) RelinquishBranchOwnership() {
-	g.branchCreatedByUs = false
-}
-
 // NewGitWorktreeFromStorage restores a GitWorktree from persisted state.
 // branchCreatedByUs indicates whether the session originally created the
 // branch itself. Existing saved sessions (written before this field was

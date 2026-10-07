@@ -1004,7 +1004,7 @@
         "pointer": "api/sessions_prune.go sessionsPruneCmd -> daemon/control_client.go PruneSessions -> controlServer.PruneSessions (daemon/prune.go)"
       },
       "verdict": "deliberate",
-      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. The daemon route POST /v1/PruneSessions is public so the same RPC is reachable for remote daemons and external tooling; it is a mutation-gated handler whose dry run is a read."
+      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. Slice 1 ships the dry run only: a strictly read-only listing of reclaimable archives — the deletion+tombstone apply lands in the follow-up filed from #5142's review. The daemon route POST /v1/PruneSessions is public so the same read-only RPC is reachable for remote daemons and external tooling."
     },
     {
       "id": "session.restore",
@@ -1884,7 +1884,6 @@
       "af sessions preview --tab-id": "session.preview-tab",
       "af sessions preview --tab-name": "session.preview-tab",
       "af sessions prune --all": "session.prune",
-      "af sessions prune --apply": "session.prune",
       "af sessions prune --help": "meta.discovery",
       "af sessions prune --older-than": "session.prune",
       "af sessions restore --force-reap": "session.restore",
@@ -2394,19 +2393,7 @@
           }
         }
       },
-      "PruneSessionsRequest": {
-        "cli": {
-          "apply": {
-            "ok": "Reached by sessionsPruneCmd after the dry-run plan renders and the optional TTY confirm answers yes (api/sessions_prune.go assigns req.Apply post-literal). The CLI AST derivation recognizes composite-literal fields but not post-literal assignment, so it conservatively reports the field as absent."
-          },
-          "only": {
-            "ok": "Reached by sessionsPruneCmd only on the TTY-confirmed apply path: it binds the delete to the exact identities the dry-run plan showed (api/sessions_prune.go assigns req.Only post-literal inside the IsTerminal branch). The CLI AST derivation recognizes composite-literal fields but not post-literal assignment, so it conservatively reports the field as absent."
-          },
-          "only_set": {
-            "ok": "Reached by sessionsPruneCmd alongside only on the TTY-confirmed apply path: it is the gob-stable presence bit for the confirmed set (api/sessions_prune.go assigns req.OnlySet post-literal). The control socket collapses a non-nil empty slice to nil, so without it an explicit empty only would widen to unrestricted — the field exists so the daemon can still fail closed (#5136 Codex round 5)."
-          }
-        }
-      }
+      "PruneSessionsRequest": {}
     },
     "web_rpcs": {
       "ListAccounts": {

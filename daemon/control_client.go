@@ -599,22 +599,14 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 }
 
 // PruneSessions asks the daemon to evaluate archived sessions against a
-// prune request (#5136) — a dry run listing the reclaimable sessions, or an
-// apply that deletes their files and tombstones the records.
+// prune request (#5136). Slice 1 is strictly read-only — a dry-run listing of
+// the reclaimable sessions; the apply call lands in the follow-up issue.
 func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
-	// Gob decodes a non-nil EMPTY Only slice as nil — the daemon would read
-	// the confirmed-empty intent as "unrestricted" and an apply could delete
-	// every eligible archive in scope. Lift the intent into the bool, which
-	// survives the wire (#5136 Codex round 5).
-	if req.Only != nil {
-		req.OnlySet = true
-	}
 	var resp PruneSessionsResponse
-	err := callDaemon("PruneSessions", req, &resp)
-	if err != nil && !isMutationCommitted(err) {
+	if err := callDaemon("PruneSessions", req, &resp); err != nil {
 		return PruneSessionsResponse{}, err
 	}
-	return resp, err
+	return resp, nil
 }
 
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.

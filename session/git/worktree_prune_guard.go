@@ -33,7 +33,13 @@ import (
 // is returned, so the caller fails closed instead of treating "unknown" as
 // "clean".
 func WorktreeDirtyFiles(worktreePath string) (int, error) {
-	out, err := runBoundedWorktreeGit(worktreePath, false, "status", "--porcelain", "--untracked-files=normal", "--ignored")
+	// --no-optional-locks makes the probe a pure read: without it `git
+	// status` opportunistically rewrites the worktree index's stat cache,
+	// which would break slice 1's "the dry run writes nothing, anywhere"
+	// promise (#5136 — the AF-home/archive byte-identical guarantee extends
+	// to the repo's .git too).
+	out, err := runBoundedWorktreeGit(worktreePath, false, "--no-optional-locks",
+		"status", "--porcelain", "--untracked-files=normal", "--ignored")
 	if err != nil {
 		return 0, err
 	}
@@ -57,7 +63,7 @@ func VerifyRegisteredWorktreeOccupantBranch(worktreePath, repoPath, expectedBran
 	if expectedBranch == "" {
 		return nil
 	}
-	out, err := runBoundedWorktreeGit(repoPath, false, "worktree", "list", "--porcelain", "-z")
+	out, err := runBoundedWorktreeGit(repoPath, false, "--no-optional-locks", "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return fmt.Errorf("could not list %s's worktrees to bind the occupant's branch: %w", repoPath, err)
 	}

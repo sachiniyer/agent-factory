@@ -206,7 +206,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/PruneSessions",
-		Description: "Prune old archived sessions: dry-run lists what would be reclaimed; apply deletes archived worktrees, tombstones the records, and keeps branches.",
+		Description: "Dry-run listing for `af sessions prune`: reports which old archived sessions a reclaim would remove and the allocated bytes each would free. Strictly read-only.",
 		requestType: reflect.TypeOf(PruneSessionsRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.PruneSessions) },
 	},

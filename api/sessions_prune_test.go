@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,7 +22,6 @@ func resetPruneFlags(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		sessionsPruneAllFlag = false
-		sessionsPruneApplyFlag = false
 		sessionsPruneOlderThanStr = ""
 	}
 	t.Cleanup(reset)
@@ -39,13 +37,22 @@ func stubPruneDaemon(t *testing.T, fn func(daemon.PruneSessionsRequest) (daemon.
 
 func dryPlan() daemon.PruneSessionsResponse {
 	return daemon.PruneSessionsResponse{
-		OK: true, Applied: false, OlderThan: "720h",
+		OK: true, OlderThan: "720h",
 		Pruned: []daemon.PrunedSessionEntry{{
 			Title: "old", RepoID: "repo-a", Branch: "siyer/old",
 			ArchivedAt: time.Now().Add(-90 * 24 * time.Hour), ReclaimedBytes: 1234,
 		}},
 		ReclaimedBytes: 1234,
 	}
+}
+
+// TestSessionsPrune_HasNoApplyFlag: slice 1 ships the dry run only — the
+// command must not carry a mutation flag at all (#5136 split). If --apply is
+// ever re-added it lands in the follow-up's own PR, so this lookup must stay
+// nil until then.
+func TestSessionsPrune_HasNoApplyFlag(t *testing.T) {
+	assert.Nil(t, sessionsPruneCmd.Flags().Lookup("apply"),
+		"slice 1 is strictly read-only — no --apply flag may be registered")
 }
 
 // TestSessionsPrune_RequiresOlderThan: the retention window is the one input
@@ -67,8 +74,7 @@ func TestSessionsPrune_RequiresOlderThan(t *testing.T) {
 	assert.False(t, called, "a missing retention window must never reach the daemon")
 }
 
-// TestSessionsPrune_RepoAndAllMutuallyExclusive: scope ambiguity on a
-// destructive command fails closed.
+// TestSessionsPrune_RepoAndAllMutuallyExclusive: scope ambiguity fails closed.
 func TestSessionsPrune_RepoAndAllMutuallyExclusive(t *testing.T) {
 	setupRepoForCmd(t)
 	resetPruneFlags(t)
@@ -80,9 +86,10 @@ func TestSessionsPrune_RepoAndAllMutuallyExclusive(t *testing.T) {
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
 
-// TestSessionsPrune_DryRunSendsApplyFalseAndChangesNothing: the default is
-// the plan — one daemon call, Apply unset, JSON payload out.
-func TestSessionsPrune_DryRunSendsApplyFalseAndChangesNothing(t *testing.T) {
+// TestSessionsPrune_DryRunListsCandidatesAndSkips: the whole command is one
+// read — scope flags map straight onto the request and the daemon's listing
+// comes back out as JSON.
+func TestSessionsPrune_DryRunListsCandidatesAndSkips(t *testing.T) {
 	repoID := setupRepoForCmd(t)
 	resetPruneFlags(t)
 	sessionsPruneOlderThanStr = "720h"
@@ -90,13 +97,16 @@ func TestSessionsPrune_DryRunSendsApplyFalseAndChangesNothing(t *testing.T) {
 	var reqs []daemon.PruneSessionsRequest
 	stubPruneDaemon(t, func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
 		reqs = append(reqs, req)
-		return dryPlan(), nil
+		resp := dryPlan()
+		resp.Skipped = []daemon.PruneSkippedEntry{{
+			Title: "live", RepoID: "repo-a", Reason: "not archived (liveness ready)",
+		}}
+		return resp, nil
 	})
 
 	out, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
 	require.NoError(t, err)
 	require.Len(t, reqs, 1, "a dry run makes exactly one daemon call")
-	assert.False(t, reqs[0].Apply)
 	assert.False(t, reqs[0].All)
 	assert.Equal(t, repoID, reqs[0].RepoID)
 	assert.Equal(t, "720h", reqs[0].OlderThan)
@@ -104,9 +114,10 @@ func TestSessionsPrune_DryRunSendsApplyFalseAndChangesNothing(t *testing.T) {
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(out, &parsed))
 	assert.Equal(t, true, parsed["ok"])
-	assert.Equal(t, false, parsed["applied"])
 	assert.Len(t, parsed["pruned"], 1)
 	assert.EqualValues(t, 1234, parsed["reclaimed_bytes"])
+	require.Len(t, parsed["skipped"], 1)
+	assert.Contains(t, parsed["skipped"].([]any)[0].(map[string]any)["reason"], "not archived")
 }
 
 // TestSessionsPrune_AllSpansEveryProject: --all routes around repo resolution
@@ -130,83 +141,18 @@ func TestSessionsPrune_AllSpansEveryProject(t *testing.T) {
 	assert.Empty(t, gotReq.RepoID)
 }
 
-// TestSessionsPrune_ApplyRunsPlanThenApply: non-TTY --apply skips the prompt
-// but still makes the same two-phase call — the dry-run plan first, then the
-// apply — so the reported bytes are exactly what was measured.
-func TestSessionsPrune_ApplyRunsPlanThenApply(t *testing.T) {
-	setupRepoForCmd(t)
-	resetPruneFlags(t)
-	sessionsPruneOlderThanStr = "720h"
-	sessionsPruneApplyFlag = true
-
-	var applies int
-	stubPruneDaemon(t, func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
-		if req.Apply {
-			applies++
-			resp := dryPlan()
-			resp.Applied = true
-			resp.Pruned[0].PrunedAt = time.Now()
-			return resp, nil
-		}
-		return dryPlan(), nil
-	})
-
-	out, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 1, applies, "stdin is not a TTY in tests: --apply alone must suffice for scripts")
-
-	var parsed map[string]any
-	require.NoError(t, json.Unmarshal(out, &parsed))
-	assert.Equal(t, true, parsed["applied"])
-	assert.Contains(t, parsed["pruned"].([]any)[0].(map[string]any), "pruned_at")
-}
-
-// TestSessionsPrune_ApplyIncompleteExitsNonZero: a response whose deletion
-// started but could not be confirmed finished is a failure outcome — the
-// structured accounting still lands on stdout, but the command exits non-zero
-// so scripts do not read a partially-applied prune as done (#5136 review).
-func TestSessionsPrune_ApplyIncompleteExitsNonZero(t *testing.T) {
-	setupRepoForCmd(t)
-	resetPruneFlags(t)
-	sessionsPruneOlderThanStr = "720h"
-	sessionsPruneApplyFlag = true
-
-	stubPruneDaemon(t, func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
-		if !req.Apply {
-			return dryPlan(), nil
-		}
-		resp := dryPlan()
-		resp.Applied = true
-		resp.OK = false
-		resp.Pruned = nil
-		resp.Incomplete = []daemon.PruneSkippedEntry{{
-			Title: "old", RepoID: "repo-a", Reason: "tombstone write failed",
-		}}
-		return resp, nil
-	})
-
-	out, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
-	require.Error(t, err, "an incomplete apply must exit non-zero")
-	assert.Contains(t, err.Error(), "incomplete")
-	var parsed map[string]any
-	require.NoError(t, json.Unmarshal(out, &parsed))
-	assert.Equal(t, false, parsed["ok"], "the full accounting still reaches stdout")
-	assert.Contains(t, parsed, "incomplete")
-}
-
 // TestSessionsPrune_RoutesToTheTargetedDaemon: --daemon-url/AF_DAEMON_URL
-// must carry BOTH the dry-run plan and the apply to the remote daemon —
-// through the local control socket the same command would delete THIS host's
-// archives while reporting a success about another machine (#5136 Codex
-// round 3). The stub server answers over the real envelope so a locally
-// answered request fails the test, not the assertion shape.
+// must carry the listing to the remote daemon — through the local control
+// socket the same command would report THIS host's archives for a run the
+// operator aimed elsewhere (#5136 Codex round 3). The stub server answers
+// over the real envelope so a locally answered request fails the test, not
+// the assertion shape.
 func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
 	for _, spelling := range remoteTargetNames {
 		t.Run(spelling, func(t *testing.T) {
 			resetPruneFlags(t)
 			sessionsPruneAllFlag = true // --all needs no local repo context
 			sessionsPruneOlderThanStr = "720h"
-			sessionsPruneApplyFlag = true
 
 			var mu sync.Mutex
 			var reqs []daemon.PruneSessionsRequest
@@ -223,7 +169,7 @@ func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
 				reqs = append(reqs, req)
 				mu.Unlock()
 				_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PruneSessionsResponse{
-					OK: true, Applied: req.Apply, OlderThan: req.OlderThan,
+					OK: true, OlderThan: req.OlderThan,
 					Pruned: []daemon.PrunedSessionEntry{{
 						Title: "remote-old", RepoID: "box-repo", Branch: "af/remote-old",
 					}},
@@ -236,10 +182,8 @@ func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
 			require.NoError(t, err)
 			mu.Lock()
 			defer mu.Unlock()
-			require.Len(t, reqs, 2, "the plan and the apply must both reach the targeted daemon")
-			assert.False(t, reqs[0].Apply, "first call is the dry-run plan")
-			assert.True(t, reqs[1].Apply, "second call is the apply")
-			assert.True(t, reqs[1].All)
+			require.Len(t, reqs, 1, "the dry run makes exactly one call to the targeted daemon")
+			assert.True(t, reqs[0].All)
 			assert.Contains(t, string(out), "remote-old",
 				"the targeted daemon's answer — not a local one — must reach stdout")
 		})
@@ -248,9 +192,9 @@ func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
 
 // TestSessionsPrune_RemoteTargetRequiresAll: repo scoping resolves against
 // THIS machine's checkouts — against a remote --daemon-url a repo_id hashed
-// from a local path can name a different project on the remote, and a scoped
-// prune is destructive. The command must refuse a local scope against a
-// remote target and ask for --all instead (#5136 Codex round 5).
+// from a local path can name a different project on the remote. The command
+// must refuse a local scope against a remote target and ask for --all
+// instead (#5136 Codex round 5).
 func TestSessionsPrune_RemoteTargetRequiresAll(t *testing.T) {
 	remoteTarget(t)
 	resetPruneFlags(t)
@@ -278,24 +222,4 @@ func TestSessionsPrune_SurfacesDaemonError(t *testing.T) {
 	_, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a positive Go duration")
-}
-
-// TestConfirmPruneApply proves the TTY gate honors exactly y/yes and that an
-// empty answer, other words, or EOF all refuse — a prompt is a pause, not an
-// approval.
-func TestConfirmPruneApply(t *testing.T) {
-	plan := dryPlan()
-	for _, tc := range []struct {
-		in   string
-		want bool
-	}{
-		{"y\n", true}, {"yes\n", true}, {"Y\n", true}, {"YES\n", true},
-		{"n\n", false}, {"\n", false}, {"nope\n", false}, {"", false},
-	} {
-		var out strings.Builder
-		got, err := confirmPruneApply(&out, strings.NewReader(tc.in), plan)
-		require.NoError(t, err)
-		assert.Equal(t, tc.want, got, "input %q", tc.in)
-		assert.Contains(t, out.String(), "old")
-	}
 }

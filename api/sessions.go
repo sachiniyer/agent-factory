@@ -35,7 +35,7 @@ var (
 	restoreSessionViaDaemon = daemon.RestoreSession
 	pruneSessionsViaDaemon  = func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
 		// A remote --daemon-url/AF_DAEMON_URL target must receive the prune —
-		// the local control socket would delete THIS host's archives for a
+		// the local control socket would report THIS host's archives for a
 		// command the operator aimed elsewhere (#5136 review).
 		if !apiclient.IsRemoteTarget() {
 			return daemon.PruneSessions(req)

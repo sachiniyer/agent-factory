@@ -241,39 +241,25 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
 `PruneSessions` returns
-`{ "ok": true, "applied": <bool>, "older_than": "<duration>", "archived_before": "<rfc3339>", "pruned": [<entry>…], "skipped"?: [<entry>…], "incomplete"?: [<entry>…], "reclaimed_bytes": <int>, "warnings"?: [<string>…] }`:
-a dry run (`apply` omitted/false) lists in `pruned` each archived session it
-WOULD prune — `{ "id"?, "title", "repo_id", "branch", "archived_at",
-"reclaimed_bytes" }` — and changes nothing; `apply: true` performs the
-deletion and stamps `pruned_at` on each entry. `skipped` entries
-(`{ "title", "repo_id", "reason" }`) were evaluated and refused before
-anything was touched; `incomplete` entries started deleting but could not be
-confirmed finished and need operator attention or a re-run — and whenever
-`incomplete` is non-empty the response is `"ok": false` so automation does
-not read a partially applied run as done. An archived worktree still holding
-uncommitted files is **refused**, not deleted: the kept branch does not
-contain them, and they are the only copy — restore the session or clean the
-tree first. `older_than` is required and must be a positive Go duration
-measured from each session's archive time; the request needs a scope —
-`repo_id` or `all: true`, which are mutually exclusive; and
-`only: [{"repo_id", "title", "id"?}…]` optionally restricts the run to those
-confirmed identities (the CLI's TTY-confirm apply sends the dry-run plan's
-set); a ref carrying `id` binds the stable session identity, so a same-title
-replacement created after the plan is reported rather than pruned. An
-explicitly empty `only` list never widens to all sessions: on an `apply` it
-is rejected outright, and on a dry run it scopes to nothing — omit `only`
-entirely for an unrestricted run. `only_set` is the presence bit for
-transports that cannot carry nil-vs-empty (the control socket's gob codec
-collapses `only: []` to absent): clients on such transports set it whenever
-`only` was provided; JSON callers get the same semantics from the slice
-itself. `reclaimed_bytes` counts **allocated** disk
+`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "pruned": [<entry>…], "skipped"?: [<entry>…], "reclaimed_bytes": <int>, "warnings"?: [<string>…] }`:
+the STRICTLY READ-ONLY dry run for the archived-session reclaim — it lists in
+`pruned` each archived session a reclaim would remove —
+`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimed_bytes" }` —
+and changes nothing: no deletion, no record update, no git write. (The apply
+half lands in the follow-up to #5142.) `skipped` entries
+(`{ "title", "repo_id", "reason" }`) were evaluated and refused. An archived
+worktree still holding uncommitted or ignored files is **refused**, not
+counted: the kept branch does not contain them and they are the only copy —
+restore the session or clean the tree first. `older_than` is required and
+must be a positive Go duration measured from each session's archive time;
+the request needs a scope — `repo_id` or `all: true`, which are mutually
+exclusive. `reclaimed_bytes` counts **allocated** disk
 blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
 hard-linked file is credited only when deleting the tree removes its last
-link — it is what deletion actually frees, not apparent file size. A session
-whose recorded origin repository
-is gone is never pruned — with the repo deleted there is no kept branch for
-the tombstone to promise, so the archived worktree may be the last copy of
-the work;
+link — it is what a deletion would actually free, not apparent file size. A
+session whose recorded origin repository
+is gone is refused — with the repo deleted there is no kept branch, so the
+archived worktree may be the last copy of the work;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
@@ -305,7 +291,6 @@ RFC 3339 timestamps:
 | `created_at` | When the session was created. |
 | `updated_at` | When the session state last mutated: lifecycle, identity, prompt delivery, tab roster, or pane activity. Reads, serialization, and cache refreshes do not advance it. |
 | `archived_at` | When the session's archive move committed; `--older-than` for `PruneSessions` is measured from it. Omitted on live sessions; records archived before the field existed report nothing and prune falls back to `updated_at`. |
-| `pruned_at` | When `PruneSessions --apply` deleted the session's archived worktree and tombstoned the record. Present only on pruned tombstones: the row stays listed, restore refuses naming the kept branch, and `lifecycle_action` is suppressed so no client advertises restore. |
 
 `updated_at` survives saves and restarts. Older records retain their last save
 time; a missing or zero stored value falls back to `created_at` when loaded.
