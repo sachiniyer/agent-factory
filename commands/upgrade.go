@@ -356,11 +356,18 @@ func startDaemonHint() string {
 // StopDaemon — SIGTERM, then SIGKILL — destroying the very work the withheld
 // respawn exists to protect. The verb is `kill -9` because a draining daemon
 // absorbs SIGTERM by design.
+//
+// The check is `af daemon status`, not `ps`: the user acts minutes after this
+// prints, by which time the pid may name a different process. Each status run
+// re-verifies that this home's recorded pid is a live `af --daemon` ("verified"),
+// and it never starts a daemon, so it is safe to run during the drain. A bare
+// `ps -p` would pass for whatever reused the pid, and "any leftover
+// `af --daemon`" may serve another home.
 func shutdownIncompleteHint(pid int) string {
 	if pid > 0 {
-		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait until ps -p %d no longer shows it, then run af again (running af sooner can kill it mid-shutdown). If it still shows after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
+		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait until `af daemon status` no longer shows pid %d as verified, then run af again (running af sooner can kill it mid-shutdown). If it still does after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
 	}
-	return "still finishing its shutdown — it normally exits on its own: wait until no leftover `af --daemon` shows, then run af again (running af sooner can kill it mid-shutdown). If one still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost)."
+	return "still finishing its shutdown — it normally exits on its own: wait until `af daemon status` no longer shows a verified pid, then run af again (running af sooner can kill it mid-shutdown). If it still does after several minutes, it may be wedged: kill -9 that pid (in-flight shutdown work may be lost)."
 }
 
 // reportUpgradeRestart tells the user what the restart actually did.
