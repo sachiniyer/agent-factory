@@ -6,17 +6,20 @@ import (
 	"errors"
 	"net"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // TestConnPIDNamesTheConnectingProcess proves the kernel answer tracks the
 // CONNECTING process, not anything the caller asserts: this test process dials
 // the socket itself, so its own pid is the only possible correct peer.
 func TestConnPIDNamesTheConnectingProcess(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "peercred.sock")
+	// SocketPath, not t.TempDir: the test name in the path overruns darwin's
+	// 104-byte sun_path and the bind fails as a bare "invalid argument" (#1940).
+	path := testguard.SocketPath(t, "peercred.sock")
 	listener, err := net.Listen("unix", path)
 	require.NoError(t, err)
 	defer listener.Close()
@@ -59,7 +62,7 @@ func TestConnPIDRejectsNonUnixConn(t *testing.T) {
 // a pid; the teardown seam treats "could not tell" as no requester, so a
 // silently wrong answer here is the forgeable exemption #5182 rules out.
 func TestConnPIDClosesWithReadError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "peercred-closed.sock")
+	path := testguard.SocketPath(t, "peercred-closed.sock")
 	listener, err := net.Listen("unix", path)
 	require.NoError(t, err)
 	defer listener.Close()
