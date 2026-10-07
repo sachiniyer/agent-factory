@@ -322,7 +322,7 @@ type ResumeFromLimitResponse struct {
 // success worth logging. The manual-retry path exposes this same distinction
 // through ResumeFromLimitResponse.OK (outcome == resumePerformed).
 func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, error) {
-	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap, false)
 }
 
 // fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
@@ -369,7 +369,9 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 // resumeFromLimitOutcome calls this body directly; the auto-resume scheduler's
 // resumeLimitedSession reaches it through resumeFromLimitLockedWithAccount. Both
 // take the two locks before calling in, so this body never acquires either itself.
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (outcome resumeFromLimitOutcome, resultErr error) {
+// operatorInitiated selects the liveness-probe budget: the explicit RPC uses
+// probeLivenessForOperator; the poll-driven scheduler keeps the short poll budget.
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap, operatorInitiated bool) (outcome resumeFromLimitOutcome, resultErr error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
@@ -487,6 +489,48 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	defer releaseAccountSwapFences()
 	if accountSwap != nil && !accountSwap.alreadySet {
 		testHookAccountSwapBeforeFinalFence()
+		// Compute the liveness probe BEFORE acquiring the global config-apply
+		// and account-limit fences below. The probe is a network round-trip
+		// bounded by the caller-specific budget (probeLivenessForOperator for
+		// the manual RPC, probeLiveness for the poll-driven scheduler), and
+		// holding those fences for its whole budget blocks unrelated config
+		// application and account-limit/delivery operations daemon-wide. Both
+		// the manual and the automatic caller reach commitNewAccountSwapIdentity
+		// through this path after the fences are taken, so computing the probe
+		// inside it (as the previous revision did) held the fences for the full
+		// probe on every caller — including the manual RPC's 30s operator
+		// budget. The per-session op lock the caller already holds keeps the
+		// runtime stable across the fence acquisition, so a probe taken here is
+		// still current when prepareRuntimeForAccountSwap runs under the
+		// fences below. See remoteloss.go and prepareRuntimeForAccountSwap.
+		//
+		// For a manual swap, run a non-mutating admission precheck BEFORE the
+		// slow liveness probe. An obviously invalid manual swap (an
+		// unregistered, limited, or otherwise inadmissible account, or a VS
+		// Code tab) is already determinable without the network round-trip, so
+		// waiting the operator probe budget (up to 35s) only to report that
+		// error needlessly blocks the session's target/op/worktree locks the
+		// caller (handoffAccount) still holds. checkManualAccountSwap is
+		// non-mutating (recordLaunch=false) and the authoritative admission
+		// under the fences below re-evaluates it, so this unlocked pass only
+		// short-circuits the network wait for the already-determinable failure;
+		// the probe is skipped when the precheck fails. If the precheck did
+		// fail, probeComputed stays false and the zero-value probe is NOT
+		// trusted: commitNewAccountSwapIdentity performs a real probe before
+		// teardown when its authoritative admission reverses this precheck
+		// (a config/registry change between the unlocked pass and the fenced
+		// admission), so prepareRuntimeForAccountSwap never receives a
+		// fabricated probeAlive verdict for a runtime it never probed.
+		var accountSwapProbe livenessProbe
+		probeComputed := false
+		if !accountSwap.manual || m.checkManualAccountSwap(instance, accountSwap) == nil {
+			if operatorInitiated {
+				accountSwapProbe = probeLivenessForOperator(instance, instance.AgentServer())
+			} else {
+				accountSwapProbe = probeLiveness(instance, instance.AgentServer())
+			}
+			probeComputed = true
+		}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied,
 		// this admission observes it; once admission owns the fence, ApplyConfig
@@ -529,7 +573,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			lockEntered = true
 			var err error
 			fallbackEligible, err = m.commitNewAccountSwapIdentity(
-				repoID, key, requestedTitle, instance, accountSwap, liveConfig)
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated, accountSwapProbe, probeComputed)
 			return err
 		})
 		swapErr := lockErr
@@ -552,7 +596,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	as := instance.AgentServer()
 	probe := probeAbsent
 	if !forceRespawn {
-		probe = probeLiveness(instance, as)
+		// Caller-specific budget — see the operatorInitiated doc above and remoteloss.go.
+		if operatorInitiated {
+			probe = probeLivenessForOperator(instance, as)
+		} else {
+			probe = probeLiveness(instance, as)
+		}
 	}
 	shouldRespawn := forceRespawn
 	switch probe {

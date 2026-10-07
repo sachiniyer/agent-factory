@@ -125,7 +125,7 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 			accountOnly: strings.TrimSpace(req.To) == "",
 		}
 	}
-	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap)
+	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap, true)
 	response := HandoffSessionResponse{OK: true, From: swap.fromAgent, To: target, FromAccount: swap.from, ToAccount: swap.to, HeadSHA: swap.headSHA}
 	if err != nil {
 		if outcome == resumePerformed || isMutationCommitted(err) {

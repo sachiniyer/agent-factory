@@ -112,5 +112,5 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 		return resumeNotPerformed, nil
 	}
 
-	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance))
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance), true)
 }

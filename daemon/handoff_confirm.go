@@ -112,7 +112,10 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	// operator attests the mission landed; the probe keeps that attestation
 	// from resurrecting a tombstone-shaped pane. probeUnknown refuses rather
 	// than guesses — an unreachable runtime cannot have its delivery confirmed.
-	switch probe := probeLiveness(instance, instance.AgentServer()); probe {
+	// This is an operator one-shot RPC under the per-session op lock, so the
+	// probe uses probeLivenessForOperator's budget (remoteConfirmProbeTimeout),
+	// not the poll loop's 5s tie-break budget — see remoteloss.go.
+	switch probe := probeLivenessForOperator(instance, instance.AgentServer()); probe {
 	case probeAlive:
 	default:
 		return false, fmt.Errorf(
