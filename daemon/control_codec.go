@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/gob"
+	"errors"
 	"io"
 	"net"
 	"net/rpc"
@@ -48,11 +49,23 @@ func newGobServerCodec(conn net.Conn, pending *pendingUntracks) *gobServerCodec 
 }
 
 func (c *gobServerCodec) ReadRequestHeader(r *rpc.Request) error {
-	if err := c.dec.Decode(r); err != nil {
-		return err
+	err := c.dec.Decode(r)
+	if err == nil {
+		c.curSeq = r.Seq
+		return nil
 	}
-	c.curSeq = r.Seq
-	return nil
+	// A peer that can no longer be read can never receive a reply still owed —
+	// a parked unregister keyed to that reply would hold its requester exempt
+	// forever even though nothing is listening (Codex on #5186). io.EOF and
+	// io.ErrUnexpectedEOF are the failures that end net/rpc's read loop for
+	// good; a gob decode error gets an in-band error response and reading
+	// resumes, so only the terminal cases drain.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		if c.pending != nil {
+			c.pending.drain()
+		}
+	}
+	return err
 }
 
 func (c *gobServerCodec) ReadRequestBody(body any) error {
@@ -84,20 +97,31 @@ func (c *gobServerCodec) WriteResponse(r *rpc.Response, body any) error {
 	}
 	c.seqMu.Unlock()
 	if err := c.enc.Encode(r); err != nil {
-		_ = c.encBuf.Flush()
-		return err
+		return c.fail(err)
 	}
 	if err := c.enc.Encode(body); err != nil {
-		_ = c.encBuf.Flush()
-		return err
+		return c.fail(err)
 	}
 	if err := c.encBuf.Flush(); err != nil {
-		return err
+		return c.fail(err)
 	}
 	if registered && c.pending != nil {
 		c.pending.releaseFor(argv)
 	}
 	return nil
+}
+
+// fail closes the codec on a response-write error. net/rpc's sendResponse
+// discards the returned error and continues serving the connection, so an
+// encoder that can no longer write would keep every parked unregister exempt
+// forever — no response can release what can never be sent. Closing drains
+// the whole pending set (the transport is dead; nothing it owed can be
+// delivered) and fails the read loop, which is how ServeCodec learns to stop
+// (Codex on #5186).
+func (c *gobServerCodec) fail(err error) error {
+	_ = c.encBuf.Flush()
+	_ = c.Close()
+	return err
 }
 
 func (c *gobServerCodec) Close() error {
