@@ -321,6 +321,56 @@ func TestPruneSessions_IncompleteApplyReportsNotOK(t *testing.T) {
 	assert.True(t, inst.PrunedAt().IsZero(), "the rolled-back marker keeps the row retryable")
 }
 
+// TestPruneSessions_OnlyBindsSessionID: the confirmed plan carries the stable
+// session ID, not just repo+title — a same-title replacement created while
+// the TTY prompt sat open must not inherit the operator's yes (#5136 Codex
+// round 3).
+func TestPruneSessions_OnlyBindsSessionID(t *testing.T) {
+	manager, repoID, _, inst, archivedPath := seedPrunableArchive(t, "bound-row")
+	planID := inst.ToInstanceData().ID
+	require.NotEmpty(t, planID)
+
+	// A same-title row under a DIFFERENT id is not the session the plan
+	// showed — apply must report it rather than prune it.
+	resp, err := manager.PruneSessions(PruneSessionsRequest{
+		RepoID: repoID, OlderThan: "1ms", Apply: true,
+		Only: []PrunePlanRef{{RepoID: repoID, Title: "bound-row", ID: "a-different-session-id"}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "replaced")
+	assert.True(t, exists(archivedPath), "the unconfirmed replacement must be left untouched")
+
+	// The exact identity the plan carried still prunes.
+	resp2, err := manager.PruneSessions(PruneSessionsRequest{
+		RepoID: repoID, OlderThan: "1ms", Apply: true,
+		Only: []PrunePlanRef{{RepoID: repoID, Title: "bound-row", ID: planID}},
+	})
+	require.NoError(t, err)
+	require.Len(t, resp2.Pruned, 1)
+	assert.False(t, exists(archivedPath))
+}
+
+// TestPruneSessions_RefusesRepoGoneOrigin: when the origin repository is
+// deleted there is no reachable branch to satisfy the tombstone's promise —
+// the archived directory may be the last copy of the work, and prune must
+// refuse rather than delete it while reporting the branch was kept (#5136
+// Codex round 3).
+func TestPruneSessions_RefusesRepoGoneOrigin(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath := seedPrunableArchive(t, "gone-row")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "origin repository")
+	assert.True(t, exists(archivedPath),
+		"with the repo gone the archived directory may be the last copy — it must survive")
+	assert.True(t, inst.PrunedAt().IsZero())
+}
+
 // TestPruneSessions_ConcurrentArchiveIsSkipped: a session mid-archive (its
 // in-flight op legitimately raised by BeginArchive) is exactly the race the
 // op gate exists for — prune must report it, not delete underneath it.

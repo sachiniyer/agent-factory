@@ -256,11 +256,16 @@ contain them, and they are the only copy — restore the session or clean the
 tree first. `older_than` is required and must be a positive Go duration
 measured from each session's archive time; the request needs a scope —
 `repo_id` or `all: true`, which are mutually exclusive; and
-`only: [{"repo_id", "title"}…]` optionally restricts the run to those
+`only: [{"repo_id", "title", "id"?}…]` optionally restricts the run to those
 confirmed identities (the CLI's TTY-confirm apply sends the dry-run plan's
-set). An explicitly empty `only` list never widens to all sessions: on an
-`apply` it is rejected outright, and on a dry run it scopes to nothing — omit
-`only` entirely for an unrestricted run;
+set); a ref carrying `id` binds the stable session identity, so a same-title
+replacement created after the plan is reported rather than pruned. An
+explicitly empty `only` list never widens to all sessions: on an `apply` it
+is rejected outright, and on a dry run it scopes to nothing — omit `only`
+entirely for an unrestricted run. A session whose recorded origin repository
+is gone is never pruned — with the repo deleted there is no kept branch for
+the tombstone to promise, so the archived worktree may be the last copy of
+the work;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a

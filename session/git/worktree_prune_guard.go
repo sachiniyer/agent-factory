@@ -1,13 +1,8 @@
 package git
 
 import (
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
-
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // Deletion-boundary guards for `af sessions prune` (#5136 review). Prune
@@ -18,13 +13,10 @@ import (
 // These helpers add the checks the first cut lacked:
 //
 //   - the occupant's registered BRANCH must be the session's recorded branch
-//     (repo-present mode), and
-//   - the pointer's repository half must name the RECORDED origin (repo-gone
-//     mode), not merely carry an absent linked-worktree shape.
-//
-// The third helper answers the question rm -rf cannot take back: whether the
-// worktree still holds uncommitted content — the only copy of that work,
-// which the tombstone's kept-branch promise does not cover.
+//     (repo-present mode; a repo-gone row is refused before either check),
+//     and
+//   - the worktree must carry no uncommitted content — the only copy of that
+//     work, which the tombstone's kept-branch promise does not cover.
 
 // WorktreeDirtyFiles runs a bounded `git status --porcelain
 // --untracked-files=normal` inside worktreePath and returns how many
@@ -78,46 +70,4 @@ func VerifyRegisteredWorktreeOccupantBranch(worktreePath, repoPath, expectedBran
 			worktreePath, strings.TrimPrefix(branch, "refs/heads/"), expectedBranch)
 	}
 	return nil
-}
-
-// VerifyArchivedWorktreePointerForRepo is VerifyArchivedWorktreePointer plus
-// an origin binding for the repo-gone mode: the occupant's `.git` gitdir must
-// name a linked-worktree leaf INSIDE the recorded origin's metadata
-// (<repoPath>/.git/worktrees/<leaf>, or <repoPath>/worktrees/<leaf> for a bare
-// layout), not merely carry the absent-leaf shape of any deleted repository's
-// worktree. Without it a foreign worktree orphaned by the deletion of ITS OWN
-// origin satisfies the check and gets deleted by this session's say-so.
-//
-// The comparison is textual-through-ResolveForCompare because the origin is
-// gone: only the deepest surviving ancestors resolve, and both sides degrade
-// to cleaned paths identically. It cannot bind leaf name to session title —
-// git names the leaf after the worktree's basename at creation and af moves
-// the directory at archive — so this stays a repo binding layered on the
-// linked-worktree shape, strictly stronger than the shape alone.
-func VerifyArchivedWorktreePointerForRepo(worktreePath, recordedRepoPath string) error {
-	return boundedPointerCheck("archivedrepo\x00"+recordedRepoPath, worktreePath, func(path string) error {
-		target, err := verifyWorktreePointerShape(path)
-		if err != nil {
-			return err
-		}
-		metadataDir := filepath.Dir(filepath.Dir(target))
-		recorded := pathutil.ResolveForCompare(recordedRepoPath)
-		resolved := pathutil.ResolveForCompare(metadataDir)
-		if resolved != recorded &&
-			resolved != pathutil.ResolveForCompare(filepath.Join(recordedRepoPath, ".git")) {
-			return worktreeIdentityMismatchf(
-				"archived worktree pointer %s names metadata under %s, not the recorded origin %s — the occupant belongs to a different repository",
-				filepath.Join(path, ".git"), metadataDir, recordedRepoPath)
-		}
-		if _, err := os.Lstat(target); err == nil {
-			return fmt.Errorf(
-				"archived worktree pointer %s names gitdir %s, which still exists — the occupant belongs to a live repository, or the origin kept a separate git dir that outlived it; run a restore first: a failed repo-gone restore installs the cleanup authorization kill needs",
-				filepath.Join(path, ".git"), target)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf(
-				"archived worktree pointer %s: could not establish the state of gitdir %s: %w",
-				filepath.Join(path, ".git"), target, err)
-		}
-		return nil
-	})
 }

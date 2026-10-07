@@ -33,7 +33,19 @@ var (
 	killSessionViaDaemon    = daemon.KillSession
 	archiveSessionViaDaemon = daemon.ArchiveSession
 	restoreSessionViaDaemon = daemon.RestoreSession
-	pruneSessionsViaDaemon  = daemon.PruneSessions
+	pruneSessionsViaDaemon  = func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		// A remote --daemon-url/AF_DAEMON_URL target must receive the prune —
+		// the local control socket would delete THIS host's archives for a
+		// command the operator aimed elsewhere (#5136 review).
+		if !apiclient.IsRemoteTarget() {
+			return daemon.PruneSessions(req)
+		}
+		client, err := apiclient.NewTargeted()
+		if err != nil {
+			return daemon.PruneSessionsResponse{}, err
+		}
+		return client.PruneSessions(req)
+	}
 	sessionsArchiveSelf     bool
 	sendPromptViaDaemon     = daemon.SendPromptWithStatus
 	deliverPromptViaDaemon  = daemon.DeliverPromptWithStatus

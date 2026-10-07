@@ -79,10 +79,16 @@ type PruneSessionsRequest struct {
 	Only []PrunePlanRef `json:"only,omitempty"`
 }
 
-// PrunePlanRef names one session the operator confirmed for pruning.
+// PrunePlanRef names one session the operator confirmed for pruning. ID is
+// the stable session identity the dry-run plan carried: a row removed while
+// the TTY prompt sits open can be REPLACED by a same-title session — which
+// the repo+title key alone would match, pruning a session the operator never
+// saw (#5136 review). An empty ID (a client that predates the field) falls
+// back to the repo+title binding.
 type PrunePlanRef struct {
 	RepoID string `json:"repo_id"`
 	Title  string `json:"title"`
+	ID     string `json:"id,omitempty"`
 }
 
 // PrunedSessionEntry is one session the run pruned (apply) or would prune
@@ -250,14 +256,14 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	warnings = append(warnings, ghostWarns...)
 	skipped = append(skipped, ghosts...)
 
-	var confirmed map[string]bool
+	var confirmed map[string]PrunePlanRef
 	if req.Only != nil {
 		// Non-nil is the confirmed-plan contract: exactly the named rows are
 		// in scope — an EMPTY set scopes to nothing rather than widening to
 		// everything, and apply rejects it at validation above.
-		confirmed = make(map[string]bool, len(req.Only))
+		confirmed = make(map[string]PrunePlanRef, len(req.Only))
 		for _, ref := range req.Only {
-			confirmed[daemonInstanceKey(ref.RepoID, ref.Title)] = true
+			confirmed[daemonInstanceKey(ref.RepoID, ref.Title)] = ref
 		}
 	}
 
@@ -267,11 +273,22 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 			continue
 		}
 		data := row.instance.ToInstanceData()
-		if confirmed != nil && !confirmed[daemonInstanceKey(row.repoID, data.Title)] {
-			// Outside the confirmed set: not reported at all — the plan the
-			// operator answered named it, so this run treats it as out of
-			// scope rather than as a refusal needing a reason.
-			continue
+		if confirmed != nil {
+			ref, named := confirmed[daemonInstanceKey(row.repoID, data.Title)]
+			if !named {
+				// Outside the confirmed set: not reported at all — the plan the
+				// operator answered named it, so this run treats it as out of
+				// scope rather than as a refusal needing a reason.
+				continue
+			}
+			if ref.ID != "" && ref.ID != data.ID {
+				// Same repo+title but a different session: the confirmed row
+				// was removed and a replacement archived since the plan. The
+				// operator never saw this one — report it rather than prune.
+				skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
+					Reason: "the confirmed session was replaced by a different session under the same title"})
+				continue
+			}
 		}
 		if reason := session.PruneSkipReason(data, cutoff); reason != "" {
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
@@ -503,10 +520,14 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 // and every later candidate forever (#5136 review).
 //
 // A missing path needs no identity proof — there is nothing to delete, and
-// RemoveWorktreeDir still clears the stale registration. A repo-gone
-// worktree cannot be asked whether it is dirty (its .git pointer is dead),
-// and its branch is already gone with the repo, so the kept-branch promise is
-// moot there; the pointer-for-repo binding is the check that remains.
+// RemoveWorktreeDir still clears the stale registration.
+//
+// A repo-gone row is REFUSED outright: with the origin deleted there is no
+// reachable repository or branch to satisfy the tombstone's kept-branch
+// promise, so the archived directory may be the last surviving copy of the
+// work — prune cannot delete it while claiming the branch survives (#5136
+// review). Restore the repository first, or remove the directory by hand
+// once its contents are preserved elsewhere.
 func pruneFilesystemRefusal(data session.InstanceData) string {
 	repoPath := data.Worktree.RepoPath
 	if repoPath == "" {
@@ -520,7 +541,6 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, err)
 	}
 
-	repoPresent := true
 	switch probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath); {
 	case probeErr == nil:
 		// Repo-present: the same bidirectional evidence the kill path requires
@@ -531,17 +551,11 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
 		}
 	case errors.Is(probeErr, sessiongit.ErrRepoGone):
-		repoPresent = false
-		if err := sessiongit.VerifyArchivedWorktreePointerForRepo(wtPath, repoPath); err != nil {
-			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
-		}
+		return fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
 	default:
 		return fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
 	}
 
-	if !repoPresent {
-		return ""
-	}
 	// Uncommitted content in an archived worktree is the ONLY copy — archive
 	// relocates bytes verbatim and snapshots only on the disposable-backends
 	// path. The tombstone promises the branch survives, but the branch has no

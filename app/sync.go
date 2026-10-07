@@ -648,6 +648,13 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileUserKilledSnapshot(d.UserKilled) {
 		changed = true
 	}
+	// A prune tombstone is durable while the row itself stays live in the
+	// model. Adopt it monotonically so an already-open row stops offering
+	// Restore the moment the prune lands (#5136 review) — the domain's
+	// LifecycleAction consults prunedAt directly.
+	if inst.ReconcilePrunedSnapshot(d.PrunedAt) {
+		changed = true
+	}
 	snapshotOp := d.InFlightOp
 	tombstoned := d.UserKilled || inst.UserKilled()
 	if tombstoned {

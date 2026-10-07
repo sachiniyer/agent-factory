@@ -3,10 +3,14 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,6 +192,58 @@ func TestSessionsPrune_ApplyIncompleteExitsNonZero(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out, &parsed))
 	assert.Equal(t, false, parsed["ok"], "the full accounting still reaches stdout")
 	assert.Contains(t, parsed, "incomplete")
+}
+
+// TestSessionsPrune_RoutesToTheTargetedDaemon: --daemon-url/AF_DAEMON_URL
+// must carry BOTH the dry-run plan and the apply to the remote daemon —
+// through the local control socket the same command would delete THIS host's
+// archives while reporting a success about another machine (#5136 Codex
+// round 3). The stub server answers over the real envelope so a locally
+// answered request fails the test, not the assertion shape.
+func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
+	for _, spelling := range remoteTargetNames {
+		t.Run(spelling, func(t *testing.T) {
+			resetPruneFlags(t)
+			sessionsPruneAllFlag = true // --all needs no local repo context
+			sessionsPruneOlderThanStr = "720h"
+			sessionsPruneApplyFlag = true
+
+			var mu sync.Mutex
+			var reqs []daemon.PruneSessionsRequest
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path != "/v1/PruneSessions" {
+					w.WriteHeader(http.StatusNotFound)
+					_ = apiproto.WriteEnvelope(w, apiproto.Failure("unknown route "+r.URL.Path))
+					return
+				}
+				var req daemon.PruneSessionsRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				mu.Lock()
+				reqs = append(reqs, req)
+				mu.Unlock()
+				_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PruneSessionsResponse{
+					OK: true, Applied: req.Apply, OlderThan: req.OlderThan,
+					Pruned: []daemon.PrunedSessionEntry{{
+						Title: "remote-old", RepoID: "box-repo", Branch: "af/remote-old",
+					}},
+				}))
+			}))
+			t.Cleanup(srv.Close)
+			useRemoteTarget(t, spelling, srv.URL)
+
+			out, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+			require.NoError(t, err)
+			mu.Lock()
+			defer mu.Unlock()
+			require.Len(t, reqs, 2, "the plan and the apply must both reach the targeted daemon")
+			assert.False(t, reqs[0].Apply, "first call is the dry-run plan")
+			assert.True(t, reqs[1].Apply, "second call is the apply")
+			assert.True(t, reqs[1].All)
+			assert.Contains(t, string(out), "remote-old",
+				"the targeted daemon's answer — not a local one — must reach stdout")
+		})
+	}
 }
 
 func TestSessionsPrune_SurfacesDaemonError(t *testing.T) {

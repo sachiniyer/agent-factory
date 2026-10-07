@@ -235,6 +235,54 @@ func TestRenameArchived_PrunedTombstoneDoesNotLockTwice(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "a tombstone has no worktree — nothing may be created at dest")
 }
 
+// TestPrunedTombstone_SuppressesInstanceLifecycleAction: the TUI reads
+// Instance.LifecycleAction() — not the emitted projection — so the tombstone
+// check must live in the domain predicate too (#5136 review). A row
+// materialized by FromInstanceData would otherwise keep offering Restore on
+// files that are gone.
+func TestPrunedTombstone_SuppressesInstanceLifecycleAction(t *testing.T) {
+	data := pruneEligibleData(t)
+	data.ID = "pruned-1"
+	data.PrunedAt = time.Now()
+	inst, err := FromInstanceData(data)
+	require.NoError(t, err)
+	assert.Equal(t, LifecycleActionNone, inst.LifecycleAction(),
+		"the domain predicate must suppress restore on a tombstone, matching the projection")
+	assert.Equal(t, LifecycleActionNone, inst.ToInstanceData().LifecycleAction)
+}
+
+// TestReconcilePrunedSnapshotAdoptsMonotonically: the TUI's same-pointer
+// reconcile must install the tombstone when a snapshot reports it, and a
+// stale zero field must never un-prune a row the daemon already marked.
+func TestReconcilePrunedSnapshotAdoptsMonotonically(t *testing.T) {
+	inst, err := FromInstanceData(pruneEligibleData(t))
+	require.NoError(t, err)
+	assert.False(t, inst.ReconcilePrunedSnapshot(time.Time{}), "zero is not an adoption")
+	stamped := time.Now().Truncate(time.Second)
+	assert.True(t, inst.ReconcilePrunedSnapshot(stamped))
+	assert.True(t, inst.IsPruned())
+	assert.Equal(t, LifecycleActionNone, inst.LifecycleAction(),
+		"adopting the tombstone retires the restore verb on the open row")
+	assert.False(t, inst.ReconcilePrunedSnapshot(time.Time{}),
+		"a stale zero snapshot must not roll the tombstone back")
+	assert.True(t, inst.IsPruned())
+}
+
+// TestRestoreClearsArchivedAt: archived_at names the shelf the record sits on
+// — leaving the archive (restore's begin edge, fenced or plain) must clear it,
+// or a live row keeps reporting a dead shelf's age to readers and to a later
+// prune pass (#5136 review).
+func TestRestoreClearsArchivedAt(t *testing.T) {
+	inst := &Instance{liveness: LiveRunning, started: true}
+	require.NoError(t, inst.Transition(BeginArchive()))
+	require.NoError(t, inst.Transition(CommitArchive()))
+	require.False(t, inst.ArchivedAt().IsZero())
+
+	require.NoError(t, inst.Transition(BeginRestore()))
+	assert.True(t, inst.ArchivedAt().IsZero(),
+		"the row left the archive — its archive time must not survive as a stale shelf age")
+}
+
 func TestDirSizeBytes(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))

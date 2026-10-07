@@ -115,7 +115,10 @@ it proceeds on the flag alone.`,
 			// not confirmed, so they stay out too.
 			req.Only = make([]daemon.PrunePlanRef, 0, len(plan.Pruned))
 			for _, entry := range plan.Pruned {
-				req.Only = append(req.Only, daemon.PrunePlanRef{RepoID: entry.RepoID, Title: entry.Title})
+				// ID binds the confirmed identity, not just its name: a
+				// same-title replacement created while the prompt sat open
+				// must not inherit this confirmation (#5136 review).
+				req.Only = append(req.Only, daemon.PrunePlanRef{RepoID: entry.RepoID, Title: entry.Title, ID: entry.ID})
 			}
 		}
 		req.Apply = true

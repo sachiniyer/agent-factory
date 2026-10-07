@@ -68,6 +68,20 @@ func (i *Instance) UnmarkPruned(restoreUpdatedAt time.Time) {
 	i.UpdatedAt = restoreUpdatedAt
 }
 
+// ReconcilePrunedSnapshot adopts a snapshot's tombstone onto an already-open
+// row — the prune can land between polls while the TUI holds the same
+// Instance pointer. Monotonic like the kill tombstone's reconcile: a stale
+// snapshot carrying zero never un-prunes a row the daemon already marked.
+func (i *Instance) ReconcilePrunedSnapshot(prunedAt time.Time) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if prunedAt.IsZero() || !i.prunedAt.IsZero() {
+		return false
+	}
+	i.prunedAt = prunedAt
+	return true
+}
+
 // ArchiveTimeFor resolves the timestamp the prune cutoff measures from: the
 // recorded archive commit, or for rows written before archived_at existed the
 // record's UpdatedAt — the best surviving approximation of when the archive
