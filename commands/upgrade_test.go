@@ -186,7 +186,7 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
 		return respawnResult{}, nil
@@ -194,9 +194,9 @@ func TestUpgradeCallsShutdownAfterBinarySwap(t *testing.T) {
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
 	shutdownCalls := 0
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		shutdownCalls++
-		return daemon.ShutdownViaRPC, nil
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
@@ -242,16 +242,16 @@ func TestUpgradeSucceedsWhenNoDaemon(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
 		// Mirror what daemon.RequestShutdown returns when no daemon is
 		// running: (ShutdownNoDaemon, nil) — silently no-op.
-		return daemon.ShutdownNoDaemon, nil
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
@@ -290,14 +290,14 @@ func TestUpgradeSucceedsWhenShutdownErrors(t *testing.T) {
 	})
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
-	respawnDaemonFn = func(string) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownNoDaemon, errors.New("simulated rpc failure")
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, errors.New("simulated rpc failure")
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
@@ -335,15 +335,15 @@ func TestUpgradeReportsSIGTERMFallback(t *testing.T) {
 	prevRespawn := respawnDaemonFn
 	respawnCalls := 0
 	var respawnPath string
-	respawnDaemonFn = func(path string) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownTarget) (respawnResult, error) {
 		respawnCalls++
 		respawnPath = path
 		return respawnResult{}, nil
 	}
 	t.Cleanup(func() { respawnDaemonFn = prevRespawn })
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownViaSIGTERM, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownViaSIGTERM, daemon.ShutdownTarget{}, nil
 	}
 
 	stubDaemonHealth(t, daemon.HealthStatus{})
