@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
@@ -336,5 +337,122 @@ func TestDeliverPrompt_RealControlSocket_CommittedUnknownCleanup(t *testing.T) {
 	rec := recordFor(t, repoID, "committed-cleanup-deliver")
 	if rec == nil || !rec.UserKilled {
 		t.Fatalf("the retained tombstoned record must survive the committed auto-create, got %+v", rec)
+	}
+}
+
+// TestTriggerTask_RealControlSocket_CommittedOutcomeReachesCLIClassifier pins
+// the OUTER RPC boundary of #3357 the DeliverPrompt socket test above leaves
+// open: `af tasks trigger` lands on controlServer.TriggerTask -> RunTask -> the
+// deliver path, whose absent-target auto-create can return a
+// *mutationCommittedError. Before the fix the handler returned that error
+// directly, so net/rpc sent no TriggerTaskResponse body and callDaemon could
+// only match the legacy task-CRUD prefixes — which a trigger's deliver outcome
+// does not carry — leaving the CLI with a plain rpc.ServerError it would treat
+// as a clean, freely-retryable failure against a durable recorded row.
+// TriggerTask now records the committed outcome in its response envelope
+// (mirroring DeliverPrompt), so callDaemon reconstitutes the marker and the
+// CLI's apiclient.IsMutationCommitted classifies it.
+func TestTriggerTask_RealControlSocket_CommittedOutcomeReachesCLIClassifier(t *testing.T) {
+	backend := &unknownStartBackend{readyFakeBackend: readyFakeBackend{session.NewFakeBackend()}}
+	manager, repoID, repoPath := newDeliverCommittedFixture(t, backend)
+
+	// A targeted cron task whose TargetSession does not exist takes the
+	// absent-target branch through DeliverPrompt -> createMissingPromptTarget ->
+	// Manager.CreateSession — the committed-producing manager method.
+	const target = "committed-trigger-target"
+	if err := task.AddTask(task.Task{
+		ID:            "ffff0050",
+		Name:          "trigger-committed",
+		Prompt:        "run it",
+		CronExpr:      "0 3 * * *",
+		TargetSession: target,
+		ProjectPath:   repoPath,
+		Program:       "claude",
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	prevLaunch := launchDaemonProcessFn
+	launchDaemonProcessFn = func() error { return nil }
+	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
+
+	closeServer, err := startControlServer(manager, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeServer() })
+
+	// The public TriggerTask goes through callDaemon -> the real gob control
+	// socket -> TriggerTask -> RunTask -> the deliver path -> a committed
+	// auto-create, which the handler must record in the envelope rather than
+	// return directly.
+	triggerErr := TriggerTask("ffff0050", task.ProjectExpectation{})
+	if triggerErr == nil {
+		t.Fatal("expected TriggerTask over the control socket to surface the committed auto-create failure")
+	}
+
+	// THIS is the guarantee the bug broke: the committed marker must survive the
+	// real transport so apiclient.IsMutationCommitted(err) classifies it as
+	// durable (the recorded row exists) rather than a clean, freely-retryable
+	// failure.
+	if !apiproto.IsMutationCommitted(triggerErr) {
+		t.Fatalf("control-socket TriggerTask error = %T %v, want a committed-mutation marker "+
+			"apiclient.IsMutationCommitted would classify (the recorded-for-inspection row "+
+			"is durable, so a re-fire must not treat it as a clean failure)", triggerErr, triggerErr)
+	}
+	if !strings.Contains(triggerErr.Error(), "recorded for inspection") {
+		t.Fatalf("committed warning must carry the recorded-for-inspection text, got: %v", triggerErr)
+	}
+
+	// The durable recorded-for-inspection row must survive so a re-fire that
+	// branches on the committed marker can address it rather than provisioning a
+	// duplicate against a title this record still owns.
+	rec := recordFor(t, repoID, target)
+	if rec == nil || !rec.StartupStateUnknown {
+		t.Fatalf("the retained recorded-for-inspection row must survive the committed auto-create, got %+v", rec)
+	}
+}
+
+// TestTriggerTask_RealControlSocket_HappyPathStartsAndNotCommitted pins the
+// TriggerTask regression side: a normal auto-create (session started) over the
+// real control socket returns OK with no error and no committed marker, so the
+// envelope change does not misclassify the happy path.
+func TestTriggerTask_RealControlSocket_HappyPathStartsAndNotCommitted(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	if err := task.AddTask(task.Task{
+		ID:            "ffff0051",
+		Name:          "trigger-happy",
+		Prompt:        "run it",
+		CronExpr:      "0 3 * * *",
+		TargetSession: "happy-trigger-target",
+		ProjectPath:   repoPath,
+		Program:       "claude",
+		Enabled:       true,
+		CreatedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("AddTask: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	prevLaunch := launchDaemonProcessFn
+	launchDaemonProcessFn = func() error { return nil }
+	t.Cleanup(func() { launchDaemonProcessFn = prevLaunch })
+
+	closeServer, err := startControlServer(manager, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	t.Cleanup(func() { _ = closeServer() })
+
+	if err := TriggerTask("ffff0051", task.ProjectExpectation{}); err != nil {
+		t.Fatalf("happy-path TriggerTask over the control socket: %v", err)
 	}
 }
