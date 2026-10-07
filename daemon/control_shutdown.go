@@ -297,6 +297,12 @@ func WaitForShutdownCompletion(target ShutdownTarget) error {
 		}
 		time.Sleep(shutdownCompletePoll)
 	}
+	// As on the PID path: the socket may have gone quiet during the final sleep.
+	// Master only warned here; the caller now withholds the respawn, so a missed
+	// boundary would leave an exited daemon with no replacement.
+	if pingDaemon() != nil {
+		return nil
+	}
 	return fmt.Errorf("%w: daemon control socket still answering %s after shutdown was acknowledged", ErrShutdownIncomplete, shutdownSocketQuietGrace)
 }
 

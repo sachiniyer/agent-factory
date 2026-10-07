@@ -131,3 +131,35 @@ func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
 		t.Fatalf("timeout error = %v, want it to wrap ErrShutdownIncomplete", err)
 	}
 }
+
+// TestWaitForShutdownCompletionRechecksSocketAtDeadline: a socket that stops
+// answering during the final sleep — after the last in-loop ping succeeded but
+// before the deadline check — must read as a completed shutdown, not an
+// incomplete one. The caller withholds the respawn on ErrShutdownIncomplete
+// (#5007), so a missed boundary leaves an exited daemon with no replacement.
+func TestWaitForShutdownCompletionRechecksSocketAtDeadline(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	closeFn, err := startControlServer(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	closed := make(chan struct{})
+	t.Cleanup(func() { <-closed })
+
+	prevGrace, prevPoll := shutdownSocketQuietGrace, shutdownCompletePoll
+	shutdownSocketQuietGrace = 100 * time.Millisecond
+	shutdownCompletePoll = 300 * time.Millisecond
+	t.Cleanup(func() { shutdownSocketQuietGrace, shutdownCompletePoll = prevGrace, prevPoll })
+
+	// The first ping answers; the socket then closes inside the one sleep that
+	// carries the loop past its deadline.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = closeFn()
+		close(closed)
+	}()
+	if err := WaitForShutdownCompletion(ShutdownTarget{}); err != nil {
+		t.Fatalf("WaitForShutdownCompletion = %v, want nil once the socket stopped answering by the deadline", err)
+	}
+}
