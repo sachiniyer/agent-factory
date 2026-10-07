@@ -994,3 +994,117 @@ func TestStartDoesNotConvictOnStartPathAlone(t *testing.T) {
 		"an echo-source mismatch is inconclusive — never a teardown")
 	assert.False(t, killed)
 }
+
+// TestStartAcceptsPaneWhenWorktreePathRenamedMidSpawn covers the review gap:
+// a rename/unlink of the admitted directory between checkSpawnDir and the
+// post-spawn re-stat leaves the PATHNAME dead but the INODE live — the pane
+// entered the real directory and stays correctly placed by identity. Only a
+// positive source verdict may convict it; the dead path alone cannot (#5174).
+func TestStartAcceptsPaneWhenWorktreePathRenamedMidSpawn(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "admitted")
+	renamed := filepath.Join(filepath.Dir(workDir), "renamed")
+	require.NoError(t, os.MkdirAll(workDir, 0755))
+
+	var killed bool
+	sessionName := toTmuxName("renamed-mid-spawn", "")
+	inner := liveAfterSpawnExec(t, sessionName, map[string]string{
+		// The pane's live cwd is the renamed directory — the same inode the
+		// spawn was admitted on.
+		"pane_current_path": renamed,
+	}, &killed)
+	probed, renamedOnce := false, false
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			// The rename lands INSIDE the spawn seam: new-session travels the
+			// pty factory, so the first POST-spawn has-session — after
+			// checkSpawnDir admitted the path, before the post-spawn re-stat —
+			// is where the pathname dies.
+			if strings.Contains(cmd.String(), "has-session") && probed && !killed && !renamedOnce {
+				renamedOnce = true
+				require.NoError(t, os.Rename(workDir, renamed))
+			}
+			if strings.Contains(cmd.String(), "has-session") {
+				probed = true
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	require.NoError(t, session.Start(workDir),
+		"a pane holding the admitted inode stays bound even though the path it entered under is gone")
+	assert.False(t, killed, "a correctly placed pane is never torn down")
+	assert.False(t, session.MisplacedPane())
+}
+
+// TestStartClearsStaleMisplacedLatchOnFreshGeneration: a spawn convicted and
+// torn down leaves misplacedPane latched on the TmuxSession — the evidence
+// that keeps a refused pane from being name-promoted back to Ready. A LATER
+// spawn on the same object is a new generation: once its existence is
+// confirmed, the old verdict is dead evidence and must clear, so a recovery
+// whose placement sources all fail still reports the pane it just made.
+// The latch does NOT clear on a reattach — the refused squatter may still
+// hold the name, which is exactly what the latch is for (#5174 review).
+func TestStartClearsStaleMisplacedLatchOnFreshGeneration(t *testing.T) {
+	workDir := t.TempDir()
+	fallback := t.TempDir()
+
+	var killed bool
+	fields := map[string]string{"pane_current_path": fallback}
+	sessionName := toTmuxName("stale-latch", "")
+	// Same answer shape as liveAfterSpawnExec, but the pre-spawn "absent"
+	// probe is externally resettable — this test drives TWO Starts on the
+	// same session object, and each needs its first has-session to fail.
+	preSpawnProbe := true
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if killed || preSpawnProbe {
+					preSpawnProbe = false
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			if strings.Contains(s, "display-message") {
+				for field, answer := range fields {
+					if answer != "" && strings.Contains(s, "#{"+field+"}") {
+						return []byte(answer + "\n"), nil
+					}
+				}
+				return nil, nil
+			}
+			if strings.Contains(s, "list-panes") {
+				return nil, nil
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	require.ErrorIs(t, session.Start(workDir), ErrSpawnDirMissing)
+	require.True(t, session.MisplacedPane(), "the convicted spawn latches its verdict")
+
+	// Second generation: the name is free again (the teardown killed the
+	// squatter), a fresh new-session runs, and this time no source can place
+	// the pane at all — every field is empty.
+	killed = false
+	preSpawnProbe = true
+	for k := range fields {
+		delete(fields, k)
+	}
+
+	require.NoError(t, session.Start(workDir),
+		"the fresh generation's inconclusive check is not a conviction")
+	assert.False(t, session.MisplacedPane(),
+		"the verdict belongs to the dead generation — a new pane clears it at the proven boundary")
+}

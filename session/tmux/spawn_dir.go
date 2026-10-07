@@ -128,16 +128,30 @@ var spawnedPaneDirUnusableLogged sync.Once
 // misplaced pane is conclusive, the same contract the readiness-timeout
 // path keeps.
 func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) error {
-	// The re-stat below exists only to name a mid-spawn disappearance — the
-	// comparison never consults it; `want` alone decides the match.
+	// The sources speak first, always against `want` — the admitted inode —
+	// never the re-stat of the path. A rename or unlink of the admitted
+	// directory between checkSpawnDir and here leaves the PATHNAME dead but
+	// the INODE live, and a pane that entered it stays correctly placed by
+	// identity: only a positive source verdict may convict (#5174 review).
+	inside, known, source, observed := t.observedPanePlacement(want)
+	if inside {
+		t.setMisplacedPane(false)
+		return nil
+	}
+	if known {
+		return t.resolveSpawnedPaneDir(fmt.Errorf(
+			"%w: pane for session %s started in %s, not the requested %s (via %s)",
+			ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source))
+	}
+	// No source could place the pane — the pathname itself is the last
+	// evidence. The directory checkSpawnDir admitted moments ago answering
+	// ENOENT now means tmux's fallback landing is the only possibility the
+	// silence can hide. ENOTDIR rides along: an intermediate component
+	// becoming a file is the same conclusive disappearance — and like
+	// checkSpawnDir it must still wrap os.ErrNotExist itself, since ENOTDIR
+	// does not Is() to it.
 	switch info, wantErr := statSpawnDir(workDir); {
 	case errors.Is(wantErr, os.ErrNotExist) || errors.Is(wantErr, syscall.ENOTDIR):
-		// The directory checkSpawnDir admitted moments ago is gone — the
-		// pane necessarily started in tmux's fallback, wherever that is.
-		// Proven wrong, not unproven. ENOTDIR rides along: an intermediate
-		// component becoming a file is the same conclusive disappearance —
-		// and like checkSpawnDir it must still wrap os.ErrNotExist itself,
-		// since ENOTDIR does not Is() to it.
 		return t.resolveSpawnedPaneDir(fmt.Errorf(
 			"%w: start directory %s vanished during spawn: %w: %w",
 			ErrSpawnDirMissing, workDir, os.ErrNotExist, wantErr))
@@ -147,25 +161,11 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 			"%w: start directory %s is no longer a directory",
 			ErrSpawnDirMissing, workDir))
 	}
-	// wantErr == nil (dir present) or an unverifiable stat — either way the
-	// sources below still compare against the pinned inode, so proceed.
-
-	inside, known, source, observed := t.observedPanePlacement(want)
-	switch {
-	case inside:
-		t.setMisplacedPane(false)
-		return nil
-	case !known:
-		spawnedPaneDirUnusableLogged.Do(func() {
-			log.InfoLog.Printf("session %s: post-spawn cwd check skipped: no tmux source could report the spawned pane's working directory",
-				t.sanitizedName)
-		})
-		return nil
-	default:
-		return t.resolveSpawnedPaneDir(fmt.Errorf(
-			"%w: pane for session %s started in %s, not the requested %s (via %s)",
-			ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source))
-	}
+	spawnedPaneDirUnusableLogged.Do(func() {
+		log.InfoLog.Printf("session %s: post-spawn cwd check skipped: no tmux source could report the spawned pane's working directory",
+			t.sanitizedName)
+	})
+	return nil
 }
 
 // verifyReattachPaneDir applies the spawn's placement check to a session af

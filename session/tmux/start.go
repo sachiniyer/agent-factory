@@ -254,6 +254,14 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	ptmx.Close()
 
+	// The confirmed existence above names THIS spawn's generation: whatever
+	// verdict an earlier pane earned under this name died with it, so a stale
+	// misplaced latch from a previous convicted spawn must clear here rather
+	// than carry through a check that may prove inconclusive (#5174 review).
+	// The walk below re-latches if THIS pane convicts — and a refused reattach
+	// still holds its verdict, since reattach never reaches this boundary.
+	t.setMisplacedPane(false)
+
 	// The existence poll answered — but that only proves the SESSION exists.
 	// Verify the pane actually started inside the admitted directory before
 	// configuring anything: a pane af cannot place there is torn down, never
