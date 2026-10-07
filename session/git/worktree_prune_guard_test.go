@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,4 +74,37 @@ func TestVerifyRegisteredWorktreeOccupantBranch(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", foreign, "worktree", "add", "-b", "af/x", foreignWt).Run())
 	err = VerifyRegisteredWorktreeOccupantBranch(foreignWt, repo, "af/x")
 	assert.Error(t, err, "a foreign repo's worktree must not satisfy the binding")
+}
+
+// TestVerifyWorktreeRegistrationPredates pins the non-reusable half of the
+// binding: repo+branch+path can all be RE-created after the original archive
+// is deleted, but a re-created worktree's registration leaf is always younger
+// than the archive it impersonates — and pruning on the reusable spellings
+// alone would delete the replacement (#5136 Codex round 4).
+func TestVerifyWorktreeRegistrationPredates(t *testing.T) {
+	repo := newPruneGuardRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/orig", wt).Run())
+
+	// The original's leaf predates any archive time that comes later.
+	require.NoError(t, VerifyWorktreeRegistrationPredates(wt, time.Now()),
+		"a leaf created before the archive bound must verify")
+
+	// The same check against a bound EARLIER than the leaf's creation is
+	// the recreation scenario: leaf now > bound then.
+	err := VerifyWorktreeRegistrationPredates(wt, time.Now().Add(-time.Hour))
+	require.Error(t, err, "a leaf younger than the bound is a recreated worktree")
+	assert.Contains(t, err.Error(), "not the archived original")
+
+	// The literal recreation: remove the original, prune the stale
+	// registration, and `git worktree add` the same path on the same
+	// retained branch — repo, path, and branch all match again.
+	archivedAt := time.Now()
+	require.NoError(t, os.RemoveAll(wt))
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "prune").Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", wt, "af/orig").Run())
+	require.NoError(t, VerifyRegisteredWorktreeOccupantBranch(wt, repo, "af/orig"),
+		"the reusable spellings DO match — that is the hazard this test pins")
+	err = VerifyWorktreeRegistrationPredates(wt, archivedAt)
+	assert.Error(t, err, "the recreated occupant's leaf cannot predate the archive")
 }

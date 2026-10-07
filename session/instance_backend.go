@@ -679,6 +679,16 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 				return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
 			}
 		}
+		if newBranch == "" && gw != nil {
+			// The branch keeps its name and the incoming session reuses it.
+			// The tombstone's promise still holds — the branch IS kept — but
+			// its deletion authority must move to the session now owning it:
+			// otherwise the old tombstone and the replacement's eventual
+			// tombstone would name the same branch, and killing the older
+			// one could delete the newer one's recovery handle (#5136
+			// Codex round 4).
+			gw.RelinquishBranchOwnership()
+		}
 		if i.Title != newTitle {
 			i.Title = newTitle
 			i.touchLocked()

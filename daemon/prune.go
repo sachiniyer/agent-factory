@@ -99,9 +99,13 @@ type PrunedSessionEntry struct {
 	RepoID string `json:"repo_id"`
 	// Branch is the work's durable handle: it is kept, and is the restore
 	// refusal's pointer back to it.
-	Branch         string    `json:"branch"`
-	ArchivedAt     time.Time `json:"archived_at"`
-	ReclaimedBytes int64     `json:"reclaimed_bytes"`
+	Branch     string    `json:"branch"`
+	ArchivedAt time.Time `json:"archived_at"`
+	// ReclaimedBytes is ALLOCATED disk space (st_blocks×512), not apparent
+	// file size — sparse holes are not counted, and a hard-linked inode is
+	// credited only when deleting this tree removes its last link (#5136
+	// Codex round 4). It is what `rm -rf` of the worktree would free.
+	ReclaimedBytes int64 `json:"reclaimed_bytes"`
 	// PrunedAt is stamped only on the apply path.
 	PrunedAt time.Time `json:"pruned_at,omitzero"`
 }
@@ -548,6 +552,14 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		// proves only same-repo membership, and a different session's worktree
 		// parked at this recycled path would pass it (#5136 review).
 		if err := sessiongit.VerifyRegisteredWorktreeOccupantBranch(wtPath, repoPath, pruneBranchFor(data)); err != nil {
+			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
+		}
+		// Repo+branch+path are still REUSABLE spellings: after the original
+		// archive's removal, `git worktree add <path> <branch>` recreates all
+		// three. The registration leaf's age is the evidence a re-create
+		// cannot fake — it is always younger than the archive it pretends
+		// to precede (#5136 Codex round 4).
+		if err := sessiongit.VerifyWorktreeRegistrationPredates(wtPath, session.ArchiveTimeFor(data)); err != nil {
 			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
 		}
 	case errors.Is(probeErr, sessiongit.ErrRepoGone):

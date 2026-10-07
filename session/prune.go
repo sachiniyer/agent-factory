@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -161,8 +162,13 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 	return ""
 }
 
-// DirSizeBytes sums the file sizes under root. Missing roots contribute zero —
-// a worktree deleted out-of-band is "already reclaimed", not an error — while
+// DirSizeBytes sums the ALLOCATED disk blocks under root (st_blocks × 512 —
+// what `rm -rf` would actually free), not apparent file lengths: a sparse
+// file's holes are never counted, and a hard-linked inode frees its blocks
+// only when every link dies inside the deleted tree, so multiply-linked
+// inodes are tracked and counted once — or not at all when a link survives
+// outside root (#5136 Codex round 4). Missing roots contribute zero — a
+// worktree deleted out-of-band is "already reclaimed", not an error — while
 // every other failure is reported so the dry-run total cannot silently
 // understate what a later --apply would reclaim.
 func DirSizeBytes(root string) (int64, error) {
@@ -171,6 +177,15 @@ func DirSizeBytes(root string) (int64, error) {
 	}
 	var total int64
 	var firstErr error
+	// inoKey → {blocks, nlink, links seen in-tree}. Only populated for
+	// regular files with nlink>1; blocks are credited after the walk only
+	// when no link to the inode survives outside root.
+	type linkAcct struct {
+		blocks int64
+		nlink  uint64
+		seen   uint64
+	}
+	linked := make(map[[2]uint64]*linkAcct)
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -190,10 +205,34 @@ func DirSizeBytes(root string) (int64, error) {
 		if d == nil {
 			return nil
 		}
-		if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
-			total += info.Size()
+		info, err := d.Info()
+		if err != nil {
+			return nil
 		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			// No stat_t (non-unix build): apparent size is the only measure
+			// available — a coarse upper bound, still preferable to zero.
+			total += info.Size()
+			return nil
+		}
+		if info.Mode().IsRegular() && stat.Nlink > 1 {
+			key := [2]uint64{uint64(stat.Dev), stat.Ino}
+			acct := linked[key]
+			if acct == nil {
+				acct = &linkAcct{blocks: stat.Blocks, nlink: uint64(stat.Nlink)}
+				linked[key] = acct
+			}
+			acct.seen++
+			return nil
+		}
+		total += stat.Blocks * 512
 		return nil
 	})
+	for _, acct := range linked {
+		if acct.seen >= acct.nlink {
+			total += acct.blocks * 512
+		}
+	}
 	return total, firstErr
 }

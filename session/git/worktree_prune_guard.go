@@ -3,6 +3,7 @@ package git
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Deletion-boundary guards for `af sessions prune` (#5136 review). Prune
@@ -70,4 +71,33 @@ func VerifyRegisteredWorktreeOccupantBranch(worktreePath, repoPath, expectedBran
 			worktreePath, strings.TrimPrefix(branch, "refs/heads/"), expectedBranch)
 	}
 	return nil
+}
+
+// VerifyWorktreeRegistrationPredates adds the temporal half of the identity
+// binding: repo, path, and branch are all REUSABLE spellings — after the
+// original archive is removed, `git worktree add <path> <branch>` recreates
+// all three and satisfies every check above while being a different worktree
+// (#5136 Codex round 4). What it cannot recreate is the registration leaf's
+// age: a fresh leaf under <repo>/.git/worktrees gets a fresh directory mtime,
+// while the original's was created at `git worktree add` long before the
+// archive (the archive's repair rewrites only file CONTENTS inside the leaf,
+// which does not advance the directory's mtime). Bound is the record's
+// provable archive time; a leaf created after it cannot be the original.
+func VerifyWorktreeRegistrationPredates(worktreePath string, bound time.Time) error {
+	return boundedPointerCheck("regpredate\x00"+bound.Format(time.RFC3339Nano), worktreePath, func(path string) error {
+		target, err := verifyWorktreePointerShape(path)
+		if err != nil {
+			return err
+		}
+		st, err := BoundedLstat(target)
+		if err != nil {
+			return fmt.Errorf("could not stat worktree registration %s: %w", target, err)
+		}
+		if st.ModTime().After(bound) {
+			return worktreeIdentityMismatchf(
+				"worktree %s was registered at %s, after this session's archive time %s — a re-created worktree at the same path is not the archived original",
+				path, st.ModTime().Format(time.RFC3339), bound.Format(time.RFC3339))
+		}
+		return nil
+	})
 }

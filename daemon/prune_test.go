@@ -277,6 +277,39 @@ func TestPruneSessions_RefusesSameRepoReplacementOccupant(t *testing.T) {
 	assert.True(t, inst.PrunedAt().IsZero())
 }
 
+// TestPruneSessions_RefusesRecreatedWorktree is the finding the branch check
+// alone cannot cover: repo, path, AND branch are all reusable spellings —
+// after the original archive is deleted, `git worktree add <path> <branch>`
+// recreates a clean linked worktree that satisfies every comparison while
+// being a different worktree. What it cannot recreate is the registration
+// leaf's age, so the leaf must predate the session's archive time — a fresh
+// leaf means refuse, leave the replacement's contents alone, and stamp no
+// tombstone (#5136 Codex round 4).
+func TestPruneSessions_RefusesRecreatedWorktree(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath := seedPrunableArchive(t, "rebuilt-row")
+
+	// Delete the original archive, drop its stale registration, and recreate
+	// a clean linked worktree at the same path on the same retained branch —
+	// the exact reproduction shape the review describes.
+	require.NoError(t, os.RemoveAll(archivedPath))
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "prune").CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", repoPath, "worktree", "add",
+		archivedPath, "af/rebuilt-row").CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.FileExists(t, filepath.Join(archivedPath, ".git"),
+		"the recreation really is a registered linked worktree at the same path")
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "could not be verified")
+	assert.True(t, exists(archivedPath),
+		"the recreated worktree is not the archived original — it must be left untouched")
+	assert.True(t, inst.PrunedAt().IsZero(), "nothing was deleted, so no tombstone may be stamped")
+}
+
 // TestPruneSessions_EmptyOnlyApplyRejected: the confirmed-plan binding uses a
 // present 'only' list, and an explicitly EMPTY one can never widen to an
 // unrestricted delete — a TTY "Prune 0" answer or an empty API list applies
