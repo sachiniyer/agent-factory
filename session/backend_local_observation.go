@@ -12,7 +12,7 @@ func (b *LocalBackend) HasUpdatedWithBaseline(i *Instance) (updated bool, hasPro
 	if !s || ts == nil {
 		return false, false, "", false
 	}
-	return ts.HasUpdatedWithBaseline()
+	return ts.HasUpdatedWithBaselineExpectingTeardown(i.teardownExpected)
 }
 
 // resetAgentBrokerCaptures is the single post-replacement hook for every local

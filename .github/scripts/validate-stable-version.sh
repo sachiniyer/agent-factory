@@ -3,6 +3,10 @@
 #
 # Usage: git tag | validate-stable-version.sh <version>
 #
+# stable-release.yml feeds it only tags with a PUBLISHED release, so a tag
+# stranded without its release (#5159) neither counts as the latest stable
+# nor blocks re-cutting the same version — re-running heals the stranding.
+#
 # <version> is the bare semver, no leading "v" (e.g. "1.1.0"). Existing git
 # tags are read one per line on stdin. Exits 0 if the version is well-formed,
 # not already tagged, and strictly greater than the latest stable tag;

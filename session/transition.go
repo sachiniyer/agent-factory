@@ -694,14 +694,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// Publish its identity and durable negative quota evidence in the same
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
-		if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-			i.limitAgent = agent
-			i.touchLocked()
-		}
-		if i.limitAccount != i.Account {
-			i.limitAccount = i.Account
-			i.touchLocked()
-		}
+		i.attributeLimitIdentityLocked()
 		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer

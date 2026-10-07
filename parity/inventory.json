@@ -270,8 +270,8 @@
         "pointer": "commands/configcmd.go config set/unset --project (config.SetProjectConfigValue/UnsetProjectConfigValue)"
       },
       "verdict": "real-gap",
-      "issue": "#2216",
-      "notes": "Stage 5 of #2216 adds CLI per-project writes: `af config set <key> --project <id-or-path>` and `af config unset <key> --project`. The value lands in the project's machine-local ~/.agent-factory/.agent-factory-projects/<id>/config.toml, above the checked-in in-repo layer, and only for the preference keys the manifest admits per project. TUI/web target selection, source badge, and Clear-override are intentionally scheduled for #2216 stage 7 after the durable project model and personal layers exist."
+      "issue": "#5157",
+      "notes": "Stage 5 of #2216 adds CLI per-project writes: `af config set <key> --project <id-or-path>` and `af config unset <key> --project`. The value lands in the project's machine-local ~/.agent-factory/.agent-factory-projects/<id>/config.toml, above the checked-in in-repo layer, and only for the preference keys the manifest admits per project; the CLI path is deliberately local-only (commands/configremote.go refuses --project under --daemon-url) because that file lives on the daemon's host. The durable project model and personal layers the #2216 stage-7 plan waited on now exist, so the UI half is tracked live as #5157: it needs a project-scoped admission-gated write route beside GetProjectConfig (the UIs cannot write in-process — #3231 routes every UI write through the daemon) and the editor scope selector the config.read-project fix (#4634, PR #4947) is already adding to both surfaces. Building a second selector would be the parallel-implementation failure the parity rules exist to prevent, so #5157 is sequenced behind that read surface and reuses its plumbing, adding the source badge and Clear-override the stage-7 plan describes."
     },
     {
       "id": "daemon.lifecycle",
@@ -2270,10 +2270,10 @@
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
@@ -2288,10 +2288,10 @@
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
@@ -2306,10 +2306,10 @@
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
@@ -2378,18 +2378,18 @@
       "RestartTaskRequest": {
         "tui": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
           }
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -446,13 +445,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 // unloadable-row (retracted below) is not in it, so neither an omission, a
 // zero-rows file, nor a partial loss is a repair (#4783, #4812, #4876).
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
-	if err := config.MigrateAllRepoInstancesForDaemonLoad(); err != nil {
-		return existing, nil, nil, nil, err
-	}
-	allInstances, unreadable, missing, err := loadAllRepoInstancesForRefresh()
+	load, err := loadAllRepoInstancesForRefresh()
 	if err != nil {
 		return existing, nil, nil, nil, err
 	}
+	allInstances, unreadable, missing, sigs := load.Instances, load.Skipped, load.Missing, load.Signatures
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
@@ -479,52 +476,70 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 	}
 	reread := make(map[string]bool, len(allInstances))
 	for repoID, raw := range allInstances {
-		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
-			// A missing file loads as "[]" too, but nothing was read, so it
-			// clears nothing (#4783).
-			reread[repoID] = !missing[repoID]
-			continue
-		}
-
+		sig := sigs[repoID]
 		var data []session.InstanceData
-		if err := json.Unmarshal(raw, &data); err != nil {
-			// Skip corrupted per-repo JSON instead of failing the whole
-			// refresh (#603). At startup (existing==nil) a single corrupt
-			// file used to abort NewManager and orphan every live session
-			// across every repo. On the polling path we also
-			// re-hydrate this repo's prior in-memory instances so a
-			// transient/persistent corruption doesn't silently drop
-			// already-running sessions — matching the pre-fix semantics
-			// of returning `existing` on parse failure.
-			//
-			// A corrupt file yields NO rows, so its task runs cannot be counted as
-			// ghosts either — there is nothing to read a task_id out of. On the poll
-			// path the re-hydrated instances above keep counting; at startup
-			// (existing==nil) this repo's runs are genuinely unknowable until the file
-			// is repaired, and a capped task there may over-admit. That is the one hole
-			// the ghost count cannot close, and it is bounded by the same corruption
-			// that already costs the repo its whole session list.
-			log.WarningLog.Printf("daemon skipping repo %s: corrupted instances.json: %v", repoID, err)
-			skipped = append(skipped, SkippedRepo{RepoID: repoID, Reason: SkippedRepoReasonCorruptedInstancesJSON})
-			if existing != nil {
-				keyPrefix := repoID + "\x00"
-				for key, inst := range existing {
-					if strings.HasPrefix(key, keyPrefix) {
-						next[key] = inst
-					}
-				}
+		var keys []string
+		if outcome, ok := refreshRowOutcomes.get(repoID, sig); ok {
+			// The file's signature is unchanged, so its parse verdict and row
+			// set are the ones recorded when it was read — replay them and let
+			// the row loop below re-run its per-tick materialization against
+			// `existing` exactly as it would on freshly decoded rows (#5169).
+			switch {
+			case outcome.corruptErr != nil:
+				skipped = recordCorruptedRepo(repoID, outcome.corruptErr, existing, next, skipped)
+				continue
+			case outcome.empty:
+				reread[repoID] = !missing[repoID]
+				continue
+			default:
+				data, keys = outcome.rows, outcome.keys
+				reread[repoID] = true
 			}
-			continue
+		} else {
+			if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+				// A missing file loads as "[]" too, but nothing was read, so it
+				// clears nothing (#4783).
+				reread[repoID] = !missing[repoID]
+				refreshRowOutcomes.store(repoID, repoRowsOutcome{sig: sig, empty: true})
+				continue
+			}
+
+			if err := json.Unmarshal(raw, &data); err != nil {
+				// Skip corrupted per-repo JSON instead of failing the whole
+				// refresh (#603). At startup (existing==nil) a single corrupt
+				// file used to abort NewManager and orphan every live session
+				// across every repo. On the polling path we also
+				// re-hydrate this repo's prior in-memory instances so a
+				// transient/persistent corruption doesn't silently drop
+				// already-running sessions — matching the pre-fix semantics
+				// of returning `existing` on parse failure.
+				//
+				// A corrupt file yields NO rows, so its task runs cannot be counted as
+				// ghosts either — there is nothing to read a task_id out of. On the poll
+				// path the re-hydrated instances above keep counting; at startup
+				// (existing==nil) this repo's runs are genuinely unknowable until the file
+				// is repaired, and a capped task there may over-admit. That is the one hole
+				// the ghost count cannot close, and it is bounded by the same corruption
+				// that already costs the repo its whole session list.
+				refreshRowOutcomes.store(repoID, repoRowsOutcome{sig: sig, corruptErr: err})
+				skipped = recordCorruptedRepo(repoID, err, existing, next, skipped)
+				continue
+			}
+			reread[repoID] = true
+			keys = make([]string, len(data))
+			for i := range data {
+				keys[i] = daemonInstanceKey(repoID, data[i].Title)
+			}
+			refreshRowOutcomes.store(repoID, repoRowsOutcome{sig: sig, rows: data, keys: keys})
 		}
-		reread[repoID] = true
 		// Retractable below: a parses-but-any-row-unloadable file is not a
 		// repair, or list/get/whoami silently serve a partial list as the
 		// complete answer the skip set exists to prevent — a partial loss is
 		// the same lie as a total one (#4812, #4876, the "read AND parsed" trim
 		// left open here).
 		materialized, failedRows := 0, 0
-		for _, item := range data {
-			key := daemonInstanceKey(repoID, item.Title)
+		for i, item := range data {
+			key := keys[i]
 			if item.ID == "" && !isLegacyTransientGhost(item) {
 				item.ID = session.NewInstanceID()
 				if existing != nil {
@@ -600,6 +615,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		// partial-loss and self-healing rationale lives in the helper.
 		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, existing != nil, skipped)
 	}
+	refreshRowOutcomes.prune(allInstances)
 
 	// Preserve in-memory instances whose repo directory vanished from disk
 	// entirely (#736). LoadAllRepoInstances only returns repos that still have

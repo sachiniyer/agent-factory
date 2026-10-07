@@ -3,6 +3,9 @@
 #
 # Usage: git tag | next-preview-version.sh
 #
+# auto-release.yml feeds it only tags with a PUBLISHED release, so a tag
+# stranded without its release (#5159) cannot bump the counter either.
+#
 # Reads existing git tags (one per line) on stdin and prints the next preview
 # version without a leading "v", e.g. "1.0.138-preview-3".
 #

@@ -748,6 +748,150 @@ func TestMigrateGlobalConfig_EmptyTomlStubMigratesNothing(t *testing.T) {
 		"migrate must not rewrite the stub it was asked to migrate — a mid-flight write may be landing in it")
 }
 
+// TestMigrateCarriesTheKeysLeadingCommentBlock is #4872: a deprecated key's
+// contiguous leading comment block introduces THAT key, so it moves with it
+// into the new table — the same association rule #4865 gives a moved table's
+// header. Before the fix, `default_program`'s file kept the security posture
+// note that described the migrated bind, 29 lines from what it described.
+func TestMigrateCarriesTheKeysLeadingCommentBlock(t *testing.T) {
+	path := migrateHome(t, "default_program = 'codex'\n# security: bind the control plane to loopback only\nlisten_addr = '127.0.0.1:8443'\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 1)
+
+	want := `default_program = 'codex'
+
+[network]
+# security: bind the control plane to loopback only
+listen_addr = '127.0.0.1:8443'
+`
+	assert.Equal(t, want, readFile(t, path))
+}
+
+// The block is contiguous: a blank line between comment and key ends the
+// association, so a separated comment stays where the author put it; the
+// contiguous block — all of it — goes with the key.
+func TestMigrateLeavesACommentSeparatedByABlankLine(t *testing.T) {
+	path := migrateHome(t, "default_program = 'codex'\n# a note about the file, not the bind\n\nlisten_addr = '127.0.0.1:8443'\n")
+
+	_, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+
+	want := `default_program = 'codex'
+# a note about the file, not the bind
+
+[network]
+listen_addr = '127.0.0.1:8443'
+`
+	assert.Equal(t, want, readFile(t, path))
+}
+
+// A multi-line comment block moves whole and keeps its indentation.
+func TestMigrateCarriesAMultiLineCommentBlock(t *testing.T) {
+	path := migrateHome(t, "# first line of the note\n  # second line, indented\nrequire_token = true\n")
+
+	_, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+
+	want := `[network]
+# first line of the note
+  # second line, indented
+require_token = true
+`
+	assert.Equal(t, want, readFile(t, path))
+}
+
+// When the destination table already exists, the carried block lands
+// directly above the migrated key inside it.
+func TestMigrateCarriesTheCommentIntoAnExistingSection(t *testing.T) {
+	path := migrateHome(t, "# security: bind the control plane to loopback only\nlisten_addr = '127.0.0.1:8443'\n\n[network]\npreview_listen_addr = '127.0.0.1:8444'\n")
+
+	_, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+
+	want := `[network]
+preview_listen_addr = '127.0.0.1:8444'
+# security: bind the control plane to loopback only
+listen_addr = '127.0.0.1:8443'
+`
+	assert.Contains(t, readFile(t, path), want)
+}
+
+// The dotted-join path keeps the comment too: it lands directly above the
+// migrated leaf's new dotted line.
+func TestMigrateCarriesTheCommentOntoADottedDestination(t *testing.T) {
+	path := migrateHome(t, "# security: bind the control plane to loopback only\nlisten_addr = '127.0.0.1:8443'\nnetwork.require_token = true\n")
+
+	_, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+
+	content := readFile(t, path)
+	assert.Contains(t, content, "# security: bind the control plane to loopback only\nnetwork.listen_addr = '127.0.0.1:8443'")
+	assert.NotContains(t, content, "[network]")
+}
+
+// A redundant flat spelling's comment block describes the redundant line, so
+// it is dropped with it — left in place it would read as a note about an
+// unrelated key, the same defect this issue fixes.
+func TestMigrateDropsARedundantKeysCommentWithTheLine(t *testing.T) {
+	path := migrateHome(t, "default_program = 'codex'\n# a note attached to the flat spelling\nlisten_addr = '127.0.0.1:8443'\n\n[network]\nlisten_addr = '127.0.0.1:8443'\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 1)
+	assert.True(t, result.Migrated[0].Redundant)
+
+	want := `default_program = 'codex'
+
+[network]
+listen_addr = '127.0.0.1:8443'
+`
+	assert.Equal(t, want, readFile(t, path))
+}
+
+// A single-line scalar's own trailing comment stays ON the moved line —
+// and, just as important, is never left behind as a standalone '#' line that
+// the next migrated key would carry as its own leading block. sandbox_ssh
+// migrates before listen_addr in alias order, so a preserved-at-site
+// '# sandbox note' would land inside [network] above listen_addr.
+func TestMigrateKeepsATrailingCommentWithItsOwnKey(t *testing.T) {
+	path := migrateHome(t, "sandbox_ssh = 'ssh host'  # sandbox note\nlisten_addr = '127.0.0.1:8443'\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 2)
+
+	content := readFile(t, path)
+	assert.Contains(t, content, "[sandbox]\nssh = 'ssh host'  # sandbox note",
+		"the trailing comment stays inline with the key it described")
+	assert.Contains(t, content, "[network]\nlisten_addr = '127.0.0.1:8443'")
+	assert.Equal(t, 1, strings.Count(content, "# sandbox note"),
+		"one note, attached to its own key — never duplicated or re-homed above listen_addr")
+	assert.NotContains(t, content, "# sandbox note\nlisten_addr")
+}
+
+// Comments inside a multiline value describe that key's elements: they move
+// with it as part of its block above the re-encoded single line, rather than
+// staying at the site as loose notes the next key would carry.
+func TestMigrateCarriesAMultilineValuesInnerComments(t *testing.T) {
+	path := migrateHome(t, "cors_allowed_origins = [\n  'a',  # first\n  'b',  # second\n]\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 1)
+
+	content := readFile(t, path)
+	assert.Contains(t, content, "# first")
+	assert.Contains(t, content, "# second")
+	assert.Contains(t, content, "cors_allowed_origins = ['a', 'b']")
+	// They must sit above the migrated key inside [network], not behind at
+	// the root where they would read as notes about an unrelated key.
+	networkIdx := strings.Index(content, "[network]")
+	firstIdx := strings.Index(content, "# first")
+	require.True(t, firstIdx > networkIdx, "inner comments must move into [network], got:\n%s", content)
+}
+
 // A zero-byte config.json with no config.toml is the same accepted stub on
 // the legacy path: nothing migrates, nothing converts, no config.toml appears.
 func TestMigrateGlobalConfig_EmptyJSONStubMigratesNothing(t *testing.T) {
