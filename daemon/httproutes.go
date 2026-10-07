@@ -231,7 +231,10 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/ResumeFromLimit",
 		Description: "Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous.",
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
+		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
+		// registry — the committed account-swap arm stops the caller's panes
+		// (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.resumeFromLimit) },
 	},
 	// The "it already landed" half of the ambiguous-delivery exit (#4429): the
 	// operator inspected the pane and attests the mission arrived, so the

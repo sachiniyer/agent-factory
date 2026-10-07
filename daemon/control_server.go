@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -29,14 +30,18 @@ type controlServer struct {
 	// is read.
 	shutdownOnce *sync.Once
 	httpRequests *httpRequestDrain
-	// requesterPID is the kernel-verified pid of the process on the other end
-	// of THIS connection — read by the accept loop via peercred (SO_PEERCRED /
-	// LOCAL_PEERPID), never from anything the client wrote. Teardown handlers
-	// register it so the reaper exempts the caller still blocked on their
-	// reply (#5182). The HTTP server shares ONE controlServer across
-	// connections, so it leaves this zero and the per-request context carries
-	// the same kernel answer instead (see httpPeerPIDContextKey).
-	requesterPID int
+	// requester is the kernel-verified identity of the process on the other
+	// end of THIS connection: the SO_PEERCRED/LOCAL_PEERPID pid, resolved to
+	// its (pid, start-stamp) instance by the accept loop while the peer
+	// provably still exists and holds the socket. Resolving at accept — not
+	// in the handler — is what keeps a peer that exited and had its pid
+	// recycled mid-request from lending a stranger the exemption (#5182).
+	// Teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. nil on read failure (the pre-#5182 posture).
+	// The HTTP server shares ONE controlServer across connections, so it
+	// leaves this nil and the per-request context carries the same identity
+	// instead (see httpPeerRequesterContextKey).
+	requester *proctree.Process
 }
 
 const (
@@ -828,15 +833,16 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 	}
 
 	// Every accepted connection gets its own rpc.Server because its
-	// controlServer carries that connection's kernel-verified requester pid
-	// (#5182): SO_PEERCRED/LOCAL_PEERPID names the process that CONNECTED, and
+	// controlServer carries that connection's kernel-verified requester
+	// identity (#5182): SO_PEERCRED/LOCAL_PEERPID names the process that
+	// CONNECTED, resolved to its (pid, start-stamp) instance at accept, and
 	// teardown handlers register it so the reaper exempts the caller still
 	// blocked on their reply. shutdownOnce is shared by all of them — one
 	// Shutdown still fires once for the whole listener. Registration runs once
 	// eagerly so a service misconfiguration fails at bind time, not per
 	// connection.
 	shutdownOnce := &sync.Once{}
-	newConnServer := func(peerPID int) (*rpc.Server, error) {
+	newConnServer := func(requester *proctree.Process) (*rpc.Server, error) {
 		server := rpc.NewServer()
 		err := server.RegisterName(controlServiceName, &controlServer{
 			manager:      manager,
@@ -844,11 +850,11 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			watchers:     watchers,
 			shutdownCh:   shutdownCh,
 			shutdownOnce: shutdownOnce,
-			requesterPID: peerPID,
+			requester:    requester,
 		})
 		return server, err
 	}
-	if _, err := newConnServer(0); err != nil {
+	if _, err := newConnServer(nil); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
@@ -881,15 +887,24 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			go func() {
 				defer serveWG.Done()
 				// The kernel's record of who CONNECTED — the only requester
-				// identity a teardown handler may trust (#5182). A read failure
-				// degrades to no requester (the pre-#5182 posture): the
-				// connection still works, teardown proceeds, and the caller is
-				// reaped as it always was.
-				peerPID, credErr := peercred.ConnPID(conn)
-				if credErr != nil {
+				// identity a teardown handler may trust (#5182). The pid is
+				// resolved to its (pid, start-stamp) instance HERE, at accept,
+				// while the peer provably still owns the slot: a lookup
+				// deferred to the handler could land after the peer exited and
+				// its pid was recycled by another pane-tree process, which
+				// would then inherit an exemption meant for the dead caller.
+				// A read failure degrades to no requester (the pre-#5182
+				// posture): the connection still works, teardown proceeds, and
+				// the caller is reaped as it always was.
+				var requester *proctree.Process
+				if peerPID, credErr := peercred.ConnPID(conn); credErr != nil {
 					log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
+				} else if proc, lookupErr := proctree.Lookup(peerPID); lookupErr != nil {
+					log.WarningLog.Printf("daemon control connection: cannot resolve peer pid %d, teardown requester exemption disabled: %v", peerPID, lookupErr)
+				} else {
+					requester = &proc
 				}
-				connServer, err := newConnServer(peerPID)
+				connServer, err := newConnServer(requester)
 				if err != nil {
 					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
 					return

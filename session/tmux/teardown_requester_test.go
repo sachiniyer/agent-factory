@@ -64,6 +64,25 @@ func TestTrackTeardownRequesterScopesByIdentity(t *testing.T) {
 	untrack() // a second unregister is a no-op, not a panic
 }
 
+// Two overlapping handlers from the same process — concurrent calls on one
+// net/rpc connection, or a second connection carrying the same kernel peer —
+// share one registry identity. The FIRST to return must not drop the
+// exemption the still-blocked second call needs, or its reap would signal
+// the requester whose reply is still outstanding (Codex on #5186).
+func TestTrackTeardownRequesterCountsOverlappingRegistrations(t *testing.T) {
+	requester := proctree.Process{PID: 424243, StartID: 888}
+	first := TrackTeardownRequester(requester)
+	second := TrackTeardownRequester(requester)
+
+	first()
+	require.True(t, isTeardownRequester(requester),
+		"one handler returning must not unregister a second still in flight")
+
+	second()
+	require.False(t, isTeardownRequester(requester),
+		"the exemption ends when the last overlapping handler returns")
+}
+
 // TrackTeardownRequester tolerates an unresolvable identity: the daemon calls
 // it with whatever proctree.Lookup produced, and a failure there must degrade
 // to "no requester" rather than tracking garbage or crashing the handler.

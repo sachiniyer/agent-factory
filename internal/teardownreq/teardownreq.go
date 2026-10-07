@@ -25,11 +25,16 @@
 // never reaches outside the captured set, and it never needs the daemon to
 // predict which tmux session a request resolves to.
 //
-// Tracking ends when the handler returns — the reply is then in flight and
-// the requester is free to exit. A requester that lingers past that (wedged,
-// or its pane already gone) is reaped by the next ordinary sweep like any
-// other leftover; the exemption only ever covers the window in which the
-// process could not have exited because its answer had not been sent.
+// Tracking ends when the LAST handler from a requester returns — the reply
+// is then in flight and the requester is free to exit. Registrations are
+// counted rather than boolean because one process can have two teardowns in
+// flight at once (net/rpc serves a connection's calls concurrently, and a
+// second connection carries the same kernel-verified peer): the first
+// unregister must not drop the identity the second handler still needs. A
+// requester that lingers past that (wedged, or its pane already gone) is
+// reaped by the next ordinary sweep like any other leftover; the exemption
+// only ever covers the window in which the process could not have exited
+// because its answer had not been sent.
 //
 // The registry lives here rather than in session/tmux because teardown has
 // more than one kill channel: the pane-tree reaper in session/tmux and the
@@ -43,7 +48,13 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
-var tracked sync.Map // map[requesterID]struct{}
+var (
+	trackedMu sync.Mutex
+	// tracked counts live registrations per requester identity: two
+	// overlapping handlers from the same process share one key, and only the
+	// last unregister removes it.
+	tracked = make(map[requesterID]int)
+)
 
 // requesterID is the (pid, start-stamp) identity of one registered requester
 // — a process instance, not a pid slot (#2103's rule applies here exactly as
@@ -63,15 +74,29 @@ func Track(proc proctree.Process) func() {
 		return func() {}
 	}
 	id := requesterID{pid: proc.PID, startID: proc.StartID}
-	tracked.Store(id, struct{}{})
-	return func() { tracked.Delete(id) }
+	trackedMu.Lock()
+	tracked[id]++
+	trackedMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			trackedMu.Lock()
+			defer trackedMu.Unlock()
+			if tracked[id] > 1 {
+				tracked[id]--
+			} else {
+				delete(tracked, id)
+			}
+		})
+	}
 }
 
 // Is reports whether p's identity is a process currently registered as
 // blocked on a teardown reply.
 func Is(p proctree.Process) bool {
-	_, ok := tracked.Load(requesterID{pid: p.PID, startID: p.StartID})
-	return ok
+	trackedMu.Lock()
+	defer trackedMu.Unlock()
+	return tracked[requesterID{pid: p.PID, startID: p.StartID}] > 0
 }
 
 // Drop returns procs without registered requesters. An exempted process is
