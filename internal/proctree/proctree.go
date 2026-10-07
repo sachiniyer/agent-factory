@@ -319,13 +319,14 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(Re
 
 // KillEscalatingExcept is KillEscalating with a last-moment exemption: exempt
 // is re-consulted on the survivor set immediately BEFORE each signal tier —
-// after the grace wait and again after the SIGTERM wait — so a process that
-// gained its reprieve while the reap was already waiting (a teardown
-// requester that registered only once the reply-blocking RPC began, after an
-// earlier teardown captured it, #5182) is spared rather than signalled. The
-// waits still cover it — exemption arrives at signal time, not selection time
-// — so the caller keeps its capture-time filter for the stall-free path and
-// uses this for the race. A nil exempt is KillEscalating exactly.
+// after the grace wait and again after the SIGTERM wait — and once more on
+// each individual process immediately BEFORE its own Signal call, so a
+// process that gained its reprieve mid-loop (a teardown requester that
+// registered only once the reply-blocking RPC began, after an earlier
+// teardown captured it, #5182) is spared rather than signalled. The waits
+// still cover it — exemption arrives at signal time, not selection time — so
+// the caller keeps its capture-time filter for the stall-free path and uses
+// this for the race. A nil exempt is KillEscalating exactly.
 func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
 	if logf == nil {
 		logf = func(ReapOutcome, string, ...any) {}
@@ -335,6 +336,9 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, ter
 		return nil
 	}
 	for _, p := range survivors {
+		if exempt != nil && exempt(p) {
+			continue
+		}
 		err := Signal(p, syscall.SIGTERM)
 		switch {
 		case err == nil:
@@ -345,6 +349,9 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, ter
 	}
 	survivors = dropExempted(WaitForExits(survivors, termWait), exempt)
 	for _, p := range survivors {
+		if exempt != nil && exempt(p) {
+			continue
+		}
 		err := Signal(p, syscall.SIGKILL)
 		switch {
 		case err == nil:

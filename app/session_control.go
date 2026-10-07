@@ -63,16 +63,23 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 // classify that error with apiclient.IsMutationOutcomeUncertain. A package var
 // for the same reason as withDaemonHTTP.
 var withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
-	// A mutation can ask the daemon to tear down the very pane this TUI runs
-	// in — kill, archive, close-tab, delete-project, account swap — and tmux
-	// closing the pty SIGHUPs the whole tty session while the reply is still
-	// in flight (#5182). The daemon spares its requester from its own
-	// reapers, but it cannot shield this process from its own terminal dying;
-	// holding the hangup for the call's duration is what lets the TUI read
-	// the answer it asked for (Codex on #5186). A detached caller has no
-	// controlling tty and nothing arrives to catch.
-	defer hangupshield.Hold()()
 	return callDaemonHTTP(fn, mutationCallRetryable)
+}
+
+// withDaemonTeardownMutation is withDaemonHTTPMutation for a mutation that can
+// tear down the very pane this TUI runs in — kill, archive, close-tab,
+// delete-project, account swap, resume-from-limit — so tmux closing the pty
+// SIGHUPs the whole tty session while the reply is still in flight (#5182).
+// The daemon spares its requester from its own reapers, but it cannot shield
+// this process from its own terminal dying; holding the hangup for the call's
+// duration is what lets the TUI read the answer it asked for (Codex on
+// #5186). Non-teardown mutations stay unshielded: masking a real terminal
+// hangup during e.g. session create would strand a running TUI against a dead
+// tty with no reply to show for it. A detached caller has no controlling tty
+// and nothing arrives to catch.
+var withDaemonTeardownMutation = func(fn func(*apiclient.Client) error) error {
+	defer hangupshield.Hold()()
+	return withDaemonHTTPMutation(fn)
 }
 
 // callDaemonHTTP is the shared body of withDaemonHTTP and withDaemonHTTPMutation:
@@ -215,7 +222,7 @@ var errDaemonUnresponsive = errors.New("daemon did not respond")
 var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
 	defer cancel()
-	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
 		return c.KillSession(ctx, request)
 	})
 	// A deadline here means the daemon took the request and went quiet, so this
@@ -236,7 +243,7 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 // test suite can stub them without dialing a real daemon.
 var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
 	var path string
-	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
 		var e error
 		path, e = c.ArchiveSession(request)
 		return e
@@ -260,7 +267,7 @@ var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (st
 // A package var so the app test suite can stub it without dialing a real daemon.
 var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeleteProjectResponse, error) {
 	var resp daemon.DeleteProjectResponse
-	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
 		var e error
 		resp, e = c.DeleteProject(daemon.DeleteProjectRequest{RepoPath: repoRoot, RepoID: repoID})
 		return e
@@ -302,7 +309,7 @@ var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, e
 // state. A package var so the app test suite can stub it without dialing a real
 // daemon.
 var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
-	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+	return withDaemonTeardownMutation(func(c *apiclient.Client) error {
 		return c.ResumeFromLimit(request)
 	})
 }
@@ -325,7 +332,7 @@ var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeli
 // A package var so the app test suite can stub it without dialing a real daemon.
 var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	var response daemon.HandoffSessionResponse
-	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
 		resp, e := c.HandoffSession(req)
 		response = resp
 		if e != nil {
@@ -447,7 +454,7 @@ var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTab
 // which kills the tab's tmux session and persists the shrunk list. The TUI drops
 // the now-dead tab locally via Instance.DropClosedTab.
 var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
-	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
+	return withDaemonTeardownMutation(func(c *apiclient.Client) error {
 		_, e := c.CloseTab(request)
 		return e
 	})
