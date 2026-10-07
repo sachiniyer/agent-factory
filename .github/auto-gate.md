@@ -701,9 +701,14 @@ The scan costs `ceil(N / 100)` GraphQL requests per snapshot, plus `ceil(B / 25)
 GraphQL requests that re-read the outputs of the B completed non-success
 decisions whose output the page dropped, batched by node id (#4975). A pass that
 retains not-yet-eligible work re-runs that whole snapshot on each in-pass rescan
-(see below), so its total is
-`(1 + rescans) × (ceil(N / 100) + ceil(B / 25))` requests, with the rescans
-bounded by the sixteen-minute retention wait. The rate window holds
+(see below). Every rescan fetches current repository state, so both `N` and `B`
+can change between snapshots (e.g. a decision that becomes blocked after the
+initial scan adds output batches only to later scans). The per-pass total is
+therefore the sum over the initial scan plus each rescan,
+`Σ_i (ceil(N_i / 100) + ceil(B_i / 25))` requests, with the rescans bounded by
+the sixteen-minute retention wait. For a population that does not change
+between scans this collapses to `(1 + rescans) × (ceil(N / 100) + ceil(B / 25))`.
+The rate window holds
 ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
 by pass completion instead — one running pass plus one pending successor in the
 shared group, each link capped at ten evaluations — and a scheduled pass adds a
