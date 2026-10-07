@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -502,7 +503,12 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 }
 
 // writeHTTPEnvelope is the single write path for both success and failure so the
-// Content-Type, status, and byte-identical envelope shape stay uniform.
+// Content-Type, status, and byte-identical envelope shape stay uniform. The
+// body is serialized before WriteHeader so Content-Length accompanies it: a
+// length-delimited response is COMPLETE the moment the handler's flush pushes
+// it into the socket, with no chunked terminator left for handler return to
+// write — which is what makes flushHTTPResponse a real reply-completed hook
+// for teardown-requester release (#5182).
 func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env apiproto.Envelope) {
 	if env.Error != nil {
 		// Keep provenance separate from the machine-readable outcome code.
@@ -511,9 +517,17 @@ func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env a
 		err.DaemonRejected = err.Code != apiproto.ErrorCodeMutationCommitted
 		env.Error = &err
 	}
+	var body bytes.Buffer
+	if err := apiproto.WriteEnvelope(&body, env); err != nil {
+		if !httpResponseWriteAbandoned(r, err) {
+			log.WarningLog.Printf("failed to marshal HTTP response envelope: %v", err)
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	w.WriteHeader(status)
-	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(r, err) {
+	if _, err := w.Write(body.Bytes()); err != nil && !httpResponseWriteAbandoned(r, err) {
 		log.WarningLog.Printf("failed to write HTTP response envelope: %v", err)
 	}
 }
