@@ -1377,8 +1377,9 @@ func TestSameProcessRoot_SameMountNamespaceIsTrue(t *testing.T) {
 
 // TestWriteDaemonPIDFile_BoundedLockAcquisition pins the bounded startup write:
 // if another writer holds the sidecar PID-file lock when RunDaemon reaches
-// writeDaemonPIDFile (which happens AFTER the control socket is bound and the
-// per-home singleton lock is acquired), each attempt must NOT block
+// writeDaemonPIDFile (inside bindControlServerExclusive, after the per-home
+// singleton lock is acquired and before the control socket binds), each
+// attempt must NOT block
 // indefinitely on a suspended or stalled holder. Contention is retried
 // in-process a bounded number of times (#5188) and then fails the start
 // closed, so the whole call is still bounded — no PID file is written and the
