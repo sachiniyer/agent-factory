@@ -144,6 +144,18 @@ func (m *Manager) sweepDeferredTaskLifecycleLocked() {
 // user who attached, read the result, and then set the session working again has
 // adopted it — that work is theirs, not the task's, and the same rule the edge
 // enforces has to hold across the deferral.
+//
+// "Not idle" is only adoption evidence when something is bound to adopt: a pane
+// behind the session's name that keystrokes and deliveries can reach. A row that
+// restored UNBOUND — LiveLost/LiveDead, the states a reattach the placement
+// check refused lands in (#5174) — has no adoption channel at all: there is no
+// attached tmux to type into and no agent-server entry point to count a
+// delivery. Dropping the obligation there is not "the work is the user's" — it
+// is the declared teardown going missing while the session's tmux, worktree, and
+// row stay behind. A refused reattach forfeits the live bind, never the
+// teardown, so LiveLost/LiveDead keep their marker and still drive the verb.
+// LivenessUnset is the third case: nothing has settled enough to read, so the
+// intent re-parks and the next drain asks again.
 func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *session.Instance) {
 	if instance.TaskID == "" {
 		return
@@ -158,11 +170,27 @@ func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *ses
 	if !owed {
 		return
 	}
-	if instance.GetLiveness() != session.LiveReady || instance.TaskRunActive() {
-		// The user picked the work back up during the attach. Drop the intent rather
-		// than carrying it forward: a verb owed to a finished run must not land on
-		// new work. The durable marker comes down with it (#4162).
+	liveness := instance.GetLiveness()
+	if instance.TaskRunActive() ||
+		liveness == session.LiveRunning || liveness == session.LiveLimitReached ||
+		liveness == session.LiveArchived {
+		// The user picked the work back up during the attach — or the session
+		// was deliberately shelved — while the intent was parked. Drop it rather
+		// than carrying it forward: a verb owed to a finished run must not land
+		// on new work, and on_complete=kill least of all on a record an explicit
+		// archive chose to keep. The durable marker comes down with it (#4162).
 		m.dischargeOwedTaskLifecycle(repoID, owedID, instance.Title)
+		return
+	}
+	if liveness != session.LiveReady &&
+		liveness != session.LiveLost && liveness != session.LiveDead {
+		// LivenessUnset, or a state this drain does not know how to read:
+		// neither adoption evidence (nothing bound) nor grounds to reap (the
+		// state may still be settling). Keep the obligation owed — put the
+		// intent back so the next drain re-evaluates it.
+		m.mu.Lock()
+		m.deferredTaskLifecycle[key] = owedID
+		m.mu.Unlock()
 		return
 	}
 	// The durable marker is the obligation this drain exists for (#4162): a
@@ -196,7 +224,17 @@ func (m *Manager) applyDeferredTaskSessionLifecycle(repoID string, instance *ses
 	// decision the edge would have made — taken now that the attach has released
 	// the session. taskRunWasActive is passed as true because the edge it names
 	// already happened, on the paused tick that parked this intent.
-	m.applyTaskSessionLifecycleOnRunEnd(repoID, instance, true)
+	if liveness == session.LiveReady {
+		m.applyTaskSessionLifecycleOnRunEnd(repoID, instance, true)
+		return
+	}
+	// An unbound row fails runEndedIntoIdle's still-idle read by definition —
+	// that gate asks "did a run just end on this tick," and the durable marker
+	// already proves one did. Drive the teardown directly: the fence guard
+	// re-validates identity/deliveries/marker/churn, and the kill/archive it
+	// admits is bound by tmux name, so a misplaced pane is reaped rather than
+	// orphaned (#5174).
+	m.driveTaskSessionLifecycle(repoID, instance)
 }
 
 // applyTaskSessionLifecycleOnRunEnd applies the owning task's on_complete verb to
@@ -213,6 +251,16 @@ func (m *Manager) applyTaskSessionLifecycleOnRunEnd(repoID string, instance *ses
 	if !runEndedIntoIdle(instance, taskRunWasActive) {
 		return
 	}
+	m.driveTaskSessionLifecycle(repoID, instance)
+}
+
+// driveTaskSessionLifecycle carries an owed teardown from "the run ended" to
+// "the worker is launched": verb resolution, the durable marker, the per-
+// generation claim, and the hook-waiting teardown goroutine. It is the
+// non-gated half of applyTaskSessionLifecycleOnRunEnd — callers must already
+// know the completion edge happened (the edge itself, or the durable marker
+// an earlier generation filed).
+func (m *Manager) driveTaskSessionLifecycle(repoID string, instance *session.Instance) {
 	taskID := instance.TaskID
 	if taskID == "" {
 		return
