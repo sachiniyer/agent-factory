@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -141,8 +142,18 @@ func worktreeWriterProcessesMatching(
 	// af's own short-lived clients inherit the self-matching daemon's cwd, so
 	// selecting them would kill the daemon's in-flight tmux commands for
 	// unrelated sessions.
+	// A tracked teardown requester (#5182) — the process that asked for this
+	// teardown, identified by kernel peer credentials and still blocked on its
+	// reply — is alive inside the worktree for the best possible reason. It is
+	// protected by the same argument that covers the daemon itself: killing it
+	// kills the caller before the answer it asked for can arrive. Its subtree
+	// prunes with it, exactly like the other infrastructure exclusions.
+	isRequester := func(pid int) bool {
+		p, ok := snap[pid]
+		return ok && teardownreq.Is(p)
+	}
 	protectedInfrastructure := func(pid int) bool {
-		return pid == selfPID || isTmuxProcess(pid)
+		return pid == selfPID || isTmuxProcess(pid) || isRequester(pid)
 	}
 	seen := make(map[int]bool)
 	var procs []proctree.Process
