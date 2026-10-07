@@ -98,7 +98,11 @@ func TestRunDaemonPIDFileLifecycle(t *testing.T) {
 	cfg.DaemonPollInterval = 50
 
 	done := make(chan error, 1)
-	go func() { done <- RunDaemon(cfg) }()
+	go func() {
+		done <- RunDaemon(cfg)
+		close(done)
+	}()
+	joinTestDaemon(t, done)
 
 	// The daemon writes the PID file early in RunDaemon, before the main
 	// select. Poll briefly for it to appear.
@@ -112,6 +116,14 @@ func TestRunDaemonPIDFileLifecycle(t *testing.T) {
 	if _, err := os.Stat(pidPath); err != nil {
 		t.Fatalf("PID file did not appear within 3s, stat err=%v", err)
 	}
+
+	// daemon.pid is written BEFORE the control socket binds (#5188), so the
+	// file existing no longer implies the RPC is answerable — wait for the
+	// socket to serve, or the Shutdown request can land in the
+	// published-but-not-yet-listening window and report no daemon.
+	waitForReady(t, "daemon serving the control socket", func() bool {
+		return pingDaemon() == nil
+	})
 
 	// Ask the daemon to exit via the Shutdown RPC.
 	result, _, err := RequestShutdown()
@@ -1365,12 +1377,14 @@ func TestSameProcessRoot_SameMountNamespaceIsTrue(t *testing.T) {
 
 // TestWriteDaemonPIDFile_BoundedLockAcquisition pins the bounded startup write:
 // if another writer holds the sidecar PID-file lock when RunDaemon reaches
-// writeDaemonPIDFile (which happens AFTER the control socket is bound and the
-// per-home singleton lock is acquired), the write must NOT block indefinitely
-// on a suspended or stalled holder. The write is best-effort, so a contended
-// lock within the startup budget is abandoned (returning the lock-held error
-// RunDaemon already logs) rather than wedging socket-bound startup forever;
-// no PID file is written, and readers fall back to the pgrep scan.
+// writeDaemonPIDFile (inside bindControlServerExclusive, after the per-home
+// singleton lock is acquired and before the control socket binds), each
+// attempt must NOT block
+// indefinitely on a suspended or stalled holder. Contention is retried
+// in-process a bounded number of times (#5188) and then fails the start
+// closed, so the whole call is still bounded — no PID file is written and the
+// startup aborts with the lock-held error rather than wedging socket-bound
+// startup forever.
 // daemonPIDLockStartupBudget is shortened so the test is fast.
 func TestWriteDaemonPIDFile_BoundedLockAcquisition(t *testing.T) {
 	home := testguard.SocketTempDir(t)

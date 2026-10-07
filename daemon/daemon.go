@@ -138,6 +138,92 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	releaseHomeLatch := latchDaemonHomePresent()
 	defer releaseHomeLatch()
 
+	// Notify on SIGINT (Ctrl+C) and SIGTERM, and watch for a Shutdown RPC.
+	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
+	// binary so the next RPC respawns the daemon from the fresh image (#498).
+	// Registered HERE — before the PID file is published inside
+	// bindControlServerExclusive below, not merely before the restore: once
+	// daemon.pid names this process the daemon is discoverable and
+	// signalable, so a supervisor stop or a `kill` landing anywhere in the
+	// startup tail must reach a select on this channel and run the deferred
+	// teardown. Go's default SIGTERM termination would skip every defer —
+	// leaving the published PID file behind and abandoning whatever the
+	// manager and listeners already created.
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// Notify has already disabled the default disposition for these
+	// signals, but nothing RECEIVES on sigChan until the restore select far
+	// below — the manager storage load, the unbounded daemon.spawn lock
+	// wait inside bindControlServerExclusive, and the socket binds all sit
+	// in the window. A stop landing there would sit buffered while the
+	// daemon holds the home lock indefinitely; a second is dropped
+	// outright. Bridge the gap with a one-shot watcher: if a signal
+	// arrives before the serve path takes over, re-raise the default
+	// disposition so the process dies the way it would have without
+	// Notify. The PID file can be left naming a now-dead process — the
+	// stale-PID paths own that well-defined case; a wedged daemon that
+	// ignores supervisor stops while holding the lock is the worse
+	// failure.
+	startupSignalWatch := make(chan struct{})
+	startupSignalWatcherDone := make(chan struct{})
+	var startupSignalWatchOnce sync.Once
+	stopStartupSignalWatch := func() {
+		startupSignalWatchOnce.Do(func() {
+			close(startupSignalWatch)
+			// Join, not just close: only after the watcher goroutine has
+			// exited is the select below provably the sole sigChan
+			// receiver. A signal arriving during a close-without-join
+			// handoff could be won by the still-live watcher and hard-kill
+			// the process past deferred listener/manager/PID cleanup, even
+			// though the graceful receiver is already armed.
+			<-startupSignalWatcherDone
+		})
+	}
+	defer stopStartupSignalWatch()
+	go func() {
+		defer close(startupSignalWatcherDone)
+		select {
+		case sig := <-sigChan:
+			// A signal landing while stopStartupSignalWatch's close is in
+			// flight makes both cases ready, and Go picks one at random.
+			// Re-check so the stand-down ALWAYS wins once it has closed —
+			// and replay the consumed signal back into the buffered
+			// channel so the first real consumer drains it through the
+			// armed cleanup defers instead of this watcher dropping it or
+			// hard-killing past them.
+			select {
+			case <-startupSignalWatch:
+				// The replay must not block: a second signal can refill
+				// the capacity-one channel in the gap between the
+				// dequeue and this send, and a blocked watcher would
+				// deadlock the joining stand-down while the daemon holds
+				// the home lock. If the slot is already taken, a shutdown
+				// signal is already queued for the graceful consumer —
+				// dropping this duplicate loses nothing.
+				select {
+				case sigChan <- sig:
+				default:
+				}
+				return
+			default:
+			}
+			signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+			if sysSig, ok := sig.(syscall.Signal); ok {
+				_ = syscall.Kill(syscall.Getpid(), sysSig)
+			}
+		case <-startupSignalWatch:
+		}
+	}()
+
+	// daemon.pid is published inside bindControlServerExclusive, under the
+	// daemon.spawn lock between the under-lock ping and the socket bind.
+	// That is the only point that satisfies both halves of the #5188
+	// contract at once: the ping proves no daemon is answering — including
+	// a pre-home-lock legacy daemon the top ping missed, whose PID file
+	// this start must not overwrite and then remove — and the file exists
+	// before the socket can ever serve, so a Ping can never succeed for an
+	// unpublished daemon.
+
 	// Shell only — no restore yet, so the bind below happens within
 	// milliseconds of process start.
 	manager, err := newManagerShellForDaemon(cfg, upgradeTransactionID)
@@ -199,6 +285,17 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
+	// bindControlServerExclusive published daemon.pid before the socket bound
+	// (a successful, non-alreadyRunning return means the write succeeded —
+	// publication is fail-closed), so remove it on teardown — registered
+	// BEFORE the socket cleanup so LIFO closes the listener first: the file
+	// must never disappear while the socket can still answer a Ping, or a
+	// concurrent status/EnsureDaemon could observe a responding daemon with
+	// no management handle (#5188). Registered here rather than in the
+	// outermost defer so the alreadyRunning early return above never deletes
+	// the running daemon's file.
+	defer removeDaemonPIDFile()
+
 	controlClosed := false
 	defer func() {
 		if controlClosed {
@@ -208,6 +305,15 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
 	}()
+
+	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
+	// once the webtab proxy is reachable it can spawn editors, and a signal
+	// caught by the hard-kill watcher would strand them along with the runtime
+	// files the defers above are registered to clean. From here a signal just
+	// buffers in sigChan until the restore select — the channel's first real
+	// receiver — drains it into the graceful return, where every deferred
+	// cleanup runs.
+	stopStartupSignalWatch()
 
 	// Start the HTTP/JSON mirror alongside the control socket (#1029 PR 4). It
 	// shares this daemon's live manager, so HTTP is just another thin client of
@@ -230,25 +336,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			}
 		}()
 	}
-
-	// Write our PID as soon as the socket is bound so `af upgrade`'s SIGTERM
-	// fallback (#504) and StopDaemon can find a still-warming daemon. Both
-	// the SIGTERM and Shutdown-RPC exit paths fall through to the deferred
-	// cleanup, so the file is removed on any graceful shutdown. A stale file
-	// is harmless — readers verify the live process's cmdline before
-	// signaling it.
-	if err := writeDaemonPIDFile(); err != nil {
-		log.WarningLog.Printf("failed to write daemon PID file: %v", err)
-	} else {
-		defer removeDaemonPIDFile()
-	}
-
-	// Notify on SIGINT (Ctrl+C) and SIGTERM, and watch for a Shutdown RPC.
-	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
-	// binary so the next RPC respawns the daemon from the fresh image (#498).
-	// Registered before the restore so both exit paths work during warm-up.
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Run the restore concurrently so a shutdown or signal during warm-up exits
 	// promptly instead of waiting for the restore to finish. The
@@ -276,6 +363,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// goroutine would race with tests restoring it after RunDaemon returns.
 	restore := restoreManagerForStartup
 	go func() { restoreDone <- restore(manager) }()
+	// The startup watcher was retired once the control-socket cleanup was
+	// armed (above); a signal landing since then sits buffered in sigChan for
+	// this select.
 	select {
 	case restoreErr := <-restoreDone:
 		if restoreErr != nil {

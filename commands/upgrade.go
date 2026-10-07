@@ -408,10 +408,23 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 		// false — while the daemon is demonstrably alive, so checking the pid alone
 		// would report "unknown" about a daemon that just talked to us.
 		h := daemonHealthFn()
-		if h.PingErr == nil || h.PIDVerified {
+		switch {
+		case h.PingErr == nil || h.PIDVerified:
 			fmt.Fprintf(errOut, "The running daemon could not be stopped: %v\n", restartErr)
 			fmt.Fprintln(errOut, "Its process is still verifiably alive, so it is still running the old binary.")
 			fmt.Fprintln(errOut, stopDaemonHint(h))
+			return
+		case h.PIDUnverifiable:
+			// PIDUnverifiable counts as evidence a daemon may still be
+			// up: the pid file names a live af daemon whose home just
+			// could not be bound, so "could not determine" is still the
+			// truthful line — but claimed alongside a pid worth checking,
+			// not bare ignorance, and NOT alongside a stop instruction:
+			// the state proves neither ownership nor which binary, and af
+			// itself refuses to signal a pid it cannot bind to this home.
+			fmt.Fprintf(errOut, "Could not determine whether the daemon was stopped: %v\n", restartErr)
+			fmt.Fprintf(errOut, "pid %d is a live af daemon, but its home could not be verified — it may serve another home, or be this home's daemon still running the old binary.\n", h.PIDFilePID)
+			fmt.Fprintln(errOut, "Check `af daemon status` — it re-verifies the pid's home on every run.")
 			return
 		}
 		fmt.Fprintf(errOut, "Could not determine whether a daemon is running: %v\n", restartErr)
@@ -444,6 +457,17 @@ func reportUpgradeRestart(out, errOut io.Writer, outcome restartOutcome, restart
 			fmt.Fprintf(errOut, "No daemon answered the control socket, but pid %d is a running af daemon, so it was not restarted.\n", h.PIDFilePID)
 			fmt.Fprintln(errOut, "It is still running the old binary.")
 			fmt.Fprintln(errOut, stopDaemonHint(h))
+			return
+		} else if h.PIDUnverifiable {
+			// A live af daemon exists under the pid file but its home is
+			// unproven: it may be this home's daemon the socket could not
+			// reach, or another home's daemon the upgrade never touched.
+			// Neither the quiet all-clear nor "still running the old
+			// binary, stop it" is honest — report the inconclusive state
+			// and print no stop instruction for a pid af cannot bind.
+			fmt.Fprintln(out, "Upgraded successfully!")
+			fmt.Fprintf(errOut, "No daemon answered the control socket, and pid %d is a live af daemon whose home could not be verified — it may serve another home.\n", h.PIDFilePID)
+			fmt.Fprintln(errOut, "Cannot determine whether this home's daemon was restarted — check `af daemon status`.")
 			return
 		}
 		fmt.Fprintln(out, "Upgraded successfully!")

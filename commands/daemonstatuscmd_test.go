@@ -356,3 +356,28 @@ func TestCollectDaemonStatusAuthenticatedNetworkBindIsUnwarned(t *testing.T) {
 
 	require.Empty(t, collectDaemonStatus().ExposureWarning)
 }
+
+// TestPrintDaemonStatusHumanMarksUnverifiablePID pins the third pid-file
+// verdict on the status surface: a pid naming a live af daemon whose home
+// could not be bound is inconclusive — not verified (a kill hint could name
+// another home's daemon), and not "unverified" stale (the file may name this
+// home's own live daemon on platforms that cannot read a peer's frame).
+func TestPrintDaemonStatusHumanMarksUnverifiablePID(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running:           false,
+		ControlSocket:     "/h/daemon.sock",
+		ControlSocketFile: false,
+		PID:               4242,
+		PIDUnverifiable:   true,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "pid:            4242 (live af daemon, home unproven)")
+	require.NotContains(t, got, "(unverified)",
+		"a live af daemon with an unproven home is inconclusive, not stale-unverified")
+	require.NotContains(t, got, "(verified)")
+}

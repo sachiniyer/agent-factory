@@ -3,8 +3,11 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -316,6 +319,63 @@ func TestRunDaemonRestartNoDaemonSkipsUnsafeUnitRefresh(t *testing.T) {
 	}
 }
 
+// TestProbeDaemonRestartPresence_UnverifiablePIDGatesOnPingVerdict pins the
+// restart gate added for #5188: an unverifiable daemon.pid only short-circuits
+// `af daemon restart` when the ping PROVED the socket absent. A timeout is
+// indeterminate — a live, backlogged daemon fails Ping the same way — and on
+// macOS the unverifiable shape is the norm (peer environ unreadable), so an
+// indeterminate ping must fall through to the ordinary fail-closed answer
+// rather than silently no-op an explicit restart over a reachable daemon.
+func TestProbeDaemonRestartPresence_UnverifiablePIDGatesOnPingVerdict(t *testing.T) {
+	prevHealth := daemonHealthFn
+	t.Cleanup(func() { daemonHealthFn = prevHealth })
+
+	// Indeterminate ping (deadline exceeded): falls through to
+	// ClassifyShutdownTarget's ordinary Undetermined, never the sentinel.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr:         &net.OpError{Op: "dial", Net: "unix", Err: os.ErrDeadlineExceeded},
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+	probeDaemonRestartPresence().Match(
+		func() { t.Error("unverifiable pid + timed-out ping is not a proven daemon") },
+		func() { t.Error("unverifiable pid + timed-out ping is not proven absent") },
+		func() { t.Error("unverifiable pid + timed-out ping is not proven absent") },
+		func(cause error) {
+			if errors.Is(cause, errRestartPresenceUnproven) {
+				t.Error("an indeterminate ping must not produce the unproven sentinel — a reachable daemon would be skipped silently")
+			}
+		},
+	)
+
+	// Definite absence (ECONNREFUSED): the sentinel applies — the unit must
+	// not be mutated for a pid that may name another home's daemon.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr: &net.OpError{Op: "dial", Net: "unix",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+	probeDaemonRestartPresence().Match(
+		func() { t.Error("definite absent socket + unverifiable pid is not a proven daemon") },
+		func() {
+			t.Error("definite absent socket + unverifiable pid is not 'no daemon' — the file may name this home's socket-lost daemon")
+		},
+		func() {
+			t.Error("definite absent socket + unverifiable pid is not 'no daemon' — the file may name this home's socket-lost daemon")
+		},
+		func(cause error) {
+			if !errors.Is(cause, errRestartPresenceUnproven) {
+				t.Errorf("definite absent socket + unverifiable pid must produce the unproven sentinel, got %v", cause)
+			}
+		},
+	)
+}
+
 // daemonRestartPresentHarness stands up the seams runDaemonRestart touches once
 // it has decided a daemon is present: the presence probe answers yes, the
 // executable resolves to a real temp file (runDaemonRestart EvalSymlinks it), no
@@ -484,5 +544,33 @@ func TestRunDaemonRestart_FailedUnitRestartIsLoudWithSIGTERM(t *testing.T) {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("stderr missing %q (SIGTERM stop must not swallow the demotion).\ngot=%q", want, errOut.String())
 		}
+	}
+}
+
+// TestRunDaemonRestart_UnprovenDaemonExitsNonzero pins the install-path
+// contract: an unverifiable live daemon whose socket is proven absent makes
+// runDaemonRestart decline the restart — and it must do so with an ERROR, not
+// the documented no-daemon no-op, because install.sh/dev-install.sh run
+// `af daemon restart --quiet` and emit their only restart warning on a
+// nonzero status (#5188 review).
+func TestRunDaemonRestart_UnprovenDaemonExitsNonzero(t *testing.T) {
+	prevPresence := daemonRestartPresenceFn
+	prevQuiet := daemonRestartQuiet
+	t.Cleanup(func() {
+		daemonRestartPresenceFn = prevPresence
+		daemonRestartQuiet = prevQuiet
+	})
+	daemonRestartPresenceFn = func() daemon.ProbeAnswer {
+		return daemon.Undetermined(fmt.Errorf("%w (pid %d)", errRestartPresenceUnproven, 4242))
+	}
+	daemonRestartQuiet = true // the exact shape install.sh drives
+
+	var out, errOut bytes.Buffer
+	err := runDaemonRestart(&out, &errOut)
+	if err == nil {
+		t.Fatal("an unproven-daemon refusal must exit nonzero so install.sh/dev-install.sh warn")
+	}
+	if !errors.Is(err, errRestartPresenceUnproven) {
+		t.Fatalf("error must carry the unproven sentinel for callers matching on it, got %v", err)
 	}
 }
