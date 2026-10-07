@@ -332,15 +332,36 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 			return
 		}
 		var resp Resp
-		if err := call(withHTTPRPCRequester(r), req, &resp); err != nil {
+		// Teardown handlers park their requester unregistrations on this
+		// per-request queue (trackTeardownRequester, #5182); drain it only
+		// after the reply has been flushed into the socket, so the requester
+		// stays exempt for as long as it is still waiting on this answer.
+		pending := &pendingUntracks{}
+		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
+		if err := call(ctx, req, &resp); err != nil {
 			status := http.StatusInternalServerError
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
 			}
 			writeHTTPError(w, r, status, err)
+			flushHTTPResponse(w)
+			pending.drain()
 			return
 		}
 		writeHTTPSuccess(w, r, resp)
+		flushHTTPResponse(w)
+		pending.drain()
+	}
+}
+
+// flushHTTPResponse forces the buffered reply into the socket now rather than
+// on handler return, so teardown-requester unregistrations released right
+// after it genuinely trail the reply (#5182). net/http's response writer
+// always satisfies http.Flusher here; the check is only for wrapped writers
+// in tests.
+func flushHTTPResponse(w http.ResponseWriter) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 

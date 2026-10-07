@@ -42,6 +42,11 @@ type controlServer struct {
 	// leaves this nil and the per-request context carries the same identity
 	// instead (see httpPeerRequesterContextKey).
 	requester *proctree.Process
+	// pendingReplies holds this connection's requester unregistrations until
+	// ServeConn returns — after every reply the client will ever read has been
+	// written (see trackTeardownRequester, #5182). nil on the shared HTTP
+	// controlServer, where the per-request context drains instead.
+	pendingReplies *pendingUntracks
 }
 
 const (
@@ -843,19 +848,20 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 	// eagerly so a service misconfiguration fails at bind time, not per
 	// connection.
 	shutdownOnce := &sync.Once{}
-	newConnServer := func(requester *proctree.Process) (*rpc.Server, error) {
+	newConnServer := func(requester *proctree.Process, pending *pendingUntracks) (*rpc.Server, error) {
 		server := rpc.NewServer()
 		err := server.RegisterName(controlServiceName, &controlServer{
-			manager:      manager,
-			scheduler:    scheduler,
-			watchers:     watchers,
-			shutdownCh:   shutdownCh,
-			shutdownOnce: shutdownOnce,
-			requester:    requester,
+			manager:        manager,
+			scheduler:      scheduler,
+			watchers:       watchers,
+			shutdownCh:     shutdownCh,
+			shutdownOnce:   shutdownOnce,
+			requester:      requester,
+			pendingReplies: pending,
 		})
 		return server, err
 	}
-	if _, err := newConnServer(nil); err != nil {
+	if _, err := newConnServer(nil, nil); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
@@ -905,12 +911,18 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			}
 			go func() {
 				defer serveWG.Done()
-				connServer, err := newConnServer(requester)
+				pending := &pendingUntracks{}
+				connServer, err := newConnServer(requester, pending)
 				if err != nil {
 					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
 					return
 				}
 				connServer.ServeConn(conn)
+				// The connection is dead: every reply has been written (the
+				// client only closes after reading them) or will never be read
+				// (the client died). Either way the requester no longer waits
+				// on this connection — release its exemptions now (#5182).
+				pending.drain()
 				connectionsMu.Lock()
 				delete(connections, conn)
 				connectionsMu.Unlock()

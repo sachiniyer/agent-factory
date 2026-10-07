@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
@@ -22,6 +21,46 @@ type rpcRequesterContextKey struct{}
 // controlServer.requester — the kernel recorded it at connect time, so nothing
 // in the request can mint it (#5182).
 type httpPeerRequesterContextKey struct{}
+
+// teardownReplyPendingContextKey carries the per-request pendingUntracks an
+// HTTP handler's unregisters queue onto; rpcHandlerCtx drains it after the
+// reply is flushed to the socket (#5182).
+type teardownReplyPendingContextKey struct{}
+
+// pendingUntracks holds requester unregistrations until the transport has
+// provably finished with the reply, then runs them. The two drains: a control
+// connection's ServeConn return — net/rpc serializes the reply inside the
+// connection's lifetime, and a client only closes after reading or dying — and
+// an HTTP request's response flush in rpcHandlerCtx. add() after drain runs
+// inline, so an unregister posted by a still-finishing handler goroutine never
+// dangles.
+type pendingUntracks struct {
+	mu      sync.Mutex
+	drained bool
+	fns     []func()
+}
+
+func (p *pendingUntracks) add(f func()) {
+	p.mu.Lock()
+	if p.drained {
+		p.mu.Unlock()
+		f()
+		return
+	}
+	p.fns = append(p.fns, f)
+	p.mu.Unlock()
+}
+
+func (p *pendingUntracks) drain() {
+	p.mu.Lock()
+	p.drained = true
+	fns := p.fns
+	p.fns = nil
+	p.mu.Unlock()
+	for _, f := range fns {
+		f()
+	}
+}
 
 // withHTTPRPCRequester records the authenticated HTTP principal and transport
 // peer on the request context. Destructive handlers consume this value when
@@ -82,21 +121,28 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context) func() {
 		return func() {}
 	}
 	untrack := sessiontmux.TrackTeardownRequester(*requester)
-	// The handler returning is NOT the end of the caller's exposure: net/rpc
-	// and net/http serialize the reply AFTER the service method returns, and
-	// a concurrent teardown's signal tier could land in that gap and kill the
-	// requester while its answer is still queued (Codex on #5186). Hold the
-	// registration a bounded beat past the write path rather than trying to
-	// hook the transport's flush, which neither transport exposes. A caller
-	// that already has its reply and lingers past the hold is just another
-	// leftover for the next sweep.
+	// The handler returning is NOT the end of the caller's exposure: the
+	// transport serializes the reply AFTER the service method returns, and a
+	// concurrent teardown's signal tier could land in that gap and kill the
+	// requester while its answer is still queued (Codex on #5186). The commit
+	// therefore parks the unregister on whichever completion the transport
+	// exposes rather than running it here — the connection's ServeConn return
+	// for net/rpc, the response flush for HTTP — so the registration outlives
+	// the reply itself, not a guess about how long the write takes. With no
+	// such hook (a unit test driving a handler directly), the unregister runs
+	// at once: the pre-#5182 boundary.
 	var once sync.Once
-	return func() { once.Do(func() { time.AfterFunc(requesterReplyHold, untrack) }) }
+	return func() {
+		once.Do(func() {
+			if p, ok := ctx.Value(teardownReplyPendingContextKey{}).(*pendingUntracks); ok && p != nil {
+				p.add(untrack)
+				return
+			}
+			if s.pendingReplies != nil {
+				s.pendingReplies.add(untrack)
+				return
+			}
+			untrack()
+		})
+	}
 }
-
-// requesterReplyHold is how long a requester stays registered after its
-// handler returns — long enough for the transport to write the reply it is
-// blocked on, short enough that a requester which exited anyway leaves the
-// exemption promptly. (pid, start-stamp) identity means a recycled slot can
-// never inherit it regardless of timing.
-const requesterReplyHold = 2 * time.Second
