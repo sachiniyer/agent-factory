@@ -697,14 +697,17 @@ reevaluated per pass, so S simultaneously stale decisions
 drain in at most `ceil(S / 10)` passes. A truncated per-head rollup is
 skipped fail-closed rather than treated as complete.
 
-The scan costs `ceil(N / 100)` GraphQL requests per pass, plus bounded reads of
-blocked decisions' outputs that the page dropped (#4975). The rate window holds
-ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
-by pass completion instead — one running pass plus one pending successor in the
-shared group, each link capped at ten evaluations — and a scheduled pass adds a
-few more.
+The scan costs `ceil(N / 100)` GraphQL requests per pass, plus `ceil(B / 25)`
+GraphQL requests that re-read the outputs of the B completed non-success
+decisions whose output the page dropped, batched by node id (#4975). The rate
+window holds ordinary-request dispatches to about 12 an hour; a handoff chain
+paces itself by pass completion instead — one running pass plus one pending
+successor in the shared group, each link capped at ten evaluations — and a
+scheduled pass adds a few more.
 That is one request per pass (about 12/hour) through the 83-head REST-quota
-threshold, or two (about 24/hour) for 120 PRs, before bounded retries. The scan
+threshold, or two (about 24/hour) for 120 PRs, before bounded retries — plus the
+`ceil(B / 25)` output-batch reads above (four at the 83-head threshold when every
+head is blocked, before bounded retries). The scan
 does no per-head REST reads except when a queued check run faces a dated
 rival; it then re-reads just that head via `listForRef` to order the run
 (#4427). Each other run pays one REST read for the marker,
