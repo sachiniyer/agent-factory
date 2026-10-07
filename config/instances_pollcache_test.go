@@ -248,6 +248,59 @@ func mustRead(t testing.TB, path string) []byte {
 	return raw
 }
 
+// TestRepoInstancesFileCache_CaseVariantSchemaVersionRefuses is the fail-first
+// for the Codex finding on #5170: encoding/json matches the schema_version
+// field case-insensitively and takes the LAST fold-match, so this document
+// decodes as version 99 and the full path refuses it. A byte-scan proof that
+// only counts the exact-spelled member would take the 1 and let a file the
+// real pipeline rejects sail through as "[]" — fail-open on the version guard.
+// The loader must refuse the same way the migration machinery does.
+func TestRepoInstancesFileCache_CaseVariantSchemaVersionRefuses(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	writeRepoInstancesFileForCacheTest(t, "case-r",
+		[]byte(`{"schema_version":1,"SCHEMA_VERSION":99,"instances":[]}`))
+
+	cache := NewRepoInstancesFileCache()
+	_, err := cache.LoadAll()
+	require.Error(t, err,
+		"a document the full decode reads as schema_version=99 must be refused, not fast-pathed as current")
+	assert.Contains(t, err.Error(), "schema_version = 99")
+	assert.Contains(t, err.Error(), "failed to migrate instances for repo case-r")
+}
+
+// TestRepoInstancesFileCache_CaseVariantLastFoldMatchLoads is the same
+// ambiguity with the members ordered the other way: the last fold-match is the
+// exactly-spelled key, so the full decode accepts the file as version 1 and
+// the loader must too — same verdict, reached through the real decode rather
+// than the proof.
+func TestRepoInstancesFileCache_CaseVariantLastFoldMatchLoads(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	writeRepoInstancesFileForCacheTest(t, "case-ok",
+		[]byte(`{"SCHEMA_VERSION":99,"schema_version":1,"instances":[{"title":"ok","id":"6b1f0000-d978-4397-9dd3-2a70dc42bd34"}]}`))
+
+	cache := NewRepoInstancesFileCache()
+	result, err := cache.LoadAll()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ok"}, pollCacheTitles(t, result, "case-ok"),
+		"last fold-match wins in the decoder — this document IS version 1")
+}
+
+// TestRepoInstancesFileCache_CaseVariantInstancesMemberUsesLastFoldMatch: the
+// same case-insensitivity applies to the instances member itself. Two
+// fold-matching members decode last-one-wins into the envelope struct, so the
+// extractor must not return the earlier exact-spelled member.
+func TestRepoInstancesFileCache_CaseVariantInstancesMemberUsesLastFoldMatch(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	writeRepoInstancesFileForCacheTest(t, "inst-case",
+		[]byte(`{"schema_version":1,"instances":[{"title":"a"}],"INSTANCES":[{"title":"b"}]}`))
+
+	cache := NewRepoInstancesFileCache()
+	result, err := cache.LoadAll()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b"}, pollCacheTitles(t, result, "inst-case"),
+		"encoding/json takes the last case-insensitive match; the scan must defer")
+}
+
 // TestRepoInstancesFileCache_NewerSchemaAborts keeps the sweep's hard-fail on
 // a file a newer binary wrote: the whole load errors rather than reporting a
 // per-repo skip, so the daemon never overwrites what it cannot parse.

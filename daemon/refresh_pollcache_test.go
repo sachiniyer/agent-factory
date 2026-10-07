@@ -186,6 +186,25 @@ func TestRefreshDaemonInstances_BackDatedRewriteObserved(t *testing.T) {
 		"a same-size rewrite with a back-dated mtime must still be observed")
 }
 
+// TestRefreshDaemonInstances_CaseVariantSchemaVersionRefuses is the fail-first
+// for the Codex finding on #5170: encoding/json fold-matches schema_version
+// and takes the LAST match, so this document decodes as version 99 — which the
+// full migration path refuses with "schema_version = 99, want 1". A byte-scan
+// proof that only counts the exact-spelled key would take the 1 and report the
+// repo as EMPTY: fail-open where the old pipeline aborted the refresh. The
+// tick must refuse the same way.
+func TestRefreshDaemonInstances_CaseVariantSchemaVersionRefuses(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	_ = captureWarnings(t)
+	rewriteInstancesFileInPlace(t, "case-r",
+		[]byte(`{"schema_version":1,"SCHEMA_VERSION":99,"instances":[]}`))
+
+	_, _, _, _, err := refreshDaemonInstances(nil)
+	require.Error(t, err,
+		"a document the full decode reads as schema_version=99 must be refused, not fast-pathed as current")
+	assert.Contains(t, err.Error(), "schema_version = 99")
+}
+
 // TestRefreshDaemonInstances_CorruptVerdictPersistsAcrossTicks: a corrupt file
 // stays skipped on every tick — the cache must replay the verdict, warning and
 // all, rather than clearing it or silently healing.
