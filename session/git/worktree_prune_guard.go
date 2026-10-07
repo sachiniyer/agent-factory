@@ -17,18 +17,23 @@ import (
 //     (repo-present mode; a repo-gone row is refused before either check),
 //     and
 //   - the worktree must carry no uncommitted content — the only copy of that
-//     work, which the tombstone's kept-branch promise does not cover.
+//     work, which the tombstone's kept-branch promise does not cover. That
+//     includes IGNORED files: a gitignored .env in the archive exists nowhere
+//     else either (#5136 Codex round 5).
 
 // WorktreeDirtyFiles runs a bounded `git status --porcelain
-// --untracked-files=normal` inside worktreePath and returns how many
+// --untracked-files=normal --ignored` inside worktreePath and returns how many
 // porcelain entries the tree carries. `normal` is the flag SnapshotAndPushBranch
-// trusts for exactly this question (#2101): bare --porcelain honors
+// trusts for the untracked half (#2101): bare --porcelain honors
 // status.showUntrackedFiles, and a worktree shares .git/config with its
 // origin, so a user who hides untracked files would otherwise read a dirty
-// tree as clean. Any error — a dead gitdir, a stalled mount — is returned, so
-// the caller fails closed instead of treating "unknown" as "clean".
+// tree as clean. --ignored adds the `!!` entries: an ignored file is still
+// the only copy of itself — the kept branch cannot restore what it never
+// tracked (#5136 Codex round 5). Any error — a dead gitdir, a stalled mount —
+// is returned, so the caller fails closed instead of treating "unknown" as
+// "clean".
 func WorktreeDirtyFiles(worktreePath string) (int, error) {
-	out, err := runBoundedWorktreeGit(worktreePath, false, "status", "--porcelain", "--untracked-files=normal")
+	out, err := runBoundedWorktreeGit(worktreePath, false, "status", "--porcelain", "--untracked-files=normal", "--ignored")
 	if err != nil {
 		return 0, err
 	}

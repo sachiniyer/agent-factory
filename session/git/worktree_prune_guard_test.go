@@ -49,6 +49,32 @@ func TestWorktreeDirtyFiles(t *testing.T) {
 	assert.Error(t, err, "a dead gitdir is an error, not a clean answer")
 }
 
+// TestWorktreeDirtyFiles_CountsIgnored: a gitignored file is invisible to a
+// plain --porcelain status yet is still the only copy of itself — a
+// gitignored .env lives nowhere but the worktree, and the kept branch cannot
+// restore what it never tracked. It must read dirty like any uncommitted
+// file (#5136 Codex round 5).
+func TestWorktreeDirtyFiles_CountsIgnored(t *testing.T) {
+	repo := newPruneGuardRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("secret.env\n"), 0o644))
+	add := exec.Command("git", "-C", repo, "add", ".gitignore")
+	require.NoError(t, add.Run())
+	require.NoError(t, exec.Command("git", "-C", repo,
+		"-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-qm", "ignore secrets").Run())
+	wt := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/ign", wt).Run())
+
+	n, err := WorktreeDirtyFiles(wt)
+	require.NoError(t, err)
+	assert.Zero(t, n, "precondition: the fresh worktree is clean")
+
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "secret.env"), []byte("TOKEN=x"), 0o644))
+	n, err = WorktreeDirtyFiles(wt)
+	require.NoError(t, err)
+	assert.Greater(t, n, 0, "an ignored file is the only copy — it must read dirty")
+}
+
 // TestVerifyRegisteredWorktreeOccupantBranch pins the session-identity half:
 // the pointer proves same-repo, and the branch proves THIS session — a
 // same-repo worktree on a different branch parked at a recycled path is a
@@ -101,7 +127,7 @@ func TestVerifyWorktreeRegistrationPredates(t *testing.T) {
 	// retained branch — repo, path, and branch all match again.
 	archivedAt := time.Now()
 	require.NoError(t, os.RemoveAll(wt))
-	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "prune").Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "prune", "--expire=now").Run())
 	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", wt, "af/orig").Run())
 	require.NoError(t, VerifyRegisteredWorktreeOccupantBranch(wt, repo, "af/orig"),
 		"the reusable spellings DO match — that is the hazard this test pins")

@@ -64,19 +64,27 @@ type PruneSessionsRequest struct {
 	// Apply performs the deletion. False is the dry run: the same candidates
 	// are listed with the bytes they would reclaim and nothing is changed.
 	Apply bool `json:"apply,omitempty"`
-	// Only, when non-empty, restricts the run to those session identities —
+	// Only, when provided, restricts the run to those session identities —
 	// the confirmed-plan binding the CLI sends on a TTY-confirmed apply, so
 	// the operator's yes covers exactly the rows the dry run showed and a
 	// session that became eligible while the prompt was open cannot be
 	// deleted unreviewed. Repo-qualified because titles collide across an
-	// --all run. Absent/nil means unrestricted (the non-TTY apply, which
-	// intentionally plans and applies in one step). An explicitly empty list
-	// must never widen to unrestricted: apply rejects it outright, and the
-	// CLI never sends it — a TTY-confirmed empty plan returns without
-	// applying. The control socket cannot distinguish nil from empty (gob
-	// collapses them), so the apply-time rejection is what fails closed on
-	// transports that can carry the distinction.
-	Only []PrunePlanRef `json:"only,omitempty"`
+	// --all run. Not provided at all means unrestricted (the non-TTY apply,
+	// which intentionally plans and applies in one step). An explicitly
+	// empty list must never widen to unrestricted: apply rejects it
+	// outright, and the CLI never sends it — a TTY-confirmed empty plan
+	// returns without applying.
+	//
+	// "Provided" is a separate bit because the control socket cannot carry
+	// it: net/rpc/gob decodes a non-nil EMPTY slice as nil, so a client that
+	// sent `only: []` — "the confirmed set is empty" — would arrive looking
+	// like unrestricted and an apply would delete every eligible archive in
+	// scope (#5136 Codex round 5). Producers set OnlySet whenever Only was
+	// given, empty or not; the daemon evaluates provided-ness as
+	// `OnlySet || Only != nil`, so transports that can distinguish nil from
+	// empty (HTTP JSON) still get it from the slice itself.
+	Only    []PrunePlanRef `json:"only,omitempty"`
+	OnlySet bool           `json:"only_set,omitempty"`
 }
 
 // PrunePlanRef names one session the operator confirmed for pruning. ID is
@@ -177,7 +185,14 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	if req.RepoID == "" && !req.All {
 		return resp, fmt.Errorf("a scope is required: pass repo_id for one project or all=true for every project")
 	}
-	if req.Apply && req.Only != nil && len(req.Only) == 0 {
+	// Gob cannot carry nil-vs-empty, so "was 'only' given" is a two-source
+	// answer: the slice itself on transports that preserve the distinction
+	// (HTTP JSON decodes `only: []` as non-nil), and the OnlySet bit a
+	// control-socket producer must set because its empty slice collapses to
+	// nil on the wire (#5136 Codex round 5). Failing closed means treating
+	// either as provided.
+	onlyGiven := req.OnlySet || req.Only != nil
+	if req.Apply && onlyGiven && len(req.Only) == 0 {
 		// An explicitly empty confirmed set means "the operator confirmed
 		// nothing", not "no restriction" — widening it would let a "Prune 0"
 		// answer delete whatever became eligible since the dry run (#5136
@@ -261,8 +276,8 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	skipped = append(skipped, ghosts...)
 
 	var confirmed map[string]PrunePlanRef
-	if req.Only != nil {
-		// Non-nil is the confirmed-plan contract: exactly the named rows are
+	if req.OnlySet || req.Only != nil {
+		// Provided is the confirmed-plan contract: exactly the named rows are
 		// in scope — an EMPTY set scopes to nothing rather than widening to
 		// everything, and apply rejects it at validation above.
 		confirmed = make(map[string]PrunePlanRef, len(req.Only))
@@ -570,15 +585,17 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 
 	// Uncommitted content in an archived worktree is the ONLY copy — archive
 	// relocates bytes verbatim and snapshots only on the disposable-backends
-	// path. The tombstone promises the branch survives, but the branch has no
-	// such content, so deleting here would silently destroy work the refusal
-	// claims is recoverable. Restore it or clean it first.
+	// path. IGNORED files count too: a gitignored .env exists nowhere else
+	// and the kept branch cannot restore what it never tracked (#5136 Codex
+	// round 5). The tombstone promises the branch survives, but the branch
+	// has no such content, so deleting here would silently destroy work the
+	// refusal claims is recoverable. Restore it or clean it first.
 	dirty, err := sessiongit.WorktreeDirtyFiles(wtPath)
 	if err != nil {
 		return fmt.Sprintf("could not verify %s is clean before deletion: %v", wtPath, err)
 	}
 	if dirty > 0 {
-		return fmt.Sprintf("worktree holds %d uncommitted file(s) that the kept branch does not contain — restore the session or clean the tree first", dirty)
+		return fmt.Sprintf("worktree holds %d uncommitted or ignored file(s) that the kept branch does not contain — restore the session or clean the tree first", dirty)
 	}
 	return ""
 }

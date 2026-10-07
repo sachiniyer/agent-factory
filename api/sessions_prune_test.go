@@ -246,6 +246,27 @@ func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
 	}
 }
 
+// TestSessionsPrune_RemoteTargetRequiresAll: repo scoping resolves against
+// THIS machine's checkouts — against a remote --daemon-url a repo_id hashed
+// from a local path can name a different project on the remote, and a scoped
+// prune is destructive. The command must refuse a local scope against a
+// remote target and ask for --all instead (#5136 Codex round 5).
+func TestSessionsPrune_RemoteTargetRequiresAll(t *testing.T) {
+	remoteTarget(t)
+	resetPruneFlags(t)
+	sessionsPruneOlderThanStr = "720h"
+	called := false
+	stubPruneDaemon(t, func(daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		called = true
+		return daemon.PruneSessionsResponse{}, nil
+	})
+
+	_, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--all")
+	assert.False(t, called, "a locally-derived scope must never reach the remote daemon")
+}
+
 func TestSessionsPrune_SurfacesDaemonError(t *testing.T) {
 	setupRepoForCmd(t)
 	resetPruneFlags(t)

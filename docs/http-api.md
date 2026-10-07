@@ -262,7 +262,11 @@ set); a ref carrying `id` binds the stable session identity, so a same-title
 replacement created after the plan is reported rather than pruned. An
 explicitly empty `only` list never widens to all sessions: on an `apply` it
 is rejected outright, and on a dry run it scopes to nothing — omit `only`
-entirely for an unrestricted run. `reclaimed_bytes` counts **allocated** disk
+entirely for an unrestricted run. `only_set` is the presence bit for
+transports that cannot carry nil-vs-empty (the control socket's gob codec
+collapses `only: []` to absent): clients on such transports set it whenever
+`only` was provided; JSON callers get the same semantics from the slice
+itself. `reclaimed_bytes` counts **allocated** disk
 blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
 hard-linked file is credited only when deleting the tree removes its last
 link — it is what deletion actually frees, not apparent file size. A session

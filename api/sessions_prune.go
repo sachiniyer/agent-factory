@@ -62,6 +62,14 @@ it proceeds on the flag alone.`,
 
 		var repoID string
 		if !sessionsPruneAllFlag {
+			if apiclient.IsRemoteTarget() {
+				// A repo scope is resolved by hashing a checkout path on THIS
+				// machine — against a remote daemon it can name a different
+				// project entirely (whatever the remote happens to keep at
+				// that path), and a scoped prune is destructive. Require the
+				// honest scope (#5136 Codex round 5).
+				return jsonError(fmt.Errorf("repo scoping (--repo, the current directory) resolves against this machine's checkouts, which a remote --daemon-url cannot honor — pass --all to prune the remote daemon's archives"))
+			}
 			var err error
 			repoID, err = resolveRepoID()
 			if err != nil {
@@ -113,6 +121,7 @@ it proceeds on the flag alone.`,
 			// session that became eligible while the prompt sat open could
 			// be deleted unreviewed. Rows the plan showed under skipped were
 			// not confirmed, so they stay out too.
+			req.OnlySet = true
 			req.Only = make([]daemon.PrunePlanRef, 0, len(plan.Pruned))
 			for _, entry := range plan.Pruned {
 				// ID binds the confirmed identity, not just its name: a

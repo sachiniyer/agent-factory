@@ -249,6 +249,56 @@ func TestPruneSessions_RefusesDirtyArchivedWorktree(t *testing.T) {
 	assert.True(t, inst.PrunedAt().IsZero(), "nothing was deleted, so no tombstone may be stamped")
 }
 
+// TestPruneSessions_RefusesIgnoredFile: an IGNORED file never shows in a
+// plain porcelain status yet is just as unrecoverable — a gitignored .env
+// lives nowhere but the archived worktree, and the kept branch cannot
+// restore what it never tracked (#5136 Codex round 5). The dirty gate must
+// count it.
+func TestPruneSessions_RefusesIgnoredFile(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "secret-row")
+	// Commit the ignore rule BEFORE the ignored file is written: git add -A
+	// skips ignored paths, so secret.env stays ignored-and-uncommitted and
+	// the committed rule is what the archive's status will honor.
+	require.NoError(t, os.WriteFile(filepath.Join(wtPath, ".gitignore"), []byte("secret.env\n"), 0o644))
+	commitFixtureDirty(t, wtPath)
+	require.NoError(t, os.WriteFile(filepath.Join(wtPath, "secret.env"), []byte("TOKEN=x"), 0o644))
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+
+	archivedPath, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "secret-row", RepoID: repoID})
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(archivedPath, "secret.env"))
+	time.Sleep(5 * time.Millisecond)
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "uncommitted or ignored")
+	assert.True(t, exists(filepath.Join(archivedPath, "secret.env")),
+		"the only copy of an ignored file must survive")
+	assert.True(t, inst.PrunedAt().IsZero())
+}
+
+// TestPruneSessions_OnlySetBitOnEmptyIsRejected: the gob control socket
+// collapses a non-nil EMPTY only slice to nil on the wire, so presence must
+// ride a bit that survives (#5136 Codex round 5). OnlySet with an empty list
+// is the confirmed-empty shape: apply rejects it, dry-run scopes to nothing.
+func TestPruneSessions_OnlySetBitOnEmptyIsRejected(t *testing.T) {
+	manager, repoID, _, _, archivedPath := seedPrunableArchive(t, "bit-row")
+
+	_, err := manager.PruneSessions(PruneSessionsRequest{
+		RepoID: repoID, OlderThan: "1ms", Apply: true, OnlySet: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty only")
+	assert.True(t, exists(archivedPath), "the worktree must survive a rejected apply")
+
+	dry, err := manager.PruneSessions(PruneSessionsRequest{
+		RepoID: repoID, OlderThan: "1ms", OnlySet: true})
+	require.NoError(t, err)
+	assert.Empty(t, dry.Pruned, "a confirmed-empty set scopes to nothing")
+}
+
 // TestPruneSessions_RefusesSameRepoReplacementOccupant: the repo-present
 // pointer binding alone proves only that the occupant belongs to the same
 // REPO — a different worktree of that repo parked at a recycled archived path
@@ -292,7 +342,11 @@ func TestPruneSessions_RefusesRecreatedWorktree(t *testing.T) {
 	// a clean linked worktree at the same path on the same retained branch —
 	// the exact reproduction shape the review describes.
 	require.NoError(t, os.RemoveAll(archivedPath))
-	out, err := exec.Command("git", "-C", repoPath, "worktree", "prune").CombinedOutput()
+	// --expire=now so the fresh stale registration is dropped on every git
+	// vintage — without it some versions only reap entries older than
+	// gc.worktreePruneExpire and the re-add below fails "already registered"
+	// (#5136 Codex round 5).
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "prune", "--expire=now").CombinedOutput()
 	require.NoError(t, err, string(out))
 	out, err = exec.Command("git", "-C", repoPath, "worktree", "add",
 		archivedPath, "af/rebuilt-row").CombinedOutput()
