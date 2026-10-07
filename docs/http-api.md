@@ -248,12 +248,19 @@ WOULD prune — `{ "id"?, "title", "repo_id", "branch", "archived_at",
 deletion and stamps `pruned_at` on each entry. `skipped` entries
 (`{ "title", "repo_id", "reason" }`) were evaluated and refused before
 anything was touched; `incomplete` entries started deleting but could not be
-confirmed finished and need operator attention or a re-run. `older_than` is
-required and must be a positive Go duration measured from each session's
-archive time; the request needs a scope — `repo_id` or `all: true`, which are
-mutually exclusive; and `only: [{"repo_id", "title"}…]` optionally restricts
-the run to those confirmed identities (the CLI's TTY-confirm apply sends the
-dry-run plan's set);
+confirmed finished and need operator attention or a re-run — and whenever
+`incomplete` is non-empty the response is `"ok": false` so automation does
+not read a partially applied run as done. An archived worktree still holding
+uncommitted files is **refused**, not deleted: the kept branch does not
+contain them, and they are the only copy — restore the session or clean the
+tree first. `older_than` is required and must be a positive Go duration
+measured from each session's archive time; the request needs a scope —
+`repo_id` or `all: true`, which are mutually exclusive; and
+`only: [{"repo_id", "title"}…]` optionally restricts the run to those
+confirmed identities (the CLI's TTY-confirm apply sends the dry-run plan's
+set). An explicitly empty `only` list never widens to all sessions: on an
+`apply` it is rejected outright, and on a dry run it scopes to nothing — omit
+`only` entirely for an unrestricted run;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a

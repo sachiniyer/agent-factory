@@ -69,8 +69,13 @@ type PruneSessionsRequest struct {
 	// the operator's yes covers exactly the rows the dry run showed and a
 	// session that became eligible while the prompt was open cannot be
 	// deleted unreviewed. Repo-qualified because titles collide across an
-	// --all run. Empty means unrestricted (the non-TTY apply, which
-	// intentionally plans and applies in one step).
+	// --all run. Absent/nil means unrestricted (the non-TTY apply, which
+	// intentionally plans and applies in one step). An explicitly empty list
+	// must never widen to unrestricted: apply rejects it outright, and the
+	// CLI never sends it — a TTY-confirmed empty plan returns without
+	// applying. The control socket cannot distinguish nil from empty (gob
+	// collapses them), so the apply-time rejection is what fails closed on
+	// transports that can carry the distinction.
 	Only []PrunePlanRef `json:"only,omitempty"`
 }
 
@@ -162,6 +167,13 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	if req.RepoID == "" && !req.All {
 		return resp, fmt.Errorf("a scope is required: pass repo_id for one project or all=true for every project")
 	}
+	if req.Apply && req.Only != nil && len(req.Only) == 0 {
+		// An explicitly empty confirmed set means "the operator confirmed
+		// nothing", not "no restriction" — widening it would let a "Prune 0"
+		// answer delete whatever became eligible since the dry run (#5136
+		// review). Omit 'only' entirely for an unrestricted apply.
+		return resp, fmt.Errorf("an explicitly empty only list applies to no sessions — omit 'only' for an unrestricted apply")
+	}
 
 	candidates, skipped, warnings := m.pruneCandidates(req, resp.ArchivedBefore)
 	resp.Skipped = skipped
@@ -186,7 +198,11 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 		resp.Pruned = append(resp.Pruned, entry)
 		resp.ReclaimedBytes += entry.ReclaimedBytes
 	}
-	resp.OK = true
+	// An incomplete row means deletion STARTED but could not be confirmed
+	// finished — the response must not report success for that (#5136 review):
+	// the structured Incomplete list tells the operator what needs attention,
+	// and ok=false lets the CLI exit non-zero so automation sees it.
+	resp.OK = len(resp.Incomplete) == 0
 	return resp, nil
 }
 
@@ -235,7 +251,10 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	skipped = append(skipped, ghosts...)
 
 	var confirmed map[string]bool
-	if len(req.Only) > 0 {
+	if req.Only != nil {
+		// Non-nil is the confirmed-plan contract: exactly the named rows are
+		// in scope — an EMPTY set scopes to nothing rather than widening to
+		// everything, and apply rejects it at validation above.
 		confirmed = make(map[string]bool, len(req.Only))
 		for _, ref := range req.Only {
 			confirmed[daemonInstanceKey(ref.RepoID, ref.Title)] = true
@@ -278,6 +297,14 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 			// the authoritative handle.
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID,
 				Reason: "incomplete archive — retained source trees are present and need manual review"})
+			continue
+		}
+		// The plan must read like the apply it previews (#5136 review): the
+		// same deletion-boundary refusals run here, so a foreign-path occupant
+		// or a dirty worktree shows as skipped in the dry run instead of
+		// appearing prunable and refusing only after --apply.
+		if reason := pruneFilesystemRefusal(data); reason != "" {
+			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
 			continue
 		}
 		entry := PrunedSessionEntry{
@@ -372,31 +399,15 @@ func (m *Manager) pruneOneSession(cand pruneCandidate, cutoff time.Time) ([]stri
 	}
 	wtPath := live.Worktree.WorktreePath
 
-	// Verify the path still names THIS session's worktree before letting
-	// rm -rf near it: out-of-band moves leave the record's pathname free for
-	// an unrelated replacement directory, and the record's say-so is not
-	// identity. A missing path needs no proof — there is nothing to delete
-	// (RemoveWorktreeDir still clears the stale registration below). This is
-	// the same bidirectional evidence the kill path requires (#3278): the
-	// repo-present check binds the occupant's `.git` pointer into this
-	// origin's metadata AND the registration's backpointer back to the
-	// occupant; the repo-gone check requires the archive's own
-	// linked-worktree pointer shape.
-	if _, statErr := os.Stat(wtPath); statErr == nil {
-		var verifyErr error
-		switch probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath); {
-		case probeErr == nil:
-			verifyErr = sessiongit.VerifyRegisteredWorktreeOccupant(wtPath, repoPath)
-		case errors.Is(probeErr, sessiongit.ErrRepoGone):
-			verifyErr = sessiongit.VerifyArchivedWorktreePointer(wtPath)
-		default:
-			verifyErr = fmt.Errorf("could not establish whether repo %s is present: %w", repoPath, probeErr)
-		}
-		if verifyErr != nil {
-			return warnings, false, fmt.Errorf("refusing to delete %s: it could not be verified as this session's worktree: %w", wtPath, verifyErr)
-		}
-	} else if !os.IsNotExist(statErr) {
-		return warnings, false, fmt.Errorf("could not inspect %s before deletion: %w", wtPath, statErr)
+	// Re-run the deletion-boundary refusals under the claim — the same checks
+	// the scan ran, now authoritative against the current record in the
+	// window the op-lock wait and claim opened: the path's occupant must
+	// still verify as THIS session's worktree (not merely a linked worktree
+	// of the right repo — a same-repo replacement parked at a recycled path
+	// is another session's checkout), and it must carry no uncommitted work,
+	// which the tombstone's kept-branch promise does not cover.
+	if reason := pruneFilesystemRefusal(live); reason != "" {
+		return warnings, false, errors.New(reason)
 	}
 
 	if _, err := sessiongit.RemoveWorktreeDir(repoPath, wtPath); err != nil {
@@ -478,6 +489,72 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 		}
 	}
 	return skipped, warnings
+}
+
+// pruneFilesystemRefusal runs the deletion-boundary refusals the record alone
+// cannot express — worktree identity and uncommitted content — and returns ""
+// only when the path is provably safe for rm -rf. The scan calls it so the
+// plan reads like the apply it previews; pruneOneSession re-runs it under the
+// operation lock and killsInFlight claim, where its answer is authoritative.
+//
+// Every probe is bounded (BoundedLstat, the pointer-check flights, the bounded
+// git runner): the apply caller holds the per-session operation lock, and a
+// plain os.Stat on a stalled FUSE/NFS mount would wedge the lock, the claim,
+// and every later candidate forever (#5136 review).
+//
+// A missing path needs no identity proof — there is nothing to delete, and
+// RemoveWorktreeDir still clears the stale registration. A repo-gone
+// worktree cannot be asked whether it is dirty (its .git pointer is dead),
+// and its branch is already gone with the repo, so the kept-branch promise is
+// moot there; the pointer-for-repo binding is the check that remains.
+func pruneFilesystemRefusal(data session.InstanceData) string {
+	repoPath := data.Worktree.RepoPath
+	if repoPath == "" {
+		repoPath = data.Path
+	}
+	wtPath := data.Worktree.WorktreePath
+	if _, err := sessiongit.BoundedLstat(wtPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ""
+		}
+		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, err)
+	}
+
+	repoPresent := true
+	switch probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath); {
+	case probeErr == nil:
+		// Repo-present: the same bidirectional evidence the kill path requires
+		// (#3278), PLUS the occupant's registered branch — the pointer alone
+		// proves only same-repo membership, and a different session's worktree
+		// parked at this recycled path would pass it (#5136 review).
+		if err := sessiongit.VerifyRegisteredWorktreeOccupantBranch(wtPath, repoPath, pruneBranchFor(data)); err != nil {
+			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
+		}
+	case errors.Is(probeErr, sessiongit.ErrRepoGone):
+		repoPresent = false
+		if err := sessiongit.VerifyArchivedWorktreePointerForRepo(wtPath, repoPath); err != nil {
+			return fmt.Sprintf("%s could not be verified as this session's worktree: %v", wtPath, err)
+		}
+	default:
+		return fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
+	}
+
+	if !repoPresent {
+		return ""
+	}
+	// Uncommitted content in an archived worktree is the ONLY copy — archive
+	// relocates bytes verbatim and snapshots only on the disposable-backends
+	// path. The tombstone promises the branch survives, but the branch has no
+	// such content, so deleting here would silently destroy work the refusal
+	// claims is recoverable. Restore it or clean it first.
+	dirty, err := sessiongit.WorktreeDirtyFiles(wtPath)
+	if err != nil {
+		return fmt.Sprintf("could not verify %s is clean before deletion: %v", wtPath, err)
+	}
+	if dirty > 0 {
+		return fmt.Sprintf("worktree holds %d uncommitted file(s) that the kept branch does not contain — restore the session or clean the tree first", dirty)
+	}
+	return ""
 }
 
 // pruneBranchFor resolves the branch the tombstone promises to keep. Branch is

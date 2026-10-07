@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// commitFixtureDirty commits the uncommitted file registerArchivable writes,
+// so the resulting worktree is CLEAN at archive time. Prune refuses an
+// archived worktree that still carries uncommitted content — it is the only
+// copy, and the kept branch does not contain it (#5136 review) — so every
+// fixture that wants a prunable row needs this first.
+func commitFixtureDirty(t *testing.T, wtPath string) {
+	t.Helper()
+	out, err := exec.Command("git", "-C", wtPath, "add", "-A").CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", wtPath, "-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-qm", "commit fixture content").CombinedOutput()
+	require.NoError(t, err, string(out))
+}
+
 // seedPrunableArchive registers a session and archives it for real — the same
 // fixture the archive tests use — then lets the stamped archive time age past
 // the smallest admissible cutoff ("1ms"), which a 5ms sleep buys without
@@ -22,7 +37,8 @@ import (
 func seedPrunableArchive(t *testing.T, title string) (*Manager, string, string, *session.Instance, string) {
 	t.Helper()
 	manager, repoID, repoPath := newStatusTestManager(t)
-	inst, _ := registerArchivable(t, manager, repoID, repoPath, title)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, title)
+	commitFixtureDirty(t, wtPath)
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 
 	archivedPath, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: title, RepoID: repoID})
@@ -124,14 +140,27 @@ func TestPruneSessions_SkipsIneligibleRows(t *testing.T) {
 	// An archived row old enough to take the cutoff — seeded FIRST because
 	// ArchiveSession refreshes the in-memory map from disk, and the test
 	// helpers rewrite the repo file with only the row they register.
-	oldInst, _ := registerArchivable(t, manager, repoID, repoPath, "old-row")
+	oldInst, oldWt := registerArchivable(t, manager, repoID, repoPath, "old-row")
+	commitFixtureDirty(t, oldWt)
 	oldInst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "old-row", RepoID: repoID})
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond)
 
-	// A live row in the same repo, registered after the archive refresh.
-	registerStarted(t, manager, repoID, repoPath, "live-row", session.NewFakeBackend(), true, session.Running)
+	// A live row in the same repo, registered after the archive refresh —
+	// in m.instances ONLY. registerStarted's seedDiskInstance REWRITES the
+	// repo file with just the row it registers, which would evict old-row's
+	// durable record: prune would then delete the worktree but fail the
+	// tombstone persist (no title on disk) and report incomplete (#5136
+	// review).
+	liveInst, err := session.NewInstance(session.InstanceOptions{Title: "live-row", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	liveInst.SetBackend(session.NewFakeBackend())
+	liveInst.SetStartedForTest(true)
+	liveInst.SetStatusForTest(session.Running)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "live-row")] = liveInst
+	manager.mu.Unlock()
 
 	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
 	require.NoError(t, err)
@@ -188,6 +217,108 @@ func TestPruneSessions_RefusesRecycledPathOccupant(t *testing.T) {
 	assert.True(t, exists(filepath.Join(archivedPath, "sub", "keep.txt")),
 		"the foreign occupant must be left untouched")
 	assert.True(t, inst.PrunedAt().IsZero(), "nothing was deleted, so no tombstone may be stamped")
+}
+
+// TestPruneSessions_RefusesDirtyArchivedWorktree: the tombstone promises only
+// the branch survives, and the local archive relocates bytes verbatim — so
+// uncommitted content in the archived worktree is the ONLY copy, and deleting
+// it while pointing the user at the branch would silently destroy work the
+// refusal claims is recoverable (#5136 review). Prune must refuse, at BOTH
+// the plan and the apply boundary, until the work is committed or the session
+// restored.
+func TestPruneSessions_RefusesDirtyArchivedWorktree(t *testing.T) {
+	manager, repoID, _, inst, archivedPath := seedPrunableArchive(t, "dirty-row")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(archivedPath, "uncommitted.txt"), []byte("the only copy"), 0o644))
+
+	// The dry run previews exactly what apply would do — a dirty worktree is a
+	// refusal in the plan, not a surprise after confirmation.
+	dry, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms"})
+	require.NoError(t, err)
+	require.Empty(t, dry.Pruned)
+	require.Len(t, dry.Skipped, 1)
+	assert.Contains(t, dry.Skipped[0].Reason, "uncommitted")
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "uncommitted")
+	assert.True(t, exists(filepath.Join(archivedPath, "uncommitted.txt")),
+		"the uncommitted file is the only copy — it must survive")
+	assert.True(t, inst.PrunedAt().IsZero(), "nothing was deleted, so no tombstone may be stamped")
+}
+
+// TestPruneSessions_RefusesSameRepoReplacementOccupant: the repo-present
+// pointer binding alone proves only that the occupant belongs to the same
+// REPO — a different worktree of that repo parked at a recycled archived path
+// satisfies it. Deleting on that evidence destroys another session's
+// checkout, so the occupant's registered branch must also match this
+// session's recorded branch (#5136 Codex round 2).
+func TestPruneSessions_RefusesSameRepoReplacementOccupant(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath := seedPrunableArchive(t, "replaced-row")
+
+	// The real archive is gone and a same-repo worktree on a DIFFERENT branch
+	// now occupies its recorded path — exactly the replacement scenario.
+	require.NoError(t, os.RemoveAll(archivedPath))
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "add",
+		"-b", "af/someone-else", archivedPath).CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(archivedPath, "keep.txt"), []byte("another session's checkout"), 0o644))
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "could not be verified")
+	assert.True(t, exists(filepath.Join(archivedPath, "keep.txt")),
+		"the replacement worktree is not this session's — it must be left untouched")
+	assert.True(t, inst.PrunedAt().IsZero())
+}
+
+// TestPruneSessions_EmptyOnlyApplyRejected: the confirmed-plan binding uses a
+// present 'only' list, and an explicitly EMPTY one can never widen to an
+// unrestricted delete — a TTY "Prune 0" answer or an empty API list applies
+// to no sessions (#5136 Codex round 2).
+func TestPruneSessions_EmptyOnlyApplyRejected(t *testing.T) {
+	manager, repoID, _, _, archivedPath := seedPrunableArchive(t, "guard-row")
+
+	_, err := manager.PruneSessions(PruneSessionsRequest{
+		RepoID: repoID, OlderThan: "1ms", Apply: true, Only: []PrunePlanRef{}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty only")
+	assert.True(t, exists(archivedPath), "the worktree must survive a rejected apply")
+
+	// The same empty list on a dry run is restrict-to-nothing, not widen-to-all.
+	dry, err := manager.PruneSessions(PruneSessionsRequest{
+		RepoID: repoID, OlderThan: "1ms", Only: []PrunePlanRef{}})
+	require.NoError(t, err)
+	assert.Empty(t, dry.Pruned, "an empty confirmed set scopes to nothing")
+}
+
+// TestPruneSessions_IncompleteApplyReportsNotOK: a deletion that STARTED but
+// could not be confirmed finished must not report success — automation reads
+// the exit status, and ok=false is what carries "needs attention" through it
+// (#5136 review). The marker rollback also keeps the row eligible so the
+// prescribed re-run can finish the tombstone.
+func TestPruneSessions_IncompleteApplyReportsNotOK(t *testing.T) {
+	manager, repoID, _, inst, archivedPath := seedPrunableArchive(t, "partial-row")
+
+	prev := testHookPersistInstanceData
+	testHookPersistInstanceData = func(string, session.InstanceData) error {
+		return errors.New("disk full")
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "1ms", Apply: true})
+	require.NoError(t, err)
+	assert.False(t, resp.OK, "a partially-finished deletion must not report success")
+	require.Empty(t, resp.Pruned)
+	require.Len(t, resp.Incomplete, 1)
+	assert.Contains(t, resp.Incomplete[0].Reason, "disk full")
+	assert.False(t, exists(archivedPath), "the files did delete — incomplete means the tombstone is owed")
+	assert.True(t, inst.PrunedAt().IsZero(), "the rolled-back marker keeps the row retryable")
 }
 
 // TestPruneSessions_ConcurrentArchiveIsSkipped: a session mid-archive (its

@@ -157,6 +157,39 @@ func TestSessionsPrune_ApplyRunsPlanThenApply(t *testing.T) {
 	assert.Contains(t, parsed["pruned"].([]any)[0].(map[string]any), "pruned_at")
 }
 
+// TestSessionsPrune_ApplyIncompleteExitsNonZero: a response whose deletion
+// started but could not be confirmed finished is a failure outcome — the
+// structured accounting still lands on stdout, but the command exits non-zero
+// so scripts do not read a partially-applied prune as done (#5136 review).
+func TestSessionsPrune_ApplyIncompleteExitsNonZero(t *testing.T) {
+	setupRepoForCmd(t)
+	resetPruneFlags(t)
+	sessionsPruneOlderThanStr = "720h"
+	sessionsPruneApplyFlag = true
+
+	stubPruneDaemon(t, func(req daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		if !req.Apply {
+			return dryPlan(), nil
+		}
+		resp := dryPlan()
+		resp.Applied = true
+		resp.OK = false
+		resp.Pruned = nil
+		resp.Incomplete = []daemon.PruneSkippedEntry{{
+			Title: "old", RepoID: "repo-a", Reason: "tombstone write failed",
+		}}
+		return resp, nil
+	})
+
+	out, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.Error(t, err, "an incomplete apply must exit non-zero")
+	assert.Contains(t, err.Error(), "incomplete")
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, false, parsed["ok"], "the full accounting still reaches stdout")
+	assert.Contains(t, parsed, "incomplete")
+}
+
 func TestSessionsPrune_SurfacesDaemonError(t *testing.T) {
 	setupRepoForCmd(t)
 	resetPruneFlags(t)

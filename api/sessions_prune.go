@@ -91,6 +91,16 @@ it proceeds on the flag alone.`,
 		}
 
 		if term.IsTerminal(int(os.Stdin.Fd())) {
+			if len(plan.Pruned) == 0 {
+				// Nothing was confirmed, so return without applying rather
+				// than prompt for an empty plan. The daemon cannot tell an
+				// explicitly empty 'only' from "unrestricted" over the gob
+				// control socket, so the binding must never carry it
+				// (#5136 review) — the apply answer is the dry-run result
+				// with the request honored.
+				plan.Applied = true
+				return jsonOut(plan)
+			}
 			ok, err := confirmPruneApply(cmd.ErrOrStderr(), os.Stdin, plan)
 			if err != nil {
 				return jsonError(err)
@@ -113,7 +123,16 @@ it proceeds on the flag alone.`,
 		if err != nil && !apiclient.IsMutationCommitted(err) {
 			return jsonError(err)
 		}
-		return jsonOut(resp)
+		if err := jsonOut(resp); err != nil {
+			return err
+		}
+		// The response carries the full accounting; ok=false means some
+		// deletion STARTED but could not be confirmed finished — a failing
+		// exit status so automation does not read partial deletion as done.
+		if !resp.OK {
+			return jsonError(fmt.Errorf("prune incomplete for %d session(s) — re-run --apply to finish, or inspect them manually", len(resp.Incomplete)))
+		}
+		return nil
 	},
 }
 
