@@ -647,10 +647,17 @@ the current completed run rather than ordering check and publication clocks.
 Missing or malformed legacy evidence is reconciled conservatively once.
 
 **A pass does not depend on the schedule (#4571).** The `*/5` schedule still
-starts passes, but GitHub has delivered it every two to five hours. Every other
+starts passes, but GitHub has delivered it every two to five hours — measured
+at 30 fires in 6.6 days against ~288 expected per day (#5179). Every other
 Auto Gate run therefore ends by requesting a pass: it sends one
 `repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
-the same pass the schedule runs. Two guards bound this:
+the same pass the schedule runs. A PR Validation run ends the same way
+(#5179): its last job POSTs the dispatch itself — a synchronous API write
+inside the run whose completion is at risk, so a dropped `workflow_run`
+delivery cannot strand the decision that completion should have refreshed —
+and its POST is a warning on failure, never a silent skip. Fork and Dependabot
+`pull_request` runs carry read-only tokens and cannot POST, so the job skips
+them outright and `workflow_run` remains their wakeup. Two guards bound this:
 
 - **No open-ended recursion.** A pass requests a pass only as a handoff: when
   it saw work at all — leftovers its bounded wait could not finish or the caps

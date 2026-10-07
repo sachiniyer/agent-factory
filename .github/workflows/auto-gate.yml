@@ -56,17 +56,22 @@ on:
   workflow_run:
     workflows: [PR Validation]
     types: [completed]
-  # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
-  # only stale decisions that name a PR Validation blocker; one paginated query
-  # batches PR heads/check rollups and at most ten reevaluations start (#4242).
-  # GitHub delivers this schedule every two to five hours, not every five minutes
-  # (#4571), so it is only the backstop. Every other run requests the same pass as
-  # the repository_dispatch below, at most once per five minutes. A pass retains
-  # work it sees too young to select, re-scanning inside its own run until it
-  # matures or resolves, and requests one successor whenever it saw work at all:
-  # unmet leftovers are owed a wakeup, and selected work is applied by
-  # apply-gate — a queued job the platform can still cancel — so a pass that
-  # selected anything hands its own lane to one follower too (#5160).
+  # GitHub has intermittently omitted that terminal workflow_run event (#5179:
+  # 64 of 381 PR Validation completions over Oct 1–7 had no gate run within ten
+  # minutes, clustered under load). Reconcile only stale decisions that name a
+  # PR Validation blocker; one paginated query batches PR heads/check rollups
+  # and at most ten reevaluations start (#4242). GitHub delivers this schedule
+  # every two to five hours, not every five minutes (#4571), so it is the last
+  # backstop. Ahead of it, a PR Validation run requests the same pass itself
+  # when it ends (#5179): a synchronous dispatch POST inside the run whose
+  # completion is at risk, which event fan-out drops cannot lose. Every other
+  # run requests the same pass as the repository_dispatch below, at most once
+  # per five minutes. A pass retains work it sees too young to select,
+  # re-scanning inside its own run until it matures or resolves, and requests
+  # one successor whenever it saw work at all: unmet leftovers are owed a
+  # wakeup, and selected work is applied by apply-gate — a queued job the
+  # platform can still cancel — so a pass that selected anything hands its own
+  # lane to one follower too (#5160).
   schedule:
     - cron: "*/5 * * * *"
   repository_dispatch:
