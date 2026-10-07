@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 // pidLooksAlive returns true when signal 0 to pid succeeds AND the kernel
@@ -50,39 +52,19 @@ func pidLooksAlive(pid int) bool {
 	return true
 }
 
-// processStartToken identifies one incarnation of pid by its start time, so a
+// processStartToken identifies one incarnation of pid by its start stamp, so a
 // wait that outlives the process can tell "still the daemon" from "the PID was
-// recycled to something else" (#5007). On Linux it is /proc/<pid>/stat field
-// 22 (starttime in clock ticks), read after the LAST ')' because comm may
-// itself contain spaces and parentheses; on macOS it is `ps -o lstart=`.
-// Returns "" when the start time cannot be observed (the process is gone,
+// recycled to something else" (#5007). It is proctree's StartID — the same
+// stamp the identity-checked signal path binds to (Linux: /proc/<pid>/stat
+// field 22; darwin: kinfo_proc's p_starttime) — compared for equality only.
+// Returns "" when it cannot be observed (the process is gone or a zombie,
 // another platform, a read failure) — callers then rely on liveness alone.
 func processStartToken(pid int) string {
-	switch runtime.GOOS {
-	case "linux":
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if err != nil {
-			return ""
-		}
-		stat := string(data)
-		i := strings.LastIndexByte(stat, ')')
-		if i < 0 {
-			return ""
-		}
-		// Fields after comm start at field 3 (state), so field 22 is index 19.
-		fields := strings.Fields(stat[i+1:])
-		if len(fields) < 20 {
-			return ""
-		}
-		return fields[19]
-	case "darwin":
-		out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(out))
+	proc, err := proctree.Lookup(pid)
+	if err != nil || proc.StartID == 0 {
+		return ""
 	}
-	return ""
+	return strconv.FormatUint(proc.StartID, 10)
 }
 
 // processStartTokenFn is processStartToken, indirected so a test can simulate
