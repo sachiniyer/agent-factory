@@ -35,7 +35,7 @@ func (s *controlServer) deleteProject(ctx context.Context, req DeleteProjectRequ
 	// one the caller is running inside when it deletes its own project.
 	// Register the kernel-verified requester so that teardown spares the
 	// process blocked on this reply (#5182).
-	defer s.trackTeardownRequester(ctx)()
+	defer s.trackTeardownRequester(ctx, resp)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}

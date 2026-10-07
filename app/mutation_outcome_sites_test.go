@@ -120,7 +120,7 @@ func TestHandoffDone_UncertainOutcomeIsNotAFailure(t *testing.T) {
 		t.Cleanup(SetHandoffRunnerForTest(func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 			return daemon.HandoffSessionResponse{}, err
 		}))
-		msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: "codex"})().(handoffDoneMsg)
+		msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: "codex"}, false)().(handoffDoneMsg)
 		_, _ = h.handleHandoffDone(msg)
 		return h
 	}

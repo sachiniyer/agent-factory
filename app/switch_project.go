@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
@@ -613,8 +614,17 @@ func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) 
 // deleteProjectCmd runs the daemon archive-then-remove off the event loop
 // (#1735), mirroring archiveInstanceCmd, and reports completion.
 func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
+	// Deleting the project this TUI's own session belongs to takes its tty with
+	// it — shield that case; a different project's teardown cannot reach it
+	// (#5182).
+	mayHitSelf := msg.repoID == m.repoID
 	return func() tea.Msg {
-		resp, err := deleteProjectThroughDaemon(msg.root, msg.repoID)
+		var resp daemon.DeleteProjectResponse
+		err := withTeardownHangupShield(mayHitSelf, func() error {
+			var e error
+			resp, e = deleteProjectThroughDaemon(msg.root, msg.repoID)
+			return e
+		})
 		return projectDeletedMsg{
 			root:     msg.root,
 			repoID:   msg.repoID,

@@ -67,7 +67,7 @@ func (s *controlServer) handoffSession(ctx context.Context, req HandoffSessionRe
 	// closeTabForDestructiveTeardown), which reaps the caller's own pane tree
 	// when the request came from inside the session — register the
 	// kernel-verified requester so that teardown spares it (#5182).
-	defer s.trackTeardownRequester(ctx)()
+	defer s.trackTeardownRequester(ctx, resp)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}

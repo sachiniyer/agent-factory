@@ -117,7 +117,7 @@ func (cs *controlServer) configAssistantDeleteHandler(w http.ResponseWriter, r *
 	// the caller still blocked on this response. The unregister parks on the
 	// per-request queue withTeardownReplyDrain installed and runs once the
 	// reply has been flushed.
-	defer cs.trackTeardownRequester(r.Context())()
+	defer cs.trackTeardownRequester(r.Context(), nil)()
 	if err := cs.manager.configAssistants.reap(); err != nil {
 		writeHTTPError(w, r, http.StatusInternalServerError, err)
 		return

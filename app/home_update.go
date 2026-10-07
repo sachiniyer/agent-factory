@@ -246,7 +246,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.resolveSessionActionTarget(msg.target) == nil {
 			return m, nil
 		}
-		return m, m.handoffCmd(msg.request)
+		return m, m.handoffCmd(msg.request, teardownMayHitOwnTTY(msg.target.tmuxName))
 	case handoffDoneMsg:
 		return m.handleHandoffDone(msg)
 	case instanceRestoredMsg:

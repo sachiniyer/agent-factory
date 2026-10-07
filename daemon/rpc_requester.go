@@ -28,15 +28,20 @@ type httpPeerRequesterContextKey struct{}
 type teardownReplyPendingContextKey struct{}
 
 // pendingUntracks holds requester unregistrations until the transport has
-// provably finished with the reply, then runs them. The two drains: a control
-// connection's ServeConn return — net/rpc serializes the reply inside the
-// connection's lifetime, and a client only closes after reading or dying — and
-// an HTTP request's response flush in rpcHandlerCtx. add() after drain runs
-// inline, so an unregister posted by a still-finishing handler goroutine never
-// dangles.
+// provably finished with the reply, then runs them. Keyed entries are parked
+// under the reply pointer their handler filled — net/rpc hands that same
+// pointer to WriteResponse, so a response can only release the exemption the
+// exact call that created it is waiting on (a Ping, a decode-rejected request,
+// or a teardown call refused before it ever registered pops nothing). Unkeyed
+// entries ride the HTTP per-request queue and are drained wholesale by
+// rpcHandlerCtx after the reply flush. Close/drain after the connection dies
+// releases whatever is left: a reply the client will never read must not
+// exempt the requester forever. add/addFor after drain runs inline, so an
+// unregister posted by a still-finishing handler goroutine never dangles.
 type pendingUntracks struct {
 	mu      sync.Mutex
 	drained bool
+	keyed   map[any]func()
 	fns     []func()
 }
 
@@ -51,20 +56,32 @@ func (p *pendingUntracks) add(f func()) {
 	p.mu.Unlock()
 }
 
-// pop runs the oldest parked unregister — one per successfully written reply
-// (gobServerCodec.WriteResponse). Parked entries are fungible decrements of
-// the same refcounted (pid, start-stamp) identity, so FIFO order is the count
-// that matters: N replies written releases N registrations.
-func (p *pendingUntracks) pop() {
+func (p *pendingUntracks) addFor(key any, f func()) {
 	p.mu.Lock()
-	if len(p.fns) == 0 {
+	if p.drained {
 		p.mu.Unlock()
+		f()
 		return
 	}
-	f := p.fns[0]
-	p.fns = p.fns[1:]
+	if p.keyed == nil {
+		p.keyed = make(map[any]func())
+	}
+	p.keyed[key] = f
 	p.mu.Unlock()
-	f()
+}
+
+// releaseFor runs the unregister parked under key — the reply pointer the
+// owning handler filled and the transport just wrote (#5182).
+func (p *pendingUntracks) releaseFor(key any) {
+	p.mu.Lock()
+	f, ok := p.keyed[key]
+	if ok {
+		delete(p.keyed, key)
+	}
+	p.mu.Unlock()
+	if ok {
+		f()
+	}
 }
 
 func (p *pendingUntracks) drain() {
@@ -72,8 +89,13 @@ func (p *pendingUntracks) drain() {
 	p.drained = true
 	fns := p.fns
 	p.fns = nil
+	keyed := p.keyed
+	p.keyed = nil
 	p.mu.Unlock()
 	for _, f := range fns {
+		f()
+	}
+	for _, f := range keyed {
 		f()
 	}
 }
@@ -113,6 +135,12 @@ func rpcRequester(ctx context.Context) string {
 
 // trackTeardownRequester registers this call's kernel-verified requester
 // process for the handler's duration and returns the unregister (#5182).
+// replyKey is the handler's reply pointer; on a control connection the parked
+// unregister is keyed by it so ONLY the transport write of this call's own
+// response releases the exemption — a multiplexed sibling response can never
+// free a registration its call is still queued behind. HTTP callers pass nil:
+// their per-request queue drains wholesale after the flush, which is already
+// scoped to this call.
 //
 // The identity comes from the connection, never from request fields: on the
 // control socket the accept loop resolved SO_PEERCRED/LOCAL_PEERPID's pid to a
@@ -128,7 +156,7 @@ func rpcRequester(ctx context.Context) string {
 // exemption. Anything that could not produce a verified identity — a read
 // failure, an unsupported platform, a peer already gone at accept — carries
 // no requester, which is exactly the pre-#5182 behavior.
-func (s *controlServer) trackTeardownRequester(ctx context.Context) func() {
+func (s *controlServer) trackTeardownRequester(ctx context.Context, replyKey any) func() {
 	requester := s.requester
 	if requester == nil {
 		requester, _ = ctx.Value(httpPeerRequesterContextKey{}).(*proctree.Process)
@@ -142,11 +170,12 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context) func() {
 	// concurrent teardown's signal tier could land in that gap and kill the
 	// requester while its answer is still queued (Codex on #5186). The commit
 	// therefore parks the unregister on whichever completion the transport
-	// exposes rather than running it here — the connection's ServeConn return
-	// for net/rpc, the response flush for HTTP — so the registration outlives
-	// the reply itself, not a guess about how long the write takes. With no
-	// such hook (a unit test driving a handler directly), the unregister runs
-	// at once: the pre-#5182 boundary.
+	// exposes rather than running it here — keyed by this call's reply pointer
+	// for net/rpc (gobServerCodec.WriteResponse releases only that entry), the
+	// response flush for HTTP — so the registration outlives the reply itself,
+	// not a guess about how long the write takes. With no such hook (a unit
+	// test driving a handler directly), the unregister runs at once: the
+	// pre-#5182 boundary.
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -155,7 +184,7 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context) func() {
 				return
 			}
 			if s.pendingReplies != nil {
-				s.pendingReplies.add(untrack)
+				s.pendingReplies.addFor(replyKey, untrack)
 				return
 			}
 			untrack()

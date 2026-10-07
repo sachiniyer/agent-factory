@@ -276,7 +276,10 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 	}
 
 	target := captureSessionActionTarget(inst, m.repoID)
-	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
+	mayHitSelf := teardownMayHitOwnTTY(inst.TabTmuxName(idx))
+	if err := withTeardownHangupShield(mayHitSelf, func() error {
+		return closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName))
+	}); err != nil {
 		// A close that may have landed is not dropped locally or reported as
 		// refused (#4824): the next snapshot removes the tab if it is gone.
 		if mutationMayHaveLanded(err) {

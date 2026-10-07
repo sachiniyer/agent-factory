@@ -253,11 +253,18 @@ type handoffDoneMsg struct {
 	err         error
 }
 
-// handoffCmd runs the daemon handoff off the event loop.
-func (m *home) handoffCmd(request daemon.HandoffSessionRequest) tea.Cmd {
+// handoffCmd runs the daemon handoff off the event loop. mayHitSelf says the
+// retired session could be the one this TUI runs inside — the SIGHUP-shield
+// question (#5182).
+func (m *home) handoffCmd(request daemon.HandoffSessionRequest, mayHitSelf bool) tea.Cmd {
 	handoff := handoffSessionThroughDaemon
 	return func() tea.Msg {
-		response, err := handoff(request)
+		var response daemon.HandoffSessionResponse
+		err := withTeardownHangupShield(mayHitSelf, func() error {
+			var e error
+			response, e = handoff(request)
+			return e
+		})
 		if err != nil {
 			log.ErrorLog.Printf("could not hand session %q off to %s: %v", request.Title, request.To, err)
 		}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -11,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/hangupshield"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -66,25 +69,39 @@ var withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
 	return callDaemonHTTP(fn, mutationCallRetryable)
 }
 
-// withDaemonTeardownMutation is withDaemonHTTPMutation for a mutation that can
-// tear down the very pane this TUI runs in — kill, archive, close-tab,
-// delete-project, account swap, resume-from-limit — so tmux closing the pty
-// SIGHUPs the whole tty session while the reply is still in flight (#5182).
-// The daemon spares its requester from its own reapers, but it cannot shield
-// this process from its own terminal dying; holding the hangup for the call's
-// duration is what lets the TUI read the answer it asked for (Codex on
-// #5186). Non-teardown mutations stay unshielded: masking a real terminal
-// hangup during e.g. session create would strand a running TUI against a dead
-// tty with no reply to show for it. A detached caller has no controlling tty
-// and nothing arrives to catch.
-var withDaemonTeardownMutation = func(fn func(*apiclient.Client) error) error {
-	// A remote-target teardown kills remote panes, never this TUI's own tty —
-	// there the shield would only swallow a real local hangup (Codex on #5186).
-	if apiclient.IsRemoteTarget() {
-		return withDaemonHTTPMutation(fn)
+// teardownMayHitOwnTTY reports whether tearing down the tmux session family
+// rooted at targetTmuxName can hang up THIS TUI's tty — i.e. the target's main
+// session or one of its tab sessions is the pane this TUI runs inside (a TUI
+// nested in a shell tab carries that tab's AF_SESSION; killing the session
+// takes every tab with it). Unknown identity answers true: an unprovable
+// disjoint set is not disjoint (#5182, Codex on #5186).
+func teardownMayHitOwnTTY(targetTmuxName string) bool {
+	own := os.Getenv(sessiontmux.EnvMarkerSession)
+	if own == "" || targetTmuxName == "" {
+		return true
 	}
-	defer hangupshield.Hold()()
-	return withDaemonHTTPMutation(fn)
+	// "__" is session.tmuxTabSeparator — a tab's tmux name is its session's
+	// name plus "__" plus the tab name.
+	return own == targetTmuxName || strings.HasPrefix(own, targetTmuxName+"__")
+}
+
+// withTeardownHangupShield holds SIGHUP non-terminating across fn when the
+// teardown it issues can close this TUI's own tty — killing or archiving the
+// session it runs in, closing the tab it runs in, deleting its project — so
+// tmux closing the pty hangs up the process while the reply is still in
+// flight (#5182). The daemon spares its requester from its own reapers, but
+// cannot shield this process from its own terminal dying; holding the hangup
+// for the call's duration is what lets the TUI read the answer it asked for.
+// The shield applies ONLY when mayHitSelf: swallowing a real terminal hangup
+// during an unrelated mutation would strand a headless TUI for up to the call
+// timeout (Bubble Tea treats input EOF as read-loop completion, not a quit —
+// Codex on #5186). A remote-target teardown kills remote panes, never this
+// tty, so it stays unshielded too.
+func withTeardownHangupShield(mayHitSelf bool, fn func() error) error {
+	if mayHitSelf && !apiclient.IsRemoteTarget() {
+		defer hangupshield.Hold()()
+	}
+	return fn()
 }
 
 // callDaemonHTTP is the shared body of withDaemonHTTP and withDaemonHTTPMutation:
@@ -227,7 +244,7 @@ var errDaemonUnresponsive = errors.New("daemon did not respond")
 var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), killRPCTimeout)
 	defer cancel()
-	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.KillSession(ctx, request)
 	})
 	// A deadline here means the daemon took the request and went quiet, so this
@@ -248,7 +265,7 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 // test suite can stub them without dialing a real daemon.
 var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
 	var path string
-	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		path, e = c.ArchiveSession(request)
 		return e
@@ -272,7 +289,7 @@ var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (st
 // A package var so the app test suite can stub it without dialing a real daemon.
 var deleteProjectThroughDaemon = func(repoRoot, repoID string) (daemon.DeleteProjectResponse, error) {
 	var resp daemon.DeleteProjectResponse
-	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
 		resp, e = c.DeleteProject(daemon.DeleteProjectRequest{RepoPath: repoRoot, RepoID: repoID})
 		return e
@@ -314,7 +331,7 @@ var rebindProjectThroughDaemon = func(projectID, path string) (config.Project, e
 // state. A package var so the app test suite can stub it without dialing a real
 // daemon.
 var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
-	return withDaemonTeardownMutation(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		return c.ResumeFromLimit(request)
 	})
 }
@@ -337,7 +354,7 @@ var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeli
 // A package var so the app test suite can stub it without dialing a real daemon.
 var handoffSessionThroughDaemon = func(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	var response daemon.HandoffSessionResponse
-	err := withDaemonTeardownMutation(func(c *apiclient.Client) error {
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		resp, e := c.HandoffSession(req)
 		response = resp
 		if e != nil {
@@ -459,7 +476,7 @@ var createTabThroughDaemon = func(req daemon.CreateTabRequest) (daemon.CreateTab
 // which kills the tab's tmux session and persists the shrunk list. The TUI drops
 // the now-dead tab locally via Instance.DropClosedTab.
 var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
-	return withDaemonTeardownMutation(func(c *apiclient.Client) error {
+	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		_, e := c.CloseTab(request)
 		return e
 	})

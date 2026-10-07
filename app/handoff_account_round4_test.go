@@ -41,7 +41,7 @@ func TestHandoffCompletionReportsAccountPair(t *testing.T) {
 			previousURL := apiclient.FlagDaemonURL
 			apiclient.FlagDaemonURL = server.URL
 			defer func() { apiclient.FlagDaemonURL = previousURL }()
-			msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: tc.to, Account: tc.toAccount})().(handoffDoneMsg)
+			msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: tc.to, Account: tc.toAccount}, false)().(handoffDoneMsg)
 			require.NoError(t, msg.err)
 			h.handleHandoffDone(msg)
 			require.Equal(t, tc.want, h.errBox.FullError())
@@ -55,7 +55,7 @@ func TestHandoffCommittedWarningRetainsResolvedIdentity(t *testing.T) {
 		return daemon.HandoffSessionResponse{From: "claude", To: "claude", FromAccount: "work", ToAccount: "personal", HeadSHA: "abc123"}, committedHandoffNoticeError{}
 	})
 	defer restore()
-	msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: "claude", Account: "personal"})().(handoffDoneMsg)
+	msg := h.handoffCmd(daemon.HandoffSessionRequest{Title: "worker", To: "claude", Account: "personal"}, false)().(handoffDoneMsg)
 	_, _ = h.handleHandoffDone(msg)
 	require.Contains(t, h.errBox.FullError(), "settlement is pending")
 	require.Contains(t, h.errBox.FullError(), "claude (work)")

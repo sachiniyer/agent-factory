@@ -30,7 +30,7 @@ func (s *controlServer) resumeFromLimit(ctx context.Context, req ResumeFromLimit
 	// when the retry was sent from inside the session being resumed.
 	// Register the kernel-verified requester so that teardown spares the
 	// process still blocked on this reply (#5182).
-	defer s.trackTeardownRequester(ctx)()
+	defer s.trackTeardownRequester(ctx, resp)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
