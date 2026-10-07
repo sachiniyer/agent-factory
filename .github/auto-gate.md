@@ -656,7 +656,8 @@ the same pass the schedule runs. A PR Validation run ends the same way
 inside the run whose completion is at risk, so a dropped `workflow_run`
 delivery cannot strand the decision that completion should have refreshed —
 and its POST is a warning on failure, never a silent skip. Fork tokens cannot
-POST, so `workflow_run` remains their wakeup. Two guards bound this:
+POST, so the job skips fork `pull_request` events outright and `workflow_run`
+remains their wakeup. Two guards bound this:
 
 - **No open-ended recursion.** A pass requests a pass only as a handoff: when
   it saw work at all — leftovers its bounded wait could not finish or the caps

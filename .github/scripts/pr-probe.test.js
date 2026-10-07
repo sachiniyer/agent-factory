@@ -49,6 +49,10 @@ function jobs(yaml) {
 
 const PROBE_SKIP = "${{ !inputs.probe }}";
 const BUILD_IF = "always() && !inputs.probe";
+// gate-reconcile adds a fork clause to Build's shape; !inputs.probe still
+// skips it on probes (#5179).
+const GATE_RECONCILE_IF =
+  "always() && !inputs.probe && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)";
 const PROBE_NAME = /^\$\{\{ inputs\.probe && '([^']+)' \|\| '([^']+)' \}\}$/;
 
 /** The name a job reports on a PR run (probe unset). */
@@ -88,7 +92,7 @@ test("a probe runs the Linux Test job and nothing else", () => {
     changed = false;
     for (const [id, job] of all) {
       if (skipped.has(id)) continue;
-      const bySelf = job.if === PROBE_SKIP || job.if === BUILD_IF;
+      const bySelf = job.if === PROBE_SKIP || job.if === BUILD_IF || job.if === GATE_RECONCILE_IF;
       const statusFunction = /\b(always|failure|cancelled|success)\(\)/.test(job.if || "");
       const byNeed = !statusFunction && job.needs.some((need) => skipped.has(need));
       if (bySelf || byNeed) {
@@ -132,6 +136,8 @@ test("dispatch inputs reach pr.yml only through names, conditions, the group and
     /^ {4}name: \$\{\{ inputs\.probe && '[^']+' \|\| '[^']+' \}\}$/,
     /^ {4}if: \$\{\{ !inputs\.probe \}\}$/,
     /^ {4}if: always\(\) && !inputs\.probe$/,
+    // gate-reconcile adds a fork clause to Build's condition shape (#5179).
+    /^ {4}if: always\(\) && !inputs\.probe && \(github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.fork != true\)$/,
     /^ {8}if: \$\{\{ !?inputs\.probe \}\}$/,
     /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/,
     /^ {10}PROBE_(PACKAGES|RUN): \$\{\{ inputs\.(packages|run) \}\}$/,

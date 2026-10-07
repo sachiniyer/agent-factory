@@ -635,9 +635,14 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
   assert.ok(job, "pr.yml needs the gate-reconcile job that sends the dispatch");
 
   // Run-end placement and no probe cost: build needs every other job and runs
-  // always(), so needing it lands this job at the end of the run.
+  // always(), so needing it lands this job at the end of the run. Fork PRs are
+  // skipped outright: their token is read-only, so the dispatch could never
+  // land — skipping keeps the workflow_run wakeup (their only net) earliest.
   assert.equal(jobKey(job, "needs"), "[build]");
-  assert.equal(jobKey(job, "if"), "always() && !inputs.probe");
+  assert.equal(
+    jobKey(job, "if"),
+    "always() && !inputs.probe && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)",
+  );
 
   // The only write permission in the workflow, scoped to this job — and this
   // job is also the only job allowed to declare permissions at all.
@@ -670,21 +675,24 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
     [...body[1].matchAll(/"(\w+)":/g)].map((match) => match[1]).sort(),
     ["head_sha", "source_event", "source_run_id"],
   );
+  // Context references anywhere in the job — `${{ }}` expressions and bare
+  // expression keys like `if:` alike — are the whole surface that can pull
+  // event data into this job.
   const interpolated = new Set();
-  for (const expression of code.matchAll(/\$\{\{[^}]*\}\}/g)) {
-    for (const ref of expression[0].matchAll(/\b(?:github|secrets|vars|inputs|needs|steps|matrix|env)\.[\w.]+/g)) {
-      interpolated.add(ref[0]);
-    }
+  for (const ref of code.matchAll(/\b(?:github|secrets|vars|inputs|needs|steps|matrix|env)\.[\w.]+/g)) {
+    interpolated.add(ref[0]);
   }
   assert.deepEqual(
     [...interpolated].sort(),
     [
+      "github.event.pull_request.head.repo.fork",
       "github.event.pull_request.head.sha",
+      "github.event_name",
       "github.sha",
       "inputs.probe",
       "secrets.GITHUB_TOKEN",
     ],
-    "only run-derived values, the probe gate, and the token may reach this job",
+    "only run-derived values, platform booleans, the probe gate, and the token may reach this job",
   );
 });
 
