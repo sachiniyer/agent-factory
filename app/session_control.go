@@ -78,6 +78,11 @@ var withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
 // tty with no reply to show for it. A detached caller has no controlling tty
 // and nothing arrives to catch.
 var withDaemonTeardownMutation = func(fn func(*apiclient.Client) error) error {
+	// A remote-target teardown kills remote panes, never this TUI's own tty —
+	// there the shield would only swallow a real local hangup (Codex on #5186).
+	if apiclient.IsRemoteTarget() {
+		return withDaemonHTTPMutation(fn)
+	}
 	defer hangupshield.Hold()()
 	return withDaemonHTTPMutation(fn)
 }

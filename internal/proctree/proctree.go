@@ -360,7 +360,12 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, ter
 			logf(ReapUnkillable, "failed to SIGKILL surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
-	remaining := WaitForExits(survivors, time.Second)
+	// A requester spared mid-loop is still in survivors; drop it again before
+	// the final wait so its liveness is never billed as "survived SIGKILL" and
+	// handed back as a leftover a synchronous teardown would refuse to finish
+	// (#5182). The post-wait drop covers the last registration window.
+	survivors = dropExempted(survivors, exempt)
+	remaining := dropExempted(WaitForExits(survivors, time.Second), exempt)
 	for _, p := range remaining {
 		logf(ReapUnkillable, "process %d (%s) survived SIGKILL", p.PID, p.Comm)
 	}

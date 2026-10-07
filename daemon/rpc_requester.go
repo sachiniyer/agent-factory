@@ -51,6 +51,22 @@ func (p *pendingUntracks) add(f func()) {
 	p.mu.Unlock()
 }
 
+// pop runs the oldest parked unregister — one per successfully written reply
+// (gobServerCodec.WriteResponse). Parked entries are fungible decrements of
+// the same refcounted (pid, start-stamp) identity, so FIFO order is the count
+// that matters: N replies written releases N registrations.
+func (p *pendingUntracks) pop() {
+	p.mu.Lock()
+	if len(p.fns) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	f := p.fns[0]
+	p.fns = p.fns[1:]
+	p.mu.Unlock()
+	f()
+}
+
 func (p *pendingUntracks) drain() {
 	p.mu.Lock()
 	p.drained = true

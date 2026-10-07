@@ -239,7 +239,7 @@ func newHTTPMux(cs *controlServer) *http.ServeMux {
 	// spawns-or-reuses, GET streams, DELETE reaps; all behind the same auth/CORS seam.
 	mux.HandleFunc("POST /v1/config-assistant", cs.configAssistantHandler)
 	mux.HandleFunc("GET /v1/config-assistant/stream", cs.configAssistantStreamHandler)
-	mux.HandleFunc("DELETE /v1/config-assistant", cs.configAssistantDeleteHandler)
+	mux.HandleFunc("DELETE /v1/config-assistant", withTeardownReplyDrain(cs.configAssistantDeleteHandler))
 
 	// The account-login stream (#3385): the same bare-session PTY WebSocket for a
 	// login pane, which likewise has no Instance. It DOES take an account in the
@@ -362,6 +362,21 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 func flushHTTPResponse(w http.ResponseWriter) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
+	}
+}
+
+// withTeardownReplyDrain gives a non-rpcHandlerCtx handler the same
+// reply-flush-then-release seam rpcHandlerCtx gives tracked teardown calls
+// (#5182): it installs the per-request pendingUntracks the tracker's commit
+// looks for, then drains it only after the response has been flushed — so a
+// requester inside the reaped tree stays exempt for as long as it is still
+// waiting on this answer.
+func withTeardownReplyDrain(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		pending := &pendingUntracks{}
+		h(w, r.WithContext(context.WithValue(r.Context(), teardownReplyPendingContextKey{}, pending)))
+		flushHTTPResponse(w)
+		pending.drain()
 	}
 }
 

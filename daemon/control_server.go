@@ -43,9 +43,10 @@ type controlServer struct {
 	// instead (see httpPeerRequesterContextKey).
 	requester *proctree.Process
 	// pendingReplies holds this connection's requester unregistrations until
-	// ServeConn returns — after every reply the client will ever read has been
-	// written (see trackTeardownRequester, #5182). nil on the shared HTTP
-	// controlServer, where the per-request context drains instead.
+	// the reply they belong to is written (gobServerCodec.WriteResponse pops
+	// one per response; Close drains the rest — see trackTeardownRequester,
+	// #5182). nil on the shared HTTP controlServer, where the per-request
+	// context drains instead.
 	pendingReplies *pendingUntracks
 }
 
@@ -917,11 +918,14 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
 					return
 				}
-				connServer.ServeConn(conn)
-				// The connection is dead: every reply has been written (the
-				// client only closes after reading them) or will never be read
-				// (the client died). Either way the requester no longer waits
-				// on this connection — release its exemptions now (#5182).
+				// Our own codec, not ServeConn's built-in one: WriteResponse
+				// releases one parked unregister per reply written, so an
+				// exemption outlives only the response it is for — never the
+				// whole connection (Codex on #5186).
+				connServer.ServeCodec(newGobServerCodec(conn, pending))
+				// Backstop for a codec path that returned without Close: any
+				// unregister still parked is for a reply the client will never
+				// read.
 				pending.drain()
 				connectionsMu.Lock()
 				delete(connections, conn)
