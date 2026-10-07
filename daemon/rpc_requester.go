@@ -136,7 +136,12 @@ func rpcRequester(ctx context.Context) string {
 }
 
 // trackTeardownRequester registers this call's kernel-verified requester
-// process for the handler's duration and returns the unregister (#5182).
+// process for the handler's duration and returns the unregister (#5182). Only
+// KillSession and ArchiveSession call it — the two teardown verbs behind all
+// measured #5182 cases; handoff, resume-from-limit, project delete,
+// config-agent reap, and tab-close are the same exposure and land in #5193,
+// which this seam is already shaped for (register + pointer arg + ctx route).
+//
 // requestKey is the handler's request pointer — the argv value net/rpc decoded
 // for this call; on a control connection the parked unregister is keyed by it
 // so ONLY the transport write of this call's own response releases the
