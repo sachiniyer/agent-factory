@@ -114,28 +114,33 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 	defer client.Close()
 	// Capture the target's PID before asking it to stop: once it acknowledges it
 	// may stop answering, and a daemon predating ShutdownResponse.PID reports
-	// none. Bounded so a wedged responder cannot stall the upgrade.
-	var pingResp PingResponse
+	// none. Bounded so a wedged responder cannot stall the upgrade — by a timer,
+	// NOT a connection deadline: net/rpc's reader goroutine moves straight on
+	// to the next read after delivering the Ping reply, so a deadline still
+	// armed in that instant can expire under it and shut the client down before
+	// the Shutdown call, which then fails without reaching the daemon. The
+	// reply decodes into its own variable, which only the abandoned call may
+	// still write after a timeout.
+	var pingResp, pinged PingResponse
 	var pingToken string
 	var pingOurs bool
 	var resp ShutdownResponse
 	var rpcErr error
-	_ = conn.SetDeadline(time.Now().Add(daemonDialTimeout))
-	if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &pingResp); pingErr != nil {
-		// A Ping that missed its bound shuts this client down, so a Shutdown sent
-		// on it would fail and misreport a slow-but-healthy daemon as one that
-		// could not be stopped. Send Shutdown on a fresh connection instead, as
-		// before the Ping existed; with no Ping answered on that connection, only
-		// the ack's own PID is trusted.
-		pingResp = PingResponse{}
+	pingErr := errors.New("ping did not answer within " + daemonDialTimeout.String())
+	ping := client.Go(controlServiceName+".Ping", PingRequest{}, &pinged, nil)
+	select {
+	case <-ping.Done:
+		pingErr = ping.Error
+	case <-time.After(daemonDialTimeout):
+	}
+	if pingErr != nil {
+		// A Ping that failed or missed its bound named no one on this
+		// connection. Send Shutdown on a fresh connection, as before the Ping
+		// existed — a slow-but-healthy daemon is still stopped, not misreported
+		// as one that could not be — and target no PID.
 		rpcErr = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 	} else {
-		// The deadline bounded the Ping alone. Clear it before the local checks
-		// below, which can be slow (a home on a slow filesystem): left armed,
-		// net/rpc's reader would time out and shut the client down, and the
-		// Shutdown call would fail without ever reaching the daemon. Shutdown
-		// keeps its historical unbounded call once connected.
-		_ = conn.SetDeadline(time.Time{})
+		pingResp = pinged
 		// Pin the pinged process's incarnation now, while it is certainly still
 		// the daemon: for a daemon whose ack carries no PID this is the only
 		// sample taken before it could exit and have its PID recycled.
@@ -143,6 +148,7 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 			pingToken = processStartTokenFn(pingResp.PID)
 			pingOurs = shutdownTargetIsOursFn(pingResp.PID)
 		}
+		// Shutdown keeps its historical unbounded call once connected.
 		rpcErr = client.Call(controlServiceName+".Shutdown", ShutdownRequest{}, &resp)
 	}
 	if rpcErr != nil {

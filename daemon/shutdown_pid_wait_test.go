@@ -203,6 +203,57 @@ func TestRequestShutdownSlowVerificationStillShutsDown(t *testing.T) {
 	}
 }
 
+// nearBoundPingControl answers Ping just inside the RequestShutdown probe's
+// bound and records that Shutdown arrived.
+type nearBoundPingControl struct {
+	pid      int
+	shutdown *atomic.Bool
+}
+
+func (c nearBoundPingControl) Ping(_ PingRequest, resp *PingResponse) error {
+	time.Sleep(daemonDialTimeout * 3 / 4)
+	resp.PID = c.pid
+	return nil
+}
+
+func (c nearBoundPingControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	c.shutdown.Store(true)
+	resp.OK = true
+	resp.PID = c.pid
+	return nil
+}
+
+// TestRequestShutdownPingNearBoundStillShutsDown: a Ping answering just inside
+// its bound must leave the connection usable — the bound may not outlive the
+// Ping and expire under net/rpc's next read — so Shutdown reaches the daemon on
+// the same connection and the pinned PID is kept.
+func TestRequestShutdownPingNearBoundStillShutsDown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	const fakePID = 424242
+	var shutdown atomic.Bool
+	srv := rpc.NewServer()
+	if err := srv.RegisterName(controlServiceName, nearBoundPingControl{pid: fakePID, shutdown: &shutdown}); err != nil {
+		t.Fatalf("register Control: %v", err)
+	}
+	_, cleanup := startFakeControlListener(t, srv)
+	t.Cleanup(cleanup)
+	// Verification outlasting the rest of the bound is what an armed
+	// connection deadline could not survive.
+	stubShutdownTargetIsOurs(t, func(int) bool {
+		time.Sleep(daemonDialTimeout)
+		return true
+	})
+
+	result, target, err := RequestShutdown()
+	if err != nil || result != ShutdownViaRPC || !shutdown.Load() {
+		t.Fatalf("RequestShutdown = %v, %v, Shutdown delivered = %v; want ShutdownViaRPC, nil, true", result, err, shutdown.Load())
+	}
+	if target.PID != fakePID {
+		t.Fatalf("shutdown pid = %d, want %d — a Ping that answered names the target", target.PID, fakePID)
+	}
+}
+
 // slowPingControl answers Ping only after the RequestShutdown probe's bound,
 // and acknowledges Shutdown WITH its PID — a PID learned only from the ack.
 type slowPingControl struct{ pid int }
