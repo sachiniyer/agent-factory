@@ -685,7 +685,7 @@ func TestControlServerShutdownClosesChannel(t *testing.T) {
 func TestRequestShutdownNoDaemon(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown returned error when no daemon present: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestRequestShutdownStaleSocket(t *testing.T) {
 		t.Fatalf("stale socket file must outlive its listener: %v", err)
 	}
 
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown returned error on stale socket: %v", err)
 	}
@@ -762,7 +762,7 @@ func TestRequestShutdownSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeServer() })
 
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
@@ -815,7 +815,7 @@ func TestRequestShutdownContactedButErrored(t *testing.T) {
 		}
 	}()
 
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err == nil {
 		t.Fatalf("RequestShutdown returned nil error for a contacted-but-errored RPC; want the transport error propagated")
 	}
