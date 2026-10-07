@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -144,16 +145,82 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 	// wantErr == nil (dir present) or an unverifiable stat — either way the
 	// sources below still compare against the pinned inode, so proceed.
 
+	inside, known, source, observed := t.observedPanePlacement(want)
+	switch {
+	case inside:
+		return nil
+	case !known:
+		spawnedPaneDirUnusableLogged.Do(func() {
+			log.InfoLog.Printf("session %s: post-spawn cwd check skipped: no tmux source could report the spawned pane's working directory",
+				t.sanitizedName)
+		})
+		return nil
+	default:
+		return t.resolveSpawnedPaneDir(fmt.Errorf(
+			"%w: pane for session %s started in %s, not the requested %s (via %s)",
+			ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source))
+	}
+}
+
+// verifyReattachPaneDir applies the spawn's placement check to a session af
+// did NOT just create: the rebind half of the #5172 invariant. A spawn that
+// proved misplaced and whose teardown failed leaves exactly this shape — a
+// live session name with a pane outside its worktree — and a reattach that
+// trusted name evidence alone would bind it and mark the row ready in the
+// wrong directory (#5174 review). The verdict is re-derived on every rebind
+// rather than remembered: in-memory rejection dies with the daemon, and the
+// first post-restart reattach is exactly the path that must refuse.
+//
+// Unlike the spawn check this refuses the BIND, not the pane — it kills
+// nothing it did not create. Missing or unverifiable evidence never
+// refuses: an unstat-able worktree baseline (a pane legitimately holding a
+// deleted dir open survives its unlink, so absence cannot convict it) and
+// silent sources both mean "cannot tell", not "misplaced". Residual: a
+// command that chdir'd OUT of its worktree before this check reads is
+// indistinguishable from a never-placed pane — every source reports the
+// post-chdir location — and is refused the same way; no evidence can
+// separate them, so refusal keeps the invariant.
+func (t *TmuxSession) verifyReattachPaneDir(workDir string) error {
+	want, err := statSpawnDir(workDir)
+	if err != nil || !want.IsDir() {
+		return nil
+	}
+	inside, known, source, observed := t.observedPanePlacement(want)
+	if !known || inside {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: pane for session %s sits in %s, not the persisted %s (via %s); refusing to reattach a misplaced pane",
+		ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source)
+}
+
+// observedPanePlacement reads the placement sources in truth-first order —
+// /proc/<pane_pid>/cwd, then #{pane_current_path}, then #{pane_start_path} —
+// and reports the first CONCLUSIVE verdict against the admitted inode:
+// observed+source name the directory that produced it, and inside says
+// whether that directory is the admitted inode or a descendant. known=false
+// means no source could place the pane at all — unsupported fields, empty
+// expansions, unstat-able paths, unresolvable observations, command silence
+// — which is never evidence in either direction.
+//
+// A display-message DEADLINE is not a per-format answer: it is the server
+// not answering at all, and every remaining format would pay the same
+// tmuxCommandTimeout for the same silence. The first timeout stops the walk
+// rather than stacking one deadline per source inside Start (#5174 review).
+func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known bool, source, observed string) {
 	sources := []struct {
 		name string
-		read func() string
+		read func() (string, bool)
 	}{
 		{"proc-cwd", t.paneProcCwd},
-		{"pane_current_path", func() string { return t.paneFormatField("#{pane_current_path}") }},
-		{"pane_start_path", func() string { return t.paneFormatField("#{pane_start_path}") }},
+		{"pane_current_path", func() (string, bool) { return t.paneFormatField("#{pane_current_path}") }},
+		{"pane_start_path", func() (string, bool) { return t.paneFormatField("#{pane_start_path}") }},
 	}
-	for _, source := range sources {
-		actual := source.read()
+	for _, s := range sources {
+		actual, timedOut := s.read()
+		if timedOut {
+			break
+		}
 		if !filepath.IsAbs(actual) {
 			// Empty (unsupported on this tmux) or unusable — try the next
 			// source rather than treat silence as a mismatch.
@@ -162,19 +229,20 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 		if _, err := statSpawnDir(actual); err != nil {
 			continue
 		}
-		if paneDirInside(actual, want) {
-			return nil
+		in, resolvable := paneDirInside(actual, want)
+		switch {
+		case in:
+			return true, true, s.name, actual
+		case resolvable:
+			return false, true, s.name, actual
 		}
-		return t.resolveSpawnedPaneDir(fmt.Errorf(
-			"%w: pane for session %s started in %s, not the requested %s (via %s)",
-			ErrSpawnDirMissing, t.sanitizedName, actual, workDir, source.name))
+		// !in && !resolvable — an observation that cannot be resolved to a
+		// walkable ancestry (a procfs cwd deleted after the spawn: stat on
+		// the link answers, EvalSymlinks cannot) whose own inode is not the
+		// admitted one. It cannot prove inside OR outside, so it falls
+		// through to the next source rather than convicting or clearing.
 	}
-
-	spawnedPaneDirUnusableLogged.Do(func() {
-		log.InfoLog.Printf("session %s: post-spawn cwd check skipped: no tmux source could report the spawned pane's working directory",
-			t.sanitizedName)
-	})
-	return nil
+	return false, false, "", ""
 }
 
 // paneDirInside reports whether dir is the admitted directory itself or a
@@ -182,41 +250,58 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 // inode against `want` — a path string is never compared, so an observed
 // /x/wt-evil does not match an admitted /x/wt, and an inode swapped into the
 // worktree path mid-spawn cannot launder a different directory into a match.
-func paneDirInside(dir string, want os.FileInfo) bool {
-	for {
-		if info, err := statSpawnDir(dir); err == nil && os.SameFile(info, want) {
-			return true
+//
+// dir is resolved once before the walk: an observed /proc/<pid>/cwd is a
+// SYMLINK whose own ancestors (/proc/<pid> → /proc → /) never reach the
+// worktree — only the resolved path's ancestors can (#5174 review). When
+// the path does not resolve at all — procfs reports a cwd deleted after the
+// spawn as "<path> (deleted)", which EvalSymlinks cannot touch — the kernel
+// still answers stat on the link itself, so the identity compare remains
+// real evidence but there is no ancestry to walk: inside reports the
+// level-0 verdict alone and resolvable reports false, telling the caller
+// "not inside" here means "cannot tell", not "outside".
+func paneDirInside(dir string, want os.FileInfo) (inside, resolvable bool) {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		info, serr := statSpawnDir(dir)
+		return serr == nil && os.SameFile(info, want), false
+	}
+	for d := resolved; ; d = filepath.Dir(d) {
+		if info, err := statSpawnDir(d); err == nil && os.SameFile(info, want) {
+			return true, true
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
+		if parent := filepath.Dir(d); parent == d {
+			return false, true
 		}
-		dir = parent
 	}
 }
 
 // paneFormatField answers one tmux display-message format for this session,
 // or "" when the query fails or the field expands to nothing — which on a
 // tmux that does not know the field is exactly how "unsupported" arrives.
-func (t *TmuxSession) paneFormatField(format string) string {
+// The second result reports a fired deadline: the SERVER's silence rather
+// than a per-format failure, which the caller treats as "stop asking"
+// rather than "try the next format" (#5174 review).
+func (t *TmuxSession) paneFormatField(format string) (string, bool) {
 	ctx, cancel := tmuxTimeoutContext()
 	out, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t",
 		exactTarget(t.sanitizedName), format)
 	// Read the deadline BEFORE cancelling: cancel() stamps ctx.Err() with
 	// Canceled unconditionally, so only a ctx.Err() taken here can still
-	// distinguish "the command's own error" from "the context fired". Both
-	// fold to "" today — the caller cannot act on either — but the ordering
-	// keeps the truth available if that changes.
+	// distinguish "the command's own error" from "the context fired".
 	ctxErr := ctx.Err()
 	cancel()
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return "", true
+	}
 	if err != nil || ctxErr != nil {
-		return ""
+		return "", false
 	}
 	// Strip only the command's line terminator — never whitespace: a start
 	// directory whose final component legitimately ends in whitespace would
 	// otherwise stat a truncated, DIFFERENT path and be torn down on the
 	// mismatch.
-	return strings.TrimSuffix(strings.TrimSuffix(string(out), "\r\n"), "\n")
+	return strings.TrimSuffix(strings.TrimSuffix(string(out), "\r\n"), "\n"), false
 }
 
 // procfsRoot is the procfs mount point — a var so tests can point it at a
@@ -227,16 +312,21 @@ var procfsRoot = "/proc"
 // off Linux or when the pane pid is unknown. Stat-ing the path resolves
 // procfs's symlink to the directory's identity — the kernel's record of where
 // the process actually runs, not the -c it was asked for — so it still proves
-// the truth even when the worktree itself was unlinked after the spawn.
-func (t *TmuxSession) paneProcCwd() string {
+// the truth even when the worktree itself was unlinked after the spawn. The
+// second result propagates paneFormatField's server-silence signal.
+func (t *TmuxSession) paneProcCwd() (string, bool) {
 	if runtime.GOOS != "linux" {
-		return ""
+		return "", false
 	}
-	pid, err := strconv.Atoi(t.paneFormatField("#{pane_pid}"))
+	field, timedOut := t.paneFormatField("#{pane_pid}")
+	if timedOut {
+		return "", true
+	}
+	pid, err := strconv.Atoi(field)
 	if err != nil || pid <= 0 {
-		return ""
+		return "", false
 	}
-	return filepath.Join(procfsRoot, strconv.Itoa(pid), "cwd")
+	return filepath.Join(procfsRoot, strconv.Itoa(pid), "cwd"), false
 }
 
 // resolveSpawnedPaneDir tears down the just-created session whose pane
@@ -251,7 +341,10 @@ func (t *TmuxSession) resolveSpawnedPaneDir(classErr error) error {
 		return fmt.Errorf("%w: %w", ErrSessionNotStarted, classErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("%v (cleanup error: %v)", classErr, closeErr)
+		// %w, never %v: the classification sentinel must survive the
+		// cleanup annotation or the daemon's WORKTREE_MISSING mapping
+		// loses this path (#5174 review).
+		return fmt.Errorf("%w (cleanup error: %v)", classErr, closeErr)
 	}
 	return classErr
 }

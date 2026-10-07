@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 
@@ -611,4 +613,227 @@ func TestStartTearDownWaitsForPaneExit(t *testing.T) {
 	assert.True(t, killed)
 	assert.True(t, paneRowQueried,
 		"waiting for the pane means asking which process to wait on")
+}
+
+// TestStartSucceedsWhenProcCwdIsWorktreeSubdir: the proc source's SYMLINK
+// must be resolved before the ancestor walk — os.Stat already follows it
+// for the identity compare, but a walk over the LINK's own ancestors
+// (/proc/<pid> → /proc → /) can never reach the worktree, so the strongest
+// source was tearing down panes that pane_current_path would have accepted
+// (#5174 review).
+func TestStartSucceedsWhenProcCwdIsWorktreeSubdir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs is Linux-only")
+	}
+	workDir := t.TempDir()
+	subdir := filepath.Join(workDir, "frontend")
+	require.NoError(t, os.Mkdir(subdir, 0o755))
+
+	const pid = "98765435"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0o755))
+	require.NoError(t, os.Symlink(subdir, filepath.Join(procRoot, pid, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
+
+	var killed bool
+	sessionName := toTmuxName("proc-subdir", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_pid": pid}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a pane in a worktree SUBDIR proven by proc-cwd must be accepted")
+	assert.False(t, killed)
+}
+
+// TestStartFallsThroughWhenProcCwdUnresolvable: procfs keeps answering stat
+// on a pane cwd deleted after the spawn (readlink shows "<path> (deleted)"),
+// but the path itself cannot be resolved — there is no ancestry to walk, so
+// the observation is inconclusive and MUST fall through to the next source
+// rather than tear down on the link's own ancestors (#5174 review).
+func TestStartFallsThroughWhenProcCwdUnresolvable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs is Linux-only")
+	}
+	workDir := t.TempDir()
+	otherDir := t.TempDir() // the inode the dangling cwd resolves to for stat
+
+	const pid = "98765436"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0o755))
+	require.NoError(t, os.Symlink(workDir+" (deleted)", filepath.Join(procRoot, pid, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
+
+	// Real procfs stats a deleted-but-current cwd fine — the kernel resolves
+	// the link to the unlinked inode — while its path no longer exists. The
+	// fixture reproduces exactly that split: stat answers, EvalSymlinks fails.
+	prevStat := statSpawnDir
+	statSpawnDir = func(path string) (os.FileInfo, error) {
+		if path == filepath.Join(procRoot, pid, "cwd") {
+			return prevStat(otherDir)
+		}
+		return prevStat(path)
+	}
+	t.Cleanup(func() { statSpawnDir = prevStat })
+
+	var killed bool
+	sessionName := toTmuxName("proc-deleted", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_pid":          pid,
+			"pane_current_path": workDir,
+		}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"an unresolvable proc cwd is inconclusive — the next source decides")
+	assert.False(t, killed)
+}
+
+// TestRestoreRefusesMisplacedPaneReattach: the rebind half of the invariant.
+// A spawn proven misplaced whose teardown FAILED leaves a live pane behind
+// the persisted name; a restore trusting name evidence alone would bind it
+// and mark the row ready in the wrong directory. A FRESH session object —
+// nothing carried from the failed spawn, the exact shape a post-restart
+// daemon restore takes — must refuse the reattach (#5174 review).
+func TestRestoreRefusesMisplacedPaneReattach(t *testing.T) {
+	workDir := t.TempDir()
+	fallback := t.TempDir() // where the misplaced pane sits
+
+	sessionName := toTmuxName("misplaced-reattach", "")
+	probed := false
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				// Only the pre-spawn probe reports absent; the failed
+				// teardown leaves the session live for every later probe.
+				if !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				return fmt.Errorf("kill-session refused")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				if strings.Contains(s, "#{pane_current_path}") {
+					return []byte(fallback + "\n"), nil
+				}
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				return nil, nil
+			}
+			return []byte("output"), nil
+		},
+	}
+
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+	startErr := session.Start(workDir)
+	require.Error(t, startErr)
+	require.ErrorIs(t, startErr, ErrSpawnDirMissing)
+	require.NotErrorIs(t, startErr, ErrSessionNotStarted,
+		"the kill failed — the misplaced pane is still live, so no not-started authority")
+
+	// Fresh object: nothing in memory says the name was already refused —
+	// the shape the first restore after a daemon restart takes.
+	restored := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+	_, err := restored.RestoreWithResult(workDir)
+
+	require.Error(t, err,
+		"a reattach that finds the pane provably outside the worktree must refuse to bind it")
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+}
+
+// TestRestoreReattachesPaneInsideWorktree: the reattach check's accept side —
+// a pane observed inside its persisted worktree (a descendant counts) binds
+// normally, so ordinary restores are unchanged.
+func TestRestoreReattachesPaneInsideWorktree(t *testing.T) {
+	workDir := t.TempDir()
+	subdir := filepath.Join(workDir, "frontend")
+	require.NoError(t, os.Mkdir(subdir, 0o755))
+
+	sessionName := toTmuxName("inside-reattach", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil }, // has-session: exists
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "display-message"):
+				if strings.Contains(s, "#{pane_current_path}") {
+					return []byte(subdir + "\n"), nil
+				}
+				return nil, nil
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	result, err := session.RestoreWithResult(workDir)
+	require.NoError(t, err)
+	assert.Equal(t, RestoreReattached, result)
+}
+
+// TestStartStopsDirQueriesOnServerTimeout: a display-message deadline is the
+// SERVER not answering — paying tmuxCommandTimeout once per source (pane_pid,
+// current_path, start_path ≈ 30s inside Start) stacks the same silence three
+// times on the daemon's create path. The first timeout must stop the walk:
+// exactly one pane-dir query may run (#5174 review).
+func TestStartStopsDirQueriesOnServerTimeout(t *testing.T) {
+	shortTmuxTimeout(t, 100*time.Millisecond)
+	workDir := t.TempDir()
+
+	var dirQueries atomic.Int32
+	probed := false
+	sessionName := toTmuxName("wedged-sources", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message") &&
+				(strings.Contains(s, "#{pane_pid}") ||
+					strings.Contains(s, "#{pane_current_path}") ||
+					strings.Contains(s, "#{pane_start_path}")):
+				dirQueries.Add(1)
+				// Outlive the shrunken deadline: the ctx has already fired
+				// by the time this returns, which is how a wedged server
+				// presents to paneFormatField.
+				time.Sleep(200 * time.Millisecond)
+				return nil, nil
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	require.NoError(t, session.Start(workDir),
+		"a silent server skips the check — unavailability is never a verdict")
+	assert.Equal(t, int32(1), dirQueries.Load(),
+		"a wedged server gets one pane-dir deadline, not one per source")
 }

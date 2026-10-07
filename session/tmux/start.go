@@ -704,6 +704,19 @@ func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
 // ReattachOnly. answered is whether the existence probe that routed here
 // answered, and confirmedFresh is restoreWithResult's.
 func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) error {
+	// The rebind-side placement check (#5172/#5174 review): a spawn proven
+	// misplaced whose teardown failed leaves this exact shape — a live name
+	// with a pane outside its worktree — and a rebind trusting name evidence
+	// alone would mark that agent ready in the wrong directory. Verified here
+	// rather than remembered: in-memory rejection dies with the daemon, and
+	// the first post-restart reattach is exactly the path that must refuse.
+	// workDir == "" binds without a baseline — Start's inner attach, whose
+	// pane was just verified, and bare Restore("")'s historical meaning.
+	if workDir != "" {
+		if err := t.verifyReattachPaneDir(workDir); err != nil {
+			return err
+		}
+	}
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
 	monitor := newStatusMonitor()
