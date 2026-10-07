@@ -188,13 +188,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			// flight makes both cases ready, and Go picks one at random.
 			// Re-check so the stand-down ALWAYS wins once it has closed —
 			// and replay the consumed signal back into the buffered
-			// channel (cap 1, so the just-freed slot is guaranteed): the
-			// first real consumer then drains it through the armed cleanup
-			// defers instead of this watcher dropping it or hard-killing
-			// past them.
+			// channel so the first real consumer drains it through the
+			// armed cleanup defers instead of this watcher dropping it or
+			// hard-killing past them.
 			select {
 			case <-startupSignalWatch:
-				sigChan <- sig
+				// The replay must not block: a second signal can refill
+				// the capacity-one channel in the gap between the
+				// dequeue and this send, and a blocked watcher would
+				// deadlock the joining stand-down while the daemon holds
+				// the home lock. If the slot is already taken, a shutdown
+				// signal is already queued for the graceful consumer —
+				// dropping this duplicate loses nothing.
+				select {
+				case sigChan <- sig:
+				default:
+				}
 				return
 			default:
 			}
