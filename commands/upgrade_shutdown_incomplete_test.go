@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -88,13 +89,13 @@ func TestReportUpgradeRestartShutdownIncomplete(t *testing.T) {
 	}{
 		{
 			pid: 4242,
-			want: "The old daemon is still finishing its shutdown (pid 4242) — it normally exits on its own: wait a moment and run af again. " +
-				"If ps -p 4242 still shows it after several minutes, it may be wedged: kill -9 4242 (in-flight shutdown work may be lost).\n",
+			want: "The old daemon is still finishing its shutdown (pid 4242) — it normally exits on its own: wait until ps -p 4242 no longer shows it, then run af again (running af sooner can kill it mid-shutdown). " +
+				"If it still shows after several minutes, it may be wedged: kill -9 4242 (in-flight shutdown work may be lost).\n",
 		},
 		{
 			pid: 0,
-			want: "The old daemon is still finishing its shutdown — it normally exits on its own: wait a moment and run af again. " +
-				"If a leftover `af --daemon` still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost).\n",
+			want: "The old daemon is still finishing its shutdown — it normally exits on its own: wait until no leftover `af --daemon` shows, then run af again (running af sooner can kill it mid-shutdown). " +
+				"If one still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost).\n",
 		},
 	} {
 		t.Run(fmt.Sprintf("pid=%d", tc.pid), func(t *testing.T) {
@@ -113,5 +114,23 @@ func TestReportUpgradeRestartShutdownIncomplete(t *testing.T) {
 				t.Fatalf("stderr = %q\nwant     %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestShutdownIncompleteHintWaitsForExitBeforeAf: the old daemon closes its
+// control socket before its final save, and an af run in that window finds no
+// socket and reclaims the home through StopDaemon — SIGTERM, then SIGKILL — so
+// the hint must never send the user to run af before the old process is gone.
+func TestShutdownIncompleteHintWaitsForExitBeforeAf(t *testing.T) {
+	for _, pid := range []int{0, 4242} {
+		hint := shutdownIncompleteHint(pid)
+		runAf := strings.Index(hint, "run af again")
+		waitExit := strings.Index(hint, "wait until")
+		if runAf < 0 || waitExit < 0 || waitExit > runAf {
+			t.Fatalf("pid=%d: hint %q must tell the user to wait until the old daemon is gone before running af", pid, hint)
+		}
+		if strings.Contains(hint, "wait a moment") {
+			t.Fatalf("pid=%d: hint %q sends the user to run af while the old daemon may still be draining", pid, hint)
+		}
 	}
 }

@@ -347,15 +347,20 @@ func startDaemonHint() string {
 
 // shutdownIncompleteHint is the #5007 spec's bound-expired wording, shared by
 // the upgrade report and the withheld-respawn error. Its steps are ordered by
-// safety: wait and run af again first, since a draining daemon normally exits
-// on its own; escalate to `kill -9` only if it is still there after several
-// minutes, and say that the kill loses in-flight shutdown work. The verb is
-// `kill -9` because a draining daemon absorbs SIGTERM by design.
+// safety: wait for the old daemon to exit before running af again, since a
+// draining daemon normally exits on its own; escalate to `kill -9` only if it is
+// still there after several minutes, and say that the kill loses in-flight
+// shutdown work. The wait comes first because running af early is not
+// harmless: the old daemon closes its control socket before its final save, so
+// an af run in that window finds no socket and reclaims the home through
+// StopDaemon — SIGTERM, then SIGKILL — destroying the very work the withheld
+// respawn exists to protect. The verb is `kill -9` because a draining daemon
+// absorbs SIGTERM by design.
 func shutdownIncompleteHint(pid int) string {
 	if pid > 0 {
-		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait a moment and run af again. If ps -p %d still shows it after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
+		return fmt.Sprintf("still finishing its shutdown (pid %d) — it normally exits on its own: wait until ps -p %d no longer shows it, then run af again (running af sooner can kill it mid-shutdown). If it still shows after several minutes, it may be wedged: kill -9 %d (in-flight shutdown work may be lost).", pid, pid, pid)
 	}
-	return "still finishing its shutdown — it normally exits on its own: wait a moment and run af again. If a leftover `af --daemon` still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost)."
+	return "still finishing its shutdown — it normally exits on its own: wait until no leftover `af --daemon` shows, then run af again (running af sooner can kill it mid-shutdown). If one still shows after several minutes, it may be wedged: kill -9 it (in-flight shutdown work may be lost)."
 }
 
 // reportUpgradeRestart tells the user what the restart actually did.
