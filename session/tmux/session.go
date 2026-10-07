@@ -259,6 +259,17 @@ type TmuxSession struct {
 	// time so a stale latch cannot pass a recreated session.
 	// Guarded by provenMu.
 	closedConclusively bool
+	// misplacedPane latches a POSITIVE outside-the-worktree verdict for the
+	// pane this object is bound to (#5174 review): the placement check proved
+	// the pane sits somewhere else and refused to keep it in service. It is
+	// set only by a conclusive mismatch — in verifySpawnedPaneDir's teardown
+	// arm and verifyReattachPaneDir's refusal — and cleared only by a
+	// conclusive inside verdict; unanswered or unresolvable sources never
+	// touch it, so the latch describes the last thing af PROVED rather than
+	// the last thing it tried. The one consumer is LocalBackend.IsAlive: a
+	// bound-but-misplaced pane must not promote its row back to Ready on a
+	// name-only has-session answer. Guarded by provenMu.
+	misplacedPane bool
 	// The teardown mark lives on statusMonitor (io.go), not here: the fact a
 	// status poll needs is the teardown attribution of the session generation
 	// IT is polling, and a shared session-level flag lets a same-object
@@ -573,6 +584,23 @@ func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
+	t.provenMu.Unlock()
+}
+
+// MisplacedPane reports that the placement check PROVED the pane behind this
+// name sits outside its admitted worktree — a spawn's teardown arm or a
+// rebind's refusal (#5174 review). It is a verdict, not a flag in the control
+// flow: the binding stays so teardown can still kill the pane by name, but a
+// name-only liveness probe must not read the pane as af's agent.
+func (t *TmuxSession) MisplacedPane() bool {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.misplacedPane
+}
+
+func (t *TmuxSession) setMisplacedPane(misplaced bool) {
+	t.provenMu.Lock()
+	t.misplacedPane = misplaced
 	t.provenMu.Unlock()
 }
 

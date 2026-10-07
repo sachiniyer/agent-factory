@@ -614,3 +614,44 @@ func TestLocalBackendCloseAttachOnlyNeverKillsSharedSession(t *testing.T) {
 	}
 	assert.False(t, inst.Started(), "discarded duplicate must be marked not-started")
 }
+
+// TestIsAliveStaysFalseAfterRefusedMisplacedRebind is the #5174 review
+// restart shape: a FRESH TmuxSession — nothing carried in memory — restored
+// over a live pane sitting outside its worktree must re-latch the verdict on
+// its own, so the name-only has-session probe inside IsAlive can never
+// promote the row Lost→Ready and re-admit the misplaced pane into service.
+func TestIsAliveStaysFalseAfterRefusedMisplacedRebind(t *testing.T) {
+	workDir := t.TempDir()
+	elsewhere := t.TempDir()
+
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil }, // has-session: the name is live
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "pane_current_path") {
+				return []byte(elsewhere + "\n"), nil
+			}
+			return nil, nil
+		},
+	}
+	// A fresh object — the post-daemon-restart shape: no latch carried.
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps("af_misplaced_rebind", "claude", nil, cmdExec)
+	backend := &LocalBackend{}
+	inst := &Instance{
+		ID:       "misplaced-rebind-id",
+		Title:    "misplaced-rebind",
+		backend:  backend,
+		Tabs:     []*Tab{newAgentTab(ts)},
+		started:  true,
+		liveness: LiveLost,
+	}
+
+	_, err := ts.RestoreWithResult(workDir)
+	require.ErrorIs(t, err, tmux.ErrSpawnDirMissing,
+		"the rebind must refuse a pane proven outside its worktree")
+
+	alive, err := backend.IsAlive(inst)
+	require.NoError(t, err)
+	assert.False(t, alive,
+		"name evidence alone may not re-admit a refused pane — the latch must re-form on a fresh binding")
+}

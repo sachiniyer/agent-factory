@@ -275,6 +275,13 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				// records WORKTREE_MISSING_DETECTED when it cannot. Returning
 				// nil lets the deferred block still mark the row started, so
 				// it stays killable and restore-eligible.
+				//
+				// This same arm takes a refused live reattach — a pane
+				// observed outside its worktree under the persisted name —
+				// where the binding must stay for teardown to reach it. The
+				// tmux-side misplacedPane latch (set by the refusal itself)
+				// is what keeps IsAlive's name-only probe from promoting the
+				// row back to Ready while the misplaced pane lives (#5174).
 				i.mu.Lock()
 				i.liveness = LiveLost
 				i.touchLocked()
@@ -893,6 +900,17 @@ func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 
 	if ts == nil {
 		// No binding at all: an answer, not a guess.
+		return false, nil
+	}
+	if ts.MisplacedPane() {
+		// The placement check PROVED this pane sits outside its worktree and
+		// refused the bind (#5174 review). The tmux name still answers — the
+		// pane is live somewhere — but af must not read it as this session's
+		// agent: a ProbeSession yes here would let resolveIdleLiveness promote
+		// the refused row Lost→Ready and re-admit the misplaced pane into
+		// service. The latch survives until a re-derive proves placement
+		// inside, so a pane that lands back in its tree heals only through a
+		// verified rebind, never through name evidence.
 		return false, nil
 	}
 	// ProbeSession, not ExistsOrUnknown (#1917 round 8): this result is EVIDENCE —

@@ -99,14 +99,19 @@ var spawnedPaneDirUnusableLogged sync.Once
 //   - /proc/<#{pane_pid}>/cwd: the pane root's live cwd — the kernel's own
 //     record of where the process runs, readable through procfs even after
 //     the directory itself was unlinked (Linux). The strongest source:
-//     it cannot echo the request and cannot be rewritten by tmux.
+//     it cannot echo the request and cannot be rewritten by tmux. Skipped
+//     when #{pane_dead} says tmux marked the pane dead: a reaped root's
+//     stale pid stays on record and the kernel may have recycled it.
 //   - #{pane_current_path}: where the pane is now; every supported tmux
 //     answers it, at the price of an early-chdir program moving the answer.
 //   - #{pane_start_path}: weakest, kept last. On tmux >= 3.4 it records the
 //     -c tmux was HANDED, not where the pane landed — the #5174 play-test
 //     showed it echoing the requested worktree while the process actually
 //     ran in the fallback cwd — so it can only confirm the request, never
-//     contradict it. On tmux < 3.4 it expands empty.
+//     contradict it, and a rename-and-replace of the admitted dir can make
+//     it resolve outside without the pane having moved: a match may
+//     confirm, a mismatch may never convict (#5174 review). On tmux < 3.4
+//     it expands empty.
 //
 // A match is the admitted inode or an inode WALK up to it (paneDirInside), not
 // a path string: a process tab legitimately running `cd frontend && npm run
@@ -148,6 +153,7 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 	inside, known, source, observed := t.observedPanePlacement(want)
 	switch {
 	case inside:
+		t.setMisplacedPane(false)
 		return nil
 	case !known:
 		spawnedPaneDirUnusableLogged.Do(func() {
@@ -186,12 +192,27 @@ func (t *TmuxSession) verifyReattachPaneDir(workDir string) error {
 		return nil
 	}
 	inside, known, source, observed := t.observedPanePlacement(want)
-	if !known || inside {
+	switch {
+	case inside:
+		// A positive inside verdict supersedes an earlier refusal: the pane
+		// provably sits in its worktree NOW (it may have been moved back, or
+		// the earlier observation read a since-replaced inode). Latches hold
+		// only what was last proven.
+		t.setMisplacedPane(false)
 		return nil
+	case !known:
+		// Nothing could place the pane — neither convict it nor clear a
+		// previous conviction. The last positive verdict stands.
+		return nil
+	default:
+		// Latch the verdict so a name-only liveness probe cannot promote the
+		// row back to Ready while the refused pane still holds the name
+		// (#5174 review — backend_local.IsAlive consults it).
+		t.setMisplacedPane(true)
+		return fmt.Errorf(
+			"%w: pane for session %s sits in %s, not the persisted %s (via %s); refusing to reattach a misplaced pane",
+			ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source)
 	}
-	return fmt.Errorf(
-		"%w: pane for session %s sits in %s, not the persisted %s (via %s); refusing to reattach a misplaced pane",
-		ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source)
 }
 
 // observedPanePlacement reads the placement sources in truth-first order —
@@ -211,10 +232,20 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 	sources := []struct {
 		name string
 		read func() (string, bool)
+		// convict is whether a resolved outside-the-worktree answer may
+		// produce the negative verdict. pane_start_path is denied it: tmux
+		// stores the -c it was HANDED (spawn.c keeps the request, not the
+		// realized chdir), so its answer names intent, not placement. If the
+		// admitted directory was renamed-and-replaced — or a symlink on the
+		// path was retargeted — after tmux entered the original inode, the
+		// stored path resolves to the replacement while the pane remains
+		// correctly bound to the original. The echo can confirm a match but
+		// can never convict (#5174 review).
+		convict bool
 	}{
-		{"proc-cwd", t.paneProcCwd},
-		{"pane_current_path", func() (string, bool) { return t.paneFormatField("#{pane_current_path}") }},
-		{"pane_start_path", func() (string, bool) { return t.paneFormatField("#{pane_start_path}") }},
+		{"proc-cwd", t.paneProcCwd, true},
+		{"pane_current_path", func() (string, bool) { return t.paneFormatField("#{pane_current_path}") }, true},
+		{"pane_start_path", func() (string, bool) { return t.paneFormatField("#{pane_start_path}") }, false},
 	}
 	for _, s := range sources {
 		actual, timedOut := s.read()
@@ -233,14 +264,15 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		switch {
 		case in:
 			return true, true, s.name, actual
-		case resolvable:
+		case resolvable && s.convict:
 			return false, true, s.name, actual
 		}
-		// !in && !resolvable — an observation that cannot be resolved to a
+		// Inconclusive — an observation that cannot be resolved to a
 		// walkable ancestry (a procfs cwd deleted after the spawn: stat on
 		// the link answers, EvalSymlinks cannot) whose own inode is not the
-		// admitted one. It cannot prove inside OR outside, so it falls
-		// through to the next source rather than convicting or clearing.
+		// admitted one, or an answer from a source that may not convict.
+		// It cannot prove inside OR outside, so it falls through to the
+		// next source rather than convicting or clearing.
 	}
 	return false, false, "", ""
 }
@@ -318,6 +350,26 @@ func (t *TmuxSession) paneProcCwd() (string, bool) {
 	if runtime.GOOS != "linux" {
 		return "", false
 	}
+	// #{pane_dead} first, as its own single-field query — panePID's row
+	// format is deliberately NOT reused here: it is also the teardown path's
+	// pane identification, and conflating the two would let a placement
+	// probe satisfy an ordering assertion meant for the kill. A pane held by
+	// remain-on-exit keeps reporting its ORIGINAL pane_pid once tmux marks
+	// it dead, and after the server reaps the root the kernel is free to
+	// recycle that pid — /proc/<pid>/cwd would then be an UNRELATED
+	// process's directory, convicting a correctly placed retained pane
+	// before pane_current_path gets a say (#5174 review). Procfs is skipped
+	// whenever tmux reports the pane dead: a still-uncollected root keeps
+	// the pid, but pane_current_path's retained record answers equally well,
+	// while a reaped root makes the pid unsafe. A tmux too old to know the
+	// field expands it empty — not-dead — and the proc source stays.
+	dead, timedOut := t.paneFormatField("#{pane_dead}")
+	if timedOut {
+		return "", true
+	}
+	if dead == "1" {
+		return "", false
+	}
 	field, timedOut := t.paneFormatField("#{pane_pid}")
 	if timedOut {
 		return "", true
@@ -336,6 +388,12 @@ func (t *TmuxSession) paneProcCwd() (string, bool) {
 // SIGHUP, and a process still flushing state inside the worktree must be gone
 // before ErrSessionNotStarted authorizes the caller to delete that tree.
 func (t *TmuxSession) resolveSpawnedPaneDir(classErr error) error {
+	// Every caller reaches here on a positive misplaced-pane verdict — the
+	// observed mismatch above or a start dir that vanished mid-spawn, which
+	// makes the fallback landing certain. Latch it BEFORE the teardown so a
+	// failed close cannot leave name evidence free to promote the row later
+	// (#5174 review — backend_local.IsAlive consults it).
+	t.setMisplacedPane(true)
 	state, closeErr := t.CloseAndWaitForPaneExit()
 	if state == PaneStateKnown && closeErr == nil {
 		return fmt.Errorf("%w: %w", ErrSessionNotStarted, classErr)
