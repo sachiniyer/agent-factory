@@ -135,7 +135,6 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 	// identity: only a positive source verdict may convict (#5174 review).
 	inside, known, source, observed := t.observedPanePlacement(want)
 	if inside {
-		t.setMisplacedPane(false)
 		return nil
 	}
 	if known {
@@ -166,53 +165,6 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 			t.sanitizedName)
 	})
 	return nil
-}
-
-// verifyReattachPaneDir applies the spawn's placement check to a session af
-// did NOT just create: the rebind half of the #5172 invariant. A spawn that
-// proved misplaced and whose teardown failed leaves exactly this shape — a
-// live session name with a pane outside its worktree — and a reattach that
-// trusted name evidence alone would bind it and mark the row ready in the
-// wrong directory (#5174 review). The verdict is re-derived on every rebind
-// rather than remembered: in-memory rejection dies with the daemon, and the
-// first post-restart reattach is exactly the path that must refuse.
-//
-// Unlike the spawn check this refuses the BIND, not the pane — it kills
-// nothing it did not create. Missing or unverifiable evidence never
-// refuses: an unstat-able worktree baseline (a pane legitimately holding a
-// deleted dir open survives its unlink, so absence cannot convict it) and
-// silent sources both mean "cannot tell", not "misplaced". Residual: a
-// command that chdir'd OUT of its worktree before this check reads is
-// indistinguishable from a never-placed pane — every source reports the
-// post-chdir location — and is refused the same way; no evidence can
-// separate them, so refusal keeps the invariant.
-func (t *TmuxSession) verifyReattachPaneDir(workDir string) error {
-	want, err := statSpawnDir(workDir)
-	if err != nil || !want.IsDir() {
-		return nil
-	}
-	inside, known, source, observed := t.observedPanePlacement(want)
-	switch {
-	case inside:
-		// A positive inside verdict supersedes an earlier refusal: the pane
-		// provably sits in its worktree NOW (it may have been moved back, or
-		// the earlier observation read a since-replaced inode). Latches hold
-		// only what was last proven.
-		t.setMisplacedPane(false)
-		return nil
-	case !known:
-		// Nothing could place the pane — neither convict it nor clear a
-		// previous conviction. The last positive verdict stands.
-		return nil
-	default:
-		// Latch the verdict so a name-only liveness probe cannot promote the
-		// row back to Ready while the refused pane still holds the name
-		// (#5174 review — backend_local.IsAlive consults it).
-		t.setMisplacedPane(true)
-		return fmt.Errorf(
-			"%w: pane for session %s sits in %s, not the persisted %s (via %s); refusing to reattach a misplaced pane",
-			ErrSpawnDirMissing, t.sanitizedName, observed, workDir, source)
-	}
 }
 
 // observedPanePlacement reads the placement sources in truth-first order —
@@ -388,12 +340,6 @@ func (t *TmuxSession) paneProcCwd() (string, bool) {
 // SIGHUP, and a process still flushing state inside the worktree must be gone
 // before ErrSessionNotStarted authorizes the caller to delete that tree.
 func (t *TmuxSession) resolveSpawnedPaneDir(classErr error) error {
-	// Every caller reaches here on a positive misplaced-pane verdict — the
-	// observed mismatch above or a start dir that vanished mid-spawn, which
-	// makes the fallback landing certain. Latch it BEFORE the teardown so a
-	// failed close cannot leave name evidence free to promote the row later
-	// (#5174 review — backend_local.IsAlive consults it).
-	t.setMisplacedPane(true)
 	state, closeErr := t.CloseAndWaitForPaneExit()
 	if state == PaneStateKnown && closeErr == nil {
 		return fmt.Errorf("%w: %w", ErrSessionNotStarted, classErr)

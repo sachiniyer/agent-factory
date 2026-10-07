@@ -254,14 +254,6 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	ptmx.Close()
 
-	// The confirmed existence above names THIS spawn's generation: whatever
-	// verdict an earlier pane earned under this name died with it, so a stale
-	// misplaced latch from a previous convicted spawn must clear here rather
-	// than carry through a check that may prove inconclusive (#5174 review).
-	// The walk below re-latches if THIS pane convicts — and a refused reattach
-	// still holds its verdict, since reattach never reaches this boundary.
-	t.setMisplacedPane(false)
-
 	// The existence poll answered — but that only proves the SESSION exists.
 	// Verify the pane actually started inside the admitted directory before
 	// configuring anything: a pane af cannot place there is torn down, never
@@ -679,12 +671,11 @@ func (t *TmuxSession) restoreWithResult(workDir string, confirmedFresh bool) (Re
 	// establishes the monitor baseline; Start's inner Restore("") keeps the fresh
 	// process behavior where first output is an update.
 	//
-	// ProvenNoPane and ClosedConclusively are cleared at the top of reattach
-	// itself — before the placement check's refusal return — because reaching
-	// the rebind path already invalidated an earlier absence proof: without
-	// that clear, a refused bind inherits the stale flag and
-	// stopForAccountSwap skips its liveness check for a pane that is still
-	// running (#5174 review).
+	// Clear the ProvenNoPane and ClosedConclusively flags: reattaching to a LIVE
+	// session means this object is now in front of a pane that genuinely exists,
+	// so any earlier absence proof is invalidated. Without this clear, a reattach
+	// through this branch inherits a stale flag and stopForAccountSwap skips its
+	// liveness check for a pane that is still running.
 	return RestoreReattached, t.reattach(workDir, answered, confirmedFresh)
 }
 
@@ -713,36 +704,8 @@ func (t *TmuxSession) ReattachOnly(workDir string, answered bool) error {
 // ReattachOnly. answered is whether the existence probe that routed here
 // answered, and confirmedFresh is restoreWithResult's.
 func (t *TmuxSession) reattach(workDir string, answered, confirmedFresh bool) error {
-	// Clear the ProvenNoPane and ClosedConclusively latches FIRST, before the
-	// placement refusal can return early: reaching this function means the
-	// name is live or merely unprobed, and either way an absence proof taken
-	// earlier no longer holds. A refused rebind that left the stale proof
-	// would let teardown's ProvenNoPane gate skip killing the misplaced pane
-	// and delete the worktree out from under it (#5174 review). Clearing on
-	// an unanswered probe is the safe direction too — a kill-session on an
-	// absent name is tmux's idempotent no-op, while a skipped kill on a live
-	// pane leaks it.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
-	// The rebind-side placement check (#5172/#5174 review): a spawn proven
-	// misplaced whose teardown failed leaves this exact shape — a live name
-	// with a pane outside its worktree — and a rebind trusting name evidence
-	// alone would mark that agent ready in the wrong directory. Verified here
-	// rather than remembered: in-memory rejection dies with the daemon, and
-	// the first post-restart reattach is exactly the path that must refuse.
-	// workDir == "" binds without a baseline — Start's inner attach, whose
-	// pane was just verified, and bare Restore("")'s historical meaning.
-	//
-	// Skipped entirely when the existence probe did not answer: nothing is
-	// established live to verify placement against, and on a wedged server
-	// each format query would pay the full tmuxCommandTimeout that the
-	// has-session just spent — once per restored session and tab, the same
-	// multiplied-silence defect the answered gate below exists to stop.
-	if workDir != "" && answered {
-		if err := t.verifyReattachPaneDir(workDir); err != nil {
-			return err
-		}
-	}
 	monitor := newStatusMonitor()
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()

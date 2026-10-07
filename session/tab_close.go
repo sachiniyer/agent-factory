@@ -167,43 +167,6 @@ func stageTabCleanup(pending []TabCleanupData, tab *Tab) (*TabCleanupData, []Tab
 	return &handle, append(pending, handle)
 }
 
-// demoteMisplacedTabPane removes a tab's tmux binding whose pane a restore
-// proved sits outside this session's worktree (#5174). The pane is foreign —
-// it must never be attached, captured, or stamped as this tab's — so the roster
-// binding is dropped rather than kept. Dropping must not lose the NAME: the
-// squatter holds an af-namespaced session this session's teardown is still
-// responsible for killing (the same rule the agent pane gets through
-// kill-by-name), so its persisted name is staged into pendingTabCleanup — the
-// durable channel that teardown reaps by exact name and the daemon's startup
-// sweep retries. The two mutations happen under one i.mu: a teardown snapshot
-// taken between them would find neither a bound tab nor a kill claim.
-//
-// When markInert is set the tab is additionally stamped inert — the process-tab
-// posture, where nothing ever respawns the command so the row must say it is
-// done being restored. Shell tabs stay re-spawnable (setupTabs replaces them).
-func (i *Instance) demoteMisplacedTabPane(tab *Tab, markInert bool) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	for idx, current := range i.Tabs {
-		if current.ID != tab.ID {
-			continue
-		}
-		ts := current.tmux
-		if ts == nil || !ts.MisplacedPane() {
-			return
-		}
-		i.pendingTabCleanup = append(i.pendingTabCleanup, TabCleanupData{TabID: current.ID, TmuxName: ts.SanitizedName()})
-		i.replaceTabFieldLocked(idx, func(copy *Tab) {
-			copy.tmux = nil
-			if markInert {
-				copy.inert = true
-			}
-		})
-		i.touchLocked()
-		return
-	}
-}
-
 // dropTabCleanup removes handle from pending, matching on the tmux name rather
 // than the TabID. The name is what a retry actually targets, and it is the field
 // guaranteed unique across the list: uniqueTabTmuxName reserves pending tokens,

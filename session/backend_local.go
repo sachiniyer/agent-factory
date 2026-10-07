@@ -275,13 +275,6 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				// records WORKTREE_MISSING_DETECTED when it cannot. Returning
 				// nil lets the deferred block still mark the row started, so
 				// it stays killable and restore-eligible.
-				//
-				// This same arm takes a refused live reattach — a pane
-				// observed outside its worktree under the persisted name —
-				// where the binding must stay for teardown to reach it. The
-				// tmux-side misplacedPane latch (set by the refusal itself)
-				// is what keeps IsAlive's name-only probe from promoting the
-				// row back to Ready while the misplaced pane lives (#5174).
 				i.mu.Lock()
 				i.liveness = LiveLost
 				i.touchLocked()
@@ -696,24 +689,12 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 		// one, the deliberate tradeoff.
 		live := false
 		if tab.tmux != nil {
-			// A live session that failed placement IS dead for this tab's
-			// purposes: the pane under the persisted name is proven not to
-			// sit in the worktree, so counting it live would leave the
-			// roster bound to a foreign pane (#5174).
-			if exists, known := tab.tmux.ProbeSession(); known && exists && !tab.tmux.MisplacedPane() {
+			if exists, known := tab.tmux.ProbeSession(); known && exists {
 				live = true
 			}
 		}
 		if !live {
 			deadShells = append(deadShells, tab)
-			// A pane convicted of squatting outside the worktree is dropped
-			// from the roster AND recorded as a durable cleanup handle in one
-			// critical section — the shell is respawned under a fresh token
-			// below (the squatted name is never retaken), while teardown and
-			// the startup sweep still kill the squatter by name (#5174).
-			if tab.tmux != nil && tab.tmux.MisplacedPane() {
-				i.demoteMisplacedTabPane(tab, false)
-			}
 		}
 	}
 	if len(deadShells) == 0 {
@@ -740,15 +721,6 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			reserved[token] = true
 		}
 	}
-	// A pending-cleanup session still squats its name: a demoted squatter's
-	// roster binding is gone (tabTmuxToken reads tmux, now nil), but the tmux
-	// session under the name may be alive, so the respawn below must never
-	// retake it (#5174).
-	for _, h := range i.PendingTabCleanup() {
-		if token, ok := strings.CutPrefix(h.TmuxName, prefix); ok {
-			reserved[token] = true
-		}
-	}
 	type shellBinding struct {
 		id    string
 		tmux  *tmux.TmuxSession
@@ -761,7 +733,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			name = tab.Name
 		}
 		tmuxName := ""
-		if tab.tmux != nil && !tab.tmux.MisplacedPane() {
+		if tab.tmux != nil {
 			// The dead shell's own token is already in reserved (seeded from tabs).
 			tmuxName = tab.tmux.SanitizedName()
 		}
@@ -921,17 +893,6 @@ func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {
 
 	if ts == nil {
 		// No binding at all: an answer, not a guess.
-		return false, nil
-	}
-	if ts.MisplacedPane() {
-		// The placement check PROVED this pane sits outside its worktree and
-		// refused the bind (#5174 review). The tmux name still answers — the
-		// pane is live somewhere — but af must not read it as this session's
-		// agent: a ProbeSession yes here would let resolveIdleLiveness promote
-		// the refused row Lost→Ready and re-admit the misplaced pane into
-		// service. The latch survives until a re-derive proves placement
-		// inside, so a pane that lands back in its tree heals only through a
-		// verified rebind, never through name evidence.
 		return false, nil
 	}
 	// ProbeSession, not ExistsOrUnknown (#1917 round 8): this result is EVIDENCE —
