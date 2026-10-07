@@ -559,7 +559,15 @@ func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) 
 // slot with a process identity. A current snapshot or marker scan must replace
 // an older entry when the same PID now carries another StartID; otherwise the
 // stale identity would be rejected later while the replacement escaped review.
+//
+// A tracked teardown requester (#5182) is never admitted to the orphan cohort:
+// it is blocked on this teardown's reply, not a leak, and it cannot exit until
+// the reply is sent — admitting it would only stall every grace pass and then
+// report the caller it was built to spare.
 func addOrReplaceOrphanCandidate(candidates []proctree.Process, byPID map[int]int, process proctree.Process) []proctree.Process {
+	if isTeardownRequester(process) {
+		return candidates
+	}
 	if index, exists := byPID[process.PID]; exists {
 		if candidates[index].StartID != process.StartID {
 			candidates[index] = process
@@ -640,6 +648,13 @@ var (
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process, at the severity the reason and the outcome agree on.
 func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
+	// A tracked teardown requester is excluded HERE, at the seam every reap
+	// shares, not only where the sets are built (#5182): it is blocked on this
+	// teardown's reply, so the grace wait cannot observe it exit and a signal
+	// would kill the reply it is waiting for. The orphan-sweep ingestion drops
+	// it earlier (addOrReplaceOrphanCandidate); this is the signal-time
+	// backstop for a requester registered after a set was already captured.
+	procs = dropTeardownRequesters(procs)
 	return proctree.KillEscalating(procs, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
 		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})

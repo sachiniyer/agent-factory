@@ -217,6 +217,14 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 		}
 	}
 
+	// The process that asked for this teardown is still blocked on its reply
+	// (#5182): it cannot exit inside the grace period, and reaping it would
+	// kill the reply it is waiting to read. It leaves the captured set HERE —
+	// before either dispatch below reads it — so it is never waited on and
+	// never signalled. Everything else in the tree is reaped exactly as
+	// before.
+	leaked = dropTeardownRequesters(leaked)
+
 	// Async so the SIGHUP grace period never adds latency to user-driven
 	// teardown; the daemon and TUI processes are long-lived, so the sweep
 	// always gets to finish. CLI kills run daemon-side (KillSession RPC).
@@ -224,8 +232,9 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	if len(leaked) > 0 {
 		// Close IS the requested teardown (#2765): a caller asked for this session
 		// to die, so every process in its pane tree dying with it is the operation
-		// succeeding, not a leak — most visibly the `af sessions archive --self`
-		// caller, which lives in this very tree and is blocked on this very call.
+		// succeeding, not a leak. The requester itself has already left this set
+		// (dropTeardownRequesters above, #5182) — what remains is the rest of the
+		// tree it asked to tear down.
 		if waitForProcesses {
 			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 		} else {
@@ -439,9 +448,14 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 	case len(processes.remaining) > 0:
 		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown",
 			processPIDList(processes.remaining)))
-	case waitForPane && !waitForProcessExit(paneProcess, paneExitWait):
+	case waitForPane && !isTeardownRequester(paneProcess) && !waitForProcessExit(paneProcess, paneExitWait):
 		// kill-session returning establishes only that SIGHUP was sent, not that
 		// the process stopped writing.
+		//
+		// A tracked teardown requester is never waited on here (#5182): when it
+		// IS the captured pane root it cannot exit while this teardown's reply
+		// is outstanding, so the wait could only burn paneExitWait to a refusal
+		// its own request caused. It exits when the reply lands.
 		return refuse(fmt.Errorf("pane process %d is still alive %v after kill-session", pid, paneExitWait))
 	}
 

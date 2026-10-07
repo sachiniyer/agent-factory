@@ -12,17 +12,31 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 type controlServer struct {
-	manager      *Manager
-	scheduler    *taskScheduler
-	watchers     *watcherSupervisor
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
+	manager    *Manager
+	scheduler  *taskScheduler
+	watchers   *watcherSupervisor
+	shutdownCh chan struct{}
+	// shutdownOnce is shared by every per-connection controlServer
+	// startControlServer builds: one Shutdown must fire once for the whole
+	// listener, not once per connection. It is nil on servers that cannot shut
+	// anything down (the HTTP server, most tests) — Shutdown returns before it
+	// is read.
+	shutdownOnce *sync.Once
 	httpRequests *httpRequestDrain
+	// requesterPID is the kernel-verified pid of the process on the other end
+	// of THIS connection — read by the accept loop via peercred (SO_PEERCRED /
+	// LOCAL_PEERPID), never from anything the client wrote. Teardown handlers
+	// register it so the reaper exempts the caller still blocked on their
+	// reply (#5182). The HTTP server shares ONE controlServer across
+	// connections, so it leaves this zero and the per-request context carries
+	// the same kernel answer instead (see httpPeerPIDContextKey).
+	requesterPID int
 }
 
 const (
@@ -308,7 +322,7 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 // lets the RPC response flush back to the caller before the listener closes.
 func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
-	if s.shutdownCh == nil {
+	if s.shutdownCh == nil || s.shutdownOnce == nil {
 		return nil
 	}
 	s.shutdownOnce.Do(func() {
@@ -471,6 +485,11 @@ func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, _ *ReapConfi
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// Reaping the config-agent session the caller sits in is the same
+	// requester-in-captured-tree problem as kill/archive (#5182). net/rpc
+	// gives no per-call context, so the connection's requester pid is the only
+	// carrier — which is also the only correct one.
+	defer s.trackTeardownRequester(context.Background())()
 	return s.manager.ReapConfigAgent(req)
 }
 
@@ -500,6 +519,10 @@ func (s *controlServer) closeTab(ctx context.Context, req CloseTabRequest, resp 
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// Closing the tab the caller is running in reaps the caller's own pane
+	// tree; register the kernel-verified requester so teardown spares the
+	// process blocked on this reply (#5182).
+	defer s.trackTeardownRequester(ctx)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -550,6 +573,11 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A caller tearing down its OWN session is still blocked on this reply
+	// inside the pane tree being reaped; register the kernel-verified
+	// requester so teardown spares it (#5182). Unregistered on return — the
+	// reply is in flight and the exemption is over.
+	defer s.trackTeardownRequester(ctx)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -575,9 +603,17 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 }
 
 func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+	return s.archiveSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) archiveSession(ctx context.Context, req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// The `af sessions archive --self` caller this issue is about (#5182):
+	// register the kernel-verified requester before its own pane tree is
+	// reaped, and unregister when the reply is on the wire.
+	defer s.trackTeardownRequester(ctx)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -791,13 +827,28 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		return nil, err
 	}
 
-	server := rpc.NewServer()
-	if err := server.RegisterName(controlServiceName, &controlServer{
-		manager:    manager,
-		scheduler:  scheduler,
-		watchers:   watchers,
-		shutdownCh: shutdownCh,
-	}); err != nil {
+	// Every accepted connection gets its own rpc.Server because its
+	// controlServer carries that connection's kernel-verified requester pid
+	// (#5182): SO_PEERCRED/LOCAL_PEERPID names the process that CONNECTED, and
+	// teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. shutdownOnce is shared by all of them — one
+	// Shutdown still fires once for the whole listener. Registration runs once
+	// eagerly so a service misconfiguration fails at bind time, not per
+	// connection.
+	shutdownOnce := &sync.Once{}
+	newConnServer := func(peerPID int) (*rpc.Server, error) {
+		server := rpc.NewServer()
+		err := server.RegisterName(controlServiceName, &controlServer{
+			manager:      manager,
+			scheduler:    scheduler,
+			watchers:     watchers,
+			shutdownCh:   shutdownCh,
+			shutdownOnce: shutdownOnce,
+			requesterPID: peerPID,
+		})
+		return server, err
+	}
+	if _, err := newConnServer(0); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
@@ -829,7 +880,21 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			connectionsMu.Unlock()
 			go func() {
 				defer serveWG.Done()
-				server.ServeConn(conn)
+				// The kernel's record of who CONNECTED — the only requester
+				// identity a teardown handler may trust (#5182). A read failure
+				// degrades to no requester (the pre-#5182 posture): the
+				// connection still works, teardown proceeds, and the caller is
+				// reaped as it always was.
+				peerPID, credErr := peercred.ConnPID(conn)
+				if credErr != nil {
+					log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
+				}
+				connServer, err := newConnServer(peerPID)
+				if err != nil {
+					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
+					return
+				}
+				connServer.ServeConn(conn)
 				connectionsMu.Lock()
 				delete(connections, conn)
 				connectionsMu.Unlock()

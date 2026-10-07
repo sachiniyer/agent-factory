@@ -6,6 +6,7 @@ package daemon
 // publish every mutation ends with — read as one surface.
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -23,9 +24,18 @@ import (
 // projects view. On a partial failure it still publishes what DID happen before
 // surfacing the error, so the rail never lags reality.
 func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProjectResponse) error {
+	return s.deleteProject(context.Background(), req, resp)
+}
+
+func (s *controlServer) deleteProject(ctx context.Context, req DeleteProjectRequest, resp *DeleteProjectResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A project delete archives/kills every session under it — including the
+	// one the caller is running inside when it deletes its own project.
+	// Register the kernel-verified requester so that teardown spares the
+	// process blocked on this reply (#5182).
+	defer s.trackTeardownRequester(ctx)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}

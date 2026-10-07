@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -122,6 +123,19 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// CORS is config-driven (§1.5): empty allow-list ⇒ no ACAO emitted.
 		Handler:           withAuth(unixHandler, nil, manager.cfg.CORSAllowedOrigins),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			// The same kernel question the control socket asks at accept
+			// (#5182): which process CONNECTED. This is the unix socket's
+			// server — the TCP web listeners run their own http.Server with no
+			// ConnContext, so a remote peer never acquires a local pid and can
+			// never present one a teardown would trust. A read failure leaves
+			// the context unchanged: no requester, the pre-#5182 posture.
+			pid, err := peercred.ConnPID(conn)
+			if err != nil {
+				return ctx
+			}
+			return context.WithValue(ctx, httpPeerPIDContextKey{}, pid)
+		},
 	}
 
 	go func() {

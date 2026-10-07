@@ -194,7 +194,10 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/ArchiveSession",
 		Description: "Archive a session: tear down tmux and relocate its worktree to the archive dir, keeping the record; refused before mutation when enabled tasks target it.",
 		requestType: reflect.TypeOf(ArchiveSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ArchiveSession) },
+		// rpcHandlerCtx so the unix-socket peer pid ConnContext stamped reaches
+		// the teardown-requester registry — the `archive --self` caller blocked
+		// on this response is exempted from its own pane reap (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.archiveSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -247,14 +250,18 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/HandoffSession",
 		Description: "Continue a session in place under a different agent (to), another account for the same agent (account), or both (to and account). Keep its worktree and branch, and deliver a mission brief with the goal and existing work to the replacement conversation. Omit to to keep the current agent.",
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSession) },
+		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
+		// registry — the --account swap tears the caller's panes down (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.handoffSession) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/DeleteProject",
 		Description: "Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched.",
 		requestType: reflect.TypeOf(DeleteProjectRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeleteProject) },
+		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
+		// registry — deleting the caller's own project reaps its pane (#5182).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.deleteProject) },
 	},
 	{
 		Method:      http.MethodPost,
