@@ -304,6 +304,16 @@ type DeliverPromptRequest struct {
 // when this call created the target session, "sent" when it sent into an
 // existing session, and "parked: usage limit" when task provenance made it skip
 // a limit-reached target — the same vocabulary deliverTaskPrompt records.
+//
+// DeliverPrompt auto-creates its target through the same Manager.CreateSession
+// the createSession handler reaches, so it inherits the same committed-outcome
+// contract: a create that provisioned a sandbox but could not confirm its
+// teardown/startup is a durable mutation, not a clean failure a caller may
+// freely retry. The response stays successful on that committed path so the
+// marker rides the envelope and callDaemon's CommittedOutcome() carrier check
+// reconstructs it — mirroring CreateSession/KillSession/ArchiveSession and the
+// other mutating handlers (#3357). VALUE embed, never a pointer: gob elides
+// zero values (see control_expect_gob_test.go and #1700).
 type DeliverPromptResponse struct {
 	Status         string                       `json:"status"`
 	DeliveryStatus session.PromptDeliveryStatus `json:"delivery_status"`
@@ -311,6 +321,7 @@ type DeliverPromptResponse struct {
 	// initial prompt is already owned by resume, from an existing limited target
 	// whose watch event still needs queue replay.
 	PromptRetained bool `json:"prompt_retained,omitempty"`
+	MutationOutcome
 }
 
 // CreateTabRequest asks the daemon to spawn a tab in the target session's

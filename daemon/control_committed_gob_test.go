@@ -54,13 +54,21 @@ func TestMutationOutcomeSurvivesGobRoundTrip(t *testing.T) {
 
 	// Every mutating response embeds it; a new one that forgets loses the channel
 	// silently, so the carrier check is asserted structurally rather than per type.
+	// DeliverPromptResponse joins this list as part of #3357: its auto-create
+	// branch reaches Manager.CreateSession, so it must carry the envelope exactly
+	// like the createSession handler's own CreateSessionResponse. CreateSession
+	// and CreateTab are listed for the same reason — they all mutate durable
+	// state through the same committed-producing manager methods.
 	t.Run("every mutating response carries the envelope", func(t *testing.T) {
 		for name, resp := range map[string]any{
+			"CreateSession":   &CreateSessionResponse{},
 			"KillSession":     &KillSessionResponse{},
 			"ArchiveSession":  &ArchiveSessionResponse{},
 			"RestoreSession":  &RestoreSessionResponse{},
 			"RestoreArchived": &RestoreArchivedResponse{},
 			"ResumeFromLimit": &ResumeFromLimitResponse{},
+			"CreateTab":       &CreateTabResponse{},
+			"DeliverPrompt":   &DeliverPromptResponse{},
 			"AddTask":         &AddTaskResponse{},
 			"UpdateTask":      &UpdateTaskResponse{},
 			"RemoveTask":      &RemoveTaskResponse{},
