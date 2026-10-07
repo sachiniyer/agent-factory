@@ -273,6 +273,17 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
+	// bindControlServerExclusive published daemon.pid before the socket bound
+	// (a successful, non-alreadyRunning return means the write succeeded —
+	// publication is fail-closed), so remove it on teardown — registered
+	// BEFORE the socket cleanup so LIFO closes the listener first: the file
+	// must never disappear while the socket can still answer a Ping, or a
+	// concurrent status/EnsureDaemon could observe a responding daemon with
+	// no management handle (#5188). Registered here rather than in the
+	// outermost defer so the alreadyRunning early return above never deletes
+	// the running daemon's file.
+	defer removeDaemonPIDFile()
+
 	controlClosed := false
 	defer func() {
 		if controlClosed {
@@ -282,13 +293,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 			log.WarningLog.Printf("failed to close daemon control socket: %v", err)
 		}
 	}()
-
-	// bindControlServerExclusive published daemon.pid before the socket bound
-	// (a successful, non-alreadyRunning return means the write succeeded —
-	// publication is fail-closed), so remove it on teardown. Registered here
-	// rather than in the outermost defer so the alreadyRunning early return
-	// above never deletes the running daemon's file.
-	defer removeDaemonPIDFile()
 
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
 	// once the webtab proxy is reachable it can spawn editors, and a signal
