@@ -839,6 +839,47 @@ func TestStartDoesNotConvictOnStartPathAlone(t *testing.T) {
 	assert.False(t, killed)
 }
 
+// TestStartDoesNotApproveDeadPaneOnStartPathAlone: a pane tmux already
+// marked dead has no live evidence — pane_dead skips procfs (the pid may be
+// recycled) and pane_current_path expands empty by design — so pane_start_path
+// becomes the only voice, and it is an ECHO of the request, never proof of
+// placement: a start dir that was stat-able but not traversable falls back to
+// the server cwd while retaining the requested start_path. The echo must not
+// be the sole approval: the check falls through to the pathname verdict, and
+// a dir gone at that point convicts — the pane provably never landed in it
+// (#5174 review).
+func TestStartDoesNotApproveDeadPaneOnStartPathAlone(t *testing.T) {
+	workDir := t.TempDir()
+
+	// statSpawnDir answers for: checkSpawnDir's admission (call 1), the
+	// source walk's stat of the start_path answer (call 2), and the
+	// ancestor walk's inode compare (call 3) — all real. The re-stat arm's
+	// read of the pathname (call 4) reports it gone, the outcome the echo
+	// can no longer mask once it loses dead-pane approval.
+	var statCalls atomic.Int32
+	prev := statSpawnDir
+	statSpawnDir = func(path string) (os.FileInfo, error) {
+		if statCalls.Add(1) >= 4 {
+			return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.ENOENT}
+		}
+		return os.Stat(path)
+	}
+	t.Cleanup(func() { statSpawnDir = prev })
+
+	var killed bool
+	sessionName := toTmuxName("dead-startpath", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":       "1",
+			"pane_start_path": workDir,
+		}, &killed))
+
+	err := session.Start(workDir)
+	require.ErrorIs(t, err, ErrSpawnDirMissing,
+		"a dead pane whose only evidence is the request's own echo must fall to the pathname verdict")
+	assert.True(t, killed, "a pane that provably never entered the worktree is torn down")
+}
+
 // TestStartAcceptsPaneWhenWorktreePathRenamedMidSpawn covers the review gap:
 // a rename/unlink of the admitted directory between checkSpawnDir and the
 // post-spawn re-stat leaves the PATHNAME dead but the INODE live — the pane

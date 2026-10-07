@@ -181,21 +181,43 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 // tmuxCommandTimeout for the same silence. The first timeout stops the walk
 // rather than stacking one deadline per source inside Start (#5174 review).
 func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known bool, source, observed string) {
+	// #{pane_dead} first, as its own single-field query — panePID's row
+	// format is deliberately NOT reused here: it is also the teardown path's
+	// pane identification, and conflating the two would let a placement
+	// probe satisfy an ordering assertion meant for the kill. A pane held by
+	// remain-on-exit keeps reporting its ORIGINAL pane_pid once tmux marks
+	// it dead, and after the server reaps the root the kernel is free to
+	// recycle that pid — /proc/<pid>/cwd would then be an UNRELATED
+	// process's directory, convicting a correctly placed retained pane
+	// before pane_current_path gets a say (#5174 review). And for the dead
+	// pane there is no live evidence at all: current_path expands empty by
+	// tmux design, leaving pane_start_path — the echo of the request — as
+	// the only voice, which must never approve placement on its own: a dir
+	// that was stat-able but not traversable falls back to the server cwd
+	// while retaining the requested start_path (#5174 review). A tmux too
+	// old to know the field expands it empty — not-dead — and the live-pane
+	// sources stay.
+	deadField, timedOut := t.paneFormatField("#{pane_dead}")
+	if timedOut {
+		return false, false, "", ""
+	}
+	paneDead := deadField == "1"
 	sources := []struct {
 		name string
 		read func() (string, bool)
 		// convict is whether a resolved outside-the-worktree answer may
-		// produce the negative verdict. pane_start_path is denied it: tmux
-		// stores the -c it was HANDED (spawn.c keeps the request, not the
-		// realized chdir), so its answer names intent, not placement. If the
-		// admitted directory was renamed-and-replaced — or a symlink on the
-		// path was retargeted — after tmux entered the original inode, the
-		// stored path resolves to the replacement while the pane remains
-		// correctly bound to the original. The echo can confirm a match but
-		// can never convict (#5174 review).
+		// produce the negative verdict — and, for a dead pane, whether an
+		// inside verdict may stand at all. pane_start_path is denied both:
+		// tmux stores the -c it was HANDED (spawn.c keeps the request, not
+		// the realized chdir), so its answer names intent, not placement.
+		// If the admitted directory was renamed-and-replaced — or a symlink
+		// on the path was retargeted — after tmux entered the original
+		// inode, the stored path resolves to the replacement while the pane
+		// remains correctly bound to the original. The echo can confirm a
+		// live pane's match but can never convict (#5174 review).
 		convict bool
 	}{
-		{"proc-cwd", t.paneProcCwd, true},
+		{"proc-cwd", func() (string, bool) { return t.paneProcCwd(paneDead) }, true},
 		{"pane_current_path", func() (string, bool) { return t.paneFormatField("#{pane_current_path}") }, true},
 		{"pane_start_path", func() (string, bool) { return t.paneFormatField("#{pane_start_path}") }, false},
 	}
@@ -214,7 +236,7 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		}
 		in, resolvable := paneDirInside(actual, want)
 		switch {
-		case in:
+		case in && (s.convict || !paneDead):
 			return true, true, s.name, actual
 		case resolvable && s.convict:
 			return false, true, s.name, actual
@@ -222,9 +244,10 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		// Inconclusive — an observation that cannot be resolved to a
 		// walkable ancestry (a procfs cwd deleted after the spawn: stat on
 		// the link answers, EvalSymlinks cannot) whose own inode is not the
-		// admitted one, or an answer from a source that may not convict.
-		// It cannot prove inside OR outside, so it falls through to the
-		// next source rather than convicting or clearing.
+		// admitted one, or an answer from a source that may not convict, or
+		// a confirm-only answer for a dead pane. It cannot prove inside OR
+		// outside, so it falls through to the next source rather than
+		// convicting or clearing.
 	}
 	return false, false, "", ""
 }
@@ -293,33 +316,18 @@ func (t *TmuxSession) paneFormatField(format string) (string, bool) {
 var procfsRoot = "/proc"
 
 // paneProcCwd returns /proc/<pane_pid>/cwd for the freshly spawned pane, or ""
-// off Linux or when the pane pid is unknown. Stat-ing the path resolves
-// procfs's symlink to the directory's identity — the kernel's record of where
-// the process actually runs, not the -c it was asked for — so it still proves
-// the truth even when the worktree itself was unlinked after the spawn. The
-// second result propagates paneFormatField's server-silence signal.
-func (t *TmuxSession) paneProcCwd() (string, bool) {
-	if runtime.GOOS != "linux" {
-		return "", false
-	}
-	// #{pane_dead} first, as its own single-field query — panePID's row
-	// format is deliberately NOT reused here: it is also the teardown path's
-	// pane identification, and conflating the two would let a placement
-	// probe satisfy an ordering assertion meant for the kill. A pane held by
-	// remain-on-exit keeps reporting its ORIGINAL pane_pid once tmux marks
-	// it dead, and after the server reaps the root the kernel is free to
-	// recycle that pid — /proc/<pid>/cwd would then be an UNRELATED
-	// process's directory, convicting a correctly placed retained pane
-	// before pane_current_path gets a say (#5174 review). Procfs is skipped
-	// whenever tmux reports the pane dead: a still-uncollected root keeps
-	// the pid, but pane_current_path's retained record answers equally well,
-	// while a reaped root makes the pid unsafe. A tmux too old to know the
-	// field expands it empty — not-dead — and the proc source stays.
-	dead, timedOut := t.paneFormatField("#{pane_dead}")
-	if timedOut {
-		return "", true
-	}
-	if dead == "1" {
+// off Linux, when the pane pid is unknown, or when the pane is already dead
+// (the pane_dead verdict observedPanePlacement fetched once for the whole
+// walk): a still-uncollected root keeps its pid, but pane_current_path's
+// retained record answers equally well, while a reaped root makes the pid
+// unsafe — the kernel is free to have recycled it onto an unrelated process
+// (#5174 review). Stat-ing the path resolves procfs's symlink to the
+// directory's identity — the kernel's record of where the process actually
+// runs, not the -c it was asked for — so it still proves the truth even when
+// the worktree itself was unlinked after the spawn. The second result
+// propagates paneFormatField's server-silence signal.
+func (t *TmuxSession) paneProcCwd(paneDead bool) (string, bool) {
+	if runtime.GOOS != "linux" || paneDead {
 		return "", false
 	}
 	field, timedOut := t.paneFormatField("#{pane_pid}")
