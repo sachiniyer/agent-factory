@@ -270,7 +270,7 @@ func WaitForShutdownCompletion(target ShutdownTarget) error {
 		// that fails is not a change: a failed read must not fabricate an exit.
 		token := target.StartToken
 		gone := func() bool {
-			if !pidLooksAlive(pid) {
+			if pidExitObserved(pid) {
 				return true
 			}
 			cur := processStartTokenFn(pid)

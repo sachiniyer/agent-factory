@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -407,5 +408,27 @@ func TestWaitForShutdownCompletionTreatsPIDReuseAsExit(t *testing.T) {
 	stubStartToken(t, "")
 	if err := WaitForShutdownCompletion(target); !errors.Is(err, ErrShutdownIncomplete) {
 		t.Fatalf("WaitForShutdownCompletion with a failed token read = %v, want ErrShutdownIncomplete", err)
+	}
+}
+
+// TestWaitForShutdownCompletionTreatsEPERMAsAlive: signal 0 answering EPERM
+// proves the process EXISTS — only an absence answer (ESRCH) proves exit. A
+// client that may inspect the daemon but not signal it (an LSM or credential
+// boundary) must keep waiting, not declare the draining daemon gone and race
+// it. PID 1 belongs to root, so as a non-root user signal 0 to it is EPERM on a
+// process that is certainly alive.
+func TestWaitForShutdownCompletionTreatsEPERMAsAlive(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may signal pid 1, so there is no EPERM to observe")
+	}
+	if err := syscall.Kill(1, 0); !errors.Is(err, syscall.EPERM) {
+		t.Skipf("signal 0 to pid 1 = %v, not EPERM; nothing to observe", err)
+	}
+	prevGrace := shutdownCompleteGrace
+	shutdownCompleteGrace = 200 * time.Millisecond
+	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+
+	if err := WaitForShutdownCompletion(ShutdownTarget{PID: 1}); !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("WaitForShutdownCompletion(pid 1 under EPERM) = %v, want ErrShutdownIncomplete — EPERM is not exit", err)
 	}
 }

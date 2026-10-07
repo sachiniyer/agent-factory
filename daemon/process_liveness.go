@@ -52,6 +52,26 @@ func pidLooksAlive(pid int) bool {
 	return true
 }
 
+// pidExitObserved reports whether pid has provably exited, for a wait that
+// must not mistake "cannot tell" for "gone". Unlike !pidLooksAlive it treats a
+// signal-0 failure as exit only when the answer is absence (ESRCH /
+// os.ErrProcessDone): EPERM means the process exists but this caller may not
+// signal it — an LSM or credential boundary — and reading that as exit would
+// end the shutdown wait while the daemon still drains (#5007). A process that
+// does answer signal 0 has exited when pidLooksAlive's zombie checks say so.
+// The wait pairs this with its start-token check, so treating an unsignalable
+// PID as alive cannot pin it on a recycled stranger.
+func pidExitObserved(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return true
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return errIsProcessGone(err)
+	}
+	return !pidLooksAlive(pid)
+}
+
 // processStartToken identifies one incarnation of pid by its start stamp, so a
 // wait that outlives the process can tell "still the daemon" from "the PID was
 // recycled to something else" (#5007). It is proctree's StartID — the same
