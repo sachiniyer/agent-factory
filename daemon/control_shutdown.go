@@ -75,14 +75,14 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // method-not-found (EACCES, ECONNRESET/EPIPE, dial timeout): a daemon was
 // listening but its final state is unknown (#978).
 //
-// The ShutdownTarget names the process being stopped — zero when unknown, or
-// when this pid namespace cannot verify the reported PID as the daemon serving
-// this home (see shutdownTargetIsOursFn). On
-// the RPC path its PID is the acknowledging daemon's own, falling back to the
-// PID a pre-shutdown Ping reported for daemons built before ShutdownResponse
-// carried one; callers pass it to WaitForShutdownCompletion so the respawn
-// waits for that exact process to exit rather than for its socket to go quiet
-// (#5007).
+// The ShutdownTarget names the process being stopped, so callers can pass it
+// to WaitForShutdownCompletion and the respawn waits for that exact process to
+// exit rather than for its socket to go quiet (#5007). On the RPC path it is
+// the PID the pre-shutdown Ping reported on the Shutdown's own connection,
+// pinned and verified before Shutdown was sent. It is zero — the socket-quiet
+// wait — when that PID is unknown, could not be pinned before shutdown, or
+// cannot be verified in this pid namespace as the daemon serving this home
+// (see shutdownTargetIsOursFn).
 func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 	socketPath, err := DaemonSocketPath()
 	if err != nil {
@@ -160,28 +160,24 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 	if !resp.OK {
 		return ShutdownNoDaemon, ShutdownTarget{}, fmt.Errorf("daemon Shutdown RPC returned OK=false")
 	}
-	// The Shutdown ack's PID wins; the Ping PID covers daemons built before the
-	// ack carried one.
-	pid := resp.PID
-	if pid == 0 {
-		pid = pingResp.PID
-	}
-	// An ack PID comes from a daemon that was alive to send it, so sample it
-	// now; a PID taken from the Ping reuses the pre-shutdown sample.
-	tok, ours := pingToken, pingOurs
-	if pid != pingResp.PID {
-		tok, ours = processStartTokenFn(pid), shutdownTargetIsOursFn(pid)
-	}
-	// The daemon reports its PID in ITS pid namespace. A client reaching it
-	// through a shared AGENT_FACTORY_HOME from another namespace would read that
-	// number as absent here — ending the wait at once while the daemon drains —
-	// or as an unrelated local process to wait on and name in the kill hint.
-	// Only a PID this namespace verifies as the daemon serving this home may
-	// drive the PID wait; otherwise fall back to the socket-quiet wait.
-	if pid == 0 || !ours {
+	// The target is the PID the Ping on this same connection reported, pinned
+	// (start token) and verified (home binding) BEFORE Shutdown was sent, while
+	// it was certainly the daemon. A PID learned only from the ack — the Ping
+	// failed — cannot be pinned that way: once acknowledged the daemon may exit
+	// and its PID be recycled before any sample, so the wait would track a
+	// stranger. Such a PID, or an ack PID that disagrees with the Ping's, is
+	// dropped; the socket-quiet wait covers it, as before #5007.
+	//
+	// The verification matters because the daemon reports its PID in ITS pid
+	// namespace. A client reaching it through a shared AGENT_FACTORY_HOME from
+	// another namespace would read that number as absent here — ending the wait
+	// at once while the daemon drains — or as an unrelated local process to wait
+	// on and name in the kill hint.
+	pid := pingResp.PID
+	if pid == 0 || !pingOurs || (resp.PID != 0 && resp.PID != pid) {
 		return ShutdownViaRPC, ShutdownTarget{}, nil
 	}
-	return ShutdownViaRPC, ShutdownTarget{PID: pid, StartToken: tok}, nil
+	return ShutdownViaRPC, ShutdownTarget{PID: pid, StartToken: pingToken}, nil
 }
 
 // shutdownTargetIsOursFn verifies, in this process's pid namespace, that pid is
@@ -253,9 +249,11 @@ var (
 // With target.PID > 0 (the target RequestShutdown returned) it waits for that
 // process to exit, bounded by shutdownCompleteGrace. Process exit is a positive signal;
 // socket quietness is not — a draining daemon can stop answering pings well
-// before it releases what a successor needs. Renamed or relocated binaries are
-// irrelevant here because nothing checks the process name, only liveness and
-// start time — a PID recycled to another process counts as the daemon's exit. On
+// before it releases what a successor needs. The wait itself checks only
+// liveness and start time, never the process name — a PID recycled to another
+// process counts as the daemon's exit. (RequestShutdown's home binding does
+// check the name, via isAgentFactoryDaemon, so a daemon running under a
+// renamed binary gets the zero target and the socket-quiet wait.) On
 // the SIGTERM fallback path the process is already gone, so the first check
 // returns. With target.PID == 0 (unknown) it falls back to waiting for the control
 // socket to stop answering, bounded by shutdownSocketQuietGrace.

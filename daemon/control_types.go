@@ -629,10 +629,12 @@ type PingResponse struct {
 type ShutdownRequest struct{}
 type ShutdownResponse struct {
 	OK bool `json:"ok"`
-	// PID is the acknowledging daemon's process id, so the caller can wait for
-	// that exact process to exit before respawning (#5007). Additive: a daemon
-	// built before this field decodes as 0, and callers fall back to the PID a
-	// pre-shutdown Ping reported.
+	// PID is the acknowledging daemon's process id (#5007). RequestShutdown
+	// cross-checks it against the PID the pre-shutdown Ping reported on the
+	// same connection and drops the target on a mismatch; it never uses it
+	// alone, because a PID learned only from the ack cannot be pinned before
+	// the daemon may exit. Additive: a daemon built before this field decodes
+	// as 0, which skips the cross-check.
 	PID int `json:"pid,omitempty"`
 }
 

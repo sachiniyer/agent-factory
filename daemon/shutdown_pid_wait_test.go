@@ -169,7 +169,7 @@ func TestRequestShutdownDropsUnverifiedPID(t *testing.T) {
 }
 
 // slowPingControl answers Ping only after the RequestShutdown probe's bound,
-// and acknowledges Shutdown without a PID.
+// and acknowledges Shutdown WITH its PID — a PID learned only from the ack.
 type slowPingControl struct{ pid int }
 
 func (c slowPingControl) Ping(_ PingRequest, resp *PingResponse) error {
@@ -180,13 +180,31 @@ func (c slowPingControl) Ping(_ PingRequest, resp *PingResponse) error {
 
 func (c slowPingControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
+	resp.PID = c.pid
+	return nil
+}
+
+// mismatchedPIDControl reports one PID to Ping and a different one in the
+// Shutdown ack.
+type mismatchedPIDControl struct{ pingPID, ackPID int }
+
+func (c mismatchedPIDControl) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.PID = c.pingPID
+	return nil
+}
+
+func (c mismatchedPIDControl) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
+	resp.OK = true
+	resp.PID = c.ackPID
 	return nil
 }
 
 // TestRequestShutdownSlowPingStillShutsDown: a Ping that misses its bound
 // kills the shared connection, so Shutdown goes out on a fresh one — a slow
-// but healthy daemon is still stopped, not misreported as unstoppable — and
-// no PID from that unanswered Ping is trusted.
+// but healthy daemon is still stopped, not misreported as unstoppable. The PID
+// its ack carries is NOT used: nothing pinned it before Shutdown was sent, and
+// once acknowledged the daemon may exit and its PID be recycled before any
+// sample, so it falls back to the zero target even when it would verify.
 func TestRequestShutdownSlowPingStillShutsDown(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
@@ -196,6 +214,8 @@ func TestRequestShutdownSlowPingStillShutsDown(t *testing.T) {
 	}
 	_, cleanup := startFakeControlListener(t, srv)
 	t.Cleanup(cleanup)
+	stubShutdownTargetIsOurs(t, func(int) bool { return true })
+	stubStartToken(t, "recycled-after-ack")
 
 	result, target, err := RequestShutdown()
 	if err != nil {
@@ -205,14 +225,39 @@ func TestRequestShutdownSlowPingStillShutsDown(t *testing.T) {
 		t.Fatalf("shutdown result = %v, want ShutdownViaRPC", result)
 	}
 	if target != (ShutdownTarget{}) {
-		t.Fatalf("shutdown target = %+v, want zero — a Ping that did not answer on the Shutdown's connection names no one", target)
+		t.Fatalf("shutdown target = %+v, want zero — an ack-only PID was never pinned before shutdown", target)
+	}
+}
+
+// TestRequestShutdownDropsMismatchedAckPID: an ack PID that disagrees with the
+// Ping on the same connection means the two cannot both name the acknowledger;
+// trust neither.
+func TestRequestShutdownDropsMismatchedAckPID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	srv := rpc.NewServer()
+	if err := srv.RegisterName(controlServiceName, mismatchedPIDControl{pingPID: 111111, ackPID: 222222}); err != nil {
+		t.Fatalf("register Control: %v", err)
+	}
+	_, cleanup := startFakeControlListener(t, srv)
+	t.Cleanup(cleanup)
+	stubShutdownTargetIsOurs(t, func(int) bool { return true })
+
+	result, target, err := RequestShutdown()
+	if err != nil || result != ShutdownViaRPC {
+		t.Fatalf("RequestShutdown = %v, %v; want ShutdownViaRPC, nil", result, err)
+	}
+	if target != (ShutdownTarget{}) {
+		t.Fatalf("shutdown target = %+v, want zero for an ack PID that disagrees with the Ping", target)
 	}
 }
 
 // startReapedProcess starts name/args and reaps it in the background, so once
 // it exits it does not linger as a zombie that kill(pid, 0) still reports
-// alive (macOS has no /proc cmdline to tell the difference). The cleanup kills
-// it if the test left it running.
+// alive (macOS has no /proc cmdline to tell the difference). It returns only
+// once pidLooksAlive observes the child, the precondition every PID-wait test
+// relies on: a child not yet observably live would read as already exited,
+// passing the exit tests vacuously and failing the timeout test at once. The
+// cleanup kills it if the test left it running.
 func startReapedProcess(t *testing.T, name string, args ...string) int {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -228,7 +273,20 @@ func startReapedProcess(t *testing.T, name string, args ...string) int {
 		_ = cmd.Process.Kill()
 		<-done
 	})
-	return cmd.Process.Pid
+	pid := cmd.Process.Pid
+	deadline := time.Now().Add(2 * time.Second)
+	for !pidLooksAlive(pid) {
+		select {
+		case <-done:
+			t.Fatalf("%s (pid %d) exited before it was observably alive", name, pid)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (pid %d) not observably alive within 2s", name, pid)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return pid
 }
 
 // TestWaitForShutdownCompletionWaitsForPIDExit: the wait returns nil once the
