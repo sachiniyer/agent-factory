@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
@@ -65,14 +66,6 @@ func globalConfigSet(key, value string) (daemon.SetConfigValueResponse, error) {
 	}
 	defer client.CloseIdleConnections()
 
-	// The #5137 skew check rides inside SetConfigValue: EVERY write goes to
-	// the guarded route only refusal-capable daemons serve — an old daemon's
-	// write→apply gap means even a safe-forcing key cannot promise its own
-	// outcome there — so a pre-#5137 daemon answers 404, which apiclient
-	// translates into the policy refusal. Capability proof and write ride in
-	// the same request: no health preflight to race a daemon swap, and never
-	// a local fallback (that would write the WRONG machine, #3678).
-	//
 	// The flat alias is the version-skew wire spelling, exactly as on the local
 	// socket (daemon.SetGlobalConfigValue): an older daemon's allowlist predates
 	// the grouped TOML name, a newer one canonicalizes the alias before writing,
@@ -84,7 +77,7 @@ func globalConfigSet(key, value string) (daemon.SetConfigValueResponse, error) {
 		Value: value,
 	})
 	if err != nil {
-		return daemon.SetConfigValueResponse{}, err
+		return daemon.SetConfigValueResponse{}, remoteConfigWriteError(client, "af config set", "SetConfigValue", err)
 	}
 	if resp.Result == nil {
 		return daemon.SetConfigValueResponse{}, missingRemoteResult("af config set")
@@ -116,12 +109,9 @@ func globalConfigUnset(key string) (daemon.UnsetConfigValueResponse, error) {
 	}
 	defer client.CloseIdleConnections()
 
-	// Same #5137 skew check as the set path — every unset takes the guarded
-	// twin an old daemon does not serve, so the policy refusal is the answer
-	// a pre-#5137 daemon gets.
 	resp, err := client.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: key})
 	if err != nil {
-		return daemon.UnsetConfigValueResponse{}, err
+		return daemon.UnsetConfigValueResponse{}, remoteConfigWriteError(client, "af config unset", "UnsetConfigValue", err)
 	}
 	if resp.Result == nil {
 		return daemon.UnsetConfigValueResponse{}, missingRemoteResult("af config unset")
@@ -139,14 +129,29 @@ func missingRemoteResult(name string) error {
 		"check that the URL names an af daemon", name, apiclient.RemoteTargetURL())
 }
 
-// There is deliberately no remote write-error rewriter here: the one failure
-// whose raw form was unactionable — a 404 on the write route — is exactly what
-// the #5137 guarded routes exist to translate, and apiclient already turns that
-// answer into the policy refusal naming the daemon, the upgrade, and the
-// on-host escape. Everything else arrives as the daemon's own error. And the
-// tempting repair — falling back to the local write, like the local socket
-// does — is the silent wrong-machine mutation #3678 closed, so a remote write
-// failure is simply returned.
+// remoteConfigWriteError passes a remote write failure through untouched, except
+// for the one failure whose raw form is unactionable: a daemon that does not
+// serve the route at all.
+//
+// That case is not hypothetical for `unset` — the UnsetConfigValue route ships
+// in this same change, so every daemon already deployed answers its 404 — and it
+// is the case where doing the obvious thing would be worst. `daemon does not
+// serve /v1/UnsetConfigValue (it answered 404: …)` names a path the operator
+// never typed and says nothing about what changed, what did not, or what to do;
+// and the tempting repair — "fall back to the local write, like the local socket
+// does" — would put the change on the caller's own machine, which is the whole
+// defect #3678 closed. So: name the daemon, name its version, state plainly that
+// nothing was written, and give the two ways forward.
+func remoteConfigWriteError(client *apiclient.Client, name, route string, err error) error {
+	if !apiclient.IsRouteNotServed(err) {
+		return err
+	}
+	return fmt.Errorf(
+		"%s cannot change config on the daemon at %s: that daemon (%s) does not serve the %s route. "+
+			"Nothing was written — af never falls back to writing this machine's config for a remote target. "+
+			"Upgrade the daemon, or run %s on the daemon host",
+		name, apiclient.RemoteTargetURL(), client.DaemonVersionPhrase(context.Background()), route, name)
+}
 
 // configWriteLocation renders WHERE a config write landed, for the success line.
 //

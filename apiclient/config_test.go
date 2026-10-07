@@ -80,8 +80,7 @@ func mustEnvelope(t *testing.T, env apiproto.Envelope) []byte {
 func TestConfigWriteRoundTrips(t *testing.T) {
 	t.Run("SetConfigValue", func(t *testing.T) {
 		var got daemon.SetConfigValueRequest
-		// Every write takes the guarded route (#5137) — the server registers it.
-		c := routeServer(t, "SetConfigValueGuarded", func(b []byte) apiproto.Envelope {
+		c := routeServer(t, "SetConfigValue", func(b []byte) apiproto.Envelope {
 			_ = json.Unmarshal(b, &got)
 			return apiproto.Success(daemon.SetConfigValueResponse{
 				Result:        &config.SetResult{Key: got.Key, Value: got.Value, Path: "/remote/config.toml"},
@@ -105,8 +104,7 @@ func TestConfigWriteRoundTrips(t *testing.T) {
 
 	t.Run("UnsetConfigValue", func(t *testing.T) {
 		var got daemon.UnsetConfigValueRequest
-		// Every unset takes the guarded route (#5137) — the stub serves it.
-		c := routeServer(t, "UnsetConfigValueGuarded", func(b []byte) apiproto.Envelope {
+		c := routeServer(t, "UnsetConfigValue", func(b []byte) apiproto.Envelope {
 			_ = json.Unmarshal(b, &got)
 			return apiproto.Success(daemon.UnsetConfigValueResponse{
 				Result: &config.UnsetResult{Key: got.Key, Removed: true, Path: "/remote/config.toml"},
@@ -129,7 +127,7 @@ func TestConfigWriteRoundTrips(t *testing.T) {
 	// missing route would tell the caller "nothing happened, upgrade the daemon"
 	// about a daemon that ran the handler and said no.
 	t.Run("an envelope error is not a missing route", func(t *testing.T) {
-		c := routeServer(t, "SetConfigValueGuarded", func([]byte) apiproto.Envelope {
+		c := routeServer(t, "SetConfigValue", func([]byte) apiproto.Envelope {
 			return apiproto.Failure("agent-factory daemon is handing off to an upgrade; retry shortly")
 		})
 		_, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "default_program", Value: "codex"})
@@ -148,21 +146,19 @@ func TestConfigWriteRoundTrips(t *testing.T) {
 func TestRouteNotServedIsDistinguishable(t *testing.T) {
 	// The daemon's own catch-all: 404 carrying the envelope
 	// (daemon/httpserver.go). rpcHandler answers only 200/400/405/413/500/503, so
-	// a 404 on a /v1 route can come from nowhere else. GetConfig is used for the
-	// pin — the write pair ALWAYS takes the guarded twins now, where the same
-	// 404 is translated into the policy refusal before it can surface.
+	// a 404 on a /v1 route can come from nowhere else.
 	t.Run("the daemon's 404 envelope", func(t *testing.T) {
 		c := statusServer(t, func(r *http.Request) (int, []byte) {
 			env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
 			env.Error.DaemonRejected = true
 			return http.StatusNotFound, mustEnvelope(t, env)
 		})
-		_, err := c.GetConfig(daemon.GetConfigRequest{})
+		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "sandbox.ssh"})
 		if !IsRouteNotServed(err) {
 			t.Fatalf("a 404 must classify as a missing route, got %T: %v", err, err)
 		}
 		var missing *RouteNotServedError
-		if !errors.As(err, &missing) || missing.Route != "/v1/GetConfig" {
+		if !errors.As(err, &missing) || missing.Route != "/v1/UnsetConfigValue" {
 			t.Fatalf("the error must name the route that 404ed, got %+v", missing)
 		}
 	})
@@ -171,7 +167,7 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		c := remoteStatusServer(t, func(r *http.Request) (int, []byte) {
 			return http.StatusNotFound, mustEnvelope(t, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
 		})
-		_, err := c.GetConfig(daemon.GetConfigRequest{})
+		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "sandbox.ssh"})
 		if !IsRouteNotServed(err) {
 			t.Fatalf("a legacy daemon catch-all must retain route-skew handling, got %T: %v", err, err)
 		}
@@ -230,118 +226,6 @@ func TestRouteNotServedIsDistinguishable(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "malformed response envelope") {
 			t.Errorf("want the existing malformed-envelope error, got: %v", err)
-		}
-	})
-}
-
-// TestGuardedRouteSelectionIsThe5137CapabilityCheck pins the write-route
-// contract itself: EVERY set and unset posts to the guarded twin only a
-// refusal-enforcing daemon serves — the key cannot decide this, because an
-// old daemon's write handler ends in a whole-file ApplyConfig whose
-// write→apply gap is not atomic, so even a safe-forcing value can be swapped
-// out before the apply reads it. The guarded route's absence on a pre-#5137
-// daemon answers the write request itself — not a preflight.
-func TestGuardedRouteSelectionIsThe5137CapabilityCheck(t *testing.T) {
-	// Each case watches which PATH the request lands on; the bodies are
-	// identical either way, so the route is the observable proof.
-	t.Run("every set takes the guarded route", func(t *testing.T) {
-		for _, req := range []daemon.SetConfigValueRequest{
-			{Key: "network.listen_addr", Value: "0.0.0.0:8443"},
-			{Key: "listen_addr", Value: "0.0.0.0:8443"}, // the legacy alias
-			{Key: "network.require_token", Value: " false "},
-			{Key: "default_program", Value: "codex"},
-			{Key: "network.allow_unauthenticated_network", Value: "true"},
-			// The formerly safe-forcing writes take it too — the old daemon's
-			// whole-file apply means no write is provably safe on its own.
-			{Key: "network.require_token", Value: "true"},
-			{Key: "network.listen_addr", Value: "127.0.0.1:8443"},
-			{Key: "network.listen_addr", Value: ""},
-		} {
-			var path string
-			c := statusServer(t, func(r *http.Request) (int, []byte) {
-				path = r.URL.Path
-				return http.StatusOK, mustEnvelope(t, apiproto.Success(daemon.SetConfigValueResponse{
-					Result: &config.SetResult{Key: req.Key, Value: req.Value, Path: "/remote/config.toml"},
-				}))
-			})
-			if _, err := c.SetConfigValue(req); err != nil {
-				t.Fatalf("SetConfigValue(%+v): %v", req, err)
-			}
-			if path != "/v1/SetConfigValueGuarded" {
-				t.Errorf("SetConfigValue(%s=%s) took %q — EVERY write is guarded", req.Key, req.Value, path)
-			}
-		}
-	})
-
-	t.Run("every unset takes the guarded route", func(t *testing.T) {
-		for _, key := range []string{
-			"network.require_token",
-			"network.preview_listen_addr",
-			"network.listen_addr", // restores the loopback default — guarded anyway
-		} {
-			var path string
-			c := statusServer(t, func(r *http.Request) (int, []byte) {
-				path = r.URL.Path
-				return http.StatusOK, mustEnvelope(t, apiproto.Success(daemon.UnsetConfigValueResponse{
-					Result: &config.UnsetResult{Key: key, Removed: true, Path: "/remote/config.toml"},
-				}))
-			})
-			if _, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: key}); err != nil {
-				t.Fatalf("UnsetConfigValue(%s): %v", key, err)
-			}
-			if path != "/v1/UnsetConfigValueGuarded" {
-				t.Errorf("UnsetConfigValue(%s) took %q — EVERY write is guarded", key, path)
-			}
-		}
-	})
-
-	// A daemon that predates #5137 404s the guarded path, and the client must
-	// say WHY — a bare "route not served" would read as a missing method, when
-	// the truth is the daemon would have served the exposure the write created.
-	t.Run("a pre-refusal daemon's 404 becomes the policy refusal", func(t *testing.T) {
-		c := statusServer(t, func(r *http.Request) (int, []byte) {
-			env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
-			env.Error.DaemonRejected = true
-			return http.StatusNotFound, mustEnvelope(t, env)
-		})
-		_, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "network.listen_addr", Value: "0.0.0.0:8443"})
-		if err == nil {
-			t.Fatal("the guarded route's 404 must fail the write")
-		}
-		if IsRouteNotServed(err) {
-			t.Errorf("the guarded 404 is translated out of the generic skew class, got %T: %v", err, err)
-		}
-		for _, want := range []string{"predates af's unauthenticated-listener refusal", "network.listen_addr", "nothing was written"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("the translated refusal must contain %q, got: %v", want, err)
-			}
-		}
-	})
-
-	t.Run("the unset direction translates the same way", func(t *testing.T) {
-		c := statusServer(t, func(r *http.Request) (int, []byte) {
-			env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
-			env.Error.DaemonRejected = true
-			return http.StatusNotFound, mustEnvelope(t, env)
-		})
-		_, err := c.UnsetConfigValue(daemon.UnsetConfigValueRequest{Key: "network.require_token"})
-		if err == nil || !strings.Contains(err.Error(), "predates af's unauthenticated-listener refusal") {
-			t.Fatalf("want the translated policy refusal, got: %v", err)
-		}
-	})
-
-	// Even the remediation direction refuses a pre-refusal daemon: the write
-	// its caller believes is safe can be swapped on disk before the old
-	// daemon's apply reads it.
-	t.Run("a safe-forcing write to a pre-refusal daemon refuses", func(t *testing.T) {
-		c := statusServer(t, func(r *http.Request) (int, []byte) {
-			env := apiproto.Failure(`unknown route "` + r.URL.Path + `"`)
-			env.Error.DaemonRejected = true
-			return http.StatusNotFound, mustEnvelope(t, env)
-		})
-		_, err := c.SetConfigValue(daemon.SetConfigValueRequest{Key: "network.require_token", Value: "true"})
-		if err == nil || !strings.Contains(err.Error(), "predates af's unauthenticated-listener refusal") {
-			t.Fatalf("want the policy refusal for require_token=true, got: %v", err)
 		}
 	})
 }

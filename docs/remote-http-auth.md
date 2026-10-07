@@ -520,41 +520,15 @@ still starts — the install never breaks — but the web/HTTP listener stays
 refused until you pick one of the three fixes. `af doctor` and `af daemon status`
 name the posture and the fixes.
 
-The mixed-version window — an older daemon still running while the CLI is
-newer — is covered on three sides:
-
-- **Every** config write sent by a newer `af` to a daemon that predates the
-  refusal is declined by the **client**, which names the daemon restart that
-  arms the gate. The key does not matter: an old daemon's writer ends in a
-  whole-file `ApplyConfig` whose write→apply gap is not atomic, so even a
-  safe-forcing write — the token coming on, the address back to loopback —
-  can be swapped on disk before the apply reads it, and nothing the client
-  sent can promise the outcome. For a remote target
-  (`--daemon-url` / `AF_DAEMON_URL`) the check is the request itself:
-  every write goes to `/v1/SetConfigValueGuarded` /
-  `/v1/UnsetConfigValueGuarded`, routes only refusal-capable daemons serve, so
-  an older daemon's 404 is the refusal — the capability proof and the write
-  arrive in one request and cannot be split by a daemon swap. The web config
-  form selects the same guarded route, so a stale browser tab writing through
-  a rollback or a mixed-version proxy fails closed the same way. Remote writes
-  never fall back to your local config.
-- The remediation for a stale daemon is to upgrade and restart it — or to edit
-  its `config.toml` on the host directly, which the refusal deliberately does
-  not guard. Writing to it is not one of the options.
-- `af daemon status` and `af doctor` pointed at a stale daemon that is *still
-  serving* the tokenless network listener report the live exposure and the
-  restart, not the refusal the new code would apply.
-
-During an `af` self-upgrade the old supervisor validates that the candidate
-rebound the listener it was serving — an expectation that predates the
-refusal. A candidate whose transaction journal recorded the TCP listener bound
-therefore keeps it bound for the bounded probation window rather than failing
-validation into a rollback that would restore the still-exposed old daemon;
-the ordinary daemon that replaces it after commit refuses the bind at its own
-startup. The journal records only that the listener was bound, not the auth
-posture it served, so while the deferral holds the candidate's socket demands
-the bearer token regardless of the refused file — it can tighten what the old
-daemon served, never widen it.
+One caveat covers the whole mixed-version window: the refusal lives in this
+build, so it only protects what this build runs. A daemon binary that predates
+it still binds and serves the tokenless network posture its config asks for —
+the *running* daemon is the one that decides. If `af daemon status` shows a
+listener `bound` on a network address, take that at face value and restart the
+daemon (`af daemon restart`) so the refusing build owns the socket. Guarding a
+newer CLI's writes to an *older* remote daemon, the upgrade supervisor's
+listener expectations, and live-vs-disk drift reporting in `af daemon status`
+and `af doctor` are tracked as follow-ups (#5183, #5184, #5185).
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
 a tokenless listener may feel reasonable, and `network.allow_unauthenticated_network = true`

@@ -4241,27 +4241,22 @@ test("config: a refresh landing mid-edit preserves focus, caret, and later typin
     let markSaveStarted!: () => void;
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
-    // EVERY save takes SetConfigValueGuarded under #5137 — an old daemon's
-    // write→apply gap means no key can promise its own outcome. Intercept the
-    // pair anyway so a future route split cannot slip an unmocked call through.
-    for (const routePattern of ["**/v1/SetConfigValue", "**/v1/SetConfigValueGuarded"]) {
-      await p.route(routePattern, async (route) => {
-        const body = route.request().postDataJSON() as { key: string; value: string };
-        markSaveStarted();
-        await saveMayFinish;
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            data: {
-              result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
-              restart_notice: "",
-            },
-            error: null,
-          }),
-        });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      markSaveStarted();
+      await saveMayFinish;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
       });
-    }
+    });
 
     await openTokenless(p);
     await p.locator('.af-viewtab[data-view="config"]').click();
@@ -4321,11 +4316,6 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
   // The route is intercepted, so the daemon is NOT mutated: network.listen_addr
   // applies live and would otherwise rebind this very daemon's listener. Only the
   // canned reply drives configStatus + ConfigPane.update/render.
-  //
-  // Every config write goes through SetConfigValueGuarded (#5137 — no key is
-  // provably safe against an old daemon's non-atomic write→apply), so the
-  // interception below names that route; the mock failing to fire means the
-  // client stopped guarding, not just the focus path under test.
   const ctx = await browser.newContext();
   let releaseSave: (() => void) | undefined;
   try {
@@ -4333,7 +4323,7 @@ test("config: a same-key Enter-save keeps focus on the rebuilt field", REAL_FIXT
     let markSaveStarted!: () => void;
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     const saveMayFinish = new Promise<void>((resolve) => { releaseSave = resolve; });
-    await p.route("**/v1/SetConfigValueGuarded", async (route) => {
+    await p.route("**/v1/SetConfigValue", async (route) => {
       const body = route.request().postDataJSON() as { key: string; value: string };
       markSaveStarted();
       await saveMayFinish;
@@ -4422,28 +4412,22 @@ test("config: a later save's status does not pull focus out of the field the use
   const releaseAll = () => { for (const resolve of releaseResolvers.values()) resolve(); };
   try {
     const p = await ctx.newPage();
-    // BOTH writes take SetConfigValueGuarded under #5137 — an old daemon's
-    // write→apply gap means even the loopback listen_addr is not provably
-    // safe. Intercept the pair anyway so a future route split cannot slip an
-    // unmocked call through.
-    for (const routePattern of ["**/v1/SetConfigValue", "**/v1/SetConfigValueGuarded"]) {
-      await p.route(routePattern, async (route) => {
-        const body = route.request().postDataJSON() as { key: string; value: string };
-        startResolvers.get(body.key)?.();
-        await holds[body.key];
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            data: {
-              result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
-              restart_notice: "",
-            },
-            error: null,
-          }),
-        });
+    await p.route("**/v1/SetConfigValue", async (route) => {
+      const body = route.request().postDataJSON() as { key: string; value: string };
+      startResolvers.get(body.key)?.();
+      await holds[body.key];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            result: { key: body.key, value: body.value, path: "/tmp/config.toml", requires_restart: false },
+            restart_notice: "",
+          },
+          error: null,
+        }),
       });
-    }
+    });
 
     await openTokenless(p);
     await p.locator('.af-viewtab[data-view="config"]').click();

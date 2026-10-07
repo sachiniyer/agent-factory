@@ -202,9 +202,9 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 		checkRunningDaemonConfig(report, h, daemonConfig)
 		checkRootAgentPrograms(ctx, report, daemonConfig)
 	}
-	// The listener/auth rows (#2090 posture, #5137 refusal, opted-in exposure,
-	// and the running-vs-disk drift row) live in listener_posture.go.
-	checkListenerPosture(report, h, cfg)
+	// The listener/auth disk-posture row (#5137 refusal, opted-in exposure)
+	// lives in listener_posture.go.
+	checkListenerPosture(report, cfg)
 	// "A unit file exists" is not "this home has autostart". There is one unit
 	// per user and it bakes its AGENT_FACTORY_HOME at install time, so under a
 	// non-default AGENT_FACTORY_HOME the installed unit is somebody else's

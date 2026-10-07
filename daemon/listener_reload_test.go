@@ -92,7 +92,7 @@ func TestWebListenerAuthAppliesLiveWithoutRebind(t *testing.T) {
 	tightened := *m.Config()
 	tightened.RequireToken = true
 	tightened.RequireLoopbackToken = true
-	m.storeLivePosture(&tightened)
+	m.live.Store(&tightened)
 
 	require.Equal(t, http.StatusUnauthorized, getStatus(t, addr, "/v1/health"),
 		"a require_token/require_loopback_token tighten must apply on the next request with no rebind")
@@ -111,7 +111,7 @@ func TestWebListenerRebindsOnListenAddrChange(t *testing.T) {
 	freeAddr := grabFreeLoopbackAddr(t)
 	next := *m.Config()
 	next.ListenAddr = freeAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err)
@@ -143,7 +143,7 @@ func TestWebListenerRebindFailureKeepsOldListenerServing(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = occupied
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "a rebind onto an occupied port must fail")
@@ -376,7 +376,7 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 			} else {
 				disabled.PreviewListenAddr = ""
 			}
-			m.storeLivePosture(&disabled)
+			m.live.Store(&disabled)
 			failed, err = wl.reconcile(&disabled)
 			require.NoError(t, err)
 			require.Empty(t, failed)
@@ -491,7 +491,7 @@ func TestWebListenerSamePortNarrowingAppliesLive(t *testing.T) {
 	newAddr := "127.0.0.1:" + port
 	next := *m.Config()
 	next.ListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "a same-port narrowing must apply live (#5140)")
@@ -515,7 +515,7 @@ func TestWebListenerSamePortWideningAppliesLive(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "a same-port widening must apply live (#5140)")
@@ -563,7 +563,7 @@ func TestWebListenerSamePortRebindFailureRestoresOldListener(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "the same-port rebind must report failure")
@@ -601,7 +601,7 @@ func TestWebListenerDifferentPortBindFailureKeepsSameHandle(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = blocker.Addr().String()
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "a rebind onto an occupied different port must fail")
@@ -643,7 +643,7 @@ func TestWebListenerSamePortDistinctAddressKeepsSameHandle(t *testing.T) {
 
 	next := *m.Config()
 	next.ListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "a rebind onto an occupied distinct address must fail")
@@ -680,7 +680,7 @@ func TestWebListenerSamePortRollbackFailureClearsBoundState(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "the rollback failure must surface")
@@ -697,7 +697,7 @@ func TestWebListenerSamePortRollbackFailureClearsBoundState(t *testing.T) {
 	// The failed listener key is still retryable: a later apply of the same
 	// address re-attempts the bind rather than deciding the state matches.
 	next2 := *m.Config()
-	m.storeLivePosture(&next2)
+	m.live.Store(&next2)
 	wl.listenTCP = net.Listen
 	failed, err := wl.reconcile(&next2)
 	require.NoError(t, err, "after the state cleared, re-applying retries the bind")
@@ -721,7 +721,7 @@ func TestWebListenerSamePortLeadingZeroPortAppliesLive(t *testing.T) {
 	newAddr := "127.0.0.1:0" + port
 	next := *m.Config()
 	next.ListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "a leading-zero spelling of the same port must still take the release path (#5140)")
@@ -769,7 +769,7 @@ func TestWebListenerSamePortWideningBlockedBySiblingKeepsHandle(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "widening onto a port the sibling shares must fail")
@@ -817,7 +817,7 @@ func TestWebListenerIPv4WildcardRequestSeesIPv6Sibling(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "widening onto a port a v6 sibling shares must fail")
@@ -854,7 +854,7 @@ func TestWebListenerSamePortSiblingMovedInSameApplyRetries(t *testing.T) {
 	next.ListenAddr = "0.0.0.0:" + port
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	next.PreviewListenAddr = ""             // torn down in the same apply — the blocker leaves
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "once the sibling leaves the port the retried widening must apply (#5140)")
@@ -888,7 +888,7 @@ func TestWebListenerSamePortIPv6WideningAppliesLive(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.NoError(t, rerr, "an IPv6 same-port widening must apply live (#5140)")
@@ -932,7 +932,7 @@ func TestWebListenerSiblingOnlyConflictRetriesAfterSiblingLeaves(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = target
 	next.PreviewListenAddr = "" // the sibling leaves the port in the same apply
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "once the sibling vacates the address the retried move must apply (#5140)")
@@ -986,7 +986,7 @@ func TestWebListenerTwoWaySwapAppliesLive(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = webTarget
 	next.PreviewListenAddr = "127.0.0.1:" + port // preview takes the control listener's home
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.NoError(t, rerr, "a two-way sibling swap must converge, not defer both sides (#5140)")
@@ -1048,7 +1048,7 @@ func TestWebListenerTwoWaySwapRestoresPairWhenSecondHalfFails(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = webTarget
 	next.PreviewListenAddr = previewTarget
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "a swap whose second half cannot land reports deferred")
@@ -1098,7 +1098,7 @@ func TestWebListenerMutualDeclineIsNotASwap(t *testing.T) {
 	next.ListenAddr = newAddr
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
 	next.PreviewListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "both sides asking for the same wildcard cannot both bind — defer")
@@ -1131,7 +1131,7 @@ func TestWebListenerSameEndpointRespellingKeepsSandboxCredentials(t *testing.T) 
 	newAddr := "127.0.0.1:0" + port
 	next := *m.Config()
 	next.ListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, rerr := wl.reconcile(&next)
 	require.NoError(t, rerr, "a respelling of the same endpoint must apply live")
@@ -1174,7 +1174,7 @@ func TestWebListenerSamePortSwapFlushesInflightRequest(t *testing.T) {
 	next := *m.Config()
 	next.ListenAddr = "0.0.0.0:" + port
 	next.AllowUnauthenticatedNetwork = true // #5137: the wildcard target needs the opt-in
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err, "the same-port widening must succeed while the request is in flight")
 	require.Empty(t, failed)
@@ -1215,7 +1215,7 @@ func TestPreviewListenerSamePortNarrowingAppliesLive(t *testing.T) {
 	newAddr := "127.0.0.1:" + port
 	next := *m.Config()
 	next.PreviewListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 
 	failed, err = wl.reconcile(&next)
 	require.NoError(t, err, "a same-port preview narrowing must apply live (#5140)")

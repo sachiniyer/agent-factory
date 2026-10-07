@@ -47,15 +47,13 @@ func TestPing_UnsetVersionStaysEmpty(t *testing.T) {
 // Phase 4 of #2168 needs status and doctor to compare the daemon that actually
 // answered Ping with the installed unit and the config currently on disk. Pin
 // those facts on Ping itself: a PID file can be stale, and rereading config in
-// the client cannot reveal what the already-running daemon is enforcing.
+// the client cannot reveal what the already-running daemon booted with.
 func TestPing_ReportsProcessAndBootConfig(t *testing.T) {
-	m := &Manager{cfg: &config.Config{
-		ListenAddr:                  "0.0.0.0:8443",
-		RequireToken:                true,
-		RequireLoopbackToken:        true,
-		AllowUnauthenticatedNetwork: true,
-	}}
-	s := &controlServer{manager: m}
+	s := &controlServer{manager: &Manager{cfg: &config.Config{
+		ListenAddr:           "0.0.0.0:8443",
+		RequireToken:         true,
+		RequireLoopbackToken: true,
+	}}}
 
 	var resp PingResponse
 	require.NoError(t, s.Ping(PingRequest{}, &resp))
@@ -67,28 +65,10 @@ func TestPing_ReportsProcessAndBootConfig(t *testing.T) {
 	require.Equal(t, float64(os.Getpid()), wire["pid"],
 		"the responding process, not daemon.pid, is the supervision identity")
 	require.Equal(t, map[string]any{
-		"listen_addr":                   "0.0.0.0:8443",
-		"require_token":                 true,
-		"require_loopback_token":        true,
-		"allow_unauthenticated_network": true,
-	}, wire["boot_config"], "with no live swap the boot config is the answer")
-
-	// The name is historical — the fields report the LIVE posture
-	// (Manager.Config()), because the listener/auth keys apply live (#2480) and
-	// every BootConfig consumer asks what this daemon enforces NOW: a
-	// live-applied write must change the answer, not read as drift.
-	live := *m.cfg
-	live.RequireToken = false
-	live.AllowUnauthenticatedNetwork = false
-	m.storeLivePosture(&live)
-
-	var after PingResponse
-	require.NoError(t, s.Ping(PingRequest{}, &after))
-	require.NotNil(t, after.BootConfig)
-	require.False(t, after.BootConfig.RequireToken,
-		"BootConfig must follow the live-applied posture, not the frozen startup config")
-	require.False(t, after.BootConfig.AllowUnauthenticatedNetwork)
-	require.True(t, after.BootConfig.RequireLoopbackToken, "untouched fields still report")
+		"listen_addr":            "0.0.0.0:8443",
+		"require_token":          true,
+		"require_loopback_token": true,
+	}, wire["boot_config"], "Ping must report the immutable config this daemon booted with")
 }
 
 func TestSetVersion_RoundTrips(t *testing.T) {

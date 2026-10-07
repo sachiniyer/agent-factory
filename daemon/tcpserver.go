@@ -211,15 +211,6 @@ type livePosture struct {
 	// previewWarmingUp reports whether the daemon is still restoring, so a denial on
 	// the preview origin can render the RETRYING notice instead of the terminal one.
 	previewWarmingUp func() bool
-	// posturePair returns the config snapshot and the #5137 probation floor in
-	// ONE atomic read. The apply sequence is three ordered writes — arm, config
-	// publish, disarm — and reading the floor as a separate atomic from the
-	// config lets a request straddle them: old tokenless config observed before
-	// the publish, cleared floor observed after it → the phantom pair admits the
-	// request unauthenticated on a socket both real snapshots would have gated.
-	// Pairing is the only answer — neither read order alone closes both the arm
-	// and the disarm straddle. Nil means (snapshot(), false) — no floor.
-	posturePair func() (*config.Config, bool)
 }
 
 // connTracker tracks the HIJACKED connections — WebSocket upgrades — of one
@@ -415,10 +406,6 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 		boundLoopback := config.IsLoopbackListenAddr(listener.Addr().String())
 		handler = withLivePosture(mux, func() requestPosture {
 			c := live.snapshot()
-			floored := false
-			if live.posturePair != nil {
-				c, floored = live.posturePair()
-			}
 			g := &authGate{
 				expectedToken:           expectedToken,
 				expectedTokenForRequest: expectedForRequest,
@@ -432,12 +419,6 @@ func startTCPListenerWithListen(mux http.Handler, addr string, cfg *config.Confi
 				// config (webListenerPolicy's terms), loopback judged from the fixed
 				// bound address, not the possibly-mid-change config.ListenAddr.
 				g.tokenDisabled = !c.RequireToken
-				if floored {
-					// The upgrade-probation floor: the candidate keeps the
-					// journaled socket bound but must not serve it
-					// unauthenticated while the file it loaded reads refused.
-					g.tokenDisabled = false
-				}
 				g.loopbackExempt = boundLoopback && !c.RequireLoopbackToken
 			}
 			cors := c.CORSAllowedOrigins

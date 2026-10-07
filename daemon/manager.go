@@ -31,11 +31,7 @@ type Manager struct {
 	// and threads that snapshot down — a per-use read inside one op could observe
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
-	// The publication also carries the #5137 upgrade-probation token floor —
-	// deliberately inside the same atomic, because the apply sequence (arm →
-	// publish → disarm) makes cfg and floor two halves of one state, and a gate
-	// that loaded them separately could observe a pair that never coexisted.
-	live atomic.Pointer[livePosturePublication]
+	live atomic.Pointer[config.Config]
 	// configApplyMu serializes live config swaps and their side effects.
 	configApplyMu sync.Mutex
 	// accountSwapAfterManualPrecheckForTest pauses a manual handoff after its
@@ -816,7 +812,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 	mgr.rootAgentLayers.Store(&rootAgentLayers)
 	// Seed the hot-reloadable live config with the startup config (#2480). Config()
 	// reads it; ApplyConfig swaps it in place.
-	mgr.live.Store(&livePosturePublication{cfg: cfg})
+	mgr.live.Store(cfg)
 	// Build the usage-limit detector from the startup config; ApplyConfig rebuilds
 	// it in place when limit_patterns changes.
 	initialDetector := task.NewLimitDetector(cfg.LimitPatterns)

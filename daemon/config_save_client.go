@@ -57,28 +57,6 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
-			// #5137 version-skew gate: EVERY write a pre-refusal daemon
-			// accepts ends in ApplyConfig loading the WHOLE file, and the
-			// write→apply gap is not atomic — a hand edit after the writer's
-			// file-lock release is what the apply binds, so even a
-			// safe-forcing write (the token coming on, a loopback
-			// listen_addr) cannot promise its own outcome. The capability
-			// field is affirmative, so an older daemon decodes false and
-			// the write is refused here before it is made. A Ping FAILURE
-			// is not a refusal: a daemon too old to answer Ping is also too
-			// old to serve SetConfigValue, so the write then falls back to
-			// this build's own gated writer — and a transport failure fails
-			// the write call next anyway.
-			//
-			// Why a Ping suffices here while the HTTP path needs the guarded
-			// /v1/*Guarded route: this socket names exactly ONE process. Probe
-			// and write cannot land on different daemons — there is no URL in
-			// front to retarget the second call — and a restart between them
-			// kills the connection rather than swapping in an older build.
-			var ping PingResponse
-			if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
-				return SetConfigValueResponse{}, staleDaemonListenerWriteRefusal(key, ping.Version)
-			}
 			// The flat alias is the version-skew wire spelling: an older daemon's
 			// SetConfigValue allowlist predates the grouped TOML name, while a new
 			// daemon canonicalizes the same alias before writing. Normalize its
@@ -166,16 +144,6 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
-			// The same #5137 skew gate as SetGlobalConfigValue — EVERY unset:
-			// a pre-refusal daemon's whole-file apply can bind whatever
-			// posture a hand edit leaves between the write and the apply, so
-			// no key's own direction is provable on the other side. Ping
-			// failure is not a refusal — see the set path for why a probe
-			// suffices on this socket.
-			var ping PingResponse
-			if pingErr := client.Call(controlServiceName+".Ping", PingRequest{}, &ping); pingErr == nil && !ping.RefusesUnauthenticatedNetworkListener {
-				return UnsetConfigValueResponse{}, staleDaemonListenerWriteRefusal(key, ping.Version)
-			}
 			callErr := client.Call(controlServiceName+".UnsetConfigValue",
 				UnsetConfigValueRequest{Key: key}, &resp)
 			if callErr == nil || !isRPCMethodMissing(callErr) {
@@ -221,24 +189,6 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 	resp.ApplyOutcome = outcome.StatusForKey(result.Key)
 	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	return resp, nil
-}
-
-// staleDaemonListenerWriteRefusal is the refusal ANY config write gets when
-// the daemon answering the control socket predates the #5137 refusal policy.
-// It is a CLIENT-side gate — the write refusal itself lives in the daemon's
-// writer, so a daemon too old to have it cannot enforce it; the message names
-// the restart that arms it.
-func staleDaemonListenerWriteRefusal(key, version string) error {
-	v := "an older version"
-	if version != "" {
-		v = "version " + version
-	}
-	return fmt.Errorf(
-		"the running daemon (%s) predates af's unauthenticated-listener refusal (#5137): accepting this %s "+
-			"write triggers its whole-file apply, which binds whatever listen_addr the file holds — "+
-			"unauthenticated if that posture is tokenless — so the write is refused here instead of risking "+
-			"it. Upgrade af on that host and restart the daemon (`af daemon restart`), then retry; to accept "+
-			"the exposure deliberately, edit config.toml on the host itself", v, key)
 }
 
 // isRPCMethodMissing reports whether a net/rpc call failed because the serving

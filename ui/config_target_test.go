@@ -83,23 +83,10 @@ func serveRemoteDaemon(t *testing.T, version string, handlers map[string]func(bo
 
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/v1/health" {
-			// The stub models THIS build's daemon, so its health answer carries
-			// the #5137 unauthenticated-listener-refusal capability — the same
-			// claim the guarded-route mirroring below makes routable.
-			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{
-				OK: true, Version: version,
-				RefusesUnauthenticatedNetworkListener: true,
-			}))
+			_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PingResponse{OK: true, Version: version}))
 			return
 		}
 		h, ok := handlers[r.URL.Path]
-		// This stub models THIS build's daemon, so the config-write twins a
-		// test registers under the plain names also answer at their #5137
-		// guarded routes — a guarded write is an exposure-capable write aimed
-		// at exactly the daemons that serve it.
-		if !ok && strings.HasSuffix(r.URL.Path, "Guarded") {
-			h, ok = handlers[strings.TrimSuffix(r.URL.Path, "Guarded")]
-		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_ = apiproto.WriteEnvelope(w, apiproto.Failure(`unknown route "`+r.URL.Path+`"`))
@@ -353,9 +340,7 @@ func TestConfigPaneEditWritesToTheTargetedDaemon(t *testing.T) {
 	if c.statusIsError {
 		t.Fatalf("the remote save failed: %s", c.status)
 	}
-	// default_program does not force the listener posture safe, so the write
-	// takes the guarded route — which this stub mirrors to the same handler.
-	body, called := d.body("/v1/SetConfigValueGuarded")
+	body, called := d.body("/v1/SetConfigValue")
 	if !called {
 		t.Fatal("the edit never reached the targeted daemon")
 	}
@@ -391,17 +376,16 @@ func TestConfigPaneEditRefusesADaemonThatDoesNotServeSetConfigValue(t *testing.T
 		},
 	})
 
-	// EVERY write posts to the guarded twin (#5137): this stub serves only the
-	// plain route, so the guarded 404 comes back as the policy refusal — the
-	// daemon predates the refusal and cannot be trusted to apply any write.
 	c := editKeyInPane(t, remoteManifest(), d.url+" · "+remotePath, "default_program", "codex")
 
 	if !c.statusIsError {
-		t.Fatalf("a daemon that does not serve SetConfigValueGuarded must be refused, got status %q", c.status)
+		t.Fatalf("a daemon that does not serve SetConfigValue must be refused, got status %q", c.status)
 	}
 	for _, want := range []string{
-		"predates af's unauthenticated-listener refusal",
-		"nothing was written",
+		"does not serve the SetConfigValue route",
+		"version 0.9.1",
+		"Nothing was written",
+		"never falls back",
 		d.url,
 	} {
 		if !strings.Contains(c.status, want) {
@@ -488,9 +472,7 @@ func TestConfigPaneRemoteEditSendsTheLegacyAliasAndEchoesTheCanonicalKey(t *test
 		t.Fatalf("the remote save failed: %s", c.status)
 	}
 
-	// The write lands on the guarded twin (#5137 — every write does); the
-	// stub's mirroring serves it from the plain handler registered above.
-	body, called := d.body("/v1/SetConfigValueGuarded")
+	body, called := d.body("/v1/SetConfigValue")
 	if !called {
 		t.Fatal("the edit never reached the targeted daemon")
 	}
@@ -629,11 +611,6 @@ func serveControlStub(t *testing.T, stub any) {
 // the tokenless-network exposure drop: a TUI edit of network.listen_addr to a
 // non-loopback address while require_token is false, with NO daemon running.
 //
-// The seed opts the exposure in with allow_unauthenticated_network: since #5137
-// the same write without it is REFUSED outright (the pane sees an error, not a
-// warning), so the warn-and-serve surface this test pins only exists under the
-// opt-in.
-//
 // On the no-daemon fallback, daemon.SetGlobalConfigValue's apply poke
 // cannot dial the control socket, so resp.Warnings stays nil while
 // resp.Result.Warnings carries the exposureWarning the write produced. Before
@@ -653,7 +630,6 @@ func TestLocalConfigSetSurfacesExposureWarningNoDaemon(t *testing.T) {
 		"",
 		"[network]",
 		"require_token = false",
-		"allow_unauthenticated_network = true",
 		"",
 	}, "\n")
 	if err := os.WriteFile(cfgPath, []byte(seed), 0644); err != nil {

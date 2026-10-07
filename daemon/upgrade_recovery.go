@@ -352,27 +352,9 @@ func daemonMatchesIdentity(h HealthStatus, want daemonIdentity) error {
 	if want.listeners.HTTPUnixBound && !h.Listeners.HTTPUnixBound {
 		return fmt.Errorf("%s daemon has not bound the HTTP control listener", want.role)
 	}
-	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound && h.Listeners.TCPRefusalReason == "" {
+	if want.listeners.TCPConfigured && want.listeners.TCPBound && !h.Listeners.TCPBound {
 		return fmt.Errorf("%s daemon has not bound the configured TCP listener", want.role)
 	}
-	// A responder that reports TCPRefusalReason has DECLINED the bind on
-	// purpose: the previous daemon's bound TCP listener was a tokenless
-	// non-loopback serve, which #5137 now refuses by policy. That is the
-	// upgrade doing its job — requiring the candidate to rebind the socket
-	// would either fail forever or resurrect the very exposure the refusal
-	// exists to close, and rolling back would strand the operator on the old
-	// daemon still serving the API unauthenticated. A genuine bind failure
-	// carries no refusal reason and still fails the check above.
-	//
-	// This clause only helps when the SUPERVISOR is itself a #5137 build: the
-	// recovery actor execs the immutable previous binary, so a pre-#5137 old
-	// daemon validates candidates with a predicate that knows no refusal reason.
-	// That direction is covered candidate-side instead — a probation candidate
-	// whose journal expected the socket bound keeps it bound under token
-	// enforcement (webListeners.upgradeCandidateCarriesRefusedListener — the
-	// journal records no auth posture, so the floor is the strongest safe
-	// answer), and the fresh ordinary daemon that replaces it after adoption
-	// refuses at its own startup reconcile.
 	return nil
 }
 

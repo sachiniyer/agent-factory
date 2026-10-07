@@ -50,10 +50,8 @@ func ServingDaemonSupervised(h HealthStatus, supervision SupervisionInfo) ProbeA
 }
 
 // RunningConfigMatches reports whether the listener/auth posture on disk is
-// the posture the responding daemon is currently enforcing. BootConfig carries
-// the LIVE config, so a live-applied write reads as a match while a hand-edit
-// the daemon has not seen reads as drift. An older responder or a failed
-// config load is an evidence gap, not a mismatch.
+// the posture the responding daemon actually booted with. An older responder
+// or a failed config load is an evidence gap, not a mismatch.
 func RunningConfigMatches(h HealthStatus, current *config.Config) ProbeAnswer {
 	if h.PingErr != nil {
 		return Undetermined(fmt.Errorf("no daemon answered Ping: %w", h.PingErr))
@@ -66,17 +64,14 @@ func RunningConfigMatches(h HealthStatus, current *config.Config) ProbeAnswer {
 	}
 	if strings.TrimSpace(h.BootConfig.ListenAddr) == strings.TrimSpace(current.ListenAddr) &&
 		h.BootConfig.RequireToken == current.RequireToken &&
-		h.BootConfig.RequireLoopbackToken == current.RequireLoopbackToken &&
-		h.BootConfig.AllowUnauthenticatedNetwork == current.AllowUnauthenticatedNetwork {
+		h.BootConfig.RequireLoopbackToken == current.RequireLoopbackToken {
 		return AnswerYes()
 	}
 	return AnswerNo()
 }
 
 // RunningConfigDifference renders only the non-secret fields which differ.
-// boot is the running daemon's live posture (DaemonBootConfig — the name is
-// historical; it reports what the daemon enforces now, not at boot). Empty
-// means no known difference (including unavailable evidence).
+// Empty means no known difference (including unavailable evidence).
 func RunningConfigDifference(boot *DaemonBootConfig, current *config.Config) string {
 	if boot == nil || current == nil {
 		return ""
@@ -91,10 +86,6 @@ func RunningConfigDifference(boot *DaemonBootConfig, current *config.Config) str
 	if boot.RequireLoopbackToken != current.RequireLoopbackToken {
 		diffs = append(diffs, fmt.Sprintf("network.require_loopback_token: running %t, file %t",
 			boot.RequireLoopbackToken, current.RequireLoopbackToken))
-	}
-	if boot.AllowUnauthenticatedNetwork != current.AllowUnauthenticatedNetwork {
-		diffs = append(diffs, fmt.Sprintf("network.allow_unauthenticated_network: running %t, file %t",
-			boot.AllowUnauthenticatedNetwork, current.AllowUnauthenticatedNetwork))
 	}
 	return strings.Join(diffs, "; ")
 }

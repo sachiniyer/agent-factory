@@ -130,17 +130,13 @@ func localConfigSet(key, value string) (*config.SetResult, string, error) {
 		return nil, "", err
 	}
 	// resp.Warnings is the apply-time notice (the daemon's
-	// ListenerExposureNotice, or the #5137 refusal when a hand-edit left the
-	// posture refused) and is only populated when a daemon actually applied the
-	// write. With no daemon reachable the apply fails and resp.Warnings is nil,
-	// while resp.Result.Warnings still carries the per-write exposureWarning
-	// config.SetGlobalConfigValue produced — the one paneNotice's doc comment
-	// promises the pane surfaces. Use it only on that fallback so a
-	// daemon-running edit shows exactly one notice, not the two
-	// differently-worded ones both fields carry there. A write whose result
-	// would be refused never reaches this plumbing at all: the writer returns
-	// it as an error above, so the pane shows the refusal as a failure rather
-	// than a warning.
+	// ListenerExposureNotice) and is only populated when a daemon actually
+	// applied the write. With no daemon reachable the apply fails and
+	// resp.Warnings is nil, while resp.Result.Warnings still carries the
+	// per-write exposureWarning config.SetGlobalConfigValue produced — the one
+	// paneNotice's doc comment promises the pane surfaces. Use it only on that
+	// fallback so a daemon-running edit shows exactly one notice, not the two
+	// differently-worded ones both fields carry there.
 	warnings := resp.Warnings
 	if len(warnings) == 0 && resp.Result != nil {
 		warnings = resp.Result.Warnings
@@ -165,13 +161,6 @@ func remoteConfigSet(key, value string) (*config.SetResult, string, error) {
 	}
 	defer client.CloseIdleConnections()
 
-	// The #5137 skew check rides inside SetConfigValue, same as `af config set
-	// --daemon-url`: EVERY write takes the guarded route that only
-	// refusal-capable daemons serve — an old daemon's write→apply gap means no
-	// key is provably safe — so the capability proof and the write are one
-	// request and a pre-#5137 daemon fails closed with a 404 apiclient already
-	// translated into the policy refusal.
-	//
 	// The flat alias is the version-skew wire spelling, exactly as on the local
 	// socket (daemon.SetGlobalConfigValue) and in `af config set --daemon-url`
 	// (commands/configremote.go): an older daemon's allowlist predates the grouped
@@ -197,12 +186,11 @@ func remoteConfigSet(key, value string) (*config.SetResult, string, error) {
 	}
 	resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
 	// Same fallback as localConfigSet: resp.Warnings carries the apply-time
-	// notice when the daemon applied the write, and resp.Result.Warnings carries
-	// the per-write exposureWarning it did not. A daemon that actually applied
-	// is the remote case, so this is dormant today, but it makes the contract
-	// explicit — one notice, from whichever field the daemon populated — rather
-	// than relying on the remote daemon always applying. A refused write comes
-	// back as the envelope error above, never a warning.
+	// ListenerExposureNotice when the daemon applied the write, and
+	// resp.Result.Warnings carries the per-write exposureWarning it did not. A
+	// daemon that actually applied is the remote case, so this is dormant today,
+	// but it makes the contract explicit — one notice, from whichever field the
+	// daemon populated — rather than relying on the remote daemon always applying.
 	warnings := resp.Warnings
 	if len(warnings) == 0 {
 		warnings = resp.Result.Warnings
@@ -212,9 +200,9 @@ func remoteConfigSet(key, value string) (*config.SetResult, string, error) {
 
 // paneNotice builds the one line the pane shows after a write: the daemon's
 // per-key effect notice, then where that daemon is accepting if the key moved a
-// listener (#3722), then any warnings — the opted-in network exposure notice,
-// a refused listener's reason, or a listener rebind's actionable reason — so a
-// TUI edit that exposes the API or could not rebind still tells the user.
+// listener (#3722), then any warnings — the tokenless-network exposure notice, or
+// a listener rebind's actionable reason — so a TUI edit that exposes the API or
+// could not rebind still tells the user.
 //
 // The address is folded in HERE, in the one place both write paths already meet,
 // rather than at each of them. That is not tidiness: the local and remote save

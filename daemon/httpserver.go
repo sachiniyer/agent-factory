@@ -150,7 +150,13 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// bindWebLocked's banner reports the exposure it is serving.
 	wl := newWebListeners(manager, mux, newPreviewMux(cs))
 	manager.webListeners = wl
-	if _, err := wl.reconcile(manager.cfg); err != nil {
+	// Reconcile against the LIVE config, not the frozen boot cfg: the unix
+	// control socket admits config writes during warm-up before webListeners
+	// exists, so an apply that landed in that window already published the live
+	// config — binding off the stale boot copy could serve a posture the
+	// applied config already revoked (e.g. an allow_unauthenticated_network
+	// revocation landing between socket-accept and this reconcile).
+	if _, err := wl.reconcile(manager.Config()); err != nil {
 		log.WarningLog.Printf("daemon web listener(s): %v", err)
 	}
 

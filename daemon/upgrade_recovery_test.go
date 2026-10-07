@@ -107,22 +107,6 @@ func TestPreviousDaemonHealthy(t *testing.T) {
 			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{TCPConfigured: true, TCPBound: true}),
 			wantErr: true,
 		},
-		{
-			// The #5137 upgrade case: the previous daemon was bound on a tokenless
-			// non-loopback listener the new build REFUSES by policy. The candidate
-			// reports the refusal, so the expectation the journal recorded
-			// (TCPBound=true, describing the OLD daemon) is intentionally unmet —
-			// failing it would roll back to the very daemon still serving the
-			// exposure. A refused bind is a satisfied check, not a failed one.
-			name: "tcp listener intentionally refused",
-			health: HealthStatus{DaemonVersion: "1.0.100", Listeners: DaemonListenerStatus{
-				TCPConfigured:    true,
-				TCPListenAddr:    "0.0.0.0:8443",
-				TCPRefusalReason: "network.listen_addr \"0.0.0.0:8443\" is reachable from the network … refused",
-			}},
-			journal: journalAt("", "1.0.100", upgradetxn.ListenerExpectation{TCPConfigured: true, TCPBound: true}),
-			wantErr: false,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := daemonMatchesIdentity(tc.health, previousDaemonIdentity(tc.journal))

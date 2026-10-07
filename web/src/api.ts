@@ -1165,20 +1165,6 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
   return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
 }
 
-// --- #5137 guarded writes ----------------------------------------------------
-//
-// SetConfigValueGuarded is the fail-closed twin of SetConfigValue: it exists
-// only on daemons that enforce the #5137 refusal of a tokenless non-loopback
-// control bind, so EVERY write posts there — the capability check AND the
-// write in one request. The key/value cannot decide this: an old daemon's
-// writer ends in a whole-file ApplyConfig and its write→apply gap is not
-// atomic, so a concurrent edit decides what binds regardless of which key was
-// sent. A stale tab writing through a rollback or downgrade, or a proxy
-// fronting mixed-version daemons, gets a 404 rather than an accepted write
-// that binds the very listener this build declines to. The Go client
-// (apiclient.SetConfigValue) does the same — the two are one contract on two
-// transports.
-
 /** Sets one global config key, exactly as `af config set key value` does: the
  *  daemon hands the value to the same validator and the same file-locked atomic
  *  writer, so an invalid value is rejected here with the CLI's own message
@@ -1187,29 +1173,7 @@ export async function getConfig(token: string): Promise<ConfigResponse> {
  *  Throws ApiError carrying the validator's message on a rejected value — the
  *  form shows it verbatim rather than substituting its own wording. */
 export async function setConfigValue(key: string, value: string, token: string): Promise<ConfigSetResponse> {
-  try {
-    return await af<ConfigSetResponse>("SetConfigValueGuarded", { key, value }, token);
-  } catch (e) {
-    // The guarded route's fail-closed answer is a 404 — but only a 404 the
-    // DAEMON provably sent may be rewritten as the refusal: a proxy can
-    // substitute its own 404 after forwarding the write, and claiming
-    // "nothing was written" about a committed mutation is the unsafe direction
-    // (an opted-in listener may already be serving). Provenance is the
-    // daemon_rejected marker or the legacy catch-all's exact envelope — the
-    // same two evidences apiclient.routeNotServed404 accepts. Anything else
-    // stays the unmarked 404 it is: uncertain, not refused.
-    if (e instanceof ApiError && e.status === 404 &&
-      (e.daemonRejected || (e.code === "" && e.message === 'unknown route "/v1/SetConfigValueGuarded"'))) {
-      throw new ApiError(404,
-        `the daemon predates af's unauthenticated-listener refusal (#5137): accepting this ${key} write ` +
-        "triggers its whole-file apply, which binds whatever listen_addr the file holds — the control " +
-        "API, including DeliverPrompt, served unauthenticated if that posture is tokenless — so the " +
-        "write is refused rather than risk it — nothing was written. Upgrade af on that host and restart " +
-        "its daemon, then retry; to accept the exposure deliberately, edit config.toml on the host instead",
-        e.code, e.daemonRejected);
-    }
-    throw e;
-  }
+  return af<ConfigSetResponse>("SetConfigValue", { key, value }, token);
 }
 
 // --- config assistant (#2467) ----------------------------------------------

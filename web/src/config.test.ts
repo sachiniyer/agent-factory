@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { ApiError, getConfig, setConfigValue } from "./api.js";
+import { getConfig, setConfigValue } from "./api.js";
 import { type ConfigStatus, canCommit, controlKind, createKeyedQueue, saveNotice, shouldCloseSavedField } from "./config.js";
 import type { ConfigEntry, ConfigSetResponse } from "./types.js";
 
@@ -82,10 +82,7 @@ test("setConfigValue posts the key and the RAW value for the daemon to validate"
   });
   const resp = await setConfigValue("update_channel", "preview", "tok");
 
-  // Every write takes the guarded route — a daemon that cannot enforce #5137
-  // 404s it, and a key classifier cannot decide this (an old daemon's apply is
-  // a whole-file reload whose write→apply gap is not atomic).
-  assert.equal(cap.url, "/v1/SetConfigValueGuarded");
+  assert.equal(cap.url, "/v1/SetConfigValue");
   assert.deepEqual(cap.body, { key: "update_channel", value: "preview" });
   // The echo is the CANONICAL value the writer reported — the UI shows this
   // rather than what it sent, which is the same contract `af config set` has.
@@ -199,87 +196,6 @@ test("setConfigValue sends no Authorization header for the tokenless credential"
   });
   await setConfigValue("auto_update", "true", "");
   assert.equal(cap.auth, undefined);
-});
-
-// --- #5137 the guarded write route -----------------------------------------
-//
-// EVERY config write posts to SetConfigValueGuarded — a route only
-// refusal-capable daemons serve, so a rollback/downgrade or mixed-version
-// proxy fails the write closed (404) instead of accepting it. A key-based
-// classifier cannot decide this: a pre-#5137 daemon's write handler ends in a
-// whole-file ApplyConfig whose write→apply gap is not atomic, so even a
-// "safe" value can be swapped on disk before the apply reads it. The cases
-// below keep the formerly divergent spellings pinned to the one answer.
-
-test("setConfigValue takes the guarded endpoint for every key and value", async () => {
-  for (const [key, value] of [
-    ["network.listen_addr", "0.0.0.0:8443"],
-    ["network.listen_addr", "192.168.1.5:8443"],
-    ["listen_addr", "0.0.0.0:8443"],          // the legacy flat alias
-    ["network.require_token", "false"],
-    ["network.require_token", "not-a-bool"],
-    ["network.allow_unauthenticated_network", "true"],
-    ["update_channel", "preview"],
-    ["default_program", "claude"],
-    // The formerly safe-forcing writes take it too — no write is provably
-    // safe against an old daemon's non-atomic write→apply sequence.
-    ["network.listen_addr", "127.0.0.1:8443"],
-    ["network.listen_addr", "[::1]:8443"],
-    ["network.listen_addr", "localhost:8443"],
-    ["network.listen_addr", ""],
-    ["network.require_token", "true"],
-    ["require_token", "true"],                // the legacy flat alias
-  ] as const) {
-    const cap = stubFetch({
-      result: { key, value, path: "/tmp/config.toml", requires_restart: false },
-      restart_notice: "",
-    });
-    await setConfigValue(key, value, "tok");
-    assert.equal(cap.url, "/v1/SetConfigValueGuarded", `${key}=${value}`);
-  }
-});
-
-test("setConfigValue translates the guarded route's daemon-proven 404 into the fail-closed refusal", async () => {
-  // The 404 IS the capability check: a daemon that predates the refusal does
-  // not serve SetConfigValueGuarded, so nothing was written. The form must say
-  // that — not "404 Not Found" — and it must still throw. The stub reproduces
-  // the pre-#5137 catch-all's exact envelope, which is the provenance the
-  // translation requires.
-  stubFetch(null, { ok: false, status: 404, error: 'unknown route "/v1/SetConfigValueGuarded"' });
-
-  await assert.rejects(
-    () => setConfigValue("network.require_token", "false", "tok"),
-    (err: Error) => {
-      assert.match(err.message, /predates af's unauthenticated-listener refusal/);
-      assert.match(err.message, /nothing was written/);
-      return true;
-    },
-  );
-});
-
-test("an unmarked 404 on the guarded route stays uncertain — never 'nothing was written'", async () => {
-  // A proxy can substitute its own 404 AFTER forwarding the write, so an
-  // unattributed one cannot be called a refusal: the mutation may have
-  // committed, and for allow_unauthenticated_network=true that could mean the
-  // unauthenticated listener is already serving. The raw ApiError must
-  // surface unchanged (#5137 review).
-  for (const noEnvelope of [true, false]) {
-    // Two shapes: a non-envelope proxy 404 (status text only) and an envelope
-    // whose message does not prove the daemon's catch-all.
-    stubFetch(null, noEnvelope
-      ? { ok: false, status: 404 }
-      : { ok: false, status: 404, error: "some intermediary said no" });
-    await assert.rejects(
-      () => setConfigValue("network.allow_unauthenticated_network", "true", "tok"),
-      (err: Error) => {
-        assert.equal(err instanceof ApiError, true);
-        assert.equal((err as ApiError).status, 404);
-        assert.doesNotMatch(err.message, /nothing was written|predates af/,
-          "an unmarked 404 must not claim the write was refused — the mutation may have committed");
-        return true;
-      },
-    );
-  }
 });
 
 // The web half of the anti-drift guarantee.

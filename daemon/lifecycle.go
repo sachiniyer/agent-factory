@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 )
@@ -352,57 +351,4 @@ func (l *daemonLifecycle) clearHTTPListeners() {
 	l.listeners.TCPBoundAddr = ""
 	l.listeners.PreviewBound = false
 	l.listeners.PreviewBoundAddr = ""
-}
-
-// Ping is the lifecycle snapshot made RPC: every field it answers except
-// Version, PID, and the capability flags is read from the daemonLifecycle, so
-// the handler lives here with the state it reports rather than in
-// control_server.go with the mutating handlers.
-func (s *controlServer) Ping(_ PingRequest, resp *PingResponse) error {
-	resp.OK = true
-	resp.AccountHandoff = true
-	resp.RefusesUnauthenticatedNetworkListener = true
-	resp.Version = Version()
-	resp.PID = os.Getpid()
-	var tcpListenAddr string
-	var haveLifecycle bool
-	if s.manager != nil && s.manager.lifecycle != nil {
-		state := s.manager.lifecycle.snapshot()
-		resp.BootID = state.bootID
-		resp.TransactionID = state.transactionID
-		resp.Phase = state.phase
-		resp.Listeners = state.listeners
-		tcpListenAddr = state.listeners.TCPListenAddr
-		haveLifecycle = true
-	}
-	if s.manager != nil {
-		// The LIVE posture, not the boot snapshot: the listener/auth keys are
-		// applied-live (#2480), so m.cfg can go stale the moment a config write
-		// lands, and every BootConfig consumer — the running-vs-disk drift rows,
-		// `af daemon status`, doctor's listener classification — is asking what
-		// this daemon enforces NOW.
-		if live := s.manager.Config(); live != nil {
-			resp.BootConfig = daemonBootConfig(live)
-			if haveLifecycle {
-				// The file's network.listen_addr can lie about what is serving:
-				// a failed live rebind keeps the PREVIOUS socket answering while
-				// Config() already holds the requested address — so
-				// RunningConfigMatches(live-vs-file) would report "yes" for a
-				// socket still bound elsewhere. Report the listener owner's
-				// configured half instead: the address that produced the socket
-				// answering now, or the refused address (so a refusal reads as
-				// enforced, not as drift from a boot value that never served).
-				resp.BootConfig.ListenAddr = tcpListenAddr
-			}
-			if s.manager.tokenFloorArmed() {
-				// The upgrade-probation floor is enforcement OUTSIDE the file:
-				// while it holds, the control listener's gate demands the
-				// bearer token even though the loaded config reads tokenless.
-				// Report what the socket enforces — otherwise status and doctor
-				// would call a floored socket unauthenticated.
-				resp.BootConfig.RequireToken = true
-			}
-		}
-	}
-	return nil
 }

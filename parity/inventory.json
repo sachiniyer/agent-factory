@@ -227,14 +227,14 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:1191 SetConfigValueGuarded"
+        "pointer": "web/src/api.ts:487 SetConfigValue"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/configcmd.go:193 config set"
       },
       "verdict": "parity",
-      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. Since #3231 all three go through the daemon's admission-gated SetConfigValue while a daemon runs, and since #3708 the TUI's write follows --daemon-url/AF_DAEMON_URL exactly as `af config set` has since #3679 — together with its read, which had to move at the same time or the editor would write values it never read. #5137 added the guarded twin POST /v1/SetConfigValueGuarded — same handler, served only by daemons that enforce the unauthenticated-listener refusal. EVERY write posts there: a pre-#5137 daemon's write→apply gap is not atomic, so no key or value can promise a safe result on the far side, and its 404 on the guarded route is the fail-closed answer. It is the SAME capability under a second name, not a new surface."
+      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. Since #3231 all three go through the daemon's admission-gated SetConfigValue while a daemon runs, and since #3708 the TUI's write follows --daemon-url/AF_DAEMON_URL exactly as `af config set` has since #3679 — together with its read, which had to move at the same time or the editor would write values it never read."
     },
     {
       "id": "config.unset-global-alias",
@@ -252,7 +252,7 @@
         "pointer": "commands/configcmd.go config unset without --project -> commands/configremote.go globalConfigUnset (local socket, or the targeted daemon's UnsetConfigValue)"
       },
       "verdict": "deliberate",
-      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope. #3679 added POST /v1/UnsetConfigValue so the CLI can reach a REMOTE daemon's clear (its `set` counterpart was already served); the route existing does not change the TUI/web answers, which are about what those editors expose rather than about what the daemon serves. #5137 added the guarded twin POST /v1/UnsetConfigValueGuarded on the same handler and for the same reason as SetConfigValueGuarded — see config.write; it is the same capability under a second name, not a new surface."
+      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope. #3679 added POST /v1/UnsetConfigValue so the CLI can reach a REMOTE daemon's clear (its `set` counterpart was already served); the route existing does not change the TUI/web answers, which are about what those editors expose rather than about what the daemon serves."
     },
     {
       "id": "config.write-project",
@@ -1641,12 +1641,10 @@
       "POST /v1/SendPrompt": "session.send-prompt",
       "POST /v1/ResumeFromLimit": "session.limit-retry",
       "POST /v1/SetConfigValue": "config.write",
-      "POST /v1/SetConfigValueGuarded": "config.write",
       "POST /v1/Snapshot": "session.list",
       "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
       "POST /v1/UnsetConfigValue": "config.unset-global-alias",
-      "POST /v1/UnsetConfigValueGuarded": "config.unset-global-alias",
       "POST /v1/UpdateTask": "task.edit"
     },
     "tui_bindings": {
@@ -1733,7 +1731,7 @@
       "ReorderTab": "session.tab.reorder",
       "RestoreSession": "session.restore",
       "ResumeFromLimit": "session.limit-retry",
-      "SetConfigValueGuarded": "config.write",
+      "SetConfigValue": "config.write",
       "Snapshot": "session.list",
       "SuggestSessionName": "-",
       "TriggerTask": "task.trigger",

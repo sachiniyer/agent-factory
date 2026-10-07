@@ -176,7 +176,7 @@ func rebindControl(t *testing.T, m *Manager, wl *webListeners) {
 	t.Helper()
 	next := *m.Config()
 	next.ListenAddr = grabFreeLoopbackAddr(t)
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 	failed, err := wl.reconcile(&next)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -277,7 +277,7 @@ func TestRebindRetiresTheOldListenerRatherThanClosingIt(t *testing.T) {
 			} else {
 				next.PreviewListenAddr = grabFreeLoopbackAddr(t)
 			}
-			m.storeLivePosture(&next)
+			m.live.Store(&next)
 			failed, err = wl.reconcile(&next)
 			require.NoError(t, err)
 			require.Empty(t, failed)
@@ -315,7 +315,7 @@ func TestDisablingAListenerRetiresIt(t *testing.T) {
 
 	disabled := *m.Config()
 	disabled.ListenAddr = ""
-	m.storeLivePosture(&disabled)
+	m.live.Store(&disabled)
 	failed, err = wl.reconcile(&disabled)
 	require.NoError(t, err)
 	require.Empty(t, failed)
@@ -361,7 +361,7 @@ func TestControlDrainWindowListenerIsClosedAfterControlReturns(t *testing.T) {
 	newAddr := grabFreeLoopbackAddr(t)
 	next := *m.Config()
 	next.ListenAddr = newAddr
-	m.storeLivePosture(&next)
+	m.live.Store(&next)
 	failed, err = wl.reconcile(&next)
 	require.NoError(t, err)
 	require.Empty(t, failed)
