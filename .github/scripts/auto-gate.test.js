@@ -424,8 +424,8 @@ const workflowGroup = (eventName, event = {}, inputs = {}, runId = 100) => {
       format("pr-{0}-{1}", event.pull_request?.number, event.pull_request?.head?.sha)) ||
     (first(event.issue?.number, event.pull_request?.number) &&
       format("pr-{0}", first(event.issue?.number, event.pull_request?.number))) ||
-    (first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha) &&
-      format("head-{0}", first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha))) ||
+    (first(event.workflow_run?.head_sha, event.sha) &&
+      format("head-{0}", first(event.workflow_run?.head_sha, event.sha))) ||
     runId
   );
 };
@@ -453,8 +453,8 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
       "&& format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) " +
       "|| (github.event.issue.number || github.event.pull_request.number) " +
       "&& format('pr-{0}', github.event.issue.number || github.event.pull_request.number) " +
-      "|| (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
-      "&& format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "|| (github.event.workflow_run.head_sha || github.event.sha) " +
+      "&& format('head-{0}', github.event.workflow_run.head_sha || github.event.sha) " +
       "|| github.run_id",
   );
   // The synchronize guard must precede both the generic pull_request_target
@@ -505,12 +505,8 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
     workflowGroup("issue_comment", { issue: { number: 4060 } }),
     workflowGroup("issue_comment", { issue: { number: 4061 } }),
   );
-  // Commit events coalesce across all three types on the same commit, and only
-  // on the same commit: coverage is exactly the named head.
-  assert.equal(
-    workflowGroup("check_suite", { check_suite: { head_sha: HEAD_SHA } }),
-    `auto-gate-head-${HEAD_SHA}`,
-  );
+  // Commit events coalesce across both subscribed types on the same commit,
+  // and only on the same commit: coverage is exactly the named head.
   assert.equal(
     workflowGroup("workflow_run", { workflow_run: { head_sha: HEAD_SHA } }),
     `auto-gate-head-${HEAD_SHA}`,
@@ -558,7 +554,6 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
   // No event's group may contain the run id except the last-resort fallback:
   // coalescing is decided by coverage, never by arrival order.
   for (const [name, event] of Object.entries({
-    check_suite: { check_suite: { head_sha: HEAD_SHA } },
     issue_comment: { issue: { number: 4060 } },
     pull_request_review: { pull_request: pr(4060) },
     pull_request_review_comment: { pull_request: pr(4060) },
@@ -575,6 +570,23 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
     );
   }
   assert.equal(workflowGroup("unrecognized_event", {}, {}, 777), "auto-gate-777");
+});
+
+test("Auto Gate never subscribes to check_suite or check_run (#5177)", () => {
+  // Every run of this workflow leaves a github-actions-owned check suite on
+  // its head, and the platform delivers that suite's completion as a fresh
+  // check_suite event — so a subscription self-feeds forever (~200 runs/hour
+  // measured on one master head for days). No payload filter can prevent it:
+  // on.check_suite accepts only `types`, and a run whose jobs are all skipped
+  // by `if` still completes its check suite, re-firing the same event — the
+  // subscription list is the only place a filtered event costs nothing.
+  // check_run recursion is the same shape through the run's own job runs.
+  // Required-check wakeups are covered by workflow_run[PR Validation] and
+  // status; anything else is the reconciliation pass's job. Do not re-add
+  // either event without a trigger-level app filter.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.doesNotMatch(triggers, /^  (check_suite|check_run):/m);
 });
 
 test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {
@@ -635,7 +647,6 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     "github.event.pull_request.number",
     "inputs.pr_number",
     "github.event.workflow_run.head_sha",
-    "github.event.check_suite.head_sha",
     "github.event.sha",
     "github.event.schedule",
     "github.event.action",
@@ -651,7 +662,6 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     return `auto-gate-target-${target}-head-${headSha}`;
   };
   const cases = {
-    check_suite: [{ check_suite: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
     issue_comment: [{ issue: { number: 4060 }, comment: { body: "[gate-ack]" } }, {}, 4060],
     pull_request_review: [{ pull_request: { number: 4060 } }, {}, 4060],
     pull_request_review_comment: [{ pull_request: { number: 4060 } }, {}, 4060],
@@ -11738,8 +11748,8 @@ test("#4210: an already-visible successor head resolves without waiting", async 
 // #5064: the same shape used to throw through the recovery catch. But a poll
 // whose every read still shows the initiating SHA never observed a successor —
 // nothing was missed, the push simply had not landed yet, and when it lands its
-// own events (its check_suite, its synchronize through auto-gate-head.yml, PR
-// Validation's terminal workflow_run) re-evaluate it. The exit is quiet: no
+// own events (its synchronize through auto-gate-head.yml, PR Validation's
+// terminal workflow_run) re-evaluate it. The exit is quiet: no
 // target, no failure comment, no red run — a notice is the audit trail.
 test("#5064: a successor that never appeared ends quietly, not red", async () => {
   const github = fakeGateGithub();
