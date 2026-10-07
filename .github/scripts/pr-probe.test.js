@@ -73,6 +73,7 @@ test("a normal PR reports exactly the check names it reported before probe mode"
       "Performance and visual baselines",
       "Test (macOS)",
       "Build",
+      "Request Auto Gate reconciliation",
     ],
   );
 });
@@ -87,7 +88,7 @@ test("a probe runs the Linux Test job and nothing else", () => {
     changed = false;
     for (const [id, job] of all) {
       if (skipped.has(id)) continue;
-      const bySelf = job.if === PROBE_SKIP || (id === "build" && job.if === BUILD_IF);
+      const bySelf = job.if === PROBE_SKIP || job.if === BUILD_IF;
       const statusFunction = /\b(always|failure|cancelled|success)\(\)/.test(job.if || "");
       const byNeed = !statusFunction && job.needs.some((need) => skipped.has(need));
       if (bySelf || byNeed) {

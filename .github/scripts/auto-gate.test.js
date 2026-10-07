@@ -16,6 +16,7 @@ const ACTIONS_APP_ID = 15368;
 const CHECK_GENERATION_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_SCRIPT = path.join(__dirname, "auto-gate.js");
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+const PR_VALIDATION_WORKFLOW = path.join(__dirname, "..", "workflows", "pr.yml");
 const AUTO_GATE_AGGREGATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate-aggregate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
 const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
@@ -587,6 +588,104 @@ test("Auto Gate never subscribes to check_suite or check_run (#5177)", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
   const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
   assert.doesNotMatch(triggers, /^  (check_suite|check_run):/m);
+});
+
+// Parses the jobs: block of a workflow file into name → raw block, walking the
+// two-space job keys by indentation. Enough YAML structure to pin a job's keys
+// without a parser dependency this suite does not have.
+function workflowJobBlocks(workflow) {
+  const jobsText = workflow.slice(workflow.indexOf("\njobs:"));
+  return Object.fromEntries(
+    [...jobsText.matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm)].map(
+      (match) => [match[1], match[2]],
+    ),
+  );
+}
+
+// A key's scalar value, or the indented block it opens, inside one job block.
+function jobKey(block, key) {
+  const scalar = block.match(new RegExp(`^    ${key}: (\\S.*)$`, "m"));
+  if (scalar) return scalar[1];
+  return block.match(new RegExp(`^    ${key}:\\n((?:      [^\\n]*\\n?)+)`, "m"))?.[1];
+}
+
+test("PR Validation ends by requesting the reconciliation pass itself (#5179)", () => {
+  // The */5 schedule is best-effort (measured ~3% of expected deliveries) and
+  // the workflow_run wakeup it backs up is dropped under load — 64 of 381 PR
+  // Validation completions over Oct 1–7 2026 produced no gate run within ten
+  // minutes. The dependable backstop is the run whose completion is at risk
+  // POSTing the auto-gate-reconcile dispatch itself: a synchronous API write,
+  // not an event delivery the platform can silently drop, and a warning in
+  // the run log rather than a silent failure. Two load-bearing conditions:
+  // contents:write exists ONLY on this job — the workflow stays read-only and
+  // the job runs nothing PR-controlled (no checkout, no repo scripts) — and
+  // the payload carries no PR-controlled fields.
+  const workflow = fs.readFileSync(PR_VALIDATION_WORKFLOW, "utf8");
+
+  // Workflow-level permissions stay read-only.
+  const topPermissions = workflow.match(/^permissions:\n((?:  \w+: \w+\n)+)/m);
+  assert.ok(topPermissions, "pr.yml must keep a top-level permissions block");
+  assert.deepEqual(
+    topPermissions[1].trim().split("\n").map((line) => line.trim()),
+    ["contents: read"],
+  );
+
+  const jobs = workflowJobBlocks(workflow);
+  const job = jobs["gate-reconcile"];
+  assert.ok(job, "pr.yml needs the gate-reconcile job that sends the dispatch");
+
+  // Run-end placement and no probe cost: build needs every other job and runs
+  // always(), so needing it lands this job at the end of the run.
+  assert.equal(jobKey(job, "needs"), "[build]");
+  assert.equal(jobKey(job, "if"), "always() && !inputs.probe");
+
+  // The only write permission in the workflow, scoped to this job — and this
+  // job is also the only job allowed to declare permissions at all.
+  assert.deepEqual(
+    Object.entries(jobs).filter(([, block]) => jobKey(block, "permissions")),
+    [["gate-reconcile", job]],
+    "no other pr.yml job may carry a permissions block",
+  );
+  assert.deepEqual(
+    jobKey(job, "permissions").trim().split("\n").map((line) => line.trim()),
+    ["contents: write"],
+  );
+
+  // No checkout, no action, no repo script: one step, a single gh api POST.
+  // Assertions run on code lines only — the job's own comment names what it
+  // must never do, and a negative pattern would match that wording.
+  const code = job.replace(/^[ \t]*#[^\n]*\n/gm, "");
+  assert.doesNotMatch(code, /uses:/);
+  assert.doesNotMatch(code, /checkout|node\s|\.github\/|require\(|git\s/);
+  assert.match(code, /gh api "repos\/\$GITHUB_REPOSITORY\/dispatches" --method POST --input -/);
+  // A failed POST is a warning, never a red check or a silent skip.
+  assert.match(code, /::warning::/);
+  assert.doesNotMatch(code, /exit 1|set -e/);
+
+  // The payload is fixed-shape: event_type plus a client_payload holding only
+  // run-derived fields — never PR-controlled strings.
+  const body = code.match(/\{"event_type":"auto-gate-reconcile","client_payload":\{([^}]*)\}\}/);
+  assert.ok(body, "the dispatch posts exactly the auto-gate-reconcile event");
+  assert.deepEqual(
+    [...body[1].matchAll(/"(\w+)":/g)].map((match) => match[1]).sort(),
+    ["head_sha", "source_event", "source_run_id"],
+  );
+  const interpolated = new Set();
+  for (const expression of code.matchAll(/\$\{\{[^}]*\}\}/g)) {
+    for (const ref of expression[0].matchAll(/\b(?:github|secrets|vars|inputs|needs|steps|matrix|env)\.[\w.]+/g)) {
+      interpolated.add(ref[0]);
+    }
+  }
+  assert.deepEqual(
+    [...interpolated].sort(),
+    [
+      "github.event.pull_request.head.sha",
+      "github.sha",
+      "inputs.probe",
+      "secrets.GITHUB_TOKEN",
+    ],
+    "only run-derived values, the probe gate, and the token may reach this job",
+  );
 });
 
 test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {

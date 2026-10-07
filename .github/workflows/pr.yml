@@ -862,3 +862,45 @@ jobs:
 
       - name: Verify compilation
         run: go build ./...
+
+  # Auto Gate's wakeup for this workflow's terminal state is the workflow_run
+  # subscription — which GitHub has intermittently dropped under load (#5179:
+  # 64 of 381 completions over Oct 1–7 had no gate run within ten minutes) —
+  # and behind it the */5 schedule, delivered every two to five hours measured.
+  # Neither is a dependable net, so the run whose completion is at risk asks
+  # for the reconciliation pass itself: a synchronous dispatch POST, not an
+  # event delivery the platform can silently drop — and a failed POST is a
+  # warning in this run's log, never a silent skip. needs:[build] lands this
+  # at run end (build requires every other job and runs always()), and a burst
+  # of completions coalesces inside the shared required-check-reconciliation
+  # concurrency group — one running pass plus one pending — so no chain or
+  # fan-out is possible; the five-minute request window in auto-gate.js is
+  # untouched. One job, no checkout, no repo scripts, and a payload with no
+  # PR-controlled fields: the pass re-derives everything from the API. A
+  # fork's pull_request token is read-only, so its POST warns and the
+  # workflow_run subscription remains the wakeup there.
+  gate-reconcile:
+    name: ${{ inputs.probe && 'Request Auto Gate reconciliation (skipped by probe)' || 'Request Auto Gate reconciliation' }}
+    needs: [build]
+    if: always() && !inputs.probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # The only write permission in this workflow, and only for the dispatch
+    # POST. The token is read-only anyway on fork pull_request runs, where the
+    # POST warns and the workflow_run event remains the wakeup.
+    permissions:
+      contents: write
+    steps:
+      - name: Dispatch auto-gate-reconcile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          payload=$(printf \
+            '{"event_type":"auto-gate-reconcile","client_payload":{"source_run_id":"%s","source_event":"%s","head_sha":"%s"}}' \
+            "$GITHUB_RUN_ID" "$GITHUB_EVENT_NAME" "$HEAD_SHA")
+          if echo "$payload" | gh api "repos/$GITHUB_REPOSITORY/dispatches" --method POST --input -; then
+            echo "::notice::Requested an Auto Gate required-check reconciliation pass."
+          else
+            echo "::warning::Could not request the Auto Gate reconciliation pass; the workflow_run subscription and the schedule remain."
+          fi
