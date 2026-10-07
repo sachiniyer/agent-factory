@@ -155,6 +155,38 @@ func TestReapSessionProcessesStillReapsGenuineLeaksBesideRequester(t *testing.T)
 		"the genuine leak is waited on, signalled, and gone — exactly as before #5182")
 }
 
+// A requester can be registered AFTER the reap's set was already captured:
+// teardown A holds this client in its grace wait while the client's own
+// destructive RPC is only now reaching its handler (Codex on #5186). The
+// registry is re-consulted before every signal tier, so a requester tracked
+// mid-grace is still spared rather than SIGTERMed.
+func TestReapSessionProcessesSparesRequesterRegisteredMidGrace(t *testing.T) {
+	var infoBuf, warnBuf logtest.Buffer
+	redirectReapLogs(t, &infoBuf, &warnBuf)
+
+	requester := spawnRequesterSleeper(t)
+	// Deliberately NOT tracked at capture time — the registration lands while
+	// the reap is already inside its grace wait, as a still-in-flight RPC
+	// handler would.
+	untrackCh := make(chan func(), 1)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		untrackCh <- TrackTeardownRequester(requester)
+	}()
+	t.Cleanup(func() { (<-untrackCh)() })
+
+	remaining := reapSessionProcesses(reapOnRequest, "af_requester_late",
+		[]proctree.Process{requester}, 900*time.Millisecond, 300*time.Millisecond)
+
+	require.Empty(t, remaining, "the late-tracked requester leaves the signal set, not the wait")
+	require.True(t, proctree.AliveSame(requester),
+		"a requester registered during the grace wait must still never be signalled")
+	require.NotContains(t, warnBuf.String(), fmt.Sprintf("%d", requester.PID),
+		"the late-tracked requester must never appear in a reap WARNING")
+	require.Contains(t, infoBuf.String(), "registered while this reap was already waiting",
+		"the mid-reap exemption is logged so the missing SIGTERM line is explainable")
+}
+
 // The exemption is scoped to the handler: once the reply is in flight the
 // unregister has run, and a stale registration cannot hide the process from a
 // LATER reap that legitimately owns it.

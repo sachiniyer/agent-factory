@@ -655,7 +655,22 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	// it earlier (addOrReplaceOrphanCandidate); this is the signal-time
 	// backstop for a requester registered after a set was already captured.
 	procs = dropTeardownRequesters(procs)
-	return proctree.KillEscalating(procs, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+	// And it can be registered AFTER the capture — a teardown still in its
+	// grace wait when this process's own destructive RPC finally reaches its
+	// handler (Codex on #5186). The exempt predicate is re-run before every
+	// signal tier so a late-tracked requester is still spared.
+	exemptedMidReap := make(map[int]bool)
+	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if !isTeardownRequester(p) {
+			return false
+		}
+		if !exemptedMidReap[p.PID] {
+			exemptedMidReap[p.PID] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) registered while this reap was already waiting; "+
+				"excluding it from signalling (#5182)", p.PID, p.Comm)
+		}
+		return true
+	}, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
 		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})
 }

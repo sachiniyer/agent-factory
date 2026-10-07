@@ -314,10 +314,23 @@ const (
 // identity-verified (see Signal) and reported through logf, one line per
 // process, with the ReapOutcome the caller maps to a severity. logf may be nil.
 func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
+	return KillEscalatingExcept(procs, nil, grace, termWait, logf)
+}
+
+// KillEscalatingExcept is KillEscalating with a last-moment exemption: exempt
+// is re-consulted on the survivor set immediately BEFORE each signal tier —
+// after the grace wait and again after the SIGTERM wait — so a process that
+// gained its reprieve while the reap was already waiting (a teardown
+// requester that registered only once the reply-blocking RPC began, after an
+// earlier teardown captured it, #5182) is spared rather than signalled. The
+// waits still cover it — exemption arrives at signal time, not selection time
+// — so the caller keeps its capture-time filter for the stall-free path and
+// uses this for the race. A nil exempt is KillEscalating exactly.
+func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
 	if logf == nil {
 		logf = func(ReapOutcome, string, ...any) {}
 	}
-	survivors := WaitForExits(procs, grace)
+	survivors := dropExempted(WaitForExits(procs, grace), exempt)
 	if len(survivors) == 0 {
 		return nil
 	}
@@ -330,7 +343,7 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(Re
 			logf(ReapUnkillable, "failed to SIGTERM surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
-	survivors = WaitForExits(survivors, termWait)
+	survivors = dropExempted(WaitForExits(survivors, termWait), exempt)
 	for _, p := range survivors {
 		err := Signal(p, syscall.SIGKILL)
 		switch {
@@ -345,6 +358,21 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(Re
 		logf(ReapUnkillable, "process %d (%s) survived SIGKILL", p.PID, p.Comm)
 	}
 	return remaining
+}
+
+// dropExempted removes exempt-matching processes from the survivor set. nil
+// exempt drops nothing.
+func dropExempted(procs []Process, exempt func(Process) bool) []Process {
+	if exempt == nil {
+		return procs
+	}
+	var kept []Process
+	for _, p := range procs {
+		if !exempt(p) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // ErrCPUUnknown is returned by CPUFraction when the kernel would not report

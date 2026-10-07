@@ -89,7 +89,22 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	if len(procs) == 0 {
 		return
 	}
-	proctree.KillEscalating(procs, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
+	// A teardown requester can register AFTER the set above was built — a
+	// teardown still in its grace wait when the requester's own destructive
+	// RPC reaches its handler. Re-check the registry before each signal tier
+	// so a late-tracked requester is spared too (Codex on #5186).
+	exemptedMidReap := make(map[int]bool)
+	proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if !teardownreq.Is(p) {
+			return false
+		}
+		if !exemptedMidReap[p.PID] {
+			exemptedMidReap[p.PID] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) registered while this reap was already waiting; "+
+				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
+		}
+		return true
+	}, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
 		// Every tier stays a WARNING here, and the outcome is deliberately unused
 		// (#2765). This reaper does not run on the requested-teardown side of that
 		// split: it fires only when a process is STILL WRITING into a worktree

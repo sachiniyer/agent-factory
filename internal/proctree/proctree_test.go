@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -552,5 +553,54 @@ func TestEnvironDoesNotPredictPermission(t *testing.T) {
 	// Nonexistent: no answer, so unknown — and NOT because we predicted a rule.
 	if _, st := LookupEnv(1<<30, "PATH"); st != EnvUnknown {
 		t.Errorf("LookupEnv(nonexistent pid) = %v, want unknown", st)
+	}
+}
+
+// KillEscalatingExcept re-consults its exemption on the survivor set right
+// before each signal tier: a process that gains its reprieve AFTER the reap
+// already started waiting — a teardown requester registered mid-grace (#5182)
+// — is still spared rather than SIGTERMed.
+func TestKillEscalatingExceptSparesProcessExemptedMidGrace(t *testing.T) {
+	child := startSleeper(t)
+	snap, err := Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	p := snap[child.Process.Pid]
+
+	var exempted atomic.Bool
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		exempted.Store(true)
+	}()
+	remaining := KillEscalatingExcept(
+		[]Process{p},
+		func(Process) bool { return exempted.Load() },
+		700*time.Millisecond, 300*time.Millisecond, nil)
+
+	if len(remaining) != 0 {
+		t.Fatalf("exempted mid-grace process came back as a leftover: %v", remaining)
+	}
+	if !AliveSame(p) {
+		t.Fatal("a process exempted while the reap was waiting was still signalled")
+	}
+}
+
+// And the un-exempted path is untouched: a process the predicate never claims
+// is still SIGTERMed after its grace expires.
+func TestKillEscalatingExceptStillSignalsNonExempt(t *testing.T) {
+	child := startSleeper(t)
+	snap, err := Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	p := snap[child.Process.Pid]
+
+	KillEscalatingExcept(
+		[]Process{p}, func(Process) bool { return false },
+		150*time.Millisecond, 500*time.Millisecond, nil)
+
+	if AliveSame(p) {
+		t.Error("a never-exempted process must still be reaped")
 	}
 }

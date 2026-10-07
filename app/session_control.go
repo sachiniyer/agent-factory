@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/hangupshield"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -62,6 +63,15 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 // classify that error with apiclient.IsMutationOutcomeUncertain. A package var
 // for the same reason as withDaemonHTTP.
 var withDaemonHTTPMutation = func(fn func(*apiclient.Client) error) error {
+	// A mutation can ask the daemon to tear down the very pane this TUI runs
+	// in — kill, archive, close-tab, delete-project, account swap — and tmux
+	// closing the pty SIGHUPs the whole tty session while the reply is still
+	// in flight (#5182). The daemon spares its requester from its own
+	// reapers, but it cannot shield this process from its own terminal dying;
+	// holding the hangup for the call's duration is what lets the TUI read
+	// the answer it asked for (Codex on #5186). A detached caller has no
+	// controlling tty and nothing arrives to catch.
+	defer hangupshield.Hold()()
 	return callDaemonHTTP(fn, mutationCallRetryable)
 }
 
