@@ -314,15 +314,52 @@ const (
 // identity-verified (see Signal) and reported through logf, one line per
 // process, with the ReapOutcome the caller maps to a severity. logf may be nil.
 func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
+	return KillEscalatingExcept(procs, nil, nil, grace, termWait, logf)
+}
+
+// KillEscalatingExcept is KillEscalating with a last-moment exemption: exempt
+// is re-consulted on the survivor set immediately BEFORE each signal tier —
+// after the grace wait and again after the SIGTERM wait — and signalIf owns
+// the per-process check-and-signal, so the exemption decision and the kill
+// share one lock and a process that gained its reprieve mid-loop (a teardown
+// requester that registered only once the reply-blocking RPC began, after an
+// earlier teardown captured it, #5182) is spared rather than signalled.
+// signalIf returns (attempted, err): attempted false means the process was
+// exempt under the exclusion's own lock; the exempt callback is still
+// consulted for the batch drops and the once-per-pid exclusion log. A nil
+// signalIf signals unconditionally — KillEscalating exactly.
+//
+// Exempt processes are never dropped from the candidate set — only from the
+// WAIT set. An exemption that lapses mid-reap (a requester's reply delivered
+// while this reap was still running) must let the next tier reap the process
+// rather than let it escape the teardown permanently (Codex on #5186). A
+// still-exempt process IS dropped from the returned leftovers: its reprieve
+// is live, so it is legitimately spared — not a SIGKILL survivor a
+// synchronous teardown would refuse on.
+func KillEscalatingExcept(procs []Process, exempt func(Process) bool, signalIf func(Process, syscall.Signal) (bool, error), grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
 	if logf == nil {
 		logf = func(ReapOutcome, string, ...any) {}
 	}
-	survivors := WaitForExits(procs, grace)
+	if signalIf == nil {
+		signalIf = func(p Process, sig syscall.Signal) (bool, error) {
+			return true, Signal(p, sig)
+		}
+	}
+	survivors := waitExcept(procs, exempt, grace)
 	if len(survivors) == 0 {
 		return nil
 	}
 	for _, p := range survivors {
-		err := Signal(p, syscall.SIGTERM)
+		if exempt != nil && exempt(p) {
+			continue
+		}
+		attempted, err := signalIf(p, syscall.SIGTERM)
+		if !attempted {
+			if exempt != nil {
+				exempt(p)
+			}
+			continue
+		}
 		switch {
 		case err == nil:
 			logf(ReapSignalled, "process %d (%s) was still alive after the grace period; sent SIGTERM: %s", p.PID, p.Comm, Cmdline(p.PID))
@@ -330,9 +367,18 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(Re
 			logf(ReapUnkillable, "failed to SIGTERM surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
-	survivors = WaitForExits(survivors, termWait)
+	survivors = waitExcept(survivors, exempt, termWait)
 	for _, p := range survivors {
-		err := Signal(p, syscall.SIGKILL)
+		if exempt != nil && exempt(p) {
+			continue
+		}
+		attempted, err := signalIf(p, syscall.SIGKILL)
+		if !attempted {
+			if exempt != nil {
+				exempt(p)
+			}
+			continue
+		}
 		switch {
 		case err == nil:
 			logf(ReapNeededKill, "process %d (%s) ignored SIGTERM; sent SIGKILL", p.PID, p.Comm)
@@ -340,11 +386,44 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(Re
 			logf(ReapUnkillable, "failed to SIGKILL surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
-	remaining := WaitForExits(survivors, time.Second)
+	remaining := dropExempted(waitExcept(survivors, exempt, time.Second), exempt)
 	for _, p := range remaining {
 		logf(ReapUnkillable, "process %d (%s) survived SIGKILL", p.PID, p.Comm)
 	}
 	return remaining
+}
+
+// waitExcept waits up to wait for the NON-exempt subset to exit — an exempt
+// process (a tracked teardown requester parked on its reply, #5182) cannot
+// exit inside the window, so waiting on it only burns the timeout — then
+// returns every input still alive, exempt ones included. Retaining them is
+// the point: a process that loses its reprieve while the reap is still
+// running is reconsidered by the next signal tier instead of escaping the
+// teardown for good.
+func waitExcept(procs []Process, exempt func(Process) bool, wait time.Duration) []Process {
+	WaitForExits(dropExempted(procs, exempt), wait)
+	var alive []Process
+	for _, p := range procs {
+		if AliveSame(p) {
+			alive = append(alive, p)
+		}
+	}
+	return alive
+}
+
+// dropExempted removes exempt-matching processes from the survivor set. nil
+// exempt drops nothing.
+func dropExempted(procs []Process, exempt func(Process) bool) []Process {
+	if exempt == nil {
+		return procs
+	}
+	var kept []Process
+	for _, p := range procs {
+		if !exempt(p) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // ErrCPUUnknown is returned by CPUFraction when the kernel would not report

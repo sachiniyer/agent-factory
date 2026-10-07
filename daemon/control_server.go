@@ -12,17 +12,44 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 type controlServer struct {
-	manager      *Manager
-	scheduler    *taskScheduler
-	watchers     *watcherSupervisor
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
+	manager    *Manager
+	scheduler  *taskScheduler
+	watchers   *watcherSupervisor
+	shutdownCh chan struct{}
+	// shutdownOnce is shared by every per-connection controlServer
+	// startControlServer builds: one Shutdown must fire once for the whole
+	// listener, not once per connection. It is nil on servers that cannot shut
+	// anything down (the HTTP server, most tests) — Shutdown returns before it
+	// is read.
+	shutdownOnce *sync.Once
 	httpRequests *httpRequestDrain
+	// requester is the kernel-verified identity of the process on the other
+	// end of THIS connection: the SO_PEERCRED/LOCAL_PEERPID pid, resolved to
+	// its (pid, start-stamp) instance by the accept loop while the peer
+	// provably still exists and holds the socket. Resolving at accept — not
+	// in the handler — is what keeps a peer that exited and had its pid
+	// recycled mid-request from lending a stranger the exemption (#5182).
+	// Teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. nil on read failure (the pre-#5182 posture).
+	// The HTTP server shares ONE controlServer across connections, so it
+	// leaves this nil and the per-request context carries the same identity
+	// instead (see httpPeerRequesterContextKey).
+	requester *proctree.Process
+	// pendingReplies holds this connection's requester unregistrations until
+	// the reply they belong to is written — each is keyed by its call's reply
+	// pointer, which gobServerCodec.WriteResponse hands back as the body it
+	// just serialized, so only that call's response releases its exemption
+	// (Close drains whatever a dead connection leaves — see
+	// trackTeardownRequester, #5182). nil on the shared HTTP controlServer,
+	// where the per-request context drains instead.
+	pendingReplies *pendingUntracks
 }
 
 const (
@@ -309,7 +336,7 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
 	resp.PID = os.Getpid()
-	if s.shutdownCh == nil {
+	if s.shutdownCh == nil || s.shutdownOnce == nil {
 		return nil
 	}
 	s.shutdownOnce.Do(func() {
@@ -543,14 +570,19 @@ func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabRespon
 	return nil
 }
 
-func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) KillSession(req *KillSessionRequest, resp *KillSessionResponse) error {
 	return s.killSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A caller tearing down its OWN session is still blocked on this reply
+	// inside the pane tree being reaped; register the kernel-verified
+	// requester so teardown spares it (#5182). Unregistered on return — the
+	// reply is in flight and the exemption is over.
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -559,7 +591,7 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx), nil)
+	killed, err := s.manager.killSessionRequestedBy(*req, rpcRequester(ctx), nil)
 	if !resp.record(err) {
 		return err
 	}
@@ -575,17 +607,25 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	return nil
 }
 
-func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+	return s.archiveSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// The `af sessions archive --self` caller this issue is about (#5182):
+	// register the kernel-verified requester before its own pane tree is
+	// reaped, and unregister when the reply is on the wire.
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(req)
+	archivedPath, _, err := s.manager.ArchiveSession(*req)
 	if !resp.record(err) {
 		return err
 	}
@@ -792,13 +832,30 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		return nil, err
 	}
 
-	server := rpc.NewServer()
-	if err := server.RegisterName(controlServiceName, &controlServer{
-		manager:    manager,
-		scheduler:  scheduler,
-		watchers:   watchers,
-		shutdownCh: shutdownCh,
-	}); err != nil {
+	// Every accepted connection gets its own rpc.Server because its
+	// controlServer carries that connection's kernel-verified requester
+	// identity (#5182): SO_PEERCRED/LOCAL_PEERPID names the process that
+	// CONNECTED, resolved to its (pid, start-stamp) instance at accept, and
+	// teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. shutdownOnce is shared by all of them — one
+	// Shutdown still fires once for the whole listener. Registration runs once
+	// eagerly so a service misconfiguration fails at bind time, not per
+	// connection.
+	shutdownOnce := &sync.Once{}
+	newConnServer := func(requester *proctree.Process, pending *pendingUntracks) (*rpc.Server, error) {
+		server := rpc.NewServer()
+		err := server.RegisterName(controlServiceName, &controlServer{
+			manager:        manager,
+			scheduler:      scheduler,
+			watchers:       watchers,
+			shutdownCh:     shutdownCh,
+			shutdownOnce:   shutdownOnce,
+			requester:      requester,
+			pendingReplies: pending,
+		})
+		return server, err
+	}
+	if _, err := newConnServer(nil, nil); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
@@ -828,9 +885,41 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			connections[conn] = struct{}{}
 			serveWG.Add(1)
 			connectionsMu.Unlock()
+			// The kernel's record of who CONNECTED — the only requester
+			// identity a teardown handler may trust (#5182). The pid is
+			// resolved to its (pid, start-stamp) instance HERE, synchronously
+			// in the accept loop while the peer provably still owns the slot:
+			// a lookup deferred even to the freshly spawned goroutine could
+			// land after the peer exited and its pid was recycled by another
+			// pane-tree process, which would then inherit an exemption meant
+			// for the dead caller (Codex on #5186). A read failure degrades to
+			// no requester (the pre-#5182 posture): the connection still works,
+			// teardown proceeds, and the caller is reaped as it always was.
+			var requester *proctree.Process
+			if peerPID, credErr := peercred.ConnPID(conn); credErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
+			} else if proc, lookupErr := proctree.Lookup(peerPID); lookupErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot resolve peer pid %d, teardown requester exemption disabled: %v", peerPID, lookupErr)
+			} else {
+				requester = &proc
+			}
 			go func() {
 				defer serveWG.Done()
-				server.ServeConn(conn)
+				pending := &pendingUntracks{}
+				connServer, err := newConnServer(requester, pending)
+				if err != nil {
+					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
+					return
+				}
+				// Our own codec, not ServeConn's built-in one: WriteResponse
+				// releases one parked unregister per reply written, so an
+				// exemption outlives only the response it is for — never the
+				// whole connection (Codex on #5186).
+				connServer.ServeCodec(newGobServerCodec(conn, pending))
+				// Backstop for a codec path that returned without Close: any
+				// unregister still parked is for a reply the client will never
+				// read.
+				pending.drain()
 				connectionsMu.Lock()
 				delete(connections, conn)
 				connectionsMu.Unlock()
