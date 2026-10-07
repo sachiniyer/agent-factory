@@ -324,14 +324,18 @@ var daemonPIDLockPoll = 20 * time.Millisecond
 
 // daemonPIDLockStartupBudget bounds how long ONE writeDaemonPIDFile attempt
 // waits on the sidecar PID-file lock. It is sized so the whole retry loop —
-// daemonPIDWriteAttempts budgets plus the pauses between them — fits inside
-// daemonReadyTimeout (5s): a lock that never clears must fail the start
-// BEFORE the auto-spawn caller's readiness wait ends, or the caller reports a
-// bare "did not become ready" timeout while this daemon's real error is still
-// retrying; and a write that finally succeeds must beat the same deadline or
-// the caller reports failure over a daemon that then starts (#5188 review).
-// Package var so tests can shorten it.
-var daemonPIDLockStartupBudget = 1400 * time.Millisecond
+// daemonPIDWriteAttempts budgets plus the pauses between them — cannot eat
+// the caller's daemonReadyTimeout (5s): that window starts when the child is
+// launched and must also cover config/manager initialization, the under-lock
+// startup ping, and the socket bind, so a lock clearing on the LAST attempt
+// still needs seconds of headroom for the work around the loop. A lock that
+// never clears must also fail the start BEFORE the caller's readiness wait
+// ends, or the caller reports a bare "did not become ready" timeout while
+// this daemon's real error is still retrying (#5188 review). 700ms x 3
+// attempts + 2 x 100ms pauses bounds the loop at ~2.3s — far past any real
+// holder's sub-millisecond critical section, and leaving ~2.7s for the rest
+// of startup. Package var so tests can shorten it.
+var daemonPIDLockStartupBudget = 700 * time.Millisecond
 
 // errDaemonPIDLockUnavailable is returned by acquireDaemonPIDLock when the
 // deadline passed while the sidecar daemon.pid.lock stayed held — the

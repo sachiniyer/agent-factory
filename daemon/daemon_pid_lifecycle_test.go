@@ -385,3 +385,38 @@ func TestEnsureDaemonAdHoc_LiveSpawnKeepsBareReadinessError(t *testing.T) {
 	assert.NotContains(t, err.Error(), "recorded in")
 	assert.NotContains(t, err.Error(), "agent-factory.log")
 }
+
+// TestEnsureDaemonAdHoc_ExitedSpawnWithoutLogEntryNamesPathHonestly pins the
+// fallback half of describeExitedDaemonSpawn: when the spawned child exited
+// but wrote no ERROR line at the spawn offset — log.Initialize falling back
+// to discarded stderr (unwritable or full home) is the case that matters —
+// the error must still name the daemon log path but must NOT claim the
+// failure is recorded there.
+func TestEnsureDaemonAdHoc_ExitedSpawnWithoutLogEntryNamesPathHonestly(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	logPath := filepath.Join(home, "agent-factory.log")
+	prevLogPathFn := daemonLogPathFn
+	daemonLogPathFn = func() string { return logPath }
+	t.Cleanup(func() { daemonLogPathFn = prevLogPathFn })
+
+	prevReady := daemonReadyTimeout
+	daemonReadyTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { daemonReadyTimeout = prevReady })
+
+	truePath, err := exec.LookPath("true") // exits before logging anything
+	require.NoError(t, err)
+
+	spawnErr := ensureDaemonAdHocUntil(func() error {
+		return launchDaemonProcessAt(truePath)
+	}, time.Now().Add(3*time.Second))
+
+	require.Error(t, spawnErr)
+	assert.Contains(t, spawnErr.Error(), "daemon did not become ready")
+	assert.Contains(t, spawnErr.Error(), logPath,
+		"the fallback must still name the resolved daemon log path")
+	assert.NotContains(t, spawnErr.Error(), "recorded in",
+		"no log entry was written, so the error must not claim one was recorded")
+	assert.Contains(t, spawnErr.Error(), "stderr is discarded")
+}

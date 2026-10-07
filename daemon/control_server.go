@@ -821,6 +821,15 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, watc
 		testHookSpawnPingPassed()
 		var serverErr error
 		closeFn, serverErr = startControlServer(manager, scheduler, watchers, shutdownCh)
+		if serverErr != nil {
+			// daemon.pid was published above, but runDaemon's removal
+			// defer only registers on the success path — without this
+			// cleanup the file keeps naming a process that is about to
+			// exit (#5188). Still under the spawn lock, so nothing else
+			// could have published; the unlink removes exactly the file
+			// this process wrote.
+			removeDaemonPIDFile()
+		}
 		return serverErr
 	})
 	if lockErr != nil {

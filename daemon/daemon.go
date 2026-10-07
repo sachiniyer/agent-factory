@@ -184,6 +184,17 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		defer close(startupSignalWatcherDone)
 		select {
 		case sig := <-sigChan:
+			// A signal landing while stopStartupSignalWatch's close is in
+			// flight makes both cases ready, and Go picks one at random.
+			// Re-check so the stand-down ALWAYS wins once it has closed:
+			// the buffered signal then survives for the first real
+			// consumer, which unwinds through the armed cleanup defers
+			// instead of this hard-kill bypassing them.
+			select {
+			case <-startupSignalWatch:
+				return
+			default:
+			}
 			signal.Reset(syscall.SIGINT, syscall.SIGTERM)
 			if sysSig, ok := sig.(syscall.Signal); ok {
 				_ = syscall.Kill(syscall.Getpid(), sysSig)

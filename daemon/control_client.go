@@ -316,11 +316,14 @@ func describeExitedDaemonSpawn(err error) error {
 	if logPath == "" {
 		return err
 	}
-	hint := fmt.Sprintf("the spawned daemon exited during startup; the startup failure is recorded in %s", logPath)
 	if line := lastDaemonLogErrorLine(logPath, lastDaemonSpawnLogOffset); line != "" {
-		hint += fmt.Sprintf("; last error logged: %q", line)
+		return fmt.Errorf("%w — the spawned daemon exited during startup; the startup failure is recorded in %s (last error logged: %q)", err, logPath, line)
 	}
-	return fmt.Errorf("%w — %s", err, hint)
+	// No new ERROR line since the spawn marker: the child either died
+	// before logging or could not open the log at all — log.Initialize
+	// falls back to stderr, which a detached spawn discards. Name the log
+	// path as the diagnostic target without claiming a record exists there.
+	return fmt.Errorf("%w — the spawned daemon exited during startup without logging a failure; its log would be at %s (child stderr is discarded, so check the home is writable and has free space)", err, logPath)
 }
 
 // daemonLogErrorQuoteCap bounds the quoted ERROR line so a long failure

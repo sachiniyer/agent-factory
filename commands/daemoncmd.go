@@ -557,18 +557,21 @@ func probeDaemonRestartPresence() daemon.ProbeAnswer {
 	if h.PIDUnverifiable && h.PingErr != nil {
 		// A live af daemon exists but its home is unproven — possibly
 		// another home's daemon under this home's pid file. The sentinel is
-		// earned ONLY when the ping proved the socket absent: a timeout,
-		// EACCES, or reset is indeterminate (a live-but-backlogged daemon
-		// fails Ping the same way — #2014/#2039), and on macOS the
-		// unreadable-environ unverifiable shape is the norm, so short-
-		// circuiting on an indeterminate ping would make an explicit
-		// `af daemon restart` silently skip a reachable daemon. Not "absent"
-		// (it may be this home's socket-lost daemon) and not "present"
-		// (unproven): carried as Undetermined with a sentinel cause so
-		// the caller can decline the unit mutation without declaring no
-		// daemon.
+		// earned ONLY when the ping proved the socket absent — ENOENT or
+		// ECONNREFUSED, the same kernel answers RequestShutdown treats as
+		// daemon-absent, so the gate goes through ClassifyShutdownTarget
+		// rather than ClassifyPingFailure (which reads every non-timeout
+		// failure as No). A timeout, EACCES, or reset is indeterminate (a
+		// live-but-backlogged daemon fails Ping the same way — #2014/#2039),
+		// and on macOS the unreadable-environ unverifiable shape is the
+		// norm, so short-circuiting on an indeterminate ping would make an
+		// explicit `af daemon restart` silently skip a reachable daemon.
+		// Not "absent" (it may be this home's socket-lost daemon) and not
+		// "present" (unproven): carried as Undetermined with a sentinel
+		// cause so the caller can decline the unit mutation without
+		// declaring no daemon.
 		definiteAbsent := false
-		daemon.ClassifyPingFailure(h.PingErr).Match(
+		daemon.ClassifyShutdownTarget(h.PingErr).Match(
 			func() {},
 			func() { definiteAbsent = true },
 			func() { definiteAbsent = true },
