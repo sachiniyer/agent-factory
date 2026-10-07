@@ -113,23 +113,3 @@ func SignalUnlessTracked(p proctree.Process, sig syscall.Signal) (bool, error) {
 	}
 	return true, proctree.Signal(p, sig)
 }
-
-// Drop returns procs without registered requesters. An exempted process is
-// never waited on and never signalled — it exits when its reply arrives —
-// and the caller sees a set containing only the processes the teardown is
-// actually responsible for.
-func Drop(procs []proctree.Process) []proctree.Process {
-	var kept []proctree.Process
-	var dropped bool
-	for _, p := range procs {
-		if Is(p) {
-			dropped = true
-			continue
-		}
-		kept = append(kept, p)
-	}
-	if !dropped {
-		return procs
-	}
-	return kept
-}

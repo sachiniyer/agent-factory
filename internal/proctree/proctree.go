@@ -328,6 +328,14 @@ func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(Re
 // exempt under the exclusion's own lock; the exempt callback is still
 // consulted for the batch drops and the once-per-pid exclusion log. A nil
 // signalIf signals unconditionally — KillEscalating exactly.
+//
+// Exempt processes are never dropped from the candidate set — only from the
+// WAIT set. An exemption that lapses mid-reap (a requester's reply delivered
+// while this reap was still running) must let the next tier reap the process
+// rather than let it escape the teardown permanently (Codex on #5186). A
+// still-exempt process IS dropped from the returned leftovers: its reprieve
+// is live, so it is legitimately spared — not a SIGKILL survivor a
+// synchronous teardown would refuse on.
 func KillEscalatingExcept(procs []Process, exempt func(Process) bool, signalIf func(Process, syscall.Signal) (bool, error), grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
 	if logf == nil {
 		logf = func(ReapOutcome, string, ...any) {}
@@ -337,7 +345,7 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, signalIf f
 			return true, Signal(p, sig)
 		}
 	}
-	survivors := dropExempted(WaitForExits(procs, grace), exempt)
+	survivors := waitExcept(procs, exempt, grace)
 	if len(survivors) == 0 {
 		return nil
 	}
@@ -359,7 +367,7 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, signalIf f
 			logf(ReapUnkillable, "failed to SIGTERM surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
-	survivors = dropExempted(WaitForExits(survivors, termWait), exempt)
+	survivors = waitExcept(survivors, exempt, termWait)
 	for _, p := range survivors {
 		if exempt != nil && exempt(p) {
 			continue
@@ -378,16 +386,29 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, signalIf f
 			logf(ReapUnkillable, "failed to SIGKILL surviving process %d (%s): %v", p.PID, p.Comm, err)
 		}
 	}
-	// A requester spared mid-loop is still in survivors; drop it again before
-	// the final wait so its liveness is never billed as "survived SIGKILL" and
-	// handed back as a leftover a synchronous teardown would refuse to finish
-	// (#5182). The post-wait drop covers the last registration window.
-	survivors = dropExempted(survivors, exempt)
-	remaining := dropExempted(WaitForExits(survivors, time.Second), exempt)
+	remaining := dropExempted(waitExcept(survivors, exempt, time.Second), exempt)
 	for _, p := range remaining {
 		logf(ReapUnkillable, "process %d (%s) survived SIGKILL", p.PID, p.Comm)
 	}
 	return remaining
+}
+
+// waitExcept waits up to wait for the NON-exempt subset to exit — an exempt
+// process (a tracked teardown requester parked on its reply, #5182) cannot
+// exit inside the window, so waiting on it only burns the timeout — then
+// returns every input still alive, exempt ones included. Retaining them is
+// the point: a process that loses its reprieve while the reap is still
+// running is reconsidered by the next signal tier instead of escaping the
+// teardown for good.
+func waitExcept(procs []Process, exempt func(Process) bool, wait time.Duration) []Process {
+	WaitForExits(dropExempted(procs, exempt), wait)
+	var alive []Process
+	for _, p := range procs {
+		if AliveSame(p) {
+			alive = append(alive, p)
+		}
+	}
+	return alive
 }
 
 // dropExempted removes exempt-matching processes from the survivor set. nil

@@ -219,11 +219,10 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 
 	// The process that asked for this teardown is still blocked on its reply
 	// (#5182): it cannot exit inside the grace period, and reaping it would
-	// kill the reply it is waiting to read. It leaves the captured set HERE —
-	// before either dispatch below reads it — so it is never waited on and
-	// never signalled. Everything else in the tree is reaped exactly as
-	// before.
-	leaked = dropTeardownRequesters(leaked)
+	// kill the reply it is waiting to read. It stays IN the captured set —
+	// reapSessionProcesses spares it per-signal while the registry still
+	// tracks it — rather than dropping out here, where a reprieve that ended
+	// mid-reap could never be reconsidered (Codex on #5186).
 
 	// Async so the SIGHUP grace period never adds latency to user-driven
 	// teardown; the daemon and TUI processes are long-lived, so the sweep
@@ -232,9 +231,8 @@ func (t *TmuxSession) close(waitForProcesses bool) (PaneState, error, closeProce
 	if len(leaked) > 0 {
 		// Close IS the requested teardown (#2765): a caller asked for this session
 		// to die, so every process in its pane tree dying with it is the operation
-		// succeeding, not a leak. The requester itself has already left this set
-		// (dropTeardownRequesters above, #5182) — what remains is the rest of the
-		// tree it asked to tear down.
+		// succeeding, not a leak. The requester is skipped by the reaper itself
+		// while its registration holds — never waited on, never signalled.
 		if waitForProcesses {
 			processes.remaining = reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 		} else {

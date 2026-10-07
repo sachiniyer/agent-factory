@@ -649,18 +649,25 @@ var (
 // paths that must stay snappy call it in a goroutine. Every signal is logged
 // per-process, at the severity the reason and the outcome agree on.
 func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proctree.Process, grace, termWait time.Duration) []proctree.Process {
-	// A tracked teardown requester is excluded HERE, at the seam every reap
-	// shares, not only where the sets are built (#5182): it is blocked on this
-	// teardown's reply, so the grace wait cannot observe it exit and a signal
-	// would kill the reply it is waiting for. The orphan-sweep ingestion drops
-	// it earlier (addOrReplaceOrphanCandidate); this is the signal-time
-	// backstop for a requester registered after a set was already captured.
-	procs = dropTeardownRequesters(procs)
+	// A tracked teardown requester stays IN the candidate set — the reaper's
+	// per-signal recheck spares it only while the registry still reports it
+	// tracked, so a reprieve that ends mid-reap lets the next tier reap it
+	// instead of escaping this teardown permanently (Codex on #5186). It is
+	// never waited on (blocked on this teardown's reply, it cannot exit inside
+	// the window) and never signalled while registered; the orphan-sweep
+	// ingestion also refuses it (addOrReplaceOrphanCandidate).
+	exemptedMidReap := make(map[int]bool)
+	for _, p := range procs {
+		if isTeardownRequester(p) {
+			exemptedMidReap[p.PID] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
+				"excluding it from signalling (#5182)", p.PID, p.Comm)
+		}
+	}
 	// And it can be registered AFTER the capture — a teardown still in its
 	// grace wait when this process's own destructive RPC finally reaches its
 	// handler (Codex on #5186). The exempt predicate is re-run before every
 	// signal tier so a late-tracked requester is still spared.
-	exemptedMidReap := make(map[int]bool)
 	return proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
 		if !isTeardownRequester(p) {
 			return false

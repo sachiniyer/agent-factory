@@ -93,22 +93,6 @@ func TestTrackTeardownRequesterZeroProcessIsNoop(t *testing.T) {
 	require.False(t, isTeardownRequester(proctree.Process{PID: 0, StartID: 0}))
 }
 
-func TestDropTeardownRequestersFiltersOnlyTracked(t *testing.T) {
-	requester := proctree.Process{PID: 400001, StartID: 10, Comm: "af"}
-	leak := proctree.Process{PID: 400002, StartID: 20, Comm: "codex-app-server"}
-	untrack := TrackTeardownRequester(requester)
-	defer untrack()
-
-	got := dropTeardownRequesters([]proctree.Process{requester, leak})
-	require.Equal(t, []proctree.Process{leak}, got,
-		"the tracked requester leaves the reap set; the genuine leak stays")
-
-	// Same PID slot, different start stamp: kept — exemption follows identity,
-	// never the bare pid a pid-reuse race would hand a stranger.
-	impostor := proctree.Process{PID: requester.PID, StartID: requester.StartID + 99}
-	require.Equal(t, []proctree.Process{impostor}, dropTeardownRequesters([]proctree.Process{impostor}))
-}
-
 // The requester is never reported as a leaked process — the whole point of
 // #5182(a): it is never waited on and never signalled, and where a reap log
 // line does mention it, it is the exclusion notice, not a leak report.

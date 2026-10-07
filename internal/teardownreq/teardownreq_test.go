@@ -61,10 +61,6 @@ func TestRecycledPIDIsDistinctIdentity(t *testing.T) {
 	if Is(recycled) {
 		t.Fatal("a recycled pid must not inherit the prior owner's registration")
 	}
-	dropped := Drop([]proctree.Process{old, recycled})
-	if len(dropped) != 1 || dropped[0] != recycled {
-		t.Fatalf("Drop must keep the recycled identity, got %v", dropped)
-	}
 }
 
 // SignalUnlessTracked is the atomic check-and-signal a reaper must use at
@@ -97,18 +93,5 @@ func TestSignalUnlessTrackedSignalsUntracked(t *testing.T) {
 	}
 	if !errors.Is(err, proctree.ErrIdentityChanged) {
 		t.Fatalf("a nonexistent pid should yield ErrIdentityChanged, got %v", err)
-	}
-}
-
-// Drop returns the input untouched when nothing is registered — teardowns
-// with no requester in the tree must not allocate or alter the set.
-func TestDropLeavesUnregisteredSetAlone(t *testing.T) {
-	in := []proctree.Process{proc(1, 1), proc(2, 2)}
-	got := Drop(in)
-	if len(got) != 2 || got[0] != in[0] || got[1] != in[1] {
-		t.Fatalf("Drop must return the set unchanged, got %v", got)
-	}
-	if &got[0] != &in[0] {
-		t.Fatal("Drop must return the same backing array when nothing dropped")
 	}
 }
