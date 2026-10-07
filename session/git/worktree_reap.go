@@ -148,9 +148,21 @@ func worktreeWriterProcessesMatching(
 	// protected by the same argument that covers the daemon itself: killing it
 	// kills the caller before the answer it asked for can arrive. Its subtree
 	// prunes with it, exactly like the other infrastructure exclusions.
+	requestersSeen := make(map[int]bool)
 	isRequester := func(pid int) bool {
 		p, ok := snap[pid]
-		return ok && teardownreq.Is(p)
+		if !ok || !teardownreq.Is(p) {
+			return false
+		}
+		if !requestersSeen[pid] {
+			// Logged once per requester per pass — the same pid can be
+			// evaluated twice (once as a root, once inside another matcher's
+			// subtree).
+			requestersSeen[pid] = true
+			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
+				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
+		}
+		return true
 	}
 	protectedInfrastructure := func(pid int) bool {
 		return pid == selfPID || isTmuxProcess(pid) || isRequester(pid)
