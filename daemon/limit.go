@@ -503,11 +503,25 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// runtime stable across the fence acquisition, so a probe taken here is
 		// still current when prepareRuntimeForAccountSwap runs under the
 		// fences below. See remoteloss.go and prepareRuntimeForAccountSwap.
+		//
+		// For a manual swap, run a non-mutating admission precheck BEFORE the
+		// slow liveness probe. An obviously invalid manual swap (an
+		// unregistered, limited, or otherwise inadmissible account, or a VS
+		// Code tab) is already determinable without the network round-trip, so
+		// waiting the operator probe budget (up to 35s) only to report that
+		// error needlessly blocks the session's target/op/worktree locks the
+		// caller (handoffAccount) still holds. checkManualAccountSwap is
+		// non-mutating (recordLaunch=false) and the authoritative admission
+		// under the fences below re-evaluates it, so this unlocked pass only
+		// short-circuits the network wait for the already-determinable failure;
+		// the probe is skipped when the precheck fails.
 		var accountSwapProbe livenessProbe
-		if operatorInitiated {
-			accountSwapProbe = probeLivenessForOperator(instance, instance.AgentServer())
-		} else {
-			accountSwapProbe = probeLiveness(instance, instance.AgentServer())
+		if !accountSwap.manual || m.checkManualAccountSwap(instance, accountSwap) == nil {
+			if operatorInitiated {
+				accountSwapProbe = probeLivenessForOperator(instance, instance.AgentServer())
+			} else {
+				accountSwapProbe = probeLiveness(instance, instance.AgentServer())
+			}
 		}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied,
