@@ -37,3 +37,37 @@ func TestTeardownMayHitOwnTTY(t *testing.T) {
 		})
 	}
 }
+
+// teardownOwnSessionInRepo is the delete-project half of the shield gate
+// (#5182): the project that owns this TUI's pane is the one AF_SESSION's
+// repo-hash names, not whichever project the TUI is currently viewing —
+// viewing B while living inside A must still shield A's delete.
+func TestTeardownOwnSessionInRepo(t *testing.T) {
+	ownRoot := "/repos/alpha"
+	otherRoot := "/repos/beta"
+	ownName := sessiontmux.SanitizedNameForRepo("work", ownRoot)
+	tabName := ownName + "__shell"
+	otherName := sessiontmux.SanitizedNameForRepo("other", otherRoot)
+
+	cases := []struct {
+		name   string
+		own    string
+		target string
+		mayHit bool
+	}{
+		{name: "session in deleted repo", own: ownName, target: ownRoot, mayHit: true},
+		{name: "tab of session in deleted repo", own: tabName, target: ownRoot, mayHit: true},
+		{name: "session in other repo", own: otherName, target: ownRoot, mayHit: false},
+		{name: "same title other repo", own: sessiontmux.SanitizedNameForRepo("work", otherRoot), target: ownRoot, mayHit: false},
+		{name: "unknown own shields", own: "", target: ownRoot, mayHit: true},
+		{name: "empty target shields", own: ownName, target: "", mayHit: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(sessiontmux.EnvMarkerSession, tc.own)
+			if got := teardownOwnSessionInRepo(tc.target); got != tc.mayHit {
+				t.Fatalf("teardownOwnSessionInRepo(%q) with AF_SESSION=%q = %v, want %v", tc.target, tc.own, got, tc.mayHit)
+			}
+		})
+	}
+}

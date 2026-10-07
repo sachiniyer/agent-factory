@@ -29,10 +29,12 @@ type teardownReplyPendingContextKey struct{}
 
 // pendingUntracks holds requester unregistrations until the transport has
 // provably finished with the reply, then runs them. Keyed entries are parked
-// under the reply pointer their handler filled — net/rpc hands that same
-// pointer to WriteResponse, so a response can only release the exemption the
-// exact call that created it is waiting on (a Ping, a decode-rejected request,
-// or a teardown call refused before it ever registered pops nothing). Unkeyed
+// under the request argv pointer net/rpc decoded for their call — the codec
+// maps each response's Seq back to that argv, so a response can only release
+// the exemption the exact call that created it is waiting on, on success and
+// on handler error alike (sendResponse swaps the reply body for
+// invalidRequest; argv is stable). A Ping, a decode-rejected request, or a
+// teardown call refused before it ever registered releases nothing. Unkeyed
 // entries ride the HTTP per-request queue and are drained wholesale by
 // rpcHandlerCtx after the reply flush. Close/drain after the connection dies
 // releases whatever is left: a reply the client will never read must not
@@ -70,8 +72,8 @@ func (p *pendingUntracks) addFor(key any, f func()) {
 	p.mu.Unlock()
 }
 
-// releaseFor runs the unregister parked under key — the reply pointer the
-// owning handler filled and the transport just wrote (#5182).
+// releaseFor runs the unregister parked under key — the request argv pointer
+// of the call whose response the transport just wrote (#5182).
 func (p *pendingUntracks) releaseFor(key any) {
 	p.mu.Lock()
 	f, ok := p.keyed[key]
@@ -135,12 +137,14 @@ func rpcRequester(ctx context.Context) string {
 
 // trackTeardownRequester registers this call's kernel-verified requester
 // process for the handler's duration and returns the unregister (#5182).
-// replyKey is the handler's reply pointer; on a control connection the parked
-// unregister is keyed by it so ONLY the transport write of this call's own
-// response releases the exemption — a multiplexed sibling response can never
-// free a registration its call is still queued behind. HTTP callers pass nil:
-// their per-request queue drains wholesale after the flush, which is already
-// scoped to this call.
+// requestKey is the handler's request pointer — the argv value net/rpc decoded
+// for this call; on a control connection the parked unregister is keyed by it
+// so ONLY the transport write of this call's own response releases the
+// exemption — a multiplexed sibling response, or an error response whose body
+// was swapped for invalidRequest, can never free or strand a registration it
+// does not own (gobServerCodec maps seq→argv). HTTP callers pass nil: their
+// per-request queue drains wholesale after the flush, which is already scoped
+// to this call.
 //
 // The identity comes from the connection, never from request fields: on the
 // control socket the accept loop resolved SO_PEERCRED/LOCAL_PEERPID's pid to a
@@ -156,7 +160,7 @@ func rpcRequester(ctx context.Context) string {
 // exemption. Anything that could not produce a verified identity — a read
 // failure, an unsupported platform, a peer already gone at accept — carries
 // no requester, which is exactly the pre-#5182 behavior.
-func (s *controlServer) trackTeardownRequester(ctx context.Context, replyKey any) func() {
+func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey any) func() {
 	requester := s.requester
 	if requester == nil {
 		requester, _ = ctx.Value(httpPeerRequesterContextKey{}).(*proctree.Process)
@@ -170,7 +174,7 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, replyKey any
 	// concurrent teardown's signal tier could land in that gap and kill the
 	// requester while its answer is still queued (Codex on #5186). The commit
 	// therefore parks the unregister on whichever completion the transport
-	// exposes rather than running it here — keyed by this call's reply pointer
+	// exposes rather than running it here — keyed by this call's request argv
 	// for net/rpc (gobServerCodec.WriteResponse releases only that entry), the
 	// response flush for HTTP — so the registration outlives the reply itself,
 	// not a guess about how long the write takes. With no such hook (a unit
@@ -184,7 +188,11 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, replyKey any
 				return
 			}
 			if s.pendingReplies != nil {
-				s.pendingReplies.addFor(replyKey, untrack)
+				if requestKey != nil {
+					s.pendingReplies.addFor(requestKey, untrack)
+					return
+				}
+				s.pendingReplies.add(untrack)
 				return
 			}
 			untrack()

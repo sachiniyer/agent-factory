@@ -48,18 +48,18 @@ type HandoffSessionResponse struct {
 	MutationOutcome
 }
 
-func (s *controlServer) HandoffSession(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
+func (s *controlServer) HandoffSession(req *HandoffSessionRequest, resp *HandoffSessionResponse) error {
 	return s.handoffSession(context.Background(), req, resp)
 }
 
 // HandoffSessionV2 binds account-aware admission and the destructive handoff to
 // one request. Keep the implementation in HandoffSession so legacy callers and
 // this versioned entry point share exactly one mutation path.
-func (s *controlServer) HandoffSessionV2(req HandoffSessionRequest, resp *HandoffSessionResponse) error {
+func (s *controlServer) HandoffSessionV2(req *HandoffSessionRequest, resp *HandoffSessionResponse) error {
 	return s.handoffSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) handoffSession(ctx context.Context, req HandoffSessionRequest, resp *HandoffSessionResponse) error {
+func (s *controlServer) handoffSession(ctx context.Context, req *HandoffSessionRequest, resp *HandoffSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -67,11 +67,11 @@ func (s *controlServer) handoffSession(ctx context.Context, req HandoffSessionRe
 	// closeTabForDestructiveTeardown), which reaps the caller's own pane tree
 	// when the request came from inside the session — register the
 	// kernel-verified requester so that teardown spares it (#5182).
-	defer s.trackTeardownRequester(ctx, resp)()
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	result, err := s.manager.HandoffSession(req)
+	result, err := s.manager.HandoffSession(*req)
 	*resp = result
 	if !resp.record(err) {
 		return err

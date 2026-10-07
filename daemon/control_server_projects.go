@@ -23,11 +23,11 @@ import (
 // archive/kill would — plus a projects-changed signal for clients keying a
 // projects view. On a partial failure it still publishes what DID happen before
 // surfacing the error, so the rail never lags reality.
-func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProjectResponse) error {
+func (s *controlServer) DeleteProject(req *DeleteProjectRequest, resp *DeleteProjectResponse) error {
 	return s.deleteProject(context.Background(), req, resp)
 }
 
-func (s *controlServer) deleteProject(ctx context.Context, req DeleteProjectRequest, resp *DeleteProjectResponse) error {
+func (s *controlServer) deleteProject(ctx context.Context, req *DeleteProjectRequest, resp *DeleteProjectResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func (s *controlServer) deleteProject(ctx context.Context, req DeleteProjectRequ
 	// one the caller is running inside when it deletes its own project.
 	// Register the kernel-verified requester so that teardown spares the
 	// process blocked on this reply (#5182).
-	defer s.trackTeardownRequester(ctx, resp)()
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -43,10 +43,10 @@ func (s *controlServer) deleteProject(ctx context.Context, req DeleteProjectRequ
 	// the same guard RegisterProject and RebindProject apply (#4821, 6616c129);
 	// see normalizeDeleteProjectRequestRepoPath. The checked value is the one
 	// passed on, and the RepoID-only form (no RepoPath) is preserved.
-	if err := normalizeDeleteProjectRequestRepoPath(&req); err != nil {
+	if err := normalizeDeleteProjectRequestRepoPath(req); err != nil {
 		return err
 	}
-	result, err := s.manager.DeleteProject(req)
+	result, err := s.manager.DeleteProject(*req)
 	for _, k := range result.Killed {
 		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
 	}

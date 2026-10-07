@@ -85,6 +85,27 @@ func teardownMayHitOwnTTY(targetTmuxName string) bool {
 	return own == targetTmuxName || strings.HasPrefix(own, targetTmuxName+"__")
 }
 
+// teardownOwnSessionInRepo reports whether this TUI's own session lives in the
+// repo rooted at root — i.e. deleting that project tears down the pane this
+// process runs inside regardless of which project the TUI is currently viewing
+// (#5182, Codex on #5186). The session's tmux name embeds the repo identity
+// hash the daemon derived when it created the session, so prefix-matching the
+// empty-title name is the same derivation. An unresolvable identity answers
+// true.
+func teardownOwnSessionInRepo(root string) bool {
+	own := os.Getenv(sessiontmux.EnvMarkerSession)
+	if own == "" || root == "" {
+		return true
+	}
+	identity := root
+	if repo, err := config.RepoFromPath(root); err == nil {
+		if p := repo.IdentityPath(); p != "" {
+			identity = p
+		}
+	}
+	return strings.HasPrefix(own, sessiontmux.SanitizedNameForRepo("", identity))
+}
+
 // withTeardownHangupShield holds SIGHUP non-terminating across fn when the
 // teardown it issues can close this TUI's own tty — killing or archiving the
 // session it runs in, closing the tab it runs in, deleting its project — so

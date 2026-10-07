@@ -313,6 +313,15 @@ func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc
 // client disconnects — r.Context() is done the moment the connection drops. This
 // is what stops an abandoned create from leaving a pane-poll spinning on the
 // daemon.
+// rpcHandlerCtxPtr adapts a handler whose request is a pointer — the tracked
+// teardown methods take *Req so the net/rpc argv pointer (and thus the
+// requester unregister parked under it) is shared with the transport (#5182).
+func rpcHandlerCtxPtr[Req any, Resp any](call func(context.Context, *Req, *Resp) error) http.HandlerFunc {
+	return rpcHandlerCtx(func(ctx context.Context, req Req, resp *Resp) error {
+		return call(ctx, &req, resp)
+	})
+}
+
 func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

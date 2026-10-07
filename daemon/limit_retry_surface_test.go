@@ -107,7 +107,7 @@ func TestResumeFromLimit_NoOpIsNotSuccess(t *testing.T) {
 
 	var resp ResumeFromLimitResponse
 	err := (&controlServer{manager: manager}).ResumeFromLimit(
-		ResumeFromLimitRequest{ID: inst.ID}, &resp)
+		&ResumeFromLimitRequest{ID: inst.ID}, &resp)
 	require.NoError(t, err)
 	assert.False(t, resp.OK)
 	assert.NotEmpty(t, resp.Reason)

@@ -38,7 +38,7 @@ func TestControlServer_DeleteProject_RefusesRelativePath(t *testing.T) {
 
 	for _, rel := range []string{".", "sub/../."} {
 		var resp DeleteProjectResponse
-		err := cs.DeleteProject(DeleteProjectRequest{RepoPath: rel}, &resp)
+		err := cs.DeleteProject(&DeleteProjectRequest{RepoPath: rel}, &resp)
 		require.Error(t, err, "relative RepoPath %q must be refused, not resolved against the daemon's cwd", rel)
 		assert.Contains(t, err.Error(), "must be absolute", "relative RepoPath %q", rel)
 		assert.False(t, resp.OK, "a refused delete must not report success")
@@ -77,7 +77,7 @@ func TestControlServer_DeleteProject_UsesTheNormalizedPath(t *testing.T) {
 	// A whitespace-padded absolute path is trimmed at the boundary and used to
 	// delete the project it names, not resolved as relative under the cwd.
 	var resp DeleteProjectResponse
-	require.NoError(t, cs.DeleteProject(DeleteProjectRequest{RepoPath: "  " + target + "\t"}, &resp))
+	require.NoError(t, cs.DeleteProject(&DeleteProjectRequest{RepoPath: "  " + target + "\t"}, &resp))
 	require.True(t, resp.OK)
 	assert.True(t, resp.Deregistered, "the trimmed absolute path's project was deregistered")
 

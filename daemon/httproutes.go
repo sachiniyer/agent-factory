@@ -187,7 +187,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/KillSession",
 		Description: "Tear down a session: kill its tmux/agent and remove its worktree and record.",
 		requestType: reflect.TypeOf(KillSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.killSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.killSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -197,7 +197,7 @@ var httpRoutes = []HTTPRoute{
 		// rpcHandlerCtx so the unix-socket peer pid ConnContext stamped reaches
 		// the teardown-requester registry — the `archive --self` caller blocked
 		// on this response is exempted from its own pane reap (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.archiveSession) },
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.archiveSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -234,7 +234,7 @@ var httpRoutes = []HTTPRoute{
 		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
 		// registry — the committed account-swap arm stops the caller's panes
 		// (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.resumeFromLimit) },
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.resumeFromLimit) },
 	},
 	// The "it already landed" half of the ambiguous-delivery exit (#4429): the
 	// operator inspected the pane and attests the mission arrived, so the
@@ -255,7 +255,7 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
 		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
 		// registry — the --account swap tears the caller's panes down (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.handoffSession) },
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.handoffSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -264,7 +264,7 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(DeleteProjectRequest{}),
 		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
 		// registry — deleting the caller's own project reaps its pane (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.deleteProject) },
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.deleteProject) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -321,7 +321,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/CloseTab",
 		Description: "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
 		requestType: reflect.TypeOf(CloseTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.closeTab) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.closeTab) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -487,7 +487,7 @@ var internalHTTPRoutes = []HTTPRoute{
 		// rpcHandlerCtx, same as the legacy handoff route: the unix-socket peer
 		// identity must reach the requester registry — the --account swap tears
 		// the caller's panes down on this transport too (Codex on #5186).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.handoffSession) },
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.handoffSession) },
 	},
 	{
 		Method:      http.MethodPost,

@@ -69,7 +69,7 @@ func TestControlServer_KillSession_RejectsTraversal(t *testing.T) {
 	server := &controlServer{manager: manager}
 
 	var resp KillSessionResponse
-	err = server.KillSession(KillSessionRequest{
+	err = server.KillSession(&KillSessionRequest{
 		Title:  "anything",
 		RepoID: "../../../etc/passwd",
 	}, &resp)

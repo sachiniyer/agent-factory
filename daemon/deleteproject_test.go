@@ -136,7 +136,7 @@ func TestControlDeleteProjectPartialFailurePreservesCommittedHookWarning(t *test
 
 	server := &controlServer{manager: manager}
 	var resp DeleteProjectResponse
-	err := server.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath}, &resp)
+	err := server.DeleteProject(&DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath}, &resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forced beta persist failure",
 		"the ordinary partial failure must remain visible")

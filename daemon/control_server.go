@@ -495,7 +495,7 @@ func (s *controlServer) AccountLogin(req AccountLoginRequest, resp *AccountLogin
 
 // ReapConfigAgent tears down a config-agent session. No event is published: a
 // config agent is not a session, so nothing on the events plane models it.
-func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, resp *ReapConfigAgentResponse) error {
+func (s *controlServer) ReapConfigAgent(req *ReapConfigAgentRequest, resp *ReapConfigAgentResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -503,8 +503,8 @@ func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, resp *ReapCo
 	// requester-in-captured-tree problem as kill/archive (#5182). net/rpc
 	// gives no per-call context, so the connection's requester pid is the only
 	// carrier — which is also the only correct one.
-	defer s.trackTeardownRequester(context.Background(), resp)()
-	return s.manager.ReapConfigAgent(req)
+	defer s.trackTeardownRequester(context.Background(), req)()
+	return s.manager.ReapConfigAgent(*req)
 }
 
 func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse) error {
@@ -525,22 +525,22 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 	return nil
 }
 
-func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) error {
+func (s *controlServer) CloseTab(req *CloseTabRequest, resp *CloseTabResponse) error {
 	return s.closeTab(context.Background(), req, resp)
 }
 
-func (s *controlServer) closeTab(ctx context.Context, req CloseTabRequest, resp *CloseTabResponse) error {
+func (s *controlServer) closeTab(ctx context.Context, req *CloseTabRequest, resp *CloseTabResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	// Closing the tab the caller is running in reaps the caller's own pane
 	// tree; register the kernel-verified requester so teardown spares the
 	// process blocked on this reply (#5182).
-	defer s.trackTeardownRequester(ctx, resp)()
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	name, err := s.manager.closeTabRequestedBy(req, rpcRequester(ctx))
+	name, err := s.manager.closeTabRequestedBy(*req, rpcRequester(ctx))
 	if err != nil {
 		return err
 	}
@@ -579,11 +579,11 @@ func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabRespon
 	return nil
 }
 
-func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) KillSession(req *KillSessionRequest, resp *KillSessionResponse) error {
 	return s.killSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -591,7 +591,7 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	// inside the pane tree being reaped; register the kernel-verified
 	// requester so teardown spares it (#5182). Unregistered on return — the
 	// reply is in flight and the exemption is over.
-	defer s.trackTeardownRequester(ctx, resp)()
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -600,7 +600,7 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx), nil)
+	killed, err := s.manager.killSessionRequestedBy(*req, rpcRequester(ctx), nil)
 	if !resp.record(err) {
 		return err
 	}
@@ -616,25 +616,25 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	return nil
 }
 
-func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
 	return s.archiveSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) archiveSession(ctx context.Context, req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	// The `af sessions archive --self` caller this issue is about (#5182):
 	// register the kernel-verified requester before its own pane tree is
 	// reaped, and unregister when the reply is on the wire.
-	defer s.trackTeardownRequester(ctx, resp)()
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(req)
+	archivedPath, _, err := s.manager.ArchiveSession(*req)
 	if !resp.record(err) {
 		return err
 	}

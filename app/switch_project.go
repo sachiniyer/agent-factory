@@ -615,9 +615,10 @@ func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) 
 // (#1735), mirroring archiveInstanceCmd, and reports completion.
 func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 	// Deleting the project this TUI's own session belongs to takes its tty with
-	// it — shield that case; a different project's teardown cannot reach it
-	// (#5182).
-	mayHitSelf := msg.repoID == m.repoID
+	// it — shield that case. The owning project is the one this process's pane
+	// lives in, NOT the currently viewed project (m.repoID): a TUI that viewed
+	// B while running inside A's session must still shield A's delete (#5182).
+	mayHitSelf := teardownOwnSessionInRepo(msg.root)
 	return func() tea.Msg {
 		var resp daemon.DeleteProjectResponse
 		err := withTeardownHangupShield(mayHitSelf, func() error {

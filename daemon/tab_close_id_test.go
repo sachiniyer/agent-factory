@@ -66,7 +66,7 @@ func TestCreateTabResponseCarriesStableIDIntoReusedNameRefusal(t *testing.T) {
 	}
 
 	var closed CloseTabResponse
-	err := cs.CloseTab(CloseTabRequest{
+	err := cs.CloseTab(&CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabName: created.Name, TabID: created.ID,
 	}, &closed)
 	if err == nil {
@@ -110,7 +110,7 @@ func TestCloseTab_RefusesUnresolvableTabID(t *testing.T) {
 	// the successor (#1779).
 	cs := &controlServer{manager: manager}
 	var resp CloseTabResponse
-	err := cs.CloseTab(CloseTabRequest{
+	err := cs.CloseTab(&CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabName: "preview", TabID: resolved,
 	}, &resp)
 	if err == nil {
@@ -150,7 +150,7 @@ func TestCloseTab_ByStableIDIgnoresReusedName(t *testing.T) {
 
 	cs := &controlServer{manager: manager}
 	var resp CloseTabResponse
-	if err := cs.CloseTab(CloseTabRequest{
+	if err := cs.CloseTab(&CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabName: "preview", TabID: resolved,
 	}, &resp); err != nil {
 		t.Fatalf("CloseTab by id: %v", err)
@@ -179,7 +179,7 @@ func TestCloseTab_WithoutTabIDResolvesByName(t *testing.T) {
 
 	cs := &controlServer{manager: manager}
 	var resp CloseTabResponse
-	if err := cs.CloseTab(CloseTabRequest{
+	if err := cs.CloseTab(&CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabName: "preview",
 	}, &resp); err != nil {
 		t.Fatalf("CloseTab by name: %v", err)
@@ -202,7 +202,7 @@ func TestCloseTab_WithoutTabIDResolvesByIndex(t *testing.T) {
 
 	cs := &controlServer{manager: manager}
 	var resp CloseTabResponse
-	if err := cs.CloseTab(CloseTabRequest{
+	if err := cs.CloseTab(&CloseTabRequest{
 		Title: title, RepoID: repo.ID, TabIndex: 2,
 	}, &resp); err != nil {
 		t.Fatalf("CloseTab by index: %v", err)

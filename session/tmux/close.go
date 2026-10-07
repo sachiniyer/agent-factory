@@ -448,14 +448,16 @@ func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneSta
 	case len(processes.remaining) > 0:
 		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown",
 			processPIDList(processes.remaining)))
-	case waitForPane && !isTeardownRequester(paneProcess) && !waitForProcessExit(paneProcess, paneExitWait):
+	case waitForPane && !waitForPaneExitOrRequester(paneProcess, paneExitWait):
 		// kill-session returning establishes only that SIGHUP was sent, not that
 		// the process stopped writing.
 		//
 		// A tracked teardown requester is never waited on here (#5182): when it
 		// IS the captured pane root it cannot exit while this teardown's reply
 		// is outstanding, so the wait could only burn paneExitWait to a refusal
-		// its own request caused. It exits when the reply lands.
+		// its own request caused. It exits when the reply lands — and the wait
+		// re-checks the registry on every poll because registration can land
+		// mid-wait.
 		return refuse(fmt.Errorf("pane process %d is still alive %v after kill-session", pid, paneExitWait))
 	}
 
@@ -576,4 +578,27 @@ func capturePaneProcess(pid int) (proctree.Process, bool, error) {
 // so neither can masquerade as a pane that is still writing (#2103).
 func waitForProcessExit(process proctree.Process, timeout time.Duration) bool {
 	return len(proctree.WaitForExits([]proctree.Process{process}, timeout)) == 0
+}
+
+// waitForPaneExitOrRequester is waitForProcessExit with the late-registration
+// window closed (#5182): the requester registry is consulted on every poll, so
+// a pane root that becomes a tracked requester mid-wait — now blocked on THIS
+// teardown's reply — stops counting as a survivor at once rather than burning
+// the whole bounded wait into a refusal its own request caused.
+func waitForPaneExitOrRequester(process proctree.Process, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if isTeardownRequester(process) {
+			log.InfoLog.Printf("pane process %d (%s) is a teardown requester blocked on this "+
+				"teardown's reply; not counting it as a survivor (#5182)", process.PID, process.Comm)
+			return true
+		}
+		if !proctree.AliveSame(process) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
