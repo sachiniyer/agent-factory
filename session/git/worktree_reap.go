@@ -92,8 +92,15 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	// A teardown requester can register AFTER the set above was built — a
 	// teardown still in its grace wait when the requester's own destructive
 	// RPC reaches its handler. Re-check the registry before each signal tier
-	// so a late-tracked requester is spared too (Codex on #5186).
+	// so a late-tracked requester is spared too (Codex on #5186). Requesters
+	// already tracked at selection were logged by the selector; seed them here
+	// so the mid-reap notice fires only for genuine late registrations.
 	exemptedMidReap := make(map[int]bool)
+	for _, p := range procs {
+		if teardownreq.Is(p) {
+			exemptedMidReap[p.PID] = true
+		}
+	}
 	proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
 		if !teardownreq.Is(p) {
 			return false
@@ -164,9 +171,10 @@ func worktreeWriterProcessesMatching(
 	// Unlike the infrastructure exclusions it exempts ONLY its own identity —
 	// a requester that spawned a writer which later chdir'd out of the
 	// worktree is still the ancestor keeping that writer reachable, and that
-	// child is this session's to reap. So the requester is never selected and
-	// never signalled, but traversal continues INTO its subtree exactly as the
-	// original matcher intends (Codex on #5186).
+	// child is this session's to reap. So the requester stays in the candidate
+	// set but is spared only while its registration holds — the per-signal
+	// recheck in KillEscalatingExcept — and traversal continues INTO its
+	// subtree exactly as the original matcher intends (Codex on #5186).
 	requestersSeen := make(map[int]bool)
 	isRequester := func(pid int) bool {
 		p, ok := snap[pid]
@@ -179,7 +187,7 @@ func worktreeWriterProcessesMatching(
 			// subtree).
 			requestersSeen[pid] = true
 			log.InfoLog.Printf("teardown requester pid %d (%s) is blocked on this teardown's reply; "+
-				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
+				"sparing it while its registration holds (#5182)", p.PID, p.Comm)
 		}
 		return true
 	}
@@ -222,10 +230,13 @@ func worktreeWriterProcessesMatching(
 				continue
 			}
 			if isRequester(p.PID) {
-				// The requester itself leaves the kill set, but its children
-				// do not: the writer it spawned stays a writer (Codex on
-				// #5186). Not marking pruned keeps the walk reaching them.
-				continue
+				// The requester stays IN the kill set — a registration that
+				// lapses mid-reap must let the next signal tier reconsider it
+				// rather than escaping the teardown permanently (Codex on
+				// #5186) — while KillEscalatingExcept's per-signal recheck
+				// spares it only while tracked. Its children are walked
+				// regardless: the writer it spawned stays a writer — not
+				// marking pruned keeps the walk reaching them.
 			}
 			add(p)
 		}

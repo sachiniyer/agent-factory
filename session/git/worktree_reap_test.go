@@ -156,10 +156,13 @@ func TestWorktreeWriterProcesses_PrunesSharedInfrastructureSubtrees(t *testing.T
 
 // A process cwd'd inside the worktree that is the teardown's own requester
 // (#5182) is alive there for the best possible reason — it is blocked on the
-// reply this teardown owes it — so the writer reaper must leave it alone. The
-// identity match is (pid, start-stamp): a same-pid process with a different
-// start stamp is a recycled slot and stays reapable.
-func TestWorktreeWriterProcesses_ExcludesTeardownRequester(t *testing.T) {
+// reply this teardown owes it — so the writer reaper must spare it. It stays
+// IN the candidate set regardless: the per-signal recheck exempts it only
+// while its registration holds, so a reprieve that lapses mid-reap is
+// reconsidered by the next tier instead of escaping permanently (Codex on
+// #5186). The identity match is (pid, start-stamp): a same-pid process with
+// a different start stamp is a recycled slot and stays reapable.
+func TestWorktreeWriterProcesses_RetainsTeardownRequester(t *testing.T) {
 	root := "/managed/worktree"
 	outside := "/somewhere/else"
 	snap := map[int]proctree.Process{
@@ -179,8 +182,9 @@ func TestWorktreeWriterProcesses_ExcludesTeardownRequester(t *testing.T) {
 	defer untrack()
 
 	got := worktreeWriterProcesses(root, snap, 99, workingDir, noTmux)
-	assert.ElementsMatch(t, []int{10, 30, 40}, processPIDs(got),
-		"the requester leaves the kill set, but its writer child stays; the genuine writer stays")
+	assert.ElementsMatch(t, []int{10, 20, 30, 40}, processPIDs(got),
+		"the requester stays a candidate — the reaper spares it per-signal while tracked, "+
+			"and its writer child plus the genuine writer stay selected")
 
 	untrack()
 	got = worktreeWriterProcesses(root, snap, 99, workingDir, noTmux)
@@ -216,8 +220,8 @@ func TestWorktreeWriterProcesses_RequesterRootKeepsChildrenEligible(t *testing.T
 	defer untrack()
 
 	got := worktreeWriterProcesses(root, snap, 99, workingDir, func(int) bool { return false })
-	assert.ElementsMatch(t, []int{60}, processPIDs(got),
-		"the matching requester is exempt, but its chdir'd-out writer child is still reaped")
+	assert.ElementsMatch(t, []int{50, 60}, processPIDs(got),
+		"the matching requester is retained for the per-signal recheck, and its chdir'd-out writer child is still selected")
 }
 
 func processPIDs(processes []proctree.Process) []int {
