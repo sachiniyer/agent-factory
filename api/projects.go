@@ -155,6 +155,9 @@ were archived.`,
 			return jsonError(err)
 		}
 
+		// Deleting the project this CLI's session belongs to reaps the caller's
+		// pane tree — same SIGHUP shield as kill/archive (#5182).
+		defer ignoreTeardownHangup()()
 		resp, err := deleteProjectViaDaemon(req)
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
