@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -670,7 +671,7 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 				"excluding it from signalling (#5182)", p.PID, p.Comm)
 		}
 		return true
-	}, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
+	}, teardownreq.SignalUnlessTracked, grace, termWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
 		logReapOutcome(reason, sanitizedName, outcome, format, args...)
 	})
 }

@@ -576,6 +576,7 @@ func TestKillEscalatingExceptSparesProcessExemptedMidGrace(t *testing.T) {
 	remaining := KillEscalatingExcept(
 		[]Process{p},
 		func(Process) bool { return exempted.Load() },
+		nil,
 		700*time.Millisecond, 300*time.Millisecond, nil)
 
 	if len(remaining) != 0 {
@@ -598,6 +599,7 @@ func TestKillEscalatingExceptStillSignalsNonExempt(t *testing.T) {
 
 	KillEscalatingExcept(
 		[]Process{p}, func(Process) bool { return false },
+		nil,
 		150*time.Millisecond, 500*time.Millisecond, nil)
 
 	if AliveSame(p) {

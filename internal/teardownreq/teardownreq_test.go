@@ -1,6 +1,8 @@
 package teardownreq
 
 import (
+	"errors"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -62,6 +64,39 @@ func TestRecycledPIDIsDistinctIdentity(t *testing.T) {
 	dropped := Drop([]proctree.Process{old, recycled})
 	if len(dropped) != 1 || dropped[0] != recycled {
 		t.Fatalf("Drop must keep the recycled identity, got %v", dropped)
+	}
+}
+
+// SignalUnlessTracked is the atomic check-and-signal a reaper must use at
+// signal time (#5182, Codex on #5186): a tracked requester is never
+// signalled, and the decision shares the registry lock with Track so a
+// registration landing mid-tier cannot be missed.
+func TestSignalUnlessTrackedSkipsTracked(t *testing.T) {
+	p := proc(4324, 5)
+	un := Track(p)
+	defer un()
+	attempted, err := SignalUnlessTracked(p, syscall.SIGTERM)
+	if attempted {
+		t.Fatal("a tracked requester must not be signalled")
+	}
+	if err != nil {
+		t.Fatalf("the exempt path must not error, got %v", err)
+	}
+	if !Is(p) {
+		t.Fatal("a skipped signal must not consume the registration")
+	}
+}
+
+// The same lock that exempts must signal: an untracked process is attempted
+// (a dead pid fails identity validation downstream, not the gate itself).
+func TestSignalUnlessTrackedSignalsUntracked(t *testing.T) {
+	p := proc(99999999, 1)
+	attempted, err := SignalUnlessTracked(p, syscall.SIGTERM)
+	if !attempted {
+		t.Fatal("an untracked process must be signalled")
+	}
+	if !errors.Is(err, proctree.ErrIdentityChanged) {
+		t.Fatalf("a nonexistent pid should yield ErrIdentityChanged, got %v", err)
 	}
 }
 

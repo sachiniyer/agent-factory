@@ -314,22 +314,28 @@ const (
 // identity-verified (see Signal) and reported through logf, one line per
 // process, with the ReapOutcome the caller maps to a severity. logf may be nil.
 func KillEscalating(procs []Process, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
-	return KillEscalatingExcept(procs, nil, grace, termWait, logf)
+	return KillEscalatingExcept(procs, nil, nil, grace, termWait, logf)
 }
 
 // KillEscalatingExcept is KillEscalating with a last-moment exemption: exempt
 // is re-consulted on the survivor set immediately BEFORE each signal tier —
-// after the grace wait and again after the SIGTERM wait — and once more on
-// each individual process immediately BEFORE its own Signal call, so a
-// process that gained its reprieve mid-loop (a teardown requester that
-// registered only once the reply-blocking RPC began, after an earlier
-// teardown captured it, #5182) is spared rather than signalled. The waits
-// still cover it — exemption arrives at signal time, not selection time — so
-// the caller keeps its capture-time filter for the stall-free path and uses
-// this for the race. A nil exempt is KillEscalating exactly.
-func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
+// after the grace wait and again after the SIGTERM wait — and signalIf owns
+// the per-process check-and-signal, so the exemption decision and the kill
+// share one lock and a process that gained its reprieve mid-loop (a teardown
+// requester that registered only once the reply-blocking RPC began, after an
+// earlier teardown captured it, #5182) is spared rather than signalled.
+// signalIf returns (attempted, err): attempted false means the process was
+// exempt under the exclusion's own lock; the exempt callback is still
+// consulted for the batch drops and the once-per-pid exclusion log. A nil
+// signalIf signals unconditionally — KillEscalating exactly.
+func KillEscalatingExcept(procs []Process, exempt func(Process) bool, signalIf func(Process, syscall.Signal) (bool, error), grace, termWait time.Duration, logf func(ReapOutcome, string, ...any)) []Process {
 	if logf == nil {
 		logf = func(ReapOutcome, string, ...any) {}
+	}
+	if signalIf == nil {
+		signalIf = func(p Process, sig syscall.Signal) (bool, error) {
+			return true, Signal(p, sig)
+		}
 	}
 	survivors := dropExempted(WaitForExits(procs, grace), exempt)
 	if len(survivors) == 0 {
@@ -339,7 +345,13 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, ter
 		if exempt != nil && exempt(p) {
 			continue
 		}
-		err := Signal(p, syscall.SIGTERM)
+		attempted, err := signalIf(p, syscall.SIGTERM)
+		if !attempted {
+			if exempt != nil {
+				exempt(p)
+			}
+			continue
+		}
 		switch {
 		case err == nil:
 			logf(ReapSignalled, "process %d (%s) was still alive after the grace period; sent SIGTERM: %s", p.PID, p.Comm, Cmdline(p.PID))
@@ -352,7 +364,13 @@ func KillEscalatingExcept(procs []Process, exempt func(Process) bool, grace, ter
 		if exempt != nil && exempt(p) {
 			continue
 		}
-		err := Signal(p, syscall.SIGKILL)
+		attempted, err := signalIf(p, syscall.SIGKILL)
+		if !attempted {
+			if exempt != nil {
+				exempt(p)
+			}
+			continue
+		}
 		switch {
 		case err == nil:
 			logf(ReapNeededKill, "process %d (%s) ignored SIGTERM; sent SIGKILL", p.PID, p.Comm)

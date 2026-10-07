@@ -104,7 +104,7 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
 		}
 		return true
-	}, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
+	}, teardownreq.SignalUnlessTracked, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
 		// Every tier stays a WARNING here, and the outcome is deliberately unused
 		// (#2765). This reaper does not run on the requested-teardown side of that
 		// split: it fires only when a process is STILL WRITING into a worktree

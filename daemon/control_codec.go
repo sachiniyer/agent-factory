@@ -135,8 +135,8 @@ func (c *gobServerCodec) Close() error {
 	if c.pending != nil {
 		c.pending.drain()
 	}
-	c.seqMu.Lock()
-	c.argvBySeq = nil
-	c.seqMu.Unlock()
+	// argvBySeq is intentionally NOT nilled: the read goroutine can still be
+	// inside ReadRequestBody while a concurrent WriteResponse failure closes
+	// us, and assigning into a nil map panics. The map dies with the codec.
 	return c.rwc.Close()
 }

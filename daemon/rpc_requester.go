@@ -174,6 +174,24 @@ func (s *controlServer) trackTeardownRequester(ctx context.Context, requestKey a
 		return func() {}
 	}
 	untrack := sessiontmux.TrackTeardownRequester(*requester)
+	// Disconnect release, parked NOW rather than at handler return: a peer
+	// that dies while this handler is still running cannot be waiting for any
+	// reply, so its exemption ends at disconnect — the codec's EOF drain (and
+	// the request-context cancellation for HTTP) runs this unkeyed entry. The
+	// keyed/addFor entry below still governs the success path and whichever
+	// fires first wins; teardownreq's unregister is once-guarded so the other
+	// is a no-op (Codex on #5186).
+	if p, ok := ctx.Value(teardownReplyPendingContextKey{}).(*pendingUntracks); ok && p != nil {
+		p.add(untrack)
+		// net/http cancels the request context when the client's connection
+		// drops; drain then, not only after the handler returns.
+		go func() {
+			<-ctx.Done()
+			p.drain()
+		}()
+	} else if s.pendingReplies != nil {
+		s.pendingReplies.add(untrack)
+	}
 	// The handler returning is NOT the end of the caller's exposure: the
 	// transport serializes the reply AFTER the service method returns, and a
 	// concurrent teardown's signal tier could land in that gap and kill the

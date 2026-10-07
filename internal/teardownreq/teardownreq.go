@@ -44,6 +44,7 @@ package teardownreq
 
 import (
 	"sync"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -97,6 +98,20 @@ func Is(p proctree.Process) bool {
 	trackedMu.Lock()
 	defer trackedMu.Unlock()
 	return tracked[requesterID{pid: p.PID, startID: p.StartID}] > 0
+}
+
+// SignalUnlessTracked sends sig to p only if p is not a tracked requester —
+// the check and the signal happen under the registry lock, so a Track that
+// lands between a reaper's exemption check and its kill can no longer slip a
+// now-registered process into the signal set (Codex on #5186). Returns
+// (attempted, err): attempted false means p was exempt under the lock.
+func SignalUnlessTracked(p proctree.Process, sig syscall.Signal) (bool, error) {
+	trackedMu.Lock()
+	defer trackedMu.Unlock()
+	if tracked[requesterID{pid: p.PID, startID: p.StartID}] > 0 {
+		return false, nil
+	}
+	return true, proctree.Signal(p, sig)
 }
 
 // Drop returns procs without registered requesters. An exempted process is
