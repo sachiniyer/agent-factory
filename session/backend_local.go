@@ -490,7 +490,21 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	if gw == nil {
 		return fmt.Errorf("swap agent: session %q has no worktree", i.Title)
 	}
-	workDir := gw.GetWorktreePath()
+	// Same refusal launch and respawn keep, and it must run BEFORE the agent
+	// is stopped: while af's own relocation of this worktree is in flight the
+	// recorded path is not authoritative — a stale-but-existing directory
+	// would pass the stat below and take a replacement agent into the wrong
+	// tree, and the swap would already have killed the current one (#5174).
+	workDir, relocation, unresolved := gw.RelocationSnapshot()
+	if unresolved {
+		location := workDir
+		if relocation.AlternatePath != "" {
+			location += " and " + relocation.AlternatePath
+		}
+		return fmt.Errorf(
+			"swap agent: session %q has unresolved worktree relocation state %s at %s; refusing to stop the current agent until the relocation settles",
+			i.Title, relocation.State, location)
+	}
 	if workDir == "" {
 		return fmt.Errorf("swap agent: session %q has no worktree path", i.Title)
 	}

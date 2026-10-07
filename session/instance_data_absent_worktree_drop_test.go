@@ -257,3 +257,74 @@ func TestStart_RefusesUnresolvedRelocation(t *testing.T) {
 		"the refusal must name the unresolved relocation, not a missing worktree")
 	assert.Equal(t, 0, newSessions, "no spawn may run while relocation is unresolved")
 }
+
+// TestSwapAgent_RefusesUnresolvedRelocation: the swap's own stop-the-old-agent
+// step must not run while af's relocation of the worktree is unresolved — a
+// stale-but-existing directory would pass the os.Stat gate and take the
+// replacement agent into a tree that is not authoritative, with the current
+// agent already dead. The refusal is the same launch/respawn keep (#5174).
+func TestSwapAgent_RefusesUnresolvedRelocation(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_swap_reloc"
+	var newSessions, killSessions, panePidQueries int
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				return nil // the current agent is live
+			case strings.Contains(s, "new-session"):
+				newSessions++
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killSessions++
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "pane_pid") {
+				panePidQueries++
+			}
+			if strings.Contains(cmd.String(), "list-panes") {
+				return nil, nil
+			}
+			return []byte("content"), nil
+		},
+	}
+
+	worktreeDir := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(
+		"/tmp/reloc-repo", worktreeDir, "reloc-swap", "reloc-swap-branch", "", false, true)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State: git.RelocationRecoveryStalled,
+	}))
+	require.True(t, gw.HasUnresolvedRelocation())
+
+	ts := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", persistPtyFactory{t: t, cmdExec: exec}, exec)
+	inst := &Instance{
+		Title:       agentName,
+		Path:        "/tmp/reloc-repo",
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs:        []*Tab{newAgentTab(ts)},
+	}
+
+	err = (&LocalBackend{}).SwapAgent(inst, AgentSwapPlan{})
+
+	require.Error(t, err, "an unresolved relocation must refuse the swap")
+	assert.Contains(t, err.Error(), "relocation",
+		"the refusal names the unresolved relocation, not a missing worktree")
+	assert.NotContains(t, err.Error(), "not a directory")
+	assert.Equal(t, 0, killSessions,
+		"the current agent must NOT be stopped while the worktree claim is unresolved")
+	assert.Equal(t, 0, newSessions, "no replacement spawn may run either")
+	assert.Equal(t, 0, panePidQueries,
+		"teardown never began — no pane identification query ran")
+}

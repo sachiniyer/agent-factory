@@ -78,6 +78,14 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 				}
 				return nil, fmt.Errorf("no recorded start path for session %q", nameOf(cmd))
 			}
+			if strings.Contains(cmd.String(), "list-panes") {
+				// list-panes is asked for #{pane_pid}-shaped rows and its
+				// answer is PARSED — "content" reads as an unestablishable
+				// process set, which the wait-for-pane-exit teardown (#5174)
+				// correctly treats as inconclusive. These mock sessions have
+				// no real panes; an empty list is the truthful answer.
+				return nil, nil
+			}
 			return []byte("content"), nil
 		},
 	}

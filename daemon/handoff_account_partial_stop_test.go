@@ -80,7 +80,11 @@ func TestHandoffAccountSiblingBlindStopRecordsStartupUnknown(t *testing.T) {
 			return inner.Run(cmd)
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			if strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), siblingName) && strings.Contains(cmd.String(), "pane_pid") {
+			// The trip is gated on `started`: AddProcessTab's own post-spawn cwd
+			// check (#5172) asks the same pane_pid question while the sibling is
+			// still being created, and the sibling must not "vanish" mid-spawn —
+			// only the handoff's teardown may observe it gone.
+			if started && strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), siblingName) && strings.Contains(cmd.String(), "pane_pid") {
 				vanished = true
 				return nil, nil
 			}

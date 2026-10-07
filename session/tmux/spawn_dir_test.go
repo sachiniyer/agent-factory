@@ -72,7 +72,16 @@ func liveAfterSpawnExec(t *testing.T, sessionName string, fields map[string]stri
 				}
 				return nil, nil
 			case strings.Contains(s, "list-panes"):
-				return nil, tmuxCantFindSessionError(t, sessionName)
+				if *killed {
+					return nil, tmuxCantFindSessionError(t, sessionName)
+				}
+				// Before the kill the session is live but the capture must
+				// not stall a fake pane on the process table — an EMPTY list
+				// answers truthfully "no panes to reap" (teardown_mark's
+				// shape). Answering can't-find-session here instead makes the
+				// wait-for-exit teardown report an inconclusive close, which
+				// withholds ErrSessionNotStarted even though the pane died.
+				return nil, nil
 			}
 			return []byte("output"), nil
 		},
@@ -160,7 +169,7 @@ func TestStartTearsDownPaneInWrongDir(t *testing.T) {
 	workDir := t.TempDir()
 	fallback := t.TempDir() // where tmux "fell back" to — any dir that is not workDir
 
-	const pid = "424243"
+	const pid = "98765431"
 	procRoot := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
 	require.NoError(t, os.Symlink(fallback, filepath.Join(procRoot, pid, "cwd")))
@@ -220,7 +229,7 @@ func TestStartTearsDownPaneInWrongDirViaFallback(t *testing.T) {
 func TestStartSucceedsWhenPaneDirMatches(t *testing.T) {
 	workDir := t.TempDir()
 
-	const pid = "424244"
+	const pid = "98765433"
 	procRoot := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
 	require.NoError(t, os.Symlink(workDir, filepath.Join(procRoot, pid, "cwd")))
@@ -274,7 +283,7 @@ func TestStartSucceedsViaProcCwd(t *testing.T) {
 		t.Skip("procfs fallback is Linux-only")
 	}
 	workDir := t.TempDir()
-	const pid = "424242"
+	const pid = "98765432"
 	procRoot := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
 	require.NoError(t, os.Symlink(workDir, filepath.Join(procRoot, pid, "cwd")))
@@ -315,7 +324,8 @@ func TestStartSucceedsWhenNoPaneDirSource(t *testing.T) {
 }
 
 // TestCheckSpawnDirClassifications pins the table directly: every start-dir
-// shape maps to exactly one verdict — usable, missing, or unknown.
+// shape maps to exactly one verdict — usable, missing, or unknown — and a
+// usable dir returns the FileInfo the post-spawn check will pin.
 func TestCheckSpawnDirClassifications(t *testing.T) {
 	realDir := t.TempDir()
 	realFile := filepath.Join(t.TempDir(), "a-file")
@@ -330,12 +340,17 @@ func TestCheckSpawnDirClassifications(t *testing.T) {
 		{"empty", "", ErrSpawnDirMissing},
 		{"absent", filepath.Join(t.TempDir(), "gone"), ErrSpawnDirMissing},
 		{"not a directory", realFile, ErrSpawnDirMissing},
+		// A file in an intermediate component stats ENOTDIR — the same
+		// conclusive-missing verdict as ENOENT, not a retriable unknown.
+		{"file as intermediate component", filepath.Join(realFile, "sub"), ErrSpawnDirMissing},
 		{"unverifiable (EINVAL)", "/nonexistent\x00dir", ErrSpawnDirUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkSpawnDir(tc.path)
+			info, err := checkSpawnDir(tc.path)
 			if tc.wantErr == nil {
 				require.NoError(t, err)
+				require.NotNil(t, info, "an admitted dir hands its identity to the post-spawn check")
+				require.True(t, info.IsDir())
 				return
 			}
 			require.ErrorIs(t, err, tc.wantErr)
@@ -392,4 +407,208 @@ func TestStartSucceedsOnWedgedDirQuery(t *testing.T) {
 	require.NoError(t, session.Start(workDir),
 		"unavailable information is never a reason to tear down")
 	assert.False(t, killed, "an unanswered pane-dir query kills nothing")
+}
+
+// TestStartSucceedsWhenPaneInWorktreeSubdir: a process tab's command may
+// chdir INSIDE its own worktree (`cd frontend && npm run dev`) before the
+// post-spawn check reads — the live cwd then names a descendant of the
+// admitted directory, which is still a pane inside its own tree. The match is
+// by inode walk, so an exact-SameFile comparison (which would tear this down)
+// is not the rule.
+func TestStartSucceedsWhenPaneInWorktreeSubdir(t *testing.T) {
+	workDir := t.TempDir()
+	subdir := filepath.Join(workDir, "frontend")
+	require.NoError(t, os.Mkdir(subdir, 0o755))
+
+	var killed bool
+	sessionName := toTmuxName("subdir-dir", "")
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory,
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_current_path": subdir}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a pane that chdir'd deeper into its own worktree is a correct spawn")
+	assert.False(t, killed)
+	assert.Len(t, ptyFactory.cmds, 1)
+}
+
+// TestStartTearsDownOnSiblingPrefixPath pins the inode rule's edge: a pane
+// observed in /x/wt-evil must NOT match an admitted /x/wt. A path-prefix
+// comparison would call wt-evil a descendant of wt — the ancestor walk
+// compares stat'd inodes instead, so only real containment counts.
+func TestStartTearsDownOnSiblingPrefixPath(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(base, "wt")
+	require.NoError(t, os.Mkdir(workDir, 0o755))
+	sibling := filepath.Join(base, "wt-evil")
+	require.NoError(t, os.Mkdir(sibling, 0o755))
+
+	var killed bool
+	sessionName := toTmuxName("prefix-dir", "")
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory,
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_current_path": sibling}, &killed))
+
+	err := session.Start(workDir)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed, "a prefix-sharing SIBLING dir is outside the admitted worktree")
+}
+
+// TestStartSucceedsWhenPanePathEndsInWhitespace: a directory whose final
+// component legitimately ends in whitespace must stat the path tmux
+// reported, not a whitespace-stripped different one. With TrimSpace the
+// answer below would stat the ADJACENT dir (which exists precisely so the
+// truncated path resolves) and tear the good spawn down on a fabricated
+// mismatch.
+func TestStartSucceedsWhenPanePathEndsInWhitespace(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(base, "spaced ")
+	adjacent := filepath.Join(base, "spaced")
+	require.NoError(t, os.Mkdir(workDir, 0o755))
+	require.NoError(t, os.Mkdir(adjacent, 0o755),
+		"the trimmed-truncation trap: this sibling exists so a stripped path still stats")
+
+	var killed bool
+	sessionName := toTmuxName("whitespace-dir", "")
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory,
+		liveAfterSpawnExec(t, sessionName,
+			map[string]string{"pane_current_path": workDir}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"only the line terminator may be stripped from tmux's answer")
+	assert.False(t, killed)
+	assert.Len(t, ptyFactory.cmds, 1)
+}
+
+// TestStartTearsDownWhenWorktreeInodeSwapped: the comparison is pinned to the
+// identity checkSpawnDir admitted, not to whatever the path resolves to later.
+// If the worktree is renamed away and a fresh directory recreated at the same
+// path between check and verify, a pane tmux reports at that path is in the
+// NEW inode — a directory the spawn was never validated against — and is torn
+// down. Re-statting the path (the previous check) would call it a match.
+func TestStartTearsDownWhenWorktreeInodeSwapped(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed, swapped bool
+	probed := 0
+	sessionName := toTmuxName("inode-swap-dir", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				probed++
+				if killed || probed == 1 {
+					return fmt.Errorf("can't find session")
+				}
+				// The first SUCCESSFUL has-session is the post-spawn
+				// existence poll — after new-session, before the dir check:
+				// swap the admitted inode out from under the path now, the
+				// rename-and-recreate race this check is pinned against.
+				if !swapped {
+					swapped = true
+					require.NoError(t, os.Rename(workDir, workDir+"-moved"))
+					require.NoError(t, os.Mkdir(workDir, 0o755))
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				if strings.Contains(s, "#{pane_current_path}") {
+					return []byte(workDir + "\n"), nil
+				}
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				return nil, tmuxCantFindSessionError(t, sessionName)
+			}
+			return []byte("output"), nil
+		},
+	}
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory, exec)
+
+	err := session.Start(workDir)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed, "the pane landed in a different inode than the admitted one")
+}
+
+// TestStartTearDownWaitsForPaneExit: a proven-misplaced pane is killed AND
+// waited out before ErrSessionNotStarted authorizes worktree cleanup —
+// kill-session only delivers SIGHUP, so teardown must first ask the pane's
+// pid (the multi-field paneRowFormat display-message that opens
+// closeAndWaitForPaneExit) before issuing kill-session. Plain Close sends the
+// kill without ever asking.
+func TestStartTearDownWaitsForPaneExit(t *testing.T) {
+	workDir := t.TempDir()
+	fallback := t.TempDir()
+
+	var killed, paneRowQueried bool
+	probed := false
+	sessionName := toTmuxName("wait-exit-dir", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if killed || !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				assert.True(t, paneRowQueried,
+					"the teardown must identify the pane (pane_pid row query) before kill-session")
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				if strings.Contains(s, "#{pane_dead}") {
+					// paneRowFormat — the panePID query opening
+					// CloseAndWaitForPaneExit.
+					paneRowQueried = true
+					return nil, nil
+				}
+				if strings.Contains(s, "#{pane_current_path}") {
+					return []byte(fallback + "\n"), nil
+				}
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				return nil, tmuxCantFindSessionError(t, sessionName)
+			}
+			return []byte("output"), nil
+		},
+	}
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(sessionName, "claude", ptyFactory, exec)
+
+	err := session.Start(workDir)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed)
+	assert.True(t, paneRowQueried,
+		"waiting for the pane means asking which process to wait on")
 }

@@ -50,8 +50,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	// route (create, restore, recover, swap, tab) funnels through, so no
 	// caller can bypass it. Same proven boundary as the env-preparation
 	// failures below: nothing has run new-session, so a name determinately
-	// absent proves no pane exists.
-	if spawnDirErr := checkSpawnDir(workDir); spawnDirErr != nil {
+	// absent proves no pane exists. The returned FileInfo pins the admitted
+	// inode so the post-spawn check compares the pane against the directory
+	// that was validated — not against whatever the path might resolve to
+	// after a mid-spawn rename-and-recreate (#5174 review).
+	admittedSpawnDir, spawnDirErr := checkSpawnDir(workDir)
+	if spawnDirErr != nil {
 		t.proveNoPaneIfDeterminatelyAbsent()
 		return spawnDirErr
 	}
@@ -251,10 +255,10 @@ func (t *TmuxSession) Start(workDir string) error {
 	ptmx.Close()
 
 	// The existence poll answered — but that only proves the SESSION exists.
-	// Verify the pane actually started in the requested directory before
+	// Verify the pane actually started inside the admitted directory before
 	// configuring anything: a pane af cannot place there is torn down, never
 	// left running under a row that will report ready (#5172).
-	if verr := t.verifySpawnedPaneDir(workDir); verr != nil {
+	if verr := t.verifySpawnedPaneDir(workDir, admittedSpawnDir); verr != nil {
 		return verr
 	}
 
