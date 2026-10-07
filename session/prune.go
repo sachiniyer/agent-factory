@@ -81,6 +81,14 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 	if data.Worktree.WorktreePath == "" {
 		return "record carries no archived worktree path"
 	}
+	// No recorded branch means no recovery handle: apply's promise is "the
+	// branch is kept and named back to you", and a branchless row cannot keep
+	// it — a detached archived worktree can hold commits its linked HEAD alone
+	// references. The listing must not price a row a reclaim could not
+	// account for (#5136 Codex round 5).
+	if data.Branch == "" && data.Worktree.BranchName == "" {
+		return "record carries no branch — the kept-branch recovery handle could not be named"
+	}
 	// A row with neither archived_at nor a genuine updated_at cannot prove
 	// when it was archived. FromInstanceData synthesizes updated_at from
 	// created_at on records that predate the field, and creation time is not

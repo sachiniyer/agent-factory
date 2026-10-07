@@ -73,6 +73,10 @@ func TestPruneSkipReason_Table(t *testing.T) {
 			d.ArchiveReport = &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{Path: "/retained"}}}
 		}, "incomplete archive"},
 		{"no worktree path", func(d *InstanceData) { d.Worktree.WorktreePath = "" }, "no archived worktree path"},
+		{"no recorded branch", func(d *InstanceData) {
+			d.Branch = ""
+			d.Worktree.BranchName = ""
+		}, "no branch"},
 		{"too recent", func(d *InstanceData) { d.ArchivedAt = recent }, "archived too recently"},
 	}
 	for _, tc := range cases {
