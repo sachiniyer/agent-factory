@@ -514,14 +514,22 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// non-mutating (recordLaunch=false) and the authoritative admission
 		// under the fences below re-evaluates it, so this unlocked pass only
 		// short-circuits the network wait for the already-determinable failure;
-		// the probe is skipped when the precheck fails.
+		// the probe is skipped when the precheck fails. If the precheck did
+		// fail, probeComputed stays false and the zero-value probe is NOT
+		// trusted: commitNewAccountSwapIdentity performs a real probe before
+		// teardown when its authoritative admission reverses this precheck
+		// (a config/registry change between the unlocked pass and the fenced
+		// admission), so prepareRuntimeForAccountSwap never receives a
+		// fabricated probeAlive verdict for a runtime it never probed.
 		var accountSwapProbe livenessProbe
+		probeComputed := false
 		if !accountSwap.manual || m.checkManualAccountSwap(instance, accountSwap) == nil {
 			if operatorInitiated {
 				accountSwapProbe = probeLivenessForOperator(instance, instance.AgentServer())
 			} else {
 				accountSwapProbe = probeLiveness(instance, instance.AgentServer())
 			}
+			probeComputed = true
 		}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied,
@@ -565,7 +573,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			lockEntered = true
 			var err error
 			fallbackEligible, err = m.commitNewAccountSwapIdentity(
-				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated, accountSwapProbe)
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated, accountSwapProbe, probeComputed)
 			return err
 		})
 		swapErr := lockErr

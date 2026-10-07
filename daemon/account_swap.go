@@ -396,6 +396,16 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 // operator RPC nor the poll-driven scheduler holds the config-apply/account-limit
 // fences for the probe's budget. operatorInitiated is retained for the
 // error-branch re-probe below, which selects its own budget the same way.
+//
+// probeComputed is false when the caller SKIPPED the probe because its
+// unlocked manual precheck (checkManualAccountSwap) failed; the zero-value
+// probe (probeAlive) must never reach prepareRuntimeForAccountSwap as a
+// fabricated live verdict. If the authoritative admission below REVERSES that
+// precheck (a config/registry change made an invalid swap admissible between
+// the unlocked pass and this fenced admission), perform the probe here before
+// teardown. This only happens on the rare reversal, so the fences are held for
+// the probe budget only in that case; the common path computes the probe
+// outside the fences. The auto path always passes probeComputed=true.
 func (m *Manager) commitNewAccountSwapIdentity(
 	repoID, key, requestedTitle string,
 	instance *session.Instance,
@@ -403,6 +413,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	global *config.Config,
 	operatorInitiated bool,
 	probe livenessProbe,
+	probeComputed bool,
 ) (fallbackEligible bool, err error) {
 	fallbackDue := scheduled.fallbackDue
 	var admitted *autoAccountSwap
@@ -419,6 +430,20 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	// unprovable while a later explicitly configured one is admitted, and the
 	// completion log must name the identity actually selected.
 	*scheduled = *admitted
+
+	// The caller skipped the probe when its unlocked precheck failed. If that
+	// precheck was reversed by a config/registry change before this fenced
+	// admission succeeded, the zero-value probe (probeAlive) would fabricate a
+	// live verdict and start teardown on an unprobed runtime. Perform the probe
+	// now so prepareRuntimeForAccountSwap gets a real verdict. This only runs
+	// on the rare reversal; the common path supplied a computed probe.
+	if !probeComputed {
+		if operatorInitiated {
+			probe = probeLivenessForOperator(instance, instance.AgentServer())
+		} else {
+			probe = probeLiveness(instance, instance.AgentServer())
+		}
+	}
 
 	err = m.prepareRuntimeForAccountSwap(key, instance, probe)
 	if err == nil {
