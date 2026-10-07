@@ -40,9 +40,9 @@ func dryPlan() daemon.PruneSessionsResponse {
 		OK: true, OlderThan: "720h",
 		Pruned: []daemon.PrunedSessionEntry{{
 			Title: "old", RepoID: "repo-a", Branch: "siyer/old",
-			ArchivedAt: time.Now().Add(-90 * 24 * time.Hour), ReclaimedBytes: 1234,
+			ArchivedAt: time.Now().Add(-90 * 24 * time.Hour), ReclaimableBytes: 1234,
 		}},
-		ReclaimedBytes: 1234,
+		ReclaimableBytes: 1234,
 	}
 }
 
@@ -115,7 +115,7 @@ func TestSessionsPrune_DryRunListsCandidatesAndSkips(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out, &parsed))
 	assert.Equal(t, true, parsed["ok"])
 	assert.Len(t, parsed["pruned"], 1)
-	assert.EqualValues(t, 1234, parsed["reclaimed_bytes"])
+	assert.EqualValues(t, 1234, parsed["reclaimable_bytes"])
 	require.Len(t, parsed["skipped"], 1)
 	assert.Contains(t, parsed["skipped"].([]any)[0].(map[string]any)["reason"], "not archived")
 }

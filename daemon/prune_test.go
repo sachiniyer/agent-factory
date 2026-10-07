@@ -102,8 +102,8 @@ func TestPruneSessions_DryRunListsCandidate(t *testing.T) {
 	entry := resp.Pruned[0]
 	assert.Equal(t, "dry-run-row", entry.Title)
 	assert.Equal(t, "af/dry-run-row", entry.Branch)
-	assert.Greater(t, entry.ReclaimedBytes, int64(0))
-	assert.Equal(t, entry.ReclaimedBytes, resp.ReclaimedBytes)
+	assert.Greater(t, entry.ReclaimableBytes, int64(0))
+	assert.Equal(t, entry.ReclaimableBytes, resp.ReclaimableBytes)
 
 	assert.True(t, exists(archivedPath), "a dry run must not touch the archived worktree")
 }

@@ -220,11 +220,11 @@ func TestDirSizeBytes(t *testing.T) {
 	assert.Zero(t, missing)
 }
 
-// TestDirSizeBytes_AllocatedNotApparent: reclaimed_bytes drives the
-// confirmation the operator reads, so it must be the disk space deletion
-// frees — a sparse file's apparent gigabytes reclaim only its populated
-// extents, and a hard-linked file whose last link lives OUTSIDE the tree
-// frees nothing at all (#5136 Codex round 4).
+// TestDirSizeBytes_AllocatedNotApparent: reclaimable_bytes is the number the
+// operator reads, so it must be the disk space deletion frees — a sparse
+// file's apparent gigabytes reclaim only its populated extents, and a
+// hard-linked file whose last link lives OUTSIDE the tree frees nothing at
+// all (#5136 Codex round 4).
 func TestDirSizeBytes_AllocatedNotApparent(t *testing.T) {
 	root := t.TempDir()
 

@@ -52,11 +52,13 @@ type PrunedSessionEntry struct {
 	// future apply's restore refusal names back to it.
 	Branch     string    `json:"branch"`
 	ArchivedAt time.Time `json:"archived_at"`
-	// ReclaimedBytes is ALLOCATED disk space (st_blocks×512), not apparent
+	// ReclaimableBytes is ALLOCATED disk space (st_blocks×512), not apparent
 	// file size — sparse holes are not counted, and a hard-linked inode is
 	// credited only when deleting this tree removes its last link (#5136
-	// Codex round 4). It is what `rm -rf` of the worktree would free.
-	ReclaimedBytes int64 `json:"reclaimed_bytes"`
+	// Codex round 4). It is what `rm -rf` of the worktree would free — the
+	// dry run reclaims nothing, so the field names what is reclaimABLE;
+	// reclaimed_bytes belongs to the follow-up's apply (#5189).
+	ReclaimableBytes int64 `json:"reclaimable_bytes"`
 }
 
 // PruneSkippedEntry is one session the run evaluated and refused, with the
@@ -79,9 +81,9 @@ type PruneSessionsResponse struct {
 	// Skipped holds rows refused BEFORE anything was deleted — they are
 	// untouched. Re-running with a different --older-than or after the blocking
 	// condition clears can admit them.
-	Skipped        []PruneSkippedEntry `json:"skipped,omitempty"`
-	ReclaimedBytes int64               `json:"reclaimed_bytes"`
-	Warnings       []string            `json:"warnings,omitempty"`
+	Skipped          []PruneSkippedEntry `json:"skipped,omitempty"`
+	ReclaimableBytes int64               `json:"reclaimable_bytes"`
+	Warnings         []string            `json:"warnings,omitempty"`
 }
 
 // PruneSessions evaluates archived sessions against req and lists the ones
@@ -112,7 +114,7 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	resp.Warnings = warnings
 	resp.Pruned = candidates
 	for _, entry := range candidates {
-		resp.ReclaimedBytes += entry.ReclaimedBytes
+		resp.ReclaimableBytes += entry.ReclaimableBytes
 	}
 	return resp, nil
 }
@@ -211,7 +213,7 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 		if sizeErr != nil {
 			warnings = append(warnings, fmt.Sprintf("session %q: could not fully measure %s: %v", data.Title, data.Worktree.WorktreePath, sizeErr))
 		}
-		entry.ReclaimedBytes = worktreeBytes
+		entry.ReclaimableBytes = worktreeBytes
 		candidates = append(candidates, entry)
 	}
 	sort.Slice(candidates, func(a, b int) bool {

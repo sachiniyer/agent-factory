@@ -241,10 +241,10 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
 `PruneSessions` returns
-`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "pruned": [<entry>…], "skipped"?: [<entry>…], "reclaimed_bytes": <int>, "warnings"?: [<string>…] }`:
+`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "pruned": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
 the STRICTLY READ-ONLY dry run for the archived-session reclaim — it lists in
 `pruned` each archived session a reclaim would remove —
-`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimed_bytes" }` —
+`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimable_bytes" }` —
 and changes nothing: no deletion, no record update, no git write. (The apply
 half lands in the follow-up to #5142.) `skipped` entries
 (`{ "title", "repo_id", "reason" }`) were evaluated and refused. An archived
@@ -253,7 +253,7 @@ counted: the kept branch does not contain them and they are the only copy —
 restore the session or clean the tree first. `older_than` is required and
 must be a positive Go duration measured from each session's archive time;
 the request needs a scope — `repo_id` or `all: true`, which are mutually
-exclusive. `reclaimed_bytes` counts **allocated** disk
+exclusive. `reclaimable_bytes` counts **allocated** disk
 blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
 hard-linked file is credited only when deleting the tree removes its last
 link — it is what a deletion would actually free, not apparent file size. A
