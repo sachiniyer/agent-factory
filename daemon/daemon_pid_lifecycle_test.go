@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -282,4 +283,105 @@ func TestReadManagedFileNoFollow_RefusesNonManagedShapes(t *testing.T) {
 	data, ok := readManagedFileNoFollow(pidFile, daemonPIDFileMaxBytes)
 	require.True(t, ok)
 	assert.Equal(t, "12345\n", string(data))
+}
+
+// TestEnsureDaemonAdHoc_ExitedSpawnPointsAtDaemonLog pins the #5188 review
+// requirement while #5196 is pending: a detached auto-spawn whose daemon
+// fails closed must not surface only "daemon did not become ready" — the
+// error names the resolved daemon log path, says the startup failure is
+// recorded there, and quotes the last ERROR line the child wrote. No new
+// persisted state: the diagnostic reads the log the daemon already wrote.
+func TestEnsureDaemonAdHoc_ExitedSpawnPointsAtDaemonLog(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// Pre-existing log content the quote must NOT surface: the offset the
+	// spawn records scopes the tail scan to what this daemon wrote.
+	logPath := filepath.Join(home, "agent-factory.log")
+	require.NoError(t, os.WriteFile(logPath,
+		[]byte("[DAEMON] ERROR:2026/01/01 00:00:00 old_test.go:1: ancient unrelated error\n"), 0600))
+	prevLogPathFn := daemonLogPathFn
+	daemonLogPathFn = func() string { return logPath }
+	t.Cleanup(func() { daemonLogPathFn = prevLogPathFn })
+
+	prevReady := daemonReadyTimeout
+	daemonReadyTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { daemonReadyTimeout = prevReady })
+
+	truePath, err := exec.LookPath("true") // exits immediately, like a fail-closed daemon
+	require.NoError(t, err)
+
+	spawnErr := ensureDaemonAdHocUntil(func() error {
+		if lerr := launchDaemonProcessAt(truePath); lerr != nil {
+			return lerr
+		}
+		// What the fail-closed daemon writes at ERROR before exiting (the
+		// symlinked-daemon.pid shape): the child logs its startup failure to
+		// the home's agent-factory.log, then dies.
+		f, oerr := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, oerr)
+		_, werr := f.WriteString("[DAEMON] ERROR:2026/10/07 00:00:01 root.go:91: failed to start daemon control server: cannot write daemon PID file: symlinked\n")
+		require.NoError(t, f.Close())
+		require.NoError(t, werr)
+		return nil
+	}, time.Now().Add(3*time.Second))
+
+	require.Error(t, spawnErr)
+	assert.Contains(t, spawnErr.Error(), "daemon did not become ready")
+	assert.Contains(t, spawnErr.Error(), logPath,
+		"the error must name the resolved daemon log path")
+	assert.Contains(t, spawnErr.Error(), "recorded in",
+		"the error must say the startup failure is recorded in the log")
+	assert.Contains(t, spawnErr.Error(), "cannot write daemon PID file",
+		"the error should quote the child's last logged ERROR line")
+	assert.NotContains(t, spawnErr.Error(), "ancient unrelated error",
+		"the quote must be scoped to lines this spawn wrote, not stale log content")
+}
+
+// TestEnsureDaemonAdHoc_LiveSpawnKeepsBareReadinessError pins the child-exit
+// gate: the log hint fires only when the spawned daemon has exited — a child
+// still warming (or wedged) gets the bare readiness error, and a stale spawn
+// marker reset by this call must not attribute another spawn's dead pid.
+func TestEnsureDaemonAdHoc_LiveSpawnKeepsBareReadinessError(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	logPath := filepath.Join(home, "agent-factory.log")
+	require.NoError(t, os.WriteFile(logPath,
+		[]byte("[DAEMON] ERROR:2026/01/01 00:00:00 old_test.go:1: ancient unrelated error\n"), 0600))
+
+	prevReady := daemonReadyTimeout
+	daemonReadyTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { daemonReadyTimeout = prevReady })
+
+	// A dead pid from an earlier spawn would make the hint fire if the
+	// pre-launch reset did not scope the marker to THIS launcher: a stub
+	// launcher that never calls launchDaemonProcessAt must leave it cleared.
+	truePath, err := exec.LookPath("true")
+	require.NoError(t, err)
+	dead := exec.Command(truePath)
+	require.NoError(t, dead.Start())
+	require.NoError(t, dead.Wait())
+	lastDaemonSpawnPID = dead.Process.Pid
+	t.Cleanup(func() { lastDaemonSpawnPID = 0 })
+
+	err = ensureDaemonAdHocUntil(func() error {
+		return nil // stubbed launch: spawns nothing, touches no marker
+	}, time.Now().Add(2*time.Second))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon did not become ready")
+	assert.NotContains(t, err.Error(), "recorded in",
+		"a launcher that spawned nothing must not inherit a stale marker")
+	assert.NotContains(t, err.Error(), "agent-factory.log")
+
+	// And when the spawned child IS still alive — the warming case — the
+	// hint stays off: no exited startup failure to point at the log for.
+	err = ensureDaemonAdHocUntil(func() error {
+		lastDaemonSpawnPID = os.Getpid() // this test process is alive
+		return nil
+	}, time.Now().Add(2*time.Second))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon did not become ready")
+	assert.NotContains(t, err.Error(), "recorded in")
+	assert.NotContains(t, err.Error(), "agent-factory.log")
 }

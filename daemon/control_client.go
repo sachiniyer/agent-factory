@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/rpc"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -271,6 +273,10 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 	// listener binds (startHTTPServer), and `af doctor` / `af daemon status`
 	// carry a row for it.
 
+	// Scope the spawn marker to this launch before the launcher runs: a
+	// stubbed or early-failing launcher must not let a marker from an earlier
+	// spawn attribute someone else's exit to this attempt.
+	lastDaemonSpawnPID = 0
 	if err := launch(); err != nil {
 		return err
 	}
@@ -279,6 +285,17 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 	}
 
 	err := waitForDaemonReady(admissionBoundedDeadline(deadline, daemonReadyTimeout))
+	if err != nil && lastDaemonSpawnPID != 0 && !pidLooksAlive(lastDaemonSpawnPID) {
+		// The detached child already exited: the actionable cause is in the
+		// daemon's own log — the fail-closed startup paths (an unwritable
+		// daemon.pid, a refused bind) log at ERROR before exiting — not in
+		// this process's stderr, which a detached child never had. Name the
+		// resolved log path and quote its last ERROR line so the user is not
+		// left with only "did not become ready" while #5196 (persisting the
+		// startup error for status/doctor) is still pending. Pure diagnostic:
+		// no persisted state, and nothing here mutates the outcome.
+		err = describeExitedDaemonSpawn(err)
+	}
 	if err != nil && admissionDeadlineExpired(deadline) {
 		// Same deadline-identity rule as the unit path: a readiness wait that
 		// consumed the whole admission window must still read as a deadline to
@@ -286,6 +303,80 @@ func ensureDaemonAdHocUntil(launch func() error, deadline time.Time) error {
 		return fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
 	}
 	return err
+}
+
+// describeExitedDaemonSpawn points a readiness failure at the daemon log
+// after the spawned child has already exited. The daemon's startup failure
+// is recorded at ERROR level in its agent-factory.log (commands/root.go
+// logs `failed to start daemon` before the process exits), so the returned
+// error names the resolved log path and, when one was written since the
+// spawn, quotes the last ERROR line.
+func describeExitedDaemonSpawn(err error) error {
+	logPath := daemonLogPathFn()
+	if logPath == "" {
+		return err
+	}
+	hint := fmt.Sprintf("the spawned daemon exited during startup; the startup failure is recorded in %s", logPath)
+	if line := lastDaemonLogErrorLine(logPath, lastDaemonSpawnLogOffset); line != "" {
+		hint += fmt.Sprintf("; last error logged: %q", line)
+	}
+	return fmt.Errorf("%w — %s", err, hint)
+}
+
+// daemonLogErrorQuoteCap bounds the quoted ERROR line so a long failure
+// message does not flood the caller's error text.
+const daemonLogErrorQuoteCap = 600
+
+// lastDaemonLogErrorLine returns the last log line carrying the ERROR level
+// marker written at or after offset — the spawn marker's log-size snapshot —
+// so the quote is the failing daemon's own startup error, not a stale line
+// from an earlier run. "" means nothing quotable (no log, no new content, or
+// a file that shrank below the recorded offset).
+func lastDaemonLogErrorLine(logPath string, offset int64) string {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	if offset < 0 || offset > info.Size() {
+		offset = 0
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+	const tailCap = 256 << 10
+	data, err := io.ReadAll(io.LimitReader(f, tailCap))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	if offset > 0 {
+		// The offset can land mid-line (the log's last byte was not a
+		// newline); drop the partial first line rather than quote a
+		// fragment. A '\n' immediately before the offset means the first
+		// line read is complete and must be kept.
+		var prev [1]byte
+		if _, err := f.ReadAt(prev[:], offset-1); err != nil || prev[0] != '\n' {
+			i := strings.IndexByte(string(data), '\n')
+			if i < 0 {
+				return ""
+			}
+			data = data[i+1:]
+		}
+	}
+	last := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "] ERROR:") {
+			last = strings.TrimSpace(line)
+		}
+	}
+	if len(last) > daemonLogErrorQuoteCap {
+		last = last[:daemonLogErrorQuoteCap] + "…"
+	}
+	return last
 }
 
 func waitForDaemonReady(deadline time.Time) error {

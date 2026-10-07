@@ -32,6 +32,26 @@ import (
 // a bound-but-warming daemon is treated as running, never respawned (#829).
 var launchDaemonProcessFn = launchDaemonProcess
 
+// lastDaemonSpawnPID and lastDaemonSpawnLogOffset describe the most recent
+// detached daemon child launchDaemonProcessAt spawned: its PID (0 before any
+// spawn) and the daemon log's size at spawn time, so a caller diagnosing a
+// readiness failure can scope a log-tail scan to the content THIS daemon
+// wrote. Written by launchDaemonProcessAt inside the ensureDaemonMu-critical
+// launch() call and read after the failed readiness wait in the same
+// critical section; ensureDaemonAdHocUntil zeroes the PID before launch so a
+// stubbed or early-failing launcher cannot attribute a stale spawn's exit to
+// this attempt.
+var (
+	lastDaemonSpawnPID       int
+	lastDaemonSpawnLogOffset int64
+)
+
+// daemonLogPathFn resolves the daemon's agent-factory.log path — the file a
+// detached child writes its startup failure into. Package-level so tests can
+// pin the resolution (the package's TestMain initializes logging under a
+// sandboxed home, which would otherwise freeze the path for every test).
+var daemonLogPathFn = log.LogFilePath
+
 func launchDaemonProcess() error {
 	// Find the agent-factory binary.
 	execPath, err := os.Executable()
@@ -43,10 +63,21 @@ func launchDaemonProcess() error {
 }
 
 func launchDaemonProcessAt(execPath string) error {
+	// Record the daemon log's size BEFORE spawning so a readiness-failure
+	// diagnostic can quote only what this daemon wrote; stat failure (no log
+	// yet) records 0 — the whole file is then this spawn's to quote.
+	if p := daemonLogPathFn(); p != "" {
+		if info, statErr := os.Stat(p); statErr == nil {
+			lastDaemonSpawnLogOffset = info.Size()
+		} else {
+			lastDaemonSpawnLogOffset = 0
+		}
+	}
 	pid, err := startDaemonChild(execPath)
 	if err != nil {
 		return err
 	}
+	lastDaemonSpawnPID = pid
 
 	log.InfoLog.Printf("started daemon child process with PID: %d", pid)
 
