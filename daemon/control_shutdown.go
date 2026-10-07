@@ -75,7 +75,9 @@ const sigtermFallbackPoll = 100 * time.Millisecond
 // method-not-found (EACCES, ECONNRESET/EPIPE, dial timeout): a daemon was
 // listening but its final state is unknown (#978).
 //
-// The ShutdownTarget names the process being stopped (zero when unknown). On
+// The ShutdownTarget names the process being stopped — zero when unknown, or
+// when this pid namespace cannot verify the reported PID as the daemon serving
+// this home (see shutdownTargetIsOursFn). On
 // the RPC path its PID is the acknowledging daemon's own, falling back to the
 // PID a pre-shutdown Ping reported for daemons built before ShutdownResponse
 // carried one; callers pass it to WaitForShutdownCompletion so the respawn
@@ -115,6 +117,7 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 	// none. Bounded so a wedged responder cannot stall the upgrade.
 	var pingResp PingResponse
 	var pingToken string
+	var pingOurs bool
 	var resp ShutdownResponse
 	var rpcErr error
 	_ = conn.SetDeadline(time.Now().Add(daemonDialTimeout))
@@ -132,6 +135,7 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 		// sample taken before it could exit and have its PID recycled.
 		if pingResp.PID > 0 {
 			pingToken = processStartTokenFn(pingResp.PID)
+			pingOurs = shutdownTargetIsOursFn(pingResp.PID)
 		}
 		// Shutdown keeps its historical unbounded call once connected.
 		_ = conn.SetDeadline(time.Time{})
@@ -164,12 +168,27 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 	}
 	// An ack PID comes from a daemon that was alive to send it, so sample it
 	// now; a PID taken from the Ping reuses the pre-shutdown sample.
-	tok := pingToken
+	tok, ours := pingToken, pingOurs
 	if pid != pingResp.PID {
-		tok = processStartTokenFn(pid)
+		tok, ours = processStartTokenFn(pid), shutdownTargetIsOursFn(pid)
+	}
+	// The daemon reports its PID in ITS pid namespace. A client reaching it
+	// through a shared AGENT_FACTORY_HOME from another namespace would read that
+	// number as absent here — ending the wait at once while the daemon drains —
+	// or as an unrelated local process to wait on and name in the kill hint.
+	// Only a PID this namespace verifies as the daemon serving this home may
+	// drive the PID wait; otherwise fall back to the socket-quiet wait.
+	if pid == 0 || !ours {
+		return ShutdownViaRPC, ShutdownTarget{}, nil
 	}
 	return ShutdownViaRPC, ShutdownTarget{PID: pid, StartToken: tok}, nil
 }
+
+// shutdownTargetIsOursFn verifies, in this process's pid namespace, that pid is
+// the daemon serving this home (pidBelongsToThisHome, the same binding the
+// SIGTERM fallback signals on). Indirected because the tests' in-process
+// control servers are not real `af --daemon` processes.
+var shutdownTargetIsOursFn = pidBelongsToThisHome
 
 // ClassifyShutdownTarget turns the read-only ping made before a restart into
 // the exact presence answer RequestShutdown will rely on. Only the two kernel

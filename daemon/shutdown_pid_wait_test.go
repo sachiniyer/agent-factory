@@ -31,6 +31,9 @@ func TestRequestShutdownReturnsAckPID(t *testing.T) {
 		t.Fatalf("startControlServer: %v", err)
 	}
 	t.Cleanup(func() { _ = closeFn() })
+	// The in-process server is not a real `af --daemon`; stand in for the
+	// home-binding check passing.
+	stubShutdownTargetIsOurs(t, func(int) bool { return true })
 
 	result, target, err := RequestShutdown()
 	if err != nil {
@@ -86,6 +89,9 @@ func TestRequestShutdownFallsBackToPingPID(t *testing.T) {
 		}
 		return "sampled-before-shutdown"
 	}
+	// The home binding is checked at Ping time too: after Shutdown the daemon
+	// may already be gone and unverifiable.
+	stubShutdownTargetIsOurs(t, func(pid int) bool { return pid == fakePID && !shutdown.Load() })
 	srv := rpc.NewServer()
 	if err := srv.RegisterName(controlServiceName, pidlessShutdownControl{pid: fakePID, shutdown: &shutdown}); err != nil {
 		t.Fatalf("register Control: %v", err)
@@ -106,6 +112,60 @@ func TestRequestShutdownFallsBackToPingPID(t *testing.T) {
 	if target.StartToken != "sampled-before-shutdown" {
 		t.Fatalf("shutdown start token = %q, want the pre-shutdown sample", target.StartToken)
 	}
+}
+
+// stubShutdownTargetIsOurs replaces the home-binding check RequestShutdown
+// applies to the PID it reports.
+func stubShutdownTargetIsOurs(t *testing.T, ours func(int) bool) {
+	t.Helper()
+	prev := shutdownTargetIsOursFn
+	t.Cleanup(func() { shutdownTargetIsOursFn = prev })
+	shutdownTargetIsOursFn = ours
+}
+
+// TestRequestShutdownDropsUnverifiedPID: a daemon reports its PID in its own
+// pid namespace. When this namespace cannot verify that PID as the daemon
+// serving this home — another namespace's number reads as absent, or names an
+// unrelated local process — RequestShutdown must report no target, so the wait
+// falls back to the socket and the hint names no process, rather than ending
+// the wait early or waiting on (and naming for kill -9) a stranger.
+func TestRequestShutdownDropsUnverifiedPID(t *testing.T) {
+	t.Run("ack pid", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		closeFn, err := startControlServer(nil, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("startControlServer: %v", err)
+		}
+		t.Cleanup(func() { _ = closeFn() })
+		stubShutdownTargetIsOurs(t, func(int) bool { return false })
+
+		result, target, err := RequestShutdown()
+		if err != nil || result != ShutdownViaRPC {
+			t.Fatalf("RequestShutdown = %v, %v; want ShutdownViaRPC, nil", result, err)
+		}
+		if target != (ShutdownTarget{}) {
+			t.Fatalf("shutdown target = %+v, want zero for an unverified pid", target)
+		}
+	})
+	t.Run("ping pid", func(t *testing.T) {
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		var shutdown atomic.Bool
+		srv := rpc.NewServer()
+		if err := srv.RegisterName(controlServiceName, pidlessShutdownControl{pid: 424242, shutdown: &shutdown}); err != nil {
+			t.Fatalf("register Control: %v", err)
+		}
+		_, cleanup := startFakeControlListener(t, srv)
+		t.Cleanup(cleanup)
+		stubShutdownTargetIsOurs(t, func(int) bool { return false })
+
+		result, target, err := RequestShutdown()
+		if err != nil || result != ShutdownViaRPC {
+			t.Fatalf("RequestShutdown = %v, %v; want ShutdownViaRPC, nil", result, err)
+		}
+		if target != (ShutdownTarget{}) {
+			t.Fatalf("shutdown target = %+v, want zero for an unverified pid", target)
+		}
+	})
 }
 
 // slowPingControl answers Ping only after the RequestShutdown probe's bound,
