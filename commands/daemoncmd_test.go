@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -543,5 +544,33 @@ func TestRunDaemonRestart_FailedUnitRestartIsLoudWithSIGTERM(t *testing.T) {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("stderr missing %q (SIGTERM stop must not swallow the demotion).\ngot=%q", want, errOut.String())
 		}
+	}
+}
+
+// TestRunDaemonRestart_UnprovenDaemonExitsNonzero pins the install-path
+// contract: an unverifiable live daemon whose socket is proven absent makes
+// runDaemonRestart decline the restart — and it must do so with an ERROR, not
+// the documented no-daemon no-op, because install.sh/dev-install.sh run
+// `af daemon restart --quiet` and emit their only restart warning on a
+// nonzero status (#5188 review).
+func TestRunDaemonRestart_UnprovenDaemonExitsNonzero(t *testing.T) {
+	prevPresence := daemonRestartPresenceFn
+	prevQuiet := daemonRestartQuiet
+	t.Cleanup(func() {
+		daemonRestartPresenceFn = prevPresence
+		daemonRestartQuiet = prevQuiet
+	})
+	daemonRestartPresenceFn = func() daemon.ProbeAnswer {
+		return daemon.Undetermined(fmt.Errorf("%w (pid %d)", errRestartPresenceUnproven, 4242))
+	}
+	daemonRestartQuiet = true // the exact shape install.sh drives
+
+	var out, errOut bytes.Buffer
+	err := runDaemonRestart(&out, &errOut)
+	if err == nil {
+		t.Fatal("an unproven-daemon refusal must exit nonzero so install.sh/dev-install.sh warn")
+	}
+	if !errors.Is(err, errRestartPresenceUnproven) {
+		t.Fatalf("error must carry the unproven sentinel for callers matching on it, got %v", err)
 	}
 }

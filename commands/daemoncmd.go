@@ -423,11 +423,15 @@ func runDaemonRestart(w, errOut io.Writer) error {
 	// mutation without claiming absence (#5188).
 	absent := false
 	unproven := false
+	var presenceCause error
 	daemonRestartPresenceFn().Match(
 		func() {},
 		func() { absent = true },
 		func() { absent = true },
-		func(cause error) { unproven = errors.Is(cause, errRestartPresenceUnproven) },
+		func(cause error) {
+			unproven = errors.Is(cause, errRestartPresenceUnproven)
+			presenceCause = cause
+		},
 	)
 	if absent {
 		if !daemonRestartQuiet {
@@ -440,11 +444,12 @@ func runDaemonRestart(w, errOut io.Writer) error {
 		// Restart is powerless here either way: this home's socket is dead
 		// (RequestShutdown would no-op) and the pid may belong to another
 		// home's daemon, so mutating the unit on its behalf is not
-		// authorized. Say what we know instead of printing "no daemon".
-		if !daemonRestartQuiet {
-			fmt.Fprintln(w, "a live af daemon exists but its home could not be verified; not restarting an unproven daemon — check `af daemon status`")
-		}
-		return nil
+		// authorized. This is an inconclusive refusal, not the documented
+		// no-daemon no-op — it must exit nonzero: install.sh and
+		// dev-install.sh run `af daemon restart --quiet` and emit their
+		// only restart warning on a nonzero status, so a nil return would
+		// silently leave an old (possibly foreign) daemon running.
+		return fmt.Errorf("a live af daemon exists but its home could not be verified; refusing to restart an unproven daemon — check `af daemon status`: %w", presenceCause)
 	}
 
 	execPath, err := osExecutableFn()

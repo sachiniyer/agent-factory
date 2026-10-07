@@ -186,12 +186,15 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		case sig := <-sigChan:
 			// A signal landing while stopStartupSignalWatch's close is in
 			// flight makes both cases ready, and Go picks one at random.
-			// Re-check so the stand-down ALWAYS wins once it has closed:
-			// the buffered signal then survives for the first real
-			// consumer, which unwinds through the armed cleanup defers
-			// instead of this hard-kill bypassing them.
+			// Re-check so the stand-down ALWAYS wins once it has closed —
+			// and replay the consumed signal back into the buffered
+			// channel (cap 1, so the just-freed slot is guaranteed): the
+			// first real consumer then drains it through the armed cleanup
+			// defers instead of this watcher dropping it or hard-killing
+			// past them.
 			select {
 			case <-startupSignalWatch:
+				sigChan <- sig
 				return
 			default:
 			}
