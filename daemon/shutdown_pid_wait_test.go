@@ -169,6 +169,40 @@ func TestRequestShutdownDropsUnverifiedPID(t *testing.T) {
 	})
 }
 
+// TestRequestShutdownSlowVerificationStillShutsDown: the Ping's deadline
+// must not outlive the Ping. The local start-token and home checks that follow
+// it can be slow (a home on a slow filesystem); if the 250ms deadline were
+// still armed, net/rpc's reader would time out, shut the client down, and the
+// Shutdown call would fail locally without ever reaching the daemon — leaving
+// the old daemon running after the binary swap.
+func TestRequestShutdownSlowVerificationStillShutsDown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	const fakePID = 424242
+	var shutdown atomic.Bool
+	srv := rpc.NewServer()
+	if err := srv.RegisterName(controlServiceName, pidlessShutdownControl{pid: fakePID, shutdown: &shutdown}); err != nil {
+		t.Fatalf("register Control: %v", err)
+	}
+	_, cleanup := startFakeControlListener(t, srv)
+	t.Cleanup(cleanup)
+	stubShutdownTargetIsOurs(t, func(int) bool {
+		time.Sleep(4 * daemonDialTimeout)
+		return true
+	})
+
+	result, target, err := RequestShutdown()
+	if err != nil {
+		t.Fatalf("RequestShutdown after a slow verification: %v", err)
+	}
+	if result != ShutdownViaRPC || !shutdown.Load() {
+		t.Fatalf("result = %v, Shutdown delivered = %v; want ShutdownViaRPC with the RPC delivered", result, shutdown.Load())
+	}
+	if target.PID != fakePID {
+		t.Fatalf("shutdown pid = %d, want %d", target.PID, fakePID)
+	}
+}
+
 // slowPingControl answers Ping only after the RequestShutdown probe's bound,
 // and acknowledges Shutdown WITH its PID — a PID learned only from the ack.
 type slowPingControl struct{ pid int }

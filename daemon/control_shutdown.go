@@ -130,6 +130,12 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 		pingResp = PingResponse{}
 		rpcErr = callDaemonNoEnsure("Shutdown", ShutdownRequest{}, &resp)
 	} else {
+		// The deadline bounded the Ping alone. Clear it before the local checks
+		// below, which can be slow (a home on a slow filesystem): left armed,
+		// net/rpc's reader would time out and shut the client down, and the
+		// Shutdown call would fail without ever reaching the daemon. Shutdown
+		// keeps its historical unbounded call once connected.
+		_ = conn.SetDeadline(time.Time{})
 		// Pin the pinged process's incarnation now, while it is certainly still
 		// the daemon: for a daemon whose ack carries no PID this is the only
 		// sample taken before it could exit and have its PID recycled.
@@ -137,8 +143,6 @@ func RequestShutdown() (ShutdownResult, ShutdownTarget, error) {
 			pingToken = processStartTokenFn(pingResp.PID)
 			pingOurs = shutdownTargetIsOursFn(pingResp.PID)
 		}
-		// Shutdown keeps its historical unbounded call once connected.
-		_ = conn.SetDeadline(time.Time{})
 		rpcErr = client.Call(controlServiceName+".Shutdown", ShutdownRequest{}, &resp)
 	}
 	if rpcErr != nil {

@@ -1,9 +1,9 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,12 +21,13 @@ import (
 // for any zombie before escalating to SIGKILL — visible as a 5s pause in
 // `af upgrade` when the dying daemon's parent isn't waiting.
 //
-// macOS has no /proc, so there it asks ps for the process state and treats a
-// zombie ("Z") as dead. Without that, an exited-but-unreaped daemon keeps
-// passing signal 0, and WaitForShutdownCompletion would burn its full grace
-// and withhold the respawn over a daemon that is already gone (#5007). If ps
-// fails (the pid vanished between checks, or ps is missing) it falls back to
-// the signal-0 result: a ps failure must not fabricate a death.
+// macOS has no /proc, so there it asks the process table (proctree.Lookup, one
+// kern.proc.pid sysctl — no subprocess, so it is cheap at the wait's 50ms
+// cadence) and treats ErrProcessExited, which it returns for a zombie, as dead.
+// Without that, an exited-but-unreaped daemon keeps passing signal 0, and
+// WaitForShutdownCompletion would burn its full grace and withhold the respawn
+// over a daemon that is already gone (#5007). Any other lookup failure falls
+// back to the signal-0 result: a failed read must not fabricate a death.
 func pidLooksAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -44,8 +45,7 @@ func pidLooksAlive(pid int) bool {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
-		if err == nil && strings.Contains(string(out), "Z") {
+		if _, err := proctree.Lookup(pid); errors.Is(err, proctree.ErrProcessExited) {
 			return false
 		}
 	}
