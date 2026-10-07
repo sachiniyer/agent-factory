@@ -231,10 +231,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/ResumeFromLimit",
 		Description: "Resume a usage-limit-blocked session, or explicitly retry an inspected handoff whose mission delivery was ambiguous.",
 		requestType: reflect.TypeOf(ResumeFromLimitRequest{}),
-		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
-		// registry — the committed account-swap arm stops the caller's panes
-		// (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.resumeFromLimit) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ResumeFromLimit) },
 	},
 	// The "it already landed" half of the ambiguous-delivery exit (#4429): the
 	// operator inspected the pane and attests the mission arrived, so the
@@ -253,18 +250,14 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/HandoffSession",
 		Description: "Continue a session in place under a different agent (to), another account for the same agent (account), or both (to and account). Keep its worktree and branch, and deliver a mission brief with the goal and existing work to the replacement conversation. Omit to to keep the current agent.",
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
-		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
-		// registry — the --account swap tears the caller's panes down (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.handoffSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSession) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/DeleteProject",
 		Description: "Delete a project (a repo's session grouping): archive its live sessions (restorable), tear down in-place ones, and drop its root_agents opt-in — the real git repo is untouched.",
 		requestType: reflect.TypeOf(DeleteProjectRequest{}),
-		// rpcHandlerCtx so the unix-socket peer pid reaches the requester
-		// registry — deleting the caller's own project reaps its pane (#5182).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.deleteProject) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.DeleteProject) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -321,7 +314,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/CloseTab",
 		Description: "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
 		requestType: reflect.TypeOf(CloseTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.closeTab) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.closeTab) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -484,10 +477,7 @@ var internalHTTPRoutes = []HTTPRoute{
 		Path:        "/v1/" + AccountAwareHandoffMethod,
 		Description: "Version-bound account-aware transport for HandoffSession.",
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
-		// rpcHandlerCtx, same as the legacy handoff route: the unix-socket peer
-		// identity must reach the requester registry — the --account swap tears
-		// the caller's panes down on this transport too (Codex on #5186).
-		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtxPtr(cs.handoffSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSessionV2) },
 	},
 	{
 		Method:      http.MethodPost,

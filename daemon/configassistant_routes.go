@@ -111,13 +111,6 @@ func (cs *controlServer) configAssistantDeleteHandler(w http.ResponseWriter, r *
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
-	// A detached local client inside the assistant's own pane deleting it is
-	// the requester-in-captured-tree case kill/archive already cover (#5182):
-	// register the kernel-verified requester so the bare-session reap spares
-	// the caller still blocked on this response. The unregister parks on the
-	// per-request queue withTeardownReplyDrain installed and runs once the
-	// reply has been flushed.
-	defer cs.trackTeardownRequester(r.Context(), nil)()
 	if err := cs.manager.configAssistants.reap(); err != nil {
 		writeHTTPError(w, r, http.StatusInternalServerError, err)
 		return

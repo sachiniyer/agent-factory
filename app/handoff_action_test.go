@@ -226,7 +226,7 @@ func TestHandleStateSelectHandoffAgent_ConfirmsThenSwapsTheChosenAgent(t *testin
 	require.True(t, ok, "confirming must emit startHandoffMsg")
 	require.Equal(t, tmux.ProgramGemini, start.request.To)
 
-	msg := h.handoffCmd(start.request, false)()
+	msg := h.handoffCmd(start.request)()
 	done, ok := msg.(handoffDoneMsg)
 	require.True(t, ok, "expected handoffDoneMsg, got %T", msg)
 	require.NoError(t, done.err)

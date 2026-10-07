@@ -19,17 +19,12 @@ type sessionActionTarget struct {
 	title     string
 	repoID    string
 	createdAt time.Time
-	// tmuxName is the session's main (agent-tab) tmux session name, captured
-	// alongside the rest so a teardown verb can tell whether its target is the
-	// very session this TUI runs inside — the SIGHUP-shield question (#5182).
-	// "" when the instance has no local session (not started, remote).
-	tmuxName string
 }
 
 func captureSessionActionTarget(inst *session.Instance, repoID string) sessionActionTarget {
 	return sessionActionTarget{
 		id: inst.ID, title: inst.Title, repoID: repoID,
-		createdAt: inst.CreatedAt, tmuxName: inst.TabTmuxName(0),
+		createdAt: inst.CreatedAt,
 	}
 }
 

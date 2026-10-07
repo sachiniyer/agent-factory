@@ -95,9 +95,6 @@ Examples:
 			return jsonError(err)
 		}
 
-		// The --account swap tears the session's panes down — same SIGHUP
-		// shield as kill/archive when the caller sits in one of them (#5182).
-		defer ignoreTeardownHangup()()
 		resp, err := handoffSessionViaDaemon(daemon.HandoffSessionRequest{
 			Title:   title,
 			RepoID:  repoID,

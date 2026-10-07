@@ -60,11 +60,6 @@ Example:
 		if sessionsRetryLimitDelivered {
 			err = confirmHandoffDeliveryViaDaemon(daemon.ConfirmHandoffDeliveryRequest{Title: title, RepoID: repoID})
 		} else {
-			// A committed account-swap retry stops the resumed session's
-			// panes — possibly this caller's own tty — while the daemon reply
-			// is still in flight; hold SIGHUP for the call so the CLI lives
-			// long enough to read it (Codex on #5186).
-			defer ignoreTeardownHangup()()
 			err = resumeFromLimitViaDaemon(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
 		}
 		warning := ""

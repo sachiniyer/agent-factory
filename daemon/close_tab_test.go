@@ -620,7 +620,7 @@ func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
 	}
 	notReady := &controlServer{manager: shell}
 	var resp CloseTabResponse
-	if err := notReady.CloseTab(&CloseTabRequest{Title: "x"}, &resp); !IsDaemonStartingErr(err) {
+	if err := notReady.CloseTab(CloseTabRequest{Title: "x"}, &resp); !IsDaemonStartingErr(err) {
 		t.Fatalf("CloseTab on warming manager: want daemon-starting error, got: %v", err)
 	}
 
@@ -629,7 +629,7 @@ func TestControlServer_CloseTab_GatedAndValidated(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	ready := &controlServer{manager: manager}
-	err = ready.CloseTab(&CloseTabRequest{Title: "x", RepoID: "../../../etc/passwd"}, &resp)
+	err = ready.CloseTab(CloseTabRequest{Title: "x", RepoID: "../../../etc/passwd"}, &resp)
 	if err == nil || !strings.Contains(err.Error(), "rejected RPC request") {
 		t.Fatalf("CloseTab traversal RepoID: want rejection, got: %v", err)
 	}

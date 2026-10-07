@@ -276,14 +276,7 @@ func (m *home) deleteConfirmedTab(inst *session.Instance, idx int) (tea.Model, t
 	}
 
 	target := captureSessionActionTarget(inst, m.repoID)
-	// A processless tab (web/VS Code — TabKind.HasTmux false) holds no pane
-	// that could be this TUI's, so closing it cannot hang up our tty: gate it
-	// out before the conservative empty-name fallback shields it anyway
-	// (#5182, Codex on #5186).
-	mayHitSelf := tab.Kind.HasTmux() && teardownMayHitOwnTTY(inst.TabTmuxName(idx))
-	if err := withTeardownHangupShield(mayHitSelf, func() error {
-		return closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName))
-	}); err != nil {
+	if err := closeTabThroughDaemon(target.closeTabRequest(tab.ID, tabName)); err != nil {
 		// A close that may have landed is not dropped locally or reported as
 		// refused (#4824): the next snapshot removes the tab if it is gone.
 		if mutationMayHaveLanded(err) {

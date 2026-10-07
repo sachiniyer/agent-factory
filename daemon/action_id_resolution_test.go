@@ -300,7 +300,7 @@ func TestCreateCloseTabByIDTargetsRightSession(t *testing.T) {
 
 	// CloseTab addressed by id B removes the shell tab from B; A stays untouched.
 	var xResp CloseTabResponse
-	if err := cs.CloseTab(&CloseTabRequest{ID: dataB.ID, Title: "feature", RepoID: "", TabName: cResp.Name}, &xResp); err != nil {
+	if err := cs.CloseTab(CloseTabRequest{ID: dataB.ID, Title: "feature", RepoID: "", TabName: cResp.Name}, &xResp); err != nil {
 		t.Fatalf("CloseTab by id B: %v", err)
 	}
 	if got := tabCount(repoB.ID); got != 1 {

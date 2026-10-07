@@ -240,12 +240,11 @@ func (m *home) killInstanceCmd(target sessionActionTarget) tea.Cmd {
 	// package var swapped by test seams, so reading it inside the cmd goroutine
 	// would race a sibling parallel test's swap (#960 PR 4 race-fix class).
 	kill := killSessionThroughDaemon
-	mayHitSelf := teardownMayHitOwnTTY(target.tmuxName)
 	return func() tea.Msg {
 		// The shell tab's tmux session is owned by the instance and torn down by
 		// LocalBackend.Kill (looping all tabs) inside the daemon teardown — there
 		// is no longer a UI-side terminal cache to clean up (#930 PR 2).
-		if err := withTeardownHangupShield(mayHitSelf, func() error { return kill(target.killRequest()) }); err != nil {
+		if err := kill(target.killRequest()); err != nil {
 			log.ErrorLog.Printf("could not kill instance: %v", err)
 			return instanceKilledMsg{target: target, err: err}
 		}
@@ -412,12 +411,8 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 // whole operation, so it must not run on the Update goroutine.
 func (m *home) archiveInstanceCmd(target sessionActionTarget) tea.Cmd {
 	archive := archiveSessionThroughDaemon
-	mayHitSelf := teardownMayHitOwnTTY(target.tmuxName)
 	return func() tea.Msg {
-		if err := withTeardownHangupShield(mayHitSelf, func() error {
-			_, e := archive(target.archiveRequest())
-			return e
-		}); err != nil {
+		if _, err := archive(target.archiveRequest()); err != nil {
 			log.ErrorLog.Printf("could not archive instance %q: %v", target.title, err)
 			return instanceArchivedMsg{target: target, err: err}
 		}
@@ -535,9 +530,8 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 // restoreInstanceCmd.
 func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 	resume := resumeFromLimitThroughDaemon
-	mayHitSelf := teardownMayHitOwnTTY(target.tmuxName)
 	return func() tea.Msg {
-		if err := withTeardownHangupShield(mayHitSelf, func() error { return resume(target.resumeFromLimitRequest()) }); err != nil {
+		if err := resume(target.resumeFromLimitRequest()); err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
 			}

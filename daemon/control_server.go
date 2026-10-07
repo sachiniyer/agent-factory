@@ -495,16 +495,11 @@ func (s *controlServer) AccountLogin(req AccountLoginRequest, resp *AccountLogin
 
 // ReapConfigAgent tears down a config-agent session. No event is published: a
 // config agent is not a session, so nothing on the events plane models it.
-func (s *controlServer) ReapConfigAgent(req *ReapConfigAgentRequest, resp *ReapConfigAgentResponse) error {
+func (s *controlServer) ReapConfigAgent(req ReapConfigAgentRequest, _ *ReapConfigAgentResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	// Reaping the config-agent session the caller sits in is the same
-	// requester-in-captured-tree problem as kill/archive (#5182). net/rpc
-	// gives no per-call context, so the connection's requester pid is the only
-	// carrier — which is also the only correct one.
-	defer s.trackTeardownRequester(context.Background(), req)()
-	return s.manager.ReapConfigAgent(*req)
+	return s.manager.ReapConfigAgent(req)
 }
 
 func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse) error {
@@ -525,22 +520,18 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 	return nil
 }
 
-func (s *controlServer) CloseTab(req *CloseTabRequest, resp *CloseTabResponse) error {
+func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) error {
 	return s.closeTab(context.Background(), req, resp)
 }
 
-func (s *controlServer) closeTab(ctx context.Context, req *CloseTabRequest, resp *CloseTabResponse) error {
+func (s *controlServer) closeTab(ctx context.Context, req CloseTabRequest, resp *CloseTabResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	// Closing the tab the caller is running in reaps the caller's own pane
-	// tree; register the kernel-verified requester so teardown spares the
-	// process blocked on this reply (#5182).
-	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	name, err := s.manager.closeTabRequestedBy(*req, rpcRequester(ctx))
+	name, err := s.manager.closeTabRequestedBy(req, rpcRequester(ctx))
 	if err != nil {
 		return err
 	}

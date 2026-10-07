@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"fmt"
 )
 
@@ -16,25 +15,14 @@ const (
 // same handler through daemon.ResumeFromLimit on the gob control socket; only
 // the transport differs, while the controlServer and Manager action stay shared.
 
-func (s *controlServer) ResumeFromLimit(req *ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
-	return s.resumeFromLimit(context.Background(), req, resp)
-}
-
-func (s *controlServer) resumeFromLimit(ctx context.Context, req *ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
+func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *ResumeFromLimitResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	// A committed account-swap repair stops this session's panes from inside
-	// the resume (StopForAccountSwap / StopRemainingPanesForAccountSwap in
-	// resumeFromLimitLockedOutcome) — including the caller's own pane tree
-	// when the retry was sent from inside the session being resumed.
-	// Register the kernel-verified requester so that teardown spares the
-	// process still blocked on this reply (#5182).
-	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	outcome, err := s.manager.resumeFromLimitOutcome(*req)
+	outcome, err := s.manager.resumeFromLimitOutcome(req)
 	resp.OK = outcome == resumePerformed
 	if !resp.MutationOutcome.record(err) {
 		return err

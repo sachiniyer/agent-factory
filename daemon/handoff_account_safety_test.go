@@ -509,7 +509,7 @@ func TestControlHandoffAccountSettlementFailureUsesCommittedEnvelope(t *testing.
 	}
 	var resp HandoffSessionResponse
 	cs := &controlServer{manager: m}
-	require.NoError(t, cs.HandoffSession(&HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"}, &resp))
+	require.NoError(t, cs.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"}, &resp))
 	require.True(t, resp.OK)
 	require.Equal(t, "claude", resp.From)
 	require.Equal(t, "claude", resp.To)
@@ -545,7 +545,7 @@ func TestControlRetryHandoffSettlementFailureUsesCommittedEnvelope(t *testing.T)
 
 	var resp ResumeFromLimitResponse
 	err = (&controlServer{manager: m}).ResumeFromLimit(
-		&ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}, &resp,
+		ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}, &resp,
 	)
 	require.NoError(t, err, "a delivered retry must answer through the response envelope")
 	require.True(t, resp.OK)
@@ -567,7 +567,7 @@ func TestControlRetryHandoffDeliveryFailureIsNotCommitted(t *testing.T) {
 	backend.sendPromptErr = errors.New("retry delivery failed")
 	var resp ResumeFromLimitResponse
 	err = (&controlServer{manager: m}).ResumeFromLimit(
-		&ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}, &resp,
+		ResumeFromLimitRequest{Title: inst.Title, RepoID: repo}, &resp,
 	)
 	require.ErrorContains(t, err, "retry delivery failed")
 	require.False(t, isMutationCommitted(err),

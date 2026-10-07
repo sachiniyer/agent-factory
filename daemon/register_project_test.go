@@ -191,7 +191,7 @@ func TestControlServer_DeleteProject_RemovesRegistryRecordAndPublishes(t *testin
 	_, ch := manager.events.subscribe()
 
 	var del DeleteProjectResponse
-	require.NoError(t, cs.DeleteProject(&DeleteProjectRequest{RepoPath: repoPath}, &del))
+	require.NoError(t, cs.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}, &del))
 	require.True(t, del.OK)
 	assert.Equal(t, 0, del.ArchivedCount, "a sessionless project archives nothing")
 	assert.Equal(t, 0, del.KilledCount)
@@ -225,7 +225,7 @@ func TestControlServer_DeleteProject_RepoIDOnlyRemovesRegistryRecord(t *testing.
 	require.Len(t, projects, 1, "precondition: the sessionless project is registered")
 
 	var del DeleteProjectResponse
-	require.NoError(t, cs.DeleteProject(&DeleteProjectRequest{RepoID: repo.ID}, &del))
+	require.NoError(t, cs.DeleteProject(DeleteProjectRequest{RepoID: repo.ID}, &del))
 	require.True(t, del.OK)
 	assert.Equal(t, 0, del.ArchivedCount)
 	assert.Equal(t, 0, del.KilledCount)

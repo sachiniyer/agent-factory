@@ -245,9 +245,6 @@ func runTabDelete(cmd *cobra.Command, args []string) error {
 		return jsonError(err)
 	}
 
-	// Same SIGHUP shield as kill/archive (#5182): closing the tab this CLI is
-	// running inside tears down its pane pty under it.
-	defer ignoreTeardownHangup()()
 	name, err := closeTabViaDaemon(daemon.CloseTabRequest{
 		Title:   args[0],
 		RepoID:  repoID,

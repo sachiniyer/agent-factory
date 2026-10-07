@@ -64,7 +64,7 @@ func TestCloseTabRPCLogNamesResolvedTarget(t *testing.T) {
 	info := captureDestructiveRPCInfoLog(t)
 
 	var resp CloseTabResponse
-	if err := (&controlServer{manager: manager}).CloseTab(&CloseTabRequest{
+	if err := (&controlServer{manager: manager}).CloseTab(CloseTabRequest{
 		ID: data.ID, Title: "stale-display-title", TabID: created.ID,
 	}, &resp); err != nil {
 		t.Fatalf("CloseTab: %v", err)
