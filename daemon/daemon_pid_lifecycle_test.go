@@ -18,15 +18,18 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
-// The #5188 publication contract this PR carries: daemon.pid is written before
-// the control socket can serve its first Ping (a successful readiness probe
-// structurally implies the file exists), and a daemon that cannot publish its
-// identity fails closed — it must not serve while invisible to StopDaemon,
-// Health, `af daemon status`, and doctor. Health's PIDVerified is bound to
-// THIS home by classifyDaemonHome, the same binding StopDaemon requires.
+// The #5188 lifecycle contract this PR carries: daemon.pid names this home's
+// daemon for exactly the span it is alive AND holding the per-home
+// daemon.lock — removed only after the lock is released, by a removal that
+// re-reads and compares before unlinking so a successor's rewrite is never
+// deleted (#5191 is the removal half; the publication half landed in #5197).
 // These tests drive RunDaemon in-process — the daemon is real but
 // unprivileged, the home is a temp dir, and no tmux or supervisor is
 // involved.
+//
+// The two teardown hooks (testHookDaemonBefore/AfterHomeLockRelease) bracket
+// the home-lock release in runDaemon's outermost defer, so they observe the
+// ordering the lock release and the PID-file removal actually take.
 
 // joinTestDaemon registers the cleanup that guarantees a spawned RunDaemon
 // goroutine is dead before this test's other cleanups restore package-level
@@ -419,4 +422,203 @@ func TestEnsureDaemonAdHoc_ExitedSpawnWithoutLogEntryNamesPathHonestly(t *testin
 	assert.NotContains(t, spawnErr.Error(), "recorded in",
 		"no log entry was written, so the error must not claim one was recorded")
 	assert.Contains(t, spawnErr.Error(), "stderr is discarded")
+}
+
+// TestRunDaemon_PIDFileSurvivesUntilHomeLockRelease pins the ordering half of
+// #5188: daemon.pid must still name the exiting daemon right up to (and
+// through) the home-lock release — the file must never disappear while the
+// daemon that wrote it is still alive and holding the lock — and must be gone
+// once teardown completes. The pre-fix defer removed it mid-teardown, before
+// the lock release, so the post-release hook observed nothing.
+func TestRunDaemon_PIDFileSurvivesUntilHomeLockRelease(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	installInstantBackend(t)
+	stubLegacyUnitSweep(t)
+
+	pidPath := filepath.Join(home, "daemon.pid")
+
+	var beforePID, afterPID int
+	var beforeOK, afterOK bool
+	var lockHeldAtRelease ProbeAnswer
+	var beforeRan, afterRan bool
+	prevBefore, prevAfter := testHookDaemonBeforeHomeLockRelease, testHookDaemonAfterHomeLockRelease
+	t.Cleanup(func() {
+		testHookDaemonBeforeHomeLockRelease = prevBefore
+		testHookDaemonAfterHomeLockRelease = prevAfter
+	})
+	testHookDaemonBeforeHomeLockRelease = func() {
+		beforeRan = true
+		beforePID, beforeOK = readPIDFilePID(t, pidPath)
+		lockHeldAtRelease = ProbeHomeLock(home)
+	}
+	testHookDaemonAfterHomeLockRelease = func() {
+		afterRan = true
+		afterPID, afterOK = readPIDFilePID(t, pidPath)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.DaemonPollInterval = 50
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- RunDaemon(cfg)
+		close(runDone)
+	}()
+	// Join the daemon goroutine before ANY teardown cleanup restores package
+	// state: a RunDaemon still starting up reads stub seams (the legacy-unit
+	// sweep globals, the instant backend) that t.Cleanup resets, so letting it
+	// outlive this test races every later test in the package. Registered here
+	// so even an early failure cannot leak it.
+	joinTestDaemon(t, runDone)
+	waitForReady(t, "daemon.pid written before the daemon serves", func() bool {
+		pid, ok := readPIDFilePID(t, pidPath)
+		return ok && pid == os.Getpid()
+	})
+	// daemon.pid is now written BEFORE the control socket binds (#5188) — the
+	// file's existence no longer implies the daemon can answer RPCs. Wait for
+	// the socket to serve before issuing Shutdown, or the request lands in the
+	// published-but-not-yet-listening window and reports no daemon.
+	waitForReady(t, "daemon serving the control socket", func() bool {
+		return pingDaemon() == nil
+	})
+
+	result, _, err := RequestShutdown()
+	require.NoError(t, err)
+	require.Equal(t, ShutdownViaRPC, result)
+	select {
+	case err := <-runDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("RunDaemon did not return within 5s after Shutdown RPC")
+	}
+
+	require.True(t, beforeRan, "pre-release hook never fired — the teardown ordering seam moved")
+	require.True(t, afterRan, "post-release hook never fired — the teardown ordering seam moved")
+	require.True(t, beforeOK, "daemon.pid must still exist while the exiting daemon holds the home lock")
+	assert.Equal(t, os.Getpid(), beforePID,
+		"daemon.pid must still name the exiting daemon while it holds the home lock")
+	lockHeldAtRelease.Match(
+		func() {},
+		func() {
+			t.Errorf("the home lock was already released when the pre-release hook ran — " +
+				"the release moved ahead of the PID-file check")
+		},
+		func() { t.Errorf("daemon.lock file missing at teardown") },
+		func(cause error) { t.Errorf("home-lock probe undetermined at teardown: %v", cause) },
+	)
+	assert.True(t, afterOK, "daemon.pid must survive the home-lock release — removal runs after it")
+	assert.Equal(t, os.Getpid(), afterPID,
+		"daemon.pid must still name the exiting daemon in the release→remove window")
+
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("daemon.pid survived RunDaemon's completed teardown, stat err=%v", err)
+	}
+}
+
+// TestRunDaemon_TeardownPreservesSuccessorPIDFile pins the removal half of
+// #5188: a successor daemon that wins the home lock during the exiting
+// daemon's release→remove window writes its own daemon.pid, and the exiting
+// daemon's teardown must NOT delete that file. The hook simulates exactly that
+// write; the teardown removal must re-read and compare before unlinking.
+func TestRunDaemon_TeardownPreservesSuccessorPIDFile(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	installInstantBackend(t)
+	stubLegacyUnitSweep(t)
+
+	pidPath := filepath.Join(home, "daemon.pid")
+	successorPID := os.Getpid() + 424242 // sentinel: parseable, never this process
+
+	var ownFileAtAfterRelease bool
+	prevBefore, prevAfter := testHookDaemonBeforeHomeLockRelease, testHookDaemonAfterHomeLockRelease
+	t.Cleanup(func() {
+		testHookDaemonBeforeHomeLockRelease = prevBefore
+		testHookDaemonAfterHomeLockRelease = prevAfter
+	})
+	testHookDaemonAfterHomeLockRelease = func() {
+		pid, ok := readPIDFilePID(t, pidPath)
+		ownFileAtAfterRelease = ok && pid == os.Getpid()
+		// The successor's rewrite: it claimed the home the moment the lock
+		// dropped and published its own identity.
+		_ = os.WriteFile(pidPath, []byte(strconv.Itoa(successorPID)), 0600)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.DaemonPollInterval = 50
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- RunDaemon(cfg)
+		close(runDone)
+	}()
+	joinTestDaemon(t, runDone)
+	waitForReady(t, "daemon.pid written before the daemon serves", func() bool {
+		pid, ok := readPIDFilePID(t, pidPath)
+		return ok && pid == os.Getpid()
+	})
+	// The file precedes the socket (#5188): wait for a serving daemon before
+	// issuing Shutdown, or the request lands in the not-yet-listening window.
+	waitForReady(t, "daemon serving the control socket", func() bool {
+		return pingDaemon() == nil
+	})
+
+	_, _, err := RequestShutdown()
+	require.NoError(t, err)
+	select {
+	case err := <-runDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("RunDaemon did not return within 5s after Shutdown RPC")
+	}
+
+	require.True(t, ownFileAtAfterRelease,
+		"daemon.pid was already gone at the post-release hook — the removal ran before the lock release")
+	pid, ok := readPIDFilePID(t, pidPath)
+	require.True(t, ok, "the successor's daemon.pid was deleted by the exiting daemon's teardown")
+	assert.Equal(t, successorPID, pid,
+		"daemon.pid must still name the successor — an exiting daemon never deletes a file it did not write")
+}
+
+// TestRemoveDaemonPIDFile_KeepsForeignPID pins the teardown removal's identity
+// guard at the helper level: a daemon.pid that does not name THIS process is
+// never unlinked by removeDaemonPIDFile, however it got there (a successor's
+// rewrite is the case that matters).
+func TestRemoveDaemonPIDFile_KeepsForeignPID(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	pidFile := filepath.Join(home, "daemon.pid")
+	require.NoError(t, os.WriteFile(pidFile, []byte("424242"), 0600))
+
+	removeDaemonPIDFile()
+
+	pid, ok := readPIDFilePID(t, pidFile)
+	require.True(t, ok, "removeDaemonPIDFile deleted a PID file that names another daemon")
+	assert.Equal(t, 424242, pid)
+}
+
+// TestCleanupDaemonRuntimeFiles_KeepsSuccessorPID pins the stop-side cleanup's
+// identity guard: the PID file removal must keep a file that no longer names
+// the PID this stop accounted for. The stopped daemon's own PID is the 12345
+// it read and signaled; the file naming 424242 is a successor's rewrite that
+// landed in the window before cleanup ran.
+func TestCleanupDaemonRuntimeFiles_KeepsSuccessorPID(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	// A plain file at the socket path stands in for a SIGKILLed daemon's
+	// leftover socket: dialing it fails, so nothing answers the ping.
+	socketPath, err := DaemonSocketPath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(socketPath, nil, 0600))
+	pidFile := filepath.Join(home, "daemon.pid")
+	require.NoError(t, os.WriteFile(pidFile, []byte("424242"), 0600))
+
+	cleanupDaemonRuntimeFiles(pidFile, 12345, time.Time{})
+
+	pid, ok := readPIDFilePID(t, pidFile)
+	require.True(t, ok, "cleanup removed a PID file naming a PID other than the one it stopped — a successor's rewrite must survive")
+	assert.Equal(t, 424242, pid)
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("the stale control socket should still be removed, stat err=%v", err)
+	}
 }

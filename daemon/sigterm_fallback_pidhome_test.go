@@ -46,7 +46,7 @@ func TestLocateDaemonPID_CountsRejectedPIDFileCandidateAfterScan(t *testing.T) {
 	// candidate is absent from the scan results.
 	stubDaemonScan(t, []int{ours}, nil)
 
-	pid, _, _, scanned, err := locateDaemonPID()
+	pid, _, _, _, scanned, err := locateDaemonPID()
 	if err != nil {
 		t.Fatalf("locateDaemonPID: %v", err)
 	}
