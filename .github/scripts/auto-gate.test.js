@@ -636,12 +636,13 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
 
   // Run-end placement and no probe cost: build needs every other job and runs
   // always(), so needing it lands this job at the end of the run. Fork PRs are
-  // skipped outright: their token is read-only, so the dispatch could never
-  // land — skipping keeps the workflow_run wakeup (their only net) earliest.
+  // skipped outright, and Dependabot's same-repo runs too — GitHub downgrades
+  // both to a read-only token, so the dispatch could never land and skipping
+  // keeps the workflow_run wakeup (their only net) earliest.
   assert.equal(jobKey(job, "needs"), "[build]");
   assert.equal(
     jobKey(job, "if"),
-    "always() && !inputs.probe && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)",
+    "always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))",
   );
 
   // The only write permission in the workflow, scoped to this job — and this
@@ -685,6 +686,7 @@ test("PR Validation ends by requesting the reconciliation pass itself (#5179)", 
   assert.deepEqual(
     [...interpolated].sort(),
     [
+      "github.actor",
       "github.event.pull_request.head.repo.fork",
       "github.event.pull_request.head.sha",
       "github.event_name",

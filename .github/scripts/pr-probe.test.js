@@ -49,10 +49,10 @@ function jobs(yaml) {
 
 const PROBE_SKIP = "${{ !inputs.probe }}";
 const BUILD_IF = "always() && !inputs.probe";
-// gate-reconcile adds a fork clause to Build's shape; !inputs.probe still
-// skips it on probes (#5179).
+// gate-reconcile adds a fork/Dependabot clause to Build's shape; !inputs.probe
+// still skips it on probes (#5179).
 const GATE_RECONCILE_IF =
-  "always() && !inputs.probe && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)";
+  "always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))";
 const PROBE_NAME = /^\$\{\{ inputs\.probe && '([^']+)' \|\| '([^']+)' \}\}$/;
 
 /** The name a job reports on a PR run (probe unset). */
@@ -136,8 +136,8 @@ test("dispatch inputs reach pr.yml only through names, conditions, the group and
     /^ {4}name: \$\{\{ inputs\.probe && '[^']+' \|\| '[^']+' \}\}$/,
     /^ {4}if: \$\{\{ !inputs\.probe \}\}$/,
     /^ {4}if: always\(\) && !inputs\.probe$/,
-    // gate-reconcile adds a fork clause to Build's condition shape (#5179).
-    /^ {4}if: always\(\) && !inputs\.probe && \(github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.fork != true\)$/,
+    // gate-reconcile adds a fork/Dependabot clause to Build's condition shape (#5179).
+    /^ {4}if: always\(\) && !inputs\.probe && \(github\.event_name != 'pull_request' \|\| \(github\.event\.pull_request\.head\.repo\.fork != true && github\.actor != 'dependabot\[bot\]'\)\)$/,
     /^ {8}if: \$\{\{ !?inputs\.probe \}\}$/,
     /^ {2}group: \$\{\{ inputs\.probe && 'probe-' \|\| 'pr-' \}\}\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}$/,
     /^ {10}PROBE_(PACKAGES|RUN): \$\{\{ inputs\.(packages|run) \}\}$/,

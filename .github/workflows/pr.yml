@@ -877,16 +877,19 @@ jobs:
   # fan-out is possible; the five-minute request window in auto-gate.js is
   # untouched. One job, no checkout, no repo scripts, and a payload with no
   # PR-controlled fields: the pass re-derives everything from the API. A
-  # fork's pull_request token is read-only and could never POST, so the job
-  # skips forks outright and the workflow_run subscription stays their wakeup.
+  # fork's pull_request token is read-only and could never POST — and neither
+  # could Dependabot's, whose same-repo runs are downgraded the same way — so
+  # the job skips both outright and workflow_run stays their wakeup.
   gate-reconcile:
     name: ${{ inputs.probe && 'Request Auto Gate reconciliation (skipped by probe)' || 'Request Auto Gate reconciliation' }}
     needs: [build]
-    # forks never reach the runner: their token is read-only, so the dispatch
-    # would warn for nothing while delaying the workflow_run wakeup that is
-    # their only net. merge_group/workflow_dispatch carry no pull_request
-    # payload, so the fork clause short-circuits true there.
-    if: always() && !inputs.probe && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true)
+    # forks and Dependabot never reach the runner: their tokens are read-only,
+    # so the dispatch would warn for nothing while delaying the workflow_run
+    # wakeup that is their only net. merge_group/workflow_dispatch carry no
+    # pull_request payload, so the clause short-circuits true there. actor is
+    # the trigger of THIS run — a maintainer pushing to a Dependabot branch
+    # gets a writable token and runs the job.
+    if: always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))
     runs-on: ubuntu-latest
     timeout-minutes: 2
     # The only write permission in this workflow, and only for the dispatch
