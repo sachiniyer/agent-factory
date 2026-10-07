@@ -484,7 +484,10 @@ var internalHTTPRoutes = []HTTPRoute{
 		Path:        "/v1/" + AccountAwareHandoffMethod,
 		Description: "Version-bound account-aware transport for HandoffSession.",
 		requestType: reflect.TypeOf(HandoffSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffSessionV2) },
+		// rpcHandlerCtx, same as the legacy handoff route: the unix-socket peer
+		// identity must reach the requester registry — the --account swap tears
+		// the caller's panes down on this transport too (Codex on #5186).
+		handler: func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.handoffSession) },
 	},
 	{
 		Method:      http.MethodPost,

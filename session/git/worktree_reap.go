@@ -144,10 +144,14 @@ func worktreeWriterProcessesMatching(
 	// unrelated sessions.
 	// A tracked teardown requester (#5182) — the process that asked for this
 	// teardown, identified by kernel peer credentials and still blocked on its
-	// reply — is alive inside the worktree for the best possible reason. It is
-	// protected by the same argument that covers the daemon itself: killing it
-	// kills the caller before the answer it asked for can arrive. Its subtree
-	// prunes with it, exactly like the other infrastructure exclusions.
+	// reply — is alive inside the worktree for the best possible reason:
+	// killing it kills the caller before the answer it asked for can arrive.
+	// Unlike the infrastructure exclusions it exempts ONLY its own identity —
+	// a requester that spawned a writer which later chdir'd out of the
+	// worktree is still the ancestor keeping that writer reachable, and that
+	// child is this session's to reap. So the requester is never selected and
+	// never signalled, but traversal continues INTO its subtree exactly as the
+	// original matcher intends (Codex on #5186).
 	requestersSeen := make(map[int]bool)
 	isRequester := func(pid int) bool {
 		p, ok := snap[pid]
@@ -165,7 +169,7 @@ func worktreeWriterProcessesMatching(
 		return true
 	}
 	protectedInfrastructure := func(pid int) bool {
-		return pid == selfPID || isTmuxProcess(pid) || isRequester(pid)
+		return pid == selfPID || isTmuxProcess(pid)
 	}
 	seen := make(map[int]bool)
 	var procs []proctree.Process
@@ -200,6 +204,12 @@ func worktreeWriterProcessesMatching(
 			}
 			if protectedInfrastructure(p.PID) {
 				pruned[p.PID] = true
+				continue
+			}
+			if isRequester(p.PID) {
+				// The requester itself leaves the kill set, but its children
+				// do not: the writer it spawned stays a writer (Codex on
+				// #5186). Not marking pruned keeps the walk reaching them.
 				continue
 			}
 			add(p)
