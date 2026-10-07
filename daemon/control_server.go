@@ -308,6 +308,7 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 // lets the RPC response flush back to the caller before the listener closes.
 func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
+	resp.PID = os.Getpid()
 	if s.shutdownCh == nil {
 		return nil
 	}

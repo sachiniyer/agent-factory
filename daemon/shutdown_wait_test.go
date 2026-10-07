@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -21,7 +22,7 @@ func TestWaitForShutdownCompletionNoDaemon(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	start := time.Now()
-	if err := WaitForShutdownCompletion(); err != nil {
+	if err := WaitForShutdownCompletion(ShutdownTarget{}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion with no daemon: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -80,7 +81,7 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 		}
 	})
 
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown: %v", err)
 	}
@@ -88,7 +89,10 @@ func TestUpgradeRespawnWaitsForDelayedTeardown(t *testing.T) {
 		t.Fatalf("shutdown result = %v, want ShutdownViaRPC", result)
 	}
 
-	if err := WaitForShutdownCompletion(); err != nil {
+	// The "old daemon" here is an in-process control server, so the PID the ack
+	// reports is this test's own and never exits; exercise the no-PID
+	// socket-quiet wait, which is what this #854 regression is about.
+	if err := WaitForShutdownCompletion(ShutdownTarget{}); err != nil {
 		t.Fatalf("WaitForShutdownCompletion: %v", err)
 	}
 	if pingDaemon() == nil {
@@ -115,11 +119,47 @@ func TestWaitForShutdownCompletionTimesOut(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeFn() })
 
-	prevGrace := shutdownCompleteGrace
-	shutdownCompleteGrace = 250 * time.Millisecond
-	t.Cleanup(func() { shutdownCompleteGrace = prevGrace })
+	prevGrace := shutdownSocketQuietGrace
+	shutdownSocketQuietGrace = 250 * time.Millisecond
+	t.Cleanup(func() { shutdownSocketQuietGrace = prevGrace })
 
-	if err := WaitForShutdownCompletion(); err == nil {
+	err = WaitForShutdownCompletion(ShutdownTarget{})
+	if err == nil {
 		t.Fatalf("expected a timeout error while the daemon socket keeps answering")
+	}
+	if !errors.Is(err, ErrShutdownIncomplete) {
+		t.Fatalf("timeout error = %v, want it to wrap ErrShutdownIncomplete", err)
+	}
+}
+
+// TestWaitForShutdownCompletionRechecksSocketAtDeadline: a socket that stops
+// answering during the final sleep — after the last in-loop ping succeeded but
+// before the deadline check — must read as a completed shutdown, not an
+// incomplete one. The caller withholds the respawn on ErrShutdownIncomplete
+// (#5007), so a missed boundary leaves an exited daemon with no replacement.
+func TestWaitForShutdownCompletionRechecksSocketAtDeadline(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	closeFn, err := startControlServer(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("startControlServer: %v", err)
+	}
+	closed := make(chan struct{})
+	t.Cleanup(func() { <-closed })
+
+	prevGrace, prevPoll := shutdownSocketQuietGrace, shutdownCompletePoll
+	shutdownSocketQuietGrace = 100 * time.Millisecond
+	shutdownCompletePoll = 300 * time.Millisecond
+	t.Cleanup(func() { shutdownSocketQuietGrace, shutdownCompletePoll = prevGrace, prevPoll })
+
+	// The first ping answers; the socket then closes inside the one sleep that
+	// carries the loop past its deadline.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = closeFn()
+		close(closed)
+	}()
+	if err := WaitForShutdownCompletion(ShutdownTarget{}); err != nil {
+		t.Fatalf("WaitForShutdownCompletion = %v, want nil once the socket stopped answering by the deadline", err)
 	}
 }

@@ -51,7 +51,7 @@ func TestRunDaemonKeepsManagerWarmingUntilOrphanSweepCompletes(t *testing.T) {
 		"state RPC reached the ready manager while the orphan sweep was still running: %v", err)
 
 	releaseSweep()
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	require.NoError(t, err)
 	assert.Equal(t, ShutdownViaRPC, result)
 	select {

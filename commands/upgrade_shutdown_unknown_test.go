@@ -23,8 +23,8 @@ func TestRestartDaemon_NoDaemonWithAnErrorIsIndeterminate(t *testing.T) {
 	prev := requestDaemonShutdownFn
 	t.Cleanup(func() { requestDaemonShutdownFn = prev })
 	probeErr := errors.New("stat /run/af.sock: permission denied")
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownNoDaemon, probeErr
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, probeErr
 	}
 
 	outcome, err := restartDaemonFromPathDetailed("/usr/local/bin/af")

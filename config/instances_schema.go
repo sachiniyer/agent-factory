@@ -276,6 +276,29 @@ func validateInstancesEnvelope(raw []byte) error {
 	return err
 }
 
+// instancesArrayInCurrentEnvelope returns the instances member of raw verbatim
+// — no decode and no re-marshal — for bytes ProveJSONSchemaVersion has already
+// proved are a well-formed current-version document (#5169). json.Valid ran
+// inside the probe, so every member value this pulls out is a complete JSON
+// value and every '['-led one is a complete array: those bytes are already the
+// normalized array in the only sense normalizeJSONRawArray's callers use it,
+// since the array goes straight to an unmarshal that whitespace cannot change.
+//
+// Only a plainly array-shaped member takes the fast return. Everything else —
+// an absent member, one found under a case-variant key, null, or a non-array
+// value — defers to the same decodeInstancesEnvelope the slow path ran, so the
+// verdict and the error text cannot drift: the decoder's case-insensitive
+// field match and its nil-RawMessage handling of an explicit null reproduce
+// exactly what the migration-validated read produced.
+func instancesArrayInCurrentEnvelope(raw []byte) (json.RawMessage, error) {
+	if member, found := lastTopLevelJSONMember(raw, "instances"); found {
+		if trimmed := bytes.TrimSpace(member); len(trimmed) > 0 && trimmed[0] == '[' {
+			return member, nil
+		}
+	}
+	return decodeInstancesEnvelope(raw)
+}
+
 func detectInstancesSchemaVersion(raw []byte) (int, error) {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return LegacySchemaVersion, nil
