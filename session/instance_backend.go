@@ -668,7 +668,9 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 		return fmt.Errorf("cannot rename session %q: it is not archived", i.Title)
 	}
 	gw := i.gitWorktree
-	if i.IsPruned() {
+	// i.mu is already write-locked here, so read i.prunedAt directly — calling
+	// IsPruned() would RLock a held RWMutex and deadlock (#5136 CI hang).
+	if !i.prunedAt.IsZero() {
 		// A pruned tombstone has no worktree to relocate — prune deleted it
 		// (#5136). Only the record's title and the still-kept branch move
 		// aside so the new session can take both names.

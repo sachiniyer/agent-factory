@@ -200,6 +200,41 @@ func TestArchiveTimeForFallbackOrder(t *testing.T) {
 	assert.True(t, ArchiveTimeFor(InstanceData{}).IsZero())
 }
 
+// TestRenameArchived_PrunedTombstoneDoesNotLockTwice pins the deadlock CI
+// caught on the first cut of this path: RenameArchived holds i.mu, so the
+// pruned-tombstone branch must read i.prunedAt directly — routing through
+// IsPruned() takes RLock on a held RWMutex and hangs forever. The goroutine +
+// timeout makes the pre-fix shape fail in seconds rather than hang the suite
+// (daemon TestReserveCreate_ReuseArchivedNameCutOffRecordsTheLocation did
+// exactly that on the unfixed head).
+func TestRenameArchived_PrunedTombstoneDoesNotLockTwice(t *testing.T) {
+	worktreePath := filepath.Join(t.TempDir(), "archived-wt")
+	gw, err := git.NewGitWorktreeFromStorage("/repo", worktreePath, "old-title", "dev/old-title", "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{
+		Title:       "old-title",
+		Path:        "/repo",
+		Branch:      "dev/old-title",
+		liveness:    LiveArchived,
+		gitWorktree: gw,
+	}
+	inst.MarkPruned(time.Now())
+	require.True(t, inst.IsPruned(), "precondition: the row is a tombstone")
+
+	dest := filepath.Join(t.TempDir(), "freed-title")
+	done := make(chan error, 1)
+	go func() { done <- inst.RenameArchived("freed-title", dest, "") }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("RenameArchived deadlocked on a pruned tombstone — it must not reacquire i.mu")
+	}
+	assert.Equal(t, "freed-title", inst.Title, "the tombstone's title must move aside")
+	_, statErr := os.Stat(dest)
+	assert.True(t, os.IsNotExist(statErr), "a tombstone has no worktree — nothing may be created at dest")
+}
+
 func TestDirSizeBytes(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
