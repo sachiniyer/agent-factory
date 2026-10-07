@@ -696,12 +696,24 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 		// one, the deliberate tradeoff.
 		live := false
 		if tab.tmux != nil {
-			if exists, known := tab.tmux.ProbeSession(); known && exists {
+			// A live session that failed placement IS dead for this tab's
+			// purposes: the pane under the persisted name is proven not to
+			// sit in the worktree, so counting it live would leave the
+			// roster bound to a foreign pane (#5174).
+			if exists, known := tab.tmux.ProbeSession(); known && exists && !tab.tmux.MisplacedPane() {
 				live = true
 			}
 		}
 		if !live {
 			deadShells = append(deadShells, tab)
+			// A pane convicted of squatting outside the worktree is dropped
+			// from the roster AND recorded as a durable cleanup handle in one
+			// critical section — the shell is respawned under a fresh token
+			// below (the squatted name is never retaken), while teardown and
+			// the startup sweep still kill the squatter by name (#5174).
+			if tab.tmux != nil && tab.tmux.MisplacedPane() {
+				i.demoteMisplacedTabPane(tab, false)
+			}
 		}
 	}
 	if len(deadShells) == 0 {
@@ -728,6 +740,15 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			reserved[token] = true
 		}
 	}
+	// A pending-cleanup session still squats its name: a demoted squatter's
+	// roster binding is gone (tabTmuxToken reads tmux, now nil), but the tmux
+	// session under the name may be alive, so the respawn below must never
+	// retake it (#5174).
+	for _, h := range i.PendingTabCleanup() {
+		if token, ok := strings.CutPrefix(h.TmuxName, prefix); ok {
+			reserved[token] = true
+		}
+	}
 	type shellBinding struct {
 		id    string
 		tmux  *tmux.TmuxSession
@@ -740,7 +761,7 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			name = tab.Name
 		}
 		tmuxName := ""
-		if tab.tmux != nil {
+		if tab.tmux != nil && !tab.tmux.MisplacedPane() {
 			// The dead shell's own token is already in reserved (seeded from tabs).
 			tmuxName = tab.tmux.SanitizedName()
 		}

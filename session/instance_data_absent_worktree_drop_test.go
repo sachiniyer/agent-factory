@@ -138,17 +138,19 @@ func TestFromInstanceData_LiveRowPaneInWrongDirLoadsAsLost(t *testing.T) {
 	const agentName = "af_misplaced_pane_agent"
 	shellName := agentName + tmuxTabSeparator + shellTabName
 
-	// The worktree EXISTS, so the pre-spawn stat passes — but tmux records a
-	// different start path (its fallback cwd). countingExec answers
-	// pane_start_path with whatever -c it was handed; override OutputFunc so
-	// the agent session reports the daemon-cwd-shaped fallback instead.
+	// The worktree EXISTS, so the pre-spawn stat passes — but the pane's
+	// current path is tmux's fallback cwd instead. pane_current_path answers
+	// the agent session's placement query (a convicting source; pane_start_path
+	// only ever echoes the -c it was handed and cannot convict — #5174 review),
+	// while every other session falls through to countingExec's recorded -c.
 	var newSessions int
 	fallbackDir := t.TempDir()
 	inner := countingExec(map[string]bool{}, &newSessions)
 	exec := cmd_test.MockCmdExec{
 		RunFunc: inner.Run,
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
-			if strings.Contains(cmd.String(), "pane_start_path") {
+			if strings.Contains(cmd.String(), "pane_current_path") &&
+				tmuxTargetName(cmd.Args) == agentName {
 				return []byte(fallbackDir + "\n"), nil
 			}
 			return inner.Output(cmd)

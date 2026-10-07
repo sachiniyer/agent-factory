@@ -61,14 +61,28 @@ func restoreProcessTab(i *Instance, tab *Tab, worktreePath string) {
 		})
 		return
 	}
+	// Bind BEFORE healing or stamping: the pane under the persisted name may
+	// not be af's at all — a positive placement mismatch means a remain-on-exit
+	// heal would mutate a foreign pane and a pane_dead stamp would record a
+	// foreign process's exit as this command's (#5174).
+	if err := tab.tmux.ReattachOnly(worktreePath, true); err != nil {
+		if tab.tmux.MisplacedPane() {
+			// The refusal proved the pane sits outside this session's
+			// worktree: not af's to bind, heal, stamp, or present. The tab
+			// goes inert and the squatter's name is demoted to the durable
+			// cleanup list, so teardown still kills it by name while nothing
+			// can attach or capture it (#5174).
+			log.WarningLog.Printf("restore process tab %q for %q: the pane under its persisted name sits outside the worktree; leaving the tab inert and unbound rather than presenting a foreign pane", tab.Name, i.Title)
+			i.demoteMisplacedTabPane(tab, true)
+			return
+		}
+		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
+	}
 	// Best-effort heal for a still-running pre-#4479 pane: with the option on,
 	// tmux holds the pane when the command exits and pane_dead records it.
 	tab.tmux.ApplyRemainOnExit()
 	if tab.Exit == nil {
 		stampProcessTabExit(i, tab)
-	}
-	if err := tab.tmux.ReattachOnly(worktreePath, true); err != nil {
-		log.WarningLog.Printf("reattach process tab %q for %q failed: %v", tab.Name, i.Title, err)
 	}
 }
 

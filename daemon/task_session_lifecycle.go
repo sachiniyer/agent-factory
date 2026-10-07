@@ -292,6 +292,19 @@ func (m *Manager) driveTaskSessionLifecycle(repoID string, instance *session.Ins
 				taskID, title, err)
 			m.fileOwedTaskLifecycle(repoID, instance)
 		}
+		// The durable marker alone is not enough: a drain that reached here has
+		// already deleted its deferredTaskLifecycle entry, and the edge path
+		// never had one — so without a re-park nothing asks again until a
+		// restart or an unrelated refresh re-arms it, stranding a declared
+		// kill/archive in the meantime (#5174). The park is keyed on the session
+		// id, so a replacement session can never inherit the obligation, and
+		// the sweep reclaims it if the row is gone by then.
+		m.mu.Lock()
+		if m.deferredTaskLifecycle == nil {
+			m.deferredTaskLifecycle = make(map[string]string)
+		}
+		m.deferredTaskLifecycle[daemonInstanceKey(repoID, title)] = sessionID
+		m.mu.Unlock()
 		return
 	}
 	if verb == task.OnCompleteKeep {

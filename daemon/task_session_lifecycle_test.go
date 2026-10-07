@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -621,4 +622,66 @@ func TestTaskSessionLifecycle_DeferredDrainTeardownExcludesLostRecovery(t *testi
 	_, tracked := manager.instances[key]
 	manager.mu.Unlock()
 	assert.False(t, tracked, "the reaped session must leave the manager")
+}
+
+// TestTaskSessionLifecycle_DeferredDriveReParksWhenTaskLookupFails covers the
+// unbound-row drain's own failure mode (#5174 review): the drain deletes its
+// deferredTaskLifecycle entry before driving, so a transient task-store error
+// inside driveTaskSessionLifecycle would otherwise strand the obligation —
+// the durable marker survives, but nothing asks again until an unrelated
+// refresh or a restart re-arms it. The failed lookup must re-park the intent
+// so the NEXT drain retries, and once the store answers the owed teardown
+// must actually land.
+func TestTaskSessionLifecycle_DeferredDriveReParksWhenTaskLookupFails(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-kill")
+
+	var storeFails atomic.Bool
+	storeFails.Store(true)
+	prev := loadTasksForRepoID
+	loadTasksForRepoID = func(string) ([]task.Task, []task.Task, error) {
+		if storeFails.Load() {
+			return nil, nil, assert.AnError
+		}
+		return []task.Task{{ID: "task-kill", OnComplete: task.OnCompleteKill}}, nil, nil
+	}
+	t.Cleanup(func() { loadTasksForRepoID = prev })
+
+	was := endRunOnIdleEdge(t, inst)
+	manager.deferTaskSessionLifecycleWhilePaused(repoID, inst, was)
+	require.NotNil(t, inst.OwedOnComplete(), "precondition: the durable marker is filed")
+
+	// The restarted daemon's refused-reattach shape: Lost and unbound.
+	inst.SetStatusForTest(session.Lost)
+
+	key := daemonInstanceKey(repoID, "nightly")
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	manager.mu.Lock()
+	reParkedID, parked := manager.deferredTaskLifecycle[key]
+	manager.mu.Unlock()
+	require.True(t, parked,
+		"a task lookup failure must re-park the intent — the durable marker alone is never asked again")
+	assert.Equal(t, inst.ID, reParkedID)
+	assert.NotNil(t, inst.OwedOnComplete(), "the obligation stays durable")
+
+	// The re-parked intent is live: once the store answers, the next drain
+	// drives the owed kill.
+	got := make(chan KillSessionRequest, 1)
+	prevKill := killSessionForLifecycle
+	killSessionForLifecycle = func(m *Manager, req KillSessionRequest, _ sessionTeardownGuard) error {
+		got <- req
+		return nil
+	}
+	t.Cleanup(func() { killSessionForLifecycle = prevKill })
+	storeFails.Store(false)
+
+	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
+
+	select {
+	case req := <-got:
+		assert.Equal(t, inst.ID, req.ID, "the owed teardown lands once the store answers again")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the re-parked obligation was never retried")
+	}
 }

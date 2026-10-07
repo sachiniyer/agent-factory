@@ -516,6 +516,12 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // has not completed. The archive case is the load-bearing one:
 // ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
 // during archive; OpArchiving is the fence that started=true cannot provide.
+//
+// The unresolved-relocation refusal is the same one restore and respawn keep
+// (#5172): while af's own move of this worktree has not settled, the recorded
+// path is not authoritative, and a tab spawned into it could land in a stale
+// or replaced directory. RelocationSnapshot takes only the worktree's own
+// leaf lock — it never calls back into i.mu, so reading it here is safe.
 func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.liveness == LiveArchived {
 		return fmt.Errorf("cannot add a tab to an archived session; restore it first (af sessions restore)")
@@ -525,6 +531,11 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	}
 	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
 		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
+	}
+	if gw := i.gitWorktree; gw != nil {
+		if _, _, unresolved := gw.RelocationSnapshot(); unresolved {
+			return fmt.Errorf("cannot add a tab while session %q has an unresolved worktree relocation; try again once it settles", i.Title)
+		}
 	}
 	return nil
 }
