@@ -850,6 +850,48 @@ listen_addr = '127.0.0.1:8443'
 	assert.Equal(t, want, readFile(t, path))
 }
 
+// A single-line scalar's own trailing comment stays ON the moved line —
+// and, just as important, is never left behind as a standalone '#' line that
+// the next migrated key would carry as its own leading block. sandbox_ssh
+// migrates before listen_addr in alias order, so a preserved-at-site
+// '# sandbox note' would land inside [network] above listen_addr.
+func TestMigrateKeepsATrailingCommentWithItsOwnKey(t *testing.T) {
+	path := migrateHome(t, "sandbox_ssh = 'ssh host'  # sandbox note\nlisten_addr = '127.0.0.1:8443'\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 2)
+
+	content := readFile(t, path)
+	assert.Contains(t, content, "[sandbox]\nssh = 'ssh host'  # sandbox note",
+		"the trailing comment stays inline with the key it described")
+	assert.Contains(t, content, "[network]\nlisten_addr = '127.0.0.1:8443'")
+	assert.Equal(t, 1, strings.Count(content, "# sandbox note"),
+		"one note, attached to its own key — never duplicated or re-homed above listen_addr")
+	assert.NotContains(t, content, "# sandbox note\nlisten_addr")
+}
+
+// Comments inside a multiline value describe that key's elements: they move
+// with it as part of its block above the re-encoded single line, rather than
+// staying at the site as loose notes the next key would carry.
+func TestMigrateCarriesAMultilineValuesInnerComments(t *testing.T) {
+	path := migrateHome(t, "cors_allowed_origins = [\n  'a',  # first\n  'b',  # second\n]\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 1)
+
+	content := readFile(t, path)
+	assert.Contains(t, content, "# first")
+	assert.Contains(t, content, "# second")
+	assert.Contains(t, content, "cors_allowed_origins = ['a', 'b']")
+	// They must sit above the migrated key inside [network], not behind at
+	// the root where they would read as notes about an unrelated key.
+	networkIdx := strings.Index(content, "[network]")
+	firstIdx := strings.Index(content, "# first")
+	require.True(t, firstIdx > networkIdx, "inner comments must move into [network], got:\n%s", content)
+}
+
 // A zero-byte config.json with no config.toml is the same accepted stub on
 // the legacy path: nothing migrates, nothing converts, no config.toml appears.
 func TestMigrateGlobalConfig_EmptyJSONStubMigratesNothing(t *testing.T) {
