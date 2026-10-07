@@ -489,6 +489,26 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	defer releaseAccountSwapFences()
 	if accountSwap != nil && !accountSwap.alreadySet {
 		testHookAccountSwapBeforeFinalFence()
+		// Compute the liveness probe BEFORE acquiring the global config-apply
+		// and account-limit fences below. The probe is a network round-trip
+		// bounded by the caller-specific budget (probeLivenessForOperator for
+		// the manual RPC, probeLiveness for the poll-driven scheduler), and
+		// holding those fences for its whole budget blocks unrelated config
+		// application and account-limit/delivery operations daemon-wide. Both
+		// the manual and the automatic caller reach commitNewAccountSwapIdentity
+		// through this path after the fences are taken, so computing the probe
+		// inside it (as the previous revision did) held the fences for the full
+		// probe on every caller — including the manual RPC's 30s operator
+		// budget. The per-session op lock the caller already holds keeps the
+		// runtime stable across the fence acquisition, so a probe taken here is
+		// still current when prepareRuntimeForAccountSwap runs under the
+		// fences below. See remoteloss.go and prepareRuntimeForAccountSwap.
+		var accountSwapProbe livenessProbe
+		if operatorInitiated {
+			accountSwapProbe = probeLivenessForOperator(instance, instance.AgentServer())
+		} else {
+			accountSwapProbe = probeLiveness(instance, instance.AgentServer())
+		}
 		// Serialize the final policy read and identity checkpoint with live config
 		// application. If an opt-out or candidate restriction has already applied,
 		// this admission observes it; once admission owns the fence, ApplyConfig
@@ -531,7 +551,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			lockEntered = true
 			var err error
 			fallbackEligible, err = m.commitNewAccountSwapIdentity(
-				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated)
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated, accountSwapProbe)
 			return err
 		})
 		swapErr := lockErr

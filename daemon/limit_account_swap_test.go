@@ -1251,7 +1251,8 @@ func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testin
 		vscode:    newVSCodeSupervisor(),
 	}
 	registerVSCodeMarker(manager, "key")
-	if err := manager.prepareRuntimeForAccountSwap("key", inst, true); err != nil {
+	probe := probeLivenessForOperator(inst, inst.AgentServer())
+	if err := manager.prepareRuntimeForAccountSwap("key", inst, probe); err != nil {
 		t.Fatal(err)
 	}
 	if inst.TabAlive(1) {

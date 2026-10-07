@@ -96,30 +96,48 @@ var (
 	// re-justified for this context and cuts a live-but-slow runtime off
 	// mid-probe.
 	//
-	// The budget must be at least as long as the transport's own dial timeout.
-	// The remote agent-server HTTP client dials with a 10s TCP budget
-	// (remoteAgentDialTimeout) and bounds the whole control round-trip at 30s
-	// (remoteAgentCallTimeout); both live in the session package unexported, so
-	// they are named as literals here (status_remote_test.go does the same).
-	// A caller budget shorter than the dial timeout lets the probe give up
-	// before the transport even finishes establishing the connection on a cold
-	// link — the 5s budget is shorter than the 10s dial it runs on top of, so a
-	// remote whose /v1/agent/alive exceeds 5s answered probeUnknown and both
-	// operator exits refused on every retry, leaving only restore/kill (which
-	// discard unpushed commits) — the exact harm the #1794/#2589 "unreachable is
-	// not dead" discipline exists to prevent.
+	// The budget must be STRICTLY LONGER than the transport's whole control
+	// round-trip, not merely equal to it. The remote agent-server HTTP client
+	// dials with a 10s TCP budget (remoteAgentDialTimeout) and bounds the
+	// whole control round-trip at 30s (remoteAgentCallTimeout); both live in
+	// the session package unexported, so they are named as literals here
+	// (status_remote_test.go does the same). A caller budget shorter than
+	// the dial timeout lets the probe give up before the transport even
+	// finishes establishing the connection on a cold link — the 5s budget
+	// is shorter than the 10s dial it runs on top of, so a remote whose
+	// /v1/agent/alive exceeds 5s answered probeUnknown and both operator
+	// exits refused on every retry, leaving only restore/kill (which
+	// discard unpushed commits) — the exact harm the #1794/#2589
+	// "unreachable is not dead" discipline exists to prevent.
 	//
-	// Matching the transport's call timeout (30s) makes the caller's budget
-	// EQUAL to the underlying Alive() call's own, so aliveWithin's timer never
-	// fires before the transport gives up: the operator probe waits exactly as
-	// long as the transport itself would, and aliveWithin's buffered-channel
-	// goroutine settles at the same bound rather than outliving the caller. The
-	// trade-off is operator wait time on a truly unreachable remote — a
-	// one-shot, per-session cost to the operator, not a stall affecting other
-	// sessions — and both ends land in the same safe probeUnknown refusal; the
-	// looser budget only widens the window in which a live-but-slow remote can
-	// answer and avoid the destructive path.
-	remoteConfirmProbeTimeout = 30 * time.Second
+	// But EQUALITY with the 30s transport timeout is not enough either. The
+	// spawned Alive() goroutine in aliveWithin does not start running the
+	// instant the outer timer is created: under a busy daemon the scheduler
+	// can defer the goroutine, and the transport's own 30s deadline then
+	// begins at that deferred start. If the caller's budget were equal to
+	// 30s, the outer timer could fire probeUnknown while the transport
+	// still had time to receive a valid slow response — contrary to the
+	// stated guarantee and leaving the operator unable to confirm or retry
+	// a live handoff. remoteConfirmProbeSlack covers that goroutine
+	// scheduling delay so the outer timer never fires before the transport
+	// gives up on its own; the orphaned goroutine then settles to the
+	// buffered channel within its own remoteAgentCallTimeout and nothing
+	// leaks past either bound.
+	//
+	// The trade-off is operator wait time on a truly unreachable remote — a
+	// one-shot, per-session cost to the operator, not a stall affecting
+	// other sessions — and both ends land in the same safe probeUnknown
+	// refusal; the looser budget only widens the window in which a
+	// live-but-slow remote can answer and avoid the destructive path.
+	remoteConfirmProbeTimeout = 30*time.Second + remoteConfirmProbeSlack
+	// remoteConfirmProbeSlack is the margin by which the operator probe's
+	// outer budget exceeds the transport's remoteAgentCallTimeout (30s). It
+	// exists so the goroutine aliveWithin spawns can start late under a
+	// busy daemon without the outer timer firing before the transport's own
+	// deadline. Named separately so the relationship to the transport
+	// timeout is explicit; sized generously over any realistic goroutine
+	// scheduling delay.
+	remoteConfirmProbeSlack = 5 * time.Second
 )
 
 // remoteLossState is the per-session debounce state. Guarded by Manager.mu.
