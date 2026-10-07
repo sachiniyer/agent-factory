@@ -127,17 +127,21 @@ type daemonStatusInfo struct {
 	HTTPSocketFile    bool                         `json:"http_socket_file"`
 	PID               int                          `json:"pid"`
 	PIDVerified       bool                         `json:"pid_verified"`
-	ServingPID        int                          `json:"serving_pid,omitempty"`
-	AutostartUnit     bool                         `json:"autostart_unit"`
-	AutostartEnabled  string                       `json:"autostart_enabled,omitempty"`
-	AutostartActive   string                       `json:"autostart_active,omitempty"`
-	UnitPID           int                          `json:"unit_pid,omitempty"`
-	Supervised        string                       `json:"serving_daemon_supervised,omitempty"`
-	SupervisionDetail string                       `json:"supervision_detail,omitempty"`
-	BootConfig        *daemon.DaemonBootConfig     `json:"boot_config,omitempty"`
-	ConfigMatches     string                       `json:"config_matches_running_daemon,omitempty"`
-	ConfigDetail      string                       `json:"config_detail,omitempty"`
-	BinaryStale       bool                         `json:"binary_stale"`
+	// PIDUnverifiable means pid names a live af daemon whose home could not
+	// be bound — inconclusive, NOT absent: it may be this home's daemon with
+	// an unreadable process frame (#5188).
+	PIDUnverifiable   bool                     `json:"pid_unverifiable,omitempty"`
+	ServingPID        int                      `json:"serving_pid,omitempty"`
+	AutostartUnit     bool                     `json:"autostart_unit"`
+	AutostartEnabled  string                   `json:"autostart_enabled,omitempty"`
+	AutostartActive   string                   `json:"autostart_active,omitempty"`
+	UnitPID           int                      `json:"unit_pid,omitempty"`
+	Supervised        string                   `json:"serving_daemon_supervised,omitempty"`
+	SupervisionDetail string                   `json:"supervision_detail,omitempty"`
+	BootConfig        *daemon.DaemonBootConfig `json:"boot_config,omitempty"`
+	ConfigMatches     string                   `json:"config_matches_running_daemon,omitempty"`
+	ConfigDetail      string                   `json:"config_detail,omitempty"`
+	BinaryStale       bool                     `json:"binary_stale"`
 	// ExposureWarning is non-empty when the config on disk serves the control API
 	// unauthenticated on a network address (#2090) — an ALLOWED posture since
 	// #2168 Phase 0, so this reports it rather than predicting a failure.
@@ -177,6 +181,7 @@ func collectDaemonStatus() daemonStatusInfo {
 		ControlSocketFile: h.SocketExists,
 		PID:               h.PIDFilePID,
 		PIDVerified:       h.PIDVerified,
+		PIDUnverifiable:   h.PIDUnverifiable,
 		ServingPID:        h.ServingPID,
 		AutostartUnit:     unitServesHome || (unitScopeErr != nil && unitInstalled),
 		BootConfig:        h.BootConfig,
@@ -284,8 +289,11 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 	}
 	if info.PID > 0 {
 		pidNote := "unverified"
-		if info.PIDVerified {
+		switch {
+		case info.PIDVerified:
 			pidNote = "verified"
+		case info.PIDUnverifiable:
+			pidNote = "live af daemon, home unproven"
 		}
 		fmt.Fprintf(w, "  pid:            %d (%s)\n", info.PID, pidNote)
 	} else {
@@ -410,17 +418,31 @@ func runDaemonRestart(w, errOut io.Writer) error {
 	// unit. A stale or foreign unit is irrelevant when there is no daemon to
 	// stop, and failing to parse/reload it must not turn an idempotent restart
 	// into an error (#2185). Undetermined deliberately falls through to the
-	// fail-closed refresh path; only a completed negative authorizes the no-op.
+	// fail-closed refresh path; only a completed negative authorizes the no-op —
+	// and the unproven-PID answer below is neither: it declines the unit
+	// mutation without claiming absence (#5188).
 	absent := false
+	unproven := false
 	daemonRestartPresenceFn().Match(
 		func() {},
 		func() { absent = true },
 		func() { absent = true },
-		func(error) {},
+		func(cause error) { unproven = errors.Is(cause, errRestartPresenceUnproven) },
 	)
 	if absent {
 		if !daemonRestartQuiet {
 			fmt.Fprintln(w, "no running daemon to restart")
+		}
+		return nil
+	}
+	if unproven {
+		// daemon.pid names a live af daemon whose home cannot be verified.
+		// Restart is powerless here either way: this home's socket is dead
+		// (RequestShutdown would no-op) and the pid may belong to another
+		// home's daemon, so mutating the unit on its behalf is not
+		// authorized. Say what we know instead of printing "no daemon".
+		if !daemonRestartQuiet {
+			fmt.Fprintln(w, "a live af daemon exists but its home could not be verified; not restarting an unproven daemon — check `af daemon status`")
 		}
 		return nil
 	}
@@ -514,6 +536,14 @@ var (
 	daemonStatusSupervisionFn   = daemon.AutostartSupervision
 )
 
+// errRestartPresenceUnproven is the sentinel Undetermined cause
+// probeDaemonRestartPresence returns when the ONLY evidence is a pid file
+// naming a live af daemon whose home cannot be verified (#5188): the daemon
+// it names may serve another home, so it authorizes neither the "no daemon"
+// no-op nor the pre-shutdown unit refresh — runDaemonRestart matches on it
+// to report the inconclusive state and stop.
+var errRestartPresenceUnproven = errors.New("daemon.pid names a live af daemon whose home could not be verified")
+
 // probeDaemonRestartPresence gives the explicit restart command a three-value
 // read-only answer before it mutates an installed unit. A responding daemon or
 // a verified daemon PID is positive evidence. Only RequestShutdown's own
@@ -523,6 +553,30 @@ func probeDaemonRestartPresence() daemon.ProbeAnswer {
 	h := daemonHealthFn()
 	if h.PIDVerified {
 		return daemon.AnswerYes()
+	}
+	if h.PIDUnverifiable && h.PingErr != nil {
+		// A live af daemon exists but its home is unproven — possibly
+		// another home's daemon under this home's pid file. The sentinel is
+		// earned ONLY when the ping proved the socket absent: a timeout,
+		// EACCES, or reset is indeterminate (a live-but-backlogged daemon
+		// fails Ping the same way — #2014/#2039), and on macOS the
+		// unreadable-environ unverifiable shape is the norm, so short-
+		// circuiting on an indeterminate ping would make an explicit
+		// `af daemon restart` silently skip a reachable daemon. Not "absent"
+		// (it may be this home's socket-lost daemon) and not "present"
+		// (unproven): carried as Undetermined with a sentinel cause so
+		// the caller can decline the unit mutation without declaring no
+		// daemon.
+		definiteAbsent := false
+		daemon.ClassifyPingFailure(h.PingErr).Match(
+			func() {},
+			func() { definiteAbsent = true },
+			func() { definiteAbsent = true },
+			func(error) {},
+		)
+		if definiteAbsent {
+			return daemon.Undetermined(fmt.Errorf("%w (pid %d)", errRestartPresenceUnproven, h.PIDFilePID))
+		}
 	}
 	return daemon.ClassifyShutdownTarget(h.PingErr)
 }

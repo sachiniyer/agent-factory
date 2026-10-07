@@ -3,8 +3,10 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"net"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -314,6 +316,63 @@ func TestRunDaemonRestartNoDaemonSkipsUnsafeUnitRefresh(t *testing.T) {
 	if errOut.Len() != 0 {
 		t.Fatalf("no-daemon restart must not warn on stderr.\ngot stderr=%q", errOut.String())
 	}
+}
+
+// TestProbeDaemonRestartPresence_UnverifiablePIDGatesOnPingVerdict pins the
+// restart gate added for #5188: an unverifiable daemon.pid only short-circuits
+// `af daemon restart` when the ping PROVED the socket absent. A timeout is
+// indeterminate — a live, backlogged daemon fails Ping the same way — and on
+// macOS the unverifiable shape is the norm (peer environ unreadable), so an
+// indeterminate ping must fall through to the ordinary fail-closed answer
+// rather than silently no-op an explicit restart over a reachable daemon.
+func TestProbeDaemonRestartPresence_UnverifiablePIDGatesOnPingVerdict(t *testing.T) {
+	prevHealth := daemonHealthFn
+	t.Cleanup(func() { daemonHealthFn = prevHealth })
+
+	// Indeterminate ping (deadline exceeded): falls through to
+	// ClassifyShutdownTarget's ordinary Undetermined, never the sentinel.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr:         &net.OpError{Op: "dial", Net: "unix", Err: os.ErrDeadlineExceeded},
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+	probeDaemonRestartPresence().Match(
+		func() { t.Error("unverifiable pid + timed-out ping is not a proven daemon") },
+		func() { t.Error("unverifiable pid + timed-out ping is not proven absent") },
+		func() { t.Error("unverifiable pid + timed-out ping is not proven absent") },
+		func(cause error) {
+			if errors.Is(cause, errRestartPresenceUnproven) {
+				t.Error("an indeterminate ping must not produce the unproven sentinel — a reachable daemon would be skipped silently")
+			}
+		},
+	)
+
+	// Definite absence (ECONNREFUSED): the sentinel applies — the unit must
+	// not be mutated for a pid that may name another home's daemon.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr: &net.OpError{Op: "dial", Net: "unix",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+	probeDaemonRestartPresence().Match(
+		func() { t.Error("definite absent socket + unverifiable pid is not a proven daemon") },
+		func() {
+			t.Error("definite absent socket + unverifiable pid is not 'no daemon' — the file may name this home's socket-lost daemon")
+		},
+		func() {
+			t.Error("definite absent socket + unverifiable pid is not 'no daemon' — the file may name this home's socket-lost daemon")
+		},
+		func(cause error) {
+			if !errors.Is(cause, errRestartPresenceUnproven) {
+				t.Errorf("definite absent socket + unverifiable pid must produce the unproven sentinel, got %v", cause)
+			}
+		},
+	)
 }
 
 // daemonRestartPresentHarness stands up the seams runDaemonRestart touches once

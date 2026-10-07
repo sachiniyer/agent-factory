@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,6 +95,24 @@ func daemonPIDFilePath() (string, error) {
 	return filepath.Join(dir, "daemon.pid"), nil
 }
 
+// daemonPIDWriteAttempts bounds the in-process retries writeDaemonPIDFile
+// makes when the sidecar PID-file lock is contended
+// (errDaemonPIDLockUnavailable). A stop's read-compare-unlink holds
+// daemon.pid.lock for sub-millisecond stretches, so contention at startup is
+// usually transient; failing the start on the FIRST contended attempt would
+// hand the failure to the supervisor's restart budget (systemd's
+// StartLimitBurst is only five), which a busy box could exhaust on a
+// momentarily-stuck lock (#5188 review). Persistent failures — a symlinked
+// daemon.pid, an unwritable home, ENOSPC — are never retried: they cannot
+// resolve on their own, and the startup must fail closed promptly.
+// daemonPIDWriteRetryPause lets a finishing holder's release land before the
+// next attempt burns its acquisition budget. Package vars so tests can
+// shrink them.
+var (
+	daemonPIDWriteAttempts   = 3
+	daemonPIDWriteRetryPause = 100 * time.Millisecond
+)
+
 // writeDaemonPIDFile atomically writes the current process's PID to the daemon
 // PID file with mode 0600. Used by RunDaemon so callers (StopDaemon, the
 // SIGTERM fallback in RequestShutdown) can locate and signal this daemon.
@@ -103,14 +122,32 @@ func daemonPIDFilePath() (string, error) {
 // a link there is neither af's to write through nor af's to replace — the same
 // answer the bearer token and the autostart unit take. It takes the PID-file
 // lock (withDaemonPIDLock) so a stop's read-compare-unlink can't interleave.
+//
+// The returned error always names the PID-file path and the underlying cause,
+// which for a planted symlink already carries the remedy: RunDaemon surfaces
+// it verbatim to the caller, and a detached spawn's copy lands in the daemon
+// log (persisting the failure for status/doctor is #5196).
 func writeDaemonPIDFile() error {
 	path, err := daemonPIDFilePath()
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot write daemon PID file: %w", err)
 	}
-	return withDaemonPIDLock(path, time.Now().Add(daemonPIDLockStartupBudget), func() error {
-		return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
-	})
+	var writeErr error
+	for attempt := 0; attempt < daemonPIDWriteAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(daemonPIDWriteRetryPause)
+		}
+		writeErr = withDaemonPIDLock(path, time.Now().Add(daemonPIDLockStartupBudget), func() error {
+			return config.AtomicWriteFileRefusingLink(path, []byte(strconv.Itoa(os.Getpid())), 0600)
+		})
+		if !errors.Is(writeErr, errDaemonPIDLockUnavailable) {
+			break
+		}
+	}
+	if writeErr != nil {
+		return fmt.Errorf("cannot write daemon PID file %s: %w", path, writeErr)
+	}
+	return nil
 }
 
 // removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
@@ -197,6 +234,288 @@ func pidLockCleanupDeadline(deadline time.Time) time.Time {
 	return time.Now().Add(stopDaemonPIDLockBudget)
 }
 
+// daemonPIDFileMaxBytes caps a daemon.pid read. The file is a pid and a
+// newline; anything bigger is not something af wrote.
+const daemonPIDFileMaxBytes = 64
+
+// readManagedFileNoFollow reads a small af-managed file through a descriptor
+// opened O_NOFOLLOW|O_NONBLOCK and validated by fstat — a planted or swapped-in
+// symlink fails the open atomically (an Lstat-then-ReadFile pair could be
+// swapped between the check and the open), a FIFO or device substitute cannot
+// hold the caller in the open or the read, and a non-regular or oversized file
+// reports as unreadable. Used by every daemon.pid read that must not hang or
+// follow a swapped replacement: the lock-holding teardown re-reads, the
+// liveness readers, and Health.
+func readManagedFileNoFollow(path string, maxBytes int64) ([]byte, bool) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxBytes {
+		return nil, false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil || int64(len(data)) > maxBytes {
+		return nil, false
+	}
+	return data, true
+}
+
+// readPIDFromFile parses the daemon PID file. Returns (0, false) when the
+// file is missing, malformed, or points at an obviously bogus PID. A stale
+// or reused PID is not filtered here — callers re-verify with cmdline.
+func readPIDFromFile() (int, bool) {
+	path, err := daemonPIDFilePath()
+	if err != nil {
+		return 0, false
+	}
+	// Same no-follow/nonblocking read as the teardown path — a FIFO swapped
+	// in for daemon.pid would otherwise hang every caller (status, doctor,
+	// StopDaemon) in the open.
+	data, ok := readManagedFileNoFollow(path, daemonPIDFileMaxBytes)
+	if !ok {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 1 || pid == os.Getpid() {
+		return 0, false
+	}
+	return pid, true
+}
+
+// daemonPIDLockPoll is the cadence a nonblocking PID-file lock acquisition
+// retries at when a deadline bounds the wait. Package var so tests can
+// shorten it; production keeps it short so a deadline-bounded stop does not
+// spend its whole budget asleep between attempts.
+var daemonPIDLockPoll = 20 * time.Millisecond
+
+// daemonPIDLockStartupBudget bounds how long ONE writeDaemonPIDFile attempt
+// waits on the sidecar PID-file lock. It is sized so the whole retry loop —
+// daemonPIDWriteAttempts budgets plus the pauses between them — fits inside
+// daemonReadyTimeout (5s): a lock that never clears must fail the start
+// BEFORE the auto-spawn caller's readiness wait ends, or the caller reports a
+// bare "did not become ready" timeout while this daemon's real error is still
+// retrying; and a write that finally succeeds must beat the same deadline or
+// the caller reports failure over a daemon that then starts (#5188 review).
+// Package var so tests can shorten it.
+var daemonPIDLockStartupBudget = 1400 * time.Millisecond
+
+// errDaemonPIDLockUnavailable is returned by acquireDaemonPIDLock when the
+// deadline passed while the sidecar daemon.pid.lock stayed held — the
+// TRANSIENT contention outcome (another writer is mid read-compare-unlink or
+// a holder is briefly stalled), as distinct from a hard failure like a
+// symlinked lock path or a flock that errors for a non-contention reason. writeDaemonPIDFile matches on it (errors.Is) to retry
+// startup contention in-process rather than spending a supervisor restart on
+// it (#5188); every other caller treats it like any lock failure.
+var errDaemonPIDLockUnavailable = errors.New("daemon PID lock held by another writer")
+
+// withDaemonPIDLock runs fn while holding an exclusive flock on a sidecar lock
+// file next to the daemon PID file. writeDaemonPIDFile writes daemon.pid with an
+// atomic temp-then-rename, and removePIDFileIfStillNames reads it and
+// conditionally unlinks it; without coordination, a same-home daemon's atomic
+// rename can land in the window between the removal's re-read and its unlink
+// and have its freshly-written PID file deleted — orphaning the new daemon the
+// way the unconditional unlink the removal replaced once did. A flock on the
+// PID file itself does not help: the atomic rename changes daemon.pid's inode
+// out from under any flock held on it, so a SEPARATE lock file is what the
+// writer and the remover both hold to serialize read-compare-unlink against
+// temp-then-rename. The lock is released by the kernel when the holder exits,
+// so a crashed daemon never strands it. The lock file is left in place and
+// re-opened by later callers, the way the rest of the codebase's sidecar .lock
+// files are.
+//
+// deadline bounds the acquisition: zero blocks indefinitely (StopDaemon, which
+// carries no caller deadline); a non-zero deadline makes the acquisition
+// nonblocking and deadline-aware, so writeDaemonPIDFile's startup write caps
+// its wait at daemonPIDLockStartupBudget — a suspended or stalled writer holding
+// daemon.pid.lock would otherwise block startup indefinitely while the daemon
+// already holds the per-home singleton lock and nothing can replace it — and a
+// deadline-bounded stopDaemonUntil that reaches foreign-PID cleanup while
+// another writer holds daemon.pid.lock does not block past its admission
+// deadline. The lock is abandoned rather than waiting indefinitely on a
+// suspended writer or a stalled filesystem.
+func withDaemonPIDLock(pidFile string, deadline time.Time, fn func() error) error {
+	lockPath := pidFile + ".lock"
+	// os.OpenFile FOLLOWS a pre-existing daemon.pid.lock symlink, so a
+	// symlinked sidecar is not a stable coordination object: a holder swapped
+	// between the remover acquiring its lock and a new daemon acquiring its
+	// own would let the remover hold the old inode (and read the stale PID)
+	// while the writer holds the replacement inode and atomically writes a
+	// fresh PID file — the remover then unlinks that fresh file, reopening
+	// the read/compare/unlink race the sidecar lock is there to close (#4793
+	// review). Open with O_NOFOLLOW so a symlink at the lock path is refused
+	// atomically (ELOOP), the same way upgradetxn's locks refuse one; af
+	// created this sidecar (O_CREATE) and re-opens it, so a link is a user
+	// arrangement af did not author — the same policy writeDaemonPIDFile and
+	// removeDaemonPIDFile take against a symlinked daemon.pid (#3672).
+	// Callers treat lock-acquisition failure as best-effort: the startup
+	// write is logged and proceeds (readers fall back to the pgrep scan), and
+	// the stop-side removal leaves the stale file (safe — readers re-verify
+	// cmdline + the home binding before acting), so a refused lock degrades
+	// to the same safe "leave it" outcome a contended or untrusted-FS lock
+	// already does.
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0644)
+	if err != nil {
+		return fmt.Errorf("open daemon PID lock: %w", err)
+	}
+	defer lock.Close()
+	if err := acquireDaemonPIDLock(lock, deadline); err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	return fn()
+}
+
+// acquireDaemonPIDLock takes an exclusive flock on lock, blocking indefinitely
+// when deadline is zero and otherwise polling a nonblocking acquire at
+// daemonPIDLockPoll against deadline. Returns errDaemonPIDLockUnavailable (a
+// retryable-by-writeDaemonPIDFile contention outcome) only when the deadline
+// passes while the lock stays held; a flock error that is NOT contention —
+// ENOTSUP on a filesystem without flock support, an I/O error — is returned
+// verbatim so fail-closed PID publication reports the real cause instead of
+// retrying a hard failure for the whole startup budget and claiming another
+// writer holds the lock.
+func acquireDaemonPIDLock(lock *os.File, deadline time.Time) error {
+	if deadline.IsZero() {
+		// The blocking form never returns EWOULDBLOCK; a non-nil error is a
+		// real failure, not contention.
+		return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX)
+	}
+	for {
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("flock daemon PID lock: %w", err)
+		}
+		if admissionDeadlineExpired(deadline) {
+			return errDaemonPIDLockUnavailable
+		}
+		if !waitUntilAdmissionDeadline(deadline, daemonPIDLockPoll) {
+			return errDaemonPIDLockUnavailable
+		}
+	}
+}
+
+// removePIDFileIfStillNames unlinks pidFile only when it still records pid.
+// stopDaemonUntil read a stale foreign PID and proved the process it names is
+// not this home's daemon; in the window between that read and this unlink a
+// same-home daemon may have started and atomically rewritten daemon.pid with
+// its own PID. Removing the file unconditionally would delete that valid
+// replacement and recreate the untracked-daemon state the PID file exists to
+// prevent — the new daemon would be live but no longer discoverable by
+// StopDaemon. Re-read and compare first under the writer's lock (see
+// withDaemonPIDLock) so the compare-and-unlink and a same-home daemon's
+// atomic rewrite cannot interleave: leave a freshly-written valid file to its
+// owner, and treat the unreadable/malformed case the same way rather than
+// unlinking a file whose current contents we did not establish (#4793).
+//
+// The number-only compare the lock guards is not enough on its own: a foreign
+// PID that exits can have its number recycled by a same-home daemon that writes
+// the same PID value to the PID file, so a stale entry that still names the old
+// number can be the new daemon's freshly-written file. Re-classify the live PID
+// under the lock (pidBelongsToThisHome) and leave the file when the PID now
+// belongs to this home's daemon — a recycled number on our own daemon is its
+// handle, not the stale foreign entry to unlink (#4793).
+//
+// The sidecar lock this held is no coordination at all on a filesystem whose
+// flock cannot be trusted (NFS, SMB, 9p, FUSE — see lockFSReliable in
+// singleton_lock.go): the writer's temp-then-rename is not serialized against
+// this read-compare-unlink, so the very race the lock prevents on local
+// filesystems reopens on a network one. The removal is skipped there and the
+// stale file is left; a stale PID file is safe to leave because readers re-verify
+// it (cmdline + home binding) before acting, and the writer's fresh file is
+// preserved.
+//
+// Like removeStaleDaemonPIDFile it refuses a symlinked PID file (#3672):
+// writeDaemonPIDFile refuses to write through one, so a link here is a user
+// arrangement af did not author, and the cleanup neither reads its target
+// through the link nor unlinks the link. The refusal is taken up front, so a
+// symlinked daemon.pid is left in place the way the other stale-PID cleanups
+// leave one.
+//
+// deadline propagates the caller's admission deadline to the lock acquisition
+// (see withDaemonPIDLock): a deadline-bounded stopDaemonUntil does not block
+// indefinitely on a contended lock. On a deadline the cleanup is abandoned
+// (best-effort, logged) rather than waiting past the stop/restart budget.
+func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
+	// On a filesystem whose flock cannot be trusted (NFS, SMB, 9p, FUSE — see
+	// lockFSReliable in singleton_lock.go), the sidecar daemon.pid.lock does not
+	// serialize the writer's temp-then-rename against this read-compare-unlink:
+	// a successful flock may silently no-op, so a same-home daemon's freshly
+	// written PID file can land in the window between the re-read and the unlink
+	// and be deleted — the race the lock is meant to prevent (#4793). Skip the
+	// conditional removal there and leave the stale file; readers re-verify a PID
+	// file (cmdline + home binding) before acting, so a stale file left in place
+	// is safe, and the writer's fresh one is preserved.
+	if ok, _ := lockFSReliable(filepath.Dir(pidFile)); !ok {
+		log.InfoLog.Printf("stale daemon PID file %q on a filesystem whose flock is untrusted; leaving it in place", pidFile)
+		return
+	}
+	if err := withDaemonPIDLock(pidFile, deadline, func() error {
+		// A symlinked PID file is not af's to unlink — writeDaemonPIDFile
+		// refuses to write through one, so a link here is a user arrangement
+		// af did not author. Refuse it the way the other stale-PID cleanups do
+		// (removeStaleDaemonPIDFile, #3672): do not read its target through the
+		// link to decide whether to unlink it, and do not unlink the link. A
+		// missing path (an already-gone file) is an ordinary done state, so
+		// RefuseManagedFileSymlink's nil-for-absent return falls through to the
+		// read below.
+		if err := config.RefuseManagedFileSymlink(pidFile); err != nil {
+			if errors.Is(err, config.ErrManagedFileSymlink) {
+				log.InfoLog.Printf("stale daemon PID file %q (PID: %d) is a symlink af did not write through; leaving it in place", pidFile, pid)
+			}
+			return nil
+		}
+		// No-follow, nonblocking, fstat-validated read: this runs holding
+		// daemon.pid.lock, so an os.ReadFile here would let a FIFO swapped in
+		// for daemon.pid block the daemon's deferred cleanup — and every
+		// later lock waiter, including a successor's fail-closed PID
+		// publication — on a writer that never comes. Anything that is not a
+		// small regular file is not a PID file af wrote; leave it for the
+		// reader-side verifications rather than unlinking on a guess.
+		data, ok := readManagedFileNoFollow(pidFile, daemonPIDFileMaxBytes)
+		if !ok {
+			// Already gone (or unreadable) — nothing to remove; a missing file
+			// is the desired end state, and a permission error is no worse than
+			// the previous unconditional os.Remove would have been.
+			return nil
+		}
+		var current int
+		if _, err := fmt.Sscanf(string(data), "%d", &current); err != nil {
+			// Malformed, and therefore not the foreign PID we read. A
+			// newly-started daemon writes a valid PID, so this is neither the
+			// stale file we own nor safe to claim — leave it for the next
+			// caller.
+			return nil
+		}
+		if current != pid {
+			return nil // a new daemon has written its own PID; keep the file
+		}
+		// The number still names the stale PID, but the kernel may have recycled it
+		// onto a same-home daemon that wrote the same number. Re-classify the live
+		// PID with the tri-state classifier (not the bool helper, which collapses
+		// daemonUnverifiable into "not ours"): a PROVEN-foreign (or dead) PID is
+		// unlinked; daemonOurs is the recycled number's new owner, and
+		// daemonUnverifiable may be this home's own daemon whose environ could not
+		// be read — unlinking it would orphan the live daemon, so retain it. (#4793)
+		switch classifyDaemonHome(pid) {
+		case daemonOurs, daemonUnverifiable:
+			return nil
+		case daemonForeign:
+			if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
+				log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.WarningLog.Printf("sigterm fallback: could not coordinate removal of stale PID file %q: %v", pidFile, err)
+	}
+}
+
 // StopDaemon attempts to stop a running daemon process if it exists. The bool
 // return reports whether a live agent-factory daemon was actually signaled: it
 // is false (with a nil error) when there was nothing to stop — no PID file, an
@@ -237,6 +556,14 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 	}
 
 	pidFile := filepath.Join(pidDir, "daemon.pid")
+	// Deliberately a plain read: StopDaemon must TOLERATE a symlinked
+	// daemon.pid — read the pid through it, classify the named process, and
+	// leave the link untouched (the #3672 refusal governs writes/unlinks,
+	// not this read; TestStopDaemon_DoesNotUnlinkASymlinkedStalePIDFile and
+	// the LiveDaemonFifthSite variant pin the no-error contract). The
+	// descriptor-validated read stays on the lock-holding teardown paths
+	// where a swapped FIFO would wedge cleanup, not on the read-only
+	// front door.
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		if os.IsNotExist(err) {
