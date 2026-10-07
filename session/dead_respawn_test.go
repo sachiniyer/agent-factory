@@ -45,6 +45,13 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 		}
 		return ""
 	}
+	// noServerErr is a real *exec.ExitError carrying tmux's no-server
+	// diagnostic. The strict probe behind Start's refusal arms (the Output
+	// channel) only treats tmux's own diagnostics as determinate absence —
+	// assertNoSession on the Run channel is the loose probe's answer and
+	// cannot satisfy it (#5174 review).
+	_, noServerErr := exec.Command("sh", "-c",
+		`echo 'no server running on /tmp/tmux-1000/default' >&2; exit 1`).Output()
 	return cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			s := cmd.String()
@@ -72,6 +79,12 @@ func countingExec(alive map[string]bool, newSessions *int) cmd_test.MockCmdExec 
 			return nil
 		},
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "has-session") {
+				if existing[nameOf(cmd)] {
+					return []byte(""), nil
+				}
+				return nil, noServerErr
+			}
 			if strings.Contains(cmd.String(), "pane_start_path") {
 				if d, ok := startDirs[nameOf(cmd)]; ok {
 					return []byte(d), nil

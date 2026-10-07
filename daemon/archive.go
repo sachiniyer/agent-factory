@@ -621,14 +621,14 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 // Archived. A restored kill tombstone has no in-flight op-lock state and may
 // still be started, so UserKilled must be checked explicitly under this newly
 // acquired lock rather than left to the instance-level started guard.
-func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance) (*sync.Mutex, error) {
+func (m *Manager) archiveExclusiveTabLock(key string, instance *session.Instance, kind session.TabKind) (*sync.Mutex, error) {
 	opLock := m.opLockFor(key)
 	opLock.Lock()
 	if instance.UserKilled() {
 		opLock.Unlock()
 		return nil, fmt.Errorf("cannot create a tab on killed session %q", instance.Title)
 	}
-	if err := instance.TabSpawnBlocked(); err != nil {
+	if err := instance.TabSpawnBlocked(kind); err != nil {
 		opLock.Unlock()
 		return nil, err
 	}

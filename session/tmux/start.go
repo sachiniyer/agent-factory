@@ -9,6 +9,23 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 )
 
+// refuseUnstartedStart annotates a failure that happens before new-session's
+// process begins. The only cleanup-authorizing basis at that point is the
+// name's occupancy — and ONLY the strict probe's determinate "not there" may
+// grant it. The loose has-session at the top of Start collapses non-answer
+// failures (a socket-policy denial, a transient exec error) into absence;
+// attaching ErrSessionNotStarted on that reading would authorize
+// LocalBackend.launch's gw.Cleanup to delete the worktree while a same-named
+// pane is still rooted inside it (#5174 review). Unproven absence returns the
+// error bare, which preserves the workspace the same way ErrPaneMayBeLive
+// does for post-spawn failures.
+func (t *TmuxSession) refuseUnstartedStart(err error) error {
+	if t.proveNoPaneIfDeterminatelyAbsent() {
+		return fmt.Errorf("%w: %w", ErrSessionNotStarted, err)
+	}
+	return err
+}
+
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
@@ -56,8 +73,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// after a mid-spawn rename-and-recreate (#5174 review).
 	admittedSpawnDir, spawnDirErr := checkSpawnDir(workDir)
 	if spawnDirErr != nil {
-		t.proveNoPaneIfDeterminatelyAbsent()
-		return spawnDirErr
+		return t.refuseUnstartedStart(spawnDirErr)
 	}
 
 	// The name is positively absent, so any Start from here creates a new pane
@@ -81,8 +97,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	if envErr != nil {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).
-		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
+		return t.refuseUnstartedStart(fmt.Errorf("prepare filtered session environment: %v", envErr))
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
@@ -110,8 +125,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	args, envErr = t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
-		t.proveNoPaneIfDeterminatelyAbsent()
-		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
+		return t.refuseUnstartedStart(fmt.Errorf("prepare existing tmux session environment: %v", envErr))
 	}
 	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
@@ -149,7 +163,7 @@ func (t *TmuxSession) Start(workDir string) error {
 				go reapSessionProcesses(reapOnRequest, t.sanitizedName, leaked, reapGraceWait, reapTermWait)
 			}
 		}
-		return fmt.Errorf("%w: error starting tmux session: %w", ErrSessionNotStarted, err)
+		return t.refuseUnstartedStart(fmt.Errorf("error starting tmux session: %w", err))
 	}
 
 	t.observeStart(StartBeforeExistencePoll)

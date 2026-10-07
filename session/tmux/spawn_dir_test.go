@@ -21,8 +21,14 @@ import (
 
 // absentSessionExec answers every has-session with "not found": the session
 // never exists server-side, so a Start must reach new-session to create it.
-// The refusal tests assert it never gets that far.
-func absentSessionExec() cmd_test.MockCmdExec {
+// The refusal tests assert it never gets that far. Both probe flavors are
+// answered: the loose gate reads RunFunc, and a failed Start's
+// proveNoPaneIfDeterminatelyAbsent re-asks on the strict (Output) channel —
+// which only treats tmux's own diagnostic on a real *exec.ExitError as
+// determinate absence. A plain error on that second channel leaves the name
+// unproven and withholds ErrSessionNotStarted (#5174 review).
+func absentSessionExec(t *testing.T) cmd_test.MockCmdExec {
+	t.Helper()
 	return cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
 			if strings.Contains(cmd.String(), "has-session") {
@@ -30,7 +36,12 @@ func absentSessionExec() cmd_test.MockCmdExec {
 			}
 			return nil
 		},
-		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "has-session") {
+				return nil, tmuxExitOneError(t, "no server running on /tmp/tmux-1000/default")
+			}
+			return []byte("output"), nil
+		},
 	}
 }
 
@@ -95,7 +106,7 @@ func liveAfterSpawnExec(t *testing.T, sessionName string, fields map[string]stri
 // to the server's cwd and start the pane in the daemon's own directory.
 func TestStartRefusesMissingWorkDir(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
-	session := newTmuxSession(toTmuxName("missing-dir", ""), "claude", ptyFactory, absentSessionExec())
+	session := newTmuxSession(toTmuxName("missing-dir", ""), "claude", ptyFactory, absentSessionExec(t))
 
 	err := session.Start(filepath.Join(t.TempDir(), "gone"))
 
@@ -112,7 +123,7 @@ func TestStartRefusesMissingWorkDir(t *testing.T) {
 // server's cwd — the exact fallback this seam exists to forbid.
 func TestStartRefusesEmptyWorkDir(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
-	session := newTmuxSession(toTmuxName("empty-dir", ""), "claude", ptyFactory, absentSessionExec())
+	session := newTmuxSession(toTmuxName("empty-dir", ""), "claude", ptyFactory, absentSessionExec(t))
 
 	err := session.Start("")
 
@@ -137,7 +148,7 @@ func TestStartRefusesUnverifiableWorkDir(t *testing.T) {
 	t.Cleanup(func() { statSpawnDir = prev })
 
 	ptyFactory := NewMockPtyFactory(t)
-	session := newTmuxSession(toTmuxName("unverifiable-dir", ""), "claude", ptyFactory, absentSessionExec())
+	session := newTmuxSession(toTmuxName("unverifiable-dir", ""), "claude", ptyFactory, absentSessionExec(t))
 
 	err := session.Start(workDir)
 	require.Error(t, err)
@@ -187,6 +198,7 @@ func TestStartTearsDownPaneInWrongDir(t *testing.T) {
 			// What tmux >= 3.4 really answers: the request echoed back,
 			// alongside the truth in the pane's live cwd.
 			"pane_start_path":   workDir,
+			"pane_dead":         "0",
 			"pane_pid":          pid,
 			"pane_current_path": fallback,
 		}, &killed))
@@ -245,6 +257,7 @@ func TestStartSucceedsWhenPaneDirMatches(t *testing.T) {
 	session := newTmuxSession(sessionName, "claude", ptyFactory,
 		liveAfterSpawnExec(t, sessionName, map[string]string{
 			"pane_start_path":   workDir, // the >= 3.4 echo
+			"pane_dead":         "0",
 			"pane_pid":          pid,
 			"pane_current_path": workDir,
 		}, &killed))
@@ -299,7 +312,7 @@ func TestStartSucceedsViaProcCwd(t *testing.T) {
 	ptyFactory := NewMockPtyFactory(t)
 	session := newTmuxSession(sessionName, "claude", ptyFactory,
 		liveAfterSpawnExec(t, sessionName,
-			map[string]string{"pane_pid": pid}, &killed))
+			map[string]string{"pane_dead": "0", "pane_pid": pid}, &killed))
 
 	require.NoError(t, session.Start(workDir),
 		"the /proc/<pid>/cwd fallback proves the pane landed in the requested dir")
@@ -356,7 +369,10 @@ func TestCheckSpawnDirClassifications(t *testing.T) {
 				return
 			}
 			require.ErrorIs(t, err, tc.wantErr)
-			require.ErrorIs(t, err, ErrSessionNotStarted)
+			// The classification never carries cleanup authorization itself:
+			// ErrSessionNotStarted is attached by the caller only after the
+			// strict probe proves the name determinately absent (#5174 review).
+			require.NotErrorIs(t, err, ErrSessionNotStarted)
 			if tc.wantErr == ErrSpawnDirMissing {
 				require.ErrorIs(t, err, os.ErrNotExist)
 			} else {
@@ -643,7 +659,7 @@ func TestStartSucceedsWhenProcCwdIsWorktreeSubdir(t *testing.T) {
 	sessionName := toTmuxName("proc-subdir", "")
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
 		liveAfterSpawnExec(t, sessionName,
-			map[string]string{"pane_pid": pid}, &killed))
+			map[string]string{"pane_dead": "0", "pane_pid": pid}, &killed))
 
 	require.NoError(t, session.Start(workDir),
 		"a pane in a worktree SUBDIR proven by proc-cwd must be accepted")
@@ -686,6 +702,7 @@ func TestStartFallsThroughWhenProcCwdUnresolvable(t *testing.T) {
 	sessionName := toTmuxName("proc-deleted", "")
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
 		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":         "0",
 			"pane_pid":          pid,
 			"pane_current_path": workDir,
 		}, &killed))
@@ -920,4 +937,96 @@ func TestStartAcceptsPaneWhenWorktreePathRenamedMidSpawn(t *testing.T) {
 	require.NoError(t, session.Start(workDir),
 		"a pane holding the admitted inode stays bound even though the path it entered under is gone")
 	assert.False(t, killed, "a correctly placed pane is never torn down")
+}
+
+// TestStartNeverReadsProcCwdWithoutLiveProof is the #5174 review fix: only an
+// AFFIRMATIVE pane_dead == "0" licenses the /proc/<pane_pid>/cwd read. When the
+// field query fails or expands empty — an old tmux, a denied format — the pane
+// is UNVERIFIED rather than live, and its retained pid may already have been
+// recycled onto an unrelated process. Reading that pid would convict a
+// correctly placed pane on a foreign process's cwd, so the unknown answer must
+// disable procfs entirely; the other sources then carry placement, or the
+// spawn is accepted on silence — never torn down on recycled evidence.
+func TestStartNeverReadsProcCwdWithoutLiveProof(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs is Linux-only")
+	}
+	workDir := t.TempDir()
+	recycled := t.TempDir() // a foreign directory — what a recycled pid would show
+
+	const pid = "98765437"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
+	require.NoError(t, os.Symlink(recycled, filepath.Join(procRoot, pid, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
+
+	var killed bool
+	sessionName := toTmuxName("pane-dead-unanswered", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			// pane_dead is deliberately ABSENT from the map — the unsupported/
+			// unanswered expansion — while pane_pid answers a pid that procfs
+			// resolves to a foreign directory. Under the old read, "not marked
+			// dead" licensed the pid read and convict on the recycled answer.
+			"pane_pid":          pid,
+			"pane_current_path": workDir,
+		}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"an unproven live state must keep procfs off — current_path carries the approval")
+	assert.False(t, killed,
+		"a pid read on an unproven pane is recycled-pid evidence: it can never convict")
+}
+
+// TestStartWithholdsNotStartedWhenAbsenceUnproven is the #5174 review fix for
+// the cleanup-authorizing sentinel: the loose has-session at the top of Start
+// collapses a NON-timeout failure (a socket-policy denial, a transient exec
+// error) into "absent", which could hide a same-named pane still rooted in the
+// worktree. ErrSessionNotStarted is what authorizes LocalBackend.launch to
+// delete that tree — so it may only ride the refusal when the STRICT probe
+// answers determinate absence. A strict probe that fails the same way leaves
+// occupancy unproven and the error must arrive bare.
+func TestStartWithholdsNotStartedWhenAbsenceUnproven(t *testing.T) {
+	workDir := t.TempDir()
+
+	prev := statSpawnDir
+	statSpawnDir = func(path string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.EPERM}
+	}
+	t.Cleanup(func() { statSpawnDir = prev })
+
+	ptyFactory := NewMockPtyFactory(t)
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				// The loose probe's collapsed absence: a denied probe is
+				// reported as "not there", which is exactly what must NOT
+				// authorize cleanup on its own.
+				return fmt.Errorf("has-session: socket policy denied")
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			if strings.Contains(cmd.String(), "has-session") {
+				// The strict re-probe is denied the same way — a plain
+				// (non-ExitError) failure is never determinate absence, so the
+				// name's occupancy stays unproven.
+				return nil, fmt.Errorf("has-session: socket policy denied")
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("unproven-refusal", ""), "claude", ptyFactory, exec)
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirUnknown,
+		"the EPERM stat verdict still reports the directory state faithfully")
+	require.NotErrorIs(t, err, ErrSessionNotStarted,
+		"a name whose absence was never proven must not carry cleanup authorization — "+
+			"a same-named pane may still be rooted in the worktree")
+	require.False(t, session.ProvenNoPane())
+	assert.Empty(t, ptyFactory.cmds, "no spawn while the directory state is unproven")
 }

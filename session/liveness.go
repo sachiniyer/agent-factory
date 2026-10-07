@@ -520,9 +520,13 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // The unresolved-relocation refusal is the same one restore and respawn keep
 // (#5172): while af's own move of this worktree has not settled, the recorded
 // path is not authoritative, and a tab spawned into it could land in a stale
-// or replaced directory. RelocationSnapshot takes only the worktree's own
-// leaf lock — it never calls back into i.mu, so reading it here is safe.
-func (i *Instance) tabSpawnBlockedLocked() error {
+// or replaced directory. It fences only kinds that can touch the worktree —
+// a local process spawn or a local worktree read — because a metadata-only
+// web tab is a name and a URL: it starts nothing and reads nothing under the
+// tree, so an unsettled move is no reason to refuse it (#5174 review).
+// RelocationSnapshot takes only the worktree's own leaf lock — it never calls
+// back into i.mu, so reading it here is safe.
+func (i *Instance) tabSpawnBlockedLocked(kind TabKind) error {
 	if i.liveness == LiveArchived {
 		return fmt.Errorf("cannot add a tab to an archived session; restore it first (af sessions restore)")
 	}
@@ -532,20 +536,24 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
 		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
-	if gw := i.gitWorktree; gw != nil {
-		if _, _, unresolved := gw.RelocationSnapshot(); unresolved {
-			return fmt.Errorf("cannot add a tab while session %q has an unresolved worktree relocation; try again once it settles", i.Title)
+	if TabKindRequires(kind) != TabNeedsMetadataOnly {
+		if gw := i.gitWorktree; gw != nil {
+			if _, _, unresolved := gw.RelocationSnapshot(); unresolved {
+				return fmt.Errorf("cannot add a tab while session %q has an unresolved worktree relocation; try again once it settles", i.Title)
+			}
 		}
 	}
 	return nil
 }
 
 // TabSpawnBlocked is the locking form of tabSpawnBlockedLocked, for callers that
-// don't already hold i.mu (the daemon's archive-exclusive tab lock).
-func (i *Instance) TabSpawnBlocked() error {
+// don't already hold i.mu (the daemon's archive-exclusive tab lock). The kind
+// argument is what the relocation fence reads: pass the kind the operation
+// would create.
+func (i *Instance) TabSpawnBlocked(kind TabKind) error {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.tabSpawnBlockedLocked()
+	return i.tabSpawnBlockedLocked(kind)
 }
 
 // SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it

@@ -66,7 +66,7 @@ func tabSpawnPreconditionErr(started, hasTmux, hasWorktree bool, kind TabKind) e
 func (i *Instance) AddShellTab() (*Tab, error) {
 	i.mu.RLock()
 	started := i.started
-	spawnErr := i.tabSpawnBlockedLocked()
+	spawnErr := i.tabSpawnBlockedLocked(TabKindShell)
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueShellName(i.Tabs)
@@ -116,7 +116,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// would leak a tmux session that escapes teardown while its worktree is deleted
 	// or moved (#990, #1028). Make the recheck and append atomic under one
 	// acquisition so no further race opens.
-	stale := !i.started || i.tabSpawnBlockedLocked() != nil
+	stale := !i.started || i.tabSpawnBlockedLocked(TabKindShell) != nil
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
@@ -156,7 +156,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 
 	i.mu.RLock()
 	started := i.started
-	spawnErr := i.tabSpawnBlockedLocked()
+	spawnErr := i.tabSpawnBlockedLocked(TabKindProcess)
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
 	displayName := uniqueTabName(i.Tabs, processTabBaseName(requestedName, command))
@@ -208,7 +208,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// started=true but raises OpArchiving over the window (#1195); appending now
 	// would leak a tmux session whose worktree Kill deletes or archive moves (#990,
 	// #1028). Recheck + append are atomic under one acquisition.
-	stale := !i.started || i.tabSpawnBlockedLocked() != nil
+	stale := !i.started || i.tabSpawnBlockedLocked(TabKindProcess) != nil
 	title := i.Title
 	if !stale {
 		i.Tabs = append(i.Tabs, tab)
@@ -264,7 +264,7 @@ func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
 			break
 		}
 	}
-	stale := !i.started || i.tabSpawnBlockedLocked() != nil
+	stale := !i.started || i.tabSpawnBlockedLocked(tab.Kind) != nil
 	adopt := !stale && !exists
 	if adopt {
 		i.Tabs = append(i.Tabs, tab)
@@ -308,7 +308,7 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	// the same preconditions the other Add*Tab methods do so a web tab can't be
 	// wedged onto a not-started, tearing-down, or full instance.
 	defer i.mu.Unlock()
-	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+	if spawnErr := i.tabSpawnBlockedLocked(TabKindWeb); spawnErr != nil {
 		return nil, spawnErr
 	}
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindWeb); err != nil {
@@ -346,7 +346,7 @@ func (i *Instance) AddVSCodeTab(requestedName string) (*Tab, error) {
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if spawnErr := i.tabSpawnBlockedLocked(); spawnErr != nil {
+	if spawnErr := i.tabSpawnBlockedLocked(TabKindVSCode); spawnErr != nil {
 		return nil, spawnErr
 	}
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindVSCode); err != nil {

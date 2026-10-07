@@ -563,11 +563,18 @@ func (t *TmuxSession) ClosedConclusivelyAndStillAbsent() bool {
 // which means a create that fails while tmux is unreachable in an indeterminate way
 // still leaves a tombstone. That is the correct trade: a tombstone is recoverable
 // by the user, a worktree deleted under a running agent is not.
-func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
+//
+// The bool is THIS call's verdict — the only basis on which a caller may attach
+// ErrSessionNotStarted's cleanup authorization (#5174 review). The latch is the
+// same proof retained for teardown gating; it is deliberately never unset here
+// because a later unknown answer does not repeal an earlier proven absence.
+func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() bool {
 	exists, known, _ := probeSessionStrict(t.cmdExec, t.sanitizedName)
-	if known && !exists {
+	proven := known && !exists
+	if proven {
 		t.setProvenNoPane(true)
 	}
+	return proven
 }
 
 func (t *TmuxSession) setProvenNoPane(proven bool) {

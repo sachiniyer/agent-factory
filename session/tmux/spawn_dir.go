@@ -42,17 +42,21 @@ import (
 var statSpawnDir = os.Stat
 
 // checkSpawnDir refuses a spawn whose start directory is unusable, before any
-// tmux command has run. Callers invoke it while the session name is already
-// known-absent, so the refusal can carry ErrSessionNotStarted: nothing was
-// ever spawned. On success it returns the admitted directory's FileInfo so the
-// post-spawn check compares the pane against THAT inode — not a possibly
-// renamed-and-recreated path sampled later (#5174 review).
+// tmux command has run. The error carries ONLY the directory classification —
+// ErrSpawnDirMissing/ErrSpawnDirUnknown (+ os.ErrNotExist where the daemon's
+// WORKTREE_MISSING mapping keys on it) — never ErrSessionNotStarted: the loose
+// existence probe that ran first collapses non-answer failures into absence,
+// so the cleanup-authorizing marker may only be attached by a caller that ran
+// the strict probe and got tmux's determinate "not there" (#5174 review). On
+// success it returns the admitted directory's FileInfo so the post-spawn check
+// compares the pane against THAT inode — not a possibly renamed-and-recreated
+// path sampled later.
 func checkSpawnDir(workDir string) (os.FileInfo, error) {
 	if workDir == "" {
 		// An empty -c asks tmux for its default — the server's cwd — which is
 		// exactly the fallback this seam exists to forbid.
-		return nil, fmt.Errorf("%w: %w: %w: no start directory was requested",
-			ErrSessionNotStarted, ErrSpawnDirMissing, os.ErrNotExist)
+		return nil, fmt.Errorf("%w: %w: no start directory was requested",
+			ErrSpawnDirMissing, os.ErrNotExist)
 	}
 	info, err := statSpawnDir(workDir)
 	switch {
@@ -61,8 +65,8 @@ func checkSpawnDir(workDir string) (os.FileInfo, error) {
 	case err == nil:
 		// A non-directory at the worktree path is not a working directory;
 		// tmux would fall back exactly as if it were absent.
-		return nil, fmt.Errorf("%w: %w: %w: %s exists but is not a directory",
-			ErrSessionNotStarted, ErrSpawnDirMissing, os.ErrNotExist, workDir)
+		return nil, fmt.Errorf("%w: %w: %s exists but is not a directory",
+			ErrSpawnDirMissing, os.ErrNotExist, workDir)
 	case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
 		// ENOTDIR is an intermediate-component form of the same verdict: a
 		// file where a directory belongs makes the path conclusively
@@ -70,11 +74,11 @@ func checkSpawnDir(workDir string) (os.FileInfo, error) {
 		// worktree recovery instead of being held and retried forever.
 		// os.ErrNotExist is wrapped explicitly: ENOTDIR does not Is() to it,
 		// and the daemon's WORKTREE_MISSING classification keys on ENOENT.
-		return nil, fmt.Errorf("%w: %w: %s: %w: %w",
-			ErrSessionNotStarted, ErrSpawnDirMissing, workDir, os.ErrNotExist, err)
+		return nil, fmt.Errorf("%w: %s: %w: %w",
+			ErrSpawnDirMissing, workDir, os.ErrNotExist, err)
 	default:
-		return nil, fmt.Errorf("%w: %w: cannot verify %s: %w",
-			ErrSessionNotStarted, ErrSpawnDirUnknown, workDir, err)
+		return nil, fmt.Errorf("%w: cannot verify %s: %w",
+			ErrSpawnDirUnknown, workDir, err)
 	}
 }
 
@@ -194,14 +198,21 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 	// tmux design, leaving pane_start_path — the echo of the request — as
 	// the only voice, which must never approve placement on its own: a dir
 	// that was stat-able but not traversable falls back to the server cwd
-	// while retaining the requested start_path (#5174 review). A tmux too
-	// old to know the field expands it empty — not-dead — and the live-pane
-	// sources stay.
+	// while retaining the requested start_path (#5174 review).
+	//
+	// pane_dead is a THREE-valued answer, not a bool: "0" is the affirmative
+	// proof that the pane's root process is live, "1" is tmux's dead mark,
+	// and anything else — a tmux too old to know the field, a denied or
+	// failed expansion, an unanswered format — is UNVERIFIED. Only the
+	// affirmative "0" makes pane_pid safe to consult and lets the start-path
+	// echo confirm: a pane that MIGHT be dead keeps a retained pid the
+	// kernel is free to have recycled onto an unrelated process, and "the
+	// field did not say 1" cannot rule that state out (#5174 review).
 	deadField, timedOut := t.paneFormatField("#{pane_dead}")
 	if timedOut {
 		return false, false, "", ""
 	}
-	paneDead := deadField == "1"
+	paneLive := deadField == "0"
 	sources := []struct {
 		name string
 		read func() (string, bool)
@@ -217,7 +228,7 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		// live pane's match but can never convict (#5174 review).
 		convict bool
 	}{
-		{"proc-cwd", func() (string, bool) { return t.paneProcCwd(paneDead) }, true},
+		{"proc-cwd", func() (string, bool) { return t.paneProcCwd(paneLive) }, true},
 		{"pane_current_path", func() (string, bool) { return t.paneFormatField("#{pane_current_path}") }, true},
 		{"pane_start_path", func() (string, bool) { return t.paneFormatField("#{pane_start_path}") }, false},
 	}
@@ -236,7 +247,7 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		}
 		in, resolvable := paneDirInside(actual, want)
 		switch {
-		case in && (s.convict || !paneDead):
+		case in && (s.convict || paneLive):
 			return true, true, s.name, actual
 		case resolvable && s.convict:
 			return false, true, s.name, actual
@@ -245,9 +256,9 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		// walkable ancestry (a procfs cwd deleted after the spawn: stat on
 		// the link answers, EvalSymlinks cannot) whose own inode is not the
 		// admitted one, or an answer from a source that may not convict, or
-		// a confirm-only answer for a dead pane. It cannot prove inside OR
-		// outside, so it falls through to the next source rather than
-		// convicting or clearing.
+		// a confirm-only answer for a pane that is not proven live. It cannot
+		// prove inside OR outside, so it falls through to the next source
+		// rather than convicting or clearing.
 	}
 	return false, false, "", ""
 }
@@ -316,18 +327,20 @@ func (t *TmuxSession) paneFormatField(format string) (string, bool) {
 var procfsRoot = "/proc"
 
 // paneProcCwd returns /proc/<pane_pid>/cwd for the freshly spawned pane, or ""
-// off Linux, when the pane pid is unknown, or when the pane is already dead
-// (the pane_dead verdict observedPanePlacement fetched once for the whole
-// walk): a still-uncollected root keeps its pid, but pane_current_path's
-// retained record answers equally well, while a reaped root makes the pid
-// unsafe — the kernel is free to have recycled it onto an unrelated process
-// (#5174 review). Stat-ing the path resolves procfs's symlink to the
-// directory's identity — the kernel's record of where the process actually
-// runs, not the -c it was asked for — so it still proves the truth even when
-// the worktree itself was unlinked after the spawn. The second result
-// propagates paneFormatField's server-silence signal.
-func (t *TmuxSession) paneProcCwd(paneDead bool) (string, bool) {
-	if runtime.GOOS != "linux" || paneDead {
+// off Linux, when the pane pid is unknown, or when the pane's live state was
+// not affirmatively proven (the pane_dead answer observedPanePlacement fetched
+// once for the whole walk). The pid is only safe to read under a live proof —
+// pane_dead == "0": a dead pane's retained pid is free to have been recycled
+// onto an unrelated process, and a pane_dead query that FAILED to answer —
+// unsupported field, denied expansion — leaves exactly the same doubt, so
+// "not marked dead" can never license the read (#5174 review). Stat-ing the
+// path resolves procfs's symlink to the directory's identity — the kernel's
+// record of where the process actually runs, not the -c it was asked for — so
+// it still proves the truth even when the worktree itself was unlinked after
+// the spawn. The second result propagates paneFormatField's server-silence
+// signal.
+func (t *TmuxSession) paneProcCwd(paneLive bool) (string, bool) {
+	if runtime.GOOS != "linux" || !paneLive {
 		return "", false
 	}
 	field, timedOut := t.paneFormatField("#{pane_pid}")

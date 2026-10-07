@@ -132,7 +132,7 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	// Serialize the tab spawn against an archive/kill/restore teardown+move for
 	// this session and reject if it is archived/mid-archive (#1195); see
 	// archiveExclusiveTabLock for the op-lock ordering and orphan rationale.
-	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance)
+	opLock, err := m.archiveExclusiveTabLock(daemonInstanceKey(repoID, title), instance, effectiveKind)
 	if err != nil {
 		return CreateTabResponse{}, err
 	}

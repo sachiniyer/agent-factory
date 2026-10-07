@@ -36,10 +36,15 @@ func (failingPtyFactory) Start(*exec.Cmd) (*os.File, error) {
 }
 
 // wedgeKillSessionAfterCreateOnPath installs a fake `tmux` on PATH that:
-//   - answers the FIRST has-session "no such session" (exit 1), so Start's up-front
-//     existence gate passes and the create proceeds to ptyFactory.Start;
-//   - answers every LATER has-session "exists" (exit 0), so the post-failure
-//     ExistsOrUnknown reports the session present and the cleanup kill-session runs;
+//   - answers the FIRST has-session "no server running" (exit 1 with tmux's
+//     diagnostic), so Start's up-front existence gate passes and the create
+//     proceeds to ptyFactory.Start;
+//   - answers the SECOND has-session "exists" (exit 0), so the post-failure
+//     ExistsOrUnknown reports the session present and the cleanup kill-session
+//     runs;
+//   - answers every LATER has-session "no server running" again — the strict
+//     re-probe a refusal arm runs before it may attach ErrSessionNotStarted
+//     only accepts tmux's own diagnostic as determinate absence (#5174 review);
 //   - answers list-panes (SessionProcessTrees) cleanly with no panes;
 //   - WEDGES kill-session by sleeping in a child, standing in for a wedged server —
 //     the command whose unbounded Run this test pins.
@@ -54,8 +59,13 @@ func wedgeKillSessionAfterCreateOnPath(t *testing.T) {
 		"  n=$(cat " + state + " 2>/dev/null || echo 0)\n" +
 		"  n=$((n + 1))\n" +
 		"  echo \"$n\" > " + state + "\n" +
-		"  if [ \"$n\" -eq 1 ]; then exit 1; fi\n" +
-		"  exit 0\n" +
+		"  if [ \"$n\" -eq 2 ]; then exit 0; fi\n" +
+		"  # Call 1 is Start's loose existence gate (absent -> proceed); call 2 is\n" +
+		"  # the post-failure ExistsOrUnknown that triggers the wedged cleanup;\n" +
+		"  # every later has-session is a strict re-probe, which only accepts\n" +
+		"  # tmux's own diagnostic as determinate absence (#5174 review).\n" +
+		"  echo 'no server running on /tmp/tmux-1000/default' >&2\n" +
+		"  exit 1\n" +
 		"  ;;\n" +
 		"list-panes)\n" +
 		"  exit 0\n" +
