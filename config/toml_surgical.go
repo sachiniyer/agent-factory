@@ -183,6 +183,22 @@ func tomlAssignmentEnd(lines []string, start int) int {
 	return start
 }
 
+// leadingTOMLCommentStart returns the index where the contiguous comment
+// block directly above ls[idx] begins — idx itself when there is none. The
+// association rule is the one #4865 gives a moved table's header
+// (leadingTableCommentStart in configset_value.go): only a line that is
+// wholly a comment belongs to the block, and a blank or any non-comment line
+// ends it — so a note separated from the key by a blank line stays where the
+// author put it. A line that begins inside a multiline string is that
+// string's content, never a comment (#3662's mask, again).
+func leadingTOMLCommentStart(ls []string, stringContent []bool, idx int) int {
+	start := idx
+	for start > 0 && !stringContent[start-1] && strings.HasPrefix(strings.TrimSpace(ls[start-1]), "#") {
+		start--
+	}
+	return start
+}
+
 func preservedTOMLAssignmentComments(lines []string, start, end int) []string {
 	_, equal, ok := tomlAssignmentPath(lines[start])
 	if !ok {
