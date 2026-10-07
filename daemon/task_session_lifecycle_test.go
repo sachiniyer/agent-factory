@@ -584,19 +584,24 @@ func TestTaskSessionLifecycle_DeferredDrainTeardownExcludesLostRecovery(t *testi
 	manager.mu.Unlock()
 	inst.SetStatusForTest(session.Lost)
 
+	// raceBackend nils these fields unsynchronized inside Recover/Kill — copy
+	// the channels before either goroutine can run (the -race-safe pattern the
+	// existing interleaving tests use).
+	recoverStarted := backend.recoverStarted
+	killStarted := backend.killStarted
 	restoreDone := make(chan struct{})
 	go func() {
 		manager.RestoreLostSessions()
 		close(restoreDone)
 	}()
-	<-backend.recoverStarted // the restore loop is inside Recover, holding the op lock
+	<-recoverStarted // the restore loop is inside Recover, holding the op lock
 
 	manager.applyDeferredTaskSessionLifecycle(repoID, inst)
 
 	// The owed teardown drives its worker, but the kill it issues must
 	// serialize behind the in-flight recover — never interleave.
 	select {
-	case <-backend.killStarted:
+	case <-killStarted:
 		t.Fatal("the owed teardown ran its kill inside the in-flight recover's op lock")
 	case <-time.After(200 * time.Millisecond):
 	}
