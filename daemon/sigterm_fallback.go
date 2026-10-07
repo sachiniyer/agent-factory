@@ -37,13 +37,14 @@ import (
 //     filter out /tmp/Test* paths (Go test binaries) and the current
 //     process, and require exactly one candidate.
 //
-// Returns ShutdownViaSIGTERM when a signal was delivered, or ShutdownFailed
+// Returns ShutdownViaSIGTERM and the signalled target when a signal was
+// delivered (the process is already dead — signalAndWait waited), or ShutdownFailed
 // with an actionable error when the daemon (which is provably running — the
 // caller only invokes us after the Shutdown RPC returned method-not-found,
 // not ECONNREFUSED) could not be located or signaled. Returning
 // ShutdownNoDaemon here would contradict the established state and silently
 // leave the stale daemon running (#553).
-func sigtermFallback() (ShutdownResult, error) {
+func sigtermFallback() (ShutdownResult, ShutdownTarget, error) {
 	pid, proc, source, scanned, err := locateDaemonPID()
 	if err != nil {
 		if scanned > 0 {
@@ -55,9 +56,9 @@ func sigtermFallback() (ShutdownResult, error) {
 			// constraint, so following it would kill exactly the foreign-home
 			// daemons the home filter refused to touch, plus any unrelated
 			// process carrying "--daemon".
-			return ShutdownFailed, err
+			return ShutdownFailed, ShutdownTarget{}, err
 		}
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback failed: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			err,
 		)
@@ -72,20 +73,23 @@ func sigtermFallback() (ShutdownResult, error) {
 			// daemons this filtering refused to touch, plus any unrelated
 			// process carrying "--daemon". The daemon serving THIS home must
 			// be stopped by its PID, not a host-wide pattern.
-			return ShutdownFailed, fmt.Errorf(
+			return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 				"sigterm fallback: daemon is running on the control socket but no PID candidate was found for this home (%s); "+
 					"%d `--daemon` process(es) were left untouched because they serve another home or could not be bound — "+
 					"stop the daemon serving this home by its PID, then retry `af upgrade`",
 				source, scanned,
 			)
 		}
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback: daemon is running on the control socket but no PID candidate was found (%s); "+
 				"run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			source,
 		)
 	}
 
+	// Pin the incarnation before signalling, while pid is certainly the daemon:
+	// sampled after it dies, a recycled PID would yield the replacement's token.
+	target := ShutdownTarget{PID: pid, StartToken: processStartTokenFn(pid)}
 	log.InfoLog.Printf("sigterm fallback: signaling pre-#501 daemon (pid=%d source=%s)", pid, source)
 	if err := signalClassifiedDaemon(pid, proc); err != nil {
 		if errors.Is(err, errSignalTargetChanged) {
@@ -99,7 +103,7 @@ func sigtermFallback() (ShutdownResult, error) {
 			// the identity check just refused to touch, plus any unrelated
 			// process carrying "--daemon". The caller must rediscover the
 			// daemon serving this home by its PID (#4793 review).
-			return ShutdownFailed, fmt.Errorf(
+			return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 				"sigterm fallback: the daemon pid %d proven to serve this home exited before SIGTERM and its PID was recycled onto another process; not signalling the replacement — "+
 					"stop the daemon serving this home by its PID, then retry `af upgrade`",
 				pid,
@@ -115,12 +119,12 @@ func sigtermFallback() (ShutdownResult, error) {
 			// unrelated process carrying "--daemon". Carry the scoped recovery
 			// the other branches already use: stop the daemon serving THIS
 			// home by its PID, not a host-wide pattern.
-			return ShutdownFailed, fmt.Errorf(
+			return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 				"sigterm fallback for daemon pid %d: %w; %d other `--daemon` process(es) were left untouched because they serve another home or could not be bound — stop the daemon serving this home by its PID, then retry `af upgrade`",
 				pid, err, scanned-1,
 			)
 		}
-		return ShutdownFailed, fmt.Errorf(
+		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback for daemon pid %d: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			pid, err,
 		)
@@ -130,7 +134,7 @@ func sigtermFallback() (ShutdownResult, error) {
 	// a stale file. StopDaemon does this on its happy path too; doing it
 	// here keeps state tidy when the daemon binary never wrote one itself.
 	removeDaemonPIDFile()
-	return ShutdownViaSIGTERM, nil
+	return ShutdownViaSIGTERM, target, nil
 }
 
 // locateDaemonPID returns the PID of the running daemon to signal, a
@@ -516,38 +520,6 @@ func reclaimDeadUnverifiablePIDFile(pidFile string, pid int, deadline time.Time)
 		return true
 	}
 	return false
-}
-
-// pidLooksAlive returns true when signal 0 to pid succeeds AND the kernel
-// still has user-space state for the process (cmdline is non-empty). The
-// cmdline check is the cheap Linux-side way to filter out zombies: once a
-// process has exited but not yet been reaped, /proc/<pid>/cmdline is empty,
-// but kill(pid, 0) still succeeds because the process entry exists. Without
-// the second check, signalAndWait would wait the full sigtermFallbackGrace
-// for any zombie before escalating to SIGKILL — visible as a 5s pause in
-// `af upgrade` when the dying daemon's parent isn't waiting.
-//
-// On platforms without /proc (macOS), the cmdline read below returns "" and we
-// can't distinguish zombie from "kernel doesn't expose the cmdline"; we
-// fall back to the signal-0 result. The cost there is the 5s grace, which
-// is correct but slow.
-func pidLooksAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return false
-	}
-	if _, err := os.Stat("/proc"); err == nil {
-		// /proc is mounted (Linux). An empty cmdline means the task is a
-		// zombie or kernel thread; for our purposes either is "dead".
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-		if err == nil && len(strings.TrimRight(string(data), "\x00")) == 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // pidBelongsToThisHome reports whether the process at pid is an agent-factory

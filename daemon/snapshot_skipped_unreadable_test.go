@@ -35,15 +35,16 @@ func stageRepoReadErrorForRefresh(t *testing.T, repoID string, readErr error) (l
 	t.Helper()
 	prev := loadAllRepoInstancesForRefresh
 	staged := true
-	loadAllRepoInstancesForRefresh = func() (map[string]json.RawMessage, []config.RepoInstancesSkip, map[string]bool, error) {
-		all, skips, missing, err := prev()
+	loadAllRepoInstancesForRefresh = func() (config.RepoInstancesPollResult, error) {
+		load, err := prev()
 		if err != nil || !staged {
-			return all, skips, missing, err
+			return load, err
 		}
-		delete(all, repoID)
+		delete(load.Instances, repoID)
+		delete(load.Signatures, repoID)
 		path, _ := config.RepoInstancesPath(repoID)
-		skips = append(skips, config.RepoInstancesSkip{RepoID: repoID, Path: path, Err: readErr})
-		return all, skips, missing, nil
+		load.Skipped = append(load.Skipped, config.RepoInstancesSkip{RepoID: repoID, Path: path, Err: readErr})
+		return load, nil
 	}
 	t.Cleanup(func() { loadAllRepoInstancesForRefresh = prev })
 	return func() { staged = false }
