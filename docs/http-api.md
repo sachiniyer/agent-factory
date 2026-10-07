@@ -241,9 +241,9 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
 `PruneSessions` returns
-`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "pruned": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
+`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "candidates": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
 the STRICTLY READ-ONLY dry run for the archived-session reclaim — it lists in
-`pruned` each archived session a reclaim would remove —
+`candidates` each archived session a reclaim would remove —
 `{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimable_bytes" }` —
 and changes nothing: no deletion, no record update, no git write. (The apply
 half lands in the follow-up to #5142.) `skipped` entries

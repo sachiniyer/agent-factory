@@ -38,7 +38,7 @@ func stubPruneDaemon(t *testing.T, fn func(daemon.PruneSessionsRequest) (daemon.
 func dryPlan() daemon.PruneSessionsResponse {
 	return daemon.PruneSessionsResponse{
 		OK: true, OlderThan: "720h",
-		Pruned: []daemon.PrunedSessionEntry{{
+		Candidates: []daemon.PruneCandidate{{
 			Title: "old", RepoID: "repo-a", Branch: "siyer/old",
 			ArchivedAt: time.Now().Add(-90 * 24 * time.Hour), ReclaimableBytes: 1234,
 		}},
@@ -53,6 +53,39 @@ func dryPlan() daemon.PruneSessionsResponse {
 func TestSessionsPrune_HasNoApplyFlag(t *testing.T) {
 	assert.Nil(t, sessionsPruneCmd.Flags().Lookup("apply"),
 		"slice 1 is strictly read-only — no --apply flag may be registered")
+}
+
+// TestSessionsPrune_ResponseJSONKeys pins the wire contract (#5136 review):
+// the list is `candidates` — a dry run prunes nothing, and #5189's apply
+// takes `pruned` for rows it actually removed; the bytes key is
+// `reclaimable_bytes` for the same reason. Marshaling the response directly
+// catches a renamed tag before it reaches a generated doc or a client.
+func TestSessionsPrune_ResponseJSONKeys(t *testing.T) {
+	payload, err := json.Marshal(daemon.PruneSessionsResponse{
+		OK: true, OlderThan: "720h", ArchivedBefore: time.Now(),
+		Candidates: []daemon.PruneCandidate{{
+			Title: "old", RepoID: "repo-a", Branch: "af/old",
+			ArchivedAt: time.Now(), ReclaimableBytes: 4096,
+		}},
+		Skipped:          []daemon.PruneSkippedEntry{{Title: "live", RepoID: "repo-a", Reason: "not archived"}},
+		ReclaimableBytes: 4096,
+		Warnings:         []string{"w"},
+	})
+	require.NoError(t, err)
+	var top map[string]any
+	require.NoError(t, json.Unmarshal(payload, &top))
+	for _, key := range []string{"ok", "older_than", "archived_before", "candidates", "skipped", "reclaimable_bytes", "warnings"} {
+		assert.Contains(t, top, key)
+	}
+	assert.NotContains(t, top, "pruned", "pruned is reserved for #5189's apply")
+	assert.NotContains(t, top, "reclaimed_bytes", "reclaimed_bytes is reserved for #5189's apply")
+
+	entries, ok := top["candidates"].([]any)
+	require.True(t, ok)
+	entry := entries[0].(map[string]any)
+	for _, key := range []string{"title", "repo_id", "branch", "archived_at", "reclaimable_bytes"} {
+		assert.Contains(t, entry, key)
+	}
 }
 
 // TestSessionsPrune_RequiresOlderThan: the retention window is the one input
@@ -114,7 +147,7 @@ func TestSessionsPrune_DryRunListsCandidatesAndSkips(t *testing.T) {
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(out, &parsed))
 	assert.Equal(t, true, parsed["ok"])
-	assert.Len(t, parsed["pruned"], 1)
+	assert.Len(t, parsed["candidates"], 1)
 	assert.EqualValues(t, 1234, parsed["reclaimable_bytes"])
 	require.Len(t, parsed["skipped"], 1)
 	assert.Contains(t, parsed["skipped"].([]any)[0].(map[string]any)["reason"], "not archived")
@@ -170,7 +203,7 @@ func TestSessionsPrune_RoutesToTheTargetedDaemon(t *testing.T) {
 				mu.Unlock()
 				_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.PruneSessionsResponse{
 					OK: true, OlderThan: req.OlderThan,
-					Pruned: []daemon.PrunedSessionEntry{{
+					Candidates: []daemon.PruneCandidate{{
 						Title: "remote-old", RepoID: "box-repo", Branch: "af/remote-old",
 					}},
 				}))

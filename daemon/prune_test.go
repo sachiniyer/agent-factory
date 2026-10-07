@@ -98,8 +98,8 @@ func TestPruneSessions_DryRunListsCandidate(t *testing.T) {
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
 	require.True(t, resp.OK)
-	require.Len(t, resp.Pruned, 1)
-	entry := resp.Pruned[0]
+	require.Len(t, resp.Candidates, 1)
+	entry := resp.Candidates[0]
 	assert.Equal(t, "dry-run-row", entry.Title)
 	assert.Equal(t, "af/dry-run-row", entry.Branch)
 	assert.Greater(t, entry.ReclaimableBytes, int64(0))
@@ -126,7 +126,7 @@ func TestPruneSessions_DryRunWritesNothing(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Len(t, resp.Pruned, 1, "the seeded archive must list as reclaimable")
+	require.Len(t, resp.Candidates, 1, "the seeded archive must list as reclaimable")
 
 	for name, snap := range before {
 		var root string
@@ -175,7 +175,7 @@ func TestPruneSessions_SkipsIneligibleRows(t *testing.T) {
 	require.NoError(t, err)
 
 	var titles []string
-	for _, e := range resp.Pruned {
+	for _, e := range resp.Candidates {
 		titles = append(titles, e.Title)
 	}
 	assert.ElementsMatch(t, []string{"old-row"}, titles)
@@ -195,7 +195,7 @@ func TestPruneSessions_SkipsIneligibleRows(t *testing.T) {
 
 	resp2, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "24h"})
 	require.NoError(t, err)
-	require.Empty(t, resp2.Pruned)
+	require.Empty(t, resp2.Candidates)
 	skips2 := make(map[string]string)
 	for _, s := range resp2.Skipped {
 		skips2[s.Title] = s.Reason
@@ -219,7 +219,7 @@ func TestPruneSessions_RefusesRecycledPathOccupant(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "could not be verified")
 
@@ -238,7 +238,7 @@ func TestPruneSessions_RefusesDirtyArchivedWorktree(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "uncommitted")
 	assert.True(t, exists(filepath.Join(archivedPath, "uncommitted.txt")),
@@ -268,7 +268,7 @@ func TestPruneSessions_RefusesIgnoredFile(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "uncommitted or ignored")
 	assert.True(t, exists(filepath.Join(archivedPath, "secret.env")),
@@ -295,7 +295,7 @@ func TestPruneSessions_RefusesSameRepoReplacementOccupant(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "could not be verified")
 	assert.True(t, exists(filepath.Join(archivedPath, "keep.txt")),
@@ -331,7 +331,7 @@ func TestPruneSessions_RefusesRecreatedWorktree(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "could not be verified")
 	assert.True(t, exists(archivedPath),
@@ -348,7 +348,7 @@ func TestPruneSessions_RefusesRepoGoneOrigin(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "origin repository")
 	assert.True(t, exists(archivedPath),
@@ -365,7 +365,7 @@ func TestPruneSessions_ConcurrentArchiveIsSkipped(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "operation in flight")
 	assert.True(t, exists(archivedPath), "nothing may be touched under a held lifecycle op")
@@ -383,7 +383,7 @@ func TestPruneSessions_KillsInFlightClaimIsSkipped(t *testing.T) {
 
 	resp, err := manager.PruneSessions(pruneReq(repoID))
 	require.NoError(t, err)
-	require.Empty(t, resp.Pruned)
+	require.Empty(t, resp.Candidates)
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "in progress")
 	assert.True(t, exists(archivedPath))

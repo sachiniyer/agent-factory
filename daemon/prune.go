@@ -43,8 +43,8 @@ type PruneSessionsRequest struct {
 	OlderThan string `json:"older_than"`
 }
 
-// PrunedSessionEntry is one session the run lists as reclaimable.
-type PrunedSessionEntry struct {
+// PruneCandidate is one session the run lists as reclaimable.
+type PruneCandidate struct {
 	ID     string `json:"id,omitempty"`
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
@@ -76,8 +76,10 @@ type PruneSessionsResponse struct {
 	OK             bool      `json:"ok"`
 	OlderThan      string    `json:"older_than"`
 	ArchivedBefore time.Time `json:"archived_before"`
-	// Pruned holds the rows a future --apply would reclaim.
-	Pruned []PrunedSessionEntry `json:"pruned"`
+	// Candidates holds the rows a future --apply would reclaim. The key is
+	// "candidates", not "pruned" — a dry run prunes nothing, and #5189's
+	// apply wants "pruned" for rows it actually removed.
+	Candidates []PruneCandidate `json:"candidates"`
 	// Skipped holds rows refused BEFORE anything was deleted — they are
 	// untouched. Re-running with a different --older-than or after the blocking
 	// condition clears can admit them.
@@ -112,7 +114,7 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	candidates, skipped, warnings := m.pruneCandidates(req, resp.ArchivedBefore)
 	resp.Skipped = skipped
 	resp.Warnings = warnings
-	resp.Pruned = candidates
+	resp.Candidates = candidates
 	for _, entry := range candidates {
 		resp.ReclaimableBytes += entry.ReclaimableBytes
 	}
@@ -122,7 +124,7 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 // pruneCandidates enumerates every in-scope session row — the live map plus
 // on-disk rows the daemon could not materialize — classifies each as
 // eligible/skipped, and measures what the eligible ones would reclaim.
-func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([]PrunedSessionEntry, []PruneSkippedEntry, []string) {
+func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([]PruneCandidate, []PruneSkippedEntry, []string) {
 	type candidateRow struct {
 		repoID   string
 		instance *session.Instance
@@ -162,7 +164,7 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	warnings = append(warnings, ghostWarns...)
 	skipped = append(skipped, ghosts...)
 
-	var candidates []PrunedSessionEntry
+	var candidates []PruneCandidate
 	for _, row := range rows {
 		if deleting[row.repoID] {
 			continue
@@ -202,7 +204,7 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 			skipped = append(skipped, PruneSkippedEntry{Title: data.Title, RepoID: row.repoID, Reason: reason})
 			continue
 		}
-		entry := PrunedSessionEntry{
+		entry := PruneCandidate{
 			ID:         data.ID,
 			Title:      data.Title,
 			RepoID:     row.repoID,
