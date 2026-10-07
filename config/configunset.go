@@ -51,6 +51,11 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	if writeErr != nil {
 		return nil, writeErr
 	}
+	// Removing a stored per-project branch_prefix needs no restart either: the
+	// value was never applied (#4539), so nothing a restart could do changes.
+	if result.Removed && canonicalConfigKey(key) == "branch_prefix" {
+		result.RequiresRestart = false
+	}
 	return result, nil
 }
 

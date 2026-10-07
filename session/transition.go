@@ -647,12 +647,15 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// poll and carry this; the fence now settles on the incoming runtime's
 			// liveness, so the obligation itself has to say so.
 			//
-			// A held edge is recorded rather than dropped. Resolving the mission
-			// without a resend (Mark delivered) leaves the pane exactly as idle as
-			// it was, so no fresh edge into Ready ever arrives; the held marker
-			// lets the first idle observation after the obligation clears end the
-			// run in its place. A resend makes the agent work, and that run then
-			// ends on its own idle edge.
+			// A held edge is recorded rather than dropped. A resend makes the
+			// agent work, and Mark delivered now likewise leaves the ROW working
+			// — the confirm publishes LiveRunning, or keeps a LiveLimitReached
+			// wall (#5023) — so the next idle observation lands as a real edge
+			// into Ready and ends the run itself. The held marker still closes
+			// the gap for an obligation retired while the row was already
+			// recorded Ready — records written before #5023 carry exactly that —
+			// whose later polls would otherwise see only Ready → Ready and hold
+			// the run open forever.
 			//
 			// ANY idle observation while the mission is owed holds, not only a
 			// transition into Ready. A row that reloads already Ready — every row
@@ -691,14 +694,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// Publish its identity and durable negative quota evidence in the same
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
-		if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
-			i.limitAgent = agent
-			i.touchLocked()
-		}
-		if i.limitAccount != i.Account {
-			i.limitAccount = i.Account
-			i.touchLocked()
-		}
+		i.attributeLimitIdentityLocked()
 		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer

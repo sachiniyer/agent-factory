@@ -178,7 +178,11 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
 		Backend: &sandboxBackend{
-			provisioner: p,
+			// The command the sandbox's agent-server was bound to launch
+			// (#5108) — recorded as runtime evidence when the launch RPC
+			// returns.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			provisioner:        p,
 			cleanup: &SandboxRuntimeCleanupData{
 				SSHCommand: p.sshCmd,
 				SessionDir: p.sessionDir,

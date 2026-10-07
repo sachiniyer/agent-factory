@@ -422,8 +422,12 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("docker runtime: session %q running in container %s, agent-server at %s", p.spec.Title, p.shortID(), endpoint.URL)
 	return ProvisionResult{
 		Backend: &dockerBackend{
-			containerID: p.containerID,
-			provisioner: p,
+			// The command the in-container agent-server was bound to launch
+			// (#5108) — recorded as runtime evidence when the launch RPC
+			// returns.
+			remoteAgentBackend: remoteAgentBackend{resolvedProgram: p.program},
+			containerID:        p.containerID,
+			provisioner:        p,
 			cleanup: &DockerRuntimeCleanupData{
 				ContainerID: p.containerID,
 				EngineID:    p.engineID,

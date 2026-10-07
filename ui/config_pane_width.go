@@ -104,27 +104,6 @@ func (c *ConfigPane) sizeEditField() {
 // Note the asymmetry with a non-editing row, which clips the VALUE and keeps the
 // whole key: there the key is the row's identity and the value is a preview, so
 // the preview is what can go. While editing, the field IS the task.
-
-// editRowSplit divides an editing row's width between the KEY and the value
-// FIELD, and is the single place that arithmetic lives so the renderer and the
-// field's own Width can never disagree about it.
-//
-// The field is served first, and the key yields (#3430 review). At af's
-// supported minimum — a 40-column terminal, which app/render.go turns into 34
-// content cells — the cursor, `network.require_loopback_token` and the gap
-// consume all 34 by themselves. Clipping the composed row from the right then
-// removes the entire focused input: the width invariant holds, the row ends in
-// an ellipsis, and the user is typing into a field they cannot see. Truncating
-// the KEY instead costs identification the purpose line right below already
-// gives back, and is the only degradation that keeps the row's actual job doable.
-//
-// The key is only ever shortened when it would push the field below its minimum,
-// so at ordinary widths this returns the key untouched and the same field width
-// as before.
-//
-// Note the asymmetry with a non-editing row, which clips the VALUE and keeps the
-// whole key: there the key is the row's identity and the value is a preview, so
-// the preview is what can go. While editing, the field IS the task.
 func (c *ConfigPane) editRowSplit(key string) (keyBudget, fieldWidth int) {
 	keyWidth := lipgloss.Width(key)
 	// Everything the field costs beyond its text: the prompt, plus the cell a
@@ -149,22 +128,10 @@ func (c *ConfigPane) editRowSplit(key string) (keyBudget, fieldWidth int) {
 
 // entryRowChromeWidth is the fixed chrome every entry row carries: the
 // two-cell selection cursor plus the two-cell gap between key and value.
-
-// entryRowChromeWidth is the fixed chrome every entry row carries: the
-// two-cell selection cursor plus the two-cell gap between key and value.
 const entryRowChromeWidth = 4
 
 // minEditFieldWidth keeps a value field usable at a degenerate pane width.
-
-// minEditFieldWidth keeps a value field usable at a degenerate pane width.
 const minEditFieldWidth = 8
-
-// editFieldCursorWidth is the cell a focused textinput renders PAST its Width,
-// for the cursor. Measured, not assumed: Width 42 with a 2-cell prompt renders a
-// 45-cell View. Without it the composed row is one cell over the pane and the
-// fitPaneLine backstop clips the field's last character — which is invisible to a
-// width assertion (the row does fit, after clipping) and showed up only in the
-// real terminal, as `…TAILMAR…` where the value's tail should have been.
 
 // editFieldCursorWidth is the cell a focused textinput renders PAST its Width,
 // for the cursor. Measured, not assumed: Width 42 with a 2-cell prompt renders a
@@ -190,21 +157,6 @@ func (c *ConfigPane) fitPaneLine(line string) string {
 	}
 	return fitLine(line, c.width)
 }
-
-// flattenToOneLine turns embedded control whitespace into spaces so the result is
-// genuinely ONE line.
-//
-// Load-bearing, not hygiene, and for the same reason at both of its call sites. An
-// unrestricted string key (on_archive_command) may hold a newline, and every width
-// function here reports the WIDEST line of a multi-line string — so an unflattened
-// value measures as narrow, passes a width check whole, and turns one list row into
-// several. That is the overflow this file guards against arriving through height
-// instead of width, and it defeats countLines the same way. A tab is included for
-// the matching reason: a terminal expands it to the next tab stop, which no width
-// measurement predicts.
-//
-// Runs are NOT collapsed: a list row is a preview of the real value, and collapsing
-// whitespace would misreport what is stored.
 
 // flattenToOneLine turns embedded control whitespace into spaces so the result is
 // genuinely ONE line.
@@ -277,25 +229,7 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 // repaint emits and processes the whole thing. The budget is at most ~70 cells and a
 // legitimate value needs about one rune per cell, so this is orders of magnitude
 // above any real value while keeping a hostile one bounded.
-
-// maxConfigPreviewRunes caps how much of a value the LIST will even look at.
-//
-// A cell budget alone does not bound the work: a run of combining marks, zero-width
-// spaces or joiners measures ~0 cells, so a width-based cut keeps all of it and every
-// repaint emits and processes the whole thing. The budget is at most ~70 cells and a
-// legitimate value needs about one rune per cell, so this is orders of magnitude
-// above any real value while keeping a hostile one bounded.
 const maxConfigPreviewRunes = 512
-
-// truncateConfigPreview renders an untrusted config value as a bounded ONE-LINE
-// preview for the list. Config values are user text — a free-form string key like
-// on_archive_command accepts anything TOML can express, escapes included — so each
-// step below answers a specific way that text can break the pane rather than being
-// general hygiene (#3421 review).
-//
-// The edit field is untouched by all of this: c.input is filled from e.Value
-// directly, so what you can SAVE BACK is still exactly what is stored. That is the
-// same show-vs-save split CurrentValue documents.
 
 // truncateConfigPreview renders an untrusted config value as a bounded ONE-LINE
 // preview for the list. Config values are user text — a free-form string key like
@@ -372,10 +306,6 @@ func truncateConfigPreview(value string, budget int) string {
 // compositorWidth measures a string the way ui/overlay.PlaceOverlay does, which
 // is the measurement that decides whether a modal still fits over the frame. It
 // is deliberately NOT lipgloss.Width: see truncateConfigPreview step 4.
-
-// compositorWidth measures a string the way ui/overlay.PlaceOverlay does, which
-// is the measurement that decides whether a modal still fits over the frame. It
-// is deliberately NOT lipgloss.Width: see truncateConfigPreview step 4.
 func compositorWidth(s string) int {
 	return muesliansi.PrintableRuneWidth(s)
 }
@@ -425,31 +355,6 @@ type configHint struct {
 // If even the un-sheddable remainder is too wide — a pane narrower than
 // "esc close" — the row is CLIPPED rather than left for the overlay frame to
 // wrap. Never exceed the box.
-
-// fitHints renders the richest hint row that fits the pane (#1936/#3430).
-//
-// Adding a hint is a WIDTH change (#1936), and the row had exactly one
-// sheddable fragment — so once the assistant button landed, the shed remainder
-// was still 43 cells and any pane narrower than that overflowed with nothing
-// left to drop. The ladder below replaces that single special case: each step
-// sheds one more fragment, in `drop` order, and the first step that fits wins.
-//
-// The ORDER is a product decision, so it is stated here rather than left to fall
-// out of the composition:
-//
-//  1. the advanced toggle — `a` still works, and pressing it reveals the tier,
-//  2. `↑/↓ move` — arrow keys are the most conventional binding on the row,
-//  3. `↵ edit` — Enter to activate is nearly as conventional,
-//  4. `C assistant` — deliberately always-on (#2453), so it goes last of all,
-//
-// and `esc close` is shed by NOTHING. A modal must always advertise the way out:
-// the key stays live either way, but a user who cannot see it is stuck in a pane
-// they do not know how to leave, which is the #2830 failure (an advertised key
-// that is not live where focus is) run backwards.
-//
-// If even the un-sheddable remainder is too wide — a pane narrower than
-// "esc close" — the row is CLIPPED rather than left for the overlay frame to
-// wrap. Never exceed the box.
 func (c *ConfigPane) fitHints(hints []configHint) string {
 	maxDrop := 0
 	for _, h := range hints {
@@ -466,9 +371,6 @@ func (c *ConfigPane) fitHints(hints []configHint) string {
 	}
 	return c.fitPaneLine(row)
 }
-
-// joinHints composes the hint row with every fragment whose drop order is at or
-// below shedThrough removed. shedThrough 0 keeps them all.
 
 // joinHints composes the hint row with every fragment whose drop order is at or
 // below shedThrough removed. shedThrough 0 keeps them all.

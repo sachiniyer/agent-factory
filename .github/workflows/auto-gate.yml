@@ -7,8 +7,25 @@ on:
   # advancing are not evented here. workflow_dispatch repairs stale
   # observational state, and this is safe for Auto Gate because merge() always
   # performs a fresh full evaluation immediately before its destructive write.
-  check_suite:
-    types: [completed]
+  #
+  # check_suite is deliberately absent (#5177). GitHub does NOT suppress
+  # recursion for Actions-owned suites: every run of this workflow leaves a
+  # github-actions check suite on its head, and that suite's completion
+  # delivers a fresh check_suite event — measured ~200 self-triggered
+  # runs/hour on one master head for days. The documented GITHUB_TOKEN
+  # suppression covers token-authenticated writes only; a suite completing is
+  # a platform lifecycle transition, not a token write. And no payload
+  # predicate can run before the run exists — on.check_suite filters only on
+  # `types`, while a job skipped by `if` still completes its suite (skipped
+  # jobs land in it as completed check runs), so a filter inside the run would
+  # trade real runs for skipped ones and the chain would never die. Nothing
+  # needed is lost: every required check is Actions-owned, PR Validation's
+  # terminal state arrives through workflow_run below, commit statuses through
+  # status, and anything else — including a hypothetical non-Actions required
+  # check, whose pending state the pass already re-evaluates as transient — is
+  # the reconciliation pass's job. A suite completing on the master head never
+  # resolved a pull-request target anyway (no open PR owns that commit), so
+  # merge-triggered verification suites did no fleet re-evaluation here.
   issue_comment:
     types: [created, edited, deleted]
   pull_request_review:
@@ -34,9 +51,8 @@ on:
   # sees the same pull_request_target event it saw before the split.
   workflow_call:
   status:
-  # GitHub suppresses check_suite recursion for Actions-owned suites. The
-  # required Lint and Build checks both belong to PR Validation, so its terminal
-  # workflow_run is the non-recursive wakeup that republishes their final state.
+  # The required Lint and Build checks both belong to PR Validation, so its
+  # terminal workflow_run is the wakeup that republishes their final state.
   workflow_run:
     workflows: [PR Validation]
     types: [completed]
@@ -45,8 +61,12 @@ on:
   # batches PR heads/check rollups and at most ten reevaluations start (#4242).
   # GitHub delivers this schedule every two to five hours, not every five minutes
   # (#4571), so it is only the backstop. Every other run requests the same pass as
-  # the repository_dispatch below, at most once per five minutes. A pass never
-  # requests another.
+  # the repository_dispatch below, at most once per five minutes. A pass retains
+  # work it sees too young to select, re-scanning inside its own run until it
+  # matures or resolves, and requests one successor whenever it saw work at all:
+  # unmet leftovers are owed a wakeup, and selected work is applied by
+  # apply-gate — a queued job the platform can still cancel — so a pass that
+  # selected anything hands its own lane to one follower too (#5160).
   schedule:
     - cron: "*/5 * * * *"
   repository_dispatch:
@@ -71,12 +91,31 @@ permissions:
   issues: write
 
 # A concurrency group holds one running and one pending run: a newer pending
-# run replaces the older one, and cancel-in-progress stays false so an active
-# transaction always finishes uninterrupted. Replacement is safe only when the
-# survivor's invalidation covers every head the cancelled pending run would
-# have covered — a run cancelled while pending never reaches the ungrouped
-# invalidation below, and an uncovered head keeps its stale verdict. Each group
-# is keyed so that guarantee holds:
+# run replaces the older one, and cancel-in-progress stays false so a pending
+# run can never interrupt an active transaction. Replacement is safe only when
+# the survivor's invalidation covers every head the cancelled pending run would
+# have covered — a run cancelled while pending never reaches the invalidation
+# step below, and an uncovered head keeps its stale verdict.
+#
+# cancel-in-progress governs only pending-run replacement; it cannot stop the
+# platform from cancelling jobs inside an ACTIVE run. During GitHub's
+# 2026-10-05 hosted-runner incident, jobs that had sat queued inside running
+# transactions for ~15 minutes were cancelled without ever executing a step,
+# and runs that had already resolved their coverage died before invalidating
+# it (#5160). Target selection and aggregate invalidation are therefore steps
+# of the SAME job below: a run whose evaluate step committed has no queued job
+# boundary left between its selected heads and the WAITING aggregate marker
+# that makes them recoverable. A head left at that marker is re-evaluated once
+# it outlives a live transaction's 15-minute lease
+# (STALE_AGGREGATE_WAITING_AFTER_MS) — and a pass that sees the marker while it
+# is still young retains it, re-scanning inside its own run until it matures or
+# resolves, with one rate-windowed successor request if anything is left over.
+# Healing needs no human action and never waits on the schedule's real
+# delivery cadence. Heads a mid-job cancellation never reached stand exactly
+# where an event GitHub never delivered leaves them; the pass's
+# stale-decision coverage is the backstop for both.
+#
+# Each group is keyed so that guarantee holds:
 #
 # - schedule / repository_dispatch: every reconciliation pass scans every open
 #   master PR, so pending copies are fungible and the older one carries nothing
@@ -96,8 +135,8 @@ permissions:
 #   and every transition away from an older head is carried by a synchronize
 #   run that never coalesces — so a burst of comments collapses to at most one
 #   pending run and loses no invalidation.
-# - check_suite / status / workflow_run: one group per named commit. Coverage
-#   is exactly that head, so same-commit copies are identical by construction.
+# - status / workflow_run: one group per named commit. Coverage is exactly
+#   that head, so same-commit copies are identical by construction.
 concurrency:
   group: >-
     auto-gate-${{
@@ -106,7 +145,7 @@ concurrency:
       github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && format('synchronize-{0}-{1}', github.event.before, github.event.after) ||
       github.event_name == 'pull_request_target' && format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) ||
       (github.event.issue.number || github.event.pull_request.number) && format('pr-{0}', github.event.issue.number || github.event.pull_request.number) ||
-      (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) ||
+      (github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.workflow_run.head_sha || github.event.sha) ||
       github.run_id
     }}
   cancel-in-progress: false
@@ -118,6 +157,7 @@ jobs:
     outputs:
       targets: ${{ steps.evaluate.outputs.targets }}
       aggregate_heads: ${{ steps.evaluate.outputs.aggregate_heads }}
+      invalidated_heads: ${{ steps.invalidate.outputs.invalidated_heads }}
       branch_sweep: ${{ steps.sweep.outputs.branch_sweep }}
     # One resolver handles every subscribed input change. It does not branch on
     # activity type: PR/review/comment events identify a PR, while check/status/
@@ -160,7 +200,6 @@ jobs:
             const knownEventHeads = [...new Set([
               payload.pull_request?.head?.sha,
               payload.after,
-              payload.check_suite?.head_sha,
               payload.workflow_run?.head_sha,
               payload.sha,
               payload.before,
@@ -288,116 +327,29 @@ jobs:
               throw error;
             }
 
-      # A keep decided inside a merge is correct when it is made and nothing ever
-      # revisits it, so the branch leaks the moment the reason for the keep goes
-      # away — #3847 was retargeted 89 seconds after its base merged (#3852).
-      #
-      # Here rather than in apply-gate: this job runs once for every subscribed
-      # event, including the runs where nothing merges, while apply-gate is a
-      # matrix over aggregate heads that does not run at all when none was
-      # invalidated and would sweep once per head when it does.
-      - name: Sweep kept head branches
-        id: sweep
-        # always(), because a gate run whose evaluation failed still has branches
-        # to prune and pruning them cannot make that evaluation any worse — and
-        # AUTO_GATE_ENABLED, because deleting a ref is the gate writing to this
-        # repository on its own, which is the thing that switch turns off. With
-        # it off nothing merges, so nothing new leaks either.
-        # Reconciliation passes, scheduled or dispatched, exist only to reconcile
-        # required checks. Do not spend their deliberately bounded API budget on
-        # unrelated branch housekeeping.
-        if: always() && vars.AUTO_GATE_ENABLED == 'true' && github.event_name != 'schedule' && github.event_name != 'repository_dispatch'
-        uses: actions/github-script@v8
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const fs = require("fs");
-            const path = require("path");
-            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
-            if (!fs.existsSync(helperPath)) {
-              return;
-            }
-            const autoGate = require(helperPath);
-            // The workflow file takes effect before its default-branch helper on
-            // the landing run, exactly as the evaluate step above allows for.
-            if (typeof autoGate.sweepMergedHeadRefs !== "function") {
-              core.info("auto-gate helper on the default branch has no head-ref sweep yet.");
-              return;
-            }
-            try {
-              await autoGate.sweepMergedHeadRefs({ github, context, core });
-            } catch (error) {
-              // Pruning is housekeeping. Auto Gate red is this repo's highest-
-              // priority alarm and has to keep meaning "a merge decision went
-              // wrong"; a branch left on origin is visible in the next run's
-              // notice and costs nothing until then.
-              core.warning(
-                `Head-ref sweep failed: ${error && error.message ? error.message : error}`,
-              );
-            }
-
-      # Liveness for frozen decisions (#4571). The helper sends one
-      # repository_dispatch per five-minute window, and that run is a full
-      # scheduled pass. A pass never requests another: this condition skips both
-      # pass events, and the helper refuses them too. always() is not used
-      # because a cancelled run should not request a pass. A failed evaluation
-      # above should still request one, since the pass does not depend on it.
-      - name: Request stale-decision reconciliation
-        if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'repository_dispatch' }}
-        uses: actions/github-script@v8
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const fs = require("fs");
-            const path = require("path");
-            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
-            if (!fs.existsSync(helperPath)) {
-              return;
-            }
-            const autoGate = require(helperPath);
-            // The workflow file takes effect before its default-branch helper on
-            // the landing run, exactly as the evaluate step above allows for.
-            if (typeof autoGate.requestRequiredCheckReconciliation !== "function") {
-              core.info("auto-gate helper on the default branch cannot request reconciliation yet.");
-              return;
-            }
-            try {
-              await autoGate.requestRequiredCheckReconciliation({ github, context, core });
-            } catch (error) {
-              // A missed request leaves the schedule as the backstop. Auto Gate
-              // red has to keep meaning "a merge decision went wrong".
-              core.warning(
-                `Reconciliation request failed: ${error && error.message ? error.message : error}`,
-              );
-            }
-
-  invalidate-gate:
-    name: Invalidate aggregate
-    needs: auto-gate
-    outputs:
-      invalidated_heads: ${{ steps.invalidate.outputs.invalidated_heads }}
-    if: >-
-      always() &&
-      needs.auto-gate.outputs.aggregate_heads != '' &&
-      needs.auto-gate.outputs.aggregate_heads != '[]'
-    runs-on: ubuntu-latest
-    # These writes deliberately happen before the per-head serialized lanes. A
-    # newer event must turn each required check red while an older transaction
-    # is still running; generation fencing prevents that older run from
-    # overwriting it. A failed invalidation is retried before any serialized lane
-    # wait; only heads with a confirmed newer generation enter that lane, while one
-    # old-head failure cannot suppress a healthy current head.
-    steps:
-      - name: Check out gate logic
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-
+      # These writes deliberately happen inside the job that resolved them and
+      # before the per-head serialized lanes. A newer event must turn each
+      # required check red while an older transaction is still running;
+      # generation fencing prevents that older run from overwriting it. The
+      # step is part of this job rather than a second job because the platform
+      # can cancel a queued job without ever running a step of it (#5160): a
+      # selection committed above would then leave nothing that marks it. The
+      # WAITING marker written here is what the required-check reconciliation
+      # pass re-evaluates once it ages. always() keeps a failed evaluation
+      # marking its known heads, and the aggregate_heads output is empty exactly
+      # when nothing was resolved to mark. A failed invalidation is retried
+      # before any serialized lane wait; only heads with a confirmed newer
+      # generation enter that lane, while one old-head failure cannot suppress
+      # a healthy current head.
       - name: Make the aggregate non-green immediately
         id: invalidate
+        if: >-
+          always() &&
+          steps.evaluate.outputs.aggregate_heads != '' &&
+          steps.evaluate.outputs.aggregate_heads != '[]'
         uses: actions/github-script@v8
         env:
-          AGGREGATE_HEADS: ${{ needs.auto-gate.outputs.aggregate_heads }}
+          AGGREGATE_HEADS: ${{ steps.evaluate.outputs.aggregate_heads }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -485,26 +437,113 @@ jobs:
               );
             }
 
+      # A keep decided inside a merge is correct when it is made and nothing ever
+      # revisits it, so the branch leaks the moment the reason for the keep goes
+      # away — #3847 was retargeted 89 seconds after its base merged (#3852).
+      #
+      # Here rather than in apply-gate: this job runs once for every subscribed
+      # event, including the runs where nothing merges, while apply-gate is a
+      # matrix over aggregate heads that does not run at all when none was
+      # invalidated and would sweep once per head when it does.
+      - name: Sweep kept head branches
+        id: sweep
+        # always(), because a gate run whose evaluation failed still has branches
+        # to prune and pruning them cannot make that evaluation any worse — and
+        # AUTO_GATE_ENABLED, because deleting a ref is the gate writing to this
+        # repository on its own, which is the thing that switch turns off. With
+        # it off nothing merges, so nothing new leaks either.
+        # Reconciliation passes, scheduled or dispatched, exist only to reconcile
+        # required checks. Do not spend their deliberately bounded API budget on
+        # unrelated branch housekeeping.
+        if: always() && vars.AUTO_GATE_ENABLED == 'true' && github.event_name != 'schedule' && github.event_name != 'repository_dispatch'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            if (!fs.existsSync(helperPath)) {
+              return;
+            }
+            const autoGate = require(helperPath);
+            // The workflow file takes effect before its default-branch helper on
+            // the landing run, exactly as the evaluate step above allows for.
+            if (typeof autoGate.sweepMergedHeadRefs !== "function") {
+              core.info("auto-gate helper on the default branch has no head-ref sweep yet.");
+              return;
+            }
+            try {
+              await autoGate.sweepMergedHeadRefs({ github, context, core });
+            } catch (error) {
+              // Pruning is housekeeping. Auto Gate red is this repo's highest-
+              // priority alarm and has to keep meaning "a merge decision went
+              // wrong"; a branch left on origin is visible in the next run's
+              // notice and costs nothing until then.
+              core.warning(
+                `Head-ref sweep failed: ${error && error.message ? error.message : error}`,
+              );
+            }
+
+      # Liveness for frozen decisions (#4571). The helper sends one
+      # repository_dispatch per five-minute window, and that run is a full
+      # scheduled pass. This condition skips both pass events because a pass
+      # does not ask for a follow-up here: it retains not-yet-eligible work by
+      # re-scanning inside its own run, and the helper hands any remainder —
+      # and a guard for its own apply lane, which a platform cancel can still
+      # strand — to exactly one successor through the same window (#5160).
+      # always() is not used because a cancelled run should not request a pass.
+      # A failed evaluation above should still request one, since the pass does
+      # not depend on it.
+      - name: Request stale-decision reconciliation
+        if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'repository_dispatch' }}
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            if (!fs.existsSync(helperPath)) {
+              return;
+            }
+            const autoGate = require(helperPath);
+            // The workflow file takes effect before its default-branch helper on
+            // the landing run, exactly as the evaluate step above allows for.
+            if (typeof autoGate.requestRequiredCheckReconciliation !== "function") {
+              core.info("auto-gate helper on the default branch cannot request reconciliation yet.");
+              return;
+            }
+            try {
+              await autoGate.requestRequiredCheckReconciliation({ github, context, core });
+            } catch (error) {
+              // A missed request leaves the schedule as the backstop. Auto Gate
+              // red has to keep meaning "a merge decision went wrong".
+              core.warning(
+                `Reconciliation request failed: ${error && error.message ? error.message : error}`,
+              );
+            }
+
   apply-gate:
     name: Apply aggregate gate
-    needs: [auto-gate, invalidate-gate]
+    needs: auto-gate
     # Keep always() so successfully fenced heads proceed even if another candidate
     # exhausts its pre-lane retry. An unfenced head is deliberately absent: it must
     # not wait behind an older transaction that can still publish PASS.
     if: >-
       always() &&
-      needs.invalidate-gate.outputs.invalidated_heads != '' &&
-      needs.invalidate-gate.outputs.invalidated_heads != '[]'
+      needs.auto-gate.outputs.invalidated_heads != '' &&
+      needs.auto-gate.outputs.invalidated_heads != '[]'
     strategy:
       fail-fast: false
       matrix:
-        aggregate: ${{ fromJSON(needs.invalidate-gate.outputs.invalidated_heads) }}
+        aggregate: ${{ fromJSON(needs.auto-gate.outputs.invalidated_heads) }}
     # Invalidation has already run for EVERY event, outside both lanes. Keep
     # each head separate so a comment cannot replace synchronize's previous head.
     # github.event.action is reached only by a repository_dispatch pass. Every
     # other subscribed event stops at an earlier field.
     concurrency:
-      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.event.schedule || github.event.action || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
+      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.sha || github.event.schedule || github.event.action || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false
     uses: ./.github/workflows/auto-gate-aggregate.yml
     with:

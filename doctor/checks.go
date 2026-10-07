@@ -275,7 +275,7 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		report.markIncomplete("root agent program")
 		return
 	}
-	compared, drifted, unresolved := 0, 0, 0
+	compared, drifted, unresolved, unrecorded := 0, 0, 0, 0
 	for _, inst := range instances {
 		if !session.IsReservedTitle(inst.Title) || rootSessionIsInert(inst) {
 			continue
@@ -386,11 +386,14 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 		runningProgram := inst.RuntimeProgram
 		if strings.TrimSpace(runningProgram) == "" {
 			cancel()
-			unresolved++
-			report.Warn(sectionDaemon, "root agent program",
-				fmt.Sprintf("could not compare the root agent program for %s because its resolved runtime command was not recorded", rootSessionDisplayPath(inst)),
-				"restart the daemon, then kill the root to record a fresh launch command", false)
-			report.markIncomplete("root agent program")
+			// Unknown, not uninspectable: adoption and name-only reattach never
+			// record a launch command, so an empty runtime_program is the designed
+			// steady state for a root this daemon did not spawn. Nothing here is
+			// broken and nothing the user can run fills the field — only the
+			// root's next real launch does. That is a note, not a warning.
+			unrecorded++
+			report.Info(sectionDaemon, "root agent program",
+				fmt.Sprintf("the resolved runtime command is not recorded for %s — the running process was adopted, or launched before runtime commands were recorded; it will be recorded on the root's next launch", rootSessionDisplayPath(inst)))
 			continue
 		}
 		configuredProgram, programErr := inspectRootAgentProgram(probeCtx, commandRepo, profile, inspection)
@@ -418,8 +421,14 @@ func checkRootAgentPrograms(ctx *scanContext, report *Report, cfg *config.Config
 	}
 	if drifted == 0 && unresolved == 0 {
 		detail := "no enabled live root sessions to compare"
-		if compared > 0 {
+		switch {
+		case compared > 0:
 			detail = fmt.Sprintf("%d live root session(s) match the configured command", compared)
+			if unrecorded > 0 {
+				detail += fmt.Sprintf("; %d adopted live root(s) have no recorded runtime command", unrecorded)
+			}
+		case unrecorded > 0:
+			detail = "every live root was adopted without a recorded runtime command to compare"
 		}
 		report.Pass(sectionDaemon, "root agent program", detail)
 	}

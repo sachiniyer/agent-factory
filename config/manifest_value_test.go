@@ -312,3 +312,170 @@ func TestEveryManifestRowIsSettableAndHasNoReadOnlyClass(t *testing.T) {
 		}
 	}
 }
+
+// TestCurrentValueRendersRootAgentByOnDiskPresence pins the consistency fix for
+// the singleton [root_agent] table. root_agent is the only STRUCTURED global
+// manifest key backed by a struct (not a map or slice), and RootAgent.Enabled
+// deliberately carries no omitempty so an explicit enabled = false survives a
+// full serialization. Without presence-aware rendering that design made an
+// ABSENT [root_agent] table render {"enabled":false} in the config panes — the
+// only structured key rendering non-empty when its on-disk table is absent,
+// while every sibling (keys, program_overrides, root_agents, limit_patterns,
+// default_accounts) honestly rendered {} and session_env_passthrough rendered
+// []. CurrentValue now renders root_agent field-wise from the on-disk shape —
+// the same form the writer's rootAgentConfigJSON uses — so an absent table
+// renders {} and only fields actually present on disk appear. The explicit
+// enabled = false case is preserved: it still renders {"enabled":false}
+// (TestRootAgentEnabledSerializesExplicitFalse pins the no-omitempty design).
+func TestCurrentValueRendersRootAgentByOnDiskPresence(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+		want string
+	}{
+		{
+			name: "absent table renders empty aggregate, matching sibling structured keys",
+			toml: "default_program = 'claude'\n",
+			want: "{}",
+		},
+		{
+			name: "explicit enabled = false is preserved (no-omitempty design)",
+			toml: "default_program = 'claude'\n\n[root_agent]\nenabled = false\n",
+			want: `{"enabled":false}`,
+		},
+		{
+			name: "explicit enabled = true with program renders both fields",
+			toml: "default_program = 'claude'\n\n[root_agent]\nenabled = true\nprogram = 'codex'\n",
+			want: `{"enabled":true,"program":"codex"}`,
+		},
+		{
+			name: "program present without enabled renders only program",
+			toml: "default_program = 'claude'\n\n[root_agent]\nprogram = 'codex'\n",
+			want: `{"program":"codex"}`,
+		},
+		{
+			name: "enabled present without program renders only enabled",
+			toml: "default_program = 'claude'\n\n[root_agent]\nenabled = true\n",
+			want: `{"enabled":true}`,
+		},
+		{
+			name: "present but empty table renders empty aggregate",
+			toml: "default_program = 'claude'\n\n[root_agent]\n",
+			want: "{}",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeTempConfig(t, tc.toml)
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			got, ok := CurrentValue(cfg, "root_agent")
+			if !ok {
+				t.Fatalf("CurrentValue(root_agent) returned !ok")
+			}
+			if got != tc.want {
+				t.Fatalf("CurrentValue(root_agent) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCurrentValueStructuredKeysRenderEmptyAggregatesWhenAbsent is the cross-key
+// consistency lock behind the root_agent fix: on a fresh config with no
+// structured tables, EVERY structured global manifest key renders its empty
+// aggregate form — {} for the maps and [] for the lone slice. root_agent used
+// to be the sole exception (rendering {"enabled":false}); this pins that it no
+// longer diverges from its siblings, the property both config panes rely on to
+// show an unconfigured install honestly.
+func TestCurrentValueStructuredKeysRenderEmptyAggregatesWhenAbsent(t *testing.T) {
+	writeTempConfig(t, "default_program = 'claude'\n")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, key := range []string{
+		"root_agent", "keys", "program_overrides", "root_agents",
+		"limit_patterns", "default_accounts",
+	} {
+		t.Run(key, func(t *testing.T) {
+			got, ok := CurrentValue(cfg, key)
+			if !ok {
+				t.Fatalf("CurrentValue(%q) returned !ok", key)
+			}
+			if got != "{}" {
+				t.Errorf("absent structured key %q rendered %q, want {}; only an explicitly-present table should render non-empty", key, got)
+			}
+		})
+	}
+	if got, ok := CurrentValue(cfg, "session_env_passthrough"); !ok || got != "[]" {
+		t.Errorf("absent session_env_passthrough rendered %q (ok=%v), want []", got, ok)
+	}
+}
+
+// TestCurrentValueRootAgentRoundTripsThroughConfigSet pins the write-echo half
+// of the fix for both the absent and the explicit-disabled cases. The echo path
+// (SetGlobalConfigValue renders the resulting config the same way CurrentValue
+// does to report what it set) must agree with what the editor shows, or
+// `af config set root_agent <value>` would print a different value than the pane
+// shows on refresh. Before the fix the echo path parsed the post-edit bytes
+// without provenance, so an absent root_agent echoed {"enabled":false} while the
+// editor showed {} — a self-inconsistent round-trip. The explicit-enabled=false
+// case additionally guards the no-omitempty design: re-rendering an explicit
+// disabling override must stay {"enabled":false}, not erode to {}.
+func TestCurrentValueRootAgentRoundTripsThroughConfigSet(t *testing.T) {
+	t.Run("absent table round-trips as {}", func(t *testing.T) {
+		writeTempConfig(t, "default_program = 'claude'\n")
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		shown, ok := CurrentValue(cfg, "root_agent")
+		if !ok || shown != "{}" {
+			t.Fatalf("absent root_agent renders %q (ok=%v), want {}", shown, ok)
+		}
+		res, err := SetGlobalConfigValue("root_agent", shown)
+		if err != nil {
+			t.Fatalf("writing back the rendered value failed: %v", err)
+		}
+		if res.Value != shown {
+			t.Fatalf("set echoed %q, want %q — the editor and the writer disagree on an absent root_agent", res.Value, shown)
+		}
+		reloaded, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		again, ok := CurrentValue(reloaded, "root_agent")
+		if !ok || again != shown {
+			t.Fatalf("after writing %q the reloaded config renders %q (ok=%v), want %q", shown, again, ok, shown)
+		}
+	})
+
+	t.Run("explicit enabled=false round-trips as {\"enabled\":false}", func(t *testing.T) {
+		writeTempConfig(t, "default_program = 'claude'\n\n[root_agent]\nenabled = false\n")
+		cfg, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		shown, ok := CurrentValue(cfg, "root_agent")
+		if !ok || shown != `{"enabled":false}` {
+			t.Fatalf("explicit enabled=false renders %q (ok=%v), want {\"enabled\":false}", shown, ok)
+		}
+		res, err := SetGlobalConfigValue("root_agent", shown)
+		if err != nil {
+			t.Fatalf("writing back the explicit value failed: %v", err)
+		}
+		if res.Value != shown {
+			t.Fatalf("set echoed %q, want %q", res.Value, shown)
+		}
+		reloaded, err := LoadConfig()
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		again, ok := CurrentValue(reloaded, "root_agent")
+		if !ok || again != shown {
+			t.Fatalf("after writing %q the reloaded config renders %q (ok=%v), want %q", shown, again, ok, shown)
+		}
+	})
+}

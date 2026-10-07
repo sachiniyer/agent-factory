@@ -64,12 +64,12 @@ import {
   type TerminalWordRange,
   textFromCells,
   TOUCH_LONG_PRESS_MS,
-  touchHistoryScrollPlan,
   touchPressStillHeld,
   touchScrollClaimsGesture,
   wordRangeAtColumn,
   wrappedCellPosition,
 } from "./terminal-mouse.js";
+import { TouchScroll } from "./touch-scroll.js";
 import type { StreamEndpoint } from "./stream_endpoint.js";
 import { terminalSurface } from "./components.js";
 import { currentXtermTheme } from "./theme.js";
@@ -135,6 +135,67 @@ interface PendingViewportAnchor {
   atBottom: boolean;
 }
 
+// Pointer-input design notes. The bundle is built unminified and ships comments
+// inside class bodies against the perf gzip budget (events.ts documents the same
+// convention), so the long explanations for the pointer handlers live here at
+// module level, where the bundler drops them; the members keep one-line
+// pointers.
+//
+// Touch scrolling (#2681/#2682/#4982): application mouse mode switches xterm's
+// OWN touch scrolling off — both of its touch listeners return early while
+// mouse events are active — and nothing takes over: the finger is on the
+// screen, and the .xterm-viewport holding the scrollback is that screen's
+// SIBLING, so the browser has no ancestor to pan. A phone loses scrollback
+// entirely the moment an agent enables mouse tracking, and unlike the wheel
+// (#2681) it has no modifier to escape with. So af scrolls history itself: on
+// the NORMAL buffer a claimed one-finger drag moves xterm's scrollback
+// (touchScrollClaimsGesture + touchHistoryScrollPlan, sub-row travel carried in
+// scrollRem). The drag is terminal-owned, the tap still reaches the
+// application — only the move is ever cancelled, never the touchstart a tap's
+// compatibility mouse events depend on.
+//
+// On the ALTERNATE buffer there is no scrollback for that path to move, so when
+// the application owns the wheel — applicationOwnsWheel: VT200, drag, or
+// any-event, never DECSET 9/X10 which cannot report wheel — the claimed drag is
+// delivered to the application as wheel reports instead, one report per whole
+// line of travel (#4982). The reports are NOT encoded here: reportTouchWheel
+// dispatches one synthetic WheelEvent per line — deltaMode DOM_DELTA_LINE,
+// coordinates at the finger — on term.element, where xterm bound its reporting
+// wheel listener for the active protocol. The bytes therefore travel the same
+// sendEvent → CoreMouseService.triggerMouseEvent chain a real wheel takes:
+// protocol gating, encoding (SGR 1006, the X10/UTF-8 legacy form, pixel
+// coords), and the reported cell are whatever xterm resolves — button 64 up /
+// 65 down by construction, indistinguishable from a wheel since one DOM event
+// per line is the wheel's own cadence. The plan's sign convention is already
+// the wheel's: a finger moving UP the screen (positive lines) is wheel-down, a
+// downward finger wheel-up. onWheel ignores the untrusted synthetics so the
+// bridge is never read as a user scroll (no viewport reconcile, no escape-hint
+// flash).
+//
+// Click-vs-selection modifier inversion (#2787): the inversion runs in the
+// CAPTURE phase on the pane host, so it lands before both of xterm's mousedown
+// listeners — they sit on xterm's own element, a descendant — and therefore
+// before either reads the modifier. Mousedown ONLY: mouseup carries xterm's
+// alt-click-moves-cursor gesture, which reads the same altKey, so a synthetic
+// Option there would fire cursor-movement sequences into the PTY on every plain
+// click — and it is unnecessary besides, since xterm registers its PTY
+// mouseup/mousedrag forwarders inside the mousedown branch the inversion
+// already diverts, and the selection drag that replaces it is driven by
+// document listeners that read no modifier at all. Mouse pointers ONLY: the
+// inversion trades a plain click for a selection and hands the click back
+// behind a modifier — a trade a touch device cannot take, because it has no
+// modifier to hold, so inverting a tap would leave a phone with NO way to click
+// a mouse-driven TUI at all; touch does not need the trade either, its drag
+// (scroll) and tap (click) already separating without one. Once a mouse drag is
+// handed off, onHandedOffDragModifier keeps stripping the modifier from
+// move/release — xterm forwards those from document-level listeners and encodes
+// each event's OWN modifiers into the report, so stripping only the mousedown
+// would hand a mouse-aware TUI an incoherent sequence: an unmodified press
+// followed by a Shift/Alt-flagged drag and release. The modifier is af's escape
+// hatch, not input the user aimed at the application, so it must not arrive as
+// a modified-click binding — and it strips only while a handed-off drag is in
+// flight, because with the modifier NOT held the drag is a selection whose
+// mouseup must keep its true altKey for alt-click-moves-cursor.
 
 /**
  * One live attach terminal bound to a container element. Construct it with the
@@ -178,18 +239,25 @@ export class AttachTerminal {
   private mouseOverrideKeyHeld = false;
   private handedOffDrag = false;
   private historyWheelRemainder = 0;
-  // The screen position the current one-finger drag last scrolled from, plus its
-  // sub-row carry. Null whenever no gesture is af's to scroll: none is down, or a
-  // second finger arrived and the browser owns the pinch.
-  private touchScrollY: number | null = null;
-  private touchScrollRemainder = 0;
+  private scrollRem = 0;
+  private readonly fling = TouchScroll(holdClockMs);
+  // Coast ticks that applied scroll px, mirrored onto the host as
+  // data-af-coast-applied, with the count at the last stop beside it as
+  // data-af-coast-stop-count. The selftest's mid-coast press asserts the stop
+  // against these rather than scrollTop: xterm flushes scrollLines to the DOM a
+  // painted frame after the buffer moves, so a press-time DOM read sits a whole
+  // coast tick stale — the master sighting measured 68px, exactly one tick that
+  // was applied BEFORE the stop landed (#5020).
+  private coastApplied = 0;
+  private coastStopCount = 0;
+  private coastLiveStops = 0;
   // Where the gesture started, and whether it has since travelled far enough to be a
   // scroll rather than a tap. Until it has, the touch is left entirely alone. The
   // origin serves the long press too (#2849): both gestures are decided against the
   // point the finger went down on, by the same threshold.
   private touchOriginX = 0;
   private touchOriginY = 0;
-  private touchScrollClaimed = false;
+  private scrollClaimed = false;
   // The pending long press, and whether it has already acted on this gesture — a copy
   // has to swallow the compatibility click the same touch would otherwise fire.
   private touchLongPressTimer: number | null = null;
@@ -268,6 +336,12 @@ export class AttachTerminal {
   // path; pointer entry above handles the ordinary first gesture. The pending-peer
   // gate makes every ordinary input a no-op before even measuring layout.
   private readonly onWheel = (event: WheelEvent): void => {
+    if (!event.isTrusted) {
+      // The touch→wheel bridge's synthetics are not a user scroll (#4982).
+      return;
+    }
+    // A real wheel is a new scroll intent — the coast must not fight it.
+    this.stopCoast();
     this.handleUserScroll("wheel");
     if (
       !terminalMouseOverrideHeld(event, this.mouseOverride) &&
@@ -277,15 +351,6 @@ export class AttachTerminal {
       this.showMouseCaptureHint(this.wheelHint);
     }
   };
-  // Application mouse mode switches xterm's OWN touch scrolling off — both of its
-  // touch listeners return early while mouse events are active — and nothing takes
-  // over: the finger is on the screen, and the .xterm-viewport holding the scrollback
-  // is that screen's SIBLING, so the browser has no ancestor to pan. A phone
-  // therefore loses scrollback entirely the moment an agent enables mouse tracking,
-  // and unlike the wheel (#2681) it has no modifier to escape with. So af scrolls
-  // history itself here (#2682): the DRAG is terminal-owned, the TAP still reaches
-  // the application — which is why only the move is ever cancelled, never the
-  // touchstart that a tap's compatibility mouse events depend on.
   private readonly onTouchStart = (event: TouchEvent): void => {
     // Eligibility is settled once, at the start of the gesture. A touch whose target
     // is the viewport itself is a scrollbar drag the browser already handles — the
@@ -293,11 +358,13 @@ export class AttachTerminal {
     // BACKWARDS, since a thumb follows the finger while the content opposes it.
     const onScrollbar = event.target === this.container.querySelector(".xterm-viewport");
     const press = event.touches.length === 1 && !onScrollbar ? event.touches[0] : null;
-    this.touchScrollY = press?.clientY ?? null;
+    // Finger-down is tap-to-stop (#5020).
+    this.stopCoast();
     this.touchOriginX = press?.clientX ?? 0;
     this.touchOriginY = press?.clientY ?? 0;
-    this.touchScrollRemainder = 0;
-    this.touchScrollClaimed = false;
+    this.scrollRem = 0;
+    this.scrollClaimed = false;
+    if (press) this.fling.push(press.clientY);
     // Through the shared discard, so a press the timer already staged loses its
     // SELECTION too. A second finger arriving on a held press lands here, and a
     // pinch that left the highlight behind would be claiming a copy that never
@@ -319,6 +386,8 @@ export class AttachTerminal {
     // with a compatibility click instead have already copied there. Whichever runs
     // first consumes the pending text, so the copy happens exactly once.
     this.flushTouchCopy();
+    // Only claimed drags coast; a stale frame is harmless — tick() reads real dt.
+    if (this.scrollClaimed && this.fling.release()) window.requestAnimationFrame(this.onCoastFrame);
   };
   /**
    * The browser taking the gesture away — and the ONLY signal it gives when it does.
@@ -330,6 +399,9 @@ export class AttachTerminal {
    * a takeover drops both the copy and the selection that promised it.
    */
   private readonly onTouchCancel = (): void => {
+    // The browser owns the gesture now; its samples must not seed a later one.
+    this.stopCoast();
+    this.scrollClaimed = false;
     this.cancelTouchLongPress();
     this.suppressNextContextMenu = false;
     this.disposeTouchPressMarker();
@@ -363,8 +435,9 @@ export class AttachTerminal {
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
     this.handleUserScroll("touch");
+    const touch = event.touches[0];
     const moved = event.touches.length !== 1 ||
-      !touchPressStillHeld(this.touchOriginX, this.touchOriginY, event.touches[0].clientX, event.touches[0].clientY);
+      !touchPressStillHeld(this.touchOriginX, this.touchOriginY, touch?.clientX, touch?.clientY);
     if (moved) {
       // The finger left the spot it pressed on, so this gesture is a scroll (or a
       // pinch) rather than a press. Both readings cannot be live at once — and that
@@ -374,24 +447,21 @@ export class AttachTerminal {
       this.cancelTouchLongPress();
       this.discardPendingTouchCopy();
     }
-    if (this.touchScrollY === null) {
+    if (!this.fling.active) {
       return;
     }
     if (event.touches.length !== 1) {
       // A second finger arrived: hand the REST of this gesture to the browser rather
       // than scrolling by a pinch's motion or by the distance it covered untracked.
-      this.touchScrollY = null;
+      // Unclaiming it also keeps its lift from starting a coast it never drove.
+      this.stopCoast();
+      this.scrollClaimed = false;
       return;
     }
-    const last = this.touchScrollY;
-    const y = event.touches[0].clientY;
-    this.touchScrollY = y;
-    if (!this.applicationOwnsMouse()) {
-      // xterm's own touch scrolling is live here; tracking the position anyway keeps
-      // a mode change mid-drag from scrolling by everything travelled before it.
-      return;
-    }
-    if (!this.touchScrollClaimed) {
+    const y = touch.clientY;
+    // Sample every move, claimed or not: the estimator needs the approach in the slop.
+    const px = this.fling.push(y);
+    if (!this.scrollClaimed) {
       if (!touchScrollClaimsGesture(this.touchOriginY, y)) {
         // Still within a tap's wobble. Leaving the event ALONE is the point: claiming
         // it would cancel the touch, and a cancelled touch fires no compatibility
@@ -399,18 +469,21 @@ export class AttachTerminal {
         // a perfectly still one kept working.
         return;
       }
-      this.touchScrollClaimed = true;
+      this.scrollClaimed = true;
     }
-    const plan = touchHistoryScrollPlan(last, y, this.term.rows, this.rowHeight(), this.touchScrollRemainder);
-    this.touchScrollRemainder = plan.remainder;
-    if (plan.lines !== 0) {
-      this.term.scrollLines(plan.lines);
-    }
+    // Once claimed, the origin fields track the live finger — reports carry the
+    // cell under it, and at lift they hold the release cell for the coast.
+    this.touchOriginX = touch.clientX;
+    this.touchOriginY = y;
+    this.applyTouchScrollPx(px);
     // Claim the pan. Left to the browser it chains out to the document, which toggles
     // the URL bar, resizes .af-app and refits the terminal mid-gesture (#2493) — and
     // an uncancelled drag can still synthesize the compatibility mouse events the
-    // application would read as a drag it never got the button press for.
+    // application would read as a drag it never got the button press for. The stop
+    // also hides the move from xterm's own touch listener, whose 1:1 native scroll
+    // would double ours whenever no application owns the mouse.
     event.preventDefault();
+    event.stopPropagation();
   };
   /** Every browser-initiated copy over the terminal (#2831) — the chord, macOS
    *  Edit → Copy, right-click → Copy, assistive tech. The decision is in
@@ -428,6 +501,9 @@ export class AttachTerminal {
     // lifts — so this is what tells onMouseDownCapture below whether the click it is
     // about to rewrite came from a finger.
     this.lastPointerWasTouch = event.pointerType === "touch";
+    // Any fresh pointer press is new scroll intent: a mouse/pen down on a hybrid
+    // device, or a second finger, must not fight a touch flick still coasting.
+    this.stopCoast();
     // The xterm screen is a sibling of its scrollable viewport. A pointer whose
     // target is the viewport itself is therefore a scrollbar/track gesture, while
     // an ordinary terminal click targets the screen and keeps the saved anchor.
@@ -446,23 +522,7 @@ export class AttachTerminal {
       this.showMouseCaptureHint(this.pointerHint);
     }
   };
-  // The inversion itself (#2787). It runs in the CAPTURE phase on the pane host, so
-  // it lands before both of xterm's mousedown listeners — they sit on xterm's own
-  // element, a descendant — and therefore before either reads the modifier.
-  //
-  // mousedown ONLY. mouseup carries xterm's alt-click-moves-cursor gesture, which
-  // reads the same altKey: a synthetic Option there would fire cursor-movement
-  // sequences into the PTY on every plain click. It is also unnecessary — xterm only
-  // registers its PTY mouseup/mousedrag forwarders inside the mousedown branch this
-  // inversion already diverts, and the selection drag that replaces it is driven by
-  // document listeners that read no modifier at all.
-  //
-  // Mouse pointers ONLY. The inversion trades a plain click for a selection and hands
-  // the click back behind a modifier — a trade a touch device cannot take, because it
-  // has no modifier to hold, so inverting a tap would leave a phone with NO way to
-  // click a mouse-driven TUI at all. Touch does not need the trade either: its two
-  // gestures already separate without one, the drag scrolling history (#2682) and the
-  // tap staying the click.
+  // Click/selection modifier inversion (#2787) — the module note above the class.
   private readonly onMouseDownCapture = (event: MouseEvent): void => {
     if (this.lastPointerWasTouch && this.touchCopyFired) {
       // The compatibility click the press still owed. Two things happen here.
@@ -503,17 +563,7 @@ export class AttachTerminal {
       this.beginHandedOffDrag();
     }
   };
-  // The rest of a handed-off drag. xterm forwards move/release from DOCUMENT-level
-  // listeners and encodes each event's OWN modifiers into the report, so stripping
-  // only the mousedown would hand a mouse-aware TUI an incoherent sequence: an
-  // unmodified press followed by a Shift/Alt-flagged drag and release. The modifier
-  // is af's escape hatch, not input the user aimed at the application, so it must
-  // not arrive as a modified-click binding.
-  //
-  // STRIPS only, and only while a handed-off drag is in flight. With the modifier
-  // NOT held the drag is a selection, and mouseup must keep its true altKey there:
-  // xterm's alt-click-moves-cursor reads exactly that flag and would otherwise fire
-  // cursor-movement sequences into the PTY on every plain click.
+  // Strips the escape modifier from a handed-off drag (#2787) — module note above.
   private readonly onHandedOffDragModifier = (event: MouseEvent): void => {
     if (terminalMouseOverrideHeld(event, this.mouseOverride)) {
       invertTerminalMouseOverride(event, this.mouseOverride);
@@ -567,7 +617,8 @@ export class AttachTerminal {
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(container);
-    this.keybar = new TerminalKeybar(container, data => this.term.input(data, true),
+    this.keybar = new TerminalKeybar(container,
+      (data) => (this.stopCoast(), this.term.input(data, true)),
       () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode);
     this.mouseCaptureHint = document.createElement("div");
     this.mouseCaptureHint.className = "af-mouse-capture-hint";
@@ -609,6 +660,10 @@ export class AttachTerminal {
           this.cb.onFocusChange(false);
         }
       });
+      // Phone soft-keyboard and IME input arrive as beforeinput on xterm's helper
+      // textarea — keydown-less, so the key handler above never sees it. Synthetic
+      // wheel reports are DOM WheelEvents and can never fire this (#5020).
+      textarea.addEventListener("beforeinput", () => this.stopCoast());
     }
 
     // Keystrokes → OpInput. xterm hands us the terminal's outgoing byte string
@@ -616,6 +671,15 @@ export class AttachTerminal {
     // multibyte char reaches the PTY as the same bytes a real terminal would send.
     this.term.onKey(({ domEvent }) => this.keybar.markUserInput(domEvent));
     this.term.onData((data) => this.sendInput(this.keybar.transform(data)));
+    // Mouse reports in xterm's DEFAULT encoding (wheel/click without SGR 1006)
+    // leave on the binary channel — a byte string, one char per byte.
+    this.term.onBinary((data) => this.sendBinary(data));
+    // An app can leave the alternate screen mid-coast — possibly ANSWERING our
+    // own wheel reports: the ?1049l parses inside a write() frame whenever it
+    // does, and the momentum must die with the buffer it was emitted on rather
+    // than keep scrolling the restored normal buffer. The event fires with the
+    // switch itself, so the write queue's timing is not the question.
+    this.term.buffer.onBufferChange(() => this.stopCoast());
 
     // Modified input + clipboard decisions (see clipboard.ts): intercept the key
     // BEFORE xterm turns it into input. Bare Shift+Enter emits LF only for the
@@ -625,6 +689,12 @@ export class AttachTerminal {
     // never an interrupt — #2787), and Ctrl+V defers to native paste. False
     // suppresses xterm's own handling.
     this.term.attachCustomKeyEventHandler((ev) => {
+      // A key press interrupts a coast — and the on-screen key bar is a key press a
+      // DOM keydown never sees, so it stops the same way at its own site. onData
+      // cannot serve: it also fires for synthetic mouse reports (#5020).
+      if (ev.type === "keydown") {
+        this.stopCoast();
+      }
       const overrideKey = this.mouseOverride === "Option" ? "Alt" : "Shift";
       if (ev.key === overrideKey) {
         this.mouseOverrideKeyHeld = ev.type !== "keyup";
@@ -713,6 +783,7 @@ export class AttachTerminal {
     }
     this.cancelVisibleFitFrame();
     this.clearPendingViewport();
+    this.stopCoast();
     this.ro.disconnect();
     this.io.disconnect();
     window.removeEventListener("focus", this.onWindowFocus);
@@ -744,6 +815,75 @@ export class AttachTerminal {
     // scrollback there; VT200, drag, and any-event modes report wheel input.
     return mode !== "none" && mode !== "x10";
   }
+
+  private applyTouchScrollPx(px: number): void {
+    // px -> rows: scrollLines, or app-owned wheel reports targeted at the cell the
+    // finger currently holds — touchOrigin tracks the live touch once claimed, so
+    // at lift it already carries the release cell for the coast (#5020).
+    const plan = historyWheelPlan(
+      { deltaMode: 0, deltaY: px },
+      this.term.rows,
+      this.rowHeight(),
+      this.scrollRem,
+    );
+    this.scrollRem = plan.remainder;
+    if (plan.lines === 0) return;
+    if (this.term.buffer.active.type !== "alternate" || !this.applicationOwnsWheel()) {
+      this.term.scrollLines(plan.lines);
+      return;
+    }
+    const element = this.term.element;
+    if (!element) {
+      return;
+    }
+    // Plan sign is the wheel's: finger up is wheel-down (65), down is up (64).
+    // One WheelEvent per line; see the module note.
+    const deltaY = Math.sign(plan.lines);
+    for (let i = Math.abs(plan.lines); i > 0; i -= 1) {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          clientX: this.touchOriginX,
+          clientY: this.touchOriginY,
+          deltaMode: WheelEvent.DOM_DELTA_LINE,
+          deltaY,
+        }),
+      );
+    }
+  }
+
+  /** Every way a coast dies — a fresh wheel or key, a press, a second finger,
+   *  output on a followed tail, a buffer switch, dispose — funnels through here
+   *  so the stop records how many coast ticks had applied when it landed. The
+   *  frame the coast already queued still fires, but tick() reads the cleared
+   *  velocity and returns null: nothing applies past the recorded count. */
+  private stopCoast(): void {
+    // Read before stop() clears it: whether momentum was still live when THIS
+    // stop landed, so a press arriving after natural decay is not mistaken for
+    // one that interrupted a coast.
+    const live = this.fling.coasting;
+    this.fling.stop();
+    if (live) {
+      this.coastLiveStops += 1;
+      this.container.dataset.afCoastLiveStops = String(this.coastLiveStops);
+    }
+    // onMessage calls this for every PTY frame on a followed tail, so the
+    // attribute write happens only when a coast actually applied since the
+    // last recorded stop — an unchanged dataset write still costs a DOM
+    // mutation per output frame.
+    if (this.coastStopCount === this.coastApplied) return;
+    this.coastStopCount = this.coastApplied;
+    this.container.dataset.afCoastStopCount = String(this.coastStopCount);
+  }
+
+  private readonly onCoastFrame = (): void => {
+    const px = this.fling.tick();
+    if (px === null) return;
+    this.applyTouchScrollPx(px);
+    this.container.dataset.afCoastApplied = String(++this.coastApplied);
+    window.requestAnimationFrame(this.onCoastFrame);
+  };
 
   /** Tracks the modifier strip on the document for exactly the life of one
    *  handed-off drag — xterm registers its own forwarders the same way, and events
@@ -1199,10 +1339,18 @@ export class AttachTerminal {
         this.cursor = frame.seq;
         this.seeded = true;
         break;
-      case Op.PTYOut:
+      case Op.PTYOut: {
+        // Followed-tail output interrupts the coast; alt repaints are exempt.
+        // !active is the coast: coasting means the gesture's samples are gone —
+        // and stopping an idle fling is free either way.
+        const buf = this.term.buffer.active;
+        if (!this.fling.active && buf.type === "normal" && buf.viewportY >= buf.baseY) {
+          this.stopCoast();
+        }
         this.term.write(frame.data);
         this.cursor += BigInt(frame.data.length);
         break;
+      }
       case Op.Repaint:
         // Rendered like output but NOT counted toward the cursor — a repaint is a
         // per-subscriber screen snapshot, outside the ring's monotonic seq.
@@ -1513,6 +1661,24 @@ export class AttachTerminal {
       return;
     }
     this.noteQueuedInput(text);
+  }
+
+  // The byte twin of sendInput for xterm's onBinary channel: the report string
+  // carries one char per byte (DEFAULT mouse encoding), so it encodes latin-1 —
+  // a UTF-8 pass would split every byte ≥ 0x80. Same held-not-dropped contract,
+  // minus the draft bookkeeping, which reads text.
+  private sendBinary(data: string): void {
+    const bytes = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i += 1) {
+      bytes[i] = data.charCodeAt(i);
+    }
+    const frame = encode(inputFrame(bytes));
+    if (this.send(frame) || this.stopped || this.exited) {
+      return;
+    }
+    if (!this.pendingInput.push(frame)) {
+      this.flashNotice("Terminal disconnected — typing was not delivered");
+    }
   }
 
   /** Hands the PTY everything typed while the socket was down, in order, then

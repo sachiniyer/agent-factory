@@ -29,10 +29,12 @@ import (
 //     fix that silently drops the notice AND a fix that uses session-scoped
 //     wording for the per-archive key.
 //
-// The keep_restart subtable pins the opposite partition — root_agent.program and
-// branch_prefix are EffectNextDaemonStart, so they MUST still print the restart
-// notice — so a fix that over-corrects by dropping the notice for a restart-needed
-// key fails.
+// The keep_restart subtable pins the opposite partition — root_agent.program is
+// EffectNextDaemonStart, so it MUST still print the restart notice — so a fix
+// that over-corrects by dropping the notice for a restart-needed key fails.
+// branch_prefix is EffectNextDaemonStart too, but its project-scoped write is
+// stored and never applied (#4539), so it gets a stderr warning and no restart
+// notice — the final subtest pins that exception.
 func TestProjectSetAppliedLiveKeyNoticeIsNotRestart(t *testing.T) {
 	appliedLive := []struct {
 		name       string
@@ -67,7 +69,6 @@ func TestProjectSetAppliedLiveKeyNoticeIsNotRestart(t *testing.T) {
 			name, key, value string
 		}{
 			{"root_agent.program", "root_agent.program", "claude"},
-			{"branch_prefix", "branch_prefix", "af-"},
 		}
 		for _, c := range restartNeeded {
 			t.Run(c.name, func(t *testing.T) {
@@ -79,6 +80,17 @@ func TestProjectSetAppliedLiveKeyNoticeIsNotRestart(t *testing.T) {
 				})
 			})
 		}
+	})
+
+	// branch_prefix is EffectNextDaemonStart but prints NO restart notice:
+	// the write is stored and never applied (#4539), so "restart them to
+	// apply" would contradict the stderr warning it just printed.
+	t.Run("branch_prefix_inert_no_restart_notice", func(t *testing.T) {
+		projectSetNoticeRun(t, "branch_prefix", "af-", func(t *testing.T, got string) {
+			require.NotContains(t, got, "restart them to apply",
+				"`af config set --project branch_prefix` cannot be applied by a "+
+					"restart (#4539), so it must not print the restart notice. Got: %q", got)
+		})
 	})
 }
 
