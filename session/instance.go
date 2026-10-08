@@ -183,29 +183,22 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
-	// taskRunPromptAttemptAt/taskRunPromptDeliveryStatus are the task run's OWN
-	// prompt boundary (#5219), scoped apart from lastPromptAttemptAt: a manual
-	// send while the run is active must not re-arm a delivery window the agent
-	// already satisfied. The boundary updates on the first send after the run
-	// begins and on any later send only while the window stays unsatisfied —
-	// a redelivery is the one way out of a proven-undelivered window. Once the
-	// turn is taken the boundary freezes; the run's remaining life cannot be
-	// reshaped by prompts the session receives afterwards.
-	taskRunPromptAttemptAt      time.Time
-	taskRunPromptDeliveryStatus PromptDeliveryStatus
+	// taskRunPromptAttemptAt is the task run's OWN prompt boundary (#5219),
+	// scoped apart from lastPromptAttemptAt: a manual send while the run is
+	// active must not re-arm a delivery window the agent already satisfied.
+	// The boundary updates on the first send after the run begins and on any
+	// later send only while the window stays unsatisfied — a redelivery is
+	// how a pending window starts fresh. Once the turn is taken the boundary
+	// freezes; the run's remaining life cannot be reshaped by prompts the
+	// session receives afterwards.
+	taskRunPromptAttemptAt time.Time
 	// taskRunTurnObservedAt records when the agent's own in-turn chrome was
 	// observed for the run in flight — the positive "the prompt's turn began"
 	// boundary that boot output and the send's own echo cannot produce (#5219).
 	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
 	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
-	// taskRunSilentBaseAt is where the silent fallback's deadline measures
-	// from (#5221 review): the prompt attempt normally, but a runtime
-	// replacement restarts the grace — the fresh pane gets its own full boot
-	// window rather than inheriting an already-elapsed deadline measured from
-	// the predecessor's send.
-	taskRunSilentBaseAt time.Time
-	loadRuntimeReplaced bool
+	loadRuntimeReplaced   bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;

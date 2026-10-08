@@ -49,7 +49,7 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"pane churn checkpoint", nil, func(t *testing.T, i *Instance) { i.RecordPaneChurnCheckpointAtEpoch(clock, i.stateEpoch) }},
 		{"clear idle evidence", func(t *testing.T, i *Instance) { i.lastPromptAttemptAt = clock }, func(t *testing.T, i *Instance) { i.ClearIdleEvidence() }},
 		{"idle snapshot", nil, func(t *testing.T, i *Instance) {
-			i.ReconcileIdleEvidence(clock, PromptDelivered, clock, clock, "", clock, clock)
+			i.ReconcileIdleEvidence(clock, PromptDelivered, clock, clock, clock)
 		}},
 		{"restore failure", nil, func(t *testing.T, i *Instance) { i.SetLostRestoreFailure(3, errors.New("gone")) }},
 		{"clear restore failure", func(t *testing.T, i *Instance) { i.lostRestoreFailure = LostRestoreFailure{Attempts: 3, Error: "gone"} }, func(t *testing.T, i *Instance) { i.ClearLostRestoreFailure() }},
@@ -104,9 +104,7 @@ func TestUpdatedAtMutations(t *testing.T) {
 		}, func(t *testing.T, i *Instance) {
 			i.ClearLostRestoreFailureAtObservation(AgentObservationGeneration{value: 1})
 		}},
-		{"prompt observation", nil, func(t *testing.T, i *Instance) {
-			i.recordPromptAttemptForObservation(PromptDelivered, clock, nil, false)
-		}},
+		{"prompt observation", nil, func(t *testing.T, i *Instance) { i.recordPromptAttemptForObservation(PromptDelivered, clock, nil) }},
 		{"program swap", func(t *testing.T, i *Instance) { i.started = true }, func(t *testing.T, i *Instance) {
 			_, err := i.SwapAgentProgram("codex", "switch", "", false)
 			require.NoError(t, err)

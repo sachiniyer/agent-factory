@@ -637,7 +637,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// the final Ready snapshot scrubs the window fields with the run) cannot
 	// re-derive the end locally, so the daemon's decision is authoritative.
 	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt,
-		d.TaskRunPromptAttemptAt, d.TaskRunPromptDeliveryStatus, d.TaskRunTurnObservedAt, d.TaskRunSilentBaseAt) {
+		d.TaskRunPromptAttemptAt, d.TaskRunTurnObservedAt) {
 		changed = true
 	}
 	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {

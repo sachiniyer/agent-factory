@@ -158,16 +158,13 @@ type InstanceData struct {
 	// hold and end the run on the next Ready → Ready tick. An old binary drops
 	// this field and keeps the run open instead — the safe direction.
 	TaskRunTurnGateHeld bool `json:"task_run_turn_gate_held,omitempty"`
-	// TaskRunPromptAttemptAt/TaskRunPromptDeliveryStatus are the run's OWN
-	// prompt boundary (#5221 review), scoped apart from LastPromptAttemptAt so
-	// an interactive send cannot re-arm a delivery window the agent already
-	// satisfied. The boundary moves only while the window is unsatisfied; a
-	// PromptNotDelivered status keeps the gate closed until a redelivery.
-	// Persisted while the run is in flight for the same reason as
-	// TaskRunTurnObservedAt: a restart must not reopen — or wrongly satisfy — a
-	// window the daemon was still holding.
-	TaskRunPromptAttemptAt      time.Time            `json:"task_run_prompt_attempt_at,omitzero"`
-	TaskRunPromptDeliveryStatus PromptDeliveryStatus `json:"task_run_prompt_delivery_status,omitempty"`
+	// TaskRunPromptAttemptAt is the run's OWN prompt boundary (#5221 review),
+	// scoped apart from LastPromptAttemptAt so an interactive send cannot
+	// re-arm a delivery window the agent already satisfied. The boundary moves
+	// only while the window is unsatisfied. Persisted while the run is in
+	// flight for the same reason as TaskRunTurnObservedAt: a restart must not
+	// reopen — or wrongly satisfy — a window the daemon was still holding.
+	TaskRunPromptAttemptAt time.Time `json:"task_run_prompt_attempt_at,omitzero"`
 	// TaskRunTurnObservedAt is when the agent's own in-turn chrome was observed
 	// for the run in flight (#5219) — the one pane signal a still-booting agent
 	// cannot produce: its elapsed-timer status row had to tick, not just render.
@@ -176,12 +173,6 @@ type InstanceData struct {
 	// reopen the delivery window an observation already closed. omitempty +
 	// additive: an older record decodes to zero, which releases nothing.
 	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
-	// TaskRunSilentBaseAt is where the silent-fallback deadline measures from
-	// (#5221 review): the armed prompt boundary, or the runtime replacement
-	// that restarted the grace — a fresh pane gets its own boot window rather
-	// than inheriting a deadline already spent on the predecessor. Zero on
-	// decode falls back to the boundary itself.
-	TaskRunSilentBaseAt time.Time `json:"task_run_silent_base_at,omitzero"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle

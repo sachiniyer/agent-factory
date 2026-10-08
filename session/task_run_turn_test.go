@@ -326,7 +326,6 @@ func TestTaskRunLegacyRowAdoptsSessionBoundary(t *testing.T) {
 	// Simulate the pre-#5221 record: session-level evidence present, the
 	// task-scoped fields absent.
 	data.TaskRunPromptAttemptAt = time.Time{}
-	data.TaskRunPromptDeliveryStatus = ""
 	data.BackendType = "docker"
 
 	reloaded, err := FromInstanceData(data.ForStorage())
@@ -337,20 +336,18 @@ func TestTaskRunLegacyRowAdoptsSessionBoundary(t *testing.T) {
 	require.True(t, reloaded.taskRunTurnGateHeld)
 }
 
-// The session-level evidence a legacy row adopts is the SESSION's latest send —
-// possibly a manual one unrelated to the task's prompt. A failed manual send
-// must not migrate as the run's boundary: PromptNotDelivered is unsatisfiable,
-// so adoption coerces it to unverified and keeps the window releaseable
-// (#5221 review P2).
-func TestTaskRunLegacyFailedSendAdoptsAsUnverified(t *testing.T) {
+// The session-level evidence a legacy row adopts is the SESSION's latest
+// send — possibly a manual one unrelated to the task's prompt. The adopted
+// boundary stays releaseable by chrome or the arms rather than wedging on
+// evidence that may have nothing to do with the task's prompt.
+func TestTaskRunLegacyRowAdoptsLatestSessionSend(t *testing.T) {
 	inst := taskRunSession(t)
 	// Recent attempt — the upgrade window, not a drained one: an adopted
 	// boundary older than the silent grace would (correctly) release at once.
-	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
 
 	data := inst.ToInstanceData()
 	data.TaskRunPromptAttemptAt = time.Time{}
-	data.TaskRunPromptDeliveryStatus = ""
 	data.BackendType = "docker"
 
 	reloaded, err := FromInstanceData(data.ForStorage())
@@ -366,37 +363,23 @@ func TestTaskRunLegacyFailedSendAdoptsAsUnverified(t *testing.T) {
 	require.False(t, reloaded.TaskRunActive())
 }
 
-// A send that affirmatively failed delivery can never be satisfied by pane
-// activity: the prompt provably never landed, so no later churn is "the turn"
-// (#5221 review P1). The run stays open and flagged prompt-not-delivered
-// until a redelivery re-arms the boundary.
-func TestTaskRunPromptNotDeliveredNeverReleasedByChurn(t *testing.T) {
+// A send that affirmatively failed delivery does not arm the task boundary at
+// all — the pane provably took nothing, so there is no delivery window to
+// hold. The row still reads prompt-not-delivered from the session-level
+// evidence; the run itself ends on the idle edge exactly as it did before the
+// gate existed.
+func TestTaskRunFailedSendDoesNotArmTheBoundary(t *testing.T) {
 	inst := taskRunSession(t)
 
-	t0 := time.Now().Add(-2 * taskRunCompletionQuietGrace)
-	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0))
-
-	// Churn far past the quiet grace — spinner output, startup noise, anything
-	// — must not stand in for a turn on a prompt that never arrived.
-	_, epoch := inst.InFlightOpAndEpoch()
-	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(taskRunCompletionQuietGrace), epoch))
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.TaskRunActive(),
-		"proven non-delivery is unsatisfiable — the run stays open rather than completing on noise")
-	require.True(t, inst.taskRunTurnGateHeld)
+	require.False(t, inst.TaskRunActive(),
+		"an unarmed gate ends the run on the idle edge — master behavior on this seam")
 
 	reason, _ := inst.IdleReasonSnapshot()
 	require.Equal(t, IdleReasonPromptNotDelivered, reason,
-		"the row reads prompt-not-delivered — flagged, not silently wedged")
-
-	// The redelivery outcome: a later send re-arms the boundary, and ITS turn
-	// evidence completes the run.
-	t1 := time.Now().Add(-10 * time.Second)
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
-	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.False(t, inst.TaskRunActive())
+		"the row still reads prompt-not-delivered from the session-level status")
 }
 
 // The turn record latches within its window (#5221 review P2): once an
@@ -493,24 +476,24 @@ func TestTaskRunTurnEvidenceRequiresAnActiveRun(t *testing.T) {
 		"a session with no task run must not accumulate turn evidence")
 }
 
-// A runtime replacement clears pane-relative evidence but must keep the run's
-// own boundary: a replacement runtime still has to take the prompt's turn
-// before its first quiet tick may end the run. Otherwise the recovery path
-// recreates #5219 — the replacement boots, the poll settles Ready, and the
-// unarmed gate hands on_complete a session mid-boot (#5221 review P1).
-func TestTaskRunGateSurvivesRuntimeReplacement(t *testing.T) {
+// A runtime replacement retires the run's delivery evidence with the rest of
+// the retired runtime's pane facts: the replacement pane owns neither the
+// send it did not make nor the chrome it did not show, so the run's
+// remaining life follows the pane the same way it did before the gate
+// existed. The recovery-path window this leaves is tracked in the follow-up
+// issue for turn gating across replacement.
+func TestTaskRunGateDoesNotSurviveRuntimeReplacement(t *testing.T) {
 	inst := taskRunSession(t)
 	attemptedAt := time.Now()
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.taskRunTurnGateHeld, "precondition: the edge is held")
 
-	// The replacement chokepoint: pane-relative evidence retires, the run's
-	// boundary and any turn observation do not.
 	inst.ClearIdleEvidence()
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.TaskRunActive(),
-		"the replacement's first quiet tick must not end a run whose prompt was still unanswered")
-	require.True(t, inst.taskRunTurnGateHeld)
+	require.False(t, inst.TaskRunActive(),
+		"the gate is pane-relative evidence of the retired runtime — the replacement's first idle edge ends the run, as on master")
 }
 
 // A turn that fits entirely between two polls and leaves the pane byte-
@@ -548,114 +531,18 @@ func TestTaskRunSilentArmDoesNotRideOutBoot(t *testing.T) {
 		"no evidence at all is still not a turn — the run stays open inside the grace")
 }
 
-// A machinery send — the task's own prompt, a handoff or account-swap
-// mission, a limit-resume resend — asks for NEW work, so it re-arms the
-// window even after the previous turn already satisfied it (#5221 review P1).
-// Without that, a replacement runtime's first quiet tick would end the run on
-// the PREDECESSOR's turn evidence before the incoming agent took the
-// continuation.
-func TestTaskRunContinuationSendReArmsSatisfiedWindow(t *testing.T) {
+// A machinery resend of a satisfied window does not re-arm it (#5221 scope):
+// the boundary froze when the turn was taken, and the run completes on the
+// task's proven evidence — the same ending the run had before the gate
+// distinguished send origins.
+func TestTaskRunMachineryResendDoesNotRearmSatisfiedWindow(t *testing.T) {
 	inst := taskRunSession(t)
 	t0 := time.Now().Add(-time.Minute)
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
-	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
-
-	// The satisfied window would release the next idle edge — until a
-	// task-scoped send re-arms it.
-	t1 := time.Now()
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t1))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.TaskRunActive(),
-		"a continuation send starts a fresh window; the predecessor's turn cannot satisfy it")
-	require.True(t, inst.taskRunTurnGateHeld)
-
-	// And the new window takes its own turn evidence.
-	require.True(t, inst.RecordTaskRunTurn(t1.Add(3*time.Second)))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.False(t, inst.TaskRunActive())
-}
-
-// The re-arm privilege is scoped to task machinery: an operator's send after
-// satisfaction still cannot move the boundary, so interactive prompts cannot
-// hold the run open past its proven turn.
-func TestTaskRunManualSendStillFrozenAfterSatisfaction(t *testing.T) {
-	inst := taskRunSession(t)
-	t0 := time.Now().Add(-time.Minute)
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
 	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
 
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
-		"a manual send cannot re-arm a satisfied window — the run completes on the task's evidence")
-}
-
-// A machinery continuation send that comes back refused while the previous
-// window was satisfied must NOT leave the satisfied boundary standing — the
-// continuation never landed, so the predecessor's turn cannot carry the run
-// to completion (#5221 review P1, limit-resume resend path). The refused send
-// establishes a fresh unsatisfiable boundary: held, flagged, waiting on
-// redelivery.
-func TestTaskRunRefusedContinuationWedgesTheGate(t *testing.T) {
-	inst := taskRunSession(t)
-	t0 := time.Now().Add(-time.Minute)
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
-	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
-
-	// The continuation send is refused: the run must NOT complete on the
-	// predecessor's turn.
-	t1 := time.Now()
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptNotDelivered, t1))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.TaskRunActive(),
-		"a refused continuation wedges the gate — the predecessor's turn must not end the run")
-	require.True(t, inst.taskRunTurnGateHeld)
-
-	// Chrome cannot clear it; only a real redelivery re-arms the window.
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.TaskRunActive(), "an unsatisfiable boundary stays held")
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t1.Add(time.Second)))
-	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.False(t, inst.TaskRunActive())
-}
-
-// The same refused result from an OPERATOR send still cannot move a satisfied
-// boundary — the task's evidence, not the session's, decides the run.
-func TestTaskRunManualRefusedSendCannotWedge(t *testing.T) {
-	inst := taskRunSession(t)
-	t0 := time.Now().Add(-time.Minute)
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
-	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
-
-	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.False(t, inst.TaskRunActive(),
-		"a manual refused send leaves the satisfied boundary — the run completes on its turn")
-}
-
-// The unsatisfied-window twin of the refused-continuation wedge (#5221
-// review P1): a task at a limit wall before any turn is recorded still has
-// an unsatisfied boundary; a resumed machinery send that is refused must
-// replace the stale deliverable status with a fresh unsatisfiable boundary,
-// or old banner churn plus the quiet fallback would end the run although
-// the continuation never landed.
-func TestTaskRunRefusedContinuationWedgesUnsatisfiedWindow(t *testing.T) {
-	inst := taskRunSession(t)
-	t0 := time.Now().Add(-time.Minute)
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
-
-	// Old post-attempt churn exists — the quiet fallback's favorite trap.
-	inst.mu.Lock()
-	inst.lastPaneChurnAt = t0.Add(2 * time.Second)
-	inst.mu.Unlock()
-
-	require.True(t, inst.RecordTaskRunPromptAttempt(PromptNotDelivered, time.Now()))
-	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.TaskRunActive(),
-		"the refused resend must wedge the gate, not inherit a release path from stale churn")
-	require.True(t, inst.taskRunTurnGateHeld)
-	inst.mu.Lock()
-	require.Equal(t, PromptNotDelivered, inst.taskRunPromptDeliveryStatus)
-	inst.mu.Unlock()
+		"a satisfied window stays closed to every later send — machinery and manual alike")
 }

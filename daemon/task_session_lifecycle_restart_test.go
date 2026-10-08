@@ -262,7 +262,7 @@ func TestTaskSessionLifecycle_PreMarkerDeliveryRaceSurvivesAbortOnRestart(t *tes
 	// it — and nothing between the keystroke and the restart moves churn. The
 	// marker stayed pre-keystroke on durable state for the bug's guard to pass.
 	t0 := time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC)
-	inst.ReconcileIdleEvidence(time.Time{}, "", t0, time.Time{}, "", time.Time{}, time.Time{})
+	inst.ReconcileIdleEvidence(time.Time{}, "", t0, time.Time{}, time.Time{})
 
 	// The run ends on the paused tick: atRunEnd is pinned to deliveries=0,
 	// lastPaneChurnAt stays at T0, taskRunActive flips false.

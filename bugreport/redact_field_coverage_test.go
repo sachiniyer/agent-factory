@@ -106,7 +106,6 @@ var verbatimInstanceFields = map[string]string{
 
 	"IdleReason":                               "bounded IdleReason enum (#3168)",
 	"LastPromptDeliveryStatus":                 "bounded PromptDeliveryStatus enum (#3162)",
-	"TaskRunPromptDeliveryStatus":              "bounded PromptDeliveryStatus enum scoped to the task run's own send (#5219)",
 	"HandoffDeliveryStatus":                    "bounded PromptDeliveryStatus enum for mission-scoped retry evidence (#4018)",
 	"PendingAccountSwap.MissionDeliveryStatus": "bounded PromptDeliveryStatus enum tied to a pending handoff mission",
 	"LifecycleAction":                          "bounded LifecycleAction enum (\"archive\"/\"restore\")",

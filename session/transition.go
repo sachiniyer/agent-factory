@@ -706,7 +706,6 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 					// what let this edge end the run: the weaker signal, so name
 					// it in the log with the agent and the attempt's age (#5219).
 					if !i.taskRunPromptAttemptAt.IsZero() &&
-						i.taskRunPromptDeliveryStatus != PromptNotDelivered &&
 						!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) &&
 						(i.taskRunQuietReleaseLocked() || i.taskRunSilentReleaseLocked()) {
 						log.InfoLog.Printf(

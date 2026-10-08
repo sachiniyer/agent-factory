@@ -110,8 +110,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// on this row inherit a boundary it never crossed.
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
 		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
-		data.TaskRunPromptDeliveryStatus = i.taskRunPromptDeliveryStatus
-		data.TaskRunSilentBaseAt = i.taskRunSilentBaseAt
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -350,7 +348,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if data.UpdatedAt.IsZero() {
 		data.UpdatedAt = data.CreatedAt
 	}
-	taskRunAttemptAt, taskRunStatus := taskRunPromptBoundaryFromData(data)
+	taskRunAttemptAt := taskRunPromptAttemptAtFromData(data)
 	instance := &Instance{
 		ID:         id,
 		TaskID:     data.TaskID,
@@ -369,13 +367,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.
-		taskRunTurnObservedAt:       taskRunTurnObservedAtFromData(data),
-		taskRunPromptAttemptAt:      taskRunAttemptAt,
-		taskRunPromptDeliveryStatus: taskRunStatus,
-		// The silent grace's base follows the armed boundary: a stored base is
-		// trusted only for an active run; a legacy row without it measures from
-		// the adopted boundary, matching the pre-field behavior (#5221 review).
-		taskRunSilentBaseAt:      taskRunSilentBaseFromData(data, taskRunAttemptAt),
+		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
+		taskRunPromptAttemptAt:   taskRunAttemptAt,
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
