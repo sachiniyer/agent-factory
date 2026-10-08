@@ -599,8 +599,21 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 		// once per ambiguous file; a non-ambiguous file never pays for it, and a
 		// refusal returns before LoadConfig is called, so the typed read's
 		// deprecation warnings are not repeated by the load below.
-		if _, err := parseConfigForConversion(data, prettyPath); err != nil {
+		typedCfg, err := parseConfigForConversion(data, prettyPath)
+		if err != nil {
 			return nil
+		}
+		// A flat value the raw decode saw as divergent may resolve to the
+		// grouped value once the typed reader normalizes it. validateConfig
+		// repairs some flat values — an empty or invalid ssh_host_key_verification
+		// becomes "strict" — and the conversion writes that validated value into
+		// both spellings, so a flat that is raw-unequal to the grouped but
+		// validates to it writes the same effective value into both and is not a
+		// tie to break. Compare the typed, validated flat value against the
+		// grouped value (the null case is already normalized above) before
+		// reporting the ambiguity.
+		if typed, ok := typedAliasFlatValue(typedCfg, alias); ok && reflect.DeepEqual(typed, grouped) {
+			continue
 		}
 		return ambiguousLegacyJSONSpellingError(prettyPath, alias, flat, grouped)
 	}
@@ -626,6 +639,34 @@ func normalizeLegacyJSONNull(flat any, alias configKeyAlias) any {
 		return def
 	}
 	return flat
+}
+
+// typedAliasFlatValue returns the typed, validated value of one alias's legacy
+// flat field from cfg, in the shapeless-decoded form the ambiguity guard
+// compares (a bool as bool, a string as string, a string slice as []any). The
+// typed reader (parseConfigForConversion) runs validateConfig, so this is the
+// EFFECTIVE flat value the conversion writes into both spellings — not the raw
+// shapeless value, which may differ before validation (e.g. an empty
+// ssh_host_key_verification normalizes to "strict"). A false return leaves the
+// caller to compare the raw value.
+func typedAliasFlatValue(cfg *Config, alias configKeyAlias) (any, bool) {
+	field, ok := taggedFieldByKey(reflect.ValueOf(cfg), alias.legacy)
+	if !ok {
+		return nil, false
+	}
+	switch field.Kind() {
+	case reflect.Bool:
+		return field.Bool(), true
+	case reflect.String:
+		return field.String(), true
+	case reflect.Slice:
+		out := make([]any, field.Len())
+		for i := 0; i < field.Len(); i++ {
+			out[i] = field.Index(i).String()
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // defaultAliasValue returns the compiled-in default for one alias's legacy flat

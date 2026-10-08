@@ -423,6 +423,56 @@ func TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeComputingConversion(t *tes
 	assert.NoFileExists(t, filepath.Join(afHome, TomlConfigFileName), "no conversion ran")
 }
 
+// TestMigrateDoesNotRefuseLegacyJSONWhenFlatValidatesToGrouped pins the case a
+// raw DeepEqual gets wrong because the typed reader normalizes the flat value:
+// validateConfig repairs an empty or invalid ssh_host_key_verification to
+// "strict", so a flat "" or "bogus" against a grouped "strict" is raw-unequal
+// but the conversion writes the validated "strict" into both spellings — the
+// same effective value the grouped already carries, with no tie to break. The
+// guard compares the typed, validated flat value against the grouped value
+// before refusing, so the run converts instead. A flat that validates AWAY
+// from the grouped value is still a tie to break and is still refused.
+func TestMigrateDoesNotRefuseLegacyJSONWhenFlatValidatesToGrouped(t *testing.T) {
+	t.Run("empty flat normalizes to the strict grouped value", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"ssh_host_key_verification":"","ssh":{"host_key_verification":"strict"}}`)
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err, "an empty flat that validates to the grouped value is not a tie to break")
+		require.True(t, result.ConvertedFromJSON)
+		require.Len(t, result.Migrated, 1)
+		assert.True(t, result.Migrated[0].Redundant, "the flat validates to the grouped value, so they agree")
+
+		cfg, err := parseConfigTOML([]byte(readFile(t, filepath.Join(home, TomlConfigFileName))), filepath.Join(home, TomlConfigFileName))
+		require.NoError(t, err)
+		assert.Equal(t, SSHHostKeyStrict, cfg.SSHHostKeyVerification)
+	})
+
+	t.Run("invalid flat normalizes to the strict grouped value", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"ssh_host_key_verification":"bogus","ssh":{"host_key_verification":"strict"}}`)
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err, "an invalid flat that validates to the grouped value is not a tie to break")
+		require.True(t, result.ConvertedFromJSON)
+		require.Len(t, result.Migrated, 1)
+		assert.True(t, result.Migrated[0].Redundant)
+
+		cfg, err := parseConfigTOML([]byte(readFile(t, filepath.Join(home, TomlConfigFileName))), filepath.Join(home, TomlConfigFileName))
+		require.NoError(t, err)
+		assert.Equal(t, SSHHostKeyStrict, cfg.SSHHostKeyVerification)
+	})
+
+	t.Run("flat that validates away from the grouped value is still refused", func(t *testing.T) {
+		// "bogus" validates to "strict", which differs from the grouped
+		// "accept-new" the conversion would overwrite — a real tie to break.
+		seedJSONConfig(t, `{"ssh_host_key_verification":"bogus","ssh":{"host_key_verification":"accept-new"}}`)
+
+		_, err := MigrateGlobalConfig()
+		require.Error(t, err, "a flat that validates away from the grouped value still chooses between values")
+		assert.Contains(t, err.Error(), "Nothing was rewritten")
+		assert.Contains(t, err.Error(), `"ssh_host_key_verification"`, "the refusal names the flat spelling")
+	})
+}
+
 // TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig pins the other
 // divergence the finding named: json.Decoder.Decode (the shapeless read) stops
 // after the first object and ignores trailing garbage, while json.Unmarshal
