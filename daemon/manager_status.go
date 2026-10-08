@@ -314,13 +314,13 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 // separately, never nested, per pausedPolls' lock discipline.
 func (m *Manager) sweepTaskRunTurnWatches() {
 	m.pausedMu.Lock()
-	empty := len(m.taskRunTurnWatches) == 0
+	size := len(m.taskRunTurnWatches)
 	m.pausedMu.Unlock()
-	if empty {
+	if size == 0 {
 		return // nothing armed: skip the instance walk in the common case
 	}
 	m.mu.Lock()
-	live := make(map[string]struct{}, len(m.taskRunTurnWatches))
+	live := make(map[string]struct{}, size)
 	for key, inst := range m.instances {
 		if inst.TaskRunActive() {
 			repoID, _ := splitDaemonInstanceKey(key)
