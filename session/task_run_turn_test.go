@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,6 +134,44 @@ func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"post-attempt churn followed by a full grace of quiet may stand in for the chrome")
+}
+
+// A run completed by the quiet-fallback arm — no in-turn chrome ever seen —
+// must say so distinctly in the log, naming the agent and the attempt's age
+// (#5219). A chrome-released run must not carry the line.
+func TestTaskRunQuietFallbackReleaseLogsDistinctly(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.InfoLog.Writer()
+	log.InfoLog.SetOutput(&buf)
+	defer log.InfoLog.SetOutput(old)
+
+	inst := taskRunSession(t)
+	attemptedAt := time.Now().Add(-2 * taskRunCompletionQuietGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+
+	// Held while no evidence exists: the arm has not run, nothing logged.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive())
+	require.NotContains(t, buf.String(), "quiet fallback")
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+	out := buf.String()
+	require.Contains(t, out, "quiet fallback")
+	require.Contains(t, out, "agent=claude")
+	require.Contains(t, out, "elapsed_since_attempt=")
+
+	// In-turn chrome releases through the strong arm instead — no line.
+	chrome := taskRunSession(t)
+	attemptedAt = time.Now().Add(-10 * time.Second)
+	require.True(t, chrome.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.True(t, chrome.RecordTaskRunTurn(attemptedAt.Add(4*time.Second)))
+	buf.Reset()
+	require.NoError(t, chrome.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, chrome.TaskRunActive())
+	require.NotContains(t, buf.String(), "quiet fallback")
 }
 
 // A held edge is released while the session stays Ready: the paused poll path

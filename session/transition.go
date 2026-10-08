@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The lifecycle transition chokepoint (#1195 Phase 2c).
@@ -698,6 +700,18 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 						i.touchLocked()
 					}
 				case from.liveness != LiveReady || i.taskRunIdleEdgeHeld:
+					// The gate just opened. If no in-turn chrome was observed,
+					// the quiet-fallback arm — churn plus sustained silence — is
+					// what let this edge end the run: the weaker signal, so name
+					// it in the log with the agent and the attempt's age (#5219).
+					if !i.lastPromptAttemptAt.IsZero() &&
+						!i.taskRunTurnObservedAt.After(i.lastPromptAttemptAt) &&
+						i.taskRunQuietReleaseLocked() {
+						log.InfoLog.Printf(
+							"task run for session %q completed on the quiet fallback (no in-turn chrome observed): agent=%s elapsed_since_attempt=%s",
+							i.Title, i.currentAgentNameLocked(),
+							time.Since(i.lastPromptAttemptAt).Round(time.Second))
+					}
 					i.taskRunActive = false
 					i.taskRunIdleEdgeHeld = false
 					i.touchLocked()

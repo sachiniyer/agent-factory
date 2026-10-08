@@ -258,11 +258,20 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 	if i.taskRunTurnObservedAt.After(i.lastPromptAttemptAt) {
 		return false
 	}
-	if i.lastPaneChurnAt.After(i.lastPromptAttemptAt) &&
-		time.Since(i.lastPaneChurnAt) >= taskRunCompletionQuietGrace {
-		return false
-	}
-	return true
+	return !i.taskRunQuietReleaseLocked()
+}
+
+// taskRunQuietReleaseLocked reports whether the completion gate is satisfied
+// by the fallback arm alone: post-attempt pane churn followed by silence
+// longer than the completion grace. Satisfied here never means the agent
+// demonstrably took the turn — only that a boot or echo burst had time to
+// finish. The transition log names this arm distinctly so a run completed on
+// it reads differently from one released by in-turn chrome (#5219).
+//
+// Caller holds i.mu.
+func (i *Instance) taskRunQuietReleaseLocked() bool {
+	return i.lastPaneChurnAt.After(i.lastPromptAttemptAt) &&
+		time.Since(i.lastPaneChurnAt) >= taskRunCompletionQuietGrace
 }
 
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.
