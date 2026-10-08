@@ -77,6 +77,16 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	// in place, the same outcome the TOML path gives the same content (#3653
 	// review).
 	if converting {
+		// A DANGLING config.toml symlink reads as ENOENT through fileExists
+		// (Stat follows the link), so a real, ambiguous config.json beside it
+		// reaches the JSON guard below and reports the ambiguity first,
+		// directing the operator at a file the broken canonical link ignores.
+		// LoadConfig refuses the dangling link before considering JSON for the
+		// same reason (#3660 review); do the same here so the both-ends error
+		// wins, not the remedy for an ignored JSON file.
+		if err := refuseDanglingConfigLink(tomlPath); err != nil {
+			return nil, err
+		}
 		if err := refuseAmbiguousLegacyJSON(configPath, prettyHomePath(configPath)); err != nil {
 			return nil, err
 		}

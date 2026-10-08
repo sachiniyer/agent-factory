@@ -180,6 +180,49 @@ func TestMigrateAmbiguousLegacyJSONTypeMismatchDefersToLoadConfig(t *testing.T) 
 		"a parse failure writes nothing")
 }
 
+// TestMigrateAmbiguousJSONWithDanglingTomlLinkRefusesTheLink pins the case the
+// dangling-symlink guard was added for: a config.toml that is a symlink to a
+// missing target reads as ENOENT through fileExists (Stat follows the link),
+// so a real, ambiguous config.json beside it would reach the JSON guard first
+// and report the ambiguity — directing the operator at an ignored JSON file
+// while the broken canonical link is the actual problem. LoadConfig refuses the
+// dangling link before considering JSON (#3660 review); the pre-check does the
+// same, so the both-ends link error wins over the JSON ambiguity remedy.
+func TestMigrateAmbiguousJSONWithDanglingTomlLinkRefusesTheLink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+
+	// A real, ambiguous config.json.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(home, ConfigFileName),
+		[]byte(`{"listen_addr":"0.0.0.0:8443","network":{"listen_addr":"127.0.0.1:8443"}}`),
+		0o644,
+	))
+
+	// A config.toml that is a symlink to a missing target — the dotfiles-repo
+	// shape with a moved or deleted canonical file.
+	missing := filepath.Join(t.TempDir(), "gone.toml")
+	tomlLink := filepath.Join(home, TomlConfigFileName)
+	require.NoError(t, os.Symlink(missing, tomlLink))
+
+	_, err := MigrateGlobalConfig()
+	require.Error(t, err, "a dangling canonical link is refused, not masked by the JSON guard")
+	assert.Contains(t, err.Error(), "symlink", "the dangling link is named, not the JSON ambiguity")
+	assert.Contains(t, err.Error(), "cannot be resolved",
+		"the both-ends link error from refuseDanglingConfigLink is reported")
+	assert.NotContains(t, err.Error(), "both set, to different values",
+		"the JSON ambiguity remedy is not offered when the canonical link is broken")
+
+	// Neither file was rewritten: the JSON guard never ran past the link check,
+	// and the dangling link itself was left alone.
+	assert.Equal(t, `{"listen_addr":"0.0.0.0:8443","network":{"listen_addr":"127.0.0.1:8443"}}`,
+		readFile(t, filepath.Join(home, ConfigFileName)), "config.json is left exactly as it was")
+	info, lerr := os.Lstat(tomlLink)
+	require.NoError(t, lerr)
+	assert.True(t, info.Mode()&os.ModeSymlink != 0, "the dangling symlink is left in place")
+}
+
 // TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig pins the other
 // divergence the finding named: json.Decoder.Decode (the shapeless read) stops
 // after the first object and ignores trailing garbage, while json.Unmarshal
