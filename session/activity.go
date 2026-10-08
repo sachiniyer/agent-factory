@@ -284,7 +284,13 @@ func (v LifecycleView) Activity() Activity {
 // row whose relocation-recovery metadata is undecodable cannot be materialized by
 // the loader at all, so it is not a row whose run has settled; LoadedActivity
 // reports ActivityPending for it rather than guessing terminal and letting a
-// replacement past the cap while the real verdict is unknown.
+// replacement past the cap while the real verdict is unknown. A committed kill
+// (UserKilled) is the one exception: it is a definitive terminal marker the loader
+// honors before any fence (ClassifyActivity returns terminal for it first), so a
+// tombstoned row whose relocation recovery is undecodable still releases — the
+// sandbox arm of rawTaskRunHoldsSlot delegates to LoadedActivity instead of the
+// raw UserKilled guard, so honoring the tombstone here is what keeps the kill
+// terminal on the raw path too.
 //
 // The loaded form's activity is computed from the InFlightOp FromInstanceData
 // reconstructs, NOT from the raw PendingHandoffMission. ClassifyActivity on a raw
@@ -307,6 +313,16 @@ func (v LifecycleView) Activity() Activity {
 // would read the stored LiveRunning as ActivityPending and hold a slot its
 // materialized form releases, wedging the cap on the common pre-restart record.
 func LoadedActivity(data InstanceData) (Activity, string) {
+	// A committed kill is terminal even when a rollback fence or undecodable
+	// relocation-recovery record would otherwise leave the verdict unknown.
+	// ClassifyActivity honors UserKilled before any fence (it returns terminal
+	// first), and the sandbox arm of rawTaskRunHoldsSlot now routes through
+	// LoadedActivity instead of the raw UserKilled guard, so this check is what
+	// keeps a tombstoned sandbox ghost — including one whose relocation recovery
+	// cannot be decoded — terminal on the raw path instead of wedging the cap.
+	if data.UserKilled {
+		return ActivityTerminal, "session was killed and its teardown is pending"
+	}
 	data = data.RestoreArchiveRollbackFence()
 	restored, err := data.RestoreRelocationRecoveryOriginals()
 	if err != nil {

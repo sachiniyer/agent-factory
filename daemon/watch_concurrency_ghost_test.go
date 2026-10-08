@@ -844,3 +844,40 @@ func TestSandboxLostGhostWithUndecodableRelocationRecoveryHoldsTaskRunSlot(t *te
 		})
 	}
 }
+
+// TestSandboxLostGhostWithUserKilledAndUndecodableRelocationReleasesTaskRunSlot
+// covers the kill tombstone (#1108) on a sandbox row whose relocation-recovery
+// metadata cannot be decoded. An undecodable relocation record is otherwise held
+// conservatively (TestSandboxLostGhostWithUndecodableRelocationRecoveryHoldsTaskRunSlot),
+// but a committed kill is a definitive terminal marker the loader honors before
+// any fence: ClassifyActivity returns terminal for UserKilled first, and the
+// sandbox arm of rawTaskRunHoldsSlot now routes through LoadedActivity instead of
+// the raw UserKilled guard, so LoadedActivity must honor the tombstone before the
+// relocation-error early return — or the tombstoned ghost holds the slot forever
+// (it cannot materialize to run finishUserKill and clear the stale TaskRunActive).
+func TestSandboxLostGhostWithUserKilledAndUndecodableRelocationReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			row := session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				Liveness:      session.LiveLost,
+				UserKilled:    true,
+				BackendType:   backend,
+				Worktree: session.GitWorktreeData{
+					// A non-nil recovery whose original ownership fields are missing
+					// is exactly the shape RestoreRelocationRecoveryOriginals refuses.
+					RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+				},
+			}
+			activity, _ := session.LoadedActivity(row)
+			if activity != session.ActivityTerminal {
+				t.Fatalf("LoadedActivity reported %v for a %s row with a committed kill and undecodable relocation recovery; UserKilled is terminal before the relocation verdict, so the tombstone must release", activity, backend)
+			}
+			if rawTaskRunHoldsSlot(row) {
+				t.Fatalf("rawTaskRunHoldsSlot held a %s row with a committed kill and undecodable relocation recovery; the kill tombstone is terminal, so the raw arm must release it", backend)
+			}
+		})
+	}
+}
