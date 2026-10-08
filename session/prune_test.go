@@ -167,7 +167,8 @@ func TestArchivedAtRoundTrip(t *testing.T) {
 
 	inst, err := FromInstanceData(data)
 	require.NoError(t, err)
-	require.Equal(t, archived, inst.ArchivedAt())
+	require.True(t, archived.Equal(inst.ArchivedAt()),
+		"require.Equal is DeepEqual — it compares the location pointer too, so this fails off-UTC")
 
 	storedPayload, err := json.Marshal(inst.ToInstanceData().ForStorage())
 	require.NoError(t, err)
@@ -178,7 +179,8 @@ func TestArchivedAtRoundTrip(t *testing.T) {
 
 	reloaded, err := FromInstanceData(decoded)
 	require.NoError(t, err)
-	require.Equal(t, archived, reloaded.ArchivedAt(), "the shelf time must survive a daemon reload")
+	require.True(t, archived.Equal(reloaded.ArchivedAt()),
+		"the shelf time must survive a daemon reload — JSON decodes to UTC, so compare instants not locations")
 }
 
 func TestArchiveTimeForFallbackOrder(t *testing.T) {

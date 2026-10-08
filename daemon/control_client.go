@@ -601,9 +601,14 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 // PruneSessions asks the daemon to evaluate archived sessions against a
 // prune request (#5136). Slice 1 is strictly read-only — a dry-run listing of
 // the reclaimable sessions; the apply call lands in the follow-up issue.
+//
+// The read must NOT spawn a daemon (#5136 Codex round 6): a launch writes
+// sockets, locks, and logs and runs session recovery — far more side effects
+// than a listing justifies. callDaemonNoEnsure dials the existing socket only
+// and reports ErrDaemonUnavailable when none is serving.
 func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
 	var resp PruneSessionsResponse
-	if err := callDaemon("PruneSessions", req, &resp); err != nil {
+	if err := callDaemonNoEnsure("PruneSessions", req, &resp); err != nil {
 		return PruneSessionsResponse{}, err
 	}
 	return resp, nil

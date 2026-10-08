@@ -287,7 +287,12 @@ func TestPruneSessions_RefusesSameRepoReplacementOccupant(t *testing.T) {
 	// The real archive is gone and a same-repo worktree on a DIFFERENT branch
 	// now occupies its recorded path — exactly the replacement scenario.
 	require.NoError(t, os.RemoveAll(archivedPath))
-	out, err := exec.Command("git", "-C", repoPath, "worktree", "add",
+	// --expire=now drops the stale registration on every git vintage —
+	// without it some versions refuse the re-add with "missing but already
+	// registered" (#5136 CI failure).
+	out, err := exec.Command("git", "-C", repoPath, "worktree", "prune", "--expire=now").CombinedOutput()
+	require.NoError(t, err, string(out))
+	out, err = exec.Command("git", "-C", repoPath, "worktree", "add",
 		"-b", "af/someone-else", archivedPath).CombinedOutput()
 	require.NoError(t, err, string(out))
 	require.NoError(t, os.WriteFile(

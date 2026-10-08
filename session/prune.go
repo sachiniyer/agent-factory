@@ -115,10 +115,37 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 // worktree deleted out-of-band is "already reclaimed", not an error — while
 // every other failure is reported so the dry-run total cannot silently
 // understate what a later --apply would reclaim.
+// dirSizeMeasureTimeout bounds one walk: an archived tree on a stalled
+// FUSE/NFS mount would otherwise park a WalkDir (or a DirEntry.Info lstat) in
+// an uninterruptible syscall forever, and the prune listing would never reach
+// the next candidate or return to the CLI (#5136 Codex round 6). On expiry the
+// partial total returns with a timeout error so the caller can warn — the
+// abandoned goroutine leaks one walk, the same tradeoff the bounded pointer
+// checks already make for a stuck mount.
+const dirSizeMeasureTimeout = 10 * time.Second
+
 func DirSizeBytes(root string) (int64, error) {
 	if root == "" {
 		return 0, nil
 	}
+	type result struct {
+		total int64
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		total, err := dirSizeWalk(root)
+		done <- result{total, err}
+	}()
+	select {
+	case r := <-done:
+		return r.total, r.err
+	case <-time.After(dirSizeMeasureTimeout):
+		return 0, fmt.Errorf("measuring %s timed out after %s — the filesystem is likely stalled", root, dirSizeMeasureTimeout)
+	}
+}
+
+func dirSizeWalk(root string) (int64, error) {
 	var total int64
 	var firstErr error
 	// inoKey → {blocks, nlink, links seen in-tree}. Only populated for

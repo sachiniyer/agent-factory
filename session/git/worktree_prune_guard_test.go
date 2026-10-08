@@ -75,6 +75,38 @@ func TestWorktreeDirtyFiles_CountsIgnored(t *testing.T) {
 	assert.Greater(t, n, 0, "an ignored file is the only copy — it must read dirty")
 }
 
+// TestWorktreeDirtyFiles_DisablesFsmonitor: --no-optional-locks does NOT stop
+// `git status` consulting a configured core.fsmonitor hook or builtin monitor
+// — that consultation can spawn the monitor or write its cookie, a write a
+// read-only probe must not cause (#5136 Codex round 6). The invocation
+// carries `-c core.fsmonitor=` so a configured hook never runs; the marker
+// file is the observable proof.
+func TestWorktreeDirtyFiles_DisablesFsmonitor(t *testing.T) {
+	repo := newPruneGuardRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/fsm", wt).Run())
+
+	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
+	hook := filepath.Join(t.TempDir(), "fsm-hook.sh")
+	require.NoError(t, os.WriteFile(hook, []byte(
+		"#!/bin/sh\necho ran >> \""+marker+"\"\nprintf '2\\n\\n\\n'\n"), 0o755))
+	require.NoError(t, exec.Command("git", "-C", repo, "config", "core.fsmonitor", hook).Run())
+
+	// Precondition: a status WITHOUT the override invokes the hook — the
+	// fixture has to prove it can observe the write it is testing for.
+	plain := exec.Command("git", "-C", wt, "status", "--porcelain")
+	require.NoError(t, plain.Run())
+	_, err := os.Stat(marker)
+	require.NoError(t, err, "the fixture must prove a configured hook fires")
+	require.NoError(t, os.Remove(marker))
+
+	n, err := WorktreeDirtyFiles(wt)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	_, statErr := os.Stat(marker)
+	assert.Error(t, statErr, "the read-only probe must never invoke the fsmonitor hook")
+}
+
 // TestVerifyRegisteredWorktreeOccupantBranch pins the session-identity half:
 // the pointer proves same-repo, and the branch proves THIS session — a
 // same-repo worktree on a different branch parked at a recycled path is a

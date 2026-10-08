@@ -37,8 +37,12 @@ func WorktreeDirtyFiles(worktreePath string) (int, error) {
 	// status` opportunistically rewrites the worktree index's stat cache,
 	// which would break slice 1's "the dry run writes nothing, anywhere"
 	// promise (#5136 — the AF-home/archive byte-identical guarantee extends
-	// to the repo's .git too).
+	// to the repo's .git too). core.fsmonitor is unset explicitly: the lock
+	// hint does NOT stop status consulting a configured fsmonitor hook or
+	// builtin daemon, and that consultation can spawn the monitor or write
+	// its cookie — a write this probe must not cause (#5136 Codex round 6).
 	out, err := runBoundedWorktreeGit(worktreePath, false, "--no-optional-locks",
+		"-c", "core.fsmonitor=",
 		"status", "--porcelain", "--untracked-files=normal", "--ignored")
 	if err != nil {
 		return 0, err

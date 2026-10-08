@@ -2063,6 +2063,10 @@ Bytes are ALLOCATED disk space (what rm -rf would free), not apparent file
 size — sparse holes and hard links whose other end lives outside the tree are
 not counted.
 
+The listing reads the running daemon's in-flight claims and will not spawn
+one — a read must not write even a socket or a log. With no daemon up it
+refuses with guidance; pass --daemon-url or start af first.
+
 ```
 af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
 ```

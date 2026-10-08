@@ -256,3 +256,21 @@ func TestSessionsPrune_SurfacesDaemonError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a positive Go duration")
 }
+
+// TestSessionsPrune_DaemonUnavailableIsAnActionableError: a read-only listing
+// must not launch a daemon (#5136 Codex round 6) — the socket dial itself is
+// what stays write-free. With none running, the command refuses with guidance
+// rather than spawning one or printing a bare socket error.
+func TestSessionsPrune_DaemonUnavailableIsAnActionableError(t *testing.T) {
+	setupRepoForCmd(t)
+	resetPruneFlags(t)
+	sessionsPruneOlderThanStr = "720h"
+	stubPruneDaemon(t, func(daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
+		return daemon.PruneSessionsResponse{}, daemon.ErrDaemonUnavailable
+	})
+
+	_, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no daemon is running")
+	assert.Contains(t, err.Error(), "--daemon-url")
+}
