@@ -239,7 +239,10 @@ func TestTaskSessionLifecycle_DeliveryWindowIdleDoesNotFileOnComplete(t *testing
 	stubTaskLifecycle(t, "task-archive", task.OnCompleteArchive)
 
 	// The task prompt send returned sent-unverified; no pane change since.
-	attemptedAt := time.Now()
+	// The attempt is backdated so the +6s boot churn below lands in the PAST:
+	// the adoption guard stands the teardown down when lastPaneChurnAt postdates
+	// the filed obligation, and a future-dated churn stamp would fake that.
+	attemptedAt := time.Now().Add(-10 * time.Second)
 	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, attemptedAt))
 
 	was := inst.TaskRunActive()

@@ -75,7 +75,10 @@ func TestTaskRunIdleEdgeHeldDuringDeliveryWindow(t *testing.T) {
 func TestTaskRunBootChurnDoesNotReleaseTheHold(t *testing.T) {
 	inst := taskRunSession(t)
 
-	attemptedAt := time.Now()
+	// Backdate the attempt so the +6s churn lands in the past — evidence
+	// stamps are wall-clock and a future timestamp would read as activity that
+	// postdates obligations filed later (the lifecycle adoption guard).
+	attemptedAt := time.Now().Add(-10 * time.Second)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
 
 	// Post-send pane churn from echo/boot, only seconds after the send —
@@ -99,7 +102,7 @@ func TestTaskRunBootChurnDoesNotReleaseTheHold(t *testing.T) {
 func TestTaskRunIdleEdgeAfterTurnChromeEndsRun(t *testing.T) {
 	inst := taskRunSession(t)
 
-	attemptedAt := time.Now()
+	attemptedAt := time.Now().Add(-10 * time.Second)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
 
 	// The poll's chrome watcher saw the elapsed-timer row tick — the same
@@ -138,7 +141,7 @@ func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
 func TestTaskRunHeldEdgeReleasedByReadyToReadyTurn(t *testing.T) {
 	inst := taskRunSession(t)
 
-	attemptedAt := time.Now()
+	attemptedAt := time.Now().Add(-10 * time.Second)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(), "precondition: the delivery-window edge was held")
@@ -159,7 +162,7 @@ func TestTaskRunHeldEdgeReleasedByReadyToReadyTurn(t *testing.T) {
 func TestTaskRunIdleEdgeIgnoresPreAttemptEvidence(t *testing.T) {
 	inst := taskRunSession(t)
 
-	boot := time.Now()
+	boot := time.Now().Add(-time.Minute)
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(boot, epoch),
 		"precondition: boot output recorded before the prompt send")
