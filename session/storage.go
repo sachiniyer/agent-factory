@@ -176,6 +176,12 @@ type InstanceData struct {
 	// reopen the delivery window an observation already closed. omitempty +
 	// additive: an older record decodes to zero, which releases nothing.
 	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
+	// TaskRunSilentBaseAt is where the silent-fallback deadline measures from
+	// (#5221 review): the armed prompt boundary, or the runtime replacement
+	// that restarted the grace — a fresh pane gets its own boot window rather
+	// than inheriting a deadline already spent on the predecessor. Zero on
+	// decode falls back to the boundary itself.
+	TaskRunSilentBaseAt time.Time `json:"task_run_silent_base_at,omitzero"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle

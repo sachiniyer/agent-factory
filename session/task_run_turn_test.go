@@ -547,3 +547,45 @@ func TestTaskRunSilentArmDoesNotRideOutBoot(t *testing.T) {
 	require.True(t, inst.TaskRunActive(),
 		"no evidence at all is still not a turn — the run stays open inside the grace")
 }
+
+// A machinery send — the task's own prompt, a handoff or account-swap
+// mission, a limit-resume resend — asks for NEW work, so it re-arms the
+// window even after the previous turn already satisfied it (#5221 review P1).
+// Without that, a replacement runtime's first quiet tick would end the run on
+// the PREDECESSOR's turn evidence before the incoming agent took the
+// continuation.
+func TestTaskRunContinuationSendReArmsSatisfiedWindow(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
+
+	// The satisfied window would release the next idle edge — until a
+	// task-scoped send re-arms it.
+	t1 := time.Now()
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t1))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"a continuation send starts a fresh window; the predecessor's turn cannot satisfy it")
+	require.True(t, inst.taskRunTurnGateHeld)
+
+	// And the new window takes its own turn evidence.
+	require.True(t, inst.RecordTaskRunTurn(t1.Add(3*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+}
+
+// The re-arm privilege is scoped to task machinery: an operator's send after
+// satisfaction still cannot move the boundary, so interactive prompts cannot
+// hold the run open past its proven turn.
+func TestTaskRunManualSendStillFrozenAfterSatisfaction(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
+
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"a manual send cannot re-arm a satisfied window — the run completes on the task's evidence")
+}

@@ -73,20 +73,30 @@ func IdleReasonFor(data InstanceData) IdleReason {
 		return IdleReasonRecreatePending
 	}
 
-	if data.LastPromptAttemptAt.IsZero() {
+	attemptAt, status, churnAt :=
+		data.LastPromptAttemptAt, data.LastPromptDeliveryStatus, data.LastPaneChurnAt
+	if attemptAt.IsZero() && data.TaskRunActive && !data.TaskRunPromptAttemptAt.IsZero() {
+		// The run's own boundary survives a runtime replacement while the
+		// pane-relative session evidence does not — derive the reason from the
+		// gate still holding the row, or a retained PromptNotDelivered would
+		// sit Ready consuming its slot with no diagnostic at all (#5221 review).
+		attemptAt, status, churnAt =
+			data.TaskRunPromptAttemptAt, data.TaskRunPromptDeliveryStatus, time.Time{}
+	}
+	if attemptAt.IsZero() {
 		return IdleReasonNone
 	}
-	if data.LastPromptDeliveryStatus == PromptNotDelivered {
+	if status == PromptNotDelivered {
 		return IdleReasonPromptNotDelivered
 	}
-	switch data.LastPromptDeliveryStatus {
+	switch status {
 	case PromptSentUnverified, PromptCouldNotConfirm:
-		if data.LastPaneChurnAt.After(data.LastPromptAttemptAt) {
+		if churnAt.After(attemptAt) {
 			return IdleReasonSettledAfterPaneChange
 		}
 		return IdleReasonDeliveryUnconfirmed
 	case PromptDelivered:
-		if data.LastPaneChurnAt.After(data.LastPromptAttemptAt) {
+		if churnAt.After(attemptAt) {
 			return IdleReasonSettledAfterPaneChange
 		}
 		return IdleReasonNoPaneChangeSinceDelivery
@@ -125,7 +135,19 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.recordPromptAttemptLocked(status, attemptedAt)
+	return i.recordPromptAttemptLocked(status, attemptedAt, false)
+}
+
+// RecordTaskRunPromptAttempt is the task-scoped form: the send speaks for the
+// task's own machinery (the run's prompt, a handoff or account-swap mission,
+// a limit-resume resend), so it may re-arm a satisfied window (#5221 review).
+func (i *Instance) RecordTaskRunPromptAttempt(status PromptDeliveryStatus, attemptedAt time.Time) bool {
+	if attemptedAt.IsZero() {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.recordPromptAttemptLocked(status, attemptedAt, true)
 }
 
 // recordPromptAttemptForObservation commits only while runtime still owns the
@@ -135,6 +157,7 @@ func (i *Instance) recordPromptAttemptForObservation(
 	status PromptDeliveryStatus,
 	attemptedAt time.Time,
 	runtime *agentObservationRuntime,
+	taskScoped bool,
 ) bool {
 	if attemptedAt.IsZero() {
 		return false
@@ -144,11 +167,17 @@ func (i *Instance) recordPromptAttemptForObservation(
 	if i.agentObservation != runtime {
 		return false
 	}
-	return i.recordPromptAttemptLocked(status, attemptedAt)
+	return i.recordPromptAttemptLocked(status, attemptedAt, taskScoped)
 }
 
-// recordPromptAttemptLocked stores a prompt boundary. Caller holds i.mu.
-func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time) bool {
+// recordPromptAttemptLocked stores a prompt boundary. rearmTaskRun marks a
+// send that speaks for the task itself — the task's own prompt, a handoff or
+// account-swap mission, a limit-resume resend — which may re-arm even a
+// satisfied window because the machinery just asked for NEW work (#5221
+// review). An operator's manual send never carries it: once the run's turn was
+// taken, interactive prompts are the user's business, not the task's. Caller
+// holds i.mu.
+func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time, rearmTaskRun bool) bool {
 	if !status.Valid() {
 		status = PromptCouldNotConfirm
 	}
@@ -177,9 +206,14 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if i.taskRunActive &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			(status != PromptNotDelivered &&
-				!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt))) {
+				(rearmTaskRun || !i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)))) {
 		i.taskRunPromptAttemptAt = attemptedAt
 		i.taskRunPromptDeliveryStatus = status
+		// The silent grace is measured from each armed boundary — and restarted
+		// by runtime replacement (ClearIdleEvidence) — never from the run's
+		// original send, or a recovered pane would inherit a spent deadline
+		// (#5221 review).
+		i.taskRunSilentBaseAt = attemptedAt
 	}
 	i.touchLocked()
 	i.stateEpoch++
@@ -332,7 +366,17 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunSilentReleaseLocked() bool {
-	return time.Since(i.taskRunPromptAttemptAt) >= taskRunCompletionSilentGrace
+	if i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt) {
+		// Post-boundary churn means the pane IS answering — that run belongs to
+		// the quiet arm, which demands its own 30s of silence after the last
+		// output. The silent arm is only for a pane that never moved at all.
+		return false
+	}
+	base := i.taskRunSilentBaseAt
+	if base.IsZero() {
+		base = i.taskRunPromptAttemptAt
+	}
+	return time.Since(base) >= taskRunCompletionSilentGrace
 }
 
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.
@@ -351,6 +395,12 @@ func (i *Instance) ClearIdleEvidence() bool {
 	// cleared here, its first quiet Ready tick would end a run whose turn never
 	// visibly began — the original bug through the recovery path (#5221 review).
 	// The churn/quiet evidence above is pane-relative and must still reset.
+	// The SILENT grace restarts with the new runtime though — it exists for a
+	// pane that never moved, and a fresh pane has not had its own window yet.
+	if i.taskRunActive && !i.taskRunPromptAttemptAt.IsZero() {
+		i.taskRunSilentBaseAt = time.Now()
+		changed = true
+	}
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
 	// serialization domain instead of making replacement delivery wait for it;
 	// the generation invalidation fences daemon-owned side effects while the epoch
@@ -390,7 +440,7 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 // It applies both directions because runtime replacement can clear or replace
 // the evidence, and the daemon snapshot is authoritative for all six fields.
 func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDeliveryStatus, churnAt,
-	taskAttemptAt time.Time, taskStatus PromptDeliveryStatus, turnAt time.Time) bool {
+	taskAttemptAt time.Time, taskStatus PromptDeliveryStatus, turnAt, silentBaseAt time.Time) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.lastPromptAttemptAt.Equal(attemptedAt) &&
@@ -398,7 +448,8 @@ func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDel
 		i.lastPaneChurnAt.Equal(churnAt) &&
 		i.taskRunPromptAttemptAt.Equal(taskAttemptAt) &&
 		i.taskRunPromptDeliveryStatus == taskStatus &&
-		i.taskRunTurnObservedAt.Equal(turnAt) {
+		i.taskRunTurnObservedAt.Equal(turnAt) &&
+		i.taskRunSilentBaseAt.Equal(silentBaseAt) {
 		return false
 	}
 	i.lastPromptAttemptAt = attemptedAt
@@ -407,6 +458,7 @@ func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDel
 	i.taskRunPromptAttemptAt = taskAttemptAt
 	i.taskRunPromptDeliveryStatus = taskStatus
 	i.taskRunTurnObservedAt = turnAt
+	i.taskRunSilentBaseAt = silentBaseAt
 	i.touchLocked()
 	return true
 }
@@ -467,6 +519,19 @@ func taskRunPromptBoundaryFromData(data InstanceData) (time.Time, PromptDelivery
 	return data.TaskRunPromptAttemptAt, data.TaskRunPromptDeliveryStatus
 }
 
+// taskRunSilentBaseFromData restores the silent grace's measuring point for an
+// active run: the persisted base when present, else the adopted boundary —
+// the value pre-field records behaved as (#5221 review).
+func taskRunSilentBaseFromData(data InstanceData, boundary time.Time) time.Time {
+	if !data.TaskRunActive {
+		return time.Time{}
+	}
+	if data.TaskRunSilentBaseAt.IsZero() {
+		return boundary
+	}
+	return data.TaskRunSilentBaseAt
+}
+
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in
 // one lock hold for row renderers.
 func (i *Instance) IdleReasonSnapshot() (IdleReason, time.Time) {
@@ -488,6 +553,13 @@ func (i *Instance) IdleReasonDetailSnapshot() (IdleReason, *LostRestoreFailure, 
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
+		// The task-scoped fields feed IdleReasonFor's gate fallback: after a
+		// runtime replacement the session-level evidence is gone but the run's
+		// own boundary still holds — its status is the row's only diagnostic
+		// (#5221 review).
+		TaskRunActive:               i.taskRunActive,
+		TaskRunPromptAttemptAt:      i.taskRunPromptAttemptAt,
+		TaskRunPromptDeliveryStatus: i.taskRunPromptDeliveryStatus,
 	}
 	return IdleReasonFor(data), cloneLostRestoreFailure(i.lostRestoreFailure), i.lastPaneChurnAt
 }

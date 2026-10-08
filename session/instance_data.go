@@ -111,6 +111,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
 		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
 		data.TaskRunPromptDeliveryStatus = i.taskRunPromptDeliveryStatus
+		data.TaskRunSilentBaseAt = i.taskRunSilentBaseAt
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -371,33 +372,37 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		taskRunTurnObservedAt:       taskRunTurnObservedAtFromData(data),
 		taskRunPromptAttemptAt:      taskRunAttemptAt,
 		taskRunPromptDeliveryStatus: taskRunStatus,
-		limitResetAt:                data.LimitResetAt,
-		limitAgent:                  limitAgent,
-		limitAccount:                limitAccount,
-		accountLimitObservations:    accountLimitObservations,
-		agentModelChange:            agentModelChangeForLiveness(data.ModelChange, liveness),
-		archiveWarning:              data.ArchiveWarning,
-		lostRestoreFailure:          lostRestoreFailureFromData(data.LostRestoreFailure),
-		lastPromptAttemptAt:         data.LastPromptAttemptAt,
-		lastPromptDeliveryStatus:    data.LastPromptDeliveryStatus,
-		lastPaneChurnAt:             data.LastPaneChurnAt,
-		Height:                      data.Height,
-		Width:                       data.Width,
-		CreatedAt:                   data.CreatedAt,
-		UpdatedAt:                   data.UpdatedAt,
-		Program:                     data.Program,
-		runtimeProgram:              data.RuntimeProgram,
-		runtimePID:                  data.RuntimePID,
-		runtimeStartID:              data.RuntimeStartID,
-		Account:                     data.Account,
-		accountAgent:                data.AccountAgent,
-		accountAutoSelected:         data.AccountAutoSelected,
-		pendingAccountSwap:          cloneAccountSwapData(data.PendingAccountSwap),
-		Prompt:                      data.Prompt,
-		pendingHandoffMission:       data.PendingHandoffMission,
-		handoffDeliveryStatus:       data.HandoffDeliveryStatus,
-		userKilled:                  data.UserKilled,
-		startupStateUnknown:         data.StartupStateUnknown,
+		// The silent grace's base follows the armed boundary: a stored base is
+		// trusted only for an active run; a legacy row without it measures from
+		// the adopted boundary, matching the pre-field behavior (#5221 review).
+		taskRunSilentBaseAt:      taskRunSilentBaseFromData(data, taskRunAttemptAt),
+		limitResetAt:             data.LimitResetAt,
+		limitAgent:               limitAgent,
+		limitAccount:             limitAccount,
+		accountLimitObservations: accountLimitObservations,
+		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
+		archiveWarning:           data.ArchiveWarning,
+		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
+		lastPromptAttemptAt:      data.LastPromptAttemptAt,
+		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
+		lastPaneChurnAt:          data.LastPaneChurnAt,
+		Height:                   data.Height,
+		Width:                    data.Width,
+		CreatedAt:                data.CreatedAt,
+		UpdatedAt:                data.UpdatedAt,
+		Program:                  data.Program,
+		runtimeProgram:           data.RuntimeProgram,
+		runtimePID:               data.RuntimePID,
+		runtimeStartID:           data.RuntimeStartID,
+		Account:                  data.Account,
+		accountAgent:             data.AccountAgent,
+		accountAutoSelected:      data.AccountAutoSelected,
+		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
+		Prompt:                   data.Prompt,
+		pendingHandoffMission:    data.PendingHandoffMission,
+		handoffDeliveryStatus:    data.HandoffDeliveryStatus,
+		userKilled:               data.UserKilled,
+		startupStateUnknown:      data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac
 		// is still amnesiac, and a daemon restart is a likely part of the same
 		// outage. An unrecognized value from a newer binary loads as-is and

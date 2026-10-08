@@ -109,6 +109,19 @@ func (i *Instance) AgentObservationCurrent(generation AgentObservationGeneration
 // snapshot already in flight has completed, then records the delivery verdict
 // before another snapshot can begin.
 func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (PromptDeliveryStatus, error) {
+	return i.sendPromptWithEvidence(prompt, now, false)
+}
+
+// SendTaskPromptWithEvidence is the task-machinery form: the send speaks for
+// the run itself (the task's prompt, a handoff/account-swap mission, a
+// limit-resume resend), so its evidence may re-arm a satisfied turn window —
+// the machinery asked for NEW work, unlike an operator's manual send (#5221
+// review).
+func (i *Instance) SendTaskPromptWithEvidence(prompt string, now func() time.Time) (PromptDeliveryStatus, error) {
+	return i.sendPromptWithEvidence(prompt, now, true)
+}
+
+func (i *Instance) sendPromptWithEvidence(prompt string, now func() time.Time, taskScoped bool) (PromptDeliveryStatus, error) {
 	for {
 		target := i.agentObservationTarget()
 		target.runtime.mu.Lock()
@@ -121,7 +134,7 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 		}
 		attemptedAt := now()
 		status, err := SendPromptWithStatus(target.server, prompt)
-		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime)
+		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime, taskScoped)
 		target.runtime.mu.Unlock()
 		return status, err
 	}

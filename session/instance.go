@@ -199,7 +199,13 @@ type Instance struct {
 	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
 	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
-	loadRuntimeReplaced   bool
+	// taskRunSilentBaseAt is where the silent fallback's deadline measures
+	// from (#5221 review): the prompt attempt normally, but a runtime
+	// replacement restarts the grace — the fresh pane gets its own full boot
+	// window rather than inheriting an already-elapsed deadline measured from
+	// the predecessor's send.
+	taskRunSilentBaseAt time.Time
+	loadRuntimeReplaced bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;

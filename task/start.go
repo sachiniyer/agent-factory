@@ -227,7 +227,11 @@ func WaitForReadyAndSubmitPrompt(
 	}
 
 	if prompt != "" {
-		status, err := instance.SendPromptWithEvidence(prompt, time.Now)
+		// The task-machinery send: this prompt speaks for the run itself (the
+		// task's prompt, or a handoff/account-swap mission coming through the
+		// same submit path), so it may re-arm a satisfied turn window — unlike
+		// an operator's manual send (#5221 review).
+		status, err := instance.SendTaskPromptWithEvidence(prompt, time.Now)
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}
