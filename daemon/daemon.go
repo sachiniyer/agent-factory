@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"sync"
 	"syscall"
@@ -77,7 +78,24 @@ func chdirToNeutralHome() {
 	if !ok {
 		return
 	}
-	_ = os.Chdir(dir)
+	// Resolve to an absolute path BEFORE chdir'ing. A relative
+	// AGENT_FACTORY_HOME (ConfigDirFor preserves a non-empty value verbatim,
+	// e.g. "af-home") is resolved against the daemon's cwd. os.Chdir into it
+	// would move the daemon's cwd to <launch-cwd>/af-home while leaving the env
+	// value relative, so every later config.GetConfigDir() call resolved
+	// "af-home" against the NEW cwd and yielded <launch-cwd>/af-home/af-home —
+	// a nonexistent nested path that breaks control-socket binding and the home
+	// watcher. Absolutize against the current (pre-chdir) cwd — the same frame
+	// acquireHomeLock just created the home in — and fix the env to that
+	// absolute path, so the home stays stable for the whole daemon lifetime.
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return
+	}
+	if abs != dir {
+		os.Setenv("AGENT_FACTORY_HOME", abs)
+	}
+	_ = os.Chdir(abs)
 }
 
 // chdirToNeutralHomeFn is the injection point runDaemon calls. Tests that run

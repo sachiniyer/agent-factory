@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
@@ -75,5 +77,43 @@ func TestChdirToNeutralHome_UnresolvableHomeLeavesCwd(t *testing.T) {
 	if canonical(t, got) != canonical(t, worktree) {
 		t.Fatalf("daemon cwd changed to %s after chdirToNeutralHome with an unresolvable home; "+
 			"a resolution failure must leave the inherited cwd (%s) in place", got, worktree)
+	}
+}
+
+// TestChdirToNeutralHome_RelativeHomeStaysResolvable is the relative-home half
+// of the inherited-cwd fix. AGENT_FACTORY_HOME may be spelled relative to the
+// spawner's cwd (an operator may write "af-home"), and ConfigDirFor preserves a
+// non-empty value verbatim. chdirToNeutralHome must absolutize it before
+// chdir'ing and fix the env to that absolute path; otherwise the chdir moves
+// the daemon into <launch-cwd>/af-home while the env stays relative, and every
+// later config.GetConfigDir() resolves "af-home" against the NEW cwd (the home
+// itself) — yielding a nested, nonexistent <home>/af-home that breaks
+// control-socket binding and the home watcher. Deterministic in both
+// directions: with the absolutize the home stays stable, without it
+// GetConfigDir() nests and resolves to a path that does not exist.
+func TestChdirToNeutralHome_RelativeHomeStaysResolvable(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	// Spell the home RELATIVE to the spawner's cwd, the way an operator may.
+	rel := filepath.Base(home)
+	t.Chdir(filepath.Dir(home))
+	t.Setenv("AGENT_FACTORY_HOME", rel)
+
+	chdirToNeutralHome()
+
+	got, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if canonical(t, got) != canonical(t, home) {
+		t.Fatalf("daemon cwd after chdirToNeutralHome = %s, want the AF home %s; a relative "+
+			"AGENT_FACTORY_HOME must chdir into the home it names, not leave the inherited cwd", got, home)
+	}
+	resolved, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir after chdir: %v", err)
+	}
+	if canonical(t, resolved) != canonical(t, home) {
+		t.Fatalf("config.GetConfigDir() after chdirToNeutralHome = %s, want the same home %s; "+
+			"a relative AGENT_FACTORY_HOME must not nest under the chdir'd cwd", resolved, home)
 	}
 }
