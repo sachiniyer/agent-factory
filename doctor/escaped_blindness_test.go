@@ -250,6 +250,105 @@ func TestReadablePaneTreeStillReportsGenuineEscape(t *testing.T) {
 		"a readable pane tree must not produce a blindness row for genuine escapes")
 }
 
+// TestEscapedProcessForeignHomeNotAttributedToThisInstall pins the foreign-home
+// guard in the escaped-process arm. Session names are derived from repo path +
+// title and do not encode AF_HOME, so on the shared default tmux server a
+// surviving process from another install can carry a name that now matches one
+// of OUR live sessions (temporal reuse once that install's session died). Its
+// AF_HOME proves it is not ours, so it must be reported as belonging to another
+// agent-factory home rather than as an escapee of our live session — the same
+// attribution the dead-session (orphaned-process) arm already produces.
+//
+// This is the same class of false positive that the blindness fix in this file
+// removed: a process that is NOT ours reported as ours. The finding stays
+// advisory either way; the harm it corrects is factually wrong diagnostic text.
+func TestEscapedProcessForeignHomeNotAttributedToThisInstall(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_doctor-foreign-escape"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+
+	// A process with our session's AF_SESSION marker but a DIFFERENT home.
+	foreignHome := t.TempDir()
+	foreignEscapee := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: name,
+		tmux.EnvMarkerHome:    foreignHome,
+	})
+
+	// Run doctor with OUR home (different from foreignHome), under --fix: the
+	// escaped arm is report-only regardless.
+	home := testguard.SocketTempDir(t)
+	report, err := Run(testOptionsWithHome(t, home, true, foreignEscapee.PID))
+	require.NoError(t, err)
+
+	escapes := findByCheck(report, "escaped-process")
+	require.Len(t, escapes, 1, "exactly one escaped-process finding is expected")
+	require.Contains(t, escapes[0].Detail, "belongs to another agent-factory home",
+		"foreign-home escapee must be attributed to its home, not ours: %s", escapes[0].Detail)
+	require.Contains(t, escapes[0].Detail, foreignHome,
+		"the finding must name the foreign home: %s", escapes[0].Detail)
+	require.NotContains(t, escapes[0].Detail, "escaped the pane tree",
+		"a foreign-home process must not be reported as escaping our live session: %s", escapes[0].Detail)
+	require.Empty(t, escapes[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	require.Empty(t, findByCheck(report, "orphaned-process"),
+		"a live-session marker must not route through the orphaned-process arm")
+	// No blindness row: the pane tree of our live session is READABLE here, so
+	// the foreign-home guard is the only thing keeping this off the escape list.
+	require.Empty(t, findBlindnessRows(report, name),
+		"a readable pane tree must not produce a blindness row")
+	require.True(t, alive(foreignEscapee), "the escaped arm must not kill, even under --fix")
+
+	payload := BuildJSONReport(report, true, false)
+	require.Zero(t, payload.Summary.Unresolved,
+		"a foreign-home advisory must remain visible without failing a health probe")
+}
+
+// TestEscapedProcessOwnHomeStillReportedAsEscape is the companion regression: the
+// foreign-home guard must NOT suppress genuine escapes. A marked process outside
+// a readable live pane tree whose AF_HOME matches our install is still an escapee
+// of our session, as is a marked process carrying no AF_HOME at all (the original
+// TestReadablePaneTreeStillReportsGenuineEscape shape — the guard only reroutes a
+// process when AF_HOME is readable AND foreign).
+func TestEscapedProcessOwnHomeStillReportedAsEscape(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_doctor-own-home-escape"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+
+	home := testguard.SocketTempDir(t)
+
+	// An escapee whose AF_HOME matches our install: still ours, still escaped.
+	ownEscapee := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: name,
+		tmux.EnvMarkerHome:    home,
+	})
+	// An escapee carrying the marker but no AF_HOME at all: unreadable home is
+	// not foreign home, so it stays on the genuine-escape path (the orphaned arm
+	// treats unreachable AF_HOME as report-only, never as foreign).
+	unmarkedEscapee := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: name,
+	})
+
+	report, err := Run(testOptionsWithHome(t, home, true, ownEscapee.PID, unmarkedEscapee.PID))
+	require.NoError(t, err)
+
+	escapes := findByCheck(report, "escaped-process")
+	require.Len(t, escapes, 2, "own-home and unmarked escapees of a readable pane tree must both be reported")
+	for _, f := range escapes {
+		require.Contains(t, f.Detail, "escaped the pane tree",
+			"an own-home/unmarked escapee is still a genuine escape: %s", f.Detail)
+		require.NotContains(t, f.Detail, "another agent-factory home",
+			"only a proven FOREIGN home is rerouted: %s", f.Detail)
+		require.Empty(t, f.FixAction, "the escaped arm is report-only even for genuine escapes")
+	}
+	require.True(t, alive(ownEscapee), "genuine escapee must survive --fix (report-only)")
+	require.True(t, alive(unmarkedEscapee), "unmarked escapee must survive --fix (report-only)")
+}
+
 // findBlindnessRows returns the process-leak-inspection rows that announce a
 // session's pane tree could not be read. Check rows (Warn), not findings.
 func findBlindnessRows(r *Report, session string) []CheckResult {

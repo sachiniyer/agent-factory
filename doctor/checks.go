@@ -635,6 +635,26 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					if capturedPIDs[p.PID] || !observations.stillPresent(p) {
 						continue
 					}
+					// The same foreign-home attribution that the dead-session
+					// arm applies below: on the shared default tmux server a
+					// session name is derived from repo path + title and does
+					// not encode AF_HOME, so a surviving process from another
+					// install can carry a name that now matches one of OUR live
+					// sessions (temporal reuse once that install's session died).
+					// Its AF_HOME proves it is not ours, so report it as such
+					// rather than attributing the escape to this install. The
+					// escaped arm remains report-only either way — no kill path
+					// is added here.
+					home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
+					if homeStatus == proctree.EnvFound && filepath.Clean(home) != filepath.Clean(ctx.opts.ConfigDir) {
+						report.addAdvisoryFinding(Finding{
+							Check: "escaped-process",
+							Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
+								"agent-factory home (%s) — not attributed to this install",
+								describeProc(p), name, home),
+						})
+						continue
+					}
 					report.addAdvisoryFinding(Finding{
 						Check: "escaped-process",
 						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
