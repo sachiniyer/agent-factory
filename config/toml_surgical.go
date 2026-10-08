@@ -378,7 +378,16 @@ func setTOMLInlineTableMember(line, section, leaf, encoded string) (string, bool
 	trailing := len(strings.TrimRight(body, " \t"))
 	separator := ""
 	if strings.TrimSpace(body) != "" {
-		separator = ", "
+		// go-toml accepts a trailing comma in an inline table
+		// (`section = { a = 1, }`), so the loader never rejects one a user
+		// hand-edited in. Reusing that comma as the separator — a single
+		// space instead of another ", " — keeps the edit from emitting ",,",
+		// which the write gate's re-parse would refuse.
+		if trailing > 0 && body[trailing-1] == ',' {
+			separator = " "
+		} else {
+			separator = ", "
+		}
 	}
 	body = body[:trailing] + separator + leaf + " = " + encoded + body[trailing:]
 	return line[:start] + body + line[end:], true
@@ -397,7 +406,12 @@ func deleteTOMLInlineTableMember(line, section, leaf string) (string, bool) {
 	member := members[target]
 	switch {
 	case len(members) == 1:
-		body = body[:member.trimStart] + body[member.trimEnd:]
+		// Removing the only member must leave an empty table. Excising the
+		// member's trimmed range alone strands the comma that followed it
+		// (`ssh = { , }` when the table had a trailing comma; `ssh = {  }`
+		// otherwise), so collapse the whole body rather than stitch the
+		// surrounding whitespace.
+		body = ""
 	case target < len(members)-1:
 		body = body[:member.trimStart] + body[members[target+1].trimStart:]
 	default:

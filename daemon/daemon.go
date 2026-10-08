@@ -393,6 +393,21 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		}
 	}()
 
+	// Hoist the watch-task supervisor's Stop above the upgrade-probation
+	// select below: a released upgrade candidate transitions to
+	// DaemonPhaseHandoffPending while still parked in that select, and in that
+	// window it admits task-mutating RPCs (AddTask/UpdateTask/ReloadTasks) that
+	// arm real watcher subprocesses via watchers.reconcile -> go w.run() ->
+	// cmd.Start() ($SHELL -c watch_cmd, Setpgid). The select exits via
+	// `return nil` on signal or shutdown, which would skip a defer placed after
+	// it and leak those subprocesses: the reliable SIGTERM/SIGKILL group
+	// teardown lives only in watchers.Stop, and no startup sweep can discover
+	// orphaned watch_cmd processes. Registered after the closeControl defer so
+	// it runs BEFORE closeControl on LIFO, leaving the control socket live for
+	// any in-flight watch-event deliveries during teardown. No-op if reconcile()
+	// was never called — it iterates an empty map and Stop is idempotent.
+	defer watchers.Stop()
+
 	// Stand the startup watcher down BEFORE the HTTP listener starts serving:
 	// once the webtab proxy is reachable it can spawn editors, and a signal
 	// caught by the hard-kill watcher would strand them along with the runtime
@@ -507,13 +522,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	}
 	scheduler.Start()
 	defer scheduler.Stop()
-
-	// Same ordering constraint for the watch-task supervisor: its event
-	// deliveries also loop back through our own control socket, so the first
-	// watcher spawns only once the server is accepting. The deferred Stop
-	// runs before the deferred closeControl (LIFO), so in-flight deliveries
-	// during shutdown still find a live socket.
-	defer watchers.Stop()
 
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
