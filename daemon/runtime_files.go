@@ -75,20 +75,24 @@ func cleanupDaemonRuntimeFiles(pidFile string, pid int, deadline time.Time) {
 	// callDaemonNoEnsureAttemptBefore — without it a wedged listener (bound
 	// but never servicing the RPC, the net.Listen→Accept window) would make
 	// the dial succeed and client.Call block forever, hanging StopDaemon.
-	// A non-zero deadline (EnsureDaemon reclaim) is capped at
-	// min(socketRecheckBudget, remaining) so this probe cannot consume the
-	// whole admission budget before the safety-critical second probe runs.
-	probe := socketRecheckBudget
+	// A non-zero deadline (EnsureDaemon reclaim) is capped at the earlier
+	// of the caller's absolute deadline and now+socketRecheckBudget, so
+	// this probe cannot consume the whole admission budget before the
+	// safety-critical second probe runs — and it never overshoots the
+	// caller's deadline even if the goroutine is paused between computing
+	// the budget and issuing the ping (a fresh time.Now().Add(probe) could
+	// land past the original deadline when little time remained).
+	probeDeadline := time.Now().Add(socketRecheckBudget)
 	if !deadline.IsZero() {
-		if r := time.Until(deadline); r < probe {
-			probe = r
+		if deadline.Before(probeDeadline) {
+			probeDeadline = deadline
+		}
+		if !probeDeadline.After(time.Now()) {
+			log.InfoLog.Printf("caller deadline spent before the first control-socket probe; leaving runtime files in place")
+			return
 		}
 	}
-	if probe <= 0 {
-		log.InfoLog.Printf("caller deadline spent before the first control-socket probe; leaving runtime files in place")
-		return
-	}
-	switch err := pingDaemonUntil(time.Now().Add(probe)); {
+	switch err := pingDaemonUntil(probeDeadline); {
 	case err == nil:
 		log.InfoLog.Printf("a live daemon answered on the control socket after stop; leaving its runtime files in place")
 		return
