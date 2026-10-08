@@ -633,3 +633,29 @@ func TestTaskRunManualRefusedSendCannotWedge(t *testing.T) {
 	require.False(t, inst.TaskRunActive(),
 		"a manual refused send leaves the satisfied boundary — the run completes on its turn")
 }
+
+// The unsatisfied-window twin of the refused-continuation wedge (#5221
+// review P1): a task at a limit wall before any turn is recorded still has
+// an unsatisfied boundary; a resumed machinery send that is refused must
+// replace the stale deliverable status with a fresh unsatisfiable boundary,
+// or old banner churn plus the quiet fallback would end the run although
+// the continuation never landed.
+func TestTaskRunRefusedContinuationWedgesUnsatisfiedWindow(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
+
+	// Old post-attempt churn exists — the quiet fallback's favorite trap.
+	inst.mu.Lock()
+	inst.lastPaneChurnAt = t0.Add(2 * time.Second)
+	inst.mu.Unlock()
+
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptNotDelivered, time.Now()))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the refused resend must wedge the gate, not inherit a release path from stale churn")
+	require.True(t, inst.taskRunTurnGateHeld)
+	inst.mu.Lock()
+	require.Equal(t, PromptNotDelivered, inst.taskRunPromptDeliveryStatus)
+	inst.mu.Unlock()
+}
