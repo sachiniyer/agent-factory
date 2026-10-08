@@ -294,7 +294,7 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 		// redelivery retires primed state from the previous window — either way
 		// the watcher must be rebuilt rather than read the pane through rules
 		// or a prev frame that no longer belong to this boundary (#5221 review).
-		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent)}
+		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
 		m.taskRunTurnWatches[key] = entry
 	}
 	turning := entry.watch.Observe(content)

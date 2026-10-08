@@ -427,7 +427,18 @@ func taskRunPromptBoundaryFromData(data InstanceData) (time.Time, PromptDelivery
 		return time.Time{}, ""
 	}
 	if data.TaskRunPromptAttemptAt.IsZero() {
-		return data.LastPromptAttemptAt, data.LastPromptDeliveryStatus
+		// The adopted send is the SESSION's latest, not provably the task's —
+		// a manual `af sessions send` after the real turn may have overwritten
+		// it. A failed send is the ambiguous case that must not migrate as-is:
+		// PromptNotDelivered is unsatisfiable, so adopting it would wedge the
+		// concurrency slot forever on evidence that may have nothing to do with
+		// the task's own prompt. Coerce to unverified — still armed, still
+		// releaseable by chrome or the quiet fallback (#5221 review).
+		status := data.LastPromptDeliveryStatus
+		if status == PromptNotDelivered {
+			status = PromptSentUnverified
+		}
+		return data.LastPromptAttemptAt, status
 	}
 	return data.TaskRunPromptAttemptAt, data.TaskRunPromptDeliveryStatus
 }

@@ -337,6 +337,33 @@ func TestTaskRunLegacyRowAdoptsSessionBoundary(t *testing.T) {
 	require.True(t, reloaded.taskRunTurnGateHeld)
 }
 
+// The session-level evidence a legacy row adopts is the SESSION's latest send —
+// possibly a manual one unrelated to the task's prompt. A failed manual send
+// must not migrate as the run's boundary: PromptNotDelivered is unsatisfiable,
+// so adoption coerces it to unverified and keeps the window releaseable
+// (#5221 review P2).
+func TestTaskRunLegacyFailedSendAdoptsAsUnverified(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now().Add(-time.Hour)))
+
+	data := inst.ToInstanceData()
+	data.TaskRunPromptAttemptAt = time.Time{}
+	data.TaskRunPromptDeliveryStatus = ""
+	data.BackendType = "docker"
+
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, reloaded.TaskRunActive())
+	require.True(t, reloaded.taskRunTurnGateHeld)
+
+	// The adopted window is satisfiable: turn chrome ends the run rather than
+	// wedging the concurrency slot on ambiguous manual evidence.
+	require.True(t, reloaded.RecordTaskRunTurn(time.Now()))
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, reloaded.TaskRunActive())
+}
+
 // A send that affirmatively failed delivery can never be satisfied by pane
 // activity: the prompt provably never landed, so no later churn is "the turn"
 // (#5221 review P1). The run stays open and flagged prompt-not-delivered

@@ -2,19 +2,22 @@ package task
 
 import (
 	"testing"
+	"time"
 )
 
 // TurnWatch feeds the task-run turn boundary (#5219): the daemon folds each
 // status-poll capture through it, and only a firing watch — the agent's own
 // in-turn chrome — may release a held idle edge. Everything a still-booting
-// pane can produce must therefore NOT fire it.
+// pane can produce must therefore NOT fire it. And since a redelivery rekeys
+// the watch, only a turn that BEGAN after its boundary may fire it (#5221
+// review) — two post-boundary frames of a pre-boundary turn prove nothing.
 
 // The review's shape at pane level (the MHW-852 trace): the prompt's own echo
 // plus ACP-init and skill-discovery lines render seconds after Enter as
 // ordinary Updated churn. None of it is the agent mid-turn, and none of it may
 // release the hold. Only the elapsed-timer row TICKING may.
 func TestTurnWatch_DevinBootChurnNeverFires(t *testing.T) {
-	w := NewTurnWatch("devin")
+	w := NewTurnWatch("devin", time.Now())
 	boot := []string{
 		// Composer idle at the send's baseline.
 		"❭ ",
@@ -35,7 +38,7 @@ func TestTurnWatch_DevinBootChurnNeverFires(t *testing.T) {
 // A status row that APPEARS without ever having ticked is text, not chrome —
 // the same contract submittedTurnVisible applies inside the submit window.
 func TestTurnWatch_DevinNewRowNeverFires(t *testing.T) {
-	w := NewTurnWatch("devin")
+	w := NewTurnWatch("devin", time.Now())
 	frames := []string{
 		"❭ ",
 		// The row is new in this capture: nothing for it to have ticked from.
@@ -51,9 +54,10 @@ func TestTurnWatch_DevinNewRowNeverFires(t *testing.T) {
 }
 
 // The same row found in consecutive captures, timer advancing, is the turn —
-// the proof a booting pane cannot fake.
+// the proof a booting pane cannot fake. Its elapsed fits inside the boundary's
+// age, so the turn began after the prompt went out.
 func TestTurnWatch_DevinTickingRowFires(t *testing.T) {
-	w := NewTurnWatch("devin")
+	w := NewTurnWatch("devin", time.Now().Add(-time.Minute))
 	if w.Observe("⠀⡆ Thinking · 3s (esc to interrupt)\n❭ ") {
 		t.Fatal("the first capture establishes the row; it cannot already be a tick")
 	}
@@ -66,26 +70,69 @@ func TestTurnWatch_DevinTickingRowFires(t *testing.T) {
 }
 
 func TestTurnWatch_ClaudeTickingRowFires(t *testing.T) {
-	w := NewTurnWatch("claude")
+	w := NewTurnWatch("claude", time.Now().Add(-time.Minute))
 	w.Observe("transcript\n✻ Whirring… (1s · esc to interrupt)\n❯ ")
 	if !w.Observe("transcript\n✻ Whirring… (2s · esc to interrupt)\n❯ ") {
 		t.Fatal("claude's advancing elapsed timer is its in-turn chrome")
 	}
 }
 
+// A turn already RUNNING when the boundary was set cannot count as the new
+// prompt's turn: its row ticks, but its own elapsed says the turn predates the
+// boundary — the case a rebuilt watch must not launder (#5221 review). Once
+// that row's turn ends and a NEW one starts post-boundary, its elapsed is
+// young enough to prove it.
+func TestTurnWatch_PreBoundaryTurnNeverFires(t *testing.T) {
+	// The unrelated turn began minutes before the prompt boundary.
+	w := NewTurnWatch("devin", time.Now().Add(-30*time.Second))
+	for _, elapsed := range []string{"4m12s", "4m13s", "4m14s"} {
+		if w.Observe("⠀⡆ Thinking · " + elapsed + " (esc to interrupt)\n❭ ") {
+			t.Fatalf("elapsed %s exceeds the boundary's age: a pre-boundary turn is not the prompt's", elapsed)
+		}
+	}
+	// That turn ends; the redelivered prompt's own turn starts and ticks.
+	if w.Observe("work so far\n❭ ") {
+		t.Fatal("the pane going quiet is not a turn")
+	}
+	w.Observe("work so far\n⠀⡆ Thinking · 1s (esc to interrupt)\n❭ ")
+	if !w.Observe("work so far\n⠀⡆ Thinking · 2s (esc to interrupt)\n❭ ") {
+		t.Fatal("a turn younger than the boundary's age is the prompt's own")
+	}
+}
+
 // The scoped-indicator agents keep presence as their proof — their working
-// frame is anchored to the live region, so it cannot be transcript text.
+// frame is anchored to the live region, so it cannot be transcript text. But
+// presence carries no clock: an indicator already up when the watch begins
+// could be a pre-boundary turn, so it must be seen absent once first.
 func TestTurnWatch_ScopedAgentsFireOnPresence(t *testing.T) {
-	w := NewTurnWatch("codex")
+	w := NewTurnWatch("codex", time.Now())
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n") {
+		t.Fatal("a quiet frame is not a turn; it only arms the watch")
+	}
 	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n") {
 		t.Fatal("codex draws its hint below the composer, where prose cannot reach")
+	}
+}
+
+// The same watch built over a frame where the indicator is ALREADY up cannot
+// attribute the turn to the boundary — wait for it to leave and return.
+func TestTurnWatch_ScopedIndicatorPresentAtBoundaryDoesNotFire(t *testing.T) {
+	w := NewTurnWatch("codex", time.Now())
+	if w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n") {
+		t.Fatal("an indicator that never left the pane may predate the boundary")
+	}
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n") {
+		t.Fatal("the indicator leaving is the pre-boundary turn's end, not a fire")
+	}
+	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n") {
+		t.Fatal("a fresh appearance after absence is a post-boundary start")
 	}
 }
 
 // A signature-less agent has no pane proof; the watch never fires and the
 // completion gate falls back to sustained quiet.
 func TestTurnWatch_SignaturelessAgentNeverFires(t *testing.T) {
-	w := NewTurnWatch("aider")
+	w := NewTurnWatch("aider", time.Now())
 	if w.Observe("some output\n✻ Whirring… (2s · esc to interrupt)\n> ") {
 		t.Fatal("aider has no in-turn signature — even a matching row is unattributable")
 	}
