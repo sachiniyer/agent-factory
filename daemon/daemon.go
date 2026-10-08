@@ -64,6 +64,22 @@ func RunDaemonForUpgrade(cfg *config.Config, transactionID string) error {
 	return runDaemon(cfg, transactionID)
 }
 
+// chdirToNeutralHome moves the daemon off whatever cwd the spawning process
+// handed it and onto the AF home, so no daemon-spawned process can inherit a
+// managed worktree as its cwd. See runDaemon for the full rationale; this is
+// the single helper that holds the property "no daemon-spawned process can
+// have a worktree as its cwd unless that worktree is the one it's working on"
+// for every exec.Command site the daemon forks without setting cmd.Dir.
+// Best-effort and non-fatal: a resolution failure leaves the inherited cwd,
+// which under systemd is / and under an ad-hoc start is the user's.
+func chdirToNeutralHome() {
+	dir, ok := configHomeDir()
+	if !ok {
+		return
+	}
+	_ = os.Chdir(dir)
+}
+
 // runDaemon carries the transaction identity used by the probation machinery.
 // The public daemon entrypoint deliberately supplies no transaction: only the
 // durable transaction layer may eventually select the unexported non-empty
@@ -156,6 +172,24 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		testHookDaemonAfterHomeLockRelease()
 		removeDaemonPIDFile()
 	}()
+
+	// Move the daemon off whatever cwd the spawning `af` invocation handed it
+	// and onto the AF home, so no daemon-spawned process can inherit a managed
+	// worktree as its cwd. The daemon is routinely auto-started from inside a
+	// worktree and never chdirs on its own, so without this every exec.Command
+	// it forks that does not set cmd.Dir (tmux, gh, hooks, watch tasks, and the
+	// 41+ sites outside session/git) would inherit that worktree and be a false
+	// positive for the worktree writer-reaper's cwd match — an unrelated process
+	// SIGTERM'd during a concurrent reap of the inherited worktree. The git
+	// runners keep their own cmd.Dir as defence in depth, but the class of
+	// children without it is the source the reaper must not see a worktree for.
+	// acquireHomeLock just created the home, so the chdir target exists. Under
+	// systemd the daemon already starts in /; this covers the ad-hoc and launchd
+	// paths that inherit the spawner's cwd. Best-effort: a resolution failure
+	// leaves the inherited cwd, which under systemd is / and under an ad-hoc
+	// start is the user's (rarely a managed worktree, and the reaper excludes
+	// the scanning process itself).
+	chdirToNeutralHome()
 
 	// The home exists now — acquireHomeLock just created it — so latch it, and no
 	// write this daemon makes can re-create the directory once it is deleted
