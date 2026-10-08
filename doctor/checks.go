@@ -104,25 +104,6 @@ func describeProc(p proctree.Process) string {
 	return desc
 }
 
-// sameHome reports whether two agent-factory home paths identify the same
-// install. normalizeHome canonicalizes via filepath.EvalSymlinks, but on a
-// case-insensitive macOS volume EvalSymlinks preserves the spelling of ordinary
-// non-symlink components, so a session stamped with ".Agent-Factory" and a
-// doctor run using ".agent-factory" refer to the same directory yet compare
-// unequal as strings — classifying a genuine same-home escapee as foreign. When
-// both paths stat successfully, compare by filesystem identity (os.SameFile),
-// which sees through case and spelling differences on case-insensitive volumes;
-// fall back to the normalized string comparison when either path cannot be
-// statted (e.g. the foreign home no longer exists).
-func sameHome(a, b string) bool {
-	ai, aerr := os.Stat(a)
-	bi, berr := os.Stat(b)
-	if aerr == nil && berr == nil {
-		return os.SameFile(ai, bi)
-	}
-	return normalizeHome(a) == normalizeHome(b)
-}
-
 func formatAge(seconds float64) string {
 	d := time.Duration(seconds) * time.Second
 	switch {
