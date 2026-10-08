@@ -195,8 +195,13 @@ func TestRunGitCommand_ReapedInheritedWorktreeSpareUnrelatedGitChild(t *testing.
 	pidFile := filepath.Join(fakeDir, "child.pid")
 	// echo $$ writes the shell pid; `exec sleep` replaces the shell with sleep
 	// keeping the same pid, so the recorded pid is the one proctree observes and
-	// SIGKILL later reaps — no orphaned sleep child.
-	script := "#!/bin/sh\necho $$ > " + pidFile + "\nexec sleep 60\n"
+	// SIGKILL later reaps — no orphaned sleep child. The pid file path is
+	// shell-single-quoted in the redirect so a temp dir containing spaces or
+	// shell metacharacters cannot split or reinterpret it (the git child's env
+	// is filtered by repositoryPathEnvironment, so an env-var redirect would
+	// not survive that filter).
+	quotedPidFile := "'" + strings.ReplaceAll(pidFile, "'", `'\''`) + "'"
+	script := "#!/bin/sh\necho $$ > " + quotedPidFile + "\nexec sleep 60\n"
 	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "git"), []byte(script), 0o755))
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestRunGitCommand_ReapedInheritedWorktreeSpareUnrelatedGitChild$")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -179,8 +180,21 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// its pre-fix behaviour (a brief inherited-cwd window against a command
 	// git fails immediately, whose worst case is a SIGTERM'd probe that
 	// classifies as the fail-closed "unknown", not a deletion authorization).
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		cmd.Dir = path
+	//
+	// Also gated on path being ABSOLUTE: a relative path that names an
+	// existing directory would, once set as cmd.Dir, make git resolve the
+	// unchanged `-C path` argument relative to that NEW cwd (path/path), so a
+	// relative worktree path would break every git operation. Production
+	// worktree/repo paths are always absolute (every constructor normalizes
+	// via filepath.Abs or git rev-parse --show-toplevel), but
+	// NewGitWorktreeFromStorage stores persisted paths verbatim, so the guard
+	// keeps a hand-edited or externally-authored relative path on its pre-fix
+	// behaviour (no cmd.Dir; git resolves -C path relative to the daemon's
+	// cwd) rather than the double-resolution failure.
+	if filepath.IsAbs(path) {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			cmd.Dir = path
+		}
 	}
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
 	// remote needs auth and no terminal is attached. Force stable diagnostics so

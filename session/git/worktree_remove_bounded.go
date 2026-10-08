@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -77,8 +78,13 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	// directory for the same repo-gone-classification reason; the reset path's
 	// own call sites pass a live repo root, so the gate is a no-op there but
 	// keeps the two runners consistent if a future caller probes a gone path.
-	if info, err := os.Stat(repoRoot); err == nil && info.IsDir() {
-		cmd.Dir = repoRoot
+	// Also gated on repoRoot being absolute, for the same relative-path
+	// double-resolution reason as the main runner (a relative repoRoot set as
+	// cmd.Dir makes git resolve `-C repoRoot` relative to that new cwd).
+	if filepath.IsAbs(repoRoot) {
+		if info, err := os.Stat(repoRoot); err == nil && info.IsDir() {
+			cmd.Dir = repoRoot
+		}
 	}
 	// Preserve ambient runtime/credential settings, but not repository selection:
 	// Git hooks export GIT_DIR, which otherwise overrides the explicit -C path
