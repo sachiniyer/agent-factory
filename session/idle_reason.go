@@ -109,6 +109,7 @@ func (d InstanceData) WithoutIdleEvidence() InstanceData {
 	d.LastPromptAttemptAt = time.Time{}
 	d.LastPromptDeliveryStatus = ""
 	d.LastPaneChurnAt = time.Time{}
+	d.TaskRunTurnObservedAt = time.Time{}
 	return d
 }
 
@@ -194,18 +195,74 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 	return true, checkpoint
 }
 
+// taskRunCompletionQuietGrace is how long the pane must sit unchanged after
+// post-attempt churn before that churn may stand in for turn evidence. Boot
+// and echo output arrives in bursts — devin's prompt echo lands seconds after
+// Enter, then ACP init and skill discovery — so only sustained silence after
+// the last observed output counts. It is the release arm for agents whose
+// pane exposes no in-turn signature (aider, gemini, program overrides) and for
+// turns too fast for two poll captures to catch the timer moving. A var so
+// tests can compress it.
+var taskRunCompletionQuietGrace = 30 * time.Second
+
+// RecordTaskRunTurn records that the agent's own in-turn chrome was observed
+// on this runtime — the positive "a turn on the prompt began" evidence a
+// booting or echoing pane cannot produce (#5219). The unfenced form for the
+// send path: the post-submit watch sees the chrome synchronously inside
+// delivery, so there is no snapshot epoch to fence against.
+func (i *Instance) RecordTaskRunTurn(observedAt time.Time) bool {
+	if observedAt.IsZero() {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunActive || !observedAt.After(i.taskRunTurnObservedAt) {
+		return false
+	}
+	i.taskRunTurnObservedAt = observedAt
+	i.touchLocked()
+	return true
+}
+
+// RecordTaskRunTurnAtEpoch is the epoch-fenced form for the status poll: an
+// observation captured before a lifecycle fence must not apply after it,
+// exactly as RecordPaneChurnAtEpoch applies pane churn.
+func (i *Instance) RecordTaskRunTurnAtEpoch(observedAt time.Time, observedEpoch uint64) bool {
+	if observedAt.IsZero() {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.taskRunActive || i.stateEpoch != observedEpoch || !observedAt.After(i.taskRunTurnObservedAt) {
+		return false
+	}
+	i.taskRunTurnObservedAt = observedAt
+	i.touchLocked()
+	return true
+}
+
 // taskRunAwaitingTurnLocked reports whether the session's prompt has been
-// attempted but the agent has not demonstrably taken the turn — no pane churn
-// strictly after the attempt has been observed (#5219). The send seeds the
-// status monitor's comparison baseline with the post-Enter boundary frame
-// (seedDeliveryBaseline), so a later Observation.Updated is the agent's own
-// reaction to the prompt, never the send's echo. An attempt timestamp alone
-// arms the gate however the send went: a run that can show no response to its
-// prompt is not a completed run, only an idle pane.
+// attempted but the agent has not demonstrably taken the turn (#5219). Mere
+// post-attempt churn is not that boundary — a still-booting pane produces it
+// on its own. What releases the gate is the agent's own in-turn chrome
+// observed after the send, or a post-attempt burst followed by silence longer
+// than the completion grace. An attempt timestamp alone arms the gate however
+// the send went: a run that can show no turn is not a completed run, only an
+// idle pane.
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunAwaitingTurnLocked() bool {
-	return !i.lastPromptAttemptAt.IsZero() && !i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
+	if i.lastPromptAttemptAt.IsZero() {
+		return false
+	}
+	if i.taskRunTurnObservedAt.After(i.lastPromptAttemptAt) {
+		return false
+	}
+	if i.lastPaneChurnAt.After(i.lastPromptAttemptAt) &&
+		time.Since(i.lastPaneChurnAt) >= taskRunCompletionQuietGrace {
+		return false
+	}
+	return true
 }
 
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.
@@ -213,10 +270,12 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 func (i *Instance) ClearIdleEvidence() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	changed := !i.lastPromptAttemptAt.IsZero() || i.lastPromptDeliveryStatus != "" || !i.lastPaneChurnAt.IsZero()
+	changed := !i.lastPromptAttemptAt.IsZero() || i.lastPromptDeliveryStatus != "" ||
+		!i.lastPaneChurnAt.IsZero() || !i.taskRunTurnObservedAt.IsZero()
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
 	i.lastPaneChurnAt = time.Time{}
+	i.taskRunTurnObservedAt = time.Time{}
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
 	// serialization domain instead of making replacement delivery wait for it;
 	// the generation invalidation fences daemon-owned side effects while the epoch
@@ -254,20 +313,32 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.
 // It applies both directions because runtime replacement can clear or replace
-// the evidence, and the daemon snapshot is authoritative for all three fields.
-func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDeliveryStatus, churnAt time.Time) bool {
+// the evidence, and the daemon snapshot is authoritative for all four fields.
+func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDeliveryStatus, churnAt, turnAt time.Time) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.lastPromptAttemptAt.Equal(attemptedAt) &&
 		i.lastPromptDeliveryStatus == status &&
-		i.lastPaneChurnAt.Equal(churnAt) {
+		i.lastPaneChurnAt.Equal(churnAt) &&
+		i.taskRunTurnObservedAt.Equal(turnAt) {
 		return false
 	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
 	i.lastPaneChurnAt = churnAt
+	i.taskRunTurnObservedAt = turnAt
 	i.touchLocked()
 	return true
+}
+
+// taskRunTurnObservedAtFromData gates a persisted turn observation on the run
+// still being in flight, mirroring ToInstanceData's write-side gate: a finished
+// run's stale timestamp is not evidence for its successor's delivery window.
+func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
+	if !data.TaskRunActive {
+		return time.Time{}
+	}
+	return data.TaskRunTurnObservedAt
 }
 
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in

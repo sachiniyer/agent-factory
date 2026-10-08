@@ -18,14 +18,13 @@ import (
 // matcher covers it), that first quiet tick lands while the agent is still
 // STARTING, so on_complete archived live runs ~10s after spawn.
 //
-// The durable completion boundary is post-attempt pane churn: the task prompt
-// send records its attempt timestamp and seeds the status monitor's
-// comparison baseline with the post-Enter boundary frame, so a later
-// Observation.Updated is the agent's own reaction to the prompt — never the
-// send's own echo. A run whose prompt was attempted but produced no churn has
-// not been demonstrably picked up; its idle edge is HELD, and the run ends
-// on the first idle observation after the reaction arrives — exactly the
-// shape the owed-mission hold already uses (#4429).
+// The durable completion boundary is the agent's own in-turn chrome observed
+// after the attempt — the elapsed-timer status row must tick, which a booting
+// pane cannot produce — or, for agents with no in-turn signature, post-attempt
+// churn followed by quiet longer than the completion grace. Plain post-attempt
+// churn is deliberately NOT the boundary: the same async pipeline that hides
+// devin's boot renders its prompt echo, ACP init, and skill discovery as
+// ordinary Updated captures seconds after Enter.
 
 // taskRunSession returns a task-spawned session with its run in flight,
 // running under a fake backend, at LiveRunning — the state a cron session is
@@ -64,35 +63,79 @@ func TestTaskRunIdleEdgeHeldDuringDeliveryWindow(t *testing.T) {
 	require.True(t, inst.TaskRunActive(),
 		"an idle edge inside the prompt-delivery window must not end the run — the agent has not demonstrably taken the turn")
 	require.True(t, inst.taskRunIdleEdgeHeld,
-		"the edge is HELD, not silently consumed — the next post-reaction idle observation retires it")
+		"the edge is HELD, not silently consumed — the next post-boundary idle observation retires it")
 	require.Equal(t, LiveReady, inst.GetLiveness(),
 		"the observation still applies on the liveness axis — only the run-end effect is withheld")
 }
 
-// The run ends on the first idle edge AFTER the agent demonstrably reacted:
-// churn strictly later than the attempt is the turn evidence.
-func TestTaskRunIdleEdgeAfterObservedTurnEndsRun(t *testing.T) {
+// TestTaskRunBootChurnDoesNotReleaseTheHold is the review shape: send at T,
+// the prompt's own echo plus ACP-init/skill-discovery output renders at T+6s —
+// ordinary churn a still-booting pane produces on its own — and the next quiet
+// tick follows. That churn is not turn evidence; the edge must stay held.
+func TestTaskRunBootChurnDoesNotReleaseTheHold(t *testing.T) {
 	inst := taskRunSession(t)
 
 	attemptedAt := time.Now()
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
 
-	// The agent picked the prompt up — a snapshot updated strictly after the
-	// attempt's delivery baseline.
+	// Post-send pane churn from echo/boot, only seconds after the send —
+	// exactly the timing that used to release the hold.
 	_, epoch := inst.InFlightOpAndEpoch()
-	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(6*time.Second), epoch))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"echo/ACP-init churn seconds after the send is not the agent taking the turn — the edge must stay held")
+	require.True(t, inst.taskRunIdleEdgeHeld)
+
+	// And it STAYS held on quiet Ready→Ready ticks while the boot churn is
+	// still fresh — the held flag does not consume itself on the next idle.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive())
+}
+
+// The run ends on the first idle edge after the agent's own in-turn chrome is
+// observed — the one signal a still-booting pane cannot produce.
+func TestTaskRunIdleEdgeAfterTurnChromeEndsRun(t *testing.T) {
+	inst := taskRunSession(t)
+
+	attemptedAt := time.Now()
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+
+	// The poll's chrome watcher saw the elapsed-timer row tick — the same
+	// proof the send path's post-submit watch requires.
+	require.True(t, inst.RecordTaskRunTurn(attemptedAt.Add(4*time.Second)))
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
-		"once the agent has demonstrably reacted, the idle edge ends the run as before")
+		"once in-turn chrome was observed after the attempt, the idle edge ends the run")
+}
+
+// The fallback arm: agents with no in-turn signature (and turns too fast for
+// two captures to catch the timer) complete on post-attempt churn followed by
+// sustained quiet past the completion grace. A boot that keeps burping output
+// resets the window — only silence after the last observed output qualifies.
+func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
+	inst := taskRunSession(t)
+
+	attemptedAt := time.Now().Add(-2 * taskRunCompletionQuietGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+
+	// Churn post-attempt, but long enough ago that the pane has sat silent
+	// past the grace — a completed unit of work gone quiet, not a boot burst.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"post-attempt churn followed by a full grace of quiet may stand in for the chrome")
 }
 
 // A held edge is released while the session stays Ready: the paused poll path
-// (observeTaskRunWhilePaused) folds churn into lastPaneChurnAt WITHOUT a
-// liveness move, so the reaction can arrive on a Ready→Ready observation. The
-// mission hold already covers that shape through the flag; the turn gate must
-// too.
-func TestTaskRunHeldEdgeReleasedByReadyToReadyChurn(t *testing.T) {
+// (observeTaskRunWhilePaused) folds evidence in WITHOUT a liveness move, so the
+// turn boundary can arrive on a Ready→Ready observation. The mission hold
+// already covers that shape through the flag; the turn gate must too.
+func TestTaskRunHeldEdgeReleasedByReadyToReadyTurn(t *testing.T) {
 	inst := taskRunSession(t)
 
 	attemptedAt := time.Now()
@@ -100,31 +143,34 @@ func TestTaskRunHeldEdgeReleasedByReadyToReadyChurn(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(), "precondition: the delivery-window edge was held")
 
-	// The agent's reaction lands while the row is already Ready.
+	// The chrome observation lands while the row is already Ready — epoch-
+	// fenced, exactly as the poll applies it.
 	_, epoch := inst.InFlightOpAndEpoch()
-	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
+	require.True(t, inst.RecordTaskRunTurnAtEpoch(attemptedAt.Add(3*time.Second), epoch))
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
-		"the held edge completes once post-delivery churn proves the agent took the turn")
+		"the held edge completes once the turn boundary is proven")
 	require.False(t, inst.taskRunIdleEdgeHeld, "the consumed hold retires with the run")
 }
 
-// Boot output that predates the prompt is not turn evidence — only churn
-// strictly after the attempt counts.
-func TestTaskRunIdleEdgeIgnoresPreAttemptChurn(t *testing.T) {
+// Boot output and turn chrome that PREDATE the prompt are not evidence for it
+// — the gate orders both strictly after the attempt.
+func TestTaskRunIdleEdgeIgnoresPreAttemptEvidence(t *testing.T) {
 	inst := taskRunSession(t)
 
 	boot := time.Now()
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(boot, epoch),
 		"precondition: boot output recorded before the prompt send")
+	require.True(t, inst.RecordTaskRunTurn(boot),
+		"precondition: a prior turn's chrome recorded before the prompt send")
 
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, boot.Add(time.Second)))
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 
 	require.True(t, inst.TaskRunActive(),
-		"churn that predates the attempt is boot noise, not the agent taking the turn")
+		"evidence that predates the attempt is the previous turn, not this prompt's")
 }
 
 // A run whose prompt was never attempted keeps the old behavior — the
@@ -135,6 +181,28 @@ func TestTaskRunIdleEdgeWithoutAttemptStillEndsRun(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"no recorded prompt attempt means no delivery window to wait out")
+}
+
+// The turn boundary is durable like the held flag: a daemon restart must not
+// reopen a window an observation already closed — a reloaded row whose turn
+// evidence survives ends on its next idle edge instead of re-holding.
+func TestTaskRunTurnEvidenceSurvivesRoundTrip(t *testing.T) {
+	inst := taskRunSession(t)
+	attemptedAt := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.True(t, inst.RecordTaskRunTurn(attemptedAt.Add(5*time.Second)))
+
+	data := inst.ToInstanceData()
+	require.Equal(t, attemptedAt.Add(5*time.Second).UTC(), data.TaskRunTurnObservedAt.UTC(),
+		"the turn observation persists while the run is in flight")
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.True(t, reloaded.TaskRunActive(), "precondition: the run is still open after the restart")
+
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, reloaded.TaskRunActive(),
+		"a restart cannot reopen a delivery window the chrome observation already closed")
 }
 
 // The held flag is durable: a daemon restart inside the delivery window must
@@ -155,4 +223,17 @@ func TestTaskRunHeldEdgeSurvivesRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, reloaded.TaskRunActive(), "the run is still open after the restart")
 	require.True(t, reloaded.taskRunIdleEdgeHeld, "the held edge survives the restart")
+}
+
+// RecordTaskRunTurn is scoped to a live run: an interactive session can show
+// the same chrome all day and never accumulate task-run evidence.
+func TestTaskRunTurnEvidenceRequiresAnActiveRun(t *testing.T) {
+	inst, err := NewInstance(InstanceOptions{
+		Title:   "interactive",
+		Path:    t.TempDir(),
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	require.False(t, inst.RecordTaskRunTurn(time.Now()),
+		"a session with no task run must not accumulate turn evidence")
 }

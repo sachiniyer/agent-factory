@@ -239,6 +239,11 @@ func WaitForReadyAndSubmitPrompt(
 		// readability guess. A miss claims nothing; the ambiguous verdict stands.
 		if status == session.PromptSentUnverified &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
+			// The chrome is also the run's turn boundary (#5219): a task run may
+			// only end idle once the agent has demonstrably taken the turn, and
+			// this observation is the earliest the boundary can land — often a
+			// full poll tick before the daemon's own watch sees the row tick.
+			instance.RecordTaskRunTurn(time.Now())
 			return session.PromptDelivered, nil
 		}
 		return status, nil

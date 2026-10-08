@@ -141,12 +141,21 @@ type InstanceData struct {
 	TaskRunActive bool `json:"task_run_active,omitempty"`
 	// TaskRunIdleEdgeHeld records that the run's idle edge was held open — a
 	// handoff mission was still owed (#4429), or the prompt attempt had no
-	// post-delivery pane churn to prove the agent took the turn (#5219) — so
-	// the next idle observation after the blocker clears ends the run.
+	// in-turn-chrome observation or sustained quiet to prove the agent took the
+	// turn (#5219) — so the next idle observation after the blocker clears ends
+	// the run.
 	// Persisted for the same reason as TaskRunActive: the held edge is already
 	// spent and nothing re-derives it. omitempty + additive: an older record
 	// decodes to false, which holds nothing.
 	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
+	// TaskRunTurnObservedAt is when the agent's own in-turn chrome was observed
+	// for the run in flight (#5219) — the one pane signal a still-booting agent
+	// cannot produce: its elapsed-timer status row had to tick, not just render.
+	// Pane churn stays a weaker fact and cannot release the held edge alone.
+	// Persisted for the same reason as TaskRunIdleEdgeHeld: a restart must not
+	// reopen the delivery window an observation already closed. omitempty +
+	// additive: an older record decodes to zero, which releases nothing.
+	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle

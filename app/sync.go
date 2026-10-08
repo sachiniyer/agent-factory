@@ -699,7 +699,7 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// Mirror the daemon's durable mechanical evidence independently of liveness.
 	// An interactive send can change delivery status while the row remains Ready,
 	// and pane churn can race the next Running transition (#3168).
-	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt) {
+	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt, d.TaskRunTurnObservedAt) {
 		changed = true
 	}
 	// Same shape for the re-created-root notice (#2629): it appears when the

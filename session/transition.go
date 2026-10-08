@@ -672,13 +672,18 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// that boots behind a still pane (devin's ACP startup takes seconds,
 			// and no IsWorkingContent matcher covers it) has visibly reacted —
 			// used to end the run and hand on_complete a session whose turn never
-			// began. Post-attempt pane churn is the turn evidence; the send
-			// seeds the monitor's baseline with the post-Enter frame, so that
-			// churn cannot be the send's own echo. The edge holds rather than
-			// drops: churn landing while the row is already Ready (the paused
-			// poll path folds churn into lastPaneChurnAt without a liveness
-			// move) releases it through the flag exactly as the mission hold
-			// does. A run that never produces it stays open — reported
+			// began. Pane churn alone is not the turn evidence: the same async
+			// pipeline that hides boot also makes the prompt's own echo, ACP
+			// init, and skill discovery land as ordinary Updated captures seconds
+			// after Enter. What releases the gate is the agent's own in-turn
+			// chrome — devin/claude's elapsed-timer row must tick, which boot
+			// cannot fake — or a post-attempt burst followed by sustained quiet
+			// past the completion grace (the arm that covers signature-less
+			// agents and turns too fast for two captures). The edge holds rather
+			// than drops: evidence landing while the row is already Ready (the
+			// paused poll path folds churn into lastPaneChurnAt without a
+			// liveness move) releases it through the flag exactly as the mission
+			// hold does. A run that never produces it stays open — reported
 			// in-flight, never a completion.
 			if to.liveness == LiveReady {
 				switch {

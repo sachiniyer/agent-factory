@@ -546,6 +546,14 @@ type Manager struct {
 	// unbounded over the daemon's lifetime (#2015).
 	taskRunProbeDue map[string]time.Time
 
+	// taskRunTurnWatches holds each in-flight task run's pane-chrome watcher —
+	// the stateful detector that folds consecutive captures into "the agent's
+	// own in-turn row is ticking" evidence (#5219). Keyed by stableSessionKey,
+	// created lazily by the poll while a run is active, and reclaimed by
+	// sweepTaskRunTurnWatches once the run ends or the row is gone. Guarded by
+	// pausedMu: the paused-path observation feeds it off the same map.
+	taskRunTurnWatches map[string]*task.TurnWatch
+
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it
 	// to clients. On the Manager (not a controlServer) because both transports
@@ -795,6 +803,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		settleOwed:                make(map[string]settleOwedEntry),
 		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),
+		taskRunTurnWatches:        make(map[string]*task.TurnWatch),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),

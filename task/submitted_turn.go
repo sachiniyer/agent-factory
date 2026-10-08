@@ -254,3 +254,43 @@ func timedRowTicked(prev, cur map[string]timedRow) bool {
 	}
 	return false
 }
+
+// TurnWatch accumulates one session's consecutive pane captures and reports
+// when the agent's own in-turn chrome is demonstrated — the signal that
+// separates a live turn from boot or prompt-echo noise (#5219). It is the
+// poll-cadence sibling of submittedTurnVisible: same vocabulary, fed one
+// capture per status tick instead of inside the submit window. A task run's
+// idle edge may only spend the session once this fires (or the quieter
+// fallback qualifies), because nothing else the pane renders proves the agent
+// — rather than its own boot output — began the turn.
+type TurnWatch struct {
+	agent string
+	prev  map[string]timedRow
+}
+
+// NewTurnWatch returns the chrome watcher for the agent the pane actually runs
+// — pass the resolved (runtime) agent so a handoff or program override picks
+// the right signature. An agent with no in-turn signature never reports;
+// callers cover it with the quieter fallback evidence instead.
+func NewTurnWatch(agent string) *TurnWatch {
+	return &TurnWatch{agent: agent}
+}
+
+// Observe folds one captured frame into the watch and reports whether it
+// proves the agent mid-turn. For the timed-row agents (claude, devin) a row's
+// presence is not enough — scrollback can hold a stale one — so the row's
+// elapsed timer must have advanced against the previous capture, the same
+// contract submittedTurnVisible applies inside the submit window. The other
+// agents' indicators are scoped to their live frame, so presence there is
+// already proof.
+func (w *TurnWatch) Observe(content string) bool {
+	switch w.agent {
+	case tmux.ProgramClaude, tmux.ProgramDevin:
+		cur := timedTurnRowsByIdentity(content)
+		ticked := timedRowTicked(w.prev, cur)
+		w.prev = cur
+		return ticked
+	default:
+		return submittedTurnContent(content, w.agent)
+	}
+}

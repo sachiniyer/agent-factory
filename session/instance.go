@@ -173,7 +173,13 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
-	loadRuntimeReplaced      bool
+	// taskRunTurnObservedAt records when the agent's own in-turn chrome was
+	// observed for the run in flight — the positive "the prompt's turn began"
+	// boundary that boot output and the send's own echo cannot produce (#5219).
+	// Ordering against lastPromptAttemptAt does the scoping: a resend starts a
+	// new window the stale record cannot release.
+	taskRunTurnObservedAt time.Time
+	loadRuntimeReplaced   bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
 	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
 	// an observer learns whether its captured-pane decision was superseded before it applies it;
