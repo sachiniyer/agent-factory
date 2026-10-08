@@ -124,6 +124,27 @@ func sigtermFallback() (ShutdownResult, ShutdownTarget, error) {
 				pid, err, scanned-1,
 			)
 		}
+		if scanned == 0 {
+			// The PID-file fast path (locateDaemonPID's daemonOurs arm)
+			// returns scanned = 0: it proved this PID serves this home and
+			// short-circuited before the pgrep scan ran, so it has NO
+			// knowledge of whether other `--daemon` processes — including
+			// daemons serving foreign homes on this shared host — are alive.
+			// Do NOT recommend the blanket `pkill -f -- '--daemon'` below: that
+			// command has no home or PID constraint, so following it would kill
+			// exactly the foreign-home daemons the home binding never had a
+			// chance to leave untouched. The only safe remedy here is the same
+			// scoped recovery the other branches carry — stop the daemon
+			// serving THIS home by its known PID. (The slow path's case 1 arm
+			// returns scanned >= 1, and case 0/default return pid == 0, which
+			// routes through the `if pid == 0` block above rather than this
+			// signal-error block; so scanned == 0 reaches here only via the
+			// fast path.)
+			return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
+				"sigterm fallback for daemon pid %d: %w; stop the daemon serving this home by its PID, then retry `af upgrade`",
+				pid, err,
+			)
+		}
 		return ShutdownFailed, ShutdownTarget{}, fmt.Errorf(
 			"sigterm fallback for daemon pid %d: %w; run \"pkill -f -- '--daemon'\" to stop the old daemon manually before retrying `af upgrade`",
 			pid, err,
