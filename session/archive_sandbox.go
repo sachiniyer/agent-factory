@@ -559,7 +559,13 @@ func isSandboxBackendType(t string) bool {
 // a LOCAL session that is Lost loads started=true and already survives, and a
 // local row that never started is the junk the checkpoint's !Started() skip is for.
 func lostSandboxRecord(data InstanceData) bool {
-	return isSandboxBackendType(data.BackendType) && data.Liveness == LiveLost
+	// EffectiveLiveness, not data.Liveness directly, so a pre-#1195 sandbox row
+	// (LivenessUnset with a legacy Status: Lost/Dead) rolls forward to LiveLost
+	// exactly as FromInstanceData does on load. Reading data.Liveness here would
+	// miss that row while the loader treats it as a lost sandbox record, so the
+	// loaded form would release its slot and the raw ghost would still hold it —
+	// the cap wedges on the very legacy row the release exists for.
+	return isSandboxBackendType(data.BackendType) && EffectiveLiveness(data) == LiveLost
 }
 
 // LostSandboxRecord is the exported form of lostSandboxRecord for the raw-row

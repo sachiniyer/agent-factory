@@ -33,11 +33,38 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // in-memory Instance exists to run the lifecycle edge that would clear
 // TaskRunActive, the same unrecoverable wedge class the terminal-marker guards
 // below prevent.
+//
+// The release is gated on the row's raw activity being terminal, not on
+// LostSandboxRecord alone. A sandbox LiveLost row that also carries a durable
+// pending handoff (PromptNotDelivered) or account swap reconstructs OpReplacing /
+// ActivityPending on load, so its materialized form HOLDS (holdsTaskRunSlot's
+// Activity arm wins over the started=false release). Releasing such a ghost
+// unconditionally would let a replacement past max_concurrent_runs while the
+// original task transaction is still in flight. ClassifyActivity is the
+// raw-record reader's activity oracle (the same function holdsTaskRunSlot's
+// Activity() reaches through the reconstructed op axis), so it is what decides
+// "terminal" here, keeping the two arms on the same verdict.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	return item.TaskID != "" && item.TaskRunActive &&
 		!item.StartupStateUnknown && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp &&
-		!session.LostSandboxRecord(item)
+		!releasesLostSandboxGhost(item)
+}
+
+// releasesLostSandboxGhost reports whether a row that failed to materialize is a
+// sandbox LiveLost ghost whose materialized form releases its task-run slot, so
+// the raw arm releases it too instead of wedging the cap on an unloadable row.
+// It is the !LostSandboxRecord term of rawTaskRunHoldsSlot, scoped to the rows
+// whose materialized form actually releases: a sandbox LiveLost row whose raw
+// activity is terminal. A pending-handoff/account-swap variant loads with
+// ActivityPending (OpReplacing reconstructed), so its live arm holds and this
+// returns false — see rawTaskRunHoldsSlot.
+func releasesLostSandboxGhost(item session.InstanceData) bool {
+	if !session.LostSandboxRecord(item) {
+		return false
+	}
+	activity, _ := session.ClassifyActivity(item)
+	return activity == session.ActivityTerminal
 }
 
 // fromInstanceDataForRefresh is the entry point refreshDaemonInstances uses
