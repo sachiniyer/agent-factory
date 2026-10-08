@@ -573,3 +573,23 @@ func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
 		"a stale durable churn stamp is not a finished 30s of silence — the quiet arm measures from reload time")
 	require.True(t, reloaded.taskRunTurnGateHeld)
 }
+
+// A failed first send must not come back from a restart as an armed
+// boundary (#5221 review): while the daemon is up, recordPromptAttemptLocked
+// refuses to bind a PromptNotDelivered attempt, and the restore-side
+// adoption of the session-level send must apply the same exclusion — the
+// first Ready observation ends the run exactly as it would have without the
+// restart, not five minutes later off the silent fallback.
+func TestTaskRunFailedSendDoesNotRestoreAsArmedBoundary(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now().Add(-time.Minute)))
+
+	data := inst.ToInstanceData()
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, reloaded.TaskRunActive(),
+		"a proven-failed send is no boundary — restore matches the un-restarted run's first-Ready end")
+}

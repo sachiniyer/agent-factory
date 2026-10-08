@@ -456,11 +456,18 @@ func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
 // active run with only the session-level send on record — that send IS the
 // task's prompt for an upgrade-era row, so adopt it rather than restart with
 // an unarmed gate that lets the first Ready tick complete the run (#5221).
+// The adoption skips a proven-failed send: RecordPromptAttempt never binds a
+// PromptNotDelivered attempt to the boundary while the daemon is up, so a
+// restart must not resurrect one — the same Ready tick that would end the
+// un-restarted run must end this one too, not wedge it until fallback.
 func taskRunPromptAttemptAtFromData(data InstanceData) time.Time {
 	if !data.TaskRunActive {
 		return time.Time{}
 	}
 	if data.TaskRunPromptAttemptAt.IsZero() {
+		if data.LastPromptDeliveryStatus == PromptNotDelivered {
+			return time.Time{}
+		}
 		return data.LastPromptAttemptAt
 	}
 	return data.TaskRunPromptAttemptAt
