@@ -202,11 +202,17 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// prompt was affirmatively not delivered. The boundary is the last send
 	// that could actually have delivered — a PromptNotDelivered result proves
 	// the pane took nothing, so it must not supersede a standing boundary and
-	// strand the window unsatisfiable.
+	// strand the window unsatisfiable. The single exception is machinery: a
+	// task-scoped continuation send that is refused while the OLD window was
+	// already satisfied proves the continuation never landed, and keeping the
+	// satisfied boundary would let the predecessor's turn end the run anyway
+	// (#5221 review). The refused send therefore establishes a fresh
+	// unsatisfiable boundary — held and flagged — until a redelivery lands.
+	satisfied := i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)
 	if i.taskRunActive &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
-			(status != PromptNotDelivered &&
-				(rearmTaskRun || !i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)))) {
+			(status != PromptNotDelivered && (rearmTaskRun || !satisfied)) ||
+			(rearmTaskRun && satisfied && status == PromptNotDelivered)) {
 		i.taskRunPromptAttemptAt = attemptedAt
 		i.taskRunPromptDeliveryStatus = status
 		// The silent grace is measured from each armed boundary — and restarted

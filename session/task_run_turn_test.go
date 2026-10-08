@@ -589,3 +589,47 @@ func TestTaskRunManualSendStillFrozenAfterSatisfaction(t *testing.T) {
 	require.False(t, inst.TaskRunActive(),
 		"a manual send cannot re-arm a satisfied window — the run completes on the task's evidence")
 }
+
+// A machinery continuation send that comes back refused while the previous
+// window was satisfied must NOT leave the satisfied boundary standing — the
+// continuation never landed, so the predecessor's turn cannot carry the run
+// to completion (#5221 review P1, limit-resume resend path). The refused send
+// establishes a fresh unsatisfiable boundary: held, flagged, waiting on
+// redelivery.
+func TestTaskRunRefusedContinuationWedgesTheGate(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
+
+	// The continuation send is refused: the run must NOT complete on the
+	// predecessor's turn.
+	t1 := time.Now()
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptNotDelivered, t1))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"a refused continuation wedges the gate — the predecessor's turn must not end the run")
+	require.True(t, inst.taskRunTurnGateHeld)
+
+	// Chrome cannot clear it; only a real redelivery re-arms the window.
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(), "an unsatisfiable boundary stays held")
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t1.Add(time.Second)))
+	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+}
+
+// The same refused result from an OPERATOR send still cannot move a satisfied
+// boundary — the task's evidence, not the session's, decides the run.
+func TestTaskRunManualRefusedSendCannotWedge(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordTaskRunPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)))
+
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"a manual refused send leaves the satisfied boundary — the run completes on its turn")
+}
