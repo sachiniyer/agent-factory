@@ -669,3 +669,48 @@ func TestLegacySandboxLostGhostReleasesTaskRunSlot(t *testing.T) {
 		})
 	}
 }
+
+// TestSandboxLostGhostWithAmbiguousHandoffReleasesTaskRunSlot is the third leg of
+// the sandbox LiveLost handoff scoping: a LiveLost row whose PendingHandoffMission
+// carries an ambiguous delivery verdict — PromptCouldNotConfirm, or the missing
+// evidence a legacy record carries (no HandoffDeliveryStatus at all) — does NOT
+// reconstruct OpReplacing on load. FromInstanceData's fence reconstruction
+// (pendingHandoffMissionNeedsFence) admits only PromptNotDelivered and
+// PromptDelivered; an ambiguous verdict loads with InFlightOp=OpNone, so the
+// loaded sandbox LiveLost row is terminal and holdsTaskRunSlot releases.
+//
+// ClassifyActivity on the raw record returns ActivityPending for the non-empty
+// PendingHandoffMission regardless of the verdict, so without LoadedActivity the
+// raw arm would HOLD while the live arm releases — the same wedged-cap mismatch
+// the PR fixes. LoadedActivity mirrors LifecycleView.Activity() composed with
+// FromInstanceData's InFlightOp reconstruction, so the raw arm sees the terminal
+// verdict a loaded Instance would.
+func TestSandboxLostGhostWithAmbiguousHandoffReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	cases := []struct {
+		name    string
+		mission string
+		status  session.PromptDeliveryStatus
+	}{
+		{name: "missing-evidence", mission: "continue the inherited work", status: ""},
+		{name: "could-not-confirm", mission: "continue the inherited work", status: session.PromptCouldNotConfirm},
+		{name: "sent-unverified", mission: "continue the inherited work", status: session.PromptSentUnverified},
+	}
+	for _, backend := range sandboxBackends {
+		for _, tc := range cases {
+			t.Run(backend+"-"+tc.name, func(t *testing.T) {
+				row := session.InstanceData{
+					TaskID:                "task1",
+					TaskRunActive:         true,
+					Liveness:              session.LiveLost,
+					BackendType:           backend,
+					PendingHandoffMission: tc.mission,
+					HandoffDeliveryStatus: tc.status,
+				}
+				if rawTaskRunHoldsSlot(row) {
+					t.Fatalf("rawTaskRunHoldsSlot held a %s LiveLost row with ambiguous handoff (%s); the loader does not reconstruct OpReplacing, so its materialized form is terminal and the raw arm must release", backend, tc.name)
+				}
+			})
+		}
+	}
+}

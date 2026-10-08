@@ -269,6 +269,49 @@ func (v LifecycleView) Activity() Activity {
 	return activity
 }
 
+// LoadedActivity reports the activity the loaded form of a raw InstanceData would
+// have, mirroring LifecycleView.Activity() composed with FromInstanceData's
+// InFlightOp reconstruction. It is the raw-record reader's equivalent of the
+// live arm's v.Activity() — the activity holdsTaskRunSlot sees for a materialized
+// Instance — so a row that failed to materialize can reach the same verdict
+// without an in-memory Instance.
+//
+// The loaded form's activity is computed from the InFlightOp FromInstanceData
+// reconstructs, NOT from the raw PendingHandoffMission. ClassifyActivity on a raw
+// record returns ActivityPending for any non-empty PendingHandoffMission (line 99),
+// but the loader reconstructs OpReplacing only for the verdicts that still own an
+// in-flight obligation the daemon resolves itself — PromptNotDelivered (automatic
+// replay) and PromptDelivered (crash-window settle). An ambiguous verdict
+// (PromptCouldNotConfirm, PromptSentUnverified, or the missing evidence a legacy
+// record carries) loads WITHOUT the fence, so the loaded form has InFlightOp=OpNone.
+// LifecycleView.Activity() reaches the terminal verdict for such a row by omitting
+// PendingHandoffMission from the InstanceData it builds; LoadedActivity does the
+// same for a raw record that never materialized, so a sandbox LiveLost ghost with
+// an ambiguous handoff releases its slot instead of wedging the cap forever.
+func LoadedActivity(data InstanceData) (Activity, string) {
+	data = data.RestoreHandoffRollbackFence()
+	data = data.RestoreAccountSwapRollbackFence()
+	data = data.restoreMissingHandoffMissionEvidence()
+	data = data.restoreMissingAccountSwapMissionEvidence()
+	op := inFlightOpFromData(data)
+	if data.UserKilled {
+		op = OpNone
+	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && op == OpNone &&
+		pendingHandoffMissionNeedsFence(data.HandoffDeliveryStatus) {
+		op = OpReplacing
+	}
+	effective := InstanceData{
+		Liveness:            livenessFromData(data),
+		InFlightOp:          op,
+		UserKilled:          data.UserKilled,
+		StartupStateUnknown: data.StartupStateUnknown,
+	}
+	if data.PendingAccountSwap != nil {
+		effective.PendingAccountSwap = &AccountSwapData{}
+	}
+	return ClassifyActivity(effective)
+}
+
 // classifyActivityByStatus is the legacy-Status fallback for ClassifyActivity,
 // used only for records written before the liveness axis existed (#1195).
 func classifyActivityByStatus(s Status) (Activity, string) {

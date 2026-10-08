@@ -34,16 +34,20 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // TaskRunActive, the same unrecoverable wedge class the terminal-marker guards
 // below prevent.
 //
-// The release is gated on the row's raw activity being terminal, not on
+// The release is gated on the row's loaded activity being terminal, not on
 // LostSandboxRecord alone. A sandbox LiveLost row that also carries a durable
 // pending handoff (PromptNotDelivered) or account swap reconstructs OpReplacing /
 // ActivityPending on load, so its materialized form HOLDS (holdsTaskRunSlot's
 // Activity arm wins over the started=false release). Releasing such a ghost
 // unconditionally would let a replacement past max_concurrent_runs while the
-// original task transaction is still in flight. ClassifyActivity is the
-// raw-record reader's activity oracle (the same function holdsTaskRunSlot's
-// Activity() reaches through the reconstructed op axis), so it is what decides
-// "terminal" here, keeping the two arms on the same verdict.
+// original task transaction is still in flight. An ambiguous handoff delivery
+// (PromptCouldNotConfirm, or the missing evidence a legacy record carries) does
+// NOT reconstruct the fence, so the loaded form is terminal and the raw arm
+// releases. session.LoadedActivity is the raw-record reader's activity oracle —
+// the same composition of FromInstanceData's InFlightOp reconstruction and
+// ClassifyActivity that holdsTaskRunSlot's Activity() reaches through the
+// reconstructed op axis — so it is what decides "terminal" here, keeping the two
+// arms on the same verdict.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	return item.TaskID != "" && item.TaskRunActive &&
 		!item.StartupStateUnknown && !item.UserKilled &&
@@ -55,15 +59,20 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 // sandbox LiveLost ghost whose materialized form releases its task-run slot, so
 // the raw arm releases it too instead of wedging the cap on an unloadable row.
 // It is the !LostSandboxRecord term of rawTaskRunHoldsSlot, scoped to the rows
-// whose materialized form actually releases: a sandbox LiveLost row whose raw
-// activity is terminal. A pending-handoff/account-swap variant loads with
-// ActivityPending (OpReplacing reconstructed), so its live arm holds and this
-// returns false — see rawTaskRunHoldsSlot.
+// whose materialized form actually releases: a sandbox LiveLost row whose loaded
+// activity is terminal. A pending-handoff variant whose delivery still owns an
+// in-flight obligation (PromptNotDelivered/PromptDelivered) reconstructs
+// OpReplacing on load, so its live arm holds and this returns false. An ambiguous
+// delivery (PromptCouldNotConfirm, or the missing evidence a legacy record
+// carries) does NOT reconstruct the fence; the loaded sandbox is inert/terminal
+// and releases, so the raw arm must agree. session.LoadedActivity mirrors
+// LifecycleView.Activity() composed with FromInstanceData's InFlightOp
+// reconstruction, so the raw arm sees the same verdict a loaded Instance would.
 func releasesLostSandboxGhost(item session.InstanceData) bool {
 	if !session.LostSandboxRecord(item) {
 		return false
 	}
-	activity, _ := session.ClassifyActivity(item)
+	activity, _ := session.LoadedActivity(item)
 	return activity == session.ActivityTerminal
 }
 
