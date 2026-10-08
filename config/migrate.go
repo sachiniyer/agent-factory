@@ -77,6 +77,15 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	// in place, the same outcome the TOML path gives the same content (#3653
 	// review).
 	if converting {
+		// The pre-checks below can return before LoadConfig, which is where the
+		// owner-only home repair runs (loadConfig → secureAFHomeForPath,
+		// config_load.go). A default AF home left 0755 by an older release would
+		// stay that way on a refused ambiguous file, so harden it first — the
+		// same call LoadConfig makes (#2197), which is a no-op on a home already
+		// at 0700.
+		if err := secureAFHomeForPath(tomlPath); err != nil {
+			return nil, fmt.Errorf("failed to secure config directory: %w", err)
+		}
 		// A DANGLING config.toml symlink reads as ENOENT through fileExists
 		// (Stat follows the link), so a real, ambiguous config.json beside it
 		// reaches the JSON guard below and reports the ambiguity first,

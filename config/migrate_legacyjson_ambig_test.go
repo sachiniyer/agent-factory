@@ -223,6 +223,51 @@ func TestMigrateAmbiguousJSONWithDanglingTomlLinkRefusesTheLink(t *testing.T) {
 	assert.True(t, info.Mode()&os.ModeSymlink != 0, "the dangling symlink is left in place")
 }
 
+// TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeRefusing pins the home-hardening
+// ordering the pre-check must keep. The ambiguity guard refuses BEFORE LoadConfig
+// runs, and loadConfig is where the owner-only home repair lives
+// (secureAFHomeForPath, config_load.go). A default AF home left 0755 by an older
+// release must still be tightened to 0700 even when the file is refused, so a
+// refused run does not leave credential-adjacent state under stale permissions
+// (#2197) — the same repair LoadConfig would have performed had the file loaded.
+func TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeRefusing(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0755 home cannot be staged as world-readable")
+	}
+	fastShell(t)
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+	afHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(afHome, ConfigFileName),
+		[]byte(`{"listen_addr":"0.0.0.0:8443","network":{"listen_addr":"127.0.0.1:8443"}}`),
+		0o644,
+	))
+	require.NoError(t, os.Chmod(afHome, 0o755))
+
+	_, err := MigrateGlobalConfig()
+	require.Error(t, err, "ambiguous JSON is still refused")
+	assert.Contains(t, err.Error(), "with different values",
+		"the refusal is the ambiguity guard's, not a side effect of the repair")
+	assert.Contains(t, err.Error(), "Nothing was rewritten",
+		"the refusal left the source untouched")
+
+	// The home was hardened before the refusal returned, exactly as LoadConfig
+	// would have done had the file not been refused.
+	info, statErr := os.Stat(afHome)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"a refused ambiguous legacy JSON still tightens a 0755 default AF home to 0700")
+
+	// The refusal still left the source untouched, as every other refusal does.
+	assert.Equal(t, `{"listen_addr":"0.0.0.0:8443","network":{"listen_addr":"127.0.0.1:8443"}}`,
+		readFile(t, filepath.Join(afHome, ConfigFileName)), "config.json is left exactly as it was")
+	assert.NoFileExists(t, filepath.Join(afHome, TomlConfigFileName),
+		"no conversion ran, so no config.toml was written")
+}
+
 // TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig pins the other
 // divergence the finding named: json.Decoder.Decode (the shapeless read) stops
 // after the first object and ignores trailing garbage, while json.Unmarshal
