@@ -283,15 +283,23 @@ func TestEscapedProcessForeignHomeNotAttributedToThisInstall(t *testing.T) {
 	report, err := Run(testOptionsWithHome(t, home, true, foreignEscapee.PID))
 	require.NoError(t, err)
 
-	escapes := findByCheck(report, "escaped-process")
-	require.Len(t, escapes, 1, "exactly one escaped-process finding is expected")
-	require.Contains(t, escapes[0].Detail, "belongs to another agent-factory home",
-		"foreign-home escapee must be attributed to its home, not ours: %s", escapes[0].Detail)
-	require.Contains(t, escapes[0].Detail, foreignHome,
-		"the finding must name the foreign home: %s", escapes[0].Detail)
-	require.NotContains(t, escapes[0].Detail, "escaped the pane tree",
-		"a foreign-home process must not be reported as escaping our live session: %s", escapes[0].Detail)
-	require.Empty(t, escapes[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	// The foreign-home process is reported under a DISTINCT check key, not the
+	// escaped-process key: the escaped-process collapse renders every item in
+	// that group as "N processes escaped live session pane trees", which would
+	// re-attribute this foreign process to our install in the default
+	// (non-verbose) CLI and JSON. Its own key keeps the foreign-home distinction
+	// visible without --verbose.
+	foreign := findByCheck(report, "foreign-home-process")
+	require.Len(t, foreign, 1, "exactly one foreign-home-process finding is expected")
+	require.Contains(t, foreign[0].Detail, "belongs to another agent-factory home",
+		"foreign-home escapee must be attributed to its home, not ours: %s", foreign[0].Detail)
+	require.Contains(t, foreign[0].Detail, foreignHome,
+		"the finding must name the foreign home: %s", foreign[0].Detail)
+	require.NotContains(t, foreign[0].Detail, "escaped the pane tree",
+		"a foreign-home process must not be reported as escaping our live session: %s", foreign[0].Detail)
+	require.Empty(t, foreign[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	require.Empty(t, findByCheck(report, "escaped-process"),
+		"a foreign-home process must not be reported as an escapee of our live session")
 	require.Empty(t, findByCheck(report, "orphaned-process"),
 		"a live-session marker must not route through the orphaned-process arm")
 	// No blindness row: the pane tree of our live session is READABLE here, so
@@ -300,9 +308,30 @@ func TestEscapedProcessForeignHomeNotAttributedToThisInstall(t *testing.T) {
 		"a readable pane tree must not produce a blindness row")
 	require.True(t, alive(foreignEscapee), "the escaped arm must not kill, even under --fix")
 
+	// The default (non-verbose) JSON output must carry the foreign-home row with
+	// its accurate detail, not collapse it into the escaped-process summary that
+	// would re-attribute the process to this install.
 	payload := BuildJSONReport(report, true, false)
 	require.Zero(t, payload.Summary.Unresolved,
 		"a foreign-home advisory must remain visible without failing a health probe")
+	var foreignRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "foreign-home-process" {
+			foreignRow = &payload.Checks[i]
+			break
+		}
+	}
+	require.NotNil(t, foreignRow, "the default JSON output must keep the foreign-home row distinct")
+	require.Contains(t, foreignRow.Detail, "belongs to another agent-factory home",
+		"the default JSON row must preserve the foreign-home distinction: %s", foreignRow.Detail)
+	var escapedRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "escaped-processes" {
+			escapedRow = &payload.Checks[i]
+			break
+		}
+	}
+	require.Nil(t, escapedRow, "the default JSON output must not collapse a foreign-home process into an escaped-processes row")
 }
 
 // TestEscapedProcessOwnHomeStillReportedAsEscape is the companion regression: the

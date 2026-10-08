@@ -646,9 +646,19 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					// escaped arm remains report-only either way — no kill path
 					// is added here.
 					home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
-					if homeStatus == proctree.EnvFound && filepath.Clean(home) != filepath.Clean(ctx.opts.ConfigDir) {
+					// Canonicalize both sides through normalizeHome (the same
+					// home-identity normalization checkForeignDaemons uses) rather
+					// than filepath.Clean: Clean is lexical and leaves a symlinked
+					// AGENT_FACTORY_HOME — or macOS /var vs /private/var — comparing
+					// unequal to the same home, which would report a genuine
+					// escapee as foreign.
+					if homeStatus == proctree.EnvFound && normalizeHome(home) != normalizeHome(ctx.opts.ConfigDir) {
+						// A distinct check key keeps this out of the escaped-process
+						// collapse, whose row ("N processes escaped live session
+						// pane trees") would re-attribute a foreign process to this
+						// install in the default (non-verbose) CLI and JSON output.
 						report.addAdvisoryFinding(Finding{
-							Check: "escaped-process",
+							Check: "foreign-home-process",
 							Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
 								"agent-factory home (%s) — not attributed to this install",
 								describeProc(p), name, home),
