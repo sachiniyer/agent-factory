@@ -23,6 +23,18 @@ import (
 // orphan sweep, so a concurrent create cannot manufacture a sweep candidate.
 var restoreManagerForStartup = func(m *Manager) error { return m.restoreInstances() }
 
+// testHookDaemonBeforeHomeLockRelease and testHookDaemonAfterHomeLockRelease
+// bracket the home-lock release inside runDaemon's outermost defer (#5188).
+// The first fires while the exiting daemon still holds the lock — a test can
+// assert daemon.pid still names it then — and the second fires in the
+// release→remove window where a successor daemon can win the home and rewrite
+// daemon.pid, a rewrite the teardown removal must preserve. No-ops in
+// production.
+var (
+	testHookDaemonBeforeHomeLockRelease = func() {}
+	testHookDaemonAfterHomeLockRelease  = func() {}
+)
+
 // RunDaemon runs the daemon process: it serves the local control plane,
 // evaluates task cron schedules in-process, supervises watch-task scripts,
 // and iterates over all sessions each poll to compute their authoritative
@@ -128,7 +140,22 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		}
 		return err
 	}
-	defer lock.release()
+	// daemon.pid names this home's daemon for exactly the span it is alive
+	// AND holding the home lock (#5188): the file therefore survives the
+	// whole teardown tail and is removed only here, in the LAST deferred
+	// action — after the lock is released, never while it is still held.
+	// The removal re-reads the file under daemon.pid.lock and unlinks only
+	// when it still names this process (removeDaemonPIDFile), so a successor
+	// that wins the home in the release→remove window keeps the file it
+	// wrote. Identity-guarded removal is also what makes calling it
+	// unconditional safe on the early exits below: a file naming another
+	// daemon is never ours to delete.
+	defer func() {
+		testHookDaemonBeforeHomeLockRelease()
+		lock.release()
+		testHookDaemonAfterHomeLockRelease()
+		removeDaemonPIDFile()
+	}()
 
 	// The home exists now — acquireHomeLock just created it — so latch it, and no
 	// write this daemon makes can re-create the directory once it is deleted
@@ -285,17 +312,6 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		log.InfoLog.Printf("another agent-factory daemon bound the control socket first; exiting")
 		return nil
 	}
-	// bindControlServerExclusive published daemon.pid before the socket bound
-	// (a successful, non-alreadyRunning return means the write succeeded —
-	// publication is fail-closed), so remove it on teardown — registered
-	// BEFORE the socket cleanup so LIFO closes the listener first: the file
-	// must never disappear while the socket can still answer a Ping, or a
-	// concurrent status/EnsureDaemon could observe a responding daemon with
-	// no management handle (#5188). Registered here rather than in the
-	// outermost defer so the alreadyRunning early return above never deletes
-	// the running daemon's file.
-	defer removeDaemonPIDFile()
-
 	controlClosed := false
 	defer func() {
 		if controlClosed {

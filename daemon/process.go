@@ -181,21 +181,77 @@ func writeDaemonPIDFile() error {
 	return nil
 }
 
-// removeDaemonPIDFile deletes the daemon PID file. Best-effort: an ENOENT is
-// already harmless (a stale file is fine — readers verify cmdline) and
-// permission errors only occur in pathological setups. Logs at warning level
-// rather than failing the daemon teardown.
+// removeDaemonPIDFile deletes the daemon PID file AT TEARDOWN — the deferred
+// companion of writeDaemonPIDFile, run only after this daemon has released
+// the per-home lock (#5188). Best-effort: an ENOENT is already harmless (a
+// stale file is fine — readers verify cmdline) and permission errors only
+// occur in pathological setups. Logs at warning level rather than failing
+// the daemon teardown.
+//
+// The removal is identity-guarded: it re-reads the file under the sidecar
+// daemon.pid.lock and unlinks only when it still names THIS process's PID.
+// Between the home-lock release and this cleanup a successor daemon can win
+// the home and write its own PID; deleting unconditionally would orphan that
+// live daemon — the very untracked-daemon state the PID file exists to
+// prevent (#5188). The plain number compare (rather than
+// removePIDFileIfStillNames' classifyDaemonHome re-check) is right here and
+// wrong there: this function removes OUR OWN file while our process is still
+// alive, so classifying the named PID would trivially report daemonOurs and
+// keep the file forever.
 //
 // It refuses a symlinked path because the write above refuses one: af cannot
 // have written this file through a link, so unlinking one on teardown would
-// delete an arrangement af never touched (#3672).
+// delete an arrangement af never touched (#3672). And it skips the removal
+// entirely on a filesystem whose flock cannot be trusted (NFS and friends —
+// see lockFSReliable), where the sidecar lock does not actually serialize
+// the re-read against a successor's atomic rewrite; a stale file is safe to
+// leave because every reader re-verifies it.
 func removeDaemonPIDFile() {
 	path, err := daemonPIDFilePath()
 	if err != nil {
 		return
 	}
-	if err := config.RemoveFileRefusingLink(path); err != nil && !os.IsNotExist(err) {
-		log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
+	if ok, _ := lockFSReliable(filepath.Dir(path)); !ok {
+		log.InfoLog.Printf("daemon PID file %q is on a filesystem whose flock is untrusted; leaving it in place", path)
+		return
+	}
+	if err := withDaemonPIDLock(path, pidLockCleanupDeadline(time.Time{}), func() error {
+		if err := config.RefuseManagedFileSymlink(path); err != nil {
+			if errors.Is(err, config.ErrManagedFileSymlink) {
+				log.InfoLog.Printf("daemon PID file %q is a symlink af did not write through; leaving it in place", path)
+			}
+			return nil
+		}
+		// Descriptor-validated read, same as removePIDFileIfStillNames: this
+		// runs holding daemon.pid.lock AFTER the home lock is released, so a
+		// FIFO swapped in for daemon.pid here would block teardown and let a
+		// successor claim the home only to wedge its fail-closed publication
+		// on the lock we never drop.
+		data, ok := readManagedFileNoFollow(path, daemonPIDFileMaxBytes)
+		if !ok {
+			// Already gone (or unreadable) — nothing to remove; a missing
+			// file is the desired end state.
+			return nil
+		}
+		var current int
+		if _, err := fmt.Sscanf(string(data), "%d", &current); err != nil {
+			// Not a PID file af wrote; leave it for the next caller rather
+			// than unlinking a file whose current contents we did not
+			// establish (mirrors removePIDFileIfStillNames' stance).
+			return nil
+		}
+		if current != os.Getpid() {
+			// A successor daemon won the home lock during our
+			// release→remove window and wrote its own PID; its file is
+			// load-bearing bookkeeping, not ours to delete.
+			return nil
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.WarningLog.Printf("failed to remove daemon PID file: %v", err)
+		}
+		return nil
+	}); err != nil {
+		log.WarningLog.Printf("could not coordinate removal of daemon PID file %q: %v", path, err)
 	}
 }
 
@@ -670,7 +726,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 				// snapshot; nothing to signal, and a recycled PID is not. Clean
 				// up the way the errIsProcessGone SIGTERM path below does.
 				log.InfoLog.Printf("daemon process (PID: %d) exited before the signal; cleaning up", pid)
-				cleanupDaemonRuntimeFiles(pidFile, deadline)
+				cleanupDaemonRuntimeFiles(pidFile, pid, deadline)
 				return true, nil
 			}
 			// Could not bind the identity; do not fall back to a PID-only signal
@@ -690,7 +746,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 					// landed; it is gone, which is the desired outcome and not a
 					// recycled-PID signal.
 					log.InfoLog.Printf("daemon process (PID: %d) exited before SIGTERM landed; cleaning up", pid)
-					cleanupDaemonRuntimeFiles(pidFile, deadline)
+					cleanupDaemonRuntimeFiles(pidFile, pid, deadline)
 					return true, nil
 				}
 				// The PID was recycled onto another process between the home
@@ -727,7 +783,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 					// gone, which is the desired outcome; a recycled PID is not
 					// signaled.
 					log.InfoLog.Printf("daemon process (PID: %d) exited before SIGKILL landed; cleaning up", pid)
-					cleanupDaemonRuntimeFiles(pidFile, deadline)
+					cleanupDaemonRuntimeFiles(pidFile, pid, deadline)
 					return true, nil
 				}
 				if !errIsProcessGone(err) {
@@ -736,7 +792,7 @@ func stopDaemonUntil(deadline time.Time) (bool, error) {
 			}
 		}
 
-		cleanupDaemonRuntimeFiles(pidFile, deadline)
+		cleanupDaemonRuntimeFiles(pidFile, pid, deadline)
 		log.InfoLog.Printf("daemon process (PID: %d) stopped successfully", pid)
 		return true, nil
 	case daemonForeign:
