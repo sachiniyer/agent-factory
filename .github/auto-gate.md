@@ -705,9 +705,12 @@ retains not-yet-eligible work re-runs that whole snapshot on each in-pass rescan
 can change between snapshots (e.g. a decision that becomes blocked after the
 initial scan adds output batches only to later scans). The per-pass total is
 therefore the sum over the initial scan plus each rescan,
-`Σ_i (ceil(N_i / 100) + ceil(B_i / 25))` requests, with the rescans bounded by
-the sixteen-minute retention wait. For a population that does not change
-between scans this collapses to `(1 + rescans) × (ceil(N / 100) + ceil(B / 25))`.
+`Σ_i (max(1, ceil(N_i / 100)) + ceil(B_i / 25))` requests, with the rescans bounded by
+the sixteen-minute retention wait. A snapshot with no open PRs still costs one page
+(`requiredCheckReconciliationSnapshot` issues its initial GraphQL query before it can
+discover that pagination is finished), so the page-read term is `max(1, …)`. For a
+population that does not change
+between scans this collapses to `(1 + rescans) × (max(1, ceil(N / 100)) + ceil(B / 25))`.
 The rate window holds
 ordinary-request dispatches to about 12 an hour; a handoff chain paces itself
 by pass completion instead — one running pass plus one pending successor in the
