@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestDesignDriverScenes(t *testing.T) {
 	source, err := os.Getwd()
 	require.NoError(t, err)
 	for _, mode := range []string{"light", "dark"} {
-		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "confirmation-external", "confirmation-reused", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
+		for _, scene := range []string{"appearance-system", "appearance", "sessions-dense", "projects-degraded", "account-picker", "task-actions", "task-delete", "single-project", "multiple-projects", "preview-help", "search-overflow", "selection-overflow", "project-picker-overflow", "config-edit", "account-register", "hooks-edit", "hooks-add", "rail-task-selection", "rail-project-selection", "notice", "failure-notice", "project-picker-existing", "archive-warning", "alarm", "pane", "keyboard", "preview", "hooks", "config", "accounts", "sessions", "tasks", "task-create", "task-schedule", "task-weekdays", "task-weekdays-unchecked", "task-trigger", "task-program", "task-schedule-type", "help", "help-actions", "confirmation", "confirmation-external", "confirmation-reused", "confirmation-scroll", "sandbox-restore", "interactive-help", "task-watch", "search", "project-picker", "selection", "prompt"} {
 			t.Run(scene+"-"+mode, func(t *testing.T) {
 				h, inst := newDesignDriverSceneHome(t, mode, nil)
 				switch scene {
@@ -186,6 +187,19 @@ func TestDesignDriverScenes(t *testing.T) {
 					pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRight})
 				case "confirmation":
 					h.confirmAction(killConfirmMessage(inst.Title, "", false, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true}), nil)
+				case "confirmation-scroll":
+					// A destructive confirm whose risk text overflows the window:
+					// the body pages, the footer counts what is hidden in each
+					// direction, and the prompt stays pinned (#5171).
+					var warnings []string
+					warnings = append(warnings, "[!] Delete project 'atlas'?")
+					for i := 1; i <= 16; i++ {
+						warnings = append(warnings, fmt.Sprintf("Warning %02d — could not verify workspace state before deletion; data may be lost.", i))
+					}
+					h.confirmActionWithDetail(strings.Join(warnings, "\n"), "Restore an archived session to bring the project back.", nil)
+					for i := 0; i < 3; i++ {
+						h.confirmationOverlay.ScrollDown()
+					}
 				case "search-overflow", "selection-overflow", "project-picker-overflow":
 					var items []string
 					var instances []*session.Instance

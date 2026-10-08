@@ -412,8 +412,21 @@ func isWheelButton(b tea.MouseButton) bool {
 // PR the wheel scrolled whatever the focus ring pointed at. Tree zones map
 // to cursor movement (the tree's only scroll primitive, same as j/k), pane
 // zones to that pane's capture scroll, the automations section to its task
-// cursor. Modal overlays own the screen, so the wheel is inert under them.
+// cursor. Modal overlays own the screen, so the wheel is inert under them —
+// with one exception: a scrollable confirmation pages its body on the wheel
+// (#5171), since "resize the terminal" was never an answer for unread risk
+// text.
 func (m *home) handleWheel(msg tea.MouseMsg) tea.Cmd {
+	if m.state == stateConfirm {
+		if m.confirmationOverlay != nil && m.confirmationOverlay.Scrollable() {
+			if msg.Button == tea.MouseButtonWheelUp {
+				m.confirmationOverlay.ScrollUp()
+			} else {
+				m.confirmationOverlay.ScrollDown()
+			}
+		}
+		return nil
+	}
 	if m.state != stateDefault {
 		return nil
 	}
