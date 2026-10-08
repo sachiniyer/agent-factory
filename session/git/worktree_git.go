@@ -156,6 +156,32 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 ) (string, error) {
 	baseArgs := []string{"-C", path}
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
+	// Start git already cwd'd at `path` rather than inheriting the daemon's cwd.
+	// The daemon can be auto-started from a managed worktree and never chdirs, so
+	// without cmd.Dir the git child shows that inherited worktree as
+	// /proc/<pid>/cwd during git's startup window (before `git -C path` takes
+	// effect). reapWorktreeWriters selects by cwd and would then SIGTERM an
+	// unrelated session's git command during a concurrent reap of the inherited
+	// worktree. Setting cmd.Dir removes the false positive at its source; `-C
+	// path` stays as the repo selector (and is the sole selector, since
+	// repositoryPathEnvironment strips GIT_DIR etc. below). hooks.go sets
+	// cmd.Dir = run.worktreePath for the same reason — the package convention,
+	// now followed here.
+	//
+	// Gated on path being an existing directory: the repo-gone origin probe
+	// (worktree_repo_gone_authorization.go) deliberately runs `git -C <gone-or-
+	// non-dir path>` to classify a missing origin from git's *exec.ExitError. If
+	// cmd.Dir were set to a gone path, exec would fail to start git at all
+	// (fork/exec ENOENT/ENOTDIR) and the classifier would see an os.PathError
+	// instead of the ExitError it keys on. The existing-directory case — every
+	// ordinary worktree/repo operation, and the only case the inherited-cwd
+	// false positive can bite — still gets cmd.Dir; the gone-path probe keeps
+	// its pre-fix behaviour (a brief inherited-cwd window against a command
+	// git fails immediately, whose worst case is a SIGTERM'd probe that
+	// classifies as the fail-closed "unknown", not a deletion authorization).
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		cmd.Dir = path
+	}
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
 	// remote needs auth and no terminal is attached. Force stable diagnostics so
 	// repository classification is fail-closed and locale-independent.

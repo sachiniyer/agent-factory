@@ -70,6 +70,16 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
+	// Start git already cwd'd at repoRoot instead of inheriting the caller's cwd
+	// (the reset path is the daemon, whose cwd can be a managed worktree). See
+	// runGitCommandContextWithEnvironment for the inherited-cwd hazard the worktree
+	// writer-reaper's cwd match can hit. Gated on repoRoot being an existing
+	// directory for the same repo-gone-classification reason; the reset path's
+	// own call sites pass a live repo root, so the gate is a no-op there but
+	// keeps the two runners consistent if a future caller probes a gone path.
+	if info, err := os.Stat(repoRoot); err == nil && info.IsDir() {
+		cmd.Dir = repoRoot
+	}
 	// Preserve ambient runtime/credential settings, but not repository selection:
 	// Git hooks export GIT_DIR, which otherwise overrides the explicit -C path
 	// and can turn a registered worktree into a false "ours to delete" answer.
