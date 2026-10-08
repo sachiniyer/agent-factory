@@ -344,7 +344,9 @@ func TestTaskRunLegacyRowAdoptsSessionBoundary(t *testing.T) {
 // (#5221 review P2).
 func TestTaskRunLegacyFailedSendAdoptsAsUnverified(t *testing.T) {
 	inst := taskRunSession(t)
-	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now().Add(-time.Hour)))
+	// Recent attempt — the upgrade window, not a drained one: an adopted
+	// boundary older than the silent grace would (correctly) release at once.
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, time.Now()))
 
 	data := inst.ToInstanceData()
 	data.TaskRunPromptAttemptAt = time.Time{}
@@ -489,4 +491,59 @@ func TestTaskRunTurnEvidenceRequiresAnActiveRun(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, inst.RecordTaskRunTurn(time.Now()),
 		"a session with no task run must not accumulate turn evidence")
+}
+
+// A runtime replacement clears pane-relative evidence but must keep the run's
+// own boundary: a replacement runtime still has to take the prompt's turn
+// before its first quiet tick may end the run. Otherwise the recovery path
+// recreates #5219 — the replacement boots, the poll settles Ready, and the
+// unarmed gate hands on_complete a session mid-boot (#5221 review P1).
+func TestTaskRunGateSurvivesRuntimeReplacement(t *testing.T) {
+	inst := taskRunSession(t)
+	attemptedAt := time.Now()
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+
+	// The replacement chokepoint: pane-relative evidence retires, the run's
+	// boundary and any turn observation do not.
+	inst.ClearIdleEvidence()
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the replacement's first quiet tick must not end a run whose prompt was still unanswered")
+	require.True(t, inst.taskRunTurnGateHeld)
+}
+
+// A turn that fits entirely between two polls and leaves the pane byte-
+// identical produces neither chrome nor churn — the quiet arm can never
+// satisfy it. The silent arm bounds the wait from the attempt itself, at a
+// grace long enough that a real boot cannot ride it out (#5221 review P1).
+func TestTaskRunSilentTurnReleasesAfterLongGrace(t *testing.T) {
+	oldGrace := taskRunCompletionSilentGrace
+	taskRunCompletionSilentGrace = 2 * time.Second
+	defer func() { taskRunCompletionSilentGrace = oldGrace }()
+
+	inst := taskRunSession(t)
+	// Attempt far enough back that the compressed silent grace has elapsed,
+	// with zero churn recorded at any point.
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now().Add(-10*time.Second)))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"a turn invisible to the poll still completes — bounded, not wedged")
+}
+
+// The silent arm must not substitute for a short boot: an attempt inside the
+// silent grace with no evidence at all still holds.
+func TestTaskRunSilentArmDoesNotRideOutBoot(t *testing.T) {
+	oldGrace := taskRunCompletionSilentGrace
+	taskRunCompletionSilentGrace = 5 * time.Minute
+	defer func() { taskRunCompletionSilentGrace = oldGrace }()
+
+	inst := taskRunSession(t)
+	// Recent attempt, no churn — the 30s quiet arm can't fire either.
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"no evidence at all is still not a turn — the run stays open inside the grace")
 }

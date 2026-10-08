@@ -295,7 +295,13 @@ func (w *TurnWatch) Observe(content string) bool {
 		cur := timedTurnRowsByIdentity(content)
 		row, ticked := tickingTimedRow(w.prev, cur)
 		w.prev = cur
-		return ticked && row.elapsed <= time.Since(w.boundary)
+		// rowElapsed reads a whole-second display, so its truncation leaves a
+		// sub-second gap: a turn started a fraction of a second before the
+		// boundary could otherwise satisfy elapsed <= age. The margin is the
+		// display's own resolution — real elapsed is strictly less than
+		// displayed+1s, so demanding that fit inside the boundary's age makes a
+		// strictly-pre-boundary turn unrepresentable (#5221 review).
+		return ticked && row.elapsed+time.Second <= time.Since(w.boundary)
 	default:
 		if !submittedTurnContent(content, w.agent) {
 			w.armed = true

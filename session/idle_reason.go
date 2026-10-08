@@ -103,15 +103,15 @@ func (d InstanceData) ProjectIdleReason() InstanceData {
 }
 
 // WithoutIdleEvidence returns a checkpoint that cannot attribute observations
-// from a retired runtime to its replacement.
+// from a retired runtime to its replacement. The task-run fields are NOT
+// scrubbed: they describe the run, not the pane, and dropping them would leave
+// a restored active run without its delivery gate — the #5219 bug returning
+// through the crash-checkpoint path (#5221 review).
 func (d InstanceData) WithoutIdleEvidence() InstanceData {
 	d.IdleReason = IdleReasonNone
 	d.LastPromptAttemptAt = time.Time{}
 	d.LastPromptDeliveryStatus = ""
 	d.LastPaneChurnAt = time.Time{}
-	d.TaskRunPromptAttemptAt = time.Time{}
-	d.TaskRunPromptDeliveryStatus = ""
-	d.TaskRunTurnObservedAt = time.Time{}
 	return d
 }
 
@@ -224,6 +224,17 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 // tests can compress it.
 var taskRunCompletionQuietGrace = 30 * time.Second
 
+// taskRunCompletionSilentGrace bounds the case the churn arm cannot reach: a
+// signature-less agent (or program override) whose whole turn fits between two
+// poll captures and leaves the pane byte-identical produces neither in-turn
+// chrome NOR post-attempt churn, so the quiet arm's churn requirement could
+// never be satisfied and the run would hold its concurrency slot forever
+// (#5221 review). The fallback for that shape is time alone, and it must be a
+// DIFFERENT order of magnitude from the quiet arm's: a still-booting agent can
+// sit silent well past 30s, so only a grace long enough to outlast a real
+// boot may stand in for evidence. A var so tests can compress it.
+var taskRunCompletionSilentGrace = 5 * time.Minute
+
 // RecordTaskRunTurn records that the agent's own in-turn chrome was observed
 // on this runtime — the positive "a turn on the prompt began" evidence a
 // booting or echoing pane cannot produce (#5219). The unfenced form for the
@@ -297,7 +308,7 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 	if i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) {
 		return false
 	}
-	return !i.taskRunQuietReleaseLocked()
+	return !i.taskRunQuietReleaseLocked() && !i.taskRunSilentReleaseLocked()
 }
 
 // taskRunQuietReleaseLocked reports whether the completion gate is satisfied
@@ -313,20 +324,33 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 		time.Since(i.lastPaneChurnAt) >= taskRunCompletionQuietGrace
 }
 
+// taskRunSilentReleaseLocked is the bounded release for a turn the poll can
+// miss completely: no chrome, and not even churn — the pane never changed
+// after the attempt. It measures from the ATTEMPT, not the last churn, and at
+// a grace an order of magnitude past the quiet arm so a slow boot cannot ride
+// it out (#5221 review).
+//
+// Caller holds i.mu.
+func (i *Instance) taskRunSilentReleaseLocked() bool {
+	return time.Since(i.taskRunPromptAttemptAt) >= taskRunCompletionSilentGrace
+}
+
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.
 // Its epoch bump also rejects a predecessor observation still applying.
 func (i *Instance) ClearIdleEvidence() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	changed := !i.lastPromptAttemptAt.IsZero() || i.lastPromptDeliveryStatus != "" ||
-		!i.lastPaneChurnAt.IsZero() || !i.taskRunPromptAttemptAt.IsZero() ||
-		i.taskRunPromptDeliveryStatus != "" || !i.taskRunTurnObservedAt.IsZero()
+		!i.lastPaneChurnAt.IsZero()
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
 	i.lastPaneChurnAt = time.Time{}
-	i.taskRunPromptAttemptAt = time.Time{}
-	i.taskRunPromptDeliveryStatus = ""
-	i.taskRunTurnObservedAt = time.Time{}
+	// The task-run fields stay: they are facts about the RUN, not the pane —
+	// the prompt was still attempted and any turn observation still stands. A
+	// replacement runtime boots behind the same gate (#5219): were the boundary
+	// cleared here, its first quiet Ready tick would end a run whose turn never
+	// visibly began — the original bug through the recovery path (#5221 review).
+	// The churn/quiet evidence above is pane-relative and must still reset.
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
 	// serialization domain instead of making replacement delivery wait for it;
 	// the generation invalidation fences daemon-owned side effects while the epoch

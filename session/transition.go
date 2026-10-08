@@ -708,7 +708,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 					if !i.taskRunPromptAttemptAt.IsZero() &&
 						i.taskRunPromptDeliveryStatus != PromptNotDelivered &&
 						!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) &&
-						i.taskRunQuietReleaseLocked() {
+						(i.taskRunQuietReleaseLocked() || i.taskRunSilentReleaseLocked()) {
 						log.InfoLog.Printf(
 							"task run for session %q completed on the quiet fallback (no in-turn chrome observed): agent=%s elapsed_since_attempt=%s",
 							i.Title, i.currentAgentNameLocked(),
