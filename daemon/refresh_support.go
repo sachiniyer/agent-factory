@@ -20,56 +20,63 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // rows refreshDaemonInstances cannot materialize. Terminal markers must release
 // capacity here too because no Instance exists to run their lifecycle edge.
 //
-// A sandbox-backed (docker/ssh/hook) LiveLost row is the one shape whose raw form
-// must mirror its materialized form on Started, which is absent from InstanceData.
-// FromInstanceData loads a non-archived sandbox row inert (started stays false),
-// so holdsTaskRunSlot releases it: Activity is Terminal for LiveLost and
-// canAutoRestoreLostSession returns false (ValidateRuntimeAction refuses a
-// !Started session). The raw arm has no Started to read, so it consults
-// session.LostSandboxRecord directly — the same storage predicate the loader
-// uses to decide the inert load — and releases for the same rows. Without this
-// term a sandbox row that ghosts on a materialization failure (broken worktree
-// or relocation-recovery record) wedges max_concurrent_runs forever: no
+// A sandbox-backed (docker/ssh/hook) row is the one shape whose raw form must
+// mirror its materialized form on Started, which is absent from InstanceData.
+// FromInstanceData loads a non-archived sandbox row inert (started stays false)
+// and rewrites its liveness to LiveLost, so holdsTaskRunSlot releases it:
+// Activity is Terminal for LiveLost and canAutoRestoreLostSession returns false
+// (ValidateRuntimeAction refuses a !Started session). The raw arm has no Started
+// to read and no rewritten liveness, so a sandbox row delegates to
+// releasesLostSandboxGhost, which replays the loader's fence restoration and
+// liveness rewrite through session.LoadedActivity and releases for the same rows.
+// Without this a sandbox row that ghosts on a materialization failure (broken
+// worktree or relocation-recovery record, or a row persisted LiveRunning before
+// the restart that made it a ghost) wedges max_concurrent_runs forever: no
 // in-memory Instance exists to run the lifecycle edge that would clear
 // TaskRunActive, the same unrecoverable wedge class the terminal-marker guards
 // below prevent.
 //
-// The release is gated on the row's loaded activity being terminal, not on
-// LostSandboxRecord alone. A sandbox LiveLost row that also carries a durable
-// pending handoff (PromptNotDelivered) or account swap reconstructs OpReplacing /
-// ActivityPending on load, so its materialized form HOLDS (holdsTaskRunSlot's
-// Activity arm wins over the started=false release). Releasing such a ghost
-// unconditionally would let a replacement past max_concurrent_runs while the
-// original task transaction is still in flight. An ambiguous handoff delivery
-// (PromptCouldNotConfirm, or the missing evidence a legacy record carries) does
-// NOT reconstruct the fence, so the loaded form is terminal and the raw arm
-// releases. session.LoadedActivity is the raw-record reader's activity oracle —
-// the same composition of FromInstanceData's InFlightOp reconstruction and
-// ClassifyActivity that holdsTaskRunSlot's Activity() reaches through the
-// reconstructed op axis — so it is what decides "terminal" here, keeping the two
-// arms on the same verdict.
+// The sandbox delegation runs INSTEAD of the raw StartupStateUnknown guard
+// below. A pending account swap or fenced handoff projects StartupStateUnknown=true
+// to fence an older binary, and the loader restores that projected value before
+// deciding; the raw projected value would short-circuit here and release a row
+// whose materialized form holds (its pending transaction is still in flight), so
+// the sandbox arm must let LoadedActivity restore the fence first. The raw guards
+// below apply only to non-sandbox rows, whose materialized form does not rewrite
+// liveness or restore a fence that changes whether the run is in flight.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
-	return item.TaskID != "" && item.TaskRunActive &&
-		!item.StartupStateUnknown && !item.UserKilled &&
-		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp &&
-		!releasesLostSandboxGhost(item)
+	if item.TaskID == "" || !item.TaskRunActive {
+		return false
+	}
+	if session.IsSandboxBackendType(item.BackendType) {
+		return !releasesLostSandboxGhost(item)
+	}
+	return !item.StartupStateUnknown && !item.UserKilled &&
+		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }
 
 // releasesLostSandboxGhost reports whether a row that failed to materialize is a
-// sandbox LiveLost ghost whose materialized form releases its task-run slot, so
-// the raw arm releases it too instead of wedging the cap on an unloadable row.
-// It is the !LostSandboxRecord term of rawTaskRunHoldsSlot, scoped to the rows
-// whose materialized form actually releases: a sandbox LiveLost row whose loaded
-// activity is terminal. A pending-handoff variant whose delivery still owns an
-// in-flight obligation (PromptNotDelivered/PromptDelivered) reconstructs
-// OpReplacing on load, so its live arm holds and this returns false. An ambiguous
-// delivery (PromptCouldNotConfirm, or the missing evidence a legacy record
-// carries) does NOT reconstruct the fence; the loaded sandbox is inert/terminal
-// and releases, so the raw arm must agree. session.LoadedActivity mirrors
-// LifecycleView.Activity() composed with FromInstanceData's InFlightOp
-// reconstruction, so the raw arm sees the same verdict a loaded Instance would.
+// sandbox ghost whose materialized form releases its task-run slot, so the raw arm
+// releases it too instead of wedging the cap on an unloadable row. It is the
+// sandbox term of rawTaskRunHoldsSlot, scoped to the rows whose materialized form
+// actually releases: a sandbox row whose loaded activity is terminal.
+//
+// A pending-handoff variant whose delivery still owns an in-flight obligation
+// (PromptNotDelivered/PromptDelivered) reconstructs OpReplacing on load, so its
+// live arm holds and this returns false. An ambiguous delivery
+// (PromptCouldNotConfirm, or the missing evidence a legacy record carries) does
+// NOT reconstruct the fence; the loaded sandbox is inert/terminal and releases,
+// so the raw arm must agree. A pending account swap restores its fence and holds,
+// so this returns false for it too. session.LoadedActivity mirrors
+// LifecycleView.Activity() composed with FromInstanceData's full fence
+// restoration, InFlightOp reconstruction, and inert sandbox liveness rewrite, so
+// the raw arm sees the same verdict a loaded Instance would — including a row
+// persisted LiveRunning before the restart that ghosts, which the loader rewrites
+// to LiveLost. Gating on IsSandboxBackendType rather than LostSandboxRecord lets
+// that mid-run row reach LoadedActivity instead of being held on its stored
+// (not-yet-rolled-forward) liveness.
 func releasesLostSandboxGhost(item session.InstanceData) bool {
-	if !session.LostSandboxRecord(item) {
+	if !session.IsSandboxBackendType(item.BackendType) {
 		return false
 	}
 	activity, _ := session.LoadedActivity(item)

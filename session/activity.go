@@ -276,6 +276,16 @@ func (v LifecycleView) Activity() Activity {
 // Instance — so a row that failed to materialize can reach the same verdict
 // without an in-memory Instance.
 //
+// It replays FromInstanceData's FULL fence-restoration order before classifying,
+// because a persisted row may carry a rollback fence that projected
+// StartupStateUnknown=true to fence an older binary: RestoreArchiveRollbackFence
+// and RestoreRelocationRecoveryOriginals run first (the loader calls both before
+// any handoff/account-swap restore), then the handoff and account-swap fences. A
+// row whose relocation-recovery metadata is undecodable cannot be materialized by
+// the loader at all, so it is not a row whose run has settled; LoadedActivity
+// reports ActivityPending for it rather than guessing terminal and letting a
+// replacement past the cap while the real verdict is unknown.
+//
 // The loaded form's activity is computed from the InFlightOp FromInstanceData
 // reconstructs, NOT from the raw PendingHandoffMission. ClassifyActivity on a raw
 // record returns ActivityPending for any non-empty PendingHandoffMission (line 99),
@@ -288,7 +298,21 @@ func (v LifecycleView) Activity() Activity {
 // PendingHandoffMission from the InstanceData it builds; LoadedActivity does the
 // same for a raw record that never materialized, so a sandbox LiveLost ghost with
 // an ambiguous handoff releases its slot instead of wedging the cap forever.
+//
+// A non-archived sandbox row that the loader does not short-circuit
+// (StartupStateUnknown / PendingAccountSwap) is rewritten to inert LiveLost on
+// load — started stays false regardless of the stored liveness — so a row
+// ghosted mid-run (persisted LiveRunning/LiveReady/...) releases on the live arm.
+// LoadedActivity applies that same rewrite before classifying, or the raw arm
+// would read the stored LiveRunning as ActivityPending and hold a slot its
+// materialized form releases, wedging the cap on the common pre-restart record.
 func LoadedActivity(data InstanceData) (Activity, string) {
+	data = data.RestoreArchiveRollbackFence()
+	restored, err := data.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return ActivityPending, ""
+	}
+	data = restored
 	data = data.RestoreHandoffRollbackFence()
 	data = data.RestoreAccountSwapRollbackFence()
 	data = data.restoreMissingHandoffMissionEvidence()
@@ -308,6 +332,11 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 	}
 	if data.PendingAccountSwap != nil {
 		effective.PendingAccountSwap = &AccountSwapData{}
+	}
+	if isSandboxBackendType(data.BackendType) &&
+		!data.StartupStateUnknown && data.PendingAccountSwap == nil &&
+		effective.Liveness != LiveArchived {
+		effective.Liveness = LiveLost
 	}
 	return ClassifyActivity(effective)
 }

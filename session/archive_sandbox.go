@@ -580,6 +580,16 @@ func LostSandboxRecord(data InstanceData) bool {
 	return lostSandboxRecord(data)
 }
 
+// IsSandboxBackendType is the exported form of isSandboxBackendType for the
+// raw-row cap accounting path (daemon/refresh_support.go's rawTaskRunHoldsSlot).
+// A sandbox-backed row routes its hold/release verdict through the loader's inert
+// rewrite (see session.LoadedActivity), so the raw arm must recognize the same
+// backend set the loader's sandbox branch does rather than gating on the stored
+// liveness, which a row ghosted mid-run has not yet rolled forward to LiveLost.
+func IsSandboxBackendType(t string) bool {
+	return isSandboxBackendType(t)
+}
+
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,
 // for a docker/ssh/hook session loaded from disk (#1592 Phase 4 PR6/PR7). Its
 // Type() and Capabilities() keep the session classified as its runtime so
