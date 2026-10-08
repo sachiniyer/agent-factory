@@ -16,7 +16,14 @@ func (i *Instance) ValidateHandoffRuntimeAction(agent, account string) error {
 	i.mu.RLock()
 	view := i.lifecycleViewLocked()
 	if view.PendingAccountSwap && i.pendingAccountSwapRetryTargetLocked(agent, account) {
+		// Recovery owns this exact committed transaction, including the
+		// post-commit blind-teardown wedge. The latter marks
+		// StartupStateUnknown and clears Started while preserving the committed
+		// swap; this retry is the inspection the marker waits for, so suppress
+		// those gates alongside the pending-swap one.
 		view.PendingAccountSwap = false
+		view.StartupStateUnknown = false
+		view.Started = true
 	}
 	i.mu.RUnlock()
 	return view.ValidateRuntimeAction(RuntimeActionHandoff)
@@ -82,8 +89,16 @@ func (i *Instance) BeginManualAccountSwap() error {
 	defer i.mu.Unlock()
 	view := i.lifecycleViewLocked()
 	if pending := i.pendingAccountSwap; pending != nil && pending.Manual && pending.To == i.Account {
-		// Recovery owns this exact committed transaction, including healthy checkpoints.
+		// Recovery owns this exact committed transaction, including healthy
+		// checkpoints and the post-commit blind-teardown wedge. The latter
+		// (ErrAccountSwapAgentTeardownBlind) marks StartupStateUnknown and
+		// clears Started while preserving the committed swap, so the explicit
+		// retry — the inspection the marker waits for — must reach the alreadySet
+		// recovery branches of resumeFromLimitLockedOutcome. Suppress the gates
+		// that exist to hold automatic retries back until that inspection lands.
 		view.PendingAccountSwap = false
+		view.StartupStateUnknown = false
+		view.Started = true
 	}
 	if err := view.ValidateRuntimeAction(RuntimeActionHandoff); err != nil {
 		return err
@@ -398,6 +413,22 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
+}
+
+// SetAccountSwapReplacementPanesStartedForTest seeds the committed account
+// swap's replacement-pane flag. Test-only: the post-commit blind-teardown wedge
+// (ErrAccountSwapAgentTeardownBlind) occurs during the STOP phase, before the
+// respawn that sets this flag, so a committed swap that wedged there carries
+// ReplacementPanesStarted=false. A fixture that strands delivery AFTER a
+// successful respawn cannot reproduce that state through the real flow, so the
+// test seeds it directly to exercise the live-pane repair branch.
+func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.ReplacementPanesStarted != started {
+		i.pendingAccountSwap.ReplacementPanesStarted = started
+		i.touchLocked()
+	}
 }
 
 // ParkAutomaticAccountSwapAtLimit attributes a readiness wall to the incoming

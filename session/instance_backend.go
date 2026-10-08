@@ -280,7 +280,19 @@ func (i *Instance) runLiveBoundary() {
 func (i *Instance) BeginLimitResume() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
+	view := i.lifecycleViewLocked()
+	if pending := i.pendingAccountSwap; pending != nil && pending.To == i.Account {
+		// A committed account swap whose post-commit respawn went blind
+		// (ErrAccountSwapAgentTeardownBlind) is recoverable through the
+		// alreadySet branches of resumeFromLimitLockedOutcome. That error path
+		// marks StartupStateUnknown and clears Started while preserving the
+		// committed swap; the explicit Retry RPC is the inspection the marker
+		// waits for, so the gates that suppress automatic retries until
+		// inspection must not block re-entering the recovery branches.
+		view.StartupStateUnknown = false
+		view.Started = true
+	}
+	if err := view.ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
 		return err
 	}
 	return i.transitionLocked(BeginRespawn())
