@@ -155,9 +155,17 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 	// exists, so an apply that landed in that window already published the live
 	// config — binding off the stale boot copy could serve a posture the
 	// applied config already revoked (e.g. an allow_unauthenticated_network
-	// revocation landing between socket-accept and this reconcile).
-	if _, err := wl.reconcile(manager.Config()); err != nil {
-		log.WarningLog.Printf("daemon web listener(s): %v", err)
+	// revocation landing between socket-accept and this reconcile). The
+	// snapshot and the reconcile must also be ATOMIC against applies: hold
+	// configApplyMu across both, or a revocation apply that finishes between
+	// the Config() read and wl.mu records its refusal only for this stale
+	// reconcile to clear it and bind the socket under the now-tokenless live
+	// config.
+	manager.configApplyMu.Lock()
+	_, recErr := wl.reconcile(manager.Config())
+	manager.configApplyMu.Unlock()
+	if recErr != nil {
+		log.WarningLog.Printf("daemon web listener(s): %v", recErr)
 	}
 
 	var closeOnce sync.Once

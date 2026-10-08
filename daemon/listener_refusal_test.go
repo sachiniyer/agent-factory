@@ -260,7 +260,7 @@ func TestRefusalSeversHijackedWebSocketStreams(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws://"+addr+"/v1/events", nil)
+	conn, _, err := websocket.Dial(ctx, "ws://"+loopbackDialAddr(addr)+"/v1/events", nil)
 	require.NoError(t, err, "the opted-in tokenless listener admits the events stream")
 
 	// Withdrawing the opt-in refuses the posture live: retire the socket AND
@@ -294,7 +294,7 @@ func TestRefusalSeversWebSocketStreamsAcrossGenerations(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws://"+addrA+"/v1/events", nil)
+	conn, _, err := websocket.Dial(ctx, "ws://"+loopbackDialAddr(addrA)+"/v1/events", nil)
 	require.NoError(t, err, "the opted-in tokenless listener admits the events stream")
 
 	// Rebind to a new generation. The old handle is retired and dropped while
@@ -339,7 +339,7 @@ func TestRefusalSeversStreamsLeftOpenByOptOut(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws://"+addr+"/v1/events", nil)
+	conn, _, err := websocket.Dial(ctx, "ws://"+loopbackDialAddr(addr)+"/v1/events", nil)
 	require.NoError(t, err)
 
 	// The "" opt-out retires the listener gracefully — nothing is bound, but
@@ -416,7 +416,7 @@ func TestClosedWebSocketUnregistersFromTracker(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws://"+addr+"/v1/events", nil)
+	conn, _, err := websocket.Dial(ctx, "ws://"+loopbackDialAddr(addr)+"/v1/events", nil)
 	require.NoError(t, err)
 
 	tracked := func() int {

@@ -63,10 +63,27 @@ func boundWebListeners(t *testing.T, cfg *config.Config) (*Manager, *webListener
 	return m, wl, addr
 }
 
+// loopbackDialAddr rewrites a wildcard bound address to the loopback form a
+// client can actually dial: 0.0.0.0 / :: is a bind address, not a
+// destination, and http.DefaultClient routes it through HTTP_PROXY on runners
+// that define one without a wildcard exemption (#5137 review). The wildcard
+// listener accepts loopback, so the same socket is exercised.
+func loopbackDialAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	switch host {
+	case "0.0.0.0", "::", "":
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return addr
+}
+
 // getStatus issues a plain GET to http://addr/path and returns the status code.
 func getStatus(t *testing.T, addr, path string) int {
 	t.Helper()
-	resp, err := http.Get("http://" + addr + path)
+	resp, err := http.Get("http://" + loopbackDialAddr(addr) + path)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
