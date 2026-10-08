@@ -304,6 +304,87 @@ func TestMigrateDoesNotRefuseLegacyJSONNullFlatAgainstZeroGrouped(t *testing.T) 
 	})
 }
 
+// TestMigrateRefusesLegacyJSONNullFlatAgainstZeroGroupedWhenDefaultIsNonzero
+// pins the case the prior null fix got wrong: a flat null does NOT normalize to
+// the Go zero of the grouped kind, but to the field's compiled-in DEFAULT —
+// which for listen_addr is 127.0.0.1:8443, not "". The frozen JSON reader
+// unmarshals onto DefaultConfig, so a null listen_addr leaves the field at its
+// nonzero default; converting that over a grouped "" would silently enable the
+// listener, so the guard refuses. A null flat against a grouped value equal to
+// the default (127.0.0.1:8443) converts as redundant, since the grouped value
+// already carries the default the conversion would write.
+func TestMigrateRefusesLegacyJSONNullFlatAgainstZeroGroupedWhenDefaultIsNonzero(t *testing.T) {
+	t.Run("null flat and zero grouped is refused for a nonzero default", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"listen_addr":null,"network":{"listen_addr":""}}`)
+
+		_, err := MigrateGlobalConfig()
+		require.Error(t, err, "a null flat and a zero grouped spelling diverge when the default is nonzero")
+		assert.Contains(t, err.Error(), "Nothing was rewritten")
+		assert.Contains(t, err.Error(), `"listen_addr"`, "the refusal names the flat spelling")
+		assert.NoFileExists(t, filepath.Join(home, TomlConfigFileName), "no conversion ran")
+	})
+
+	t.Run("null flat and default-valued grouped converts as redundant", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"listen_addr":null,"network":{"listen_addr":"127.0.0.1:8443"}}`)
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err, "a null flat and a grouped value equal to the default agree")
+		require.True(t, result.ConvertedFromJSON)
+		require.Len(t, result.Migrated, 1)
+		assert.True(t, result.Migrated[0].Redundant, "the flat null and the default grouped value agree")
+
+		cfg, err := parseConfigTOML([]byte(readFile(t, filepath.Join(home, TomlConfigFileName))), filepath.Join(home, TomlConfigFileName))
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1:8443", cfg.ListenAddr)
+	})
+}
+
+// TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeComputingConversion pins the
+// ordering the EACCES case needs: a default AF home left without directory
+// search permission (mode 0600) makes both fileExists calls return EACCES,
+// which that helper treats as "exists" — so `converting` would read false and
+// the ambiguity guard would be skipped, leaving LoadConfig to repair the home
+// and convert an ambiguous JSON without refusing. Hardening the home before the
+// existence checks restores search permission, so the guard sees the real
+// state (no TOML, real ambiguous JSON) and refuses instead of silently
+// homogenizing the file.
+func TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeComputingConversion(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses mode bits, so a 0600 home cannot be staged as unreadable")
+	}
+	fastShell(t)
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("AGENT_FACTORY_HOME", "")
+	afHome := filepath.Join(userHome, ".agent-factory")
+	require.NoError(t, os.Mkdir(afHome, 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(afHome, ConfigFileName),
+		[]byte(`{"listen_addr":"0.0.0.0:8443","network":{"listen_addr":"127.0.0.1:8443"}}`),
+		0o644,
+	))
+	// No config.toml — the run would convert. Strip search permission so the
+	// pre-hardening fileExists calls would both see EACCES (treated as "exists").
+	require.NoError(t, os.Chmod(afHome, 0o600))
+
+	_, err := MigrateGlobalConfig()
+	require.Error(t, err, "the ambiguity guard ran after the home was hardened, so the ambiguous JSON is refused")
+	assert.Contains(t, err.Error(), "with different values", "the refusal is the ambiguity guard's")
+	assert.Contains(t, err.Error(), "Nothing was rewritten")
+
+	// The home was hardened to 0700 before the existence checks, so the guard
+	// saw the real state and refused instead of silently converting.
+	info, statErr := os.Stat(afHome)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"a 0600 home is tightened to 0700 before the guard runs")
+
+	// The source was left untouched and no conversion ran.
+	assert.Equal(t, `{"listen_addr":"0.0.0.0:8443","network":{"listen_addr":"127.0.0.1:8443"}}`,
+		readFile(t, filepath.Join(afHome, ConfigFileName)), "config.json is left exactly as it was")
+	assert.NoFileExists(t, filepath.Join(afHome, TomlConfigFileName), "no conversion ran")
+}
+
 // TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig pins the other
 // divergence the finding named: json.Decoder.Decode (the shapeless read) stops
 // after the first object and ignores trailing garbage, while json.Unmarshal

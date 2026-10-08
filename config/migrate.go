@@ -54,6 +54,20 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	configPath := filepath.Join(configDir, ConfigFileName)
 
+	// Harden the AF home before the existence checks below compute the
+	// conversion verdict. A default home left without directory search
+	// permission (mode 0600) makes both fileExists calls return EACCES,
+	// which that helper treats as "exists" — so `converting` reads false and
+	// the ambiguity guard is skipped, then LoadConfig repairs the home,
+	// discovers the absent TOML and real ambiguous JSON, and converts it
+	// without refusing. Hardening first (the same call LoadConfig makes,
+	// config_load.go) restores search permission so the existence checks see
+	// the real state, and a refused ambiguous file is still tightened to 0700
+	// even though it returns before LoadConfig (#2197).
+	if err := secureAFHomeForPath(tomlPath); err != nil {
+		return nil, fmt.Errorf("failed to secure config directory: %w", err)
+	}
+
 	// Whether the precondition below is about to CONVERT a legacy config.json
 	// has to be observed before it runs. Reporting "nothing to migrate" after
 	// silently rewriting the user's config into a different file and moving the
@@ -77,15 +91,6 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	// in place, the same outcome the TOML path gives the same content (#3653
 	// review).
 	if converting {
-		// The pre-checks below can return before LoadConfig, which is where the
-		// owner-only home repair runs (loadConfig → secureAFHomeForPath,
-		// config_load.go). A default AF home left 0755 by an older release would
-		// stay that way on a refused ambiguous file, so harden it first — the
-		// same call LoadConfig makes (#2197), which is a no-op on a home already
-		// at 0700.
-		if err := secureAFHomeForPath(tomlPath); err != nil {
-			return nil, fmt.Errorf("failed to secure config directory: %w", err)
-		}
 		// A DANGLING config.toml symlink reads as ENOENT through fileExists
 		// (Stat follows the link), so a real, ambiguous config.json beside it
 		// reaches the JSON guard below and reports the ambiguity first,
@@ -564,16 +569,23 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 		if !flatPresent || !groupedPresent {
 			continue
 		}
-		// An explicit JSON null leaves a scalar at its zero value, so a flat
-		// null and a grouped spelling equal to that zero do not diverge: the
-		// conversion writes the zero into both spellings, the same value the
-		// grouped one already carries, and the frozen JSON reader leaves the
-		// field at that zero for the flat null too. The shapeless decode
-		// reads null as an untyped nil, which DeepEqual never matches against
-		// a typed zero like false or "", so normalize the flat null to the
-		// zero value of the grouped kind before comparing — the same effective
-		// value the typed reader would produce.
-		flat = normalizeLegacyJSONNull(flat, grouped)
+		// An explicit JSON null leaves a scalar at its DEFAULT value, not the
+		// Go zero of the grouped kind: the frozen JSON reader
+		// (parseConfigForConversion) unmarshals onto DefaultConfig, so a null
+		// flat leaves the field at whatever staticDefaultConfig carries —
+		// listen_addr is 127.0.0.1:8443, not the string zero "". The
+		// conversion writes that default into both spellings, so a flat null
+		// and a grouped value equal to the DEFAULT do not diverge (the grouped
+		// value already carries it), but a flat null against a grouped value
+		// equal to the zero but NOT the default (e.g. listen_addr null with
+		// network.listen_addr "") would be silently homogenized — the
+		// conversion overwrites the grouped empty with the nonzero default and
+		// enables the listener. The shapeless decode reads null as an untyped
+		// nil, which DeepEqual never matches against a typed value, so
+		// normalize the flat null to the field's compiled-in default — the
+		// same effective value the typed reader would produce — before
+		// comparing.
+		flat = normalizeLegacyJSONNull(flat, alias)
 		if reflect.DeepEqual(flat, grouped) {
 			continue
 		}
@@ -591,26 +603,51 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 }
 
 // normalizeLegacyJSONNull treats an explicit JSON null (decoded as an untyped
-// nil) as the zero value of the grouped spelling's kind, so a flat null and a
-// grouped value equal to that zero are not reported as divergent. The frozen
-// JSON reader leaves a scalar at its zero value for null, so the conversion
-// writes that zero into both spellings — the same value the grouped spelling
-// already carries when it equals the zero, i.e. no tie to break. A non-null
-// flat, or a grouped kind this does not model, is returned unchanged.
-func normalizeLegacyJSONNull(flat, grouped any) any {
+// nil) as the compiled-in DEFAULT value of the alias's field, so a flat null
+// and a grouped value equal to that default are not reported as divergent. The
+// frozen JSON reader unmarshals onto DefaultConfig, so a null leaves a scalar at
+// its default — not the Go zero of the grouped kind — and the conversion writes
+// that default into both spellings, the same value the grouped spelling already
+// carries when it equals the default, i.e. no tie to break. A null flat against
+// a grouped value that is NOT the default (even when it IS the Go zero, e.g.
+// listen_addr null with network.listen_addr "") still diverges and is still
+// refused. A non-null flat, or an alias whose default this does not model, is
+// returned unchanged.
+func normalizeLegacyJSONNull(flat any, alias configKeyAlias) any {
 	if flat != nil {
 		return flat
 	}
-	switch grouped.(type) {
-	case bool:
-		return false
-	case string:
-		return ""
-	case []any:
-		return []any{}
-	default:
-		return flat
+	if def, ok := defaultAliasValue(alias); ok {
+		return def
 	}
+	return flat
+}
+
+// defaultAliasValue returns the compiled-in default for one alias's legacy flat
+// field, in the shapeless-decoded form the ambiguity guard compares: a bool as
+// bool, a string as string, a string slice as []any. staticDefaultConfig is the
+// baseline parseConfigForConversion unmarshals onto, so this is the value the
+// conversion would write for an explicit JSON null. A false return leaves the
+// caller to compare the raw nil, which DeepEquals only another nil — the safe
+// (refuse) direction for an unmodeled kind.
+func defaultAliasValue(alias configKeyAlias) (any, bool) {
+	field, ok := taggedFieldByKey(reflect.ValueOf(staticDefaultConfig()), alias.legacy)
+	if !ok {
+		return nil, false
+	}
+	switch field.Kind() {
+	case reflect.Bool:
+		return field.Bool(), true
+	case reflect.String:
+		return field.String(), true
+	case reflect.Slice:
+		out := make([]any, field.Len())
+		for i := 0; i < field.Len(); i++ {
+			out[i] = field.Index(i).String()
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // ambiguousLegacyJSONSpellingError is the legacy-config.json form of the
