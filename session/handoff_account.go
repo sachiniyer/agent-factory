@@ -415,6 +415,22 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	return nil
 }
 
+// SetAccountSwapReplacementPanesStartedForTest seeds the committed account
+// swap's replacement-pane flag. Test-only: the post-commit blind-teardown wedge
+// (ErrAccountSwapAgentTeardownBlind) occurs during the STOP phase, before the
+// respawn that sets this flag, so a committed swap that wedged there carries
+// ReplacementPanesStarted=false. A fixture that strands delivery AFTER a
+// successful respawn cannot reproduce that state through the real flow, so the
+// test seeds it directly to exercise the live-pane repair branch.
+func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.ReplacementPanesStarted != started {
+		i.pendingAccountSwap.ReplacementPanesStarted = started
+		i.touchLocked()
+	}
+}
+
 // ParkAutomaticAccountSwapAtLimit attributes a readiness wall to the incoming
 // replacement identity without releasing the account transaction's fence. It is
 // the automatic-account-swap twin of ParkManualAccountSwapAtLimit: the incoming

@@ -99,6 +99,16 @@ func TestResumeFromLimit_CommittedSwapBlindWedgeRecovers(t *testing.T) {
 func TestResumeFromLimit_CommittedSwapBlindWedgeLivePaneRepairRecovers(t *testing.T) {
 	m, repo, inst, backend := wedgedCommittedSwapFixture(t, true)
 
+	// The fixture's handoff succeeded through the respawn, so it set
+	// ReplacementPanesStarted=true and incremented respawnCalls — and
+	// MarkStartupStateUnknown clears neither. The real blind-teardown wedge
+	// (ErrAccountSwapAgentTeardownBlind) occurs during the STOP phase, before
+	// the respawn that sets ReplacementPanesStarted, so the wedged row carries
+	// ReplacementPanesStarted=false. Recreate that state here so the retry
+	// actually enters the live-pane repair branch instead of skipping it.
+	inst.SetAccountSwapReplacementPanesStartedForTest(false)
+	_, respawnBefore, _ := backend.snapshot()
+
 	outcome, err := m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
 	require.NoError(t, err)
 	require.Equal(t, resumePerformed, outcome)
@@ -106,7 +116,7 @@ func TestResumeFromLimit_CommittedSwapBlindWedgeLivePaneRepairRecovers(t *testin
 	_, _, pendingAfter := inst.PendingAccountSwap()
 	require.False(t, pendingAfter, "the live-pane repair must finish the committed swap")
 	_, respawnCalls, prompts := backend.snapshot()
-	require.True(t, respawnCalls >= 1, "the incomplete pane set must force at least one respawn")
+	require.True(t, respawnCalls > respawnBefore, "the incomplete pane set must force the retry to repair it with a respawn")
 	require.Len(t, prompts, 1)
 	require.Contains(t, prompts[0], `claude account "personal"`)
 	require.False(t, inst.StartupStateUnknown())
