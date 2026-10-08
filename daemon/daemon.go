@@ -88,24 +88,42 @@ func chdirToNeutralHome() {
 	if cwd, err := os.Getwd(); err == nil {
 		sessiongit.SetDaemonLaunchCwd(cwd)
 	}
-	// Resolve to an absolute path BEFORE chdir'ing. A relative
-	// AGENT_FACTORY_HOME (ConfigDirFor preserves a non-empty value verbatim,
-	// e.g. "af-home") is resolved against the daemon's cwd. os.Chdir into it
-	// would move the daemon's cwd to <launch-cwd>/af-home while leaving the env
-	// value relative, so every later config.GetConfigDir() call resolved
-	// "af-home" against the NEW cwd and yielded <launch-cwd>/af-home/af-home —
-	// a nonexistent nested path that breaks control-socket binding and the home
-	// watcher. Absolutize against the current (pre-chdir) cwd — the same frame
-	// acquireHomeLock just created the home in — and fix the env to that
-	// absolute path, so the home stays stable for the whole daemon lifetime.
-	abs, err := filepath.Abs(dir)
-	if err != nil {
+	// A relative AGENT_FACTORY_HOME (ConfigDirFor preserves a non-empty value
+	// verbatim, e.g. "af-home") must NOT chdir. Two externally-visible consumers
+	// hold the RELATIVE value and resolve it against the daemon's cwd, so
+	// moving that cwd breaks them:
+	//
+	//   - classifyDaemonHome reads the daemon's home out of /proc/<pid>/environ,
+	//     which is FIXED AT EXEC and keeps the relative spelling for the life of
+	//     the process (os.Setenv does not rewrite it), and resolves it against
+	//     /proc/<pid>/cwd. Chdir'ing to the absolutized home moves that cwd to
+	//     <launch-cwd>/af-home, so the classifier resolves <launch-cwd>/af-home
+	//     + "af-home" = <launch-cwd>/af-home/af-home, compares unequal to the
+	//     caller's home, and marks the LIVE daemon foreign — the normal
+	//     PID-based StopDaemon then removes its PID file and leaves it running.
+	//   - log.Initialize runs before RunDaemon (commands/root.go), so the
+	//     rotating writer caches the relative log path "af-home/agent-factory.log"
+	//     against the launch cwd. A later size-triggered rotation after a chdir
+	//     reopens it against the NEW cwd → <home>/af-home/agent-factory.log, a
+	//     nonexistent nested path, and silently falls back to stderr.
+	//
+	// Keeping the launch cwd leaves the original resolution frame externally
+	// verifiable via /proc/<pid>/cwd, so both the classifier and the log writer
+	// keep resolving the relative value the way the spawner did, and
+	// config.GetConfigDir() (which resolves a relative value against the cwd)
+	// keeps naming the same home — no nesting, no foreign classification. The
+	// reaper fix this function exists for still applies to the normal
+	// absolute-home case, which is the only placement the reaper hazard
+	// (#5206) actually arises in. A relative home whose launch cwd is a managed
+	// worktree resolves the home INSIDE that worktree — an unsupported placement
+	// where chdir-to-home is not neutral either (the reaper matches cwd "at or
+	// under" the worktree), already accepted as out of scope; the git runners
+	// keep their own cmd.Dir as defence in depth so their children are never
+	// false positives regardless.
+	if !filepath.IsAbs(dir) {
 		return
 	}
-	if abs != dir {
-		os.Setenv("AGENT_FACTORY_HOME", abs)
-	}
-	_ = os.Chdir(abs)
+	_ = os.Chdir(dir)
 }
 
 // chdirToNeutralHomeFn is the injection point runDaemon calls. Tests that run
