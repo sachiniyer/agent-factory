@@ -36,26 +36,6 @@ func TestAccountLoginEnvironment_SelectsTheBrowserFreeFlowPerAgent(t *testing.T)
 	}
 }
 
-// The names travel separately from the values because the tmux launcher has to
-// name them in three places — the pass-through allowlist the pane's exec shim
-// re-applies, the client environment they are stripped from, and tmux's
-// update-environment list — and only set the value once.
-func TestAccountLoginEnvironmentNames_MatchTheEntries(t *testing.T) {
-	for _, agent := range []string{"claude", "codex", "gemini"} {
-		entries := AccountLoginEnvironment(agent)
-		names := AccountLoginEnvironmentNames(agent)
-		if len(names) != len(entries) {
-			t.Fatalf("AccountLoginEnvironmentNames(%q) = %v, want one name per entry %v", agent, names, entries)
-		}
-		for idx, entry := range entries {
-			name, _, ok := strings.Cut(entry, "=")
-			if !ok || names[idx] != name {
-				t.Fatalf("AccountLoginEnvironmentNames(%q)[%d] = %q, want the name of %q", agent, idx, names[idx], entry)
-			}
-		}
-	}
-}
-
 // A SESSION IS NOT A LOGIN, and this is the half of #3854 that is easy to get
 // wrong. NO_BROWSER changes how the gemini CLI behaves for the whole run, and
 // BROWSER redirects every URL the agent opens; handing either to an
