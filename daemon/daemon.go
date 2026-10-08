@@ -80,6 +80,15 @@ func chdirToNeutralHome() {
 	_ = os.Chdir(dir)
 }
 
+// chdirToNeutralHomeFn is the injection point runDaemon calls. Tests that run
+// RunDaemon in-process stub it to a no-op so the process-wide os.Chdir does
+// not leak into later tests' cwd assumptions (a temp AF home a test set via
+// t.Setenv is removed on cleanup, leaving the process cwd pointing at a
+// deleted directory — the "getwd: no such file or directory" failure). The
+// daemon_cwd_test.go tests call chdirToNeutralHome directly to exercise the
+// real behaviour.
+var chdirToNeutralHomeFn = chdirToNeutralHome
+
 // runDaemon carries the transaction identity used by the probation machinery.
 // The public daemon entrypoint deliberately supplies no transaction: only the
 // durable transaction layer may eventually select the unexported non-empty
@@ -189,7 +198,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// leaves the inherited cwd, which under systemd is / and under an ad-hoc
 	// start is the user's (rarely a managed worktree, and the reaper excludes
 	// the scanning process itself).
-	chdirToNeutralHome()
+	chdirToNeutralHomeFn()
 
 	// The home exists now — acquireHomeLock just created it — so latch it, and no
 	// write this daemon makes can re-create the directory once it is deleted
