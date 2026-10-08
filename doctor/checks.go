@@ -646,24 +646,48 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					// escaped arm remains report-only either way — no kill path
 					// is added here.
 					home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
-					// Canonicalize both sides through normalizeHome (the same
-					// home-identity normalization checkForeignDaemons uses) rather
-					// than filepath.Clean: Clean is lexical and leaves a symlinked
-					// AGENT_FACTORY_HOME — or macOS /var vs /private/var — comparing
-					// unequal to the same home, which would report a genuine
-					// escapee as foreign.
-					if homeStatus == proctree.EnvFound && normalizeHome(home) != normalizeHome(ctx.opts.ConfigDir) {
-						// A distinct check key keeps this out of the escaped-process
-						// collapse, whose row ("N processes escaped live session
-						// pane trees") would re-attribute a foreign process to this
-						// install in the default (non-verbose) CLI and JSON output.
-						report.addAdvisoryFinding(Finding{
-							Check: "foreign-home-process",
-							Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
-								"agent-factory home (%s) — not attributed to this install",
-								describeProc(p), name, home),
-						})
-						continue
+					if homeStatus == proctree.EnvFound {
+						// A relative AGENT_FACTORY_HOME is stamped unchanged by
+						// session/tmux.afHomeDir, so it is relative to the launching
+						// af process's frame, not the doctor's. normalizeHome resolves
+						// a path in THIS process's frame, which would resolve a
+						// relative marker against the directory doctor was invoked
+						// from — collapsing two distinct homes (each launched from a
+						// different working directory with AF_HOME=.af) onto the same
+						// doctor-relative path and letting a genuine foreign escapee
+						// compare equal to ours, falling through as an escapee of this
+						// install. The marker's originating frame is not recoverable
+						// from here, so treat a relative marker as unproven rather
+						// than normalizing it in the current frame: report it under the
+						// foreign-home key without attributing the escape to us.
+						if !filepath.IsAbs(home) {
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-process",
+								Detail: fmt.Sprintf("%s carries live session %s's name but its AF_HOME (%s) "+
+									"is a relative path that cannot be resolved to a specific agent-factory "+
+									"home — not attributed to this install", describeProc(p), name, home),
+							})
+							continue
+						}
+						// Canonicalize both sides through normalizeHome (the same
+						// home-identity normalization checkForeignDaemons uses) rather
+						// than filepath.Clean: Clean is lexical and leaves a symlinked
+						// AGENT_FACTORY_HOME — or macOS /var vs /private/var — comparing
+						// unequal to the same home, which would report a genuine
+						// escapee as foreign.
+						if normalizeHome(home) != normalizeHome(ctx.opts.ConfigDir) {
+							// A distinct check key keeps this out of the escaped-process
+							// collapse, whose row ("N processes escaped live session
+							// pane trees") would re-attribute a foreign process to this
+							// install in the default (non-verbose) CLI and JSON output.
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-process",
+								Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
+									"agent-factory home (%s) — not attributed to this install",
+									describeProc(p), name, home),
+							})
+							continue
+						}
 					}
 					report.addAdvisoryFinding(Finding{
 						Check: "escaped-process",
