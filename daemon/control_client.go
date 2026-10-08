@@ -604,12 +604,18 @@ func ArchiveSession(req ArchiveSessionRequest) (string, error) {
 //
 // The read must NOT spawn a daemon (#5136 Codex round 6): a launch writes
 // sockets, locks, and logs and runs session recovery — far more side effects
-// than a listing justifies. callDaemonNoEnsure dials the existing socket only
-// and reports ErrDaemonUnavailable when none is serving.
+// than a listing justifies. The no-ensure attempt dials the existing socket
+// only; a dial that never reached the handler reports as ErrDaemonUnavailable
+// (raw dial errors would leak socket paths into user-facing output), while a
+// handler-side error — validation, readiness — stays verbatim.
 func PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
 	var resp PruneSessionsResponse
-	if err := callDaemonNoEnsure("PruneSessions", req, &resp); err != nil {
-		return PruneSessionsResponse{}, err
+	attempt := callDaemonNoEnsureAttemptUntil("PruneSessions", req, &resp, time.Time{})
+	if attempt.err != nil {
+		if !attempt.requestStarted {
+			return PruneSessionsResponse{}, ErrDaemonUnavailable
+		}
+		return PruneSessionsResponse{}, attempt.err
 	}
 	return resp, nil
 }
