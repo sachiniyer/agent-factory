@@ -45,7 +45,7 @@ import (
 // ShutdownNoDaemon here would contradict the established state and silently
 // leave the stale daemon running (#553).
 func sigtermFallback() (ShutdownResult, ShutdownTarget, error) {
-	pid, proc, source, scanned, err := locateDaemonPID()
+	pid, proc, pidFilePID, source, scanned, err := locateDaemonPID()
 	if err != nil {
 		if scanned > 0 {
 			// An ambiguity (multiple same-home `--daemon` candidates) or
@@ -133,16 +133,30 @@ func sigtermFallback() (ShutdownResult, ShutdownTarget, error) {
 	// Best-effort PID file cleanup so the next `af` invocation does not see
 	// a stale file. StopDaemon does this on its happy path too; doing it
 	// here keeps state tidy when the daemon binary never wrote one itself.
-	removeDaemonPIDFile()
+	// The removal is identity-guarded (removePIDFileIfStillNames): the
+	// signaled daemon is dead by the time we get here, but a successor can
+	// have claimed the home and rewritten daemon.pid in the interim, and
+	// unlinking that file would orphan the live replacement (#5188). The
+	// compare target is the PID the FILE named (pidFilePID) — the stale or
+	// rejected entry being reclaimed — not the signalled PID, which differs
+	// whenever the home-scoped scan found this home's daemon under a pid the
+	// file never recorded.
+	if pidFile, ferr := daemonPIDFilePath(); ferr == nil && pidFilePID != 0 {
+		removePIDFileIfStillNames(pidFile, pidFilePID, pidLockCleanupDeadline(time.Time{}))
+	}
 	return ShutdownViaSIGTERM, target, nil
 }
 
 // locateDaemonPID returns the PID of the running daemon to signal, a
 // proctree.Process snapshot captured AT the classification decision (the
 // instance whose home classifyDaemonHome proved ours, not a later Lookup that
-// could observe a recycled PID), the source it was found in ("pid-file" or
-// "pgrep"), and the count of `--daemon` candidates the host scan surfaced (0
-// when no scan ran, e.g. no PID file and pgrep unavailable). On failure to
+// could observe a recycled PID), the PID the daemon.pid file named when read
+// (pidFilePID — 0 when absent or unparseable; it may name a foreign or dead
+// entry the home binding rejected, and sigtermFallback's stale-file cleanup
+// compares against THIS value, not the signalled PID), the source the target
+// was found in ("pid-file" or "pgrep"), and the count of `--daemon` candidates
+// the host scan surfaced (0 when no scan ran, e.g. no PID file and pgrep
+// unavailable). On failure to
 // locate a PID, returns (0, zero Process, source, scanned, nil) where source
 // describes the suspected PID source for diagnostics (e.g. "pid-file pid=N
 // foreign, pgrep: no matches for this home" or "no pid-file, pgrep
@@ -156,7 +170,7 @@ func sigtermFallback() (ShutdownResult, ShutdownTarget, error) {
 // binding proved ours: a PID the kernel recycled between this classification
 // and the signal has a different StartID, so proctree.Signal refuses it
 // (ErrIdentityChanged) rather than terminating the replacement (#4793).
-func locateDaemonPID() (int, proctree.Process, string, int, error) {
+func locateDaemonPID() (int, proctree.Process, int, string, int, error) {
 	pidFileSource := "no pid-file"
 	// rejectedPIDFilePID is the PID a daemon.pid entry named when it was a
 	// LIVE `af --daemon` the home binding PROVED serves another home
@@ -170,7 +184,13 @@ func locateDaemonPID() (int, proctree.Process, string, int, error) {
 	// or non-daemon PID-file entry is plain stale (no live foreign daemon
 	// for a blanket pkill to hit), so it counts as 0.
 	rejectedPIDFilePID := 0
+	// pidFilePID is the PID the daemon.pid file named when read here — the
+	// value the caller's stale-file cleanup compares against. It stays 0 when
+	// the file was absent or unparseable: nothing was ever claimed stale, and
+	// a file appearing afterwards belongs to a successor.
+	pidFilePID := 0
 	if pid, ok := readPIDFromFile(); ok {
+		pidFilePID = pid
 		switch {
 		case !pidLooksAlive(pid) || !isAgentFactoryDaemon(pid):
 			log.InfoLog.Printf("sigterm fallback: PID file pid=%d is dead or not a daemon; falling back to pgrep", pid)
@@ -178,7 +198,7 @@ func locateDaemonPID() (int, proctree.Process, string, int, error) {
 		default:
 			switch classifyDaemonHome(pid) {
 			case daemonOurs:
-				return pid, captureDaemonIdentity(pid), "pid-file", 0, nil
+				return pid, captureDaemonIdentity(pid), pidFilePID, "pid-file", 0, nil
 			case daemonForeign:
 				log.InfoLog.Printf("sigterm fallback: PID file pid=%d is a live daemon serving ANOTHER home; not signalling; falling back to pgrep", pid)
 				pidFileSource = fmt.Sprintf("pid-file pid=%d foreign", pid)
@@ -201,9 +221,9 @@ func locateDaemonPID() (int, proctree.Process, string, int, error) {
 			scanned = 1
 		}
 		if errors.Is(err, errPgrepUnavailable) {
-			return 0, proctree.Process{}, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), scanned, nil
+			return 0, proctree.Process{}, pidFilePID, fmt.Sprintf("%s, pgrep unavailable", pidFileSource), scanned, nil
 		}
-		return 0, proctree.Process{}, "", scanned, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
+		return 0, proctree.Process{}, pidFilePID, "", scanned, fmt.Errorf("%s, pgrep: %w", pidFileSource, err)
 	}
 	// Reclassify every scanned candidate by uid and AGENT_FACTORY_HOME before
 	// selecting a signal target. The pgrep scan returns every `--daemon`
@@ -233,7 +253,7 @@ func locateDaemonPID() (int, proctree.Process, string, int, error) {
 		if rejectedPIDFilePID != 0 && !slices.Contains(pids, rejectedPIDFilePID) {
 			scanned++
 		}
-		return 0, proctree.Process{}, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, scanned), scanned, nil
+		return 0, proctree.Process{}, pidFilePID, fmt.Sprintf("%s, pgrep: no matches for this home (%d scanned)", pidFileSource, scanned), scanned, nil
 	case 1:
 		// A rejected PID-file candidate the host scan did not surface is one
 		// more `--daemon` process this filter deliberately did not signal, the
@@ -251,241 +271,13 @@ func locateDaemonPID() (int, proctree.Process, string, int, error) {
 		if rejectedPIDFilePID != 0 && !slices.Contains(pids, rejectedPIDFilePID) {
 			scanned++
 		}
-		return scoped[0], captureDaemonIdentity(scoped[0]), "pgrep", scanned, nil
+		return scoped[0], captureDaemonIdentity(scoped[0]), pidFilePID, "pgrep", scanned, nil
 	default:
-		return 0, proctree.Process{}, "", len(pids), fmt.Errorf(
+		return 0, proctree.Process{}, pidFilePID, "", len(pids), fmt.Errorf(
 			"sigterm fallback: ambiguous, found %d `--daemon` processes for this home (%s) — "+
 				"kill the right one manually then re-run `af upgrade`",
 			len(scoped), formatPIDList(scoped),
 		)
-	}
-}
-
-// readPIDFromFile parses the daemon PID file. Returns (0, false) when the
-// file is missing, malformed, or points at an obviously bogus PID. A stale
-// or reused PID is not filtered here — callers re-verify with cmdline.
-func readPIDFromFile() (int, bool) {
-	path, err := daemonPIDFilePath()
-	if err != nil {
-		return 0, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 || pid == os.Getpid() {
-		return 0, false
-	}
-	return pid, true
-}
-
-// daemonPIDLockPoll is the cadence a nonblocking PID-file lock acquisition
-// retries at when a deadline bounds the wait. Package var so tests can
-// shorten it; production keeps it short so a deadline-bounded stop does not
-// spend its whole budget asleep between attempts.
-var daemonPIDLockPoll = 20 * time.Millisecond
-
-// daemonPIDLockStartupBudget bounds how long writeDaemonPIDFile waits on the
-// sidecar PID-file lock. RunDaemon reaches the PID-file write AFTER it has
-// bound the control socket and acquired the per-home singleton lock, so a
-// suspended or stalled writer holding daemon.pid.lock would otherwise block
-// startup indefinitely: clients could Ping a daemon whose setup never
-// advances past the PID-file write, while later launches are excluded by the
-// home lock. The write is already best-effort (RunDaemon logs the failure and
-// proceeds; the deferred removal only runs on success, and readers fall back
-// to the pgrep scan when no PID file exists), so a lock this budget cannot
-// acquire is abandoned rather than waited on. Package var so tests can
-// shorten it; production keeps it short so a contended startup write does not
-// stall a socket-bound daemon for long while still tolerating brief,
-// legitimate contention (a concurrent stop's read-compare-unlink is sub-ms).
-var daemonPIDLockStartupBudget = 2 * time.Second
-
-// withDaemonPIDLock runs fn while holding an exclusive flock on a sidecar lock
-// file next to the daemon PID file. writeDaemonPIDFile writes daemon.pid with an
-// atomic temp-then-rename, and removePIDFileIfStillNames reads it and
-// conditionally unlinks it; without coordination, a same-home daemon's atomic
-// rename can land in the window between the removal's re-read and its unlink
-// and have its freshly-written PID file deleted — orphaning the new daemon the
-// way the unconditional unlink the removal replaced once did. A flock on the
-// PID file itself does not help: the atomic rename changes daemon.pid's inode
-// out from under any flock held on it, so a SEPARATE lock file is what the
-// writer and the remover both hold to serialize read-compare-unlink against
-// temp-then-rename. The lock is released by the kernel when the holder exits,
-// so a crashed daemon never strands it. The lock file is left in place and
-// re-opened by later callers, the way the rest of the codebase's sidecar .lock
-// files are.
-//
-// deadline bounds the acquisition: zero blocks indefinitely (StopDaemon, which
-// carries no caller deadline); a non-zero deadline makes the acquisition
-// nonblocking and deadline-aware, so writeDaemonPIDFile's startup write caps
-// its wait at daemonPIDLockStartupBudget — a suspended or stalled writer holding
-// daemon.pid.lock would otherwise block startup indefinitely after RunDaemon
-// bound the control socket and acquired the per-home singleton lock — and a
-// deadline-bounded stopDaemonUntil that reaches foreign-PID cleanup while
-// another writer holds daemon.pid.lock does not block past its admission
-// deadline. The lock is abandoned (the write is best-effort anyway) rather
-// than waiting indefinitely on a suspended writer or a stalled filesystem.
-func withDaemonPIDLock(pidFile string, deadline time.Time, fn func() error) error {
-	lockPath := pidFile + ".lock"
-	// os.OpenFile FOLLOWS a pre-existing daemon.pid.lock symlink, so a
-	// symlinked sidecar is not a stable coordination object: a holder swapped
-	// between the remover acquiring its lock and a new daemon acquiring its
-	// own would let the remover hold the old inode (and read the stale PID)
-	// while the writer holds the replacement inode and atomically writes a
-	// fresh PID file — the remover then unlinks that fresh file, reopening
-	// the read/compare/unlink race the sidecar lock is there to close (#4793
-	// review). Open with O_NOFOLLOW so a symlink at the lock path is refused
-	// atomically (ELOOP), the same way upgradetxn's locks refuse one; af
-	// created this sidecar (O_CREATE) and re-opens it, so a link is a user
-	// arrangement af did not author — the same policy writeDaemonPIDFile and
-	// removeDaemonPIDFile take against a symlinked daemon.pid (#3672).
-	// Callers treat lock-acquisition failure as best-effort: the startup
-	// write is logged and proceeds (readers fall back to the pgrep scan), and
-	// the stop-side removal leaves the stale file (safe — readers re-verify
-	// cmdline + the home binding before acting), so a refused lock degrades
-	// to the same safe "leave it" outcome a contended or untrusted-FS lock
-	// already does.
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0644)
-	if err != nil {
-		return fmt.Errorf("open daemon PID lock: %w", err)
-	}
-	defer lock.Close()
-	if !acquireDaemonPIDLock(lock, deadline) {
-		return errors.New("daemon PID lock held by another writer")
-	}
-	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
-	return fn()
-}
-
-// acquireDaemonPIDLock takes an exclusive flock on lock, blocking indefinitely
-// when deadline is zero and otherwise polling a nonblocking acquire at
-// daemonPIDLockPoll against deadline. Returns false (without the lock) when
-// the deadline expires, so the caller can abandon best-effort cleanup rather
-// than exceed a bounded stop/restart contract.
-func acquireDaemonPIDLock(lock *os.File, deadline time.Time) bool {
-	if deadline.IsZero() {
-		return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX) == nil
-	}
-	for {
-		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-			return true
-		}
-		if admissionDeadlineExpired(deadline) {
-			return false
-		}
-		if !waitUntilAdmissionDeadline(deadline, daemonPIDLockPoll) {
-			return false
-		}
-	}
-}
-
-// removePIDFileIfStillNames unlinks pidFile only when it still records pid.
-// stopDaemonUntil read a stale foreign PID and proved the process it names is
-// not this home's daemon; in the window between that read and this unlink a
-// same-home daemon may have started and atomically rewritten daemon.pid with
-// its own PID. Removing the file unconditionally would delete that valid
-// replacement and recreate the untracked-daemon state the PID file exists to
-// prevent — the new daemon would be live but no longer discoverable by
-// StopDaemon. Re-read and compare first under the writer's lock (see
-// withDaemonPIDLock) so the compare-and-unlink and a same-home daemon's
-// atomic rewrite cannot interleave: leave a freshly-written valid file to its
-// owner, and treat the unreadable/malformed case the same way rather than
-// unlinking a file whose current contents we did not establish (#4793).
-//
-// The number-only compare the lock guards is not enough on its own: a foreign
-// PID that exits can have its number recycled by a same-home daemon that writes
-// the same PID value to the PID file, so a stale entry that still names the old
-// number can be the new daemon's freshly-written file. Re-classify the live PID
-// under the lock (pidBelongsToThisHome) and leave the file when the PID now
-// belongs to this home's daemon — a recycled number on our own daemon is its
-// handle, not the stale foreign entry to unlink (#4793).
-//
-// The sidecar lock this held is no coordination at all on a filesystem whose
-// flock cannot be trusted (NFS, SMB, 9p, FUSE — see lockFSReliable in
-// singleton_lock.go): the writer's temp-then-rename is not serialized against
-// this read-compare-unlink, so the very race the lock prevents on local
-// filesystems reopens on a network one. The removal is skipped there and the
-// stale file is left; a stale PID file is safe to leave because readers re-verify
-// it (cmdline + home binding) before acting, and the writer's fresh file is
-// preserved.
-//
-// Like removeStaleDaemonPIDFile it refuses a symlinked PID file (#3672):
-// writeDaemonPIDFile refuses to write through one, so a link here is a user
-// arrangement af did not author, and the cleanup neither reads its target
-// through the link nor unlinks the link. The refusal is taken up front, so a
-// symlinked daemon.pid is left in place the way the other stale-PID cleanups
-// leave one.
-//
-// deadline propagates the caller's admission deadline to the lock acquisition
-// (see withDaemonPIDLock): a deadline-bounded stopDaemonUntil does not block
-// indefinitely on a contended lock. On a deadline the cleanup is abandoned
-// (best-effort, logged) rather than waiting past the stop/restart budget.
-func removePIDFileIfStillNames(pidFile string, pid int, deadline time.Time) {
-	// On a filesystem whose flock cannot be trusted (NFS, SMB, 9p, FUSE — see
-	// lockFSReliable in singleton_lock.go), the sidecar daemon.pid.lock does not
-	// serialize the writer's temp-then-rename against this read-compare-unlink:
-	// a successful flock may silently no-op, so a same-home daemon's freshly
-	// written PID file can land in the window between the re-read and the unlink
-	// and be deleted — the race the lock is meant to prevent (#4793). Skip the
-	// conditional removal there and leave the stale file; readers re-verify a PID
-	// file (cmdline + home binding) before acting, so a stale file left in place
-	// is safe, and the writer's fresh one is preserved.
-	if ok, _ := lockFSReliable(filepath.Dir(pidFile)); !ok {
-		log.InfoLog.Printf("stale daemon PID file %q on a filesystem whose flock is untrusted; leaving it in place", pidFile)
-		return
-	}
-	if err := withDaemonPIDLock(pidFile, deadline, func() error {
-		// A symlinked PID file is not af's to unlink — writeDaemonPIDFile
-		// refuses to write through one, so a link here is a user arrangement
-		// af did not author. Refuse it the way the other stale-PID cleanups do
-		// (removeStaleDaemonPIDFile, #3672): do not read its target through the
-		// link to decide whether to unlink it, and do not unlink the link. A
-		// missing path (an already-gone file) is an ordinary done state, so
-		// RefuseManagedFileSymlink's nil-for-absent return falls through to the
-		// read below.
-		if err := config.RefuseManagedFileSymlink(pidFile); err != nil {
-			if errors.Is(err, config.ErrManagedFileSymlink) {
-				log.InfoLog.Printf("stale daemon PID file %q (PID: %d) is a symlink af did not write through; leaving it in place", pidFile, pid)
-			}
-			return nil
-		}
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			// Already gone (or unreadable) — nothing to remove; a missing file
-			// is the desired end state, and a permission error is no worse than
-			// the previous unconditional os.Remove would have been.
-			return nil
-		}
-		var current int
-		if _, err := fmt.Sscanf(string(data), "%d", &current); err != nil {
-			// Malformed, and therefore not the foreign PID we read. A
-			// newly-started daemon writes a valid PID, so this is neither the
-			// stale file we own nor safe to claim — leave it for the next
-			// caller.
-			return nil
-		}
-		if current != pid {
-			return nil // a new daemon has written its own PID; keep the file
-		}
-		// The number still names the stale PID, but the kernel may have recycled it
-		// onto a same-home daemon that wrote the same number. Re-classify the live
-		// PID with the tri-state classifier (not the bool helper, which collapses
-		// daemonUnverifiable into "not ours"): a PROVEN-foreign (or dead) PID is
-		// unlinked; daemonOurs is the recycled number's new owner, and
-		// daemonUnverifiable may be this home's own daemon whose environ could not
-		// be read — unlinking it would orphan the live daemon, so retain it. (#4793)
-		switch classifyDaemonHome(pid) {
-		case daemonOurs, daemonUnverifiable:
-			return nil
-		case daemonForeign:
-			if err := os.Remove(pidFile); err != nil && !os.IsNotExist(err) {
-				log.WarningLog.Printf("failed to remove stale daemon PID file %q: %v", pidFile, err)
-			}
-		}
-		return nil
-	}); err != nil {
-		log.WarningLog.Printf("sigterm fallback: could not coordinate removal of stale PID file %q: %v", pidFile, err)
 	}
 }
 
