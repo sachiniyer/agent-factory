@@ -770,6 +770,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 	}
 	if accountSwap != nil {
+		// A committed-swap recovery that re-established the runtime after a
+		// post-commit blind teardown (ErrAccountSwapAgentTeardownBlind) entered
+		// with StartupStateUnknown set and started cleared. The probe or the
+		// replacement respawn above has now positively identified the runtime,
+		// but ConfirmLive re-establishes liveness without clearing the inert
+		// fence or restoring started — so resolve the startup state HERE, before
+		// the readiness contract and mission delivery below attempt to preview
+		// or send against this row. On the real local backend both preview
+		// (LocalBackend.PreviewContext) and the prompt send
+		// (SendPromptCommandWithStatus) refuse a row whose started bit is still
+		// false, so a resolve left until the success path's tail is unreachable
+		// and the committed swap stays wedged. No-op for an ordinary resume or a
+		// healthy committed swap, where the fence was never raised.
+		instance.ResolveStartupState()
 		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
 			boundaryErr := fmt.Errorf("account replacement for %q did not restore every expected pane: %w", requestedTitle, err)
 			if settleErr != nil {
@@ -879,16 +893,6 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	// above stays as the safety net for the error returns, where it is the only
 	// release; after this call it is a no-op.
 	_ = instance.EndLimitResume()
-	// A committed-swap recovery that re-established the runtime after a
-	// post-commit blind teardown (ErrAccountSwapAgentTeardownBlind) entered with
-	// StartupStateUnknown set and started cleared. Respawn's ConfirmLive
-	// re-establishes liveness but does not clear the inert fence, and the
-	// success path below persists before it publishes, so without resolving the
-	// startup state here the row would reload with a stale marker that blocks
-	// every later recovery door. The explicit retry IS the inspection the
-	// marker waited for. No-op for an ordinary resume or a healthy committed
-	// swap, where the fence was never raised.
-	instance.ResolveStartupState()
 
 	// The cleared limit is itself durable state worth a checkpoint. On the respawn
 	// arm this is the second write; that is deliberate — the first one records the
