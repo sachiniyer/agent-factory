@@ -194,6 +194,20 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 	return true, checkpoint
 }
 
+// taskRunAwaitingTurnLocked reports whether the session's prompt has been
+// attempted but the agent has not demonstrably taken the turn — no pane churn
+// strictly after the attempt has been observed (#5219). The send seeds the
+// status monitor's comparison baseline with the post-Enter boundary frame
+// (seedDeliveryBaseline), so a later Observation.Updated is the agent's own
+// reaction to the prompt, never the send's echo. An attempt timestamp alone
+// arms the gate however the send went: a run that can show no response to its
+// prompt is not a completed run, only an idle pane.
+//
+// Caller holds i.mu.
+func (i *Instance) taskRunAwaitingTurnLocked() bool {
+	return !i.lastPromptAttemptAt.IsZero() && !i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
+}
+
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.
 // Its epoch bump also rejects a predecessor observation still applying.
 func (i *Instance) ClearIdleEvidence() bool {

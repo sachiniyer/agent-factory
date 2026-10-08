@@ -139,11 +139,13 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
-	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
-	// a handoff mission was still owed (#4429), so the next idle observation after
-	// the mission is resolved ends the run. Persisted for the same reason as
-	// TaskRunActive: the held edge is already spent and nothing re-derives it.
-	// omitempty + additive: an older record decodes to false, which holds nothing.
+	// TaskRunIdleEdgeHeld records that the run's idle edge was held open — a
+	// handoff mission was still owed (#4429), or the prompt attempt had no
+	// post-delivery pane churn to prove the agent took the turn (#5219) — so
+	// the next idle observation after the blocker clears ends the run.
+	// Persisted for the same reason as TaskRunActive: the held edge is already
+	// spent and nothing re-derives it. omitempty + additive: an older record
+	// decodes to false, which holds nothing.
 	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on

@@ -664,9 +664,30 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 			// run open forever after the confirm. The edge rule exists so a
 			// session born Ready does not end its run at birth; a row owing a
 			// takeover mission is past birth by construction.
+			//
+			// An idle edge is likewise not a finished run while the run's own
+			// prompt has been attempted but never demonstrably picked up (#5219).
+			// ConfirmLive publishes LiveRunning the moment the prompt send
+			// returns, so the FIRST quiet tick afterwards — long before an agent
+			// that boots behind a still pane (devin's ACP startup takes seconds,
+			// and no IsWorkingContent matcher covers it) has visibly reacted —
+			// used to end the run and hand on_complete a session whose turn never
+			// began. Post-attempt pane churn is the turn evidence; the send
+			// seeds the monitor's baseline with the post-Enter frame, so that
+			// churn cannot be the send's own echo. The edge holds rather than
+			// drops: churn landing while the row is already Ready (the paused
+			// poll path folds churn into lastPaneChurnAt without a liveness
+			// move) releases it through the flag exactly as the mission hold
+			// does. A run that never produces it stays open — reported
+			// in-flight, never a completion.
 			if to.liveness == LiveReady {
 				switch {
 				case i.owesMissionDeliveryLocked():
+					if !i.taskRunIdleEdgeHeld {
+						i.taskRunIdleEdgeHeld = true
+						i.touchLocked()
+					}
+				case i.taskRunAwaitingTurnLocked():
 					if !i.taskRunIdleEdgeHeld {
 						i.taskRunIdleEdgeHeld = true
 						i.touchLocked()

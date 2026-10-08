@@ -222,6 +222,48 @@ func TestRunEndedIntoIdle_ExcludesAnUncertainCreate(t *testing.T) {
 		"a create whose startup outcome was never established is not a finished run")
 }
 
+// TestTaskSessionLifecycle_DeliveryWindowIdleDoesNotFileOnComplete is the
+// issue's report end to end (#5219): a task session whose prompt was attempted
+// but whose agent has not visibly reacted settles idle on the first quiet
+// poll — devin's ACP startup keeps the pane still through boot and prompt
+// acceptance. That edge is held, so the run stays in flight, no on_complete
+// obligation is filed, and the session is left alone. The run ends only after
+// post-delivery churn proves the agent took the turn.
+func TestTaskSessionLifecycle_DeliveryWindowIdleDoesNotFileOnComplete(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "nightly", "task-archive")
+	stubTaskLifecycle(t, "task-archive", task.OnCompleteArchive)
+
+	// The task prompt send returned sent-unverified; no pane change since.
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, time.Now()))
+
+	was := inst.TaskRunActive()
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the delivery-window idle edge is held, not spent — the agent has not demonstrably taken the turn")
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"an idle sample inside the prompt-delivery window must not archive the session")
+	assert.Nil(t, inst.OwedOnComplete(),
+		"no on_complete obligation may be filed before the agent took the turn")
+
+	// The agent's reaction lands: pane churn strictly after the attempt, then
+	// the next idle observation is the real completion edge.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(time.Now().Add(time.Second), epoch))
+	was = inst.TaskRunActive()
+	require.NoError(t, inst.Transition(session.ObserveLiveness(session.LiveReady)))
+	require.False(t, inst.TaskRunActive(), "post-turn idle is the completion edge")
+	manager.applyTaskSessionLifecycleOnRunEnd(repoID, inst, was)
+
+	require.Eventually(t, func() bool {
+		return inst.GetLiveness() == session.LiveArchived
+	}, 20*time.Second, 25*time.Millisecond,
+		"once the agent demonstrably took the turn, settling idle completes the run")
+}
+
 // TestTaskSessionLifecycle_UnreadableTaskStoreKeepsTheSession: a lookup that
 // cannot answer is not permission to tear anything down.
 func TestTaskSessionLifecycle_UnreadableTaskStoreKeepsTheSession(t *testing.T) {
