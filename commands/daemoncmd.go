@@ -160,12 +160,12 @@ type daemonStatusInfo struct {
 // status still reports the control-plane facts.
 func collectDaemonStatus() daemonStatusInfo {
 	h := daemonHealthFn()
-	unitServesHome, unitInstalled := false, h.AutostartUnit
+	unitServesHome := false
 	var unitScopeErr error
 	if configDir, err := configDirFn(); err != nil {
 		unitScopeErr = fmt.Errorf("cannot resolve the config dir to scope the autostart unit: %w", err)
 	} else {
-		unitServesHome, unitInstalled, unitScopeErr = autostartUnitServesHomeFn(configDir)
+		unitServesHome, _, unitScopeErr = autostartUnitServesHomeFn(configDir)
 	}
 	var supervision daemon.SupervisionInfo
 	if unitScopeErr == nil && unitServesHome {
@@ -183,7 +183,7 @@ func collectDaemonStatus() daemonStatusInfo {
 		PIDVerified:       h.PIDVerified,
 		PIDUnverifiable:   h.PIDUnverifiable,
 		ServingPID:        h.ServingPID,
-		AutostartUnit:     unitServesHome || (unitScopeErr != nil && unitInstalled),
+		AutostartUnit:     unitServesHome || (unitScopeErr != nil && h.AutostartUnit),
 		BootConfig:        h.BootConfig,
 		BinaryStale:       h.BinaryDeleted,
 	}
