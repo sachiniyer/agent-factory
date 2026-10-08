@@ -661,8 +661,19 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 						// than normalizing it in the current frame: report it under the
 						// foreign-home key without attributing the escape to us.
 						if !filepath.IsAbs(home) {
+							// A relative marker is unproven ownership, not a
+							// confirmed foreign home: the marker's originating
+							// frame is not recoverable from here, so the
+							// collapsed row must not assert the definite "from
+							// another agent-factory home" claim the absolute
+							// arm makes. A distinct check key keeps this out of
+							// the foreign-home-process collapse, whose summary
+							// ("N processes from another agent-factory home")
+							// would otherwise state a conclusion the detector
+							// withheld for a relative marker in the default
+							// (non-verbose) CLI and JSON output.
 							report.addAdvisoryFinding(Finding{
-								Check: "foreign-home-process",
+								Check: "foreign-home-unresolved",
 								Detail: fmt.Sprintf("%s carries live session %s's name but its AF_HOME (%s) "+
 									"is a relative path that cannot be resolved to a specific agent-factory "+
 									"home — not attributed to this install", describeProc(p), name, home),

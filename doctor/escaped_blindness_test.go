@@ -389,8 +389,10 @@ func TestEscapedProcessRelativeMarkerNotAttributedToThisInstall(t *testing.T) {
 	// session.
 	require.Empty(t, findByCheck(report, "escaped-process"),
 		"a relative-marker process must not be attributed as an escapee of this install")
-	foreign := findByCheck(report, "foreign-home-process")
-	require.Len(t, foreign, 1, "exactly one foreign-home-process finding is expected for a relative marker")
+	require.Empty(t, findByCheck(report, "foreign-home-process"),
+		"a relative-marker process is unproven ownership, not a confirmed foreign home: %s")
+	foreign := findByCheck(report, "foreign-home-unresolved")
+	require.Len(t, foreign, 1, "exactly one foreign-home-unresolved finding is expected for a relative marker")
 	require.Contains(t, foreign[0].Detail, "relative path",
 		"the finding must explain the marker is relative: %s", foreign[0].Detail)
 	require.Contains(t, foreign[0].Detail, "not attributed to this install",
@@ -403,6 +405,37 @@ func TestEscapedProcessRelativeMarkerNotAttributedToThisInstall(t *testing.T) {
 	require.Empty(t, findBlindnessRows(report, name),
 		"a readable pane tree must not produce a blindness row")
 	require.True(t, alive(relativeEscapee), "the escaped arm must not kill, even under --fix")
+
+	// The default (non-verbose) JSON output must NOT collapse the unproven
+	// finding into the foreign-home-processes row, whose summary ("from
+	// another agent-factory home") states a definite foreign-home conclusion
+	// the detector withheld for a relative marker. It gets its own
+	// foreign-home-unresolved row whose summary says ownership could not be
+	// resolved, so the corrected attribution survives collapsing without
+	// asserting an unspecified "other" home.
+	payload := BuildJSONReport(report, true, false)
+	require.Zero(t, payload.Summary.Unresolved,
+		"an unproven-ownership advisory must remain visible without failing a health probe")
+	var unresolvedRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "foreign-home-unresolved" {
+			unresolvedRow = &payload.Checks[i]
+			break
+		}
+	}
+	require.NotNil(t, unresolvedRow, "the default JSON output must keep the unproven-ownership row distinct")
+	require.Contains(t, unresolvedRow.Detail, "could not be resolved to a specific install",
+		"the default JSON row must state ownership is unproven, not assert another home: %s", unresolvedRow.Detail)
+	require.NotContains(t, unresolvedRow.Detail, "another agent-factory home",
+		"the default JSON row must not claim a confirmed foreign home for an unproven marker: %s", unresolvedRow.Detail)
+	var foreignRow *JSONCheck
+	for i := range payload.Checks {
+		if payload.Checks[i].Name == "foreign-home-processes" {
+			foreignRow = &payload.Checks[i]
+			break
+		}
+	}
+	require.Nil(t, foreignRow, "the default JSON output must not collapse a relative-marker finding into the confirmed foreign-home row")
 }
 
 // TestEscapedProcessOwnHomeStillReportedAsEscape is the companion regression: the
