@@ -170,10 +170,14 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	// a failed poke would otherwise hold the run open forever waiting for churn
 	// the dead send cannot produce. Sends DO still move the boundary while the
 	// window is unsatisfied: a redelivery is the one way out of a window whose
-	// prompt was affirmatively not delivered.
+	// prompt was affirmatively not delivered. The boundary is the last send
+	// that could actually have delivered — a PromptNotDelivered result proves
+	// the pane took nothing, so it must not supersede a standing boundary and
+	// strand the window unsatisfiable.
 	if i.taskRunActive &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
-			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
+			(status != PromptNotDelivered &&
+				!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt))) {
 		i.taskRunPromptAttemptAt = attemptedAt
 		i.taskRunPromptDeliveryStatus = status
 	}
@@ -244,6 +248,7 @@ func (i *Instance) RecordTaskRunTurn(observedAt time.Time) bool {
 // Caller holds i.mu.
 func (i *Instance) recordTaskRunTurnLocked(observedAt time.Time) bool {
 	if !i.taskRunActive || i.taskRunPromptAttemptAt.IsZero() ||
+		i.taskRunPromptDeliveryStatus == PromptNotDelivered ||
 		!observedAt.After(i.taskRunTurnObservedAt) ||
 		i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) {
 		return false
@@ -413,9 +418,16 @@ func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
 
 // taskRunPromptBoundaryFromData is the same restore-side gate for the run's
 // own prompt boundary: evidence written for a finished run carries no window.
+// A row persisted by a release that predates the task-scoped fields keeps an
+// active run with only the session-level send on record — that send IS the
+// task's prompt for an upgrade-era row, so adopt it rather than restart with
+// an unarmed gate that lets the first Ready tick complete the run (#5221).
 func taskRunPromptBoundaryFromData(data InstanceData) (time.Time, PromptDeliveryStatus) {
 	if !data.TaskRunActive {
 		return time.Time{}, ""
+	}
+	if data.TaskRunPromptAttemptAt.IsZero() {
+		return data.LastPromptAttemptAt, data.LastPromptDeliveryStatus
 	}
 	return data.TaskRunPromptAttemptAt, data.TaskRunPromptDeliveryStatus
 }

@@ -269,6 +269,74 @@ func TestTaskRunResendWhileUnsatisfiedReArmsBoundary(t *testing.T) {
 	require.False(t, inst.TaskRunActive())
 }
 
+// A failed manual send while the window is still open must not overwrite the
+// standing boundary (#5221 review): PromptNotDelivered proves the pane took
+// nothing, so it cannot supersede an armed window — otherwise a declined poke
+// would strand a quiet-fallback release the task's own churn already earned.
+func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-2 * taskRunCompletionQuietGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(taskRunCompletionQuietGrace), epoch))
+
+	// The operator pokes the pane mid-window and the send is refused. The
+	// session-level evidence records the failure (the row's idle reason
+	// tracks it) but the task boundary must stay at the task's send.
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0.Add(taskRunCompletionQuietGrace+10*time.Second)))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"a refused manual send does not unsatisfy the window the task's churn already earned")
+}
+
+// Chrome observed while the boundary says the prompt never landed is not
+// evidence for it (#5221 review): recording it would fake a satisfied window
+// and freeze the boundary so a later redelivery could never re-arm.
+func TestTaskRunChromeOnFailedBoundaryDoesNotBlockRedelivery(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0))
+
+	// Unrelated in-turn chrome (the operator started work by hand) must not
+	// record — the prompt provably never arrived.
+	require.False(t, inst.RecordTaskRunTurn(t0.Add(5*time.Second)),
+		"chrome cannot evidence a turn on a prompt that provably never landed")
+
+	// So the redelivery still re-arms the boundary — not frozen by a stale stamp.
+	t1 := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+}
+
+// A row persisted by a release that predates the task-scoped fields restores
+// an ACTIVE run with only session-level prompt evidence. That send is the
+// task's prompt — adopt it as the boundary so the upgrade does not leave the
+// delivery window unarmed and let the first Ready tick complete the run.
+func TestTaskRunLegacyRowAdoptsSessionBoundary(t *testing.T) {
+	inst := taskRunSession(t)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
+
+	data := inst.ToInstanceData()
+	// Simulate the pre-#5221 record: session-level evidence present, the
+	// task-scoped fields absent.
+	data.TaskRunPromptAttemptAt = time.Time{}
+	data.TaskRunPromptDeliveryStatus = ""
+	data.BackendType = "docker"
+
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, reloaded.TaskRunActive(),
+		"a legacy active row must keep its delivery window armed across the upgrade")
+	require.True(t, reloaded.taskRunTurnGateHeld)
+}
+
 // A send that affirmatively failed delivery can never be satisfied by pane
 // activity: the prompt provably never landed, so no later churn is "the turn"
 // (#5221 review P1). The run stays open and flagged prompt-not-delivered
