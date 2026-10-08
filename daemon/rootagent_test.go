@@ -862,7 +862,7 @@ func TestRunDaemonEnsuresRootAgent(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- RunDaemon(cfg) }()
 	t.Cleanup(func() {
-		if _, err := RequestShutdown(); err != nil {
+		if _, _, err := RequestShutdown(); err != nil {
 			t.Logf("RequestShutdown: %v", err)
 		}
 		select {

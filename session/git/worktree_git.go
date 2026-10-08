@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +54,27 @@ func SetLocalGitTimeoutForTest(d time.Duration) func() {
 	prev := localGitTimeout
 	localGitTimeout = d
 	return func() { localGitTimeout = prev }
+}
+
+// daemonLaunchCwd is the cwd the daemon process held BEFORE chdirToNeutralHome
+// moved it onto the AF home. The daemon records it once at startup (via
+// SetDaemonLaunchCwd) so the git runners can resolve a relative `-C path`
+// against the launch cwd rather than the post-chdir AF home. Without it a
+// restored session whose persisted path NewGitWorktreeFromStorage stored
+// verbatim (a relative repo or worktree path) would resolve beneath the AF
+// home and fail every git operation — the regression the chdir introduced for
+// the relative-path edge case. Empty in tests and any non-daemon caller, which
+// leaves a relative path on its pre-chdir behaviour (resolved against the
+// current cwd).
+var daemonLaunchCwd string
+
+// SetDaemonLaunchCwd records the daemon's pre-chdir cwd so the git runners can
+// resolve relative paths against it after chdirToNeutralHome moves the daemon
+// onto the AF home. Called once from the daemon before that chdir; never after.
+func SetDaemonLaunchCwd(dir string) {
+	if dir != "" {
+		daemonLaunchCwd = dir
+	}
 }
 
 // runGitCommand executes a local git command and returns any error.
@@ -154,8 +176,57 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	environment []string,
 	args ...string,
 ) (string, error) {
+	// Resolve a relative path against the daemon's launch cwd (captured before
+	// chdirToNeutralHome moved the daemon onto the AF home) so a restored session
+	// whose persisted path NewGitWorktreeFromStorage stored verbatim still targets
+	// the same repo it did before the chdir. Without this a relative `-C path`
+	// would resolve beneath the AF home the daemon now runs in instead of the
+	// spawner's cwd, breaking every git operation for that edge case. The path is
+	// now absolute, so the existing-directory gate below sets cmd.Dir and removes
+	// the inherited-cwd window for relative paths too. Empty daemonLaunchCwd
+	// (tests, any non-daemon caller) leaves a relative path untouched so it
+	// resolves against the current cwd as before.
+	if !filepath.IsAbs(path) && daemonLaunchCwd != "" {
+		path = filepath.Join(daemonLaunchCwd, path)
+	}
 	baseArgs := []string{"-C", path}
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
+	// Start git already cwd'd at `path` rather than inheriting the daemon's cwd.
+	// The daemon can be auto-started from a managed worktree and never chdirs, so
+	// without cmd.Dir the git child shows that inherited worktree as
+	// /proc/<pid>/cwd during git's startup window (before `git -C path` takes
+	// effect). reapWorktreeWriters selects by cwd and would then SIGTERM an
+	// unrelated session's git command during a concurrent reap of the inherited
+	// worktree. Setting cmd.Dir removes the false positive at its source; `-C
+	// path` stays as the repo selector (and is the sole selector, since
+	// repositoryPathEnvironment strips GIT_DIR etc. below). hooks.go sets
+	// cmd.Dir = run.worktreePath for the same reason — the package convention,
+	// now followed here.
+	//
+	// Gated on path being an existing directory: the repo-gone origin probe
+	// (worktree_repo_gone_authorization.go) deliberately runs `git -C <gone-or-
+	// non-dir path>` to classify a missing origin from git's *exec.ExitError. If
+	// cmd.Dir were set to a gone path, exec would fail to start git at all
+	// (fork/exec ENOENT/ENOTDIR) and the classifier would see an os.PathError
+	// instead of the ExitError it keys on. The existing-directory case — every
+	// ordinary worktree/repo operation, and the only case the inherited-cwd
+	// false positive can bite — still gets cmd.Dir; the gone-path probe keeps
+	// its pre-fix behaviour (a brief inherited-cwd window against a command
+	// git fails immediately, whose worst case is a SIGTERM'd probe that
+	// classifies as the fail-closed "unknown", not a deletion authorization).
+	//
+	// A relative path is resolved against the daemon's launch cwd above, so by
+	// here it is absolute; the existing-directory gate then sets cmd.Dir too,
+	// closing the inherited-cwd window for relative paths as well. Production
+	// worktree/repo paths are always absolute (every constructor normalizes via
+	// filepath.Abs or git rev-parse --show-toplevel), so this only matters for a
+	// hand-edited or externally-authored relative path in storage — which now
+	// resolves against the launch cwd rather than the post-chdir AF home.
+	if filepath.IsAbs(path) {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			cmd.Dir = path
+		}
+	}
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
 	// remote needs auth and no terminal is attached. Force stable diagnostics so
 	// repository classification is fail-closed and locale-independent.

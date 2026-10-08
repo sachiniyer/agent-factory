@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/sockpath"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -122,6 +125,27 @@ func startHTTPServer(manager *Manager, scheduler *taskScheduler, watchers *watch
 		// CORS is config-driven (§1.5): empty allow-list ⇒ no ACAO emitted.
 		Handler:           withAuth(unixHandler, nil, manager.cfg.CORSAllowedOrigins),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			// The same kernel question the control socket asks at accept
+			// (#5182): which process CONNECTED, resolved to its (pid,
+			// start-stamp) instance while the peer provably still owns the
+			// slot — resolving here rather than in the handler keeps a peer
+			// that exits and has its pid recycled mid-request from lending a
+			// stranger the exemption. This is the unix socket's server — the
+			// TCP web listeners run their own http.Server with no ConnContext,
+			// so a remote peer never acquires a local pid and can never
+			// present one a teardown would trust. A read failure leaves the
+			// context unchanged: no requester, the pre-#5182 posture.
+			pid, err := peercred.ConnPID(conn)
+			if err != nil {
+				return ctx
+			}
+			proc, err := proctree.Lookup(pid)
+			if err != nil {
+				return ctx
+			}
+			return context.WithValue(ctx, httpPeerRequesterContextKey{}, &proc)
+		},
 	}
 
 	go func() {
@@ -305,6 +329,15 @@ func rpcHandler[Req any, Resp any](call func(Req, *Resp) error) http.HandlerFunc
 // client disconnects — r.Context() is done the moment the connection drops. This
 // is what stops an abandoned create from leaving a pane-poll spinning on the
 // daemon.
+// rpcHandlerCtxPtr adapts a handler whose request is a pointer — the tracked
+// teardown methods take *Req so the net/rpc argv pointer (and thus the
+// requester unregister parked under it) is shared with the transport (#5182).
+func rpcHandlerCtxPtr[Req any, Resp any](call func(context.Context, *Req, *Resp) error) http.HandlerFunc {
+	return rpcHandlerCtx(func(ctx context.Context, req Req, resp *Resp) error {
+		return call(ctx, &req, resp)
+	})
+}
+
 func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -325,15 +358,36 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 			return
 		}
 		var resp Resp
-		if err := call(withHTTPRPCRequester(r), req, &resp); err != nil {
+		// Teardown handlers park their requester unregistrations on this
+		// per-request queue (trackTeardownRequester, #5182); drain it only
+		// after the reply has been flushed into the socket, so the requester
+		// stays exempt for as long as it is still waiting on this answer.
+		pending := &pendingUntracks{}
+		ctx := context.WithValue(withHTTPRPCRequester(r), teardownReplyPendingContextKey{}, pending)
+		if err := call(ctx, req, &resp); err != nil {
 			status := http.StatusInternalServerError
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
 			}
 			writeHTTPError(w, r, status, err)
+			flushHTTPResponse(w)
+			pending.drain()
 			return
 		}
 		writeHTTPSuccess(w, r, resp)
+		flushHTTPResponse(w)
+		pending.drain()
+	}
+}
+
+// flushHTTPResponse forces the buffered reply into the socket now rather than
+// on handler return, so teardown-requester unregistrations released right
+// after it genuinely trail the reply (#5182). net/http's response writer
+// always satisfies http.Flusher here; the check is only for wrapped writers
+// in tests.
+func flushHTTPResponse(w http.ResponseWriter) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
@@ -459,7 +513,12 @@ func writeHTTPError(w http.ResponseWriter, r *http.Request, status int, err erro
 }
 
 // writeHTTPEnvelope is the single write path for both success and failure so the
-// Content-Type, status, and byte-identical envelope shape stay uniform.
+// Content-Type, status, and byte-identical envelope shape stay uniform. The
+// body is serialized before WriteHeader so Content-Length accompanies it: a
+// length-delimited response is COMPLETE the moment the handler's flush pushes
+// it into the socket, with no chunked terminator left for handler return to
+// write — which is what makes flushHTTPResponse a real reply-completed hook
+// for teardown-requester release (#5182).
 func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env apiproto.Envelope) {
 	if env.Error != nil {
 		// Keep provenance separate from the machine-readable outcome code.
@@ -468,9 +527,17 @@ func writeHTTPEnvelope(w http.ResponseWriter, r *http.Request, status int, env a
 		err.DaemonRejected = err.Code != apiproto.ErrorCodeMutationCommitted
 		env.Error = &err
 	}
+	var body bytes.Buffer
+	if err := apiproto.WriteEnvelope(&body, env); err != nil {
+		if !httpResponseWriteAbandoned(r, err) {
+			log.WarningLog.Printf("failed to marshal HTTP response envelope: %v", err)
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	w.WriteHeader(status)
-	if err := apiproto.WriteEnvelope(w, env); err != nil && !httpResponseWriteAbandoned(r, err) {
+	if _, err := w.Write(body.Bytes()); err != nil && !httpResponseWriteAbandoned(r, err) {
 		log.WarningLog.Printf("failed to write HTTP response envelope: %v", err)
 	}
 }

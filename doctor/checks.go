@@ -229,7 +229,19 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	default:
 		report.Pass(sectionDaemon, "autostart", "installed")
 	}
-	if h.PIDFilePID > 0 && !h.PIDVerified && h.PingErr != nil {
+	// An unverifiable pid is NEITHER verified nor stale: the file names a
+	// live af daemon whose home binding could not be proven — possibly this
+	// home's own daemon with an unreadable process frame (the normal shape
+	// on macOS), possibly another home's. It gets an advisory rather than
+	// the stale-file row, because suggesting removal over a pid that might
+	// name this home's live daemon would orphan the very handle recovery
+	// needs (#5188).
+	if h.PIDUnverifiable && h.PingErr != nil {
+		report.Warn(sectionDaemon, "daemon.pid",
+			fmt.Sprintf("records pid %d, a live af daemon whose home could not be verified", h.PIDFilePID),
+			"it may be this home's daemon or another's — check `af daemon status` in the intended home before removing the file or signalling the pid", false)
+	}
+	if h.PIDFilePID > 0 && !h.PIDVerified && !h.PIDUnverifiable && h.PingErr != nil {
 		report.Warn(sectionDaemon, "daemon.pid", fmt.Sprintf("records pid %d but no agent-factory daemon is running under it", h.PIDFilePID),
 			"remove the stale daemon.pid after verifying the pid is not an af daemon", true)
 	}

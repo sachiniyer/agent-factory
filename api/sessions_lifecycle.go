@@ -55,6 +55,10 @@ be lost. Archive instead to keep the session restorable.
 		// exit would tell automation a committed kill "failed" and invite a
 		// retry that races the in-flight guard or re-tombstones an already-
 		// UserKilled row (#3252).
+		// Ignore SIGHUP across the daemon call: a kill of the session this CLI
+		// is running inside closes the pane's pty under it, and the kernel
+		// hangup would otherwise kill the caller before the reply (#5182).
+		defer ignoreTeardownHangup()()
 		err = killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
@@ -160,6 +164,8 @@ their worktree. Local archives print the relocated worktree path on success.`,
 			}
 		}
 
+		// --self's reason for existing: same SIGHUP shield as kill (#5182).
+		defer ignoreTeardownHangup()()
 		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {

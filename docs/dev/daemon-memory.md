@@ -114,9 +114,10 @@ CPU cost, not a memory footprint, and it is not evidence of a leak. (This figure
 alone comes from the sandbox daemon's heap profile — see
 [profiling](#profiling-the-daemon) — not from the live daemon.)
 
-One line of it is worth fixing: re-reading, migrating and re-marshalling the
-state file on essentially every access accounts for about 23% of that
-cumulative allocation, tracked in
+One line of it was worth fixing, and is fixed by
+[#5169](https://github.com/sachiniyer/agent-factory/issues/5169): re-reading,
+migrating and re-marshalling the state file on essentially every access
+accounted for about 23% of that cumulative allocation, tracked in
 [#3652](https://github.com/sachiniyer/agent-factory/issues/3652).
 
 ## How memory scales with sessions

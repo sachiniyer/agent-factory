@@ -242,6 +242,78 @@ func TestCollectDaemonStatusUnitScopeFailureStaysUnknown(t *testing.T) {
 	require.Empty(t, info.AutostartActive)
 }
 
+// TestCollectDaemonStatusReadFailureShapeKeepsUnit pins the read-failure shape
+// the real AutostartUnitServesHome produces when the unit file path is present
+// per stat but not readable as a file: a directory at the path (EISDIR), a
+// chmod 0000 file on a box where af is not root, or a broken mount that answers
+// stat but not read. In that shape os.Stat succeeds so h.AutostartUnit is true,
+// while os.ReadFile fails with a non-IsNotExist error, so AutostartUnitServesHome
+// returns (false, false, err) — installed=false on a present file.
+//
+// collectDaemonStatus's scope-unknown fallback must keep AutostartUnit=true on
+// the stat-based h.AutostartUnit, not downgrade it to false on the read-based
+// installed return. Without that, status prints "autostart: no unit for this
+// home" next to "supervision: unknown (cannot tell whether the installed unit
+// serves this home)" — a self-contradiction, and a JSON autostart_unit=false
+// that scripts/lifecycle.sh (lines 484, 653) gates upgrade assertions on.
+//
+// Contrast TestCollectDaemonStatusUnitScopeFailureStaysUnknown, which stubs the
+// parse-failure shape (installed=true) that AutostartUnitServesHome returns only
+// AFTER a successful read; this test stubs the pre-read shape that masks the bug.
+func TestCollectDaemonStatusReadFailureShapeKeepsUnit(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	previousHealth := daemonHealthFn
+	previousScope := autostartUnitServesHomeFn
+	previousSupervision := daemonStatusSupervisionFn
+	t.Cleanup(func() {
+		daemonHealthFn = previousHealth
+		autostartUnitServesHomeFn = previousScope
+		daemonStatusSupervisionFn = previousSupervision
+	})
+	// Stat-based existence is true: the file is present, just unreadable.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{ServingPID: 42, AutostartUnit: true}
+	}
+	// The real read-failure shape, proven by the daemon-package reproduction: a
+	// present file that cannot be read returns (false, false, err) — installed
+	// is false BEFORE the parser ever runs, unlike the post-read parse-failure
+	// shape that returns installed=true.
+	autostartUnitServesHomeFn = func(string) (bool, bool, error) {
+		return false, false, errors.New("failed to read the autostart unit /h/agent-factory-daemon.service: read /h/agent-factory-daemon.service: is a directory")
+	}
+	daemonStatusSupervisionFn = func() daemon.SupervisionInfo {
+		t.Fatal("an unscoped unit must not be attributed through the service manager")
+		return daemon.SupervisionInfo{}
+	}
+
+	info := collectDaemonStatus()
+	require.True(t, info.AutostartUnit,
+		"the unit file is stat-present even though its home scope is unreadable; AutostartUnit must stay true")
+	require.Equal(t, "unknown", info.Supervised,
+		"an unreadable unit cannot be proven to own the responder, so supervision is unknown")
+	require.Contains(t, info.SupervisionDetail, "is a directory",
+		"the read-failure cause must reach the operator as the supervision detail")
+	require.Empty(t, info.AutostartEnabled, "no service-manager state is queried for an unscoped unit")
+	require.Empty(t, info.AutostartActive)
+
+	// The human report must not contradict itself: it must not claim "no unit
+	// for this home" while the supervision line says it cannot tell whether the
+	// INSTALLED unit serves this home.
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	printDaemonStatusHuman(cmd, info)
+	got := out.String()
+	require.Contains(t, got, "autostart:      installed",
+		"a stat-present unit must be reported as installed, not absent")
+	require.NotContains(t, got, "no unit for this home",
+		"the unit file exists by stat; status must not claim it is absent")
+	require.Contains(t, got, "supervision:    unknown")
+	require.Contains(t, got, "is a directory")
+}
+
 func TestPrintDaemonStatusHumanNamesPIDMismatchAndStaleConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
@@ -411,4 +483,29 @@ func TestCollectDaemonStatusAuthenticatedNetworkBindIsUnwarned(t *testing.T) {
 		[]byte("listen_addr = '0.0.0.0:8443'\nrequire_token = true\n"), 0600))
 
 	require.Empty(t, collectDaemonStatus().ExposureWarning)
+}
+
+// TestPrintDaemonStatusHumanMarksUnverifiablePID pins the third pid-file
+// verdict on the status surface: a pid naming a live af daemon whose home
+// could not be bound is inconclusive — not verified (a kill hint could name
+// another home's daemon), and not "unverified" stale (the file may name this
+// home's own live daemon on platforms that cannot read a peer's frame).
+func TestPrintDaemonStatusHumanMarksUnverifiablePID(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	printDaemonStatusHuman(cmd, daemonStatusInfo{
+		Running:           false,
+		ControlSocket:     "/h/daemon.sock",
+		ControlSocketFile: false,
+		PID:               4242,
+		PIDUnverifiable:   true,
+	})
+
+	got := out.String()
+	require.Contains(t, got, "pid:            4242 (live af daemon, home unproven)")
+	require.NotContains(t, got, "(unverified)",
+		"a live af daemon with an unproven home is inconclusive, not stale-unverified")
+	require.NotContains(t, got, "(verified)")
 }
