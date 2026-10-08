@@ -104,6 +104,25 @@ func describeProc(p proctree.Process) string {
 	return desc
 }
 
+// sameHome reports whether two agent-factory home paths identify the same
+// install. normalizeHome canonicalizes via filepath.EvalSymlinks, but on a
+// case-insensitive macOS volume EvalSymlinks preserves the spelling of ordinary
+// non-symlink components, so a session stamped with ".Agent-Factory" and a
+// doctor run using ".agent-factory" refer to the same directory yet compare
+// unequal as strings — classifying a genuine same-home escapee as foreign. When
+// both paths stat successfully, compare by filesystem identity (os.SameFile),
+// which sees through case and spelling differences on case-insensitive volumes;
+// fall back to the normalized string comparison when either path cannot be
+// statted (e.g. the foreign home no longer exists).
+func sameHome(a, b string) bool {
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	if aerr == nil && berr == nil {
+		return os.SameFile(ai, bi)
+	}
+	return normalizeHome(a) == normalizeHome(b)
+}
+
 func formatAge(seconds float64) string {
 	d := time.Duration(seconds) * time.Second
 	switch {
@@ -685,8 +704,14 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 						// than filepath.Clean: Clean is lexical and leaves a symlinked
 						// AGENT_FACTORY_HOME — or macOS /var vs /private/var — comparing
 						// unequal to the same home, which would report a genuine
-						// escapee as foreign.
-						if normalizeHome(home) != normalizeHome(ctx.opts.ConfigDir) {
+						// escapee as foreign. Compare by filesystem identity first
+						// (os.SameFile via sameHome): on a case-insensitive macOS
+						// volume EvalSymlinks preserves the spelling of non-symlink
+						// components, so ".Agent-Factory" and ".agent-factory" are the
+						// same directory but compare unequal as normalized strings;
+						// os.SameFile sees through the case difference and keeps a
+						// genuine same-home escapee off the foreign-home report.
+						if !sameHome(home, ctx.opts.ConfigDir) {
 							// A distinct check key keeps this out of the escaped-process
 							// collapse, whose row ("N processes escaped live session
 							// pane trees") would re-attribute a foreign process to this

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -480,6 +481,64 @@ func TestEscapedProcessOwnHomeStillReportedAsEscape(t *testing.T) {
 	}
 	require.True(t, alive(ownEscapee), "genuine escapee must survive --fix (report-only)")
 	require.True(t, alive(unmarkedEscapee), "unmarked escapee must survive --fix (report-only)")
+}
+
+// TestEscapedProcessSameHomeCaseInsensitiveNotForeign pins the os.SameFile arm
+// of the foreign-home guard. normalizeHome canonicalizes through
+// filepath.EvalSymlinks, but on a case-insensitive macOS volume EvalSymlinks
+// preserves the spelling of non-symlink components, so a session stamped with
+// ".Agent-Factory" and a doctor run using ".agent-factory" refer to the SAME
+// directory yet compare unequal as normalized strings — which would route a
+// genuine same-home escapee into the foreign-home report. sameHome compares by
+// filesystem identity when both paths stat, so the case difference is seen
+// through and the escapee stays classified as ours (escaped-process), not
+// foreign. This is only observable on a case-insensitive volume, so the test
+// skips itself anywhere the two spellings do not resolve to the same inode.
+func TestEscapedProcessSameHomeCaseInsensitiveNotForeign(t *testing.T) {
+	testguard.IsolateTmux(t)
+
+	const name = "af_doctor-case-home-escape"
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "sleep 300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
+
+	// Our home is the short temp dir doctor runs under; the marker spells it
+	// with the basename uppercased. On a case-insensitive volume that is the
+	// SAME directory; on a case-sensitive one it is a non-existent path.
+	ourHome := testguard.SocketTempDir(t)
+	markerHome := filepath.Join(filepath.Dir(ourHome), strings.ToUpper(filepath.Base(ourHome)))
+
+	// Skip unless the two spellings actually resolve to the same inode: this
+	// test only means something on a case-insensitive volume, and skipping
+	// keeps it inert on Linux/case-sensitive macOS CI.
+	ai, aerr := os.Stat(ourHome)
+	bi, berr := os.Stat(markerHome)
+	if aerr != nil || berr != nil || !os.SameFile(ai, bi) {
+		t.Skipf("case-insensitive home identity not observable (GOOS=%s, same-inode=%v)",
+			runtime.GOOS, aerr == nil && berr == nil && os.SameFile(ai, bi))
+	}
+
+	escapee := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: name,
+		tmux.EnvMarkerHome:    markerHome,
+	})
+
+	report, err := Run(testOptionsWithHome(t, ourHome, true, escapee.PID))
+	require.NoError(t, err)
+
+	// The escapee is genuinely outside the live pane tree, but its home is OURS
+	// (same inode, different spelling), so it must stay on the escaped-process
+	// report and NOT be re-attributed to another install.
+	require.Empty(t, findByCheck(report, "foreign-home-process"),
+		"a same-home escapee spelled with different case must not be attributed to another install")
+	require.Empty(t, findByCheck(report, "foreign-home-unresolved"),
+		"a same-home escapee spelled with different case must not be treated as unproven")
+	escapes := findByCheck(report, "escaped-process")
+	require.Len(t, escapes, 1,
+		"a same-home escapee must still be reported as escaping our live session: %v", escapes)
+	require.Contains(t, escapes[0].Detail, "escaped the pane tree",
+		"a same-home escapee is still a genuine escape: %s", escapes[0].Detail)
+	require.True(t, alive(escapee), "the escaped arm must not kill, even under --fix")
 }
 
 // findBlindnessRows returns the process-leak-inspection rows that announce a
