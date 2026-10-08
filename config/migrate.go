@@ -52,6 +52,7 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 		return nil, err
 	}
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+	configPath := filepath.Join(configDir, ConfigFileName)
 
 	// Whether the precondition below is about to CONVERT a legacy config.json
 	// has to be observed before it runs. Reporting "nothing to migrate" after
@@ -59,7 +60,27 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	// original aside would be false in the way that matters most — it describes
 	// a run that changed nothing when the run changed which file af reads
 	// (#3624 review).
-	converting := !fileExists(tomlPath) && fileExists(filepath.Join(configDir, ConfigFileName))
+	converting := !fileExists(tomlPath) && fileExists(configPath)
+
+	// A legacy config.json about to be converted needs its OWN ambiguity check
+	// before the LoadConfig precondition runs it. The frozen JSON reader
+	// (parseConfigJSON) unmarshals only the flat JSON tags and never reads
+	// grouped alias tables (network/ssh/docker/sandbox — TOML-only since
+	// #3354), so a config.json that writes one setting in BOTH spellings with
+	// DIFFERENT values has its grouped value dropped and the flat value written
+	// into BOTH spellings of the generated config.toml. By the time this
+	// migration's own ambiguity guard runs on that TOML the two spellings
+	// already agree, and the guard reports Redundant: true about a source that
+	// did not — contract clause 3 ("refuses rather than choose") refuses on
+	// TOML, but on the JSON path the conversion has already made the tie-break
+	// permanent. Checking the raw JSON here names the key and leaves config.json
+	// in place, the same outcome the TOML path gives the same content (#3653
+	// review).
+	if converting {
+		if err := refuseAmbiguousLegacyJSON(configPath, prettyHomePath(configPath)); err != nil {
+			return nil, err
+		}
+	}
 
 	// Precondition, exactly as `af config set` uses it: convert a legacy
 	// config.json or materialize first-run defaults so config.toml exists when
@@ -487,6 +508,66 @@ func ambiguousSpellingError(prettyPath string, alias configKeyAlias, cfg *Config
 		"af currently uses the grouped value (%s), and no migration should make that tie-break permanent for you; "+
 		"delete whichever line is wrong, then run `af config migrate` again. Nothing was rewritten",
 		prettyPath, alias.legacy, alias.canonical, echoMigrationValue(effective))
+}
+
+// refuseAmbiguousLegacyJSON is the JSON-path half of ambiguousSpellingError. It
+// runs before the LoadConfig precondition converts a legacy config.json, while
+// the raw file still carries both spellings with the values the user wrote.
+//
+// The check is about PRESENCE and EQUALITY in the raw shape only — it does not
+// parse values into a Config, because the frozen JSON reader does not read
+// grouped alias tables and so cannot report the grouped value a migration would
+// have to choose between. A file that fails to read here is left for LoadConfig
+// to refuse with its own, parse-level error; a missing or unreadable file is
+// LoadConfig's call to make, not a weaker one from here.
+func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+	metadata, err := metadataForSource(data, prettyPath, FormatJSON)
+	if err != nil {
+		return nil
+	}
+	for _, alias := range configKeyAliases {
+		flat, flatPresent := metadata.shape[alias.legacy]
+		grouped, groupedPresent := aliasGroupedValue(metadata.shape, alias)
+		if !flatPresent || !groupedPresent {
+			continue
+		}
+		if reflect.DeepEqual(flat, grouped) {
+			continue
+		}
+		return ambiguousLegacyJSONSpellingError(prettyPath, alias, flat, grouped)
+	}
+	return nil
+}
+
+// ambiguousLegacyJSONSpellingError is the legacy-config.json form of the
+// both-spellings-different-values refusal. af's JSON reader ignores the grouped
+// spelling, so af currently uses the flat value — the opposite of the TOML
+// path's "grouped value wins" — and the conversion to TOML would silently
+// overwrite the grouped value with the flat one. Naming both values lets the
+// reader see the divergence the conversion would have hidden.
+func ambiguousLegacyJSONSpellingError(prettyPath string, alias configKeyAlias, flat, grouped any) error {
+	return fmt.Errorf("refusing to migrate %s: the legacy config.json writes %q and the grouped %q with different values (%s vs %s) — "+
+		"af's JSON reader ignores the grouped spelling, so converting the file to TOML would silently overwrite it with the flat value; "+
+		"delete whichever line is wrong, then run `af config migrate` again. Nothing was rewritten",
+		prettyPath, alias.legacy, alias.canonical, echoLegacyJSONValue(flat), echoLegacyJSONValue(grouped))
+}
+
+// echoLegacyJSONValue renders a shapeless-decoded JSON value for an error
+// message. Empty strings are quoted so a blank value is not read as "absent";
+// every other scalar and list uses its default %v rendering, which is plain
+// enough for the string/bool/string-list kinds the aliases carry.
+func echoLegacyJSONValue(v any) string {
+	if s, ok := v.(string); ok {
+		if s == "" {
+			return `""`
+		}
+		return s
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // unremovableKeyError reports a key the decoder found but the surgical edit
