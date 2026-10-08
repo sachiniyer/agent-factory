@@ -139,15 +139,35 @@ type InstanceData struct {
 	// they finish); defaulting true would let a fleet of completed sessions load as
 	// active and wedge a capped task permanently.
 	TaskRunActive bool `json:"task_run_active,omitempty"`
-	// TaskRunIdleEdgeHeld records that the run's idle edge was held open — a
-	// handoff mission was still owed (#4429), or the prompt attempt had no
-	// in-turn-chrome observation or sustained quiet to prove the agent took the
-	// turn (#5219) — so the next idle observation after the blocker clears ends
-	// the run.
+	// TaskRunIdleEdgeHeld records that the run's idle edge was held open because
+	// a handoff mission was still owed (#4429), so the next idle observation
+	// after the mission is retired ends the run.
 	// Persisted for the same reason as TaskRunActive: the held edge is already
 	// spent and nothing re-derives it. omitempty + additive: an older record
 	// decodes to false, which holds nothing.
+	//
+	// This key keeps ONLY its original meaning (#5221 review): a daemon rolled
+	// back to a release that knows just the mission hold reads it exactly as it
+	// wrote it. The turn-gate hold lives in TaskRunTurnGateHeld so the older
+	// binary drops — rather than releases — a marker it cannot evaluate.
 	TaskRunIdleEdgeHeld bool `json:"task_run_idle_edge_held,omitempty"`
+	// TaskRunTurnGateHeld records that the run's idle edge was held open because
+	// the prompt had been attempted without turn evidence (#5219). Stored under
+	// its own key for rollback safety: a previous release would misread a
+	// turn-gate hold written into task_run_idle_edge_held as a resolved mission
+	// hold and end the run on the next Ready → Ready tick. An old binary drops
+	// this field and keeps the run open instead — the safe direction.
+	TaskRunTurnGateHeld bool `json:"task_run_turn_gate_held,omitempty"`
+	// TaskRunPromptAttemptAt/TaskRunPromptDeliveryStatus are the run's OWN
+	// prompt boundary (#5221 review), scoped apart from LastPromptAttemptAt so
+	// an interactive send cannot re-arm a delivery window the agent already
+	// satisfied. The boundary moves only while the window is unsatisfied; a
+	// PromptNotDelivered status keeps the gate closed until a redelivery.
+	// Persisted while the run is in flight for the same reason as
+	// TaskRunTurnObservedAt: a restart must not reopen — or wrongly satisfy — a
+	// window the daemon was still holding.
+	TaskRunPromptAttemptAt      time.Time            `json:"task_run_prompt_attempt_at,omitzero"`
+	TaskRunPromptDeliveryStatus PromptDeliveryStatus `json:"task_run_prompt_delivery_status,omitempty"`
 	// TaskRunTurnObservedAt is when the agent's own in-turn chrome was observed
 	// for the run in flight (#5219) — the one pane signal a still-booting agent
 	// cannot produce: its elapsed-timer status row had to tick, not just render.

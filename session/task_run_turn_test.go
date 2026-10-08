@@ -64,8 +64,10 @@ func TestTaskRunIdleEdgeHeldDuringDeliveryWindow(t *testing.T) {
 
 	require.True(t, inst.TaskRunActive(),
 		"an idle edge inside the prompt-delivery window must not end the run — the agent has not demonstrably taken the turn")
-	require.True(t, inst.taskRunIdleEdgeHeld,
+	require.True(t, inst.taskRunTurnGateHeld,
 		"the edge is HELD, not silently consumed — the next post-boundary idle observation retires it")
+	require.False(t, inst.taskRunIdleEdgeHeld,
+		"the mission-hold marker stays clear — task_run_idle_edge_held keeps its pre-#5219 meaning for rollback")
 	require.Equal(t, LiveReady, inst.GetLiveness(),
 		"the observation still applies on the liveness axis — only the run-end effect is withheld")
 }
@@ -91,7 +93,7 @@ func TestTaskRunBootChurnDoesNotReleaseTheHold(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
 		"echo/ACP-init churn seconds after the send is not the agent taking the turn — the edge must stay held")
-	require.True(t, inst.taskRunIdleEdgeHeld)
+	require.True(t, inst.taskRunTurnGateHeld)
 
 	// And it STAYS held on quiet Ready→Ready ticks while the boot churn is
 	// still fresh — the held flag does not consume itself on the next idle.
@@ -194,11 +196,11 @@ func TestTaskRunHeldEdgeReleasedByReadyToReadyTurn(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"the held edge completes once the turn boundary is proven")
-	require.False(t, inst.taskRunIdleEdgeHeld, "the consumed hold retires with the run")
+	require.False(t, inst.taskRunTurnGateHeld, "the consumed hold retires with the run")
 }
 
 // Boot output and turn chrome that PREDATE the prompt are not evidence for it
-// — the gate orders both strictly after the attempt.
+// — the gate orders both strictly after the task-prompt boundary.
 func TestTaskRunIdleEdgeIgnoresPreAttemptEvidence(t *testing.T) {
 	inst := taskRunSession(t)
 
@@ -206,14 +208,114 @@ func TestTaskRunIdleEdgeIgnoresPreAttemptEvidence(t *testing.T) {
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(boot, epoch),
 		"precondition: boot output recorded before the prompt send")
-	require.True(t, inst.RecordTaskRunTurn(boot),
-		"precondition: a prior turn's chrome recorded before the prompt send")
 
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, boot.Add(time.Second)))
+	attemptedAt := boot.Add(time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.True(t, inst.RecordTaskRunTurn(boot),
+		"a stale chrome stamp is stored but ordered before the boundary")
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 
 	require.True(t, inst.TaskRunActive(),
 		"evidence that predates the attempt is the previous turn, not this prompt's")
+}
+
+// The gate binds to the run's OWN prompt boundary, not the session's latest
+// send (#5221 review P1): once the turn is taken, an interactive send — even
+// one affirmatively refused by the pane — must not re-arm the delivery window
+// and wedge the run open waiting for churn a dead send cannot produce.
+func TestTaskRunManualSendAfterTurnDoesNotRearm(t *testing.T) {
+	for _, status := range []PromptDeliveryStatus{PromptSentUnverified, PromptNotDelivered} {
+		inst := taskRunSession(t)
+
+		attemptedAt := time.Now().Add(-time.Minute)
+		require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+		require.True(t, inst.RecordTaskRunTurn(attemptedAt.Add(4*time.Second)))
+
+		// A manual af sessions send while the run is still active. The
+		// session-level evidence updates (the row's idle reason tracks it),
+		// but the task-prompt boundary is frozen.
+		manualAt := attemptedAt.Add(30 * time.Second)
+		require.True(t, inst.RecordPromptAttempt(status, manualAt))
+
+		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+		require.False(t, inst.TaskRunActive(),
+			"a manual send (status %s) must not reopen a window the turn evidence already closed", status)
+	}
+}
+
+// While the window is still UNSATISFIED a later send does move the task
+// boundary: it is the redelivery path — the only way out once a send proved
+// the pane would not take the prompt.
+func TestTaskRunResendWhileUnsatisfiedReArmsBoundary(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-2 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	// Churn and quiet that would satisfy the ORIGINAL window — then a resend
+	// moves the boundary past it.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(30*time.Second), epoch))
+	t1 := t0.Add(60 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the resend's window supersedes churn that predates it")
+
+	// The redelivery's own turn evidence releases it.
+	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+}
+
+// A send that affirmatively failed delivery can never be satisfied by pane
+// activity: the prompt provably never landed, so no later churn is "the turn"
+// (#5221 review P1). The run stays open and flagged prompt-not-delivered
+// until a redelivery re-arms the boundary.
+func TestTaskRunPromptNotDeliveredNeverReleasedByChurn(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-2 * taskRunCompletionQuietGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0))
+
+	// Churn far past the quiet grace — spinner output, startup noise, anything
+	// — must not stand in for a turn on a prompt that never arrived.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(taskRunCompletionQuietGrace), epoch))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"proven non-delivery is unsatisfiable — the run stays open rather than completing on noise")
+	require.True(t, inst.taskRunTurnGateHeld)
+
+	reason, _ := inst.IdleReasonSnapshot()
+	require.Equal(t, IdleReasonPromptNotDelivered, reason,
+		"the row reads prompt-not-delivered — flagged, not silently wedged")
+
+	// The redelivery outcome: a later send re-arms the boundary, and ITS turn
+	// evidence completes the run.
+	t1 := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	require.True(t, inst.RecordTaskRunTurn(t1.Add(2*time.Second)))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive())
+}
+
+// The turn record latches within its window (#5221 review P2): once an
+// observation already satisfies the boundary, further ticking rows are the
+// same turn continuing — accepting them would checkpoint the whole instances
+// file on every poll. A re-armed boundary (redelivery while unsatisfied) takes
+// its own first observation.
+func TestTaskRunTurnRecordLatchesWithinWindow(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordTaskRunTurn(t0.Add(4*time.Second)))
+	require.False(t, inst.RecordTaskRunTurn(t0.Add(8*time.Second)),
+		"the boundary is already durable — a still-ticking row is not new evidence")
+	require.False(t, inst.RecordTaskRunTurn(t0.Add(12*time.Second)))
 }
 
 // A run whose prompt was never attempted keeps the old behavior — the
@@ -249,23 +351,36 @@ func TestTaskRunTurnEvidenceSurvivesRoundTrip(t *testing.T) {
 }
 
 // The held flag is durable: a daemon restart inside the delivery window must
-// not hand the reloaded row a spendable edge.
+// not hand the reloaded row a spendable edge. It persists under its OWN key —
+// task_run_turn_gate_held, not task_run_idle_edge_held — so a rollback to a
+// release that knows only the mission hold cannot misread it as resolved and
+// end the run on a Ready → Ready tick (#5221 review).
 func TestTaskRunHeldEdgeSurvivesRoundTrip(t *testing.T) {
 	inst := taskRunSession(t)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
-	require.True(t, inst.taskRunIdleEdgeHeld, "precondition: the edge is held")
+	require.True(t, inst.taskRunTurnGateHeld, "precondition: the edge is held")
 
 	reason, _ := inst.IdleReasonSnapshot()
 	require.Equal(t, IdleReasonDeliveryUnconfirmed, reason,
 		"a run that never produced turn evidence is reported as delivery-unknown, not as a completion")
 
 	data := inst.ToInstanceData()
+	require.True(t, data.TaskRunTurnGateHeld, "the turn-gate hold persists under its own key")
+	require.False(t, data.TaskRunIdleEdgeHeld,
+		"the mission-hold key stays clear: an older binary must not read this as its resolved-mission release")
+	require.False(t, data.TaskRunPromptAttemptAt.IsZero(), "the task prompt boundary persists")
+
 	data.BackendType = "docker"
 	reloaded, err := FromInstanceData(data.ForStorage())
 	require.NoError(t, err)
 	require.True(t, reloaded.TaskRunActive(), "the run is still open after the restart")
-	require.True(t, reloaded.taskRunIdleEdgeHeld, "the held edge survives the restart")
+	require.True(t, reloaded.taskRunTurnGateHeld, "the held edge survives the restart")
+
+	// And it still holds on the next quiet tick — the boundary evidence
+	// survived with it, so the gate is still armed.
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, reloaded.TaskRunActive())
 }
 
 // RecordTaskRunTurn is scoped to a live run: an interactive session can show

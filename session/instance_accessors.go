@@ -330,6 +330,7 @@ func (i *Instance) ClearPendingHandoffMission(mission string) bool {
 		i.pendingHandoffMission = ""
 		i.handoffDeliveryStatus = ""
 		i.taskRunIdleEdgeHeld = false
+		i.taskRunTurnGateHeld = false
 		i.touchLocked()
 	}
 	return true

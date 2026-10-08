@@ -627,6 +627,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		case runEnds:
 			i.taskRunActive = false
 			i.taskRunIdleEdgeHeld = false
+			i.taskRunTurnGateHeld = false
 			i.touchLocked()
 			// The completion transition IS the capture point for the adoption
 			// baseline (#3865): taken here, inside the same i.mu section that ends
@@ -695,25 +696,27 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 						i.touchLocked()
 					}
 				case i.taskRunAwaitingTurnLocked():
-					if !i.taskRunIdleEdgeHeld {
-						i.taskRunIdleEdgeHeld = true
+					if !i.taskRunTurnGateHeld {
+						i.taskRunTurnGateHeld = true
 						i.touchLocked()
 					}
-				case from.liveness != LiveReady || i.taskRunIdleEdgeHeld:
+				case from.liveness != LiveReady || i.taskRunIdleEdgeHeld || i.taskRunTurnGateHeld:
 					// The gate just opened. If no in-turn chrome was observed,
 					// the quiet-fallback arm — churn plus sustained silence — is
 					// what let this edge end the run: the weaker signal, so name
 					// it in the log with the agent and the attempt's age (#5219).
-					if !i.lastPromptAttemptAt.IsZero() &&
-						!i.taskRunTurnObservedAt.After(i.lastPromptAttemptAt) &&
+					if !i.taskRunPromptAttemptAt.IsZero() &&
+						i.taskRunPromptDeliveryStatus != PromptNotDelivered &&
+						!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) &&
 						i.taskRunQuietReleaseLocked() {
 						log.InfoLog.Printf(
 							"task run for session %q completed on the quiet fallback (no in-turn chrome observed): agent=%s elapsed_since_attempt=%s",
 							i.Title, i.currentAgentNameLocked(),
-							time.Since(i.lastPromptAttemptAt).Round(time.Second))
+							time.Since(i.taskRunPromptAttemptAt).Round(time.Second))
 					}
 					i.taskRunActive = false
 					i.taskRunIdleEdgeHeld = false
+					i.taskRunTurnGateHeld = false
 					i.touchLocked()
 					i.captureAdoptionBaselineLocked()
 				}

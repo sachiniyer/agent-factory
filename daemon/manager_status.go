@@ -255,6 +255,15 @@ func (m *Manager) sweepPausedPollState() {
 	}
 }
 
+// taskRunTurnWatchEntry pairs a run's chrome watcher with the resolved agent
+// it was built for: a mid-run handoff to a different agent must rebuild the
+// watcher instead of reading the new pane through the predecessor's
+// signatures (#5221 review).
+type taskRunTurnWatchEntry struct {
+	agent string
+	watch *task.TurnWatch
+}
+
 // noteTaskRunTurnEvidence feeds this tick's pane capture through the run's
 // chrome watcher and, when the agent's own in-turn chrome is demonstrated,
 // stamps the run's turn boundary (#5219). Boot output, the prompt's own echo,
@@ -270,15 +279,21 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	if !instance.TaskRunActive() || content == "" {
 		return false
 	}
+	// ResolvedAgent, not Program: the pane runs what the last handoff or
+	// program override installed, and only that agent's chrome proves a turn.
+	// Read under i.mu BEFORE pausedMu — the sweep takes the two separately and
+	// never nests them.
+	agent := instance.ResolvedAgent()
 	m.pausedMu.Lock()
-	w, ok := m.taskRunTurnWatches[key]
-	if !ok {
-		// ResolvedAgent, not Program: the pane runs what the last handoff or
-		// program override installed, and only that agent's chrome proves a turn.
-		w = task.NewTurnWatch(instance.ResolvedAgent())
-		m.taskRunTurnWatches[key] = w
+	entry, ok := m.taskRunTurnWatches[key]
+	if !ok || entry.agent != agent {
+		// A mid-run handoff swaps the signatures the pane can produce, so the
+		// watcher must be rebuilt rather than read a new agent's pane through
+		// the predecessor's rules (#5221 review).
+		entry = &taskRunTurnWatchEntry{agent: agent, watch: task.NewTurnWatch(agent)}
+		m.taskRunTurnWatches[key] = entry
 	}
-	turning := w.Observe(content)
+	turning := entry.watch.Observe(content)
 	m.pausedMu.Unlock()
 	if !turning {
 		return false

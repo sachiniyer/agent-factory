@@ -102,18 +102,28 @@ type Instance struct {
 	// so a session has exactly one run. Work a user starts in that session
 	// afterwards is theirs, not the task's, and must not consume the task's cap.
 	taskRunActive bool
-	// taskRunIdleEdgeHeld records that the agent's idle edge arrived while the
-	// run could not yet be proved finished — a handoff mission was still owed
-	// (#4429), or the run's prompt was attempted without any post-delivery pane
-	// churn to show the agent took the turn (#5219) — so the run was kept open
-	// rather than ended. The edge is spent once it is held — the pane stays
-	// Ready, and every later idle poll is Ready → Ready — so without this the
-	// run would never end after the blocker cleared without a fresh edge (Mark
-	// delivered, or churn folded in while the row stays Ready). With it, the
-	// first idle observation after the blocker clears ends the run, as the held
-	// edge would have. Meaningful only while taskRunActive; persisted with it,
-	// because the edge is not re-derivable.
+	// taskRunIdleEdgeHeld records that the agent's idle edge arrived while a
+	// handoff mission was still owed (#4429), so the run was kept open rather
+	// than ended. The edge is spent once it is held — the pane stays Ready, and
+	// every later idle poll is Ready → Ready — so without this the run would
+	// never end after the blocker cleared without a fresh edge (Mark delivered,
+	// or churn folded in while the row stays Ready). With it, the first idle
+	// observation after the blocker clears ends the run, as the held edge would
+	// have. Meaningful only while taskRunActive; persisted with it, because the
+	// edge is not re-derivable.
+	//
+	// This field keeps its ORIGINAL meaning deliberately: a daemon rolled back
+	// to a release that knows only the mission hold reads this bit exactly as
+	// it wrote it. The turn-gate hold (#5219) persists separately in
+	// taskRunTurnGateHeld so the older binary cannot mistake it for a resolved
+	// mission hold and end a run whose agent never took the turn (#5221 review).
 	taskRunIdleEdgeHeld bool
+	// taskRunTurnGateHeld is the #5219 twin of taskRunIdleEdgeHeld: an idle edge
+	// arrived while the run's prompt had been attempted without turn evidence,
+	// so the run stayed open. Kept as a separate persisted field so a rollback
+	// to the previous release — which knows only the mission hold — drops the
+	// marker instead of releasing it as a retired mission edge.
+	taskRunTurnGateHeld bool
 	// adoption counts the deliveries that make a finished task session the USER's
 	// and fences them against its declared teardown (#3865). Guarded by i.mu; see
 	// adoption_fence.go, which owns the whole contract.
@@ -173,11 +183,21 @@ type Instance struct {
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus
 	lastPaneChurnAt          time.Time
+	// taskRunPromptAttemptAt/taskRunPromptDeliveryStatus are the task run's OWN
+	// prompt boundary (#5219), scoped apart from lastPromptAttemptAt: a manual
+	// send while the run is active must not re-arm a delivery window the agent
+	// already satisfied. The boundary updates on the first send after the run
+	// begins and on any later send only while the window stays unsatisfied —
+	// a redelivery is the one way out of a proven-undelivered window. Once the
+	// turn is taken the boundary freezes; the run's remaining life cannot be
+	// reshaped by prompts the session receives afterwards.
+	taskRunPromptAttemptAt      time.Time
+	taskRunPromptDeliveryStatus PromptDeliveryStatus
 	// taskRunTurnObservedAt records when the agent's own in-turn chrome was
 	// observed for the run in flight — the positive "the prompt's turn began"
 	// boundary that boot output and the send's own echo cannot produce (#5219).
-	// Ordering against lastPromptAttemptAt does the scoping: a resend starts a
-	// new window the stale record cannot release.
+	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
+	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
 	loadRuntimeReplaced   bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation

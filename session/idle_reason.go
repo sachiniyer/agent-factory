@@ -109,6 +109,8 @@ func (d InstanceData) WithoutIdleEvidence() InstanceData {
 	d.LastPromptAttemptAt = time.Time{}
 	d.LastPromptDeliveryStatus = ""
 	d.LastPaneChurnAt = time.Time{}
+	d.TaskRunPromptAttemptAt = time.Time{}
+	d.TaskRunPromptDeliveryStatus = ""
 	d.TaskRunTurnObservedAt = time.Time{}
 	return d
 }
@@ -162,6 +164,19 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
+	// The task run's completion gate binds to the run's own prompt boundary,
+	// not the session's latest send (#5221 review): a manual prompt after the
+	// agent already took the turn must not re-arm a window that was satisfied —
+	// a failed poke would otherwise hold the run open forever waiting for churn
+	// the dead send cannot produce. Sends DO still move the boundary while the
+	// window is unsatisfied: a redelivery is the one way out of a window whose
+	// prompt was affirmatively not delivered.
+	if i.taskRunActive &&
+		(i.taskRunPromptAttemptAt.IsZero() ||
+			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
+		i.taskRunPromptAttemptAt = attemptedAt
+		i.taskRunPromptDeliveryStatus = status
+	}
 	i.touchLocked()
 	i.stateEpoch++
 	return true
@@ -216,7 +231,21 @@ func (i *Instance) RecordTaskRunTurn(observedAt time.Time) bool {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if !i.taskRunActive || !observedAt.After(i.taskRunTurnObservedAt) {
+	return i.recordTaskRunTurnLocked(observedAt)
+}
+
+// recordTaskRunTurnLocked latches the FIRST post-boundary chrome observation:
+// once the stored stamp already satisfies the window, further ticking rows are
+// the same turn continuing, not new evidence — accepting them would checkpoint
+// the whole instances file on every poll while the agent stays in turn (#5221
+// review). A re-armed boundary (a redelivery while unsatisfied) sits after the
+// latched stamp, so a new window still takes its first observation.
+//
+// Caller holds i.mu.
+func (i *Instance) recordTaskRunTurnLocked(observedAt time.Time) bool {
+	if !i.taskRunActive || i.taskRunPromptAttemptAt.IsZero() ||
+		!observedAt.After(i.taskRunTurnObservedAt) ||
+		i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) {
 		return false
 	}
 	i.taskRunTurnObservedAt = observedAt
@@ -233,29 +262,34 @@ func (i *Instance) RecordTaskRunTurnAtEpoch(observedAt time.Time, observedEpoch 
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if !i.taskRunActive || i.stateEpoch != observedEpoch || !observedAt.After(i.taskRunTurnObservedAt) {
+	if i.stateEpoch != observedEpoch {
 		return false
 	}
-	i.taskRunTurnObservedAt = observedAt
-	i.touchLocked()
-	return true
+	return i.recordTaskRunTurnLocked(observedAt)
 }
 
-// taskRunAwaitingTurnLocked reports whether the session's prompt has been
-// attempted but the agent has not demonstrably taken the turn (#5219). Mere
-// post-attempt churn is not that boundary — a still-booting pane produces it
-// on its own. What releases the gate is the agent's own in-turn chrome
-// observed after the send, or a post-attempt burst followed by silence longer
-// than the completion grace. An attempt timestamp alone arms the gate however
-// the send went: a run that can show no turn is not a completed run, only an
-// idle pane.
+// taskRunAwaitingTurnLocked reports whether the run's prompt has been
+// attempted but the agent has not demonstrably taken the turn (#5219). The
+// boundary is the run's OWN prompt evidence — taskRunPromptAttemptAt — not
+// the session's latest send, so an interactive prompt cannot re-arm a window
+// the agent already satisfied (#5221 review). Mere post-attempt churn is not
+// the release either — a still-booting pane produces it on its own. What
+// releases the gate is the agent's own in-turn chrome observed after the
+// send, or a post-attempt burst followed by silence longer than the
+// completion grace. A send that affirmatively failed delivery arms an
+// unsatisfiable window: churn after it cannot be a turn on a prompt that
+// never landed, so the run stays open and flagged prompt-not-delivered until
+// a redelivery re-arms the boundary.
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunAwaitingTurnLocked() bool {
-	if i.lastPromptAttemptAt.IsZero() {
+	if i.taskRunPromptAttemptAt.IsZero() {
 		return false
 	}
-	if i.taskRunTurnObservedAt.After(i.lastPromptAttemptAt) {
+	if i.taskRunPromptDeliveryStatus == PromptNotDelivered {
+		return true
+	}
+	if i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt) {
 		return false
 	}
 	return !i.taskRunQuietReleaseLocked()
@@ -270,7 +304,7 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunQuietReleaseLocked() bool {
-	return i.lastPaneChurnAt.After(i.lastPromptAttemptAt) &&
+	return i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt) &&
 		time.Since(i.lastPaneChurnAt) >= taskRunCompletionQuietGrace
 }
 
@@ -280,10 +314,13 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	changed := !i.lastPromptAttemptAt.IsZero() || i.lastPromptDeliveryStatus != "" ||
-		!i.lastPaneChurnAt.IsZero() || !i.taskRunTurnObservedAt.IsZero()
+		!i.lastPaneChurnAt.IsZero() || !i.taskRunPromptAttemptAt.IsZero() ||
+		i.taskRunPromptDeliveryStatus != "" || !i.taskRunTurnObservedAt.IsZero()
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
 	i.lastPaneChurnAt = time.Time{}
+	i.taskRunPromptAttemptAt = time.Time{}
+	i.taskRunPromptDeliveryStatus = ""
 	i.taskRunTurnObservedAt = time.Time{}
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
 	// serialization domain instead of making replacement delivery wait for it;
@@ -322,20 +359,44 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 
 // ReconcileIdleEvidence mirrors the daemon's evidence onto a client row model.
 // It applies both directions because runtime replacement can clear or replace
-// the evidence, and the daemon snapshot is authoritative for all four fields.
-func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDeliveryStatus, churnAt, turnAt time.Time) bool {
+// the evidence, and the daemon snapshot is authoritative for all six fields.
+func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDeliveryStatus, churnAt,
+	taskAttemptAt time.Time, taskStatus PromptDeliveryStatus, turnAt time.Time) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.lastPromptAttemptAt.Equal(attemptedAt) &&
 		i.lastPromptDeliveryStatus == status &&
 		i.lastPaneChurnAt.Equal(churnAt) &&
+		i.taskRunPromptAttemptAt.Equal(taskAttemptAt) &&
+		i.taskRunPromptDeliveryStatus == taskStatus &&
 		i.taskRunTurnObservedAt.Equal(turnAt) {
 		return false
 	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
 	i.lastPaneChurnAt = churnAt
+	i.taskRunPromptAttemptAt = taskAttemptAt
+	i.taskRunPromptDeliveryStatus = taskStatus
 	i.taskRunTurnObservedAt = turnAt
+	i.touchLocked()
+	return true
+}
+
+// ReconcileTaskRunState mirrors the daemon's authoritative run marker and hold
+// flags. A client that missed the snapshot carrying turn evidence cannot
+// re-derive the run end locally — the final Ready snapshot scrubs the window
+// fields with the run — so the marker itself must be mirrored rather than
+// recomputed from evidence that is no longer there (#5221 review).
+func (i *Instance) ReconcileTaskRunState(active, missionHeld, turnGateHeld bool) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.taskRunActive == active && i.taskRunIdleEdgeHeld == missionHeld &&
+		i.taskRunTurnGateHeld == turnGateHeld {
+		return false
+	}
+	i.taskRunActive = active
+	i.taskRunIdleEdgeHeld = missionHeld
+	i.taskRunTurnGateHeld = turnGateHeld
 	i.touchLocked()
 	return true
 }
@@ -348,6 +409,15 @@ func taskRunTurnObservedAtFromData(data InstanceData) time.Time {
 		return time.Time{}
 	}
 	return data.TaskRunTurnObservedAt
+}
+
+// taskRunPromptBoundaryFromData is the same restore-side gate for the run's
+// own prompt boundary: evidence written for a finished run carries no window.
+func taskRunPromptBoundaryFromData(data InstanceData) (time.Time, PromptDeliveryStatus) {
+	if !data.TaskRunActive {
+		return time.Time{}, ""
+	}
+	return data.TaskRunPromptAttemptAt, data.TaskRunPromptDeliveryStatus
 }
 
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in

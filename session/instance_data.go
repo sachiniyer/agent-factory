@@ -103,11 +103,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// whether it is Running, limit-parked, mid-archive, or Lost.
 	data.TaskRunActive = i.taskRunActive
 	data.TaskRunIdleEdgeHeld = i.taskRunActive && i.taskRunIdleEdgeHeld
+	data.TaskRunTurnGateHeld = i.taskRunActive && i.taskRunTurnGateHeld
 	if i.taskRunActive {
 		// Same gating as the held flag: a finished run's last turn observation
 		// is not evidence for anything, and persisting it would let a later run
 		// on this row inherit a boundary it never crossed.
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
+		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
+		data.TaskRunPromptDeliveryStatus = i.taskRunPromptDeliveryStatus
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -346,6 +349,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	if data.UpdatedAt.IsZero() {
 		data.UpdatedAt = data.CreatedAt
 	}
+	taskRunAttemptAt, taskRunStatus := taskRunPromptBoundaryFromData(data)
 	instance := &Instance{
 		ID:         id,
 		TaskID:     data.TaskID,
@@ -360,37 +364,40 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:       data.TaskRunActive,
 		taskRunIdleEdgeHeld: data.TaskRunActive && data.TaskRunIdleEdgeHeld,
+		taskRunTurnGateHeld: data.TaskRunActive && data.TaskRunTurnGateHeld,
 		// Gate on the run still being in flight, mirroring the write side and
 		// the held flag: a finished run's stale observation cannot release the
 		// next run's delivery window.
-		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
-		limitResetAt:             data.LimitResetAt,
-		limitAgent:               limitAgent,
-		limitAccount:             limitAccount,
-		accountLimitObservations: accountLimitObservations,
-		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
-		archiveWarning:           data.ArchiveWarning,
-		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
-		lastPromptAttemptAt:      data.LastPromptAttemptAt,
-		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
-		lastPaneChurnAt:          data.LastPaneChurnAt,
-		Height:                   data.Height,
-		Width:                    data.Width,
-		CreatedAt:                data.CreatedAt,
-		UpdatedAt:                data.UpdatedAt,
-		Program:                  data.Program,
-		runtimeProgram:           data.RuntimeProgram,
-		runtimePID:               data.RuntimePID,
-		runtimeStartID:           data.RuntimeStartID,
-		Account:                  data.Account,
-		accountAgent:             data.AccountAgent,
-		accountAutoSelected:      data.AccountAutoSelected,
-		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
-		Prompt:                   data.Prompt,
-		pendingHandoffMission:    data.PendingHandoffMission,
-		handoffDeliveryStatus:    data.HandoffDeliveryStatus,
-		userKilled:               data.UserKilled,
-		startupStateUnknown:      data.StartupStateUnknown,
+		taskRunTurnObservedAt:       taskRunTurnObservedAtFromData(data),
+		taskRunPromptAttemptAt:      taskRunAttemptAt,
+		taskRunPromptDeliveryStatus: taskRunStatus,
+		limitResetAt:                data.LimitResetAt,
+		limitAgent:                  limitAgent,
+		limitAccount:                limitAccount,
+		accountLimitObservations:    accountLimitObservations,
+		agentModelChange:            agentModelChangeForLiveness(data.ModelChange, liveness),
+		archiveWarning:              data.ArchiveWarning,
+		lostRestoreFailure:          lostRestoreFailureFromData(data.LostRestoreFailure),
+		lastPromptAttemptAt:         data.LastPromptAttemptAt,
+		lastPromptDeliveryStatus:    data.LastPromptDeliveryStatus,
+		lastPaneChurnAt:             data.LastPaneChurnAt,
+		Height:                      data.Height,
+		Width:                       data.Width,
+		CreatedAt:                   data.CreatedAt,
+		UpdatedAt:                   data.UpdatedAt,
+		Program:                     data.Program,
+		runtimeProgram:              data.RuntimeProgram,
+		runtimePID:                  data.RuntimePID,
+		runtimeStartID:              data.RuntimeStartID,
+		Account:                     data.Account,
+		accountAgent:                data.AccountAgent,
+		accountAutoSelected:         data.AccountAutoSelected,
+		pendingAccountSwap:          cloneAccountSwapData(data.PendingAccountSwap),
+		Prompt:                      data.Prompt,
+		pendingHandoffMission:       data.PendingHandoffMission,
+		handoffDeliveryStatus:       data.HandoffDeliveryStatus,
+		userKilled:                  data.UserKilled,
+		startupStateUnknown:         data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac
 		// is still amnesiac, and a daemon restart is a likely part of the same
 		// outage. An unrecognized value from a newer binary loads as-is and
