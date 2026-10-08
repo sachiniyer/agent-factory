@@ -70,6 +70,13 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	ctx, cancel := context.WithTimeout(context.Background(), localGitTimeout)
 	defer cancel()
 
+	// Resolve a relative repoRoot against the daemon's launch cwd, mirroring
+	// runGitCommandContextWithEnvironment: the daemon chdirs to the AF home, so a
+	// relative `-C repoRoot` would otherwise resolve beneath the AF home instead
+	// of the launch cwd. See daemonLaunchCwd in worktree_git.go.
+	if !filepath.IsAbs(repoRoot) && daemonLaunchCwd != "" {
+		repoRoot = filepath.Join(daemonLaunchCwd, repoRoot)
+	}
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
 	// Start git already cwd'd at repoRoot instead of inheriting the caller's cwd
 	// (the reset path is the daemon, whose cwd can be a managed worktree). See
@@ -78,9 +85,10 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	// directory for the same repo-gone-classification reason; the reset path's
 	// own call sites pass a live repo root, so the gate is a no-op there but
 	// keeps the two runners consistent if a future caller probes a gone path.
-	// Also gated on repoRoot being absolute, for the same relative-path
-	// double-resolution reason as the main runner (a relative repoRoot set as
-	// cmd.Dir makes git resolve `-C repoRoot` relative to that new cwd).
+	// repoRoot is now absolute (a relative one was resolved above), for the same
+	// relative-path double-resolution reason as the main runner (a relative
+	// repoRoot set as cmd.Dir makes git resolve `-C repoRoot` relative to that
+	// new cwd).
 	if filepath.IsAbs(repoRoot) {
 		if info, err := os.Stat(repoRoot); err == nil && info.IsDir() {
 			cmd.Dir = repoRoot

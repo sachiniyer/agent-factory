@@ -56,6 +56,27 @@ func SetLocalGitTimeoutForTest(d time.Duration) func() {
 	return func() { localGitTimeout = prev }
 }
 
+// daemonLaunchCwd is the cwd the daemon process held BEFORE chdirToNeutralHome
+// moved it onto the AF home. The daemon records it once at startup (via
+// SetDaemonLaunchCwd) so the git runners can resolve a relative `-C path`
+// against the launch cwd rather than the post-chdir AF home. Without it a
+// restored session whose persisted path NewGitWorktreeFromStorage stored
+// verbatim (a relative repo or worktree path) would resolve beneath the AF
+// home and fail every git operation — the regression the chdir introduced for
+// the relative-path edge case. Empty in tests and any non-daemon caller, which
+// leaves a relative path on its pre-chdir behaviour (resolved against the
+// current cwd).
+var daemonLaunchCwd string
+
+// SetDaemonLaunchCwd records the daemon's pre-chdir cwd so the git runners can
+// resolve relative paths against it after chdirToNeutralHome moves the daemon
+// onto the AF home. Called once from the daemon before that chdir; never after.
+func SetDaemonLaunchCwd(dir string) {
+	if dir != "" {
+		daemonLaunchCwd = dir
+	}
+}
+
 // runGitCommand executes a local git command and returns any error.
 // Only stdout is returned on success so callers parsing the output (e.g. SHAs
 // or porcelain status) are not corrupted by warnings git emits on stderr.
@@ -155,6 +176,19 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	environment []string,
 	args ...string,
 ) (string, error) {
+	// Resolve a relative path against the daemon's launch cwd (captured before
+	// chdirToNeutralHome moved the daemon onto the AF home) so a restored session
+	// whose persisted path NewGitWorktreeFromStorage stored verbatim still targets
+	// the same repo it did before the chdir. Without this a relative `-C path`
+	// would resolve beneath the AF home the daemon now runs in instead of the
+	// spawner's cwd, breaking every git operation for that edge case. The path is
+	// now absolute, so the existing-directory gate below sets cmd.Dir and removes
+	// the inherited-cwd window for relative paths too. Empty daemonLaunchCwd
+	// (tests, any non-daemon caller) leaves a relative path untouched so it
+	// resolves against the current cwd as before.
+	if !filepath.IsAbs(path) && daemonLaunchCwd != "" {
+		path = filepath.Join(daemonLaunchCwd, path)
+	}
 	baseArgs := []string{"-C", path}
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
 	// Start git already cwd'd at `path` rather than inheriting the daemon's cwd.
@@ -181,16 +215,13 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// git fails immediately, whose worst case is a SIGTERM'd probe that
 	// classifies as the fail-closed "unknown", not a deletion authorization).
 	//
-	// Also gated on path being ABSOLUTE: a relative path that names an
-	// existing directory would, once set as cmd.Dir, make git resolve the
-	// unchanged `-C path` argument relative to that NEW cwd (path/path), so a
-	// relative worktree path would break every git operation. Production
-	// worktree/repo paths are always absolute (every constructor normalizes
-	// via filepath.Abs or git rev-parse --show-toplevel), but
-	// NewGitWorktreeFromStorage stores persisted paths verbatim, so the guard
-	// keeps a hand-edited or externally-authored relative path on its pre-fix
-	// behaviour (no cmd.Dir; git resolves -C path relative to the daemon's
-	// cwd) rather than the double-resolution failure.
+	// A relative path is resolved against the daemon's launch cwd above, so by
+	// here it is absolute; the existing-directory gate then sets cmd.Dir too,
+	// closing the inherited-cwd window for relative paths as well. Production
+	// worktree/repo paths are always absolute (every constructor normalizes via
+	// filepath.Abs or git rev-parse --show-toplevel), so this only matters for a
+	// hand-edited or externally-authored relative path in storage — which now
+	// resolves against the launch cwd rather than the post-chdir AF home.
 	if filepath.IsAbs(path) {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			cmd.Dir = path

@@ -83,6 +83,51 @@ func TestRunGitCommandContext_ChildCwdIsPathNotInherited(t *testing.T) {
 		"the git child's cwd must be the target path (cmd.Dir = path), not the inherited daemon cwd")
 }
 
+// TestRunGitCommandContext_RelativePathResolvedAgainstDaemonLaunchCwd locks in
+// the chdir interaction the #5206 fix introduced: runDaemon now chdirs to the AF
+// home, so a relative `-C path` would resolve beneath the AF home instead of the
+// spawner's cwd. chdirToNeutralHome captures the pre-chdir cwd via
+// SetDaemonLaunchCwd, and the runner resolves a relative path against it before
+// the existing-directory gate — so a restored session whose persisted path
+// NewGitWorktreeFromStorage stored verbatim still targets the launch-cwd repo
+// AND gets cmd.Dir (closing the inherited-cwd window for relative paths too).
+//
+// Deterministic in both directions: with the resolution the fake git reports the
+// launch-cwd-resolved path (and cmd.Dir is set to it); without it a relative path
+// stays relative, the IsAbs gate skips cmd.Dir, and the child reports the inherited
+// (test-process) cwd.
+func TestRunGitCommandContext_RelativePathResolvedAgainstDaemonLaunchCwd(t *testing.T) {
+	launchCwd := testguard.CanonicalTempDir(t)
+	target := testguard.CanonicalTempDir(t)
+	rel := relPathFrom(t, launchCwd, target)
+	fakeGitPrintsCwdOnPath(t)
+
+	prev := daemonLaunchCwd
+	daemonLaunchCwd = launchCwd
+	t.Cleanup(func() { daemonLaunchCwd = prev })
+
+	g := &GitWorktree{}
+	out, err := g.runGitCommandContext(context.Background(), rel, "version")
+	require.NoError(t, err)
+
+	got := strings.TrimSpace(out)
+	testCwd, _ := os.Getwd()
+	require.NotEqual(t, testCwd, got,
+		"a relative path resolved against the launch cwd must set cmd.Dir, not leave the child on the inherited (test-process) cwd")
+	require.Equal(t, target, got,
+		"a relative path must resolve against the daemon's launch cwd (%s) to %s, not the inherited or post-chdir cwd", launchCwd, target)
+}
+
+// relPathFrom returns a relative path naming target from base, or skips the test
+// if the two do not share a common ancestor (t.TempDir siblings on the same
+// volume always do).
+func relPathFrom(t *testing.T, base, target string) string {
+	t.Helper()
+	rel, err := filepath.Rel(base, target)
+	require.NoError(t, err, "filepath.Rel(%s, %s)", base, target)
+	return rel
+}
+
 // TestRunBoundedWorktreeGit_ChildCwdIsRepoRootNotInherited verifies the
 // bounded reset-path runner sets cmd.Dir = repoRoot for the same reason. The
 // reset path is not itself reachable by the bug (`af reset` stops the daemon

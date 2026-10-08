@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -77,6 +78,15 @@ func chdirToNeutralHome() {
 	dir, ok := configHomeDir()
 	if !ok {
 		return
+	}
+	// Record the daemon's launch cwd before chdir'ing so the git runners can
+	// resolve a relative persisted path (NewGitWorktreeFromStorage stores paths
+	// verbatim) against it rather than the AF home we are about to move into.
+	// Without this the chdir would make a relative `-C path` resolve beneath the
+	// AF home and break the restored session (see daemonLaunchCwd in
+	// session/git/worktree_git.go).
+	if cwd, err := os.Getwd(); err == nil {
+		sessiongit.SetDaemonLaunchCwd(cwd)
 	}
 	// Resolve to an absolute path BEFORE chdir'ing. A relative
 	// AGENT_FACTORY_HOME (ConfigDirFor preserves a non-empty value verbatim,
