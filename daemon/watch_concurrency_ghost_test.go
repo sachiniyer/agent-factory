@@ -405,3 +405,151 @@ func TestGhostTaskRunClearsWhenTheRowLoadsAgain(t *testing.T) {
 		t.Fatalf("a row that loads again is counted once, not twice (ghost + instance); got %d", healed)
 	}
 }
+
+// TestSandboxLostGhostDoesNotHoldTaskRunSlot covers the sandbox-backed LiveLost
+// row on the raw-row path. The loaded-instance half already frees this slot:
+// FromInstanceData loads a non-archived sandbox session inert (started stays
+// false), so holdsTaskRunSlot defers to canAutoRestoreLostSession, which refuses
+// it (ValidateRuntimeAction(RecoverLost) rejects a !Started session).
+//
+// Ghost accounting reads storage directly because the row did not load, so it
+// must reach the same verdict on its own or the two halves disagree about the
+// same session. Disagreeing here is unrecoverable rather than merely wrong: no
+// in-memory Instance exists to run the lifecycle edge that would clear
+// TaskRunActive, so the cap stays wedged at its limit for as long as the row is
+// unloadable — every later event for that task parks forever. That is the same
+// wedged-cap failure the StartupStateUnknown, UserKilled, and RestoreGaveUp
+// guards exist to prevent, reached through a LiveLost row whose known
+// materialized form is started=false by design.
+//
+// The row reaches disk the moment a running sandbox session is observed Lost
+// (ObserveLiveness preserves TaskRunActive — its run ends on the Ready edge,
+// which the Lost edge never fires); the bug bites only when that row then fails
+// to load on the next daemon restart (a broken worktree path or an unresolvable
+// relocation-recovery record) — the same load-failure seam every guard above
+// uses. Each sandbox backend type is covered because LostSandboxRecord keys on
+// the backend being any re-provisionable sandbox runtime.
+func TestSandboxLostGhostDoesNotHoldTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	for _, backend := range sandboxBackends {
+		t.Run(backend, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := setupControlRepo(t)
+			repo, err := config.RepoFromPath(repoPath)
+			if err != nil {
+				t.Fatalf("RepoFromPath: %v", err)
+			}
+			title := "lost-" + backend + "-ghost"
+			// A sandbox-backed row persisted mid-run when its remote workspace died:
+			//   - Liveness=LiveLost, TaskRunActive=true (ObserveLiveness preserves the
+			//     marker — runEndsOnIdleEdge only fires on the Ready edge).
+			//   - No LostRestoreFailure (the retry loop never reached give-up), no
+			//     UserKilled, no StartupStateUnknown — none of the existing release
+			//     sentinels fire.
+			if err := appendInstanceData(repo.ID, session.InstanceData{
+				ID:            "lost-" + backend + "-id",
+				TaskID:        "task1",
+				Title:         title,
+				Path:          repoPath,
+				Status:        session.Lost,
+				Liveness:      session.LiveLost,
+				TaskRunActive: true,
+				BackendType:   backend,
+				Worktree: session.GitWorktreeData{
+					RepoPath:     repoPath,
+					WorktreePath: "/dev/null",
+					SessionName:  title,
+					BranchName:   "af/" + title,
+				},
+			}); err != nil {
+				t.Fatalf("append %s lost row: %v", backend, err)
+			}
+			failLoadFor(t, title)
+
+			manager, err := NewManager(config.DefaultConfig())
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			if err := manager.RestoreInstances(); err != nil {
+				t.Fatalf("RestoreInstances: %v", err)
+			}
+			manager.mu.Lock()
+			_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+			counted := manager.countTaskRunsLocked(repo.ID, "task1")
+			admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+			manager.mu.Unlock()
+			if live {
+				t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+			}
+			if rawTaskRunHoldsSlot(session.InstanceData{
+				TaskID:        "task1",
+				TaskRunActive: true,
+				Liveness:      session.LiveLost,
+				BackendType:   backend,
+			}) {
+				t.Fatalf("rawTaskRunHoldsSlot still HOLDS for %s LiveLost; the fix must release a sandbox LiveLost row whose materialized form loads started=false", backend)
+			}
+			if counted != 0 {
+				t.Fatalf("%s lost ghost consumed %d task slot(s); a sandbox LiveLost row's materialized form releases (started=false), so its ghost must too", backend, counted)
+			}
+			if admitErr != nil {
+				t.Fatalf("%s lost ghost wedged the task's cap — no later event can ever land: %v", backend, admitErr)
+			}
+		})
+	}
+}
+
+// TestLocalLostGhostStillHoldsTaskRunSlot confirms the sandbox release is scoped:
+// a LOCAL-backed LiveLost row without LostRestoreFailure still holds. Its
+// materialized form loads started=true (a local session restart does not tear its
+// worktree down), so canAutoRestoreLostSession keeps retrying it and
+// holdsTaskRunSlot HOLDS. rawTaskRunHoldsSlot must agree — LostSandboxRecord is
+// false for a local backend, so the added release term is a no-op here. Without
+// this agreement the cap would UNDERCOUNT a Lost session the restore loop is
+// still actively reviving, letting a capped watcher admit a replacement that
+// blows the cap the moment a retry lands.
+func TestLocalLostGhostStillHoldsTaskRunSlot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	const title = "local-lost-ghost"
+	if err := appendInstanceData(repo.ID, session.InstanceData{
+		ID:            "local-lost-id",
+		TaskID:        "task1",
+		Title:         title,
+		Path:          repoPath,
+		Status:        session.Lost,
+		Liveness:      session.LiveLost,
+		TaskRunActive: true,
+		BackendType:   "local",
+		Worktree:      session.GitWorktreeData{RepoPath: repoPath},
+	}); err != nil {
+		t.Fatalf("append local lost row: %v", err)
+	}
+	failLoadFor(t, title)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.RestoreInstances(); err != nil {
+		t.Fatalf("RestoreInstances: %v", err)
+	}
+	manager.mu.Lock()
+	_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+	counted := manager.countTaskRunsLocked(repo.ID, "task1")
+	admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+	manager.mu.Unlock()
+	if live {
+		t.Fatal("precondition: the row must have failed to materialize for this to test a ghost")
+	}
+	if counted != 1 {
+		t.Fatalf("local lost ghost consumed %d task slot(s); a local LiveLost row whose restore loop can still revive it must hold the cap (the sandbox release must not over-release)", counted)
+	}
+	if admitErr == nil {
+		t.Fatalf("local lost ghost must still refuse admission; the restore loop can revive it, so the cap must bind")
+	}
+}

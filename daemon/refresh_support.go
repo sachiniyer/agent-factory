@@ -19,10 +19,25 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // rawTaskRunHoldsSlot is the storage-only counterpart of holdsTaskRunSlot for
 // rows refreshDaemonInstances cannot materialize. Terminal markers must release
 // capacity here too because no Instance exists to run their lifecycle edge.
+//
+// A sandbox-backed (docker/ssh/hook) LiveLost row is the one shape whose raw form
+// must mirror its materialized form on Started, which is absent from InstanceData.
+// FromInstanceData loads a non-archived sandbox row inert (started stays false),
+// so holdsTaskRunSlot releases it: Activity is Terminal for LiveLost and
+// canAutoRestoreLostSession returns false (ValidateRuntimeAction refuses a
+// !Started session). The raw arm has no Started to read, so it consults
+// session.LostSandboxRecord directly — the same storage predicate the loader
+// uses to decide the inert load — and releases for the same rows. Without this
+// term a sandbox row that ghosts on a materialization failure (broken worktree
+// or relocation-recovery record) wedges max_concurrent_runs forever: no
+// in-memory Instance exists to run the lifecycle edge that would clear
+// TaskRunActive, the same unrecoverable wedge class the terminal-marker guards
+// below prevent.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	return item.TaskID != "" && item.TaskRunActive &&
 		!item.StartupStateUnknown && !item.UserKilled &&
-		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
+		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp &&
+		!session.LostSandboxRecord(item)
 }
 
 // fromInstanceDataForRefresh is the entry point refreshDaemonInstances uses

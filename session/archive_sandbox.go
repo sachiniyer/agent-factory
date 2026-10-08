@@ -562,6 +562,18 @@ func lostSandboxRecord(data InstanceData) bool {
 	return isSandboxBackendType(data.BackendType) && data.Liveness == LiveLost
 }
 
+// LostSandboxRecord is the exported form of lostSandboxRecord for the raw-row
+// cap accounting path (daemon/refresh_support.go's rawTaskRunHoldsSlot), which
+// must mirror holdsTaskRunSlot for the row's known materialized form. A
+// sandbox-backed LiveLost row always loads inert (started=false, per
+// FromInstanceData's sandbox branch), so its live arm releases —
+// canAutoRestoreLostSession returns false because ValidateRuntimeAction refuses
+// a !Started session. LostSandboxRecord lets the raw arm reach the same verdict
+// when the row ghosts and no in-memory Instance exists to consult Started.
+func LostSandboxRecord(data InstanceData) bool {
+	return lostSandboxRecord(data)
+}
+
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,
 // for a docker/ssh/hook session loaded from disk (#1592 Phase 4 PR6/PR7). Its
 // Type() and Capabilities() keep the session classified as its runtime so
