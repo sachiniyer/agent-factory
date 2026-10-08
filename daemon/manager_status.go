@@ -255,13 +255,15 @@ func (m *Manager) sweepPausedPollState() {
 	}
 }
 
-// taskRunTurnWatchEntry pairs a run's chrome watcher with the resolved agent
-// it was built for: a mid-run handoff to a different agent must rebuild the
-// watcher instead of reading the new pane through the predecessor's
-// signatures (#5221 review).
+// taskRunTurnWatchEntry keys a run's chrome watcher by the evidence it may
+// legitimately observe: the resolved agent (a mid-run handoff swaps the pane's
+// signatures) and the task-prompt boundary (a redelivery discards primed rows
+// that predate it, so an already-running turn cannot release the fresh window
+// as though it were the new prompt's — #5221 review).
 type taskRunTurnWatchEntry struct {
-	agent string
-	watch *task.TurnWatch
+	agent    string
+	boundary time.Time
+	watch    *task.TurnWatch
 }
 
 // noteTaskRunTurnEvidence feeds this tick's pane capture through the run's
@@ -284,13 +286,15 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	// Read under i.mu BEFORE pausedMu — the sweep takes the two separately and
 	// never nests them.
 	agent := instance.ResolvedAgent()
+	boundary := instance.TaskRunPromptAttemptAt()
 	m.pausedMu.Lock()
 	entry, ok := m.taskRunTurnWatches[key]
-	if !ok || entry.agent != agent {
-		// A mid-run handoff swaps the signatures the pane can produce, so the
-		// watcher must be rebuilt rather than read a new agent's pane through
-		// the predecessor's rules (#5221 review).
-		entry = &taskRunTurnWatchEntry{agent: agent, watch: task.NewTurnWatch(agent)}
+	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
+		// A mid-run handoff swaps the signatures the pane can produce, and a
+		// redelivery retires primed state from the previous window — either way
+		// the watcher must be rebuilt rather than read the pane through rules
+		// or a prev frame that no longer belong to this boundary (#5221 review).
+		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent)}
 		m.taskRunTurnWatches[key] = entry
 	}
 	turning := entry.watch.Observe(content)

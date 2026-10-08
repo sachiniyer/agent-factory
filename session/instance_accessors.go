@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -525,6 +526,16 @@ func (i *Instance) TaskRunActive() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.taskRunActive
+}
+
+// TaskRunPromptAttemptAt is the run's own prompt boundary (#5219). The daemon's
+// pane-chrome watcher keys its state to it: a redelivery must discard primed
+// rows that predate the new boundary, or a turn already in flight releases the
+// fresh window as though it were the redelivered prompt's (#5221 review).
+func (i *Instance) TaskRunPromptAttemptAt() time.Time {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.taskRunPromptAttemptAt
 }
 
 // GetGitWorktree returns the git worktree for the instance
