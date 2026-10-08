@@ -284,13 +284,15 @@ func (v LifecycleView) Activity() Activity {
 // row whose relocation-recovery metadata is undecodable cannot be materialized by
 // the loader at all; the only durable field the missing original can change is
 // StartupStateUnknown, which is terminal either way for a non-archived sandbox
-// row, so a sandbox ghost with no pending handoff, account swap, or in-flight op
-// has no field its loaded form could be pending on. LoadedActivity reports
-// ActivityTerminal for that shape — holding it pending would wedge the cap
-// forever on a row that can never materialize to clear TaskRunActive — and
-// ActivityPending for the rows that DO carry such a field, or whose liveness this
-// binary does not recognize, or any non-sandbox row whose loaded form may still
-// be active. A committed kill (UserKilled) is the one definitive terminal marker
+// row, so a sandbox ghost whose handoff the loader would NOT fence (no mission,
+// a known ambiguous verdict, or the missing evidence a legacy record carries)
+// and that has no pending account swap or in-flight op has no field its loaded
+// form could be pending on. LoadedActivity reports ActivityTerminal for that
+// shape — holding it pending would wedge the cap forever on a row that can never
+// materialize to clear TaskRunActive — and ActivityPending for the rows that DO
+// carry a fence-requiring or unrecognized handoff, or whose liveness this binary
+// does not recognize, or any non-sandbox row whose loaded form may still be
+// active. A committed kill (UserKilled) is the one definitive terminal marker
 // the loader honors before any fence (ClassifyActivity returns terminal for it
 // first), so a tombstoned row whose relocation recovery is undecodable still
 // releases — the sandbox arm of rawTaskRunHoldsSlot delegates to LoadedActivity
@@ -344,23 +346,27 @@ func LoadedActivity(data InstanceData) (Activity, string) {
 		// the missing relocation original can change is StartupStateUnknown,
 		// and for a non-archived sandbox row BOTH of its values are terminal
 		// (true -> ClassifyActivity's startup-unknown return; false -> the
-		// loader's inert LiveLost rewrite below). A sandbox ghost with no
-		// pending handoff, account swap, or in-flight op therefore has no field
-		// that could make its loaded form pending, and because the row can
-		// never materialize there is no lifecycle edge that clears TaskRunActive
-		// — holding it pending wedges max_concurrent_runs forever on the very
-		// ghost this change exists to release. Reserve the conservative
-		// pending verdict for rows whose durable transaction fields could
-		// actually produce pending activity the loader would hold on, and for
-		// a row whose liveness this binary does not recognize (a future value
-		// a newer release wrote, which ClassifyActivity fails closed to
-		// pending). A non-sandbox row's liveness is not rewritten, so it stays
-		// pending too rather than guessing terminal about a backend whose
-		// loaded form may still be active.
+		// loader's inert LiveLost rewrite below). A sandbox ghost whose only
+		// durable fields are a handoff the loader would NOT reconstruct a fence
+		// for (no mission, or a known ambiguous verdict, or the missing
+		// evidence a legacy record carries) therefore has no field that could
+		// make its loaded form pending, and because the row can never
+		// materialize there is no lifecycle edge that clears TaskRunActive —
+		// holding it pending wedges max_concurrent_runs forever on the very
+		// ghost this change exists to release. Reserve the conservative pending
+		// verdict for rows whose durable transaction fields could actually
+		// produce pending activity the loader would hold on — a fence-requiring
+		// handoff (PromptNotDelivered/PromptDelivered) or a verdict this binary
+		// does not recognize — and for a row whose liveness this binary does not
+		// recognize (a future value a newer release wrote, which ClassifyActivity
+		// fails closed to pending). A non-sandbox row's liveness is not
+		// rewritten, so it stays pending too rather than guessing terminal about
+		// a backend whose loaded form may still be active.
 		if isSandboxBackendType(data.BackendType) &&
-			data.PendingHandoffMission == "" && data.PendingAccountSwap == nil &&
+			data.PendingAccountSwap == nil &&
 			inFlightOpFromData(data) == OpNone &&
-			livenessIsKnown(livenessFromData(data)) {
+			livenessIsKnown(livenessFromData(data)) &&
+			!handoffCouldHoldSlot(data.PendingHandoffMission, data.HandoffDeliveryStatus) {
 			return ActivityTerminal, "session is lost (its backing sandbox vanished and its relocation record is undecodable); recover it with 'af sessions restore' before watching again"
 		}
 		return ActivityPending, ""
@@ -427,6 +433,27 @@ func livenessIsKnown(lv Liveness) bool {
 		return true
 	}
 	return false
+}
+
+// handoffCouldHoldSlot reports whether a PendingHandoffMission could make a
+// row's loaded form hold its task-run slot. Only a verdict that reconstructs
+// the replacement fence does so: PromptNotDelivered/PromptDelivered rebuild
+// OpReplacing, which keeps the loaded sandbox pending. An UNRECOGNIZED future
+// verdict a newer release wrote may stand for an obligation still in flight,
+// so the conservative raw path holds for it too. A known ambiguous verdict
+// (PromptCouldNotConfirm/PromptSentUnverified) and the missing evidence a
+// legacy record carries (an empty verdict) load WITHOUT the fence — the
+// operator owns the confirm-or-retry decision — so the loaded form is terminal
+// and there is nothing to hold the slot for. LoadedActivity uses this on the
+// relocation-undecodable path, where restoreMissingHandoffMissionEvidence has
+// not yet normalized the empty legacy verdict, so it reads "" as the ambiguous
+// case the loader treats it as.
+func handoffCouldHoldSlot(mission string, status PromptDeliveryStatus) bool {
+	if mission == "" {
+		return false
+	}
+	return pendingHandoffMissionNeedsFence(status) ||
+		(status != "" && !status.Valid())
 }
 
 // classifyActivityByStatus is the legacy-Status fallback for ClassifyActivity,

@@ -977,6 +977,94 @@ func TestSandboxLostGhostWithUndecodableRelocationAndUnknownLivenessHoldsTaskRun
 	}
 }
 
+// TestSandboxLostGhostWithUndecodableRelocationAndAmbiguousHandoffReleasesTaskRunSlot
+// covers a sandbox row whose relocation-recovery metadata cannot be decoded and
+// that carries a known ambiguous handoff (PromptCouldNotConfirm,
+// PromptSentUnverified, or the missing evidence a legacy record carries). The
+// loader does not reconstruct OpReplacing for an ambiguous verdict, so with
+// either possible original StartupStateUnknown the loaded form is terminal (true
+// is the startup-unknown outcome; false does not rebuild the fence and the inert
+// sandbox becomes LiveLost). The row cannot materialize to clear TaskRunActive, so
+// holding it pending wedges the cap on a ghost whose handoff the daemon does not
+// automatically act on. LoadedActivity must release it, like a handoff-less
+// ghost, rather than treat every handoff as the in-flight kind.
+func TestSandboxLostGhostWithUndecodableRelocationAndAmbiguousHandoffReleasesTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	cases := []struct {
+		name   string
+		status session.PromptDeliveryStatus
+	}{
+		{name: "missing-evidence", status: ""},
+		{name: "could-not-confirm", status: session.PromptCouldNotConfirm},
+		{name: "sent-unverified", status: session.PromptSentUnverified},
+	}
+	for _, backend := range sandboxBackends {
+		for _, tc := range cases {
+			t.Run(backend+"-"+tc.name, func(t *testing.T) {
+				row := session.InstanceData{
+					TaskID:                "task1",
+					TaskRunActive:         true,
+					Liveness:              session.LiveLost,
+					BackendType:           backend,
+					PendingHandoffMission: "continue the exact inherited work",
+					HandoffDeliveryStatus: tc.status,
+					Worktree: session.GitWorktreeData{
+						RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+					},
+				}
+				activity, _ := session.LoadedActivity(row)
+				if activity != session.ActivityTerminal {
+					t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and an ambiguous handoff (%s); the loader does not reconstruct OpReplacing, so the row is terminal and must release", activity, backend, tc.name)
+				}
+				if rawTaskRunHoldsSlot(row) {
+					t.Fatalf("rawTaskRunHoldsSlot held a %s row with an ambiguous handoff and undecodable relocation recovery; the row can never materialize to clear TaskRunActive and the handoff is not in flight, so the raw arm must release it", backend)
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxLostGhostWithUndecodableRelocationAndUnknownHandoffHoldsTaskRunSlot
+// covers a sandbox row whose relocation-recovery metadata cannot be decoded and
+// whose handoff verdict this binary does not recognize. A fence-requiring handoff
+// (PromptNotDelivered/PromptDelivered) may reconstruct OpReplacing once the
+// relocation is decoded, and an unrecognized future verdict may stand for an
+// obligation still in flight, so LoadedActivity holds the slot conservatively
+// rather than release a ghost whose transaction may still be pending.
+func TestSandboxLostGhostWithUndecodableRelocationAndUnknownHandoffHoldsTaskRunSlot(t *testing.T) {
+	sandboxBackends := []string{"ssh", "docker", "sandbox", "remote"}
+	cases := []session.PromptDeliveryStatus{
+		session.PromptNotDelivered,
+		session.PromptDelivered,
+		// A verdict no current build has a constant for.
+		session.PromptDeliveryStatus("future-verdict"),
+	}
+	for _, backend := range sandboxBackends {
+		for _, status := range cases {
+			t.Run(backend+"-"+string(status), func(t *testing.T) {
+				row := session.InstanceData{
+					TaskID:                "task1",
+					TaskRunActive:         true,
+					Liveness:              session.LiveLost,
+					BackendType:           backend,
+					PendingHandoffMission: "continue the exact inherited work",
+					HandoffDeliveryStatus: status,
+					Worktree: session.GitWorktreeData{
+						RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{},
+					},
+				}
+				activity, _ := session.LoadedActivity(row)
+				if activity != session.ActivityPending {
+					t.Fatalf("LoadedActivity reported %v for a %s row with undecodable relocation recovery and a fence-requiring or unknown handoff (%s); the handoff may still be in flight, so it must hold conservatively", activity, backend, status)
+				}
+				if !rawTaskRunHoldsSlot(row) {
+					t.Fatalf("rawTaskRunHoldsSlot released a %s row with a fence-requiring or unknown handoff and undecodable relocation recovery; the handoff may still be in flight, so the raw arm must hold the slot", backend)
+				}
+			})
+		}
+	}
+}
+
 // TestSandboxLostGhostWithUserKilledAndUndecodableRelocationReleasesTaskRunSlot
 // covers the kill tombstone (#1108) on a sandbox row whose relocation-recovery
 // metadata cannot be decoded. An undecodable relocation record with no other
