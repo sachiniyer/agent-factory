@@ -311,8 +311,19 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunQuietReleaseLocked() bool {
-	return i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt) &&
-		time.Since(i.lastPaneChurnAt) >= taskRunCompletionQuietGrace
+	if !i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt) {
+		return false
+	}
+	// The durable churn stamp can be far older than the pane's true last
+	// output — churn after the first post-prompt edge is not re-checkpointed —
+	// so silence is measured from the later of the stamp and this process's
+	// evidence floor: a restart never inherits elapsed quiet it did not see
+	// (#5221 review).
+	base := i.lastPaneChurnAt
+	if i.paneEvidenceFloorAt.After(base) {
+		base = i.paneEvidenceFloorAt
+	}
+	return time.Since(base) >= taskRunCompletionQuietGrace
 }
 
 // taskRunSilentReleaseLocked is the bounded release for a turn the poll can

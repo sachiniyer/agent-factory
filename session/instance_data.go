@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -379,6 +380,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
 		lastPaneChurnAt:          data.LastPaneChurnAt,
+		paneEvidenceFloorAt:      time.Now(),
 		Height:                   data.Height,
 		Width:                    data.Width,
 		CreatedAt:                data.CreatedAt,

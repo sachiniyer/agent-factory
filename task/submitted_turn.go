@@ -280,16 +280,21 @@ func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
 }
 
 // Observe folds one captured frame into the watch and reports whether it
-// proves a turn began after the boundary. For the timed-row agents (claude,
-// devin) a row's presence is not enough — scrollback can hold a stale one —
-// so the row's elapsed timer must have advanced against the previous capture,
-// the same contract submittedTurnVisible applies inside the submit window;
-// and the ticking row's own elapsed must fit inside the boundary's age, or a
-// turn already running when the prompt went out gets attributed to it. The
-// other agents' indicators are scoped to their live frame but carry no clock,
-// so they must be seen absent once before a present frame can count — the
-// start edge the elapsed check expresses for timed rows.
-func (w *TurnWatch) Observe(content string) bool {
+// proves a turn began after the boundary. `at` must be the frame's CAPTURE
+// (or request-start) instant, not the caller's apply time: for a remote
+// session the pane is captured inside the sandbox and processed after
+// transport, and measuring the boundary's age at apply time would let that
+// unbounded latency inflate it until a pre-boundary turn's row fits (#5221
+// review). For the timed-row agents (claude, devin) a row's presence is not
+// enough — scrollback can hold a stale one — so the row's elapsed timer must
+// have advanced against the previous capture, the same contract
+// submittedTurnVisible applies inside the submit window; and the ticking
+// row's own elapsed must fit inside the boundary's age at capture, or a turn
+// already running when the prompt went out gets attributed to it. The other
+// agents' indicators are scoped to their live frame but carry no clock, so
+// they must be seen absent once before a present frame can count — the start
+// edge the elapsed check expresses for timed rows.
+func (w *TurnWatch) Observe(content string, at time.Time) bool {
 	switch w.agent {
 	case tmux.ProgramClaude, tmux.ProgramDevin:
 		cur := timedTurnRowsByIdentity(content)
@@ -301,7 +306,7 @@ func (w *TurnWatch) Observe(content string) bool {
 		// display's own resolution — real elapsed is strictly less than
 		// displayed+1s, so demanding that fit inside the boundary's age makes a
 		// strictly-pre-boundary turn unrepresentable (#5221 review).
-		return ticked && row.elapsed+time.Second <= time.Since(w.boundary)
+		return ticked && row.elapsed+time.Second <= at.Sub(w.boundary)
 	default:
 		if !submittedTurnContent(content, w.agent) {
 			w.armed = true

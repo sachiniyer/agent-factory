@@ -546,3 +546,30 @@ func TestTaskRunMachineryResendDoesNotRearmSatisfiedWindow(t *testing.T) {
 	require.False(t, inst.TaskRunActive(),
 		"a satisfied window stays closed to every later send — machinery and manual alike")
 }
+
+// A daemon restart must not inherit elapsed quiet it never observed (#5221
+// review P1): churn after the first post-prompt edge is deliberately not
+// re-checkpointed, so a restarted row can carry a lastPaneChurnAt far older
+// than the pane's true last output. The quiet arm's silence clock measures
+// from the later of the durable stamp and this process's evidence floor.
+func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-2 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	// Checkpointed churn is minutes old by the time the daemon restarts —
+	// the later, uncheckpointed churn is gone, but the durable stamp pretends
+	// the pane has been silent the whole time.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(30*time.Second), epoch))
+
+	data := inst.ToInstanceData()
+	data.BackendType = "docker"
+	reloaded, err := FromInstanceData(data.ForStorage())
+	require.NoError(t, err)
+
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, reloaded.TaskRunActive(),
+		"a stale durable churn stamp is not a finished 30s of silence — the quiet arm measures from reload time")
+	require.True(t, reloaded.taskRunTurnGateHeld)
+}

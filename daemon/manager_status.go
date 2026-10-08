@@ -277,7 +277,7 @@ type taskRunTurnWatchEntry struct {
 // The watcher state lives under pausedMu — the paused-path observation feeds
 // the same map — while the evidence write follows the observation epoch fence,
 // same as RecordPaneChurnCheckpointAtEpoch above.
-func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, content string, epoch uint64) bool {
+func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, content string, capturedAt time.Time, epoch uint64) bool {
 	if !instance.TaskRunActive() || content == "" {
 		return false
 	}
@@ -297,7 +297,7 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
 		m.taskRunTurnWatches[key] = entry
 	}
-	turning := entry.watch.Observe(content)
+	turning := entry.watch.Observe(content, capturedAt)
 	m.pausedMu.Unlock()
 	if !turning {
 		return false
@@ -421,6 +421,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	}
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
+	// The pane capture happens inside SnapshotAgent — possibly across a remote
+	// transport — so the request's start is the earliest moment the frame could
+	// have been taken. Feeding it to the turn watch keeps the boundary-age
+	// check from being inflated by the round trip's own latency (#5221 review).
+	capturedAt := nowFunc()
 	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
@@ -435,7 +440,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
 	}
-	if m.noteTaskRunTurnEvidence(key, instance, obs.Content, epoch) {
+	if m.noteTaskRunTurnEvidence(key, instance, obs.Content, capturedAt, epoch) {
 		// The turn boundary is durable evidence: checkpoint it even when nothing
 		// else this tick writes, so a restart cannot reopen a closed window.
 		churnCheckpoint = true
@@ -654,6 +659,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// that final transport check, while the epoch fences Instance mutations.
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
+	// Same request-start bound as the paused-path feed below: the pane is
+	// captured inside SnapshotAgent, so the boundary-age check measures from
+	// before the round trip, not after it (#5221 review).
+	capturedAt := nowFunc()
 	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
 	if observedOp != session.OpNone {
 		m.clearRemoteLoss(key)
@@ -700,7 +709,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// Running; later spinner churn does not create an event/write storm.
 		_, settlementCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
 	}
-	if m.noteTaskRunTurnEvidence(key, instance, content, epoch) {
+	if m.noteTaskRunTurnEvidence(key, instance, content, capturedAt, epoch) {
 		// Feed the run's chrome watcher BEFORE the idle branch may settle the
 		// liveness: the turn boundary is what lets a held idle edge release, and
 		// it must be recorded while the observation that produced it still owns
