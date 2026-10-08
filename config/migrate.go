@@ -564,6 +564,16 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 		if !flatPresent || !groupedPresent {
 			continue
 		}
+		// An explicit JSON null leaves a scalar at its zero value, so a flat
+		// null and a grouped spelling equal to that zero do not diverge: the
+		// conversion writes the zero into both spellings, the same value the
+		// grouped one already carries, and the frozen JSON reader leaves the
+		// field at that zero for the flat null too. The shapeless decode
+		// reads null as an untyped nil, which DeepEqual never matches against
+		// a typed zero like false or "", so normalize the flat null to the
+		// zero value of the grouped kind before comparing — the same effective
+		// value the typed reader would produce.
+		flat = normalizeLegacyJSONNull(flat, grouped)
 		if reflect.DeepEqual(flat, grouped) {
 			continue
 		}
@@ -578,6 +588,29 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 		return ambiguousLegacyJSONSpellingError(prettyPath, alias, flat, grouped)
 	}
 	return nil
+}
+
+// normalizeLegacyJSONNull treats an explicit JSON null (decoded as an untyped
+// nil) as the zero value of the grouped spelling's kind, so a flat null and a
+// grouped value equal to that zero are not reported as divergent. The frozen
+// JSON reader leaves a scalar at its zero value for null, so the conversion
+// writes that zero into both spellings — the same value the grouped spelling
+// already carries when it equals the zero, i.e. no tie to break. A non-null
+// flat, or a grouped kind this does not model, is returned unchanged.
+func normalizeLegacyJSONNull(flat, grouped any) any {
+	if flat != nil {
+		return flat
+	}
+	switch grouped.(type) {
+	case bool:
+		return false
+	case string:
+		return ""
+	case []any:
+		return []any{}
+	default:
+		return flat
+	}
 }
 
 // ambiguousLegacyJSONSpellingError is the legacy-config.json form of the

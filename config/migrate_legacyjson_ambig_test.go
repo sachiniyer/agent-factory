@@ -268,6 +268,42 @@ func TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeRefusing(t *testing.T) {
 		"no conversion ran, so no config.toml was written")
 }
 
+// TestMigrateDoesNotRefuseLegacyJSONNullFlatAgainstZeroGrouped pins the case a
+// raw DeepEqual gets wrong: an explicit JSON null decodes to an untyped nil,
+// which DeepEqual never matches against a typed zero like false, so a flat
+// null and a grouped spelling equal to the field's zero would be reported as
+// divergent and refused. The typed reader leaves the scalar at its zero value
+// for null, so the conversion writes that zero into both spellings — the same
+// value the grouped spelling already carries — and there is no tie to break.
+// The guard normalizes the flat null to the grouped kind's zero before
+// comparing, so the run converts instead of refusing. A null flat against a
+// NON-zero grouped spelling still diverges and is still refused.
+func TestMigrateDoesNotRefuseLegacyJSONNullFlatAgainstZeroGrouped(t *testing.T) {
+	t.Run("null flat and zero grouped convert as redundant", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"require_token":null,"network":{"require_token":false}}`)
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err, "a null flat and a zero-valued grouped spelling agree, so no refusal")
+		require.True(t, result.ConvertedFromJSON)
+		require.Len(t, result.Migrated, 1)
+		assert.True(t, result.Migrated[0].Redundant, "the flat null and the zero grouped value agree")
+		assert.Equal(t, "require_token", result.Migrated[0].From)
+
+		cfg, err := parseConfigTOML([]byte(readFile(t, filepath.Join(home, TomlConfigFileName))), filepath.Join(home, TomlConfigFileName))
+		require.NoError(t, err)
+		assert.False(t, cfg.RequireToken, "the null flat and zero grouped value both resolve to false")
+	})
+
+	t.Run("null flat and non-zero grouped is still refused", func(t *testing.T) {
+		seedJSONConfig(t, `{"require_token":null,"network":{"require_token":true}}`)
+
+		_, err := MigrateGlobalConfig()
+		require.Error(t, err, "a null flat and a non-zero grouped spelling diverge, so the run refuses")
+		assert.Contains(t, err.Error(), "Nothing was rewritten")
+		assert.Contains(t, err.Error(), `"require_token"`, "the refusal still names the flat spelling")
+	})
+}
+
 // TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig pins the other
 // divergence the finding named: json.Decoder.Decode (the shapeless read) stops
 // after the first object and ignores trailing garbage, while json.Unmarshal
