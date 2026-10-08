@@ -7,23 +7,49 @@ import (
 	"net/rpc"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/peercred"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
 type controlServer struct {
-	manager      *Manager
-	scheduler    *taskScheduler
-	watchers     *watcherSupervisor
-	shutdownCh   chan struct{}
-	shutdownOnce sync.Once
+	manager    *Manager
+	scheduler  *taskScheduler
+	watchers   *watcherSupervisor
+	shutdownCh chan struct{}
+	// shutdownOnce is shared by every per-connection controlServer
+	// startControlServer builds: one Shutdown must fire once for the whole
+	// listener, not once per connection. It is nil on servers that cannot shut
+	// anything down (the HTTP server, most tests) — Shutdown returns before it
+	// is read.
+	shutdownOnce *sync.Once
 	httpRequests *httpRequestDrain
+	// requester is the kernel-verified identity of the process on the other
+	// end of THIS connection: the SO_PEERCRED/LOCAL_PEERPID pid, resolved to
+	// its (pid, start-stamp) instance by the accept loop while the peer
+	// provably still exists and holds the socket. Resolving at accept — not
+	// in the handler — is what keeps a peer that exited and had its pid
+	// recycled mid-request from lending a stranger the exemption (#5182).
+	// Teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. nil on read failure (the pre-#5182 posture).
+	// The HTTP server shares ONE controlServer across connections, so it
+	// leaves this nil and the per-request context carries the same identity
+	// instead (see httpPeerRequesterContextKey).
+	requester *proctree.Process
+	// pendingReplies holds this connection's requester unregistrations until
+	// the reply they belong to is written — each is keyed by its call's reply
+	// pointer, which gobServerCodec.WriteResponse hands back as the body it
+	// just serialized, so only that call's response releases its exemption
+	// (Close drains whatever a dead connection leaves — see
+	// trackTeardownRequester, #5182). nil on the shared HTTP controlServer,
+	// where the per-request context drains instead.
+	pendingReplies *pendingUntracks
 }
 
 const (
@@ -309,7 +335,8 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 // lets the RPC response flush back to the caller before the listener closes.
 func (s *controlServer) Shutdown(_ ShutdownRequest, resp *ShutdownResponse) error {
 	resp.OK = true
-	if s.shutdownCh == nil {
+	resp.PID = os.Getpid()
+	if s.shutdownCh == nil || s.shutdownOnce == nil {
 		return nil
 	}
 	s.shutdownOnce.Do(func() {
@@ -543,14 +570,19 @@ func (s *controlServer) ReorderTab(req ReorderTabRequest, resp *ReorderTabRespon
 	return nil
 }
 
-func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) KillSession(req *KillSessionRequest, resp *KillSessionResponse) error {
 	return s.killSession(context.Background(), req, resp)
 }
 
-func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest, resp *KillSessionResponse) error {
+func (s *controlServer) killSession(ctx context.Context, req *KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A caller tearing down its OWN session is still blocked on this reply
+	// inside the pane tree being reaped; register the kernel-verified
+	// requester so teardown spares it (#5182). Unregistered on return — the
+	// reply is in flight and the exemption is over.
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
@@ -559,7 +591,7 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx), nil)
+	killed, err := s.manager.killSessionRequestedBy(*req, rpcRequester(ctx), nil)
 	if !resp.record(err) {
 		return err
 	}
@@ -575,17 +607,25 @@ func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest,
 	return nil
 }
 
-func (s *controlServer) ArchiveSession(req ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+func (s *controlServer) ArchiveSession(req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
+	return s.archiveSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) archiveSession(ctx context.Context, req *ArchiveSessionRequest, resp *ArchiveSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// The `af sessions archive --self` caller this issue is about (#5182):
+	// register the kernel-verified requester before its own pane tree is
+	// reaped, and unregister when the reply is on the wire.
+	defer s.trackTeardownRequester(ctx, req)()
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
 	// ArchiveSession resolves the target (id-first, erroring on a stale/missing id),
 	// commits it, and publishes the full projection inside its operation lock. That
 	// keeps lifecycle event order identical to operation order (#2680).
-	archivedPath, _, err := s.manager.ArchiveSession(req)
+	archivedPath, _, err := s.manager.ArchiveSession(*req)
 	if !resp.record(err) {
 		return err
 	}
@@ -675,137 +715,6 @@ func (s *controlServer) SendPrompt(req SendPromptRequest, resp *SendPromptRespon
 	return nil
 }
 
-// DeleteProject deletes a project (a repo grouping of sessions, #1735):
-// archive-then-remove, reversible. The manager archives every live session
-// (restorable), tears down in-place sessions (repo untouched), and drops the
-// repo's root_agents opt-in. It publishes one archived/killed event per affected
-// session — so every client's rail moves the sessions exactly as a per-session
-// archive/kill would — plus a projects-changed signal for clients keying a
-// projects view. On a partial failure it still publishes what DID happen before
-// surfacing the error, so the rail never lags reality.
-func (s *controlServer) DeleteProject(req DeleteProjectRequest, resp *DeleteProjectResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	if err := validateRPCRepoID(req.RepoID); err != nil {
-		return err
-	}
-	// Enforce DeleteProjectRequest's absolute-path contract at the RPC boundary,
-	// the same guard RegisterProject and RebindProject apply (#4821, 6616c129);
-	// see normalizeDeleteProjectRequestRepoPath. The checked value is the one
-	// passed on, and the RepoID-only form (no RepoPath) is preserved.
-	if err := normalizeDeleteProjectRequestRepoPath(&req); err != nil {
-		return err
-	}
-	result, err := s.manager.DeleteProject(req)
-	for _, k := range result.Killed {
-		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: k.ID, Title: k.Title})
-	}
-	if len(result.Archived) > 0 || len(result.Killed) > 0 || result.Deregistered {
-		s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
-	}
-	if err != nil {
-		return err
-	}
-	resp.OK = true
-	resp.ArchivedCount = len(result.Archived)
-	resp.KilledCount = len(result.Killed)
-	resp.Deregistered = result.Deregistered
-	resp.Warning = strings.Join(result.Warnings, "\n")
-	return nil
-}
-
-// RegisterProject records a git checkout as a durable, sessionless project in
-// the #2355 registry (#2456). The daemon is the single writer (#960): the CLI,
-// web, and TUI all route their add-project action here rather than writing the
-// registry in-process, so one process owns the store and — for a web or remote
-// client — the path is resolved on the daemon's filesystem, not the caller's.
-//
-// config.RegisterProject does the work (resolve the git root, validate,
-// persist, idempotent) under its own file lock, so this handler adds only the
-// admission gate, the absolute-path boundary, and the projects-changed publish. It does NOT take a
-// manager lock: the registry is independent of the session roster, and
-// RegisterProject's own lock already serializes concurrent registrations.
-//
-// The publish rides the same EventProjectsChanged signal DeleteProject uses, so
-// a client showing a projects view re-fetches and the new empty project appears
-// without a manual refresh. It is emitted only on a successful, genuinely new or
-// re-confirmed registration — an error returns before it, and an idempotent
-// re-registration still publishes (harmless: the re-fetch is a no-op diff).
-func (s *controlServer) RegisterProject(req RegisterProjectRequest, resp *RegisterProjectResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	// Enforce RegisterProjectRequest's contract here, before the registry is
-	// touched (#4821): config.RegisterProject would resolve a relative path
-	// against THIS process's cwd. The normalized value is the one registered, so
-	// what was checked is exactly what is stored.
-	path, err := config.ResolveDaemonHostPath(req.Path)
-	if err != nil {
-		return fmt.Errorf("project %w", err)
-	}
-	project, err := config.RegisterProject(path)
-	if err != nil {
-		return err
-	}
-	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
-	resp.OK = true
-	resp.Project = project
-	return nil
-}
-
-// RebindProject moves a registered project's stable identity to a replacement
-// checkout (`af projects rebind`) — the repair when the checkout a registration
-// names was moved or recloned elsewhere. The daemon is the single writer (#960),
-// the same reason RegisterProject routes here: the CLI, TUI, and web all call
-// this rather than writing the registry in-process, and for a web or remote
-// client the path is resolved on the daemon's filesystem, not the caller's.
-//
-// config.RebindProject does the work under its own file lock — resolving the
-// replacement path's binding, refusing a root another project owns, and carrying
-// or minting the checkout marker — so this handler adds only the admission gate
-// and the projects-changed publish a client showing a projects view re-fetches
-// on (the rebound row's root changes; without the event a web switcher would
-// keep naming the dead path until the next manual refresh).
-func (s *controlServer) RebindProject(req RebindProjectRequest, resp *RebindProjectResponse) error {
-	if err := s.requireStateMutationAdmission(); err != nil {
-		return err
-	}
-	// Enforce RebindProjectRequest's contract here, before the registry moves:
-	// config.RebindProject would resolve a relative path against THIS process's
-	// cwd — an unrelated checkout for an ad-hoc daemon, / under systemd — and
-	// silently repoint the stable id there. The same boundary RegisterProject
-	// applies (#4821); the checked value is the one passed on.
-	path, err := config.ResolveDaemonHostPath(req.Path)
-	if err != nil {
-		return fmt.Errorf("rebind %w", err)
-	}
-	project, err := config.RebindProject(req.ID, path)
-	if err != nil {
-		return err
-	}
-	s.manager.publishEvent(agentproto.EventProjectsChanged, nil)
-	resp.OK = true
-	resp.Project = project
-	return nil
-}
-
-// ListProjects returns every durable project in this daemon's #2355 registry
-// (#2456). It is a pure config read: config.ListProjects walks the registry
-// directory with no lock and no manager, so — like ListBackends — this handler
-// takes no admission gate and answers even while the daemon is still restoring
-// sessions (a client building its project list must not have to wait on the
-// session restore for the registry, which is independent of it). The read is the
-// half of #2491 the LOCAL union needs; see ListProjectsRequest.
-func (s *controlServer) ListProjects(_ ListProjectsRequest, resp *ListProjectsResponse) error {
-	projects, err := config.ListProjects()
-	if err != nil {
-		return err
-	}
-	resp.Projects = projects
-	return nil
-}
-
 // validateRPCRepoID enforces the RepoID shape for RPC requests that allow an
 // empty value to mean "search all repos". A non-empty RepoID must satisfy
 // config.ValidateRepoID so it cannot escape the per-repo file scope through
@@ -859,17 +768,25 @@ func daemonSpawnLockTarget() (string, error) {
 // at the same time. No-op in production.
 var testHookSpawnPingPassed = func() {}
 
-// bindControlServerExclusive re-checks for a live daemon and binds the
-// control socket while holding an exclusive cross-process file lock, making
-// the ping→bind sequence atomic across processes. RunDaemon's top-of-function
-// ping guard rejects the common duplicate-daemon cases, but two daemons
-// starting near-simultaneously can both pass that ping before either binds;
+// bindControlServerExclusive re-checks for a live daemon, publishes this
+// daemon's PID file, and binds the control socket — all while holding an
+// exclusive cross-process file lock, making the ping→publish→bind sequence
+// atomic across processes. RunDaemon's top-of-function ping guard rejects
+// the common duplicate-daemon cases, but two daemons starting
+// near-simultaneously can both pass that ping before either binds;
 // the second startControlServer would then unlink and rebind the socket path,
 // orphaning the first daemon — alive and looping, but unreachable (#718).
 //
-// The lock is held only for the ping+bind window, not the daemon lifetime,
-// and flock is released by the kernel if the holder dies, so a crashed
-// spawner cannot wedge future spawns.
+// The PID write belongs inside the lock, between the two ends of the
+// sequence: after the under-lock ping, the final existing-daemon check — a
+// pre-home-lock legacy daemon that slipped the top ping keeps its PID file,
+// which an earlier write-then-alreadyRunning-exit would have overwritten
+// and then deleted — and before the bind, so a Ping can never succeed for
+// a daemon whose daemon.pid does not yet exist (#5188).
+//
+// The lock is held only for the ping→publish→bind window, not the daemon
+// lifetime, and flock is released by the kernel if the holder dies, so a
+// crashed spawner cannot wedge future spawns.
 //
 // Returns alreadyRunning=true when a live daemon answered the under-lock
 // ping; the caller must exit cleanly (a non-zero exit would trip the
@@ -885,9 +802,34 @@ func bindControlServerExclusive(manager *Manager, scheduler *taskScheduler, watc
 			alreadyRunning = true
 			return nil
 		}
+		// daemon.pid is published at exactly this point — after the
+		// spawn-locked ping proves no daemon is answering (a pre-home-lock
+		// legacy daemon that slipped the top-of-runDaemon ping keeps its
+		// PID file: overwriting it here and then unlinking it on the
+		// alreadyRunning exit would strip a live daemon's management
+		// handle), and before the control socket below can accept its
+		// first Ping, so a successful readiness probe structurally implies
+		// the file exists (#5188). The write is FAIL-CLOSED: a daemon that
+		// cannot publish its identity would serve while invisible to
+		// StopDaemon, Health, `af daemon status`, and doctor, which is
+		// worse than not serving. The caller sees the returned error on a
+		// foreground start; a detached spawn's cause lands in the daemon
+		// log (persisting it for status/doctor is #5196).
+		if err := writeDaemonPIDFile(); err != nil {
+			return err
+		}
 		testHookSpawnPingPassed()
 		var serverErr error
 		closeFn, serverErr = startControlServer(manager, scheduler, watchers, shutdownCh)
+		if serverErr != nil {
+			// daemon.pid was published above, but runDaemon's removal
+			// defer only registers on the success path — without this
+			// cleanup the file keeps naming a process that is about to
+			// exit (#5188). Still under the spawn lock, so nothing else
+			// could have published; the unlink removes exactly the file
+			// this process wrote.
+			removeDaemonPIDFile()
+		}
 		return serverErr
 	})
 	if lockErr != nil {
@@ -923,13 +865,30 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 		return nil, err
 	}
 
-	server := rpc.NewServer()
-	if err := server.RegisterName(controlServiceName, &controlServer{
-		manager:    manager,
-		scheduler:  scheduler,
-		watchers:   watchers,
-		shutdownCh: shutdownCh,
-	}); err != nil {
+	// Every accepted connection gets its own rpc.Server because its
+	// controlServer carries that connection's kernel-verified requester
+	// identity (#5182): SO_PEERCRED/LOCAL_PEERPID names the process that
+	// CONNECTED, resolved to its (pid, start-stamp) instance at accept, and
+	// teardown handlers register it so the reaper exempts the caller still
+	// blocked on their reply. shutdownOnce is shared by all of them — one
+	// Shutdown still fires once for the whole listener. Registration runs once
+	// eagerly so a service misconfiguration fails at bind time, not per
+	// connection.
+	shutdownOnce := &sync.Once{}
+	newConnServer := func(requester *proctree.Process, pending *pendingUntracks) (*rpc.Server, error) {
+		server := rpc.NewServer()
+		err := server.RegisterName(controlServiceName, &controlServer{
+			manager:        manager,
+			scheduler:      scheduler,
+			watchers:       watchers,
+			shutdownCh:     shutdownCh,
+			shutdownOnce:   shutdownOnce,
+			requester:      requester,
+			pendingReplies: pending,
+		})
+		return server, err
+	}
+	if _, err := newConnServer(nil, nil); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}
@@ -959,9 +918,41 @@ func startControlServer(manager *Manager, scheduler *taskScheduler, watchers *wa
 			connections[conn] = struct{}{}
 			serveWG.Add(1)
 			connectionsMu.Unlock()
+			// The kernel's record of who CONNECTED — the only requester
+			// identity a teardown handler may trust (#5182). The pid is
+			// resolved to its (pid, start-stamp) instance HERE, synchronously
+			// in the accept loop while the peer provably still owns the slot:
+			// a lookup deferred even to the freshly spawned goroutine could
+			// land after the peer exited and its pid was recycled by another
+			// pane-tree process, which would then inherit an exemption meant
+			// for the dead caller (Codex on #5186). A read failure degrades to
+			// no requester (the pre-#5182 posture): the connection still works,
+			// teardown proceeds, and the caller is reaped as it always was.
+			var requester *proctree.Process
+			if peerPID, credErr := peercred.ConnPID(conn); credErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot read peer credentials, teardown requester exemption disabled: %v", credErr)
+			} else if proc, lookupErr := proctree.Lookup(peerPID); lookupErr != nil {
+				log.WarningLog.Printf("daemon control connection: cannot resolve peer pid %d, teardown requester exemption disabled: %v", peerPID, lookupErr)
+			} else {
+				requester = &proc
+			}
 			go func() {
 				defer serveWG.Done()
-				server.ServeConn(conn)
+				pending := &pendingUntracks{}
+				connServer, err := newConnServer(requester, pending)
+				if err != nil {
+					log.WarningLog.Printf("daemon control connection: cannot register RPC service: %v", err)
+					return
+				}
+				// Our own codec, not ServeConn's built-in one: WriteResponse
+				// releases one parked unregister per reply written, so an
+				// exemption outlives only the response it is for — never the
+				// whole connection (Codex on #5186).
+				connServer.ServeCodec(newGobServerCodec(conn, pending))
+				// Backstop for a codec path that returned without Close: any
+				// unregister still parked is for a reply the client will never
+				// read.
+				pending.drain()
 				connectionsMu.Lock()
 				delete(connections, conn)
 				connectionsMu.Unlock()

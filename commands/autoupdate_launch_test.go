@@ -77,8 +77,10 @@ func seedNewerRelease(t *testing.T, current, latest string) string {
 	// Bypass the tarball extract by returning the raw binary directly.
 	downloadBinaryFn = func(string, time.Duration) ([]byte, error) { return []byte("new-binary"), nil }
 	osExecutableFn = func() (string, error) { return tempBin, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) { return daemon.ShutdownNoDaemon, nil }
-	respawnDaemonFn = func(string) (respawnResult, error) { return respawnResult{}, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
+	}
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) { return respawnResult{}, nil }
 	return tempBin
 }
 

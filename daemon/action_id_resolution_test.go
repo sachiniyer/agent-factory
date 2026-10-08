@@ -140,7 +140,7 @@ func TestKillSessionByIDTargetsRightSessionAcrossRepoTitleCollision(t *testing.T
 	_, ch := manager.events.subscribe()
 	var resp KillSessionResponse
 	// Web-shaped request: id is the key, repo_id empty. Targets B.
-	if err := cs.KillSession(KillSessionRequest{ID: dataB.ID, Title: "feature", RepoID: ""}, &resp); err != nil {
+	if err := cs.KillSession(&KillSessionRequest{ID: dataB.ID, Title: "feature", RepoID: ""}, &resp); err != nil {
 		t.Fatalf("KillSession by id B: %v", err)
 	}
 	if !resp.OK {
@@ -183,7 +183,7 @@ func TestArchiveSessionByIDTargetsRightSession(t *testing.T) {
 
 	_, ch := manager.events.subscribe()
 	var resp ArchiveSessionResponse
-	if err := cs.ArchiveSession(ArchiveSessionRequest{ID: dataB.ID, Title: "feature", RepoID: ""}, &resp); err != nil {
+	if err := cs.ArchiveSession(&ArchiveSessionRequest{ID: dataB.ID, Title: "feature", RepoID: ""}, &resp); err != nil {
 		t.Fatalf("ArchiveSession by id B: %v", err)
 	}
 	if !resp.OK {
@@ -216,7 +216,7 @@ func TestRestoreSessionByIDTargetsRightSession(t *testing.T) {
 
 	_, ch := manager.events.subscribe()
 	var archiveResp ArchiveSessionResponse
-	if err := cs.ArchiveSession(ArchiveSessionRequest{ID: dataB.ID, Title: "feature"}, &archiveResp); err != nil {
+	if err := cs.ArchiveSession(&ArchiveSessionRequest{ID: dataB.ID, Title: "feature"}, &archiveResp); err != nil {
 		t.Fatalf("ArchiveSession by id B: %v", err)
 	}
 	_ = drainNextSessionEvent(t, ch, agentproto.EventSessionArchived)
@@ -335,13 +335,13 @@ func TestActionWithStaleIDErrorsRatherThanRetargeting(t *testing.T) {
 	}
 
 	var kResp KillSessionResponse
-	if err := cs.KillSession(KillSessionRequest{ID: staleID, Title: "feature", RepoID: ""}, &kResp); err == nil {
+	if err := cs.KillSession(&KillSessionRequest{ID: staleID, Title: "feature", RepoID: ""}, &kResp); err == nil {
 		t.Fatalf("KillSession with a stale id must error, not fall back to a title match")
 	}
 	assertBothSurvive("kill")
 
 	var aResp ArchiveSessionResponse
-	if err := cs.ArchiveSession(ArchiveSessionRequest{ID: staleID, Title: "feature", RepoID: ""}, &aResp); err == nil {
+	if err := cs.ArchiveSession(&ArchiveSessionRequest{ID: staleID, Title: "feature", RepoID: ""}, &aResp); err == nil {
 		t.Fatalf("ArchiveSession with a stale id must error, not fall back to a title match")
 	}
 	assertBothSurvive("archive")

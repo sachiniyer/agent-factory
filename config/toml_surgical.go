@@ -183,6 +183,22 @@ func tomlAssignmentEnd(lines []string, start int) int {
 	return start
 }
 
+// leadingTOMLCommentStart returns the index where the contiguous comment
+// block directly above ls[idx] begins — idx itself when there is none. The
+// association rule is the one #4865 gives a moved table's header
+// (leadingTableCommentStart in configset_value.go): only a line that is
+// wholly a comment belongs to the block, and a blank or any non-comment line
+// ends it — so a note separated from the key by a blank line stays where the
+// author put it. A line that begins inside a multiline string is that
+// string's content, never a comment (#3662's mask, again).
+func leadingTOMLCommentStart(ls []string, stringContent []bool, idx int) int {
+	start := idx
+	for start > 0 && !stringContent[start-1] && strings.HasPrefix(strings.TrimSpace(ls[start-1]), "#") {
+		start--
+	}
+	return start
+}
+
 func preservedTOMLAssignmentComments(lines []string, start, end int) []string {
 	_, equal, ok := tomlAssignmentPath(lines[start])
 	if !ok {
@@ -362,7 +378,16 @@ func setTOMLInlineTableMember(line, section, leaf, encoded string) (string, bool
 	trailing := len(strings.TrimRight(body, " \t"))
 	separator := ""
 	if strings.TrimSpace(body) != "" {
-		separator = ", "
+		// go-toml accepts a trailing comma in an inline table
+		// (`section = { a = 1, }`), so the loader never rejects one a user
+		// hand-edited in. Reusing that comma as the separator — a single
+		// space instead of another ", " — keeps the edit from emitting ",,",
+		// which the write gate's re-parse would refuse.
+		if trailing > 0 && body[trailing-1] == ',' {
+			separator = " "
+		} else {
+			separator = ", "
+		}
 	}
 	body = body[:trailing] + separator + leaf + " = " + encoded + body[trailing:]
 	return line[:start] + body + line[end:], true
@@ -381,7 +406,12 @@ func deleteTOMLInlineTableMember(line, section, leaf string) (string, bool) {
 	member := members[target]
 	switch {
 	case len(members) == 1:
-		body = body[:member.trimStart] + body[member.trimEnd:]
+		// Removing the only member must leave an empty table. Excising the
+		// member's trimmed range alone strands the comma that followed it
+		// (`ssh = { , }` when the table had a trailing comma; `ssh = {  }`
+		// otherwise), so collapse the whole body rather than stitch the
+		// surrounding whitespace.
+		body = ""
 	case target < len(members)-1:
 		body = body[:member.trimStart] + body[members[target+1].trimStart:]
 	default:

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/teardownreq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -151,6 +152,76 @@ func TestWorktreeWriterProcesses_PrunesSharedInfrastructureSubtrees(t *testing.T
 		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
 			"a matching ancestor must not carry the shared tmux server and its unrelated subtree into the kill set")
 	})
+}
+
+// A process cwd'd inside the worktree that is the teardown's own requester
+// (#5182) is alive there for the best possible reason — it is blocked on the
+// reply this teardown owes it — so the writer reaper must spare it. It stays
+// IN the candidate set regardless: the per-signal recheck exempts it only
+// while its registration holds, so a reprieve that lapses mid-reap is
+// reconsidered by the next tier instead of escaping permanently (Codex on
+// #5186). The identity match is (pid, start-stamp): a same-pid process with
+// a different start stamp is a recycled slot and stays reapable.
+func TestWorktreeWriterProcesses_RetainsTeardownRequester(t *testing.T) {
+	root := "/managed/worktree"
+	outside := "/somewhere/else"
+	snap := map[int]proctree.Process{
+		10: {PID: 10, PPID: 1, StartID: 111},  // writer root
+		20: {PID: 20, PPID: 10, StartID: 222}, // the requester, under the root
+		30: {PID: 30, PPID: 10, StartID: 333}, // a genuine writer sibling
+		// The requester's own spawned writer, chdir'd OUT of the worktree:
+		// reachable only through the requester's subtree, and still this
+		// session's to reap (Codex on #5186).
+		40: {PID: 40, PPID: 20, StartID: 444},
+	}
+	workingDirs := map[int]string{10: root, 20: root, 30: root, 40: outside}
+	workingDir := func(pid int) (string, bool) { d, ok := workingDirs[pid]; return d, ok }
+	noTmux := func(int) bool { return false }
+
+	untrack := teardownreq.Track(snap[20])
+	defer untrack()
+
+	got := worktreeWriterProcesses(root, snap, 99, workingDir, noTmux)
+	assert.ElementsMatch(t, []int{10, 20, 30, 40}, processPIDs(got),
+		"the requester stays a candidate — the reaper spares it per-signal while tracked, "+
+			"and its writer child plus the genuine writer stay selected")
+
+	untrack()
+	got = worktreeWriterProcesses(root, snap, 99, workingDir, noTmux)
+	assert.ElementsMatch(t, []int{10, 20, 30, 40}, processPIDs(got),
+		"once the handler returns, the same process is a writer again")
+
+	untrack = teardownreq.Track(snap[20])
+	defer untrack()
+	recycled := map[int]proctree.Process{
+		10: snap[10],
+		20: {PID: 20, PPID: 10, StartID: 999}, // pid reused by another process
+	}
+	got = worktreeWriterProcesses(root, recycled, 99, workingDir, noTmux)
+	assert.ElementsMatch(t, []int{10, 20}, processPIDs(got),
+		"a recycled pid must not inherit the requester exemption")
+}
+
+// The requester exemption is per-identity, not per-subtree: a requester that
+// is itself a matching root still walks its children into the kill set —
+// exempting the subtree would let a requester-spawned writer escape the reap
+// (Codex on #5186).
+func TestWorktreeWriterProcesses_RequesterRootKeepsChildrenEligible(t *testing.T) {
+	root := "/managed/worktree"
+	outside := "/somewhere/else"
+	snap := map[int]proctree.Process{
+		50: {PID: 50, PPID: 1, StartID: 555},  // the requester, a standalone root
+		60: {PID: 60, PPID: 50, StartID: 666}, // its writer, chdir'd out
+	}
+	workingDirs := map[int]string{50: root, 60: outside}
+	workingDir := func(pid int) (string, bool) { d, ok := workingDirs[pid]; return d, ok }
+
+	untrack := teardownreq.Track(snap[50])
+	defer untrack()
+
+	got := worktreeWriterProcesses(root, snap, 99, workingDir, func(int) bool { return false })
+	assert.ElementsMatch(t, []int{50, 60}, processPIDs(got),
+		"the matching requester is retained for the per-signal recheck, and its chdir'd-out writer child is still selected")
 }
 
 func processPIDs(processes []proctree.Process) []int {

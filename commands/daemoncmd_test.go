@@ -3,8 +3,11 @@ package commands
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -78,7 +81,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 		*ensureCalls++
 		return nil
 	}
-	waitForShutdownCompletionFn = func() error { return nil }
+	waitForShutdownCompletionFn = func(daemon.ShutdownTarget) error { return nil }
 	return restartCalls, ensureCalls
 }
 
@@ -89,7 +92,7 @@ func stubRespawnCollaborators(t *testing.T, installed bool, restartErr error) (r
 func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -106,7 +109,7 @@ func TestRespawnAfterUpgradeRestartsInstalledUnit(t *testing.T) {
 func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -124,7 +127,7 @@ func TestRespawnAfterUpgradeWithoutUnitSpawnsAdHoc(t *testing.T) {
 func TestRespawnAfterUpgradeFallsBackWhenRestartFails(t *testing.T) {
 	restartCalls, ensureCalls := stubRespawnCollaborators(t, true, errors.New("systemctl exited 1"))
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -147,7 +150,7 @@ func TestRespawnAfterUpgradeSpawnsWithZeroEnabledTasks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	_, ensureCalls := stubRespawnCollaborators(t, false, nil)
 
-	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+	if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -164,7 +167,7 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 		return nil
 	}
 
-	if _, err := respawnDaemonAfterUpgrade("/opt/af/new"); err != nil {
+	if _, err := respawnDaemonAfterUpgrade("/opt/af/new", daemon.ShutdownTarget{}); err != nil {
 		t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 	}
 
@@ -178,25 +181,24 @@ func TestRespawnAfterUpgradeSpawnsAdHocFromProvidedPath(t *testing.T) {
 // control socket to die before EITHER respawn branch runs — otherwise the new
 // daemon (ad-hoc EnsureDaemon ping or the unit-restarted daemon's startup ping
 // guard) sees the dying daemon as alive, skips the spawn, and nothing is left
-// running once it exits. Both branches are exercised; a wait timeout must
-// degrade to a respawn attempt, never a skipped one.
+// running once it exits. Both branches are exercised. A wait that times out
+// withholds the respawn instead (#5007); upgrade_shutdown_incomplete_test.go
+// pins that.
 func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		installed bool
-		waitErr   error
 		wantStep  string
 	}{
 		{name: "ad-hoc branch", installed: false, wantStep: "ensure"},
 		{name: "unit branch", installed: true, wantStep: "restart"},
-		{name: "wait timeout still respawns", installed: false, waitErr: errors.New("daemon control socket still answering"), wantStep: "ensure"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubRespawnCollaborators(t, tc.installed, nil)
 			var seq []string
-			waitForShutdownCompletionFn = func() error {
+			waitForShutdownCompletionFn = func(daemon.ShutdownTarget) error {
 				seq = append(seq, "wait")
-				return tc.waitErr
+				return nil
 			}
 			prevRestart, prevEnsure := restartAutostartUnitFn, ensureDaemonFromPathFn
 			restartAutostartUnitFn = func() error {
@@ -208,7 +210,7 @@ func TestRespawnAfterUpgradeWaitsForShutdownFirst(t *testing.T) {
 				return prevEnsure(path)
 			}
 
-			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath); err != nil {
+			if _, err := respawnDaemonAfterUpgrade(testUpgradeDaemonPath, daemon.ShutdownTarget{}); err != nil {
 				t.Fatalf("respawnDaemonAfterUpgrade: %v", err)
 			}
 
@@ -226,10 +228,10 @@ func TestRestartDaemonFromPathNoDaemonIsNoOp(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 		respawnDaemonFn = prevRespawn
 	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownNoDaemon, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownNoDaemon, daemon.ShutdownTarget{}, nil
 	}
-	respawnDaemonFn = func(string) (respawnResult, error) {
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) {
 		t.Fatalf("respawn must not run when no daemon is present")
 		return respawnResult{}, nil
 	}
@@ -250,11 +252,11 @@ func TestRestartDaemonFromPathRespawnsStoppedDaemon(t *testing.T) {
 		requestDaemonShutdownFn = prevShutdown
 		respawnDaemonFn = prevRespawn
 	})
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) {
-		return daemon.ShutdownViaRPC, nil
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return daemon.ShutdownViaRPC, daemon.ShutdownTarget{}, nil
 	}
 	var gotPath string
-	respawnDaemonFn = func(path string) (respawnResult, error) {
+	respawnDaemonFn = func(path string, _ daemon.ShutdownTarget) (respawnResult, error) {
 		gotPath = path
 		return respawnResult{}, nil
 	}
@@ -317,6 +319,63 @@ func TestRunDaemonRestartNoDaemonSkipsUnsafeUnitRefresh(t *testing.T) {
 	}
 }
 
+// TestProbeDaemonRestartPresence_UnverifiablePIDGatesOnPingVerdict pins the
+// restart gate added for #5188: an unverifiable daemon.pid only short-circuits
+// `af daemon restart` when the ping PROVED the socket absent. A timeout is
+// indeterminate — a live, backlogged daemon fails Ping the same way — and on
+// macOS the unverifiable shape is the norm (peer environ unreadable), so an
+// indeterminate ping must fall through to the ordinary fail-closed answer
+// rather than silently no-op an explicit restart over a reachable daemon.
+func TestProbeDaemonRestartPresence_UnverifiablePIDGatesOnPingVerdict(t *testing.T) {
+	prevHealth := daemonHealthFn
+	t.Cleanup(func() { daemonHealthFn = prevHealth })
+
+	// Indeterminate ping (deadline exceeded): falls through to
+	// ClassifyShutdownTarget's ordinary Undetermined, never the sentinel.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr:         &net.OpError{Op: "dial", Net: "unix", Err: os.ErrDeadlineExceeded},
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+	probeDaemonRestartPresence().Match(
+		func() { t.Error("unverifiable pid + timed-out ping is not a proven daemon") },
+		func() { t.Error("unverifiable pid + timed-out ping is not proven absent") },
+		func() { t.Error("unverifiable pid + timed-out ping is not proven absent") },
+		func(cause error) {
+			if errors.Is(cause, errRestartPresenceUnproven) {
+				t.Error("an indeterminate ping must not produce the unproven sentinel — a reachable daemon would be skipped silently")
+			}
+		},
+	)
+
+	// Definite absence (ECONNREFUSED): the sentinel applies — the unit must
+	// not be mutated for a pid that may name another home's daemon.
+	daemonHealthFn = func() daemon.HealthStatus {
+		return daemon.HealthStatus{
+			PingErr: &net.OpError{Op: "dial", Net: "unix",
+				Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}},
+			PIDFilePID:      4242,
+			PIDUnverifiable: true,
+		}
+	}
+	probeDaemonRestartPresence().Match(
+		func() { t.Error("definite absent socket + unverifiable pid is not a proven daemon") },
+		func() {
+			t.Error("definite absent socket + unverifiable pid is not 'no daemon' — the file may name this home's socket-lost daemon")
+		},
+		func() {
+			t.Error("definite absent socket + unverifiable pid is not 'no daemon' — the file may name this home's socket-lost daemon")
+		},
+		func(cause error) {
+			if !errors.Is(cause, errRestartPresenceUnproven) {
+				t.Errorf("definite absent socket + unverifiable pid must produce the unproven sentinel, got %v", cause)
+			}
+		},
+	)
+}
+
 // daemonRestartPresentHarness stands up the seams runDaemonRestart touches once
 // it has decided a daemon is present: the presence probe answers yes, the
 // executable resolves to a real temp file (runDaemonRestart EvalSymlinks it), no
@@ -346,8 +405,10 @@ func daemonRestartPresentHarness(t *testing.T, shutdown daemon.ShutdownResult, r
 	})
 	daemonRestartPresenceFn = func() daemon.ProbeAnswer { return daemon.AnswerYes() }
 	osExecutableFn = func() (string, error) { return binPath, nil }
-	requestDaemonShutdownFn = func() (daemon.ShutdownResult, error) { return shutdown, nil }
-	respawnDaemonFn = func(string) (respawnResult, error) { return respawn, nil }
+	requestDaemonShutdownFn = func() (daemon.ShutdownResult, daemon.ShutdownTarget, error) {
+		return shutdown, daemon.ShutdownTarget{}, nil
+	}
+	respawnDaemonFn = func(string, daemon.ShutdownTarget) (respawnResult, error) { return respawn, nil }
 	stubAutostartScope(t, false, false, nil) // no unit serves this home -> refresh no-ops
 	daemonRestartQuiet = false
 
@@ -483,5 +544,33 @@ func TestRunDaemonRestart_FailedUnitRestartIsLoudWithSIGTERM(t *testing.T) {
 		if !strings.Contains(errOut.String(), want) {
 			t.Fatalf("stderr missing %q (SIGTERM stop must not swallow the demotion).\ngot=%q", want, errOut.String())
 		}
+	}
+}
+
+// TestRunDaemonRestart_UnprovenDaemonExitsNonzero pins the install-path
+// contract: an unverifiable live daemon whose socket is proven absent makes
+// runDaemonRestart decline the restart — and it must do so with an ERROR, not
+// the documented no-daemon no-op, because install.sh/dev-install.sh run
+// `af daemon restart --quiet` and emit their only restart warning on a
+// nonzero status (#5188 review).
+func TestRunDaemonRestart_UnprovenDaemonExitsNonzero(t *testing.T) {
+	prevPresence := daemonRestartPresenceFn
+	prevQuiet := daemonRestartQuiet
+	t.Cleanup(func() {
+		daemonRestartPresenceFn = prevPresence
+		daemonRestartQuiet = prevQuiet
+	})
+	daemonRestartPresenceFn = func() daemon.ProbeAnswer {
+		return daemon.Undetermined(fmt.Errorf("%w (pid %d)", errRestartPresenceUnproven, 4242))
+	}
+	daemonRestartQuiet = true // the exact shape install.sh drives
+
+	var out, errOut bytes.Buffer
+	err := runDaemonRestart(&out, &errOut)
+	if err == nil {
+		t.Fatal("an unproven-daemon refusal must exit nonzero so install.sh/dev-install.sh warn")
+	}
+	if !errors.Is(err, errRestartPresenceUnproven) {
+		t.Fatalf("error must carry the unproven sentinel for callers matching on it, got %v", err)
 	}
 }

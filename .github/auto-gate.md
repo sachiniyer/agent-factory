@@ -531,7 +531,7 @@ covered — a run discarded while pending never reaches invalidation, and an
 uncovered head keeps its stale verdict. The workflow-level group is keyed so
 that guarantee holds: scheduled and dispatched reconciliation passes share one
 fungible group; comment and
-review events coalesce per PR; check-suite, status, and workflow-run events
+review events coalesce per PR; status and workflow-run events
 coalesce per named commit; the remaining pull_request_target actions coalesce
 per (PR, payload head); synchronize stays keyed to its exact (before, after)
 transition and workflow_dispatch to its (PR, previous head), because those two
@@ -579,7 +579,7 @@ nothing replaced it.
 
 The calling evaluation job holds `auto-gate-target-<target>-head-<head SHA>`
 for the entire reusable aggregate transaction. The target is the issue or PR
-number, dispatch PR number, workflow-run head SHA, check-suite head SHA, or
+number, dispatch PR number, workflow-run head SHA, or
 status SHA (in that order), falling back to the unique run ID. With
 `cancel-in-progress: false`, newer pending evaluation jobs replace older pending
 jobs for that target/head; active transactions are never cancelled. Every
@@ -615,23 +615,49 @@ platform cancellation, not a decision — leaves the head at that non-green
 marker; the reconciliation pass below re-evaluates it once it outlives a live
 transaction's lease.
 
-GitHub suppresses `check_suite` recursion for suites created by Actions. The
-required `Lint` and `Build` jobs both belong to **PR Validation**, so Auto Gate
-also subscribes to that workflow's terminal `workflow_run` event. GitHub has
-intermittently omitted that event, so a reconciliation pass backs it up: it
-wakes only an absent exact decision, or a failed decision that names
-`Build` or `Lint` as a blocker and recorded a different state for the now-complete
-check. Runs are coalesced per PR/head. The decision records the check-run ID,
+Auto Gate does not subscribe to `check_suite` (#5177). GitHub does not
+suppress `check_suite` recursion for suites created by Actions — it only
+suppresses new workflow runs for events written with `GITHUB_TOKEN`, and a
+suite completing is a platform lifecycle transition, not a token write. So
+every run's own github-actions suite completing re-fired the workflow on the
+same head: ~200 self-triggered runs/hour measured on master for days. No
+payload predicate can run before the run exists (`on.check_suite` filters
+only on `types`), and a job skipped by `if` still completes its suite
+(skipped jobs land in it as completed check runs), so a filter inside the
+run would only trade working runs for skipped ones while the chain kept
+growing. The subscription itself is the only filter. Nothing needed is lost:
+every required check is Actions-owned, the required `Lint` and `Build` jobs
+both belong to **PR Validation** and Auto Gate still subscribes to that
+workflow's terminal `workflow_run` event, commit statuses arrive through
+`status`, and a suite completing on the master head never resolved a
+pull-request target anyway — no open PR owns that commit — so
+merge-triggered verification suites re-evaluated nothing the fleet needed;
+master-advance staleness belongs to the reconciliation pass. If the ruleset
+ever gains a required check owned by a non-Actions app, its pending state is
+a transient block the pass already re-evaluates; re-adding `check_suite`
+needs a trigger-level app filter that does not exist today.
+
+GitHub has intermittently omitted that `workflow_run` event, so a
+reconciliation pass backs it up: it wakes only an absent exact decision, or
+a failed decision that names `Build` or `Lint` as a blocker and recorded a
+different state for the now-complete check. Runs are coalesced per PR/head. The decision records the check-run ID,
 status and conclusion that its
 required-check read actually observed; the reconciler compares that tuple with
 the current completed run rather than ordering check and publication clocks.
 Missing or malformed legacy evidence is reconciled conservatively once.
 
 **A pass does not depend on the schedule (#4571).** The `*/5` schedule still
-starts passes, but GitHub has delivered it every two to five hours. Every other
+starts passes, but GitHub has delivered it every two to five hours — measured
+at 30 fires in 6.6 days against ~288 expected per day (#5179). Every other
 Auto Gate run therefore ends by requesting a pass: it sends one
 `repository_dispatch` of type `auto-gate-reconcile`, and the run that starts is
-the same pass the schedule runs. Two guards bound this:
+the same pass the schedule runs. A PR Validation run ends the same way
+(#5179): its last job POSTs the dispatch itself — a synchronous API write
+inside the run whose completion is at risk, so a dropped `workflow_run`
+delivery cannot strand the decision that completion should have refreshed —
+and its POST is a warning on failure, never a silent skip. Fork and Dependabot
+`pull_request` runs carry read-only tokens and cannot POST, so the job skips
+them outright and `workflow_run` remains their wakeup. Two guards bound this:
 
 - **No open-ended recursion.** A pass requests a pass only as a handoff: when
   it saw work at all — leftovers its bounded wait could not finish or the caps
