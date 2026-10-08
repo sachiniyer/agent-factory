@@ -520,6 +520,16 @@ func ambiguousSpellingError(prettyPath string, alias configKeyAlias, cfg *Config
 // have to choose between. A file that fails to read here is left for LoadConfig
 // to refuse with its own, parse-level error; a missing or unreadable file is
 // LoadConfig's call to make, not a weaker one from here.
+//
+// The ambiguity is reported only when the typed reader would actually reach the
+// conversion. metadataForSource is a shapeless decode: it accepts a string
+// where a bool is expected, and json.Decoder.Decode ignores trailing garbage
+// after a valid first object — both of which the frozen JSON reader
+// (parseConfigForConversion, the decode convertJSONToTOML itself runs) rejects.
+// Pointing a user at the "delete whichever line is wrong" remedy for a file the
+// reader would never convert sends them at the wrong fix, so a file that fails
+// the typed read is left for LoadConfig's own parse-level error, the same
+// deferral a syntactically invalid file already gets.
 func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -537,6 +547,14 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 		}
 		if reflect.DeepEqual(flat, grouped) {
 			continue
+		}
+		// Only refuse on a file the conversion would actually run on. This is
+		// reached only when the shapeless decode saw a divergence, so it runs
+		// once per ambiguous file; a non-ambiguous file never pays for it, and a
+		// refusal returns before LoadConfig is called, so the typed read's
+		// deprecation warnings are not repeated by the load below.
+		if _, err := parseConfigForConversion(data, prettyPath); err != nil {
+			return nil
 		}
 		return ambiguousLegacyJSONSpellingError(prettyPath, alias, flat, grouped)
 	}

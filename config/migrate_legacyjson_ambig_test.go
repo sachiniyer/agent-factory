@@ -154,3 +154,51 @@ func TestMigrateAmbiguousLegacyJSONInvalidFileDefersToLoadConfig(t *testing.T) {
 	assert.NotContains(t, err.Error(), "both set, to different values",
 		"the ambiguity guard did not run on an unparseable file")
 }
+
+// TestMigrateAmbiguousLegacyJSONTypeMismatchDefersToLoadConfig pins the case a
+// shapeless decode CANNOT catch but the typed reader does: a flat value whose
+// JSON kind is valid but whose type the frozen reader will not accept. The
+// shapeless map happily holds "yes" against a bool field, so the presence check
+// sees a divergence and would report the "delete whichever line is wrong"
+// remedy — but the conversion would never run, because parseConfigForConversion
+// rejects the string-to-bool decode. The guard confirms the typed read before
+// refusing, so the file is left for LoadConfig's own parse error instead.
+func TestMigrateAmbiguousLegacyJSONTypeMismatchDefersToLoadConfig(t *testing.T) {
+	home := seedJSONConfig(t, `{"require_token":"yes","network":{"require_token":false}}`)
+
+	_, err := MigrateGlobalConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not load",
+		"a type mismatch is LoadConfig's to surface, not the ambiguity guard's")
+	assert.Contains(t, err.Error(), "failed to parse config file",
+		"LoadConfig names the parse failure, not an ambiguity")
+	assert.Contains(t, err.Error(), "cannot unmarshal",
+		"the underlying error is the typed reader's type rejection")
+	assert.NotContains(t, err.Error(), "delete whichever line is wrong",
+		"the ambiguity remedy is not offered for a file the reader would never convert")
+	assert.NoFileExists(t, filepath.Join(home, TomlConfigFileName),
+		"a parse failure writes nothing")
+}
+
+// TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig pins the other
+// divergence the finding named: json.Decoder.Decode (the shapeless read) stops
+// after the first object and ignores trailing garbage, while json.Unmarshal
+// (the typed reader, via normalizeJSONDurationValues) rejects it. The guard
+// confirms the typed read before refusing, so trailing garbage defers to
+// LoadConfig's parse error rather than reporting an ambiguity.
+func TestMigrateAmbiguousLegacyJSONTrailingGarbageDefersToLoadConfig(t *testing.T) {
+	home := seedJSONConfig(t, `{"require_token":true,"network":{"require_token":false}}garbage`)
+
+	_, err := MigrateGlobalConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not load",
+		"trailing garbage is LoadConfig's to surface, not the ambiguity guard's")
+	assert.Contains(t, err.Error(), "failed to parse config file",
+		"LoadConfig names the parse failure, not an ambiguity")
+	assert.Contains(t, err.Error(), "invalid character",
+		"the underlying error is the typed reader rejecting the trailing bytes")
+	assert.NotContains(t, err.Error(), "delete whichever line is wrong",
+		"the ambiguity remedy is not offered for a file the reader would never convert")
+	assert.NoFileExists(t, filepath.Join(home, TomlConfigFileName),
+		"a parse failure writes nothing")
+}
