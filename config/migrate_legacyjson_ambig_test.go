@@ -339,6 +339,44 @@ func TestMigrateRefusesLegacyJSONNullFlatAgainstZeroGroupedWhenDefaultIsNonzero(
 	})
 }
 
+// TestMigrateDoesNotRefuseLegacyJSONBothSpellingsNull pins the case the flat-only
+// null normalization got wrong: when BOTH spellings are explicitly null, the flat
+// null resolves to the field's default but the grouped null stays an untyped
+// nil, so DeepEqual reports a divergence and the run refused even though the
+// source wrote identical values. The typed reader leaves the scalar at its
+// default for either null, the conversion writes that default into both
+// spellings, and there is no tie to break — so the guard normalizes the grouped
+// null to the same default and converts instead of refusing.
+func TestMigrateDoesNotRefuseLegacyJSONBothSpellingsNull(t *testing.T) {
+	t.Run("both null convert as redundant", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"require_token":null,"network":{"require_token":null}}`)
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err, "two identical null spellings agree, so no refusal")
+		require.True(t, result.ConvertedFromJSON)
+		require.Len(t, result.Migrated, 1)
+		assert.True(t, result.Migrated[0].Redundant, "the two null spellings resolve to one default value")
+
+		cfg, err := parseConfigTOML([]byte(readFile(t, filepath.Join(home, TomlConfigFileName))), filepath.Join(home, TomlConfigFileName))
+		require.NoError(t, err)
+		assert.False(t, cfg.RequireToken, "both null spellings resolve to the bool default false")
+	})
+
+	t.Run("both null convert as redundant for a nonzero default", func(t *testing.T) {
+		home := seedJSONConfig(t, `{"listen_addr":null,"network":{"listen_addr":null}}`)
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err, "two identical null spellings agree, so no refusal")
+		require.True(t, result.ConvertedFromJSON)
+		require.Len(t, result.Migrated, 1)
+		assert.True(t, result.Migrated[0].Redundant)
+
+		cfg, err := parseConfigTOML([]byte(readFile(t, filepath.Join(home, TomlConfigFileName))), filepath.Join(home, TomlConfigFileName))
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1:8443", cfg.ListenAddr, "both null spellings resolve to the string default")
+	})
+}
+
 // TestMigrateAmbiguousLegacyJSONHardensAFHomeBeforeComputingConversion pins the
 // ordering the EACCES case needs: a default AF home left without directory
 // search permission (mode 0600) makes both fileExists calls return EACCES,

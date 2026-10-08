@@ -582,10 +582,15 @@ func refuseAmbiguousLegacyJSON(configPath, prettyPath string) error {
 		// conversion overwrites the grouped empty with the nonzero default and
 		// enables the listener. The shapeless decode reads null as an untyped
 		// nil, which DeepEqual never matches against a typed value, so
-		// normalize the flat null to the field's compiled-in default — the
-		// same effective value the typed reader would produce — before
-		// comparing.
+		// comparing. A GROUPED null resolves to the same default the flat null
+		// does — the frozen JSON reader unmarshals onto DefaultConfig, and the
+		// conversion writes that default into both spellings — so a file that
+		// writes null in BOTH spellings resolves to one value and has no tie to
+		// break. Normalize the grouped null equivalently before comparing, or
+		// DeepEqual(nil, default) would report a divergence where the source
+		// wrote identical values.
 		flat = normalizeLegacyJSONNull(flat, alias)
+		grouped = normalizeLegacyJSONNull(grouped, alias)
 		if reflect.DeepEqual(flat, grouped) {
 			continue
 		}
