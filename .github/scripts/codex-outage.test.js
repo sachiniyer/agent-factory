@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { aggregate, render, readRecord, sweep, gateNotice } = require('./codex-outage.js');
+const { aggregate, render, readRecord, sweep, gateNotice, createGhApi } = require('./codex-outage.js');
 const gate = require('./auto-gate.js');
 const t = (hour) => `2026-09-05T${String(hour).padStart(2, '0')}:00:00.000Z`;
 const tomorrow = (hour) => `2026-09-06T${String(hour).padStart(2, '0')}:00:00.000Z`;
@@ -276,9 +276,12 @@ test('a failed sweep preserves the previous record; a first sweep creates only o
   assert.deepEqual(writes, ['POST', 'PATCH']);
   const previous = record.body;
   fail = true;
-  await assert.rejects(sweep(api, 'owner/repo', t(12)), /API read failed/);
-  assert.equal(record.body, previous);
-  assert.deepEqual(writes, ['POST', 'PATCH']);
+  // A failed scan still writes (#4629): the record marks itself incomplete and
+  // carries the previous episodes verbatim rather than posing as a clean read.
+  await sweep(api, 'owner/repo', t(12));
+  assert.deepEqual(writes, ['POST', 'PATCH', 'PATCH']);
+  assert.match(record.body, /incomplete/i);
+  assert.deepEqual(readRecord(record).episodes, readRecord({ body: previous, user: { login: 'sachiniyer' } }).episodes);
 });
 test('an expired completed episode is preserved after its artifacts leave scan history', async () => {
   let artifacts = [comment(2, limits[1])];
@@ -543,8 +546,13 @@ test('#4052: live sweep reads commit and paginated push anchors before accepting
   assert.deepEqual(record.episodes[0].merged, [4051]);
   assert.equal(calls.filter(([route]) => route === 'graphql').length, 2);
   unreadable = true;
-  await assert.rejects(sweep(api, 'owner/repo', t(6)), /push history unavailable/);
-  assert.equal(writes.length, 1, 'failed reads must preserve the previous record');
+  // The unreadable push history degrades to an incomplete record (#4629):
+  // the write still happens, says the scan was partial, and — the fake never
+  // serves the record back — carries an empty episode list rather than the
+  // partial scan's.
+  await sweep(api, 'owner/repo', t(6));
+  assert.equal(writes.length, 2);
+  assert.match(writes[1], /incomplete/i);
 });
 
 test('3954286650: an unrecognised submitted review cannot turn a row into recovery', () => {
@@ -683,5 +691,109 @@ test('the sweep proves the content head before counting a merge degraded', async
       assert.deepEqual(record.episodes[0].merged, [4233],
         'a merge the proof does not accept keeps the head-only count');
     }
+  }
+});
+
+// #4629: the live sweep drives `gh api` through an execFileSync helper, and
+// one transient failure inside the multi-hundred-call scan must not kill the
+// run. These stub the exec layer itself — a dropped body, a transport
+// timeout, a 5xx, a secondary-rate-limit 403, and a sustained outage.
+function ghFailure(stderr, { status = 1 } = {}) {
+  const error = new Error(`Command failed: gh api\n${stderr}`);
+  error.status = status;
+  error.stderr = stderr;
+  return error;
+}
+
+// Replays gh's wire format: paginated endpoints emit one JSON document per
+// line (`.[] | @json`), single reads and writes a single document. `handler`
+// answers by route and may throw a process error or return a raw body string.
+function fakeGh(handler) {
+  const calls = [];
+  const writes = [];
+  const execFileSync = (command, args, { input } = {}) => {
+    calls.push(args);
+    assert.equal(command, 'gh');
+    if (args.includes('--method')) {
+      writes.push(JSON.parse(input).body);
+      return JSON.stringify({ id: 42, html_url: 'https://example.com/record' });
+    }
+    const answer = handler(args[1]);
+    if (typeof answer === 'string') return answer;
+    return args.includes('--paginate') ? answer.map(JSON.stringify).join('\n') : JSON.stringify(answer);
+  };
+  return { calls, writes, execFileSync };
+}
+const callCount = (calls, part) => calls.filter(args => String(args[1]).includes(part)).length;
+const outageScanFixture = (route) => {
+  if (route.includes('/issues/3932/comments')) return [];
+  if (route.includes('/pulls?')) return [{ number: 2, created_at: t(0), updated_at: t(9), merged_at: t(8), head: { sha: head } }];
+  if (route.includes('/issues/2/comments')) return [comment(2, limits[1])];
+  if (route.includes('/pulls/2/comments') || route.includes('/pulls/2/reviews')) return [];
+  throw new Error(`unstubbed route ${route}`);
+};
+
+test('#4629: transient gh api failures retry and the sweep completes', async () => {
+  for (const [name, part, fail] of [
+    ['an empty body', '/pulls?', () => ''],
+    ['a truncated page line', '/pulls/2/comments', () => '{"number":2,"updated_at"'],
+    ['a transport timeout', '/pulls/2/reviews', () => {
+      throw ghFailure('Get "https://api.github.com/x": dial tcp 140.82.113.6:443: i/o timeout');
+    }],
+    ['a 5xx', '/pulls?', () => { throw ghFailure('gh: Server Error (HTTP 502)'); }],
+    ['a secondary rate limit', '/issues/2/comments', () => {
+      throw ghFailure('gh: You have exceeded a secondary rate limit. (HTTP 403)');
+    }],
+  ]) {
+    let failing = true;
+    const { calls, writes, execFileSync } = fakeGh((route) => {
+      if (failing && route.includes(part)) { failing = false; return fail(); }
+      return outageScanFixture(route);
+    });
+    const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.equal(callCount(calls, part), 2, `${name}: the failed call must be retried`);
+    assert.equal(writes.length, 1, name);
+    assert.match(writes[0], /unavailable since 2026-09-05T02/, name);
+    assert.doesNotMatch(writes[0], /incomplete/i, name);
+  }
+});
+
+test('#4629: a gh failure that outlives its retries writes an incomplete record', async () => {
+  const previous = { start: t(2), end: null, merged: [2], causes: ['usage-limit'],
+    latest: { time: t(2), url: 'https://example.com/2', body: limits[1], kind: 'usage-limit' } };
+  const existing = { id: 42, user: { login: 'sachiniyer' }, body: render([previous], t(5)) };
+  const { calls, writes, execFileSync } = fakeGh((route) => {
+    if (route.includes('/issues/3932/comments')) return [existing];
+    if (route.includes('/pulls?')) throw ghFailure('Get "https://api.github.com/x": dial tcp: i/o timeout');
+    return outageScanFixture(route);
+  });
+  const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+  await sweep(api, 'owner/repo', t(10));
+  assert.equal(callCount(calls, '/pulls?'), 4, 'the read is retried on a bounded schedule then stops');
+  assert.equal(writes.length, 1, 'a scan that cannot finish still writes — the record marks itself incomplete');
+  assert.match(writes[0], /incomplete/i);
+  const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
+  assert.deepEqual(record.episodes, [previous],
+    'an incomplete scan keeps the last complete episodes rather than restating them from partial data');
+  assert.equal(record.observedAt, t(5), 'observedAt stays at the last complete sweep');
+  assert.ok(record.incomplete?.at, 'the record marks the scan incomplete');
+});
+
+test('#4629: a real 4xx answer is not retried, and still degrades to a marked record', async () => {
+  for (const stderr of [
+    'gh: Not Found (HTTP 404)',
+    'gh: Validation Failed (HTTP 422)',
+    'gh: Forbidden. This integration is not allowed to read that. (HTTP 403)',
+  ]) {
+    const { calls, writes, execFileSync } = fakeGh((route) => {
+      if (route.includes('/pulls/2/comments')) throw ghFailure(stderr);
+      return outageScanFixture(route);
+    });
+    const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.equal(callCount(calls, '/pulls/2/comments'), 1, `a 4xx verdict is not retried: ${stderr}`);
+    assert.equal(writes.length, 1);
+    assert.match(writes[0], /incomplete/i);
   }
 });

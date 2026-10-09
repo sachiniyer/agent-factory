@@ -183,14 +183,24 @@ async function readUpdateBranchContentHead(api, root, pull) {
   });
 }
 
-function render(episodes, now) {
+// An incomplete sweep carries the last complete episodes verbatim and says so:
+// `observedAt` stays at the previous complete scan so gateNotice's "as of"
+// keeps describing the data's real age, and the record marks itself partial
+// rather than posing as a clean read (#4629).
+function render(episodes, now, incomplete = null) {
   const active = episodes.at(-1);
   const heading = active && !active.end
     ? `Codex reviewer unavailable since ${active.start}`
-    : 'Codex reviewer availability — recovered';
+    : incomplete
+      ? 'Codex reviewer availability — unknown (sweep incomplete)'
+      : 'Codex reviewer availability — recovered';
   const lines = [`## ${heading}`, '', 'Owned by Master Health Watch. Policy and evidence: #3932.',
     `Last sweep: ${now}. History scanned since ${SCAN_SINCE}.`,
     'Degraded merges are reconstructed from pre-merge reviewer-unavailable notices and absence of a verdict covering the merged head — where coverage admits the content head the gate\'s update-branch proof verifies, the same head set the gate accepts (the #3932 method, #4238\'s equivalence).', ''];
+  if (incomplete) {
+    lines.push(`**This sweep was incomplete** — ${escapeCommentDelimiters(incomplete.reason)}. ` +
+      `The episode history below is the last complete record${incomplete.observedAt ? `, observed ${incomplete.observedAt}` : ''}; nothing in it reflects this run.`, '');
+  }
   for (const episode of [...episodes].reverse()) {
     lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
       `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
@@ -199,7 +209,11 @@ function render(episodes, now) {
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
       episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.` : 'Status: unavailable.', '');
   }
-  const json = JSON.stringify({ episodes, observedAt: now }).replace(/--/g, '-\\u002d');
+  const json = JSON.stringify({
+    episodes,
+    observedAt: incomplete?.observedAt || now,
+    ...(incomplete ? { incomplete: { at: incomplete.at, reason: incomplete.reason } } : {}),
+  }).replace(/--/g, '-\\u002d');
   lines.push(`${MARKER}${json} -->`);
   return lines.join('\n');
 }
@@ -249,14 +263,21 @@ async function gateNotice({ github, context, since, kind = "usage-limit", now = 
   return `Codex ${description} since ${start}, ${hours(start, now)}h ago${observedCauses}${suffix}`;
 }
 
-// api paginates GET collections; failures abort before any record write. The
-// caller uses gh, so this scheduled task adds no dependency or gate polling.
+// api paginates GET collections; the caller wraps `gh api`, so this scheduled
+// task adds no dependency or gate polling.
+// A scan read that outlives api's retries must not pass for a clean sweep —
+// and must not exit without writing (#4629): the run stops scanning (a dead
+// window outlasted its backoff), preserves the last complete episodes, and
+// the record written below marks itself incomplete. Only the two irreducible
+// calls stay fatal: the record read (an unreadable record cannot be PATCHed,
+// and a blind POST could duplicate it) and the write itself.
 async function sweep(api, repo, now = new Date().toISOString()) {
   const root = `repos/${repo}`;
   const comments = await api(`${root}/issues/${POLICY_ISSUE}/comments?per_page=100`);
   const records = comments.filter(c => readRecord(c));
   if (records.length > 1) throw new Error('Multiple outage records; reconcile before updating');
-  const previous = records.length ? readRecord(records[0]).episodes : [];
+  const previousState = records.length ? readRecord(records[0]) : null;
+  const previous = previousState?.episodes || [];
   const recomputeCutoff = time(now) - RECOMPUTE_WINDOW_MS;
   const isFrozen = episode => episode.end && time(episode.end) < recomputeCutoff;
   const frozen = previous.filter(isFrozen);
@@ -265,55 +286,96 @@ async function sweep(api, repo, now = new Date().toISOString()) {
     ? new Date(time(lastFrozen.end) + 1).toISOString()
     : SCAN_SINCE;
   const pulls = [];
-  // Updated ordering includes old PRs receiving late reviews. Stop only after
-  // the active outage/last recovery; never cap a search at GitHub's 1000-item limit.
-  for (let page = 1; ; page++) {
-    const batch = await api(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`, { singlePage: true });
-    for (const pull of batch) {
-      if (time(pull.updated_at) < time(since)) continue;
-      const artifacts = [];
-      for (const endpoint of [`pulls/${pull.number}/comments`, `issues/${pull.number}/comments`, `pulls/${pull.number}/reviews`]) {
-        artifacts.push(...await api(`${root}/${endpoint}?per_page=100`));
+  let scanError;
+  try {
+    // Updated ordering includes old PRs receiving late reviews. Stop only after
+    // the active outage/last recovery; never cap a search at GitHub's 1000-item limit.
+    for (let page = 1; ; page++) {
+      const batch = await api(`${root}/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`, { singlePage: true });
+      for (const pull of batch) {
+        if (time(pull.updated_at) < time(since)) continue;
+        const artifacts = [];
+        for (const endpoint of [`pulls/${pull.number}/comments`, `issues/${pull.number}/comments`, `pulls/${pull.number}/reviews`]) {
+          artifacts.push(...await api(`${root}/${endpoint}?per_page=100`));
+        }
+        const evidence = require('./auto-gate.js').codexEvidence;
+        const rows = artifacts.flatMap(a => evidence.completedCodexSummaryRows(a));
+        const commitDates = {};
+        const commits = new Set(artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER)
+          .map(a => a.commit_id || evidence.parseReviewedCommit(a.body || ""))
+          .filter(sha => /^[0-9a-f]{7,40}$/i.test(sha || "") &&
+            rows.some(row => sha.startsWith(row.commit) || row.commit.startsWith(sha))));
+        for (const sha of commits) {
+          const commit = await api(`${root}/commits/${sha}`, { singlePage: true });
+          commitDates[commit.sha || sha] = commit.commit?.committer?.date;
+          if (!Number.isFinite(time(commitDates[commit.sha || sha]))) throw new Error(`Unreadable commit date: ${sha}`);
+        }
+        const headForcePushes = commits.size ? await readForcePushes(api, repo, pull.number) : [];
+        // Only a merged head can be counted, and only a proven update-branch
+        // merge has a content head — the same proof the gate ran (#4238), so a
+        // verdict bound to it covers the merge here exactly as it did there.
+        const contentHead = Number.isFinite(time(pull.merged_at))
+          ? await readUpdateBranchContentHead(api, root, pull)
+          : null;
+        pulls.push({ ...pull, artifacts, commitDates, headForcePushes, contentHead });
       }
-      const evidence = require('./auto-gate.js').codexEvidence;
-      const rows = artifacts.flatMap(a => evidence.completedCodexSummaryRows(a));
-      const commitDates = {};
-      const commits = new Set(artifacts.filter(a => a.user?.login === evidence.CODEX_REVIEWER)
-        .map(a => a.commit_id || evidence.parseReviewedCommit(a.body || ""))
-        .filter(sha => /^[0-9a-f]{7,40}$/i.test(sha || "") &&
-          rows.some(row => sha.startsWith(row.commit) || row.commit.startsWith(sha))));
-      for (const sha of commits) {
-        const commit = await api(`${root}/commits/${sha}`, { singlePage: true });
-        commitDates[commit.sha || sha] = commit.commit?.committer?.date;
-        if (!Number.isFinite(time(commitDates[commit.sha || sha]))) throw new Error(`Unreadable commit date: ${sha}`);
-      }
-      const headForcePushes = commits.size ? await readForcePushes(api, repo, pull.number) : [];
-      // Only a merged head can be counted, and only a proven update-branch
-      // merge has a content head — the same proof the gate ran (#4238), so a
-      // verdict bound to it covers the merge here exactly as it did there.
-      const contentHead = Number.isFinite(time(pull.merged_at))
-        ? await readUpdateBranchContentHead(api, root, pull)
-        : null;
-      pulls.push({ ...pull, artifacts, commitDates, headForcePushes, contentHead });
+      if (batch.length < 100 || time(batch.at(-1).updated_at) < time(since)) break;
     }
-    if (batch.length < 100 || time(batch.at(-1).updated_at) < time(since)) break;
+  } catch (error) {
+    scanError = error;
   }
-  const episodes = aggregate(pulls, now, since, frozen);
-  if (!episodes.length && !records.length) return null;
-  const body = render(episodes, now);
+  const episodes = scanError ? previous : aggregate(pulls, now, since, frozen);
+  if (!scanError && !episodes.length && !records.length) return null;
+  const body = render(episodes, now, scanError && {
+    at: now,
+    reason: String(scanError.message || scanError).slice(0, 300),
+    observedAt: previousState?.observedAt,
+  });
   if (records.length) {
     return api(`${root}/issues/comments/${records[0].id}`, { method: 'PATCH', body });
   }
   return api(`${root}/issues/${POLICY_ISSUE}/comments`, { method: 'POST', body });
 }
 
-if (require.main === module) {
-  const { execFileSync } = require('node:child_process');
-  const api = async (route, options = {}) => {
-    if (options.method && process.argv.includes('--dry-run')) {
-      console.log(options.body);
-      return null;
-    }
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+// Retries at the `gh api` boundary, where the failure classes that killed
+// #4629's runs actually surface: a small bounded backoff, since the sweep is
+// hourly and a dead window that outlasts ~40s is degraded by sweep() anyway.
+const GH_API_RETRY_DELAYS_MS = [2000, 8000, 30000];
+
+function ghFailureText(error) {
+  return [error?.stderr, error?.message].filter(Boolean).join('\n');
+}
+
+// gh answers HTTP rejections as "gh: <message> (HTTP <status>)" on stderr; a
+// transport failure (dial timeout, ECONNRESET, EOF, DNS) carries no status.
+function ghHttpStatus(error) {
+  const match = /\bHTTP (\d{3})\b/i.exec(ghFailureText(error));
+  return match ? Number(match[1]) : null;
+}
+
+function isRetryableGhFailure(error, method) {
+  const status = ghHttpStatus(error);
+  if (status === null) {
+    // No HTTP answer: a transport error, or a body that reached us unreadable
+    // (empty or cut mid-payload — the SyntaxError JSON.parse throws). Safe to
+    // replay for reads and idempotent PATCHes. An unanswered POST may already
+    // have committed, and a duplicate record breaks the next sweep.
+    return method !== 'POST';
+  }
+  if (status >= 500 || status === 408 || status === 429) return true;
+  // A 403 retries only when it names a rate limit, primary or secondary (the
+  // 2026-09-19 window saturated on one); any other answered 4xx is a verdict.
+  return status === 403 && /rate limit|secondary|abuse detection|retry after/i.test(ghFailureText(error));
+}
+
+// The sweep's gh-backed route helper. execFileSync and sleep are injectable so
+// the retry policy is pinned by tests without a live gh. One transient failure
+// inside the multi-hundred-call scan must not kill the run; a failure that
+// outlives the bounded backoff rethrows for sweep() to degrade on.
+function createGhApi({ execFileSync, sleep = delay, delays = GH_API_RETRY_DELAYS_MS, log = console.error }) {
+  const run = (route, options) => {
     if (options.query) {
       const args = ['api', 'graphql', '-f', `query=${options.query}`];
       for (const [key, value] of Object.entries(options.variables)) args.push('-F', `${key}=${value}`);
@@ -330,8 +392,29 @@ if (require.main === module) {
       ? output.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
       : JSON.parse(output);
   };
+  return async (route, options = {}) => {
+    if (options.method && process.argv.includes('--dry-run')) {
+      console.log(options.body);
+      return null;
+    }
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return run(route, options);
+      } catch (error) {
+        if (!isRetryableGhFailure(error, options.method) || attempt >= delays.length) throw error;
+        const detail = String(error?.stderr || error?.message || error).trim().split('\n').pop().slice(0, 200);
+        log(`codex-outage: gh api ${options.query ? 'graphql' : route} failed (${detail}); retrying in ${delays[attempt]}ms`);
+        await sleep(delays[attempt]);
+      }
+    }
+  };
+}
+
+if (require.main === module) {
+  const { execFileSync } = require('node:child_process');
+  const api = createGhApi({ execFileSync });
   sweep(api, process.argv[2] || 'sachiniyer/agent-factory')
     .then(record => { if (!process.argv.includes('--dry-run')) console.log(record?.html_url || 'No Codex outage observed'); })
     .catch(error => { console.error(error); process.exitCode = 1; });
 }
-module.exports = { aggregate, render, readRecord, sweep, gateNotice };
+module.exports = { aggregate, render, readRecord, sweep, gateNotice, createGhApi };
