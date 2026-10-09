@@ -78,11 +78,14 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if selected == nil {
 		return ""
 	}
-	if selected.ShownArchived() {
-		// The sticky binding keeps an archived session marked (▾) so the
+	if selected.IsResting() {
+		// The sticky binding keeps a resting session marked (▾) so the
 		// footer's restore verb can act on it (#4755), but no pane can ever
-		// show it — archived sessions own no live tmux. Naming it in the
-		// header claims a divergence the workspace cannot resolve.
+		// show it — resting sessions own no live runtime. Naming it in the
+		// header claims a divergence the workspace cannot resolve. Liveness,
+		// not ShownArchived: the eager re-home flips that predicate false the
+		// moment OpRestoring starts, while the session stays inert until the
+		// daemon's restore lands (#4755 review).
 		return ""
 	}
 	if m.paneMatchesSelection(p) {

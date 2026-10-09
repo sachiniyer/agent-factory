@@ -611,3 +611,78 @@ func TestSidebar_RowVerbTarget_LiveBindingNotAdopted(t *testing.T) {
 	assert.Nil(t, s.RowVerbTarget(),
 		"a live display binding must not leak row verbs onto a section header")
 }
+
+// TestSidebar_RowVerbTarget_ForeignHeaderIsNil: the fallback must scope to the
+// section the cursor's header owns (#4755 review). A bound archived row keeps
+// its ▾ marker while the cursor tours the Sessions header — but that header
+// has no relation to the Archived folder, so `r`/`D` must not reach the bound
+// row through it.
+func TestSidebar_RowVerbTarget_ForeignHeaderIsNil(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	s.proj.SelectInstance(archivedInst)
+	s.ClickHeaderKind(SectionArchived) // expanded, cursor parked on its header
+	require.Same(t, archivedInst, s.RowVerbTarget(),
+		"precondition: the Archived header adopts its bound row")
+
+	// Move the cursor onto the Sessions header — the bound row still renders
+	// its marker, but under a different section.
+	for i, it := range s.visibleItems {
+		if it.IsHeader && it.Kind == SectionInstances {
+			s.selectedIdx = i
+			break
+		}
+	}
+	_ = s.View()
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionInstances, sel.Kind)
+
+	assert.Nil(t, s.RowVerbTarget(),
+		"the Sessions header must not adopt the Archived folder's bound row")
+}
+
+// TestSidebar_RowVerbTarget_FencedRestingRowAdopted: a resting row whose
+// lifecycle verb is fenced — startup-unknown Lost, so LifecycleAction() is
+// None but CanKill() still holds — is still the row the ▾ marker shows as
+// selected. The fallback must adopt it (classified by resting LIVENESS, not
+// by the restore verb) so the header still reaches the actions the row can
+// take; each handler applies its own capability gate (#4755 review).
+func TestSidebar_RowVerbTarget_FencedRestingRowAdopted(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	lostInst := archTestInstance(t, "lost-one", session.Lost)
+	lostInst.MarkStartupStateUnknown()
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, lostInst)
+	s.SetSize(40, 40)
+
+	require.Equal(t, session.LifecycleActionNone, lostInst.LifecycleAction(),
+		"precondition: startup-unknown fences the lifecycle verb")
+	require.True(t, lostInst.CanKill(), "precondition: the row still takes D")
+
+	s.proj.SelectInstance(lostInst)
+	s.syncFromStore() // the seq bump re-pins the cursor onto the row
+	require.Same(t, lostInst, s.GetSelectedInstance(),
+		"precondition: cursor sits on the resting row")
+	require.Same(t, lostInst, s.RowVerbTarget())
+
+	// Park the cursor on the Sessions header — the section that renders a
+	// lost row — while its marker stays bound.
+	for i, it := range s.visibleItems {
+		if it.IsHeader && it.Kind == SectionInstances {
+			s.selectedIdx = i
+			break
+		}
+	}
+	_ = s.View()
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionInstances, sel.Kind)
+
+	assert.Same(t, lostInst, s.RowVerbTarget(),
+		"a fenced-but-resting bound row keeps its row verbs on its own header")
+}

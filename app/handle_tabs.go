@@ -31,15 +31,16 @@ var newTabChoices = []newTabChoice{
 // proceed — the TUI's front gate for the new-tab picker, shared by the
 // pre-modal check and the post-submit recheck. TabSpawnBlocked covers the
 // archived liveness, an in-flight teardown, and a pending account swap; the
-// lifecycle check covers the other resting rows (lost/dead settle to the same
-// LifecycleActionRestore the compact footer withholds `t` for), so a picker
-// that could never submit never opens (#4755 review).
+// resting-liveness check covers the rest — a lost/dead row owns no runtime a
+// tab could spawn into, and reads liveness rather than LifecycleAction so a
+// fenced resting row (startup-unknown, mid-restore) is refused too (#4755
+// review): a picker that could never submit never opens.
 func tabPickerRefusal(selected *session.Instance) error {
 	if err := selected.TabSpawnBlocked(); err != nil {
 		return err
 	}
-	if selected.LifecycleAction() == session.LifecycleActionRestore {
-		return fmt.Errorf("cannot add a tab to a session that is not running; restore it first (af sessions restore)")
+	if selected.IsResting() {
+		return fmt.Errorf("cannot add a tab to session %q while it is not running; restore it first (af sessions restore)", selected.Title)
 	}
 	return nil
 }

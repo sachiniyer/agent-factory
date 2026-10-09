@@ -167,6 +167,31 @@ func TestPaneSelectionHint_SkipsArchivedBinding(t *testing.T) {
 		"a live selection elsewhere must still be named")
 }
 
+// TestPaneSelectionHint_SkipsRestoringBinding: MarkRestoring keeps liveness
+// LiveArchived while raising OpRestoring — ShownArchived flips false the
+// moment restore starts, but no pane can show the session until the daemon's
+// restore lands a live tmux. The hint must stay suppressed through the whole
+// restore window, so it gates on liveness, not the render predicate (#4755
+// review).
+func TestPaneSelectionHint_SkipsRestoringBinding(t *testing.T) {
+	h := newTestHome(t)
+	live := archiveActionInstance(t, "alpha", session.Ready)
+	restoring := archiveActionInstance(t, "beta", session.Archived)
+	h.store.AddInstance(live)
+	h.store.AddInstance(restoring)
+
+	p := openTestPane(t, h, live, 0)
+
+	h.store.SetSelectedInstance(restoring)
+	require.Empty(t, h.paneSelectionHint(p), "precondition: archived binding hidden")
+
+	restoring.SetInFlightOpForTest(session.OpRestoring)
+	require.False(t, restoring.ShownArchived(),
+		"precondition: the eager re-home flips ShownArchived during OpRestoring")
+	require.Empty(t, h.paneSelectionHint(p),
+		"the restore window still owns no pane surface — keep the hint hidden")
+}
+
 // TestSelectionChanged_ArchivedRowFooterCompact: the primary reported symptom —
 // the cursor directly on the archived row — must render the compact resting
 // menu, where `r restore` survives at a real bar width instead of shedding
@@ -230,4 +255,27 @@ func TestShowNewTabPicker_RestingRowRefuses(t *testing.T) {
 		require.Contains(t, text, "restore",
 			"the refusal must point at restore — the resting row's verb (status %s)", status)
 	}
+}
+
+// TestShowNewTabPicker_FencedRestingRowRefuses: a startup-unknown Lost row has
+// LifecycleAction None — the lifecycle gate alone lets `t` through even though
+// no runtime exists — so the refusal must read resting liveness (#4755
+// review).
+func TestShowNewTabPicker_FencedRestingRowRefuses(t *testing.T) {
+	h := newTestHome(t)
+	inst := archiveActionInstance(t, "worker", session.Lost)
+	inst.MarkStartupStateUnknown()
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+	require.Equal(t, session.LifecycleActionNone, inst.LifecycleAction(),
+		"precondition: the startup-unknown fence reports no lifecycle verb")
+
+	model, _ := h.showNewTabPicker()
+	h = model.(*home)
+
+	require.Nil(t, h.selectionOverlay,
+		"the tab picker must not open for a fenced resting row")
+	text, _ := h.errBox.RetainedNotice()
+	require.Contains(t, text, "restore",
+		"the refusal must point at restore — the resting row's verb")
 }

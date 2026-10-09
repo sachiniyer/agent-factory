@@ -714,19 +714,33 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 // footer's instance hints plus `r`/`D`/`c` dispatch — should act on (#4755).
 // The cursor's own row wins whenever it rests on an instance row. When the
 // cursor rests on a section header, the answer is the store's sticky display
-// binding — but only while that binding is a resting (restorable) row that is
-// actually rendered: it is the row the ▾ marker still shows as selected. A
-// live binding is never adopted — section headers carry folder verbs only, and
-// the panes legitimately keep displaying that live selection — and a binding
-// whose row is outside the rendered window (its folder collapsed, or its row
-// scrolled past the fitted viewport) resolves to nothing, so no verb can act
-// on a row the user cannot see.
+// binding — but only while all of these hold: the binding is a resting row
+// (resting LIVENESS, not the LifecycleAction verb — a fenced resting row such
+// as startup-unknown still owns its marked row, and each handler gates its
+// own capability); the cursor's header owns the section the bound row renders
+// in (an Archived row under the Archived folder, a lost/dead or mid-restore
+// row under Sessions — a foreign header carries no row's verbs); and the row
+// is inside the rendered window — the ▾ marker exists only there, so a row in
+// a collapsed folder or scrolled past the fitted viewport resolves to nothing.
+// A live binding is never adopted — section headers carry folder verbs only,
+// and the panes legitimately keep displaying that live selection.
 func (s *Sidebar) RowVerbTarget() *session.Instance {
 	if inst := s.GetSelectedInstance(); inst != nil {
 		return inst
 	}
+	sel := s.rawSelection()
+	if !sel.IsHeader {
+		return nil
+	}
 	bound := s.proj.GetSelectedInstance()
-	if bound == nil || bound.LifecycleAction() != session.LifecycleActionRestore {
+	if bound == nil || !bound.IsResting() {
+		return nil
+	}
+	wantSection := SectionInstances
+	if bound.ShownArchived() {
+		wantSection = SectionArchived
+	}
+	if sel.Kind != wantSection {
 		return nil
 	}
 	for i, inst := range s.proj.GetInstances() {
