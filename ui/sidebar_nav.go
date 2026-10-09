@@ -718,8 +718,9 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 // actually rendered: it is the row the ▾ marker still shows as selected. A
 // live binding is never adopted — section headers carry folder verbs only, and
 // the panes legitimately keep displaying that live selection — and a binding
-// whose row is not rendered (its folder collapsed) resolves to nothing, so no
-// verb can act on a row the user cannot see.
+// whose row is outside the rendered window (its folder collapsed, or its row
+// scrolled past the fitted viewport) resolves to nothing, so no verb can act
+// on a row the user cannot see.
 func (s *Sidebar) RowVerbTarget() *session.Instance {
 	if inst := s.GetSelectedInstance(); inst != nil {
 		return inst
@@ -732,8 +733,15 @@ func (s *Sidebar) RowVerbTarget() *session.Instance {
 		if inst != bound {
 			continue
 		}
-		for _, item := range s.visibleItems {
+		for j, item := range s.visibleItems {
 			if isInstanceRow(item) && !item.IsTab && item.ItemIndex == i {
+				// The ▾ marker renders only inside the fitted window
+				// (sidebar_render.go). A bound row beyond it — deeper than
+				// the viewport in a long expanded folder — is on no frame's
+				// screen, so it may not take row verbs.
+				if s.hasRendered && (j < s.renderedStart || j >= s.renderedEnd) {
+					return nil
+				}
 				return bound
 			}
 		}

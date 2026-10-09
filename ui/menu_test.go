@@ -219,6 +219,39 @@ func TestMenuRestingRowKeepsRestoreAtNarrowWidth(t *testing.T) {
 	}
 }
 
+// TestMenuRestingRowShedsDeleteBeforeRestore: `r restore` is the whole point
+// of a resting row's footer, so it must outlast every droppable neighbor. The
+// shared hintDropOrder serves the live row — where Delete is deliberately the
+// last shed — and drops Restore early; applied to the compact resting menu
+// that hid restore at ~50 cells while `D delete session` stayed (the #4755
+// lie again, in miniature). The resting row sheds D first, restore last.
+func TestMenuRestingRowShedsDeleteBeforeRestore(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status session.Status
+	}{
+		{name: "archived", status: session.Archived},
+		{name: "lost", status: session.Lost},
+		{name: "dead", status: session.Dead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &session.Instance{ID: "resting-id"}
+			inst.SetStatusForTest(tc.status)
+			m := NewMenu()
+			m.SetInstance(inst)
+			m.SetSize(50, 1)
+
+			out := xansi.Strip(m.String())
+			if !strings.Contains(out, "restore") {
+				t.Fatalf("%s row at 50 cells must still advertise restore — it is the row's verb:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, "delete session") {
+				t.Fatalf("%s row at 50 cells must shed delete before restore:\n%s", tc.name, out)
+			}
+		})
+	}
+}
+
 // TestMenuRestingRowDropsDeadLiveVerbs is the other half of the #4755 footer
 // lie at ANY width: a resting row has no live surface, so the verbs that name
 // one — attach/interact, tab create/close/rename/jump, pane open — must not be

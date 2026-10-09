@@ -174,6 +174,16 @@ type Sidebar struct {
 	// minimally so the selected row stays visible.
 	scrollOffset int
 
+	// renderedStart/renderedEnd bracket the visibleItems indices String() last
+	// rendered — the window of rows actually on screen. RowVerbTarget's
+	// resting-binding fallback consults them rather than the full item list:
+	// a bound row scrolled outside the window carries no ▾ marker on screen,
+	// so no row verb may resolve to it (#4755 review). Before the first render
+	// (hasRendered false) the whole list counts — no fitted viewport exists
+	// yet to contradict a row's visibility.
+	renderedStart, renderedEnd int
+	hasRendered                bool
+
 	// Rendering
 	renderer *tree.InstanceRenderer
 	height   int

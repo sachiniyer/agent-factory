@@ -84,6 +84,11 @@ func (s *Sidebar) String() string {
 		s.scrollOffset = 0
 	}
 
+	// The rendered window is the row range this frame puts on screen — the
+	// only indices whose ▾ marker is visible. RowVerbTarget reads it to keep
+	// the resting-binding fallback scoped to what the user can actually see.
+	s.renderedStart, s.renderedEnd, s.hasRendered = start, end, true
+
 	s.registerZones(heights, start, end, hiddenAbove > 0)
 
 	var b strings.Builder

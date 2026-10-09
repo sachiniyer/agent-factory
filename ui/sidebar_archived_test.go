@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -525,6 +526,65 @@ func TestSidebar_RowVerbTarget_InvisibleBindingIsNil(t *testing.T) {
 
 	assert.Nil(t, s.RowVerbTarget(),
 		"no visible row is marked, so no row verb may resolve")
+}
+
+// TestSidebar_RowVerbTarget_OffscreenBindingIsNil: the resting fallback means
+// "the row the ▾ marker shows" — and the marker only exists inside the
+// rendered window. When an expanded Archived folder is taller than the
+// sidebar, a bound row below the fold is in visibleItems but on no frame's
+// screen; the footer and `r`/`D` must not resolve to it (#4755 review).
+func TestSidebar_RowVerbTarget_OffscreenBindingIsNil(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	var archivedRows []*session.Instance
+	for i := 0; i < 12; i++ {
+		inst := archTestInstance(t, fmt.Sprintf("arch-%02d", i), session.Archived)
+		archivedRows = append(archivedRows, inst)
+		addTestInstance(s, inst)
+	}
+	// A short allocation: the expanded folder's tail rows fall below the fold.
+	s.SetSize(40, 8)
+
+	// Bind the OLDEST archived row — the folder renders newest-first, so it
+	// lands at the tail, below the fold — then park the cursor on the folder
+	// header, which stays in view while the bound row is rendered off-screen.
+	bound := archivedRows[0]
+	s.proj.SelectInstance(bound)
+	s.ClickHeaderKind(SectionArchived)
+	_ = s.View() // one frame establishes the fitted window
+
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader, "precondition: cursor rests on the Archived header")
+	boundIdx := -1
+	for j, it := range s.visibleItems {
+		if isInstanceRow(it) && !it.IsTab {
+			if inst := s.proj.GetInstances()[it.ItemIndex]; inst == bound {
+				boundIdx = j
+				break
+			}
+		}
+	}
+	require.GreaterOrEqual(t, boundIdx, 0, "precondition: the bound row is in the expanded list")
+	require.True(t, boundIdx < s.renderedStart || boundIdx >= s.renderedEnd,
+		"precondition: the bound row (index %d) is outside the rendered window [%d,%d)",
+		boundIdx, s.renderedStart, s.renderedEnd)
+
+	assert.Nil(t, s.RowVerbTarget(),
+		"a binding whose marker is off-screen must not take row verbs")
+
+	// Rebind the NEWEST archived row — first under the header, inside the
+	// window — and the same fallback resolves it again.
+	s.proj.SelectInstance(archivedRows[len(archivedRows)-1])
+	_ = s.View() // the seq bump re-pins the cursor on the row; re-park below
+	for i, it := range s.visibleItems {
+		if it.IsHeader && it.Kind == SectionArchived {
+			s.selectedIdx = i
+			break
+		}
+	}
+	_ = s.View()
+	assert.Same(t, archivedRows[len(archivedRows)-1], s.RowVerbTarget(),
+		"the bound row inside the rendered window still resolves")
 }
 
 // TestSidebar_RowVerbTarget_LiveBindingNotAdopted: a header never carries

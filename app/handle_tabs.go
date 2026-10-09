@@ -27,6 +27,23 @@ var newTabChoices = []newTabChoice{
 	{label: "VS Code (web UI)", kind: session.TabKindVSCode},
 }
 
+// tabPickerRefusal reports why `t` cannot run on selected, or nil when it may
+// proceed — the TUI's front gate for the new-tab picker, shared by the
+// pre-modal check and the post-submit recheck. TabSpawnBlocked covers the
+// archived liveness, an in-flight teardown, and a pending account swap; the
+// lifecycle check covers the other resting rows (lost/dead settle to the same
+// LifecycleActionRestore the compact footer withholds `t` for), so a picker
+// that could never submit never opens (#4755 review).
+func tabPickerRefusal(selected *session.Instance) error {
+	if err := selected.TabSpawnBlocked(); err != nil {
+		return err
+	}
+	if selected.LifecycleAction() == session.LifecycleActionRestore {
+		return fmt.Errorf("cannot add a tab to a session that is not running; restore it first (af sessions restore)")
+	}
+	return nil
+}
+
 // showNewTabPicker opens the TUI's existing enum-selection overlay for `t`.
 // Terminal and VS Code both need no further input, so they fit this small picker;
 // process and web tabs still need a command or URL and remain on tab-create. The
@@ -40,8 +57,9 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 	}
 	// Archived sessions keep a frozen roster for restore and a pending swap
 	// owns its own tab answer — refuse BEFORE the picker opens, since the
-	// picker could never submit (#4755's `t` dead end).
-	if err := selected.TabSpawnBlocked(); err != nil {
+	// picker could never submit (#4755's `t` dead end). The same goes for
+	// the other resting rows the footer withholds `t` from.
+	if err := tabPickerRefusal(selected); err != nil {
 		return m, m.handleNotice(err)
 	}
 	if !selected.Capabilities().TabManagement {
@@ -109,7 +127,7 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	}
 	// Same gate as the picker, re-checked after the modal resolves its captured
 	// target: an archive or a pending swap can land while the picker is open.
-	if err := selected.TabSpawnBlocked(); err != nil {
+	if err := tabPickerRefusal(selected); err != nil {
 		return m, m.handleNotice(err)
 	}
 	if !selected.Capabilities().TabManagement {

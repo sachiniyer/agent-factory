@@ -207,3 +207,27 @@ func TestShowNewTabPicker_ArchivedRowRefuses(t *testing.T) {
 	require.Contains(t, text, "archived",
 		"the refusal must say why — restore it first")
 }
+
+// TestShowNewTabPicker_RestingRowRefuses: the compact footer withholds `t`
+// from EVERY resting row, so the raw key must refuse Lost/Dead rows too —
+// TabSpawnBlocked only names the archived liveness, and a picker that opens
+// for a session with no runtime can never submit (#4755 review).
+func TestShowNewTabPicker_RestingRowRefuses(t *testing.T) {
+	for _, status := range []session.Status{session.Lost, session.Dead} {
+		h := newTestHome(t)
+		inst := archiveActionInstance(t, "worker", status)
+		h.store.AddInstance(inst)
+		h.sidebar.SetSelectedInstance(0)
+		require.Same(t, inst, h.sidebar.GetSelectedInstance(),
+			"precondition: the cursor is on the resting row")
+
+		model, _ := h.showNewTabPicker()
+		h = model.(*home)
+
+		require.Nil(t, h.selectionOverlay,
+			"the tab picker must not open for a %s session", status)
+		text, _ := h.errBox.RetainedNotice()
+		require.Contains(t, text, "restore",
+			"the refusal must point at restore — the resting row's verb (status %s)", status)
+	}
+}
