@@ -211,7 +211,9 @@ function render(episodes, now, incomplete = null) {
       `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
       `> ${escapeCommentDelimiters(episode.latest.body).replace(/\n/g, '\n> ')}`,
       `Degraded merges: ${episode.merged.length}${episode.merged.length ? ` (${episode.merged.map(n => `#${n}`).join(', ')})` : ''}.`,
-      episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.` : 'Status: unavailable.', '');
+      episode.end ? `Recovered: ${episode.end} — [first real verdict](${episode.recovery}). Final degraded-merge count: ${episode.merged.length}.`
+        : incomplete ? `Status: unavailable as of ${horizon} (last complete observation).`
+          : 'Status: unavailable.', '');
   }
   const json = JSON.stringify({
     episodes,
@@ -353,8 +355,13 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 
 // Retries at the `gh api` boundary, where the failure classes that killed
 // #4629's runs actually surface: a small bounded backoff, since the sweep is
-// hourly and a dead window that outlasts ~40s is degraded by sweep() anyway.
+// hourly and a dead window that outlasts it is degraded by sweep() anyway.
 const GH_API_RETRY_DELAYS_MS = [2000, 8000, 30000];
+// GitHub's rate-limit guidance: honor the returned retry timing — which `gh`
+// does not surface on stderr — and otherwise wait at least a minute between
+// retries; continuing at transport pace inside a secondary-limit window only
+// extends the throttle.
+const GH_API_RATE_LIMIT_MIN_DELAY_MS = 60000;
 
 function ghFailureText(error) {
   return [error?.stderr, error?.message].filter(Boolean).join('\n');
@@ -367,23 +374,27 @@ function ghHttpStatus(error) {
   return match ? Number(match[1]) : null;
 }
 
-function isRetryableGhFailure(error, method) {
+function isGhRateLimit(error) {
   const status = ghHttpStatus(error);
-  const rateLimited = status === 429 ||
+  return status === 429 ||
     (status === 403 && /rate limit|secondary|abuse detection|retry after/i.test(ghFailureText(error)));
+}
+
+function isRetryableGhFailure(error, method) {
   // The record-create POST is the one non-idempotent call. Only a rate-limit
   // refusal is a definitive "nothing was created" worth replaying — the gate's
   // isDefinitiveRateLimitResponse convention: even a 5xx answer can report a
   // committed create, and a duplicate record fails every later sweep on
   // "Multiple outage records". Any other POST failure exits; the next hourly
   // run creates the record.
-  if (method === 'POST') return rateLimited;
+  if (method === 'POST') return isGhRateLimit(error);
+  const status = ghHttpStatus(error);
   // No HTTP answer: a transport error, or a body that reached us unreadable
   // (empty or cut mid-payload — the SyntaxError JSON.parse throws). Safe to
   // replay for reads and the idempotent PATCH.
   if (status === null) return true;
   // Any other answered 4xx is a verdict, not a flap.
-  return status >= 500 || status === 408 || rateLimited;
+  return status >= 500 || status === 408 || isGhRateLimit(error);
 }
 
 // The sweep's gh-backed route helper. execFileSync and sleep are injectable so
@@ -431,9 +442,12 @@ function createGhApi({ execFileSync, sleep = delay, delays = GH_API_RETRY_DELAYS
         return run(route, options);
       } catch (error) {
         if (!isRetryableGhFailure(error, options.method) || attempt >= delays.length) throw error;
+        const waitMs = isGhRateLimit(error)
+          ? Math.max(delays[attempt], GH_API_RATE_LIMIT_MIN_DELAY_MS)
+          : delays[attempt];
         const detail = String(error?.stderr || error?.message || error).trim().split('\n').pop().slice(0, 200);
-        log(`codex-outage: gh api ${options.query ? 'graphql' : route} failed (${detail}); retrying in ${delays[attempt]}ms`);
-        await sleep(delays[attempt]);
+        log(`codex-outage: gh api ${options.query ? 'graphql' : route} failed (${detail}); retrying in ${waitMs}ms`);
+        await sleep(waitMs);
       }
     }
   };

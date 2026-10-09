@@ -778,6 +778,8 @@ test('#4629: a gh failure that outlives its retries writes an incomplete record'
   assert.equal(callCount(calls, '/pulls?'), 4, 'the read is retried on a bounded schedule then stops');
   assert.equal(writes.length, 1, 'a scan that cannot finish still writes — the record marks itself incomplete');
   assert.match(writes[0], /incomplete/i);
+  assert.match(writes[0], /Status: unavailable as of 2026-09-05T05:00:00\.000Z \(last complete observation\)/);
+  assert.doesNotMatch(writes[0], /Status: unavailable\./);
   const record = readRecord({ body: writes[0], user: { login: 'sachiniyer' } });
   assert.deepEqual(record.episodes, [previous],
     'an incomplete scan keeps the last complete episodes rather than restating them from partial data');
@@ -848,6 +850,7 @@ test('#4629: an incomplete record never claims a still-running outage across the
   const body = render(episodes, t(9), { at: t(9), reason: 'dial tcp: i/o timeout', observedAt: t(5) });
   assert.match(body, /availability — unknown \(sweep incomplete\)/);
   assert.match(body, /3\.0h elapsed/, 'elapsed time stops at the last complete observation');
+  assert.match(body, /Status: unavailable as of 2026-09-05T05/, 'the open episode is labelled a last observation, not current');
   assert.doesNotMatch(body, /7\.0h/, 'must not stretch a stale outage across the unobserved gap');
   const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
     { user: { login: 'sachiniyer' }, body, html_url: 'https://example.com/record' },
@@ -857,4 +860,20 @@ test('#4629: an incomplete record never claims a still-running outage across the
   const notice = await gateNotice({ github, context: { repo: {} }, since: t(8), now: t(12), kind: 'usage-limit' });
   assert.ok(notice.startsWith(`Codex usage-limited since ${t(8)}, 4.0h ago`), notice);
   assert.match(notice, /sweep incomplete/);
+});
+
+test('#4629: a rate-limit refusal waits at least GitHub\'s documented minimum between retries', async () => {
+  let failures = 2;
+  const sleeps = [];
+  const { execFileSync } = fakeGh((route, args) => {
+    if (failures && route.includes('/pulls/2/reviews')) {
+      failures -= 1;
+      throw ghFailure('gh: You have exceeded a secondary rate limit. (HTTP 403)');
+    }
+    return outageScanFixture(route, args);
+  });
+  const api = createGhApi({ execFileSync, sleep: async ms => { sleeps.push(ms); }, delays: [0, 0, 0], log: () => {} });
+  await sweep(api, 'owner/repo', t(10));
+  assert.deepEqual(sleeps, [60000, 60000],
+    'secondary-limit retries take the documented ≥60s floor, not the transport schedule');
 });
