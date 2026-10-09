@@ -42,8 +42,19 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 // deciding; the raw projected value would short-circuit here and release a row
 // whose materialized form holds (its pending transaction is still in flight), so
 // the sandbox arm must let LoadedActivity restore the fence first. The raw guards
-// below apply only to non-sandbox rows, whose materialized form does not rewrite
-// liveness or restore a fence that changes whether the run is in flight.
+// below apply to non-sandbox rows. ForStorage projects StartupStateUnknown=true
+// onto a local row mid-account-swap too — the projection has no backend gate
+// (projectPendingAccountSwapForPreviousRelease) — and ClassifyActivity checks
+// PendingAccountSwap BEFORE StartupStateUnknown regardless of backend type, so
+// the materialized form of a local row mid-swap is ActivityPending and HOLDS the
+// slot. The local arm mirrors that precedence: the PendingAccountSwap term below
+// holds a mid-swap row before the projected StartupStateUnknown guard, or a local
+// ghost that fails to materialize while a swap is in flight would slip past the cap
+// — and the undercount never self-corrects, because refreshDaemonInstances rebuilds
+// ghostTaskRuns from scratch on every call and re-evaluates this arm against the
+// same on-disk row. The local backend is the only one that can commit an account
+// swap (SupportsAutomaticAccountSwap gates on backend.Type() == "local"), so this
+// is the one raw arm the term is needed on.
 func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if item.TaskID == "" || !item.TaskRunActive {
 		return false
@@ -51,7 +62,7 @@ func rawTaskRunHoldsSlot(item session.InstanceData) bool {
 	if session.IsSandboxBackendType(item.BackendType) {
 		return !releasesLostSandboxGhost(item)
 	}
-	return !item.StartupStateUnknown && !item.UserKilled &&
+	return (!item.StartupStateUnknown || item.PendingAccountSwap != nil) && !item.UserKilled &&
 		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
 }
 
