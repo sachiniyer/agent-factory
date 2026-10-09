@@ -841,3 +841,20 @@ test('#4629: an unreadable policy-record read retries, then fails without a blin
   assert.equal(callCount(calls, '/issues/3932/comments'), 4, 'the bootstrap read still exhausts its retries');
   assert.equal(writes.length, 0, 'no record may be created while the existing one is unreadable');
 });
+
+test('#4629: an incomplete record never claims a still-running outage across the unobserved gap', async () => {
+  const episodes = [{ start: t(2), end: null, merged: [2], causes: ['usage-limit'],
+    latest: { time: t(2), url: 'https://example.com/2', body: limits[1], kind: 'usage-limit' } }];
+  const body = render(episodes, t(9), { at: t(9), reason: 'dial tcp: i/o timeout', observedAt: t(5) });
+  assert.match(body, /availability — unknown \(sweep incomplete\)/);
+  assert.match(body, /3\.0h elapsed/, 'elapsed time stops at the last complete observation');
+  assert.doesNotMatch(body, /7\.0h/, 'must not stretch a stale outage across the unobserved gap');
+  const github = { rest: { issues: { listComments() {} } }, paginate: async () => [
+    { user: { login: 'sachiniyer' }, body, html_url: 'https://example.com/record' },
+  ] };
+  // The gate falls back to the duration this PR observed itself rather than
+  // adopting the stale active episode's start.
+  const notice = await gateNotice({ github, context: { repo: {} }, since: t(8), now: t(12), kind: 'usage-limit' });
+  assert.ok(notice.startsWith(`Codex usage-limited since ${t(8)}, 4.0h ago`), notice);
+  assert.match(notice, /sweep incomplete/);
+});

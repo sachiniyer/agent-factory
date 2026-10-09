@@ -189,10 +189,10 @@ async function readUpdateBranchContentHead(api, root, pull) {
 // rather than posing as a clean read (#4629).
 function render(episodes, now, incomplete = null) {
   const active = episodes.at(-1);
-  const heading = active && !active.end
-    ? `Codex reviewer unavailable since ${active.start}`
-    : incomplete
-      ? 'Codex reviewer availability — unknown (sweep incomplete)'
+  const heading = incomplete
+    ? 'Codex reviewer availability — unknown (sweep incomplete)'
+    : active && !active.end
+      ? `Codex reviewer unavailable since ${active.start}`
       : 'Codex reviewer availability — recovered';
   const lines = [`## ${heading}`, '', 'Owned by Master Health Watch. Policy and evidence: #3932.',
     `Last sweep: ${now}. History scanned since ${SCAN_SINCE}.`,
@@ -201,8 +201,12 @@ function render(episodes, now, incomplete = null) {
     lines.push(`**This sweep was incomplete** — ${escapeCommentDelimiters(incomplete.reason)}. ` +
       `The episode history below is the last complete record${incomplete.observedAt ? `, observed ${incomplete.observedAt}` : ''}; nothing in it reflects this run.`, '');
   }
+  // An open episode's elapsed time stops at the last complete observation —
+  // a recovery may have happened in the unobserved gap, so `now` would claim
+  // an unbroken outage the failed sweep never saw.
+  const horizon = incomplete?.observedAt || now;
   for (const episode of [...episodes].reverse()) {
-    lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || now)}h elapsed.`,
+    lines.push(`### Unavailable since ${episode.start}`, `${hours(episode.start, episode.end || horizon)}h elapsed.`,
       `Observed causes: ${(episode.causes || []).map(causeLabel).join(', ') || 'not recorded'}.`,
       `Latest reviewer-unavailable notice: [${episode.latest.time}](${episode.latest.url})`,
       `> ${escapeCommentDelimiters(episode.latest.body).replace(/\n/g, '\n> ')}`,
@@ -247,7 +251,15 @@ async function gateNotice({ github, context, since, kind = "usage-limit", now = 
       ...context.repo, issue_number: POLICY_ISSUE, per_page: 100,
     });
     const record = comments.map(comment => ({ comment, state: readRecord(comment) })).find(r => r.state);
-    const active = record?.state.episodes.at(-1);
+    const state = record?.state;
+    // An incomplete record's episodes are the last complete scan, verbatim;
+    // adopting a stale active episode would claim an outage across a window
+    // the failed sweep never observed (#4629). The PR's own evidence keeps
+    // the duration local instead.
+    const active = state && !state.incomplete ? state.episodes.at(-1) : null;
+    if (state?.incomplete) {
+      suffix = ` (Master Health Watch sweep incomplete at ${state.incomplete.at || state.observedAt}; duration observed on this PR)`;
+    }
     if (active && !active.end && time(active.start) <= time(since)) {
       start = active.start;
       const causes = active.causes || [];
