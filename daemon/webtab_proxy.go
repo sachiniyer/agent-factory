@@ -265,7 +265,7 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 //
 //   - TabSpawnBlocked: archive raises its fence (BeginArchive) and then MOVES the
 //     worktree. An editor started against the old path now serves bytes that are
-//     gone. ArchiveTeardown keeps the vscode tab (it is metadata-only, #1817), so
+//     gone. ArchiveTeardownWithClaim keeps the vscode tab (it is metadata-only, #1817), so
 //     the tab check alone says "still wanted" and cannot catch this. That was
 //     masked while archive still (wrongly) stripped the tab — the tab check
 //     returned false and stopped the editor BY ACCIDENT — so fixing the archive
