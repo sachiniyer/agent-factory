@@ -59,9 +59,10 @@ const transientProcfsError = "cannot refresh processes"
 // already dead (!live), the function should return nil — it has EVIDENCE the
 // capture is empty — but the stale observeErr makes it report failure instead.
 //
-// This is case (iii) from the deadline-return analysis: some polls fail, then a
+// This is case (iii) from the deadline-return analysis: a single poll fails, then a
 // successful poll before the deadline with !live triggers the early return. The
-// fix (observeErr = nil on the success branch) clears the transient failure.
+// fix (clearing observeErr on the success branch only when the unobserved gap is
+// at most one poll interval) clears the transient failure.
 //
 // Without the fix this test FAILS: the stale observeErr is returned despite the
 // successful poll proving no captured process is alive.
@@ -117,12 +118,13 @@ func TestObserveOrphanAncestryPreservesErrorWhenAllSnapshotPollsFail(t *testing.
 }
 
 // TestObserveOrphanAncestryReturnsLiveProcessesAfterSnapshotRecoveryAtDeadline
-// verifies case (iv): some polls fail, then succeed showing the captured process
-// is still alive (live == true) until the deadline expires. The fix clears
-// observeErr on each success, so the deadline return yields nil error; the
-// captured list of still-live processes is returned in full so the caller can
-// reap them. Without the fix the stale observeErr leaks onto the deadline return,
-// aborting the sweep for a transient read that has since recovered.
+// verifies case (iv): a SINGLE poll fails, then succeeds showing the captured
+// process is still alive (live == true) until the deadline expires. The unobserved
+// gap is one poll interval (≤ 1), so the fix clears observeErr on the recovery;
+// the deadline return yields nil error, and the captured list of still-live
+// processes is returned in full so the caller can reap them. Without the fix the
+// stale observeErr leaks onto the deadline return, aborting the sweep for a
+// transient read that has since recovered.
 //
 // The fail-closed guarantee for genuinely-live orphans is NOT lost: the caller
 // reaps the returned captured list via reapSessionProcesses, and survivors appear
@@ -147,7 +149,7 @@ func TestObserveOrphanAncestryReturnsLiveProcessesAfterSnapshotRecoveryAtDeadlin
 
 	returned, err := observeOrphanAncestry(captured, "af_observe_test", reapGraceWait)
 	require.NoError(t, err,
-		"after the transient procfs read recovers, the deadline return must not carry the stale error")
+		"after a single-poll transient failure recovers, the deadline return must not carry the stale error")
 	require.NotEmpty(t, returned,
 		"the still-live captured processes must be returned so the caller can reap them")
 	require.Equal(t, captured[0].PID, returned[0].PID,
@@ -159,9 +161,84 @@ func TestObserveOrphanAncestryReturnsLiveProcessesAfterSnapshotRecoveryAtDeadlin
 		"the observe loop must continue past the failing pass until the deadline")
 }
 
+// TestObserveOrphanAncestryKeepsErrorAfterConsecutiveSnapshotFailuresOnProvenExit
+// is the fail-closed guard for the unobserved-ancestry gap: two or more
+// consecutive failed polls open a window long enough for a captured parent to
+// fork a child, call setsid, drop its markers, and exit before the next
+// successful snapshot can reconstruct the relationship. A successful snapshot
+// after such a gap may prove the captured parent is gone (!live), but the
+// detached child is in neither the parent's tree nor its session, so it is not
+// in the refreshed set and is not reported by the reaping terms. The error from
+// the gap must stay so the reset refuses rather than reporting success while the
+// child survives (#4600 pre-merge review).
+//
+// This is the complement of TestObserveOrphanAncestryClearsStaleSnapshotErrorOnProvenExit:
+// a single failed poll (gap ≤ 1) clears on recovery, but two or more (gap > 1)
+// does not, because the longer window is exactly the case
+// observeOrphanAncestry exists to guard against.
+func TestObserveOrphanAncestryKeepsErrorAfterConsecutiveSnapshotFailuresOnProvenExit(t *testing.T) {
+	shrinkReapWaits(t)
+	// A captured PID that will never appear in the successful snapshot, so the
+	// !live check trips by evidence (absence from the snapshot), not by failure.
+	captured := []proctree.Process{{PID: 4242, StartID: 1, SID: 4242}}
+	counter := &snapshotCallCounter{
+		// Two consecutive failures open an unobserved gap longer than one poll
+		// interval; the recovery must not clear it.
+		failCalls: map[int]struct{}{1: {}, 2: {}},
+		Real:      proctree.Snapshot,
+		OnSuccess: map[int]proctree.Process{},
+	}
+	stubSnapshot(t, counter.snapshot)
+
+	returned, err := observeOrphanAncestry(captured, "af_observe_test", reapGraceWait)
+	require.Error(t, err,
+		"after two or more consecutive failures, a successful snapshot proving !live must NOT clear the stale error — the unobserved gap could have hidden a detached child")
+	require.ErrorContains(t, err, transientProcfsError,
+		"the error must be the accumulated procfs read failure, not a spurious nil")
+	require.NotEmpty(t, returned,
+		"the captured identity list must be returned in full even when the error is kept")
+	require.GreaterOrEqual(t, counter.calls, 3,
+		"the observe loop must make at least three calls (fail, fail, recover)")
+}
+
+// TestObserveOrphanAncestryClearsErrorOnRecoveryAfterSingleFailureAtDeadline
+// verifies that a single failed poll (gap ≤ 1) is cleared on the NEXT successful
+// poll even when the captured process is still alive: the deadline return carries
+// no error. This is the complement of the consecutive-failure case above — a
+// single transient read is the stale-procfs window this fix targets, and the
+// recovery on the next poll clears it because the gap is one interval, not two.
+func TestObserveOrphanAncestryClearsErrorOnRecoveryAfterSingleFailureAtDeadline(t *testing.T) {
+	shrinkReapWaits(t)
+	captured := []proctree.Process{{PID: 4242, StartID: 999, SID: 4242}}
+	liveSnapshot := map[int]proctree.Process{
+		4242: {PID: 4242, StartID: 999, SID: 4242, PPID: 1},
+	}
+	counter := &snapshotCallCounter{
+		// One failed poll (gap ≤ 1), then every poll succeeds showing the
+		// process alive so the loop runs to the deadline.
+		failCalls: map[int]struct{}{1: {}},
+		Real:      proctree.Snapshot,
+		OnSuccess: liveSnapshot,
+	}
+	stubSnapshot(t, counter.snapshot)
+
+	returned, err := observeOrphanAncestry(captured, "af_observe_test", reapGraceWait)
+	require.NoError(t, err,
+		"after a single-poll gap the deadline return must not carry the stale error")
+	require.NotEmpty(t, returned,
+		"the still-live captured processes must be returned so the caller can reap them")
+	require.Equal(t, captured[0].PID, returned[0].PID,
+		"the returned identity list must match the captured set")
+	require.GreaterOrEqual(t, counter.calls, 3,
+		"the observe loop must continue past the failing pass until the deadline")
+}
+
 // TestVanishedSessionSweepSucceedsAfterTransientSnapshotFailure is the end-to-end
-// regression: a transient proctree.Snapshot failure inside the observe loop must
-// not abort af reset after the orphan sweep already completed.
+// regression: a single transient proctree.Snapshot failure inside the observe loop
+// must not abort af reset after the orphan sweep already completed. A single
+// failed poll is a gap of one interval (≤ 1), so the fix clears the stale error
+// on recovery; two or more consecutive failures are a longer gap and keep the
+// error (see TestObserveOrphanAncestryKeepsErrorAfterConsecutiveSnapshotFailuresOnProvenExit).
 //
 // It uses graceObservationBarrier to hold the sweep at its first observe pass so
 // the test can kill the captured escapee (so the next successful snapshot proves

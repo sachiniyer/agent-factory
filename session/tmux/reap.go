@@ -482,6 +482,7 @@ var graceObservationBarrier func(match string)
 func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wait time.Duration) ([]proctree.Process, error) {
 	deadline := time.Now().Add(wait)
 	var observeErr error
+	var failedPolls int
 	for {
 		if barrier := graceObservationBarrier; barrier != nil {
 			barrier(sanitizedName)
@@ -489,21 +490,31 @@ func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wa
 		refreshed, snap, err := refreshCapturedAncestry(captured, sanitizedName)
 		if err != nil {
 			observeErr = errors.Join(observeErr, err)
+			failedPolls++
 		} else {
-			// A successful snapshot supersedes earlier transient read
-			// failures: the pass has just rebuilt the captured set from a
-			// fresh, successful read. proctree.Snapshot silently skips PIDs
-			// it cannot read, so a captured process absent from this snapshot
-			// may be unreadable rather than dead — but that narrowing is by
-			// the fresh read's evidence, not by error type, and a stale procfs
-			// read error describes the previous failure, not the current
-			// state. Leaving it alive here would make a later !live early
-			// return report "process cleanup is incomplete" after the reaping
-			// already completed, aborting af reset for a failure that has
-			// since cleared. The captured identity list (returned in full
-			// on every path) is untouched, so a genuine survivor is still
-			// reported via the reaping terms, not via a stale read error.
-			observeErr = nil
+			// A successful snapshot may clear an earlier transient read
+			// failure only when the unobserved gap it opened is no longer
+			// than one normal poll interval. A single failed poll is the
+			// stale-procfs case this fix targets — a ReadDir that
+			// transiently failed and recovered within one ~50 ms window.
+			// Two or more consecutive failures open a gap long enough for a
+			// captured parent to fork a child, call setsid, drop its markers,
+			// and exit before the next successful snapshot can reconstruct
+			// the relationship; the refreshed set cannot see a detached
+			// descendant, so the error must stay to keep the reset
+			// fail-closed (#4600 pre-merge review). proctree.Snapshot
+			// silently skips PIDs it cannot read, so a captured process
+			// absent from this snapshot may be unreadable rather than dead —
+			// but that narrowing is by the fresh read's evidence, not by
+			// error type, and a stale procfs read error describes the
+			// previous failure, not the current state. The captured identity
+			// list (returned in full on every path) is untouched, so a
+			// genuine survivor is still reported via the reaping terms, not
+			// via a stale read error.
+			if failedPolls <= 1 {
+				observeErr = nil
+			}
+			failedPolls = 0
 			captured = refreshed
 			live := false
 			for _, process := range captured {
