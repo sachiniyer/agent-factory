@@ -357,17 +357,21 @@ function ghHttpStatus(error) {
 
 function isRetryableGhFailure(error, method) {
   const status = ghHttpStatus(error);
-  if (status === null) {
-    // No HTTP answer: a transport error, or a body that reached us unreadable
-    // (empty or cut mid-payload — the SyntaxError JSON.parse throws). Safe to
-    // replay for reads and idempotent PATCHes. An unanswered POST may already
-    // have committed, and a duplicate record breaks the next sweep.
-    return method !== 'POST';
-  }
-  if (status >= 500 || status === 408 || status === 429) return true;
-  // A 403 retries only when it names a rate limit, primary or secondary (the
-  // 2026-09-19 window saturated on one); any other answered 4xx is a verdict.
-  return status === 403 && /rate limit|secondary|abuse detection|retry after/i.test(ghFailureText(error));
+  const rateLimited = status === 429 ||
+    (status === 403 && /rate limit|secondary|abuse detection|retry after/i.test(ghFailureText(error)));
+  // The record-create POST is the one non-idempotent call. Only a rate-limit
+  // refusal is a definitive "nothing was created" worth replaying — the gate's
+  // isDefinitiveRateLimitResponse convention: even a 5xx answer can report a
+  // committed create, and a duplicate record fails every later sweep on
+  // "Multiple outage records". Any other POST failure exits; the next hourly
+  // run creates the record.
+  if (method === 'POST') return rateLimited;
+  // No HTTP answer: a transport error, or a body that reached us unreadable
+  // (empty or cut mid-payload — the SyntaxError JSON.parse throws). Safe to
+  // replay for reads and the idempotent PATCH.
+  if (status === null) return true;
+  // Any other answered 4xx is a verdict, not a flap.
+  return status >= 500 || status === 408 || rateLimited;
 }
 
 // The sweep's gh-backed route helper. execFileSync and sleep are injectable so
@@ -383,14 +387,27 @@ function createGhApi({ execFileSync, sleep = delay, delays = GH_API_RETRY_DELAYS
     }
     const args = ['api', route];
     if (options.method) args.push('--method', options.method, '--input', '-');
-    else if (!options.singlePage) args.push('--paginate', '--jq', '.[] | @json');
+    // `@json` prints each page as one JSON-array line, so a completed read
+    // emits at least `[]` — empty stdout can only be a body that never
+    // reached us, and a non-array page an error document. `.[] | @json`
+    // printed nothing for an empty collection, which read identically to a
+    // dropped response and could have blinded the record read into a
+    // duplicate POST (#4629 review).
+    else if (!options.singlePage) args.push('--paginate', '--jq', '@json');
     const output = execFileSync('gh', args, {
       encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
       input: options.method ? JSON.stringify({ body: options.body }) : undefined,
     });
-    return !options.method && !options.singlePage
-      ? output.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
-      : JSON.parse(output);
+    if (!options.method && !options.singlePage) {
+      const text = output.trim();
+      if (!text) throw new SyntaxError(`gh api --paginate produced no output for ${route}`);
+      const pages = text.split('\n').map(line => JSON.parse(line));
+      if (pages.some(page => !Array.isArray(page))) {
+        throw new Error(`gh api --paginate returned a non-collection page for ${route}`);
+      }
+      return pages.flat();
+    }
+    return JSON.parse(output);
   };
   return async (route, options = {}) => {
     if (options.method && process.argv.includes('--dry-run')) {

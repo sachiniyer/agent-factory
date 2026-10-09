@@ -705,27 +705,30 @@ function ghFailure(stderr, { status = 1 } = {}) {
   return error;
 }
 
-// Replays gh's wire format: paginated endpoints emit one JSON document per
-// line (`.[] | @json`), single reads and writes a single document. `handler`
-// answers by route and may throw a process error or return a raw body string.
+// Replays gh's wire format: paginated endpoints emit each page as one JSON
+// array line (`--jq '@json'`), single reads and writes a single document.
+// `handler` answers by route (and sees argv, so it can fail a write) and may
+// throw a process error or return a raw body string.
 function fakeGh(handler) {
   const calls = [];
   const writes = [];
   const execFileSync = (command, args, { input } = {}) => {
     calls.push(args);
     assert.equal(command, 'gh');
+    const answer = handler(args[1], args);
+    if (typeof answer === 'string') return answer;
     if (args.includes('--method')) {
       writes.push(JSON.parse(input).body);
       return JSON.stringify({ id: 42, html_url: 'https://example.com/record' });
     }
-    const answer = handler(args[1]);
-    if (typeof answer === 'string') return answer;
-    return args.includes('--paginate') ? answer.map(JSON.stringify).join('\n') : JSON.stringify(answer);
+    return JSON.stringify(answer);
   };
   return { calls, writes, execFileSync };
 }
 const callCount = (calls, part) => calls.filter(args => String(args[1]).includes(part)).length;
-const outageScanFixture = (route) => {
+const writeCount = (calls) => calls.filter(args => args.includes('--method')).length;
+const outageScanFixture = (route, args = []) => {
+  if (args.includes('--method')) return { id: 42, html_url: 'https://example.com/record' };
   if (route.includes('/issues/3932/comments')) return [];
   if (route.includes('/pulls?')) return [{ number: 2, created_at: t(0), updated_at: t(9), merged_at: t(8), head: { sha: head } }];
   if (route.includes('/issues/2/comments')) return [comment(2, limits[1])];
@@ -736,7 +739,9 @@ const outageScanFixture = (route) => {
 test('#4629: transient gh api failures retry and the sweep completes', async () => {
   for (const [name, part, fail] of [
     ['an empty body', '/pulls?', () => ''],
-    ['a truncated page line', '/pulls/2/comments', () => '{"number":2,"updated_at"'],
+    ['a truncated page line', '/pulls/2/comments', () => '[{"number":2,"updated_at"'],
+    ['an empty page envelope', '/pulls/2/comments', () => ''],
+    ['a non-collection page', '/pulls/2/comments', () => '{"message":"Server Error"}'],
     ['a transport timeout', '/pulls/2/reviews', () => {
       throw ghFailure('Get "https://api.github.com/x": dial tcp 140.82.113.6:443: i/o timeout');
     }],
@@ -746,9 +751,9 @@ test('#4629: transient gh api failures retry and the sweep completes', async () 
     }],
   ]) {
     let failing = true;
-    const { calls, writes, execFileSync } = fakeGh((route) => {
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
       if (failing && route.includes(part)) { failing = false; return fail(); }
-      return outageScanFixture(route);
+      return outageScanFixture(route, args);
     });
     const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
     await sweep(api, 'owner/repo', t(10));
@@ -763,10 +768,10 @@ test('#4629: a gh failure that outlives its retries writes an incomplete record'
   const previous = { start: t(2), end: null, merged: [2], causes: ['usage-limit'],
     latest: { time: t(2), url: 'https://example.com/2', body: limits[1], kind: 'usage-limit' } };
   const existing = { id: 42, user: { login: 'sachiniyer' }, body: render([previous], t(5)) };
-  const { calls, writes, execFileSync } = fakeGh((route) => {
+  const { calls, writes, execFileSync } = fakeGh((route, args) => {
     if (route.includes('/issues/3932/comments')) return [existing];
     if (route.includes('/pulls?')) throw ghFailure('Get "https://api.github.com/x": dial tcp: i/o timeout');
-    return outageScanFixture(route);
+    return outageScanFixture(route, args);
   });
   const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
   await sweep(api, 'owner/repo', t(10));
@@ -786,9 +791,9 @@ test('#4629: a real 4xx answer is not retried, and still degrades to a marked re
     'gh: Validation Failed (HTTP 422)',
     'gh: Forbidden. This integration is not allowed to read that. (HTTP 403)',
   ]) {
-    const { calls, writes, execFileSync } = fakeGh((route) => {
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
       if (route.includes('/pulls/2/comments')) throw ghFailure(stderr);
-      return outageScanFixture(route);
+      return outageScanFixture(route, args);
     });
     const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
     await sweep(api, 'owner/repo', t(10));
@@ -796,4 +801,43 @@ test('#4629: a real 4xx answer is not retried, and still degrades to a marked re
     assert.equal(writes.length, 1);
     assert.match(writes[0], /incomplete/i);
   }
+});
+
+test('#4629: a record-create POST replays only a rate-limit refusal, never an ambiguous failure', async () => {
+  for (const [name, failPost, attempts, matches] of [
+    ['a 5xx answer', () => { throw ghFailure('gh: Server Error (HTTP 502)'); }, 1, /502/],
+    ['a transport failure', () => { throw ghFailure('Post "https://api.github.com/x": EOF'); }, 1, /EOF/],
+    // The POST may have committed; an unreadable response cannot tell us.
+    ['an unreadable response body', () => '{"id":42', 1, /JSON|end of JSON/],
+    // A rate-limit refusal is a definitive "nothing was created" — replayable.
+    ['a rate-limit refusal', () => {
+      throw ghFailure('gh: You have exceeded a secondary rate limit. (HTTP 403)');
+    }, 2, /unavailable since/],
+  ]) {
+    let failing = true;
+    const { calls, writes, execFileSync } = fakeGh((route, args) => {
+      if (failing && args.includes('--method')) { failing = false; return failPost(); }
+      return outageScanFixture(route, args);
+    });
+    const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+    if (attempts === 1) {
+      await assert.rejects(sweep(api, 'owner/repo', t(10)), matches, name);
+    } else {
+      await sweep(api, 'owner/repo', t(10));
+      assert.match(writes[0], matches, name);
+    }
+    assert.equal(writeCount(calls), attempts,
+      `${name}: an ambiguous create is never replayed — a duplicate record breaks every later sweep`);
+  }
+});
+
+test('#4629: an unreadable policy-record read retries, then fails without a blind duplicate POST', async () => {
+  const { calls, writes, execFileSync } = fakeGh((route, args) => {
+    if (route.includes('/issues/3932/comments') && !args.includes('--method')) return '';
+    return outageScanFixture(route, args);
+  });
+  const api = createGhApi({ execFileSync, sleep: async () => {}, delays: [0, 0, 0], log: () => {} });
+  await assert.rejects(sweep(api, 'owner/repo', t(10)), /no output/);
+  assert.equal(callCount(calls, '/issues/3932/comments'), 4, 'the bootstrap read still exhausts its retries');
+  assert.equal(writes.length, 0, 'no record may be created while the existing one is unreadable');
 });
