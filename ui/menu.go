@@ -53,6 +53,12 @@ type Menu struct {
 	state         MenuState
 	instance      *session.Instance
 
+	// dropOrder is the hint-shedding priority String() applies when the row
+	// is wider than the bar. Every option set uses the shared hintDropOrder
+	// except the compact resting-row menu, whose primary verb (restore) must
+	// shed last rather than in the live row's position (#4755 review).
+	dropOrder [][]keys.KeyName
+
 	// focusRegion is the focus-ring region the hints are rendered for
 	// (layout.RegionTree / RegionAutomations / a layout.PaneRegion id). The
 	// status bar is context-sensitive per RFC §2.1: hints follow focus, so the
@@ -276,6 +282,7 @@ func (m *Menu) SetStatusText(text string) {
 // updateOptions updates the menu options based on current state, focus
 // region, and instance
 func (m *Menu) updateOptions() {
+	m.dropOrder = hintDropOrder
 	// Interactive mode outranks everything: the terminal owns the keyboard,
 	// the bar owns nothing but the way out.
 	if m.interactive {
@@ -443,20 +450,43 @@ func (m *Menu) addInstanceOptions() {
 		return
 	}
 
-	// Instance management group. `a` archives a LIVE row; a resting
-	// (Archived/Lost/Dead) row instead advertises the dedicated `r` restore key
-	// (#1605) — the two verbs no longer share the `a` binding, so the footer
-	// shows exactly the one action the selected row supports.
+	// A resting (Archived/Lost/Dead) row has no live surface: nothing to attach
+	// to, no tab roster the TUI may edit, no pane it can show. Feeding it the
+	// full instance menu advertises verbs that cannot run — and worse, the width
+	// drop order sheds `r restore` long before those dead verbs (`t`, `w`,
+	// `1-9`), so at a real bar width the footer lies both ways (#4755). Give it
+	// its own compact menu: the lifecycle verbs a resting row can actually take
+	// plus the global keys. `c` still advertises for a pending handoff delivery
+	// that outlived its session — retry/confirm remain meaningful there.
+	if lifecycleAction == session.LifecycleActionRestore {
+		m.options = []keys.KeyName{keys.KeyNew}
+		if canKill {
+			m.options = append(m.options, keys.KeyKill)
+		}
+		m.options = append(m.options, keys.KeyRestore)
+		if canRetryHandoff {
+			m.options = append(m.options, keys.KeyLimitRetry)
+		}
+		m.options = append(m.options, keys.KeyHelp, keys.KeyQuit)
+		m.groups = []menuGroup{
+			{start: 0, end: len(m.options), isAction: false},
+		}
+		// On this row restore IS the verb — it sheds last, after the
+		// destructive and conditional neighbors, so the bar keeps naming it
+		// through the supported widths instead of repeating the lie that
+		// hid it (review on #4755).
+		m.dropOrder = restingHintDropOrder
+		return
+	}
+
+	// Instance management group for a live row (`a` archives it; the resting
+	// row's `r` restore key is handled by the compact menu above, #1605/#4755).
 	mgmtGroup := []keys.KeyName{keys.KeyNew}
 	if canKill {
 		mgmtGroup = append(mgmtGroup, keys.KeyKill)
 	}
-	if lifecycleAction != session.LifecycleActionNone {
-		mgmtVerb := keys.KeyArchive
-		if lifecycleAction == session.LifecycleActionRestore {
-			mgmtVerb = keys.KeyRestore
-		}
-		mgmtGroup = append(mgmtGroup, mgmtVerb)
+	if lifecycleAction == session.LifecycleActionArchive {
+		mgmtGroup = append(mgmtGroup, keys.KeyArchive)
 	}
 
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).
@@ -710,6 +740,18 @@ var hintDropOrder = [][]keys.KeyName{
 	{keys.KeyKill},
 }
 
+// restingHintDropOrder is the compact resting-row menu's shed order (#4755
+// review): `r restore` is the one verb that row exists to offer, so it sheds
+// LAST — after delete and the conditional handoff retry. The shared order
+// above serves the live row, where restore is an early shed and delete the
+// last; applied to the resting menu it hid the primary hint at realistic
+// widths while keeping `D`. n/?/q stay the undroppable floor, as everywhere.
+var restingHintDropOrder = [][]keys.KeyName{
+	{keys.KeyKill},
+	{keys.KeyLimitRetry},
+	{keys.KeyRestore},
+}
+
 func (m *Menu) String() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
@@ -724,7 +766,7 @@ func (m *Menu) String() string {
 	// drop list is exhausted is clamped by the status bar as before.
 	drop := make(map[keys.KeyName]bool)
 	line, spans := m.renderHints(drop)
-	for _, ks := range hintDropOrder {
+	for _, ks := range m.dropOrder {
 		if lipgloss.Width(line) <= m.width {
 			break
 		}
