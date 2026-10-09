@@ -527,7 +527,7 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // (its worktree was moved away), one with a teardown op in flight — an archive
 // (OpArchiving) or kill (OpKilling) — or one whose durable account replacement
 // has not completed. The archive case is the load-bearing one:
-// ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
+// ArchiveTeardownWithClaim keeps started=true, so the #990 started-flag guard never fires
 // during archive; OpArchiving is the fence that started=true cannot provide.
 func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.liveness == LiveArchived {
