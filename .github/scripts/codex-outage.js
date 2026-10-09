@@ -376,8 +376,15 @@ function ghHttpStatus(error) {
 
 function isGhRateLimit(error) {
   const status = ghHttpStatus(error);
-  return status === 429 ||
-    (status === 403 && /rate limit|secondary|abuse detection|retry after/i.test(ghFailureText(error)));
+  if (status === 429) return true;
+  // GraphQL secondary limits can answer HTTP 200 with an errors payload — gh
+  // exits nonzero with the error text and no `HTTP nnn` suffix, so the
+  // message must classify with no status too; a bare transport failure never
+  // carries it.
+  if (status === null || status === 403) {
+    return /rate limit|secondary|abuse detection|retry after/i.test(ghFailureText(error));
+  }
+  return false;
 }
 
 function isRetryableGhFailure(error, method) {

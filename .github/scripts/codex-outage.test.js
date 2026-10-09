@@ -863,17 +863,24 @@ test('#4629: an incomplete record never claims a still-running outage across the
 });
 
 test('#4629: a rate-limit refusal waits at least GitHub\'s documented minimum between retries', async () => {
-  let failures = 2;
-  const sleeps = [];
-  const { execFileSync } = fakeGh((route, args) => {
-    if (failures && route.includes('/pulls/2/reviews')) {
-      failures -= 1;
-      throw ghFailure('gh: You have exceeded a secondary rate limit. (HTTP 403)');
-    }
-    return outageScanFixture(route, args);
-  });
-  const api = createGhApi({ execFileSync, sleep: async ms => { sleeps.push(ms); }, delays: [0, 0, 0], log: () => {} });
-  await sweep(api, 'owner/repo', t(10));
-  assert.deepEqual(sleeps, [60000, 60000],
-    'secondary-limit retries take the documented ≥60s floor, not the transport schedule');
+  for (const stderr of [
+    'gh: You have exceeded a secondary rate limit. (HTTP 403)',
+    // GraphQL secondary limits can return HTTP 200 — gh exits nonzero on the
+    // errors payload with no `HTTP nnn` for ghHttpStatus to read.
+    'gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.',
+  ]) {
+    let failures = 2;
+    const sleeps = [];
+    const { execFileSync } = fakeGh((route, args) => {
+      if (failures && route.includes('/pulls/2/reviews')) {
+        failures -= 1;
+        throw ghFailure(stderr);
+      }
+      return outageScanFixture(route, args);
+    });
+    const api = createGhApi({ execFileSync, sleep: async ms => { sleeps.push(ms); }, delays: [0, 0, 0], log: () => {} });
+    await sweep(api, 'owner/repo', t(10));
+    assert.deepEqual(sleeps, [60000, 60000],
+      `secondary-limit retries take the documented ≥60s floor, not the transport schedule: ${stderr}`);
+  }
 });
