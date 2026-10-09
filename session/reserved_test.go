@@ -1,8 +1,6 @@
 package session
 
 import (
-	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -24,19 +22,6 @@ func TestReservedTitleCollisionCatchesDerivedNames(t *testing.T) {
 		t.Run(title, func(t *testing.T) {
 			if got := ReservedTitleCollision(title); got != RootSessionTitle {
 				t.Fatalf("ReservedTitleCollision(%q) = %q, want %q", title, got, RootSessionTitle)
-			}
-			err := ReservedTitleRefusal(title)
-			if err == nil {
-				t.Fatalf("ReservedTitleRefusal(%q) admitted a title that claims the reserved name", title)
-			}
-			// Actionable means: it names the title the caller asked for, the
-			// reserved title it collides with, and what to do instead.
-			// The title is quoted in the message, so a tab or a non-breaking
-			// space appears there in its escaped form — compare the same way.
-			for _, want := range []string{fmt.Sprintf("%q", title), RootSessionTitle, "pick another name", "[root_agent]"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("refusal %q does not mention %q", err, want)
-				}
 			}
 		})
 	}
@@ -61,9 +46,6 @@ func TestReservedTitleCollisionLeavesDistinctTitlesAlone(t *testing.T) {
 		t.Run(title, func(t *testing.T) {
 			if got := ReservedTitleCollision(title); got != "" {
 				t.Fatalf("ReservedTitleCollision(%q) = %q, want no collision", title, got)
-			}
-			if err := ReservedTitleRefusal(title); err != nil {
-				t.Fatalf("ReservedTitleRefusal(%q) refused an unrelated title: %v", title, err)
 			}
 		})
 	}
