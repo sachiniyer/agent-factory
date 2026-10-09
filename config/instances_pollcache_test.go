@@ -212,6 +212,46 @@ func TestRepoInstancesFileCache_CorruptFileServesRawBytes(t *testing.T) {
 	assert.EqualValues(t, 1, reads, "a corrupt file's verdict is cached too — no re-read to re-report it")
 }
 
+// TestRepoInstancesFileCache_TypeMismatchedDuplicateVersionServesRawBytes is the
+// #5170 follow-up trigger: a document whose LAST schema_version is a valid
+// integer but whose EARLIER one is a string proves current to the map-based
+// probe (ProveJSONSchemaVersion matches the map detector's last-wins, any-type)
+// yet is corrupt to the struct decoder (decodeInstancesEnvelope assigns each
+// schema_version into an int in order and errors on the first type mismatch).
+// The poll-cache fast path must not serve the well-formed instances array
+// verbatim past that corruption — it must hand the daemon the raw bytes, the
+// same corrupt-file posture loadRepoInstancesForAll held before the poll cache.
+func TestRepoInstancesFileCache_TypeMismatchedDuplicateVersionServesRawBytes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	corrupt := []byte(`{"schema_version":"1","instances":[{"title":"a"}],"schema_version":1}`)
+	writeRepoInstancesFileForCacheTest(t, "mismatch-r", corrupt)
+
+	// Preconditions this test depends on — they pin the bug's boundary so a
+	// future change to either contract turns this red rather than silently
+	// weakening the assertion below.
+	require.True(t, ProveJSONSchemaVersion(corrupt, InstancesSchemaVersion),
+		"the trigger must prove current to the map-based probe: that is what reaches the fast path")
+	_, decodeErr := decodeInstancesEnvelope(corrupt)
+	require.Error(t, decodeErr,
+		"the trigger must be corrupt to the struct decoder: the envelope the fast path serves verbatim must be one it would reject")
+
+	cache := NewRepoInstancesFileCache()
+	result, err := cache.LoadAll()
+	require.NoError(t, err)
+	assert.Equal(t, json.RawMessage(corrupt), result.Instances["mismatch-r"],
+		"a type-mismatched duplicate schema_version is corrupt; the cache must serve the raw bytes "+
+			"for the daemon to flag, not the extracted instances array")
+
+	// The corrupt posture is cached: the next tick re-observes the same bytes
+	// without re-reading, the same way the object-shaped corrupt file above
+	// does.
+	_, err = cache.LoadAll()
+	require.NoError(t, err)
+	second, err := cache.LoadAll()
+	require.NoError(t, err)
+	assert.Equal(t, json.RawMessage(corrupt), second.Instances["mismatch-r"], "the corrupt posture is stable across ticks")
+}
+
 // TestRepoInstancesFileCache_LegacyFileMigratesOnce: a legacy array-root file
 // is migrated in place by the first poll (the sweep behavior the cache fused
 // in), and the second poll rides the fast path without another rewrite.
@@ -348,6 +388,17 @@ func TestInstancesArrayInCurrentEnvelope_ErrorParity(t *testing.T) {
 		{"object member", `{"schema_version":1,"instances":{"a":1}}`},
 		{"string member", `{"schema_version":1,"instances":"x"}`},
 		{"number member", `{"schema_version":1,"instances":5}`},
+		// A type-mismatched duplicate schema_version: the LAST value is a valid
+		// integer (so the map-based probe proves current) but an EARLIER one is
+		// a type the struct decoder cannot assign to an int field, so the
+		// struct decoder rejects the file. The verbatim array fast path must
+		// reject exactly the same way rather than serve the well-formed
+		// instances array past the corrupt schema_version (#5170 follow-up).
+		{"duplicate version string first", `{"schema_version":"1","instances":[{"title":"a"}],"schema_version":1}`},
+		{"duplicate version bool first", `{"schema_version":true,"instances":[],"schema_version":1}`},
+		{"duplicate version object first", `{"schema_version":{},"instances":[],"schema_version":1}`},
+		{"duplicate version array first", `{"schema_version":[1],"instances":[],"schema_version":1}`},
+		{"duplicate version float first", `{"schema_version":1.5,"instances":[],"schema_version":1}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := []byte(tc.raw)

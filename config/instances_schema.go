@@ -256,17 +256,31 @@ func migrateLegacyInstancesArray(raw []byte) ([]byte, error) {
 	return marshalInstancesEnvelope(raw)
 }
 
+// decodeInstancesEnvelopeStruct decodes one instances.json envelope and
+// validates its schema version, returning the decoded envelope with Instances
+// still a json.RawMessage — the array is decoded only far enough to bound it,
+// not normalized. It is the shared validation both the verbatim fast path and
+// the normalizing slow path run, so the two cannot drift on what they accept
+// or what error they name.
+func decodeInstancesEnvelopeStruct(raw []byte) (instancesEnvelope, error) {
+	var envelope instancesEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return instancesEnvelope{}, fmt.Errorf("%w: failed to parse instances envelope: %v", errInstancesSchemaContent, err)
+	}
+	if envelope.SchemaVersion != InstancesSchemaVersion {
+		return instancesEnvelope{}, fmt.Errorf("schema_version = %d, want %d", envelope.SchemaVersion, InstancesSchemaVersion)
+	}
+	return envelope, nil
+}
+
 // decodeInstancesEnvelope decodes one instances.json envelope, checks it, and
 // returns its normalized instances array. It is the single decode both readers
 // share: validateInstancesEnvelope is this with the array dropped, and
 // extractInstancesArray is this with the array kept (#3726).
 func decodeInstancesEnvelope(raw []byte) (json.RawMessage, error) {
-	var envelope instancesEnvelope
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, fmt.Errorf("%w: failed to parse instances envelope: %v", errInstancesSchemaContent, err)
-	}
-	if envelope.SchemaVersion != InstancesSchemaVersion {
-		return nil, fmt.Errorf("schema_version = %d, want %d", envelope.SchemaVersion, InstancesSchemaVersion)
+	envelope, err := decodeInstancesEnvelopeStruct(raw)
+	if err != nil {
+		return nil, err
 	}
 	return normalizeJSONRawArray(envelope.Instances, "instances")
 }
@@ -277,22 +291,38 @@ func validateInstancesEnvelope(raw []byte) error {
 }
 
 // instancesArrayInCurrentEnvelope returns the instances member of raw verbatim
-// — no decode and no re-marshal — for bytes ProveJSONSchemaVersion has already
-// proved are a well-formed current-version document (#5169). json.Valid ran
-// inside the probe, so every member value this pulls out is a complete JSON
-// value and every '['-led one is a complete array: those bytes are already the
-// normalized array in the only sense normalizeJSONRawArray's callers use it,
-// since the array goes straight to an unmarshal that whitespace cannot change.
+// — no re-marshal of the array — for bytes ProveJSONSchemaVersion has already
+// proved are a well-formed current-version document under the map detector's
+// rules (#5169). The array is sliced out, not normalized: json.Valid ran inside
+// the probe, so every member value this pulls out is a complete JSON value and
+// every '['-led one is a complete array — already the normalized array in the
+// only sense normalizeJSONRawArray's callers use it, since the array goes
+// straight to an unmarshal that whitespace cannot change.
 //
-// Only a plainly array-shaped member takes the fast return. Everything else —
-// an absent member, one found under a case-variant key, null, or a non-array
-// value — defers to the same decodeInstancesEnvelope the slow path ran, so the
-// verdict and the error text cannot drift: the decoder's case-insensitive
-// field match and its nil-RawMessage handling of an explicit null reproduce
-// exactly what the migration-validated read produced.
+// ProveJSONSchemaVersion's contract is to match DetectJSONSchemaVersion, a
+// map[string]any decode where duplicate keys collapse last-wins with no type
+// error. The struct decoder this envelope goes through elsewhere
+// (decodeInstancesEnvelope) is stricter: it assigns each schema_version in
+// order into an int field and errors on the FIRST one that cannot go there. A
+// file whose LAST schema_version is a valid integer but an EARLIER one is a
+// string, bool, object, array, or float proves current to the probe yet is
+// corrupt to the struct decoder — and a verbatim return trusts the probe. So
+// decode the envelope struct here and refuse what the rest of the pipeline
+// refuses, restoring the parity the pre-#5169 fast path held by running
+// plan.Validate (the struct decode) even when the probe proved current.
+//
+// Only a plainly array-shaped member takes the verbatim fast return. Everything
+// else — an absent member, one found under a case-variant key, null, or a
+// non-array value — defers to the same decodeInstancesEnvelope the slow path
+// ran, so the verdict and the error text cannot drift: the decoder's
+// case-insensitive field match and its nil-RawMessage handling of an explicit
+// null reproduce exactly what the migration-validated read produced.
 func instancesArrayInCurrentEnvelope(raw []byte) (json.RawMessage, error) {
 	if member, found := lastTopLevelJSONMember(raw, "instances"); found {
 		if trimmed := bytes.TrimSpace(member); len(trimmed) > 0 && trimmed[0] == '[' {
+			if _, err := decodeInstancesEnvelopeStruct(raw); err != nil {
+				return nil, err
+			}
 			return member, nil
 		}
 	}
