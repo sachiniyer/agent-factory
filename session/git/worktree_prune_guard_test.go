@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,53 @@ func TestWorktreeDirtyFiles_DisablesFsmonitor(t *testing.T) {
 	assert.Zero(t, n)
 	_, statErr := os.Stat(marker)
 	assert.Error(t, statErr, "the read-only probe must never invoke the fsmonitor hook")
+}
+
+// TestWorktreeDirtyFiles_SeesPastSubmoduleIgnore: `submodule.<name>.ignore=all`
+// makes `git status` suppress EVERYTHING inside the submodule — even with
+// --ignored — so unrecoverable work parked there would read clean and list as
+// reclaimable. The probe carries --ignore-submodules=none (#5136 Codex round
+// 7); a file only inside the ignored submodule must read dirty.
+func TestWorktreeDirtyFiles_SeesPastSubmoduleIgnore(t *testing.T) {
+	repo := newPruneGuardRepo(t)
+	sub := newPruneGuardRepo(t)
+
+	add := exec.Command("git", "-C", repo,
+		"-c", "protocol.file.allow=always",
+		"submodule", "add", sub, "vendor/sub")
+	add.Env = append(os.Environ(), "GIT_ALLOW_PROTOCOL=file")
+	out, err := add.CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.NoError(t, exec.Command("git", "-C", repo,
+		"-c", "user.email=t@t", "-c", "user.name=t",
+		"commit", "-qm", "add submodule").Run())
+	// ignore=all is the suppressive configuration Codex reproduced: status
+	// reports nothing inside the submodule at all.
+	require.NoError(t, exec.Command("git", "-C", repo,
+		"config", "submodule.vendor/sub.ignore", "all").Run())
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	require.NoError(t, exec.Command("git", "-C", repo, "worktree", "add", "-b", "af/sub", wt).Run())
+	init := exec.Command("git", "-C", wt, "-c", "protocol.file.allow=always",
+		"submodule", "update", "--init")
+	init.Env = append(os.Environ(), "GIT_ALLOW_PROTOCOL=file")
+	require.NoError(t, init.Run())
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "vendor", "sub", "wip.txt"), []byte("only copy"), 0o644))
+
+	// Precondition: WITHOUT the override the ignore rule hides the work —
+	// the fixture has to prove the hazard it is testing against.
+	plain := exec.Command("git", "-C", wt, "--no-optional-locks",
+		"-c", "core.fsmonitor=",
+		"status", "--porcelain", "--untracked-files=normal", "--ignored")
+	porcelain, err := plain.Output()
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(string(porcelain)),
+		"submodule.<name>.ignore=all must actually suppress the uncommitted file")
+
+	n, err := WorktreeDirtyFiles(wt)
+	require.NoError(t, err)
+	assert.Greater(t, n, 0,
+		"a submodule file visible only via --ignore-submodules=none must read dirty")
 }
 
 // TestVerifyRegisteredWorktreeOccupantBranch pins the session-identity half:

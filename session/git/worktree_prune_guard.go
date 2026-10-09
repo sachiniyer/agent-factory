@@ -41,9 +41,14 @@ func WorktreeDirtyFiles(worktreePath string) (int, error) {
 	// hint does NOT stop status consulting a configured fsmonitor hook or
 	// builtin daemon, and that consultation can spawn the monitor or write
 	// its cookie — a write this probe must not cause (#5136 Codex round 6).
+	// --ignore-submodules=none overrides `submodule.<name>.ignore=all`:
+	// without it a configured ignore swallows every change inside the
+	// submodule, including unrecoverable work the kept branch does not have
+	// (#5136 Codex round 7).
 	out, err := runBoundedWorktreeGit(worktreePath, false, "--no-optional-locks",
 		"-c", "core.fsmonitor=",
-		"status", "--porcelain", "--untracked-files=normal", "--ignored")
+		"status", "--porcelain", "--untracked-files=normal", "--ignored",
+		"--ignore-submodules=none")
 	if err != nil {
 		return 0, err
 	}
