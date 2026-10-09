@@ -229,6 +229,10 @@ func (s *Sidebar) SetSize(width, height int) {
 	s.width = width
 	s.height = height
 	s.renderer.SetWidth(s.contentWidth())
+	// The fitted window assumes the old allocation — a resize can move the
+	// bound row across the fold without any rebuild. Mark it stale so the
+	// next RowVerbTarget refits before answering (#4755 review).
+	s.hasRendered = false
 }
 
 // SetNamingPlaceholder threads the autocreate-name shadow text (#2470) from the

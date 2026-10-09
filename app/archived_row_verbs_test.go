@@ -279,3 +279,48 @@ func TestShowNewTabPicker_FencedRestingRowRefuses(t *testing.T) {
 	require.Contains(t, text, "restore",
 		"the refusal must point at restore — the resting row's verb")
 }
+
+// capsBackend wraps a backend with an explicit capability set — used to pin
+// the refusal-precedence test without dragging a real remote backend into the
+// fixture.
+type capsBackend struct {
+	session.Backend
+	caps session.Capabilities
+}
+
+func (b capsBackend) Capabilities() session.Capabilities { return b.caps }
+
+// TestPaneSelectionHint_LostBindingKeepsDivergenceHint: a Lost (or Dead) row
+// can still own a preview pane — ui/tab_pane.go renders their fallback
+// content — so when the workspace pane shows a different session, the
+// — selected: hint is an honest divergence marker and must stay (#4755
+// review). Only archived/restoring bindings (no pane surface, ever) suppress
+// it.
+func TestPaneSelectionHint_LostBindingKeepsDivergenceHint(t *testing.T) {
+	h := newTestHome(t)
+	live := archiveActionInstance(t, "alpha", session.Ready)
+	lost := archiveActionInstance(t, "beta", session.Lost)
+	h.store.AddInstance(live)
+	h.store.AddInstance(lost)
+
+	p := openTestPane(t, h, live, 0)
+
+	h.store.SetSelectedInstance(lost)
+	require.NotEmpty(t, h.paneSelectionHint(p),
+		"a lost selection diverging from the pane is real — keep the hint")
+}
+
+// TestTabPickerRefusal_PrefersCapabilityGate: on a backend that can never
+// manage tabs (docker/ssh/hook), a resting row's refusal must name the
+// permanent reason — "only local sessions" — not "restore it first", which
+// would promise a restore can enable `t` when it cannot (#4755 review).
+func TestTabPickerRefusal_PrefersCapabilityGate(t *testing.T) {
+	inst := archiveActionInstance(t, "remote-arch", session.Archived)
+	inst.SetBackend(capsBackend{Backend: session.NewFakeBackend(),
+		caps: session.Capabilities{TabManagement: false}})
+
+	err := tabPickerRefusal(inst)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "only local sessions",
+		"the permanent capability refusal must outrank the restore hint")
+}

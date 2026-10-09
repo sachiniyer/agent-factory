@@ -36,6 +36,12 @@ var newTabChoices = []newTabChoice{
 // fenced resting row (startup-unknown, mid-restore) is refused too (#4755
 // review): a picker that could never submit never opens.
 func tabPickerRefusal(selected *session.Instance) error {
+	// The capability refusal outranks the resting one: an off-box backend
+	// (docker/ssh/hook) can never take a tab — a restore changes nothing —
+	// so it names the permanent reason, not the transient one (#4755 review).
+	if !selected.Capabilities().TabManagement {
+		return fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in")
+	}
 	if err := selected.TabSpawnBlocked(); err != nil {
 		return err
 	}
@@ -62,9 +68,6 @@ func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
 	// the other resting rows the footer withholds `t` from.
 	if err := tabPickerRefusal(selected); err != nil {
 		return m, m.handleNotice(err)
-	}
-	if !selected.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
 	items := make([]string, len(newTabChoices))
@@ -130,9 +133,6 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	// target: an archive or a pending swap can land while the picker is open.
 	if err := tabPickerRefusal(selected); err != nil {
 		return m, m.handleNotice(err)
-	}
-	if !selected.Capabilities().TabManagement {
-		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
 	}
 
 	target := captureSessionActionTarget(selected, m.repoID)

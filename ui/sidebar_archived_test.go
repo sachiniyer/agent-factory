@@ -791,3 +791,32 @@ func TestSidebar_RowVerbTarget_CollapsedMarkerNotAdopted(t *testing.T) {
 	assert.Nil(t, s.RowVerbTarget(),
 		"a bound row without its ▾ marker is not visibly selected — no verbs")
 }
+
+// TestSidebar_RowVerbTarget_ResizeRefits: the fitted window assumes the
+// allocation it was computed against. A resize moves the fold without any
+// rebuild — a bound row that was on screen can cross it — so SetSize marks
+// the window stale and the fallback refits before answering (#4755 review).
+func TestSidebar_RowVerbTarget_ResizeRefits(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	var archivedRows []*session.Instance
+	for i := 0; i < 12; i++ {
+		inst := archTestInstance(t, fmt.Sprintf("arch-%02d", i), session.Archived)
+		archivedRows = append(archivedRows, inst)
+		addTestInstance(s, inst)
+	}
+	bound := archivedRows[0] // oldest → tail of the newest-first folder
+	s.SetSize(40, 40)
+
+	s.proj.SelectInstance(bound)
+	s.ClickHeaderKind(SectionArchived)
+	_ = s.View()
+	require.Same(t, bound, s.RowVerbTarget(),
+		"precondition: the bound tail row fits at the large height")
+
+	// Shrink the rail: the bound tail row is now below the fold, with no
+	// rebuild and no intervening frame to re-fit the window.
+	s.SetSize(40, 6)
+	assert.Nil(t, s.RowVerbTarget(),
+		"a resize that scrolls the bound row off must drop it immediately")
+}
