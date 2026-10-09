@@ -405,7 +405,7 @@ func systemdAsk(verb string) (ProbeAnswer, string) {
 		return Undetermined(fmt.Errorf("could not query systemd (%s): %w: %w",
 			verb, errSystemdUnreachable, res.Cause())), "unknown"
 	}
-	word := firstLine(strings.TrimSpace(out))
+	word := firstLineTrimmed(strings.TrimSpace(out))
 
 	// systemd's exit code is a TRANSPORT fact — "the command ran, and roughly
 	// how it feels about it". The ANSWER is the word. Trusting exit 0 to mean
@@ -448,7 +448,7 @@ func systemdMainPID() (int, ProbeAnswer) {
 	if !res.Succeeded() {
 		return 0, Undetermined(systemdProbeErr("show MainPID", out))
 	}
-	word := strings.TrimSpace(firstLine(out))
+	word := firstLineTrimmed(out)
 	word = strings.TrimSpace(strings.TrimPrefix(word, "MainPID="))
 	pid, err := strconv.Atoi(word)
 	if err != nil || pid < 0 {
@@ -529,12 +529,15 @@ var systemdActiveAnswers = map[string]ProbeAnswer{
 
 func systemdProbeErr(verb, out string) error {
 	if text := strings.TrimSpace(out); text != "" {
-		return fmt.Errorf("could not query systemd (%s): %s", verb, firstLine(text))
+		return fmt.Errorf("could not query systemd (%s): %s", verb, firstLineTrimmed(text))
 	}
 	return fmt.Errorf("could not query systemd (%s): it exited non-zero without a state", verb)
 }
 
-func firstLine(s string) string {
+// firstLineTrimmed returns s's first line with its surrounding whitespace
+// removed. Callers trim the input first when leading blank lines must be
+// skipped rather than answered as an empty first line.
+func firstLineTrimmed(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return strings.TrimSpace(line)
 }
@@ -585,7 +588,7 @@ func launchdProbeErr(what string, res probeResult) error {
 		return fmt.Errorf("could not query launchd (%s): %w", what, cause)
 	}
 	if text, _ := res.Output(); strings.TrimSpace(text) != "" {
-		return fmt.Errorf("could not query launchd (%s): %s", what, firstLine(strings.TrimSpace(text)))
+		return fmt.Errorf("could not query launchd (%s): %s", what, firstLineTrimmed(strings.TrimSpace(text)))
 	}
 	return fmt.Errorf("could not query launchd (%s): it exited %d without an answer", what, res.ExitCode())
 }
