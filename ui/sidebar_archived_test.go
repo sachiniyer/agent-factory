@@ -432,3 +432,122 @@ func TestSidebar_ClickHeaderKindTogglesCorrectFolder(t *testing.T) {
 	assert.False(t, instExpanded(), "clicking the Instances header toggles Instances")
 	assert.True(t, archExpanded(), "the Archived folder must be untouched")
 }
+
+// TestSidebar_RowVerbTarget_ExpandedArchivedHeader pins the #4755 divergence:
+// pressing `l` on "▶ Archived (1)" expands the folder WITHOUT moving the tree
+// cursor — the cursor stays on the section header (GetSelectedInstance nil)
+// while the store's sticky display selection keeps the archived row marked
+// with ▾. A selection-scoped row verb (`r`, `D`, `c`) and the footer must act
+// on the row the user SEES as selected: the bound resting row.
+func TestSidebar_RowVerbTarget_ExpandedArchivedHeader(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	// The display binding points at the archived session (bound while it was
+	// live — archiving mutates the row in place, so the pointer survives).
+	s.proj.SelectInstance(archivedInst)
+	// The issue's `l` on "▶ Archived (1)": cursor parks on the header, the
+	// folder opens.
+	s.ClickHeaderKind(SectionArchived)
+
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader, "precondition: cursor rests on the section header")
+	require.Equal(t, SectionArchived, sel.Kind)
+	require.Nil(t, s.GetSelectedInstance(),
+		"precondition: the cursor selection resolves nil on a header")
+	require.True(t, archivedRowVisible(s),
+		"precondition: the archived row renders under the expanded header")
+	require.Same(t, archivedInst, s.proj.GetSelectedInstance(),
+		"precondition: the display binding still marks the archived row")
+
+	assert.Same(t, archivedInst, s.RowVerbTarget(),
+		"the ▾-marked row is the row a selection-scoped verb must act on")
+}
+
+// TestSidebar_RowVerbTarget_CursorRowWins: when the cursor is ON the archived
+// row, the row verb target is that row — the resting-binding fallback must
+// never override the cursor's own selection (here the display binding still
+// names a different, live session).
+func TestSidebar_RowVerbTarget_CursorRowWins(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	liveInst := archTestInstance(t, "live-one", session.Ready)
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, liveInst)
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	s.SetSelectedInstance(0)
+	require.Same(t, liveInst, s.proj.GetSelectedInstance(),
+		"precondition: the display binding names the live session")
+
+	// Park the cursor on the archived row directly (an archived row never
+	// pushes itself into the store binding — pushSelection only writes live
+	// SectionInstances rows — so the binding keeps the live session).
+	s.ClickHeaderKind(SectionArchived)
+	parked := false
+	for i, it := range s.visibleItems {
+		if it.Kind == SectionArchived && !it.IsHeader {
+			s.selectedIdx = i
+			parked = true
+			break
+		}
+	}
+	require.True(t, parked, "the expanded folder must expose the archived row")
+	require.Same(t, archivedInst, s.GetSelectedInstance())
+
+	assert.Same(t, archivedInst, s.RowVerbTarget(),
+		"the cursor's own row wins over a stale live binding")
+}
+
+// TestSidebar_RowVerbTarget_InvisibleBindingIsNil: the resting fallback applies
+// only while the bound row is RENDERED — on a collapsed "▶ Archived" header no
+// row carries the ▾ marker, so no row verb may resolve.
+func TestSidebar_RowVerbTarget_InvisibleBindingIsNil(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	s.proj.SelectInstance(archivedInst)
+	// SelectInstance's re-pin lands the cursor on the archived row; h/← parks
+	// it back on the now-collapsed section header — the row no longer renders.
+	s.SetSelectedInstance(0)
+	s.CollapseSection()
+
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionArchived, sel.Kind)
+	require.False(t, archivedRowVisible(s),
+		"precondition: the archived row is hidden while the folder is collapsed")
+
+	assert.Nil(t, s.RowVerbTarget(),
+		"no visible row is marked, so no row verb may resolve")
+}
+
+// TestSidebar_RowVerbTarget_LiveBindingNotAdopted: a header never carries
+// live-row verbs — the store's sticky binding is the WORKSPACE selection (the
+// panes keep showing it while the cursor tours headers), not a row the user
+// sees as selected. Only a resting binding composes with a header cursor.
+func TestSidebar_RowVerbTarget_LiveBindingNotAdopted(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	liveInst := archTestInstance(t, "live-one", session.Ready)
+	addTestInstance(s, liveInst)
+	addTestInstance(s, archTestInstance(t, "put-away", session.Archived))
+	s.SetSize(40, 40)
+
+	s.SetSelectedInstance(0)
+	require.Same(t, liveInst, s.proj.GetSelectedInstance())
+
+	// Cursor on the expanded Instances header.
+	s.ClickHeader()
+	s.ClickHeader()
+
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionInstances, sel.Kind)
+	assert.Nil(t, s.RowVerbTarget(),
+		"a live display binding must not leak row verbs onto a section header")
+}

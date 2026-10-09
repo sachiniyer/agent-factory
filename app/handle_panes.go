@@ -78,6 +78,13 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if selected == nil {
 		return ""
 	}
+	if selected.ShownArchived() {
+		// The sticky binding keeps an archived session marked (▾) so the
+		// footer's restore verb can act on it (#4755), but no pane can ever
+		// show it — archived sessions own no live tmux. Naming it in the
+		// header claims a divergence the workspace cannot resolve.
+		return ""
+	}
 	if m.paneMatchesSelection(p) {
 		return ""
 	}

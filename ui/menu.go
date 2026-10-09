@@ -443,20 +443,38 @@ func (m *Menu) addInstanceOptions() {
 		return
 	}
 
-	// Instance management group. `a` archives a LIVE row; a resting
-	// (Archived/Lost/Dead) row instead advertises the dedicated `r` restore key
-	// (#1605) — the two verbs no longer share the `a` binding, so the footer
-	// shows exactly the one action the selected row supports.
+	// A resting (Archived/Lost/Dead) row has no live surface: nothing to attach
+	// to, no tab roster the TUI may edit, no pane it can show. Feeding it the
+	// full instance menu advertises verbs that cannot run — and worse, the width
+	// drop order sheds `r restore` long before those dead verbs (`t`, `w`,
+	// `1-9`), so at a real bar width the footer lies both ways (#4755). Give it
+	// its own compact menu: the lifecycle verbs a resting row can actually take
+	// plus the global keys. `c` still advertises for a pending handoff delivery
+	// that outlived its session — retry/confirm remain meaningful there.
+	if lifecycleAction == session.LifecycleActionRestore {
+		m.options = []keys.KeyName{keys.KeyNew}
+		if canKill {
+			m.options = append(m.options, keys.KeyKill)
+		}
+		m.options = append(m.options, keys.KeyRestore)
+		if canRetryHandoff {
+			m.options = append(m.options, keys.KeyLimitRetry)
+		}
+		m.options = append(m.options, keys.KeyHelp, keys.KeyQuit)
+		m.groups = []menuGroup{
+			{start: 0, end: len(m.options), isAction: false},
+		}
+		return
+	}
+
+	// Instance management group for a live row (`a` archives it; the resting
+	// row's `r` restore key is handled by the compact menu above, #1605/#4755).
 	mgmtGroup := []keys.KeyName{keys.KeyNew}
 	if canKill {
 		mgmtGroup = append(mgmtGroup, keys.KeyKill)
 	}
-	if lifecycleAction != session.LifecycleActionNone {
-		mgmtVerb := keys.KeyArchive
-		if lifecycleAction == session.LifecycleActionRestore {
-			mgmtVerb = keys.KeyRestore
-		}
-		mgmtGroup = append(mgmtGroup, mgmtVerb)
+	if lifecycleAction == session.LifecycleActionArchive {
+		mgmtGroup = append(mgmtGroup, keys.KeyArchive)
 	}
 
 	// Action group: enter interacts in-pane, o attaches full-screen (#1089).

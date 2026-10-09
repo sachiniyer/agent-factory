@@ -710,6 +710,38 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 	return instances[sel.ItemIndex]
 }
 
+// RowVerbTarget resolves the instance a selection-scoped row verb — the
+// footer's instance hints plus `r`/`D`/`c` dispatch — should act on (#4755).
+// The cursor's own row wins whenever it rests on an instance row. When the
+// cursor rests on a section header, the answer is the store's sticky display
+// binding — but only while that binding is a resting (restorable) row that is
+// actually rendered: it is the row the ▾ marker still shows as selected. A
+// live binding is never adopted — section headers carry folder verbs only, and
+// the panes legitimately keep displaying that live selection — and a binding
+// whose row is not rendered (its folder collapsed) resolves to nothing, so no
+// verb can act on a row the user cannot see.
+func (s *Sidebar) RowVerbTarget() *session.Instance {
+	if inst := s.GetSelectedInstance(); inst != nil {
+		return inst
+	}
+	bound := s.proj.GetSelectedInstance()
+	if bound == nil || bound.LifecycleAction() != session.LifecycleActionRestore {
+		return nil
+	}
+	for i, inst := range s.proj.GetInstances() {
+		if inst != bound {
+			continue
+		}
+		for _, item := range s.visibleItems {
+			if isInstanceRow(item) && !item.IsTab && item.ItemIndex == i {
+				return bound
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
 // SetSelectedInstance sets the cursor to point at the given instance index.
 // The section holding the target (Instances, or the Archived folder for an
 // archived session, #1028) is expanded first so the target row is always

@@ -34,9 +34,15 @@ var newTabChoices = []newTabChoice{
 // while the modal owns the keyboard and may replace the instance pointer or
 // reuse its display title.
 func (m *home) showNewTabPicker() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil || selected.HasInFlightOp() {
 		return m, nil
+	}
+	// Archived sessions keep a frozen roster for restore and a pending swap
+	// owns its own tab answer — refuse BEFORE the picker opens, since the
+	// picker could never submit (#4755's `t` dead end).
+	if err := selected.TabSpawnBlocked(); err != nil {
+		return m, m.handleNotice(err)
 	}
 	if !selected.Capabilities().TabManagement {
 		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
@@ -100,6 +106,11 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	}
 	if selected.HasInFlightOp() {
 		return m, nil
+	}
+	// Same gate as the picker, re-checked after the modal resolves its captured
+	// target: an archive or a pending swap can land while the picker is open.
+	if err := selected.TabSpawnBlocked(); err != nil {
+		return m, m.handleNotice(err)
 	}
 	if !selected.Capabilities().TabManagement {
 		return m, m.handleNotice(fmt.Errorf("only local sessions support new tabs — this session's workspace runs off-box (docker/ssh/remote), so there is no local worktree to spawn a tab in"))
