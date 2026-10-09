@@ -10,6 +10,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestReservedTitleRefusalProjectScopedRemedy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, dir := range []string{filepath.Join(home, "relocated"), t.TempDir()} {
+		t.Run(filepath.Base(dir), func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", dir)
+			for _, title := range []string{"root", "ro ot"} {
+				err := ReservedTitleRefusalFor(title, "")
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "from this repo")
+				assert.Contains(t, err.Error(), "daemon host")
+				assert.Contains(t, err.Error(), "AF_DAEMON_URL unset")
+				assert.Contains(t, err.Error(), "without --daemon-url")
+				assert.Contains(t, err.Error(), "af projects add .")
+				assert.Contains(t, err.Error(), `af config set --project . root_agent '{"enabled":true}'`)
+				assert.NotContains(t, err.Error(), config.GlobalConfigFileForDisplay())
+				assert.NotContains(t, err.Error(), "config.toml")
+				assert.Contains(t, err.Error(), "[root_agent]")
+				assert.NotContains(t, err.Error(), "config.json")
+				assert.NotContains(t, err.Error(), "root_agents")
+			}
+		})
+	}
+}
+
 func TestBackendConfigErrorResolvedConfigFile(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	for _, kind := range []BackendKind{BackendDocker, BackendSSH, BackendHook} {
