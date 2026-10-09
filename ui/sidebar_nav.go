@@ -28,6 +28,18 @@ func (s *Sidebar) syncFromStore() {
 		return
 	}
 	s.rebuildVisibleItems()
+	// treeCollapsed is the user's fold of the BOUND live row's tab subtree.
+	// Archiving re-homes that row into the flat Archived folder, where the
+	// override no longer folds anything — it only suppresses the ▾ marker the
+	// header fallback keys on, leaving an adoptable row that looks unselected
+	// (#4755 review). Clear the dead override on the transition.
+	if s.treeCollapsed != "" {
+		if sel := s.proj.GetSelectedInstance(); sel == nil ||
+			sel.Title != s.treeCollapsed || sel.ShownArchived() {
+			s.treeCollapsed = ""
+			s.rebuildVisibleItems()
+		}
+	}
 	if s.proj.SelectionSeq() != s.seenSelSeq {
 		if inst := s.proj.GetSelectedInstance(); inst != nil {
 			s.moveCursorToInstance(inst)
@@ -300,6 +312,12 @@ func (s *Sidebar) rebuildVisibleItems() {
 	if s.selectedIdx < 0 {
 		s.selectedIdx = 0
 	}
+	// The fitted window described the OLD list — rows it now contains (e.g. a
+	// bound row an `l` expand just revealed) can sit beyond renderedEnd, so
+	// RowVerbTarget's off-screen check must not consult it until String()
+	// re-fits. hasRendered=false falls the check back to the full list for the
+	// remainder of the frame (#4755 review).
+	s.hasRendered = false
 }
 
 // rawSelection returns the currently selected item without syncing against

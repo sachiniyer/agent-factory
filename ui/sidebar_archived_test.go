@@ -686,3 +686,70 @@ func TestSidebar_RowVerbTarget_FencedRestingRowAdopted(t *testing.T) {
 	assert.Same(t, lostInst, s.RowVerbTarget(),
 		"a fenced-but-resting bound row keeps its row verbs on its own header")
 }
+
+// TestSidebar_RowVerbTarget_StaleWindowAfterExpand: the fitted window is only
+// valid for the row list it was computed against. Expanding the collapsed
+// Archived folder rebuilds visibleItems — the bound row re-enters the list at
+// an index beyond the previous frame's renderedEnd — and the same key update
+// asks RowVerbTarget for a verdict BEFORE String() re-fits. A bound row must
+// not be refused off the stale window: the fallback composes with the
+// CURRENT list until the next render establishes fresh bounds (#4755 review).
+func TestSidebar_RowVerbTarget_StaleWindowAfterExpand(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	archivedInst := archTestInstance(t, "put-away", session.Archived)
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, archivedInst)
+	s.SetSize(40, 40)
+
+	s.proj.SelectInstance(archivedInst)
+	s.ClickHeaderKind(SectionArchived) // expanded, cursor parked on its header
+	_ = s.View()                       // a frame fixes the window on the open list
+	require.Same(t, archivedInst, s.RowVerbTarget(),
+		"precondition: the expanded header adopts its bound row")
+
+	s.CollapseSection() // h on the header folds the folder back up
+	_ = s.View()        // the collapsed frame re-fits: bounds describe the short list
+	s.ExpandSection()   // l: the rebuild re-adds the bound row — before any render
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionArchived, sel.Kind)
+
+	assert.Same(t, archivedInst, s.RowVerbTarget(),
+		"the row the expand just revealed must not be refused on stale bounds")
+}
+
+// TestSidebar_ArchiveClearsTabCollapse: treeCollapsed is the user's explicit
+// fold of the BOUND live row's tab subtree. Archiving re-homes that row into
+// the Archived folder where no tab children render — the stale override then
+// only suppresses the ▾ marker, leaving a row the header fallback would adopt
+// for `r`/`D` while nothing marks it selected (#4755 review). The archive
+// transition must drop the dead override so the bound row keeps its marker.
+func TestSidebar_ArchiveClearsTabCollapse(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	inst := archTestInstance(t, "put-away", session.Ready)
+	addTestInstance(s, inst)
+	s.SetSize(40, 40)
+
+	s.proj.SelectInstance(inst) // cursor + binding on the soon-to-be-archived row
+	s.syncFromStore()
+	s.treeCollapsed = inst.Title
+	require.False(t, s.instanceExpanded(inst),
+		"precondition: the collapse override suppresses the ▾ marker")
+
+	// Archive in place, the way the reconcile delivers it: the same instance
+	// pointer flips liveness. The cursor clamps onto the Archived header — no
+	// live row takes the push — so the binding keeps pointing at it.
+	inst.SetStatusForTest(session.Archived)
+	s.syncFromStore()
+
+	require.Same(t, inst, s.proj.GetSelectedInstance(),
+		"precondition: the archived row stays display-bound")
+	require.Empty(t, s.treeCollapsed,
+		"a collapse override for a row with no tab subtree must not persist")
+	require.True(t, s.instanceExpanded(inst),
+		"the bound archived row renders its ▾ marker again")
+
+	s.ClickHeaderKind(SectionArchived)
+	assert.Same(t, inst, s.RowVerbTarget(),
+		"the marker-visible bound row resolves on its own header")
+}
