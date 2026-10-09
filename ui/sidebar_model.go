@@ -174,13 +174,14 @@ type Sidebar struct {
 	// minimally so the selected row stays visible.
 	scrollOffset int
 
-	// renderedStart/renderedEnd bracket the visibleItems indices String() last
-	// rendered — the window of rows actually on screen. RowVerbTarget's
-	// resting-binding fallback consults them rather than the full item list:
-	// a bound row scrolled outside the window carries no ▾ marker on screen,
-	// so no row verb may resolve to it (#4755 review). Before the first render
-	// (hasRendered false) the whole list counts — no fitted viewport exists
-	// yet to contradict a row's visibility.
+	// renderedStart/renderedEnd bracket the visibleItems indices the fitted
+	// window last put on screen — the only rows whose ▾ marker is visible.
+	// RowVerbTarget's resting-binding fallback consults them rather than the
+	// full item list: a bound row scrolled outside the window carries no ▾
+	// marker on screen, so no row verb may resolve to it (#4755 review).
+	// rebuildVisibleItems drops hasRendered because the bounds describe the
+	// OLD list; RowVerbTarget refits on demand (ensureRenderedWindow) so the
+	// check always answers against the rows the next frame will paint.
 	renderedStart, renderedEnd int
 	hasRendered                bool
 

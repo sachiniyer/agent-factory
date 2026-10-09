@@ -753,3 +753,41 @@ func TestSidebar_ArchiveClearsTabCollapse(t *testing.T) {
 	assert.Same(t, inst, s.RowVerbTarget(),
 		"the marker-visible bound row resolves on its own header")
 }
+
+// TestSidebar_RowVerbTarget_CollapsedMarkerNotAdopted: the header fallback
+// adopts the bound row because the user SEES it selected — the ▾ marker is
+// the evidence. A bound resting row whose marker is suppressed (a live row's
+// tabs folded with h/←, then lost) renders ▸ like every unexpanded row, and
+// no header may lend it `r`/`D` (#4755 review).
+func TestSidebar_RowVerbTarget_CollapsedMarkerNotAdopted(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	lostInst := archTestInstance(t, "lost-one", session.Lost)
+	addTestInstance(s, archTestInstance(t, "live-one", session.Ready))
+	addTestInstance(s, lostInst)
+	s.SetSize(40, 40)
+
+	s.proj.SelectInstance(lostInst)
+	s.syncFromStore()
+	require.Same(t, lostInst, s.proj.GetSelectedInstance())
+
+	// The fold the user set while the row was live survives the transition.
+	s.treeCollapsed = lostInst.Title
+	require.False(t, s.instanceExpanded(lostInst),
+		"precondition: the bound row renders ▸, not the ▾ marker")
+
+	// Park the cursor on the Sessions header — the section a lost row
+	// renders under.
+	for i, it := range s.visibleItems {
+		if it.IsHeader && it.Kind == SectionInstances {
+			s.selectedIdx = i
+			break
+		}
+	}
+	_ = s.View()
+	sel := s.GetSelection()
+	require.True(t, sel.IsHeader)
+	require.Equal(t, SectionInstances, sel.Kind)
+
+	assert.Nil(t, s.RowVerbTarget(),
+		"a bound row without its ▾ marker is not visibly selected — no verbs")
+}

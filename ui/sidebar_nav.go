@@ -312,11 +312,10 @@ func (s *Sidebar) rebuildVisibleItems() {
 	if s.selectedIdx < 0 {
 		s.selectedIdx = 0
 	}
-	// The fitted window described the OLD list — rows it now contains (e.g. a
-	// bound row an `l` expand just revealed) can sit beyond renderedEnd, so
-	// RowVerbTarget's off-screen check must not consult it until String()
-	// re-fits. hasRendered=false falls the check back to the full list for the
-	// remainder of the frame (#4755 review).
+	// The fitted window describes the OLD list now — mark it stale so the
+	// next reader (RowVerbTarget via ensureRenderedWindow, or String()'s own
+	// fit) recomputes it against THIS list rather than consulting bounds that
+	// no longer line up with these indices (#4755 review).
 	s.hasRendered = false
 }
 
@@ -754,6 +753,14 @@ func (s *Sidebar) RowVerbTarget() *session.Instance {
 	if bound == nil || !bound.IsResting() {
 		return nil
 	}
+	// The bound row must carry its ▾ marker for a header to borrow it: a
+	// leftover tab-collapse override (a live row folded, then lost/archived)
+	// renders ▸ instead — verbs must not land on a row that reads unselected
+	// (#4755 review). A mid-op row has no arrow at all and is refused the
+	// same way.
+	if !s.instanceExpanded(bound) {
+		return nil
+	}
 	wantSection := SectionInstances
 	if bound.ShownArchived() {
 		wantSection = SectionArchived
@@ -761,6 +768,11 @@ func (s *Sidebar) RowVerbTarget() *session.Instance {
 	if sel.Kind != wantSection {
 		return nil
 	}
+	// The fitted window is only valid for the list it was computed on;
+	// rebuildVisibleItems invalidates it and this refit answers against the
+	// list as it will actually render — a rebuild that just revealed or hid
+	// the bound row gets the right verdict in the same update (#4755 review).
+	s.ensureRenderedWindow()
 	for i, inst := range s.proj.GetInstances() {
 		if inst != bound {
 			continue
@@ -771,7 +783,7 @@ func (s *Sidebar) RowVerbTarget() *session.Instance {
 				// (sidebar_render.go). A bound row beyond it — deeper than
 				// the viewport in a long expanded folder — is on no frame's
 				// screen, so it may not take row verbs.
-				if s.hasRendered && (j < s.renderedStart || j >= s.renderedEnd) {
+				if j < s.renderedStart || j >= s.renderedEnd {
 					return nil
 				}
 				return bound
