@@ -378,27 +378,43 @@ func TestInstancesArrayInCurrentEnvelope_NoNormalization(t *testing.T) {
 			"differ from normalized bytes only in whitespace, which no consumer sees")
 }
 
+// TestInstancesArrayInCurrentEnvelope_ErrorParity is the #5170 follow-up's
+// second half: the verbatim array fast path must refuse the same inputs the
+// struct decoder refuses, so a corrupt-but-provably-current file is not served
+// past the corruption.
+//
+// The verbatim array fast path validates schema_version with
+// proveInstancesEnvelopeSchemaVersion, a schema-only decode that does not
+// materialize the instances array (#5237). Its error text differs from the slow
+// path's full-struct decode by the probe struct's name alone; the read path
+// branches on the error's classification (errorShape), so that is what the
+// array-shaped (duplicate-version) cases pin here. The non-array cases defer to
+// the same decodeInstancesEnvelope the slow path runs, so their text matches
+// verbatim and is asserted too.
 func TestInstancesArrayInCurrentEnvelope_ErrorParity(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		raw  string
+		name        string
+		raw         string
+		arrayShaped bool
 	}{
-		{"no member", `{"schema_version":1}`},
-		{"null member", `{"schema_version":1,"instances":null}`},
-		{"object member", `{"schema_version":1,"instances":{"a":1}}`},
-		{"string member", `{"schema_version":1,"instances":"x"}`},
-		{"number member", `{"schema_version":1,"instances":5}`},
+		{"no member", `{"schema_version":1}`, false},
+		{"null member", `{"schema_version":1,"instances":null}`, false},
+		{"object member", `{"schema_version":1,"instances":{"a":1}}`, false},
+		{"string member", `{"schema_version":1,"instances":"x"}`, false},
+		{"number member", `{"schema_version":1,"instances":5}`, false},
 		// A type-mismatched duplicate schema_version: the LAST value is a valid
 		// integer (so the map-based probe proves current) but an EARLIER one is
 		// a type the struct decoder cannot assign to an int field, so the
 		// struct decoder rejects the file. The verbatim array fast path must
-		// reject exactly the same way rather than serve the well-formed
-		// instances array past the corrupt schema_version (#5170 follow-up).
-		{"duplicate version string first", `{"schema_version":"1","instances":[{"title":"a"}],"schema_version":1}`},
-		{"duplicate version bool first", `{"schema_version":true,"instances":[],"schema_version":1}`},
-		{"duplicate version object first", `{"schema_version":{},"instances":[],"schema_version":1}`},
-		{"duplicate version array first", `{"schema_version":[1],"instances":[],"schema_version":1}`},
-		{"duplicate version float first", `{"schema_version":1.5,"instances":[],"schema_version":1}`},
+		// reject it the same way rather than serve the well-formed instances
+		// array past the corrupt schema_version (#5170 follow-up). These take
+		// the array branch, so the fast path's schema-only probe — not the slow
+		// path's full decode — names the error.
+		{"duplicate version string first", `{"schema_version":"1","instances":[{"title":"a"}],"schema_version":1}`, true},
+		{"duplicate version bool first", `{"schema_version":true,"instances":[],"schema_version":1}`, true},
+		{"duplicate version object first", `{"schema_version":{},"instances":[],"schema_version":1}`, true},
+		{"duplicate version array first", `{"schema_version":[1],"instances":[],"schema_version":1}`, true},
+		{"duplicate version float first", `{"schema_version":1.5,"instances":[],"schema_version":1}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := []byte(tc.raw)
@@ -411,8 +427,12 @@ func TestInstancesArrayInCurrentEnvelope_ErrorParity(t *testing.T) {
 				return
 			}
 			require.Error(t, gotErr)
-			assert.Equal(t, wantErr.Error(), gotErr.Error(), "error text diverged")
 			assert.Equal(t, errorShape(wantErr), errorShape(gotErr), "error classification diverged")
+			if !tc.arrayShaped {
+				// The non-array cases defer to decodeInstancesEnvelope, so their
+				// error text is the slow path's verbatim and must match.
+				assert.Equal(t, wantErr.Error(), gotErr.Error(), "error text diverged")
+			}
 		})
 	}
 }

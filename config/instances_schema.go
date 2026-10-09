@@ -290,6 +290,35 @@ func validateInstancesEnvelope(raw []byte) error {
 	return err
 }
 
+// proveInstancesEnvelopeSchemaVersion decodes only the schema_version of one
+// instances.json envelope — without materializing its instances member — so the
+// verbatim fast path can reject a type-mismatched duplicate schema_version the
+// map-based probe lets through without paying the array copy a full envelope
+// decode would (#5237: a ~4.7 MB instances.json is unmarshalled twice on every
+// cache miss — daemon startup, and after any file update — when this only needs
+// the version field).
+//
+// The decode uses the same json struct-field assignment the slow path's
+// decodeInstancesEnvelopeStruct does: last-wins with a first-type-error on a
+// duplicate schema_version, so a file the struct decoder rejects here is one it
+// rejects in the slow path too. It decodes into a struct that carries only
+// schema_version, so the (possibly multi-megabyte) instances array is never
+// materialized. The error text differs from decodeInstancesEnvelopeStruct's by
+// the probe struct's name alone; the classification (errInstancesSchemaContent
+// for a parse error) matches, which is what the read path branches on.
+func proveInstancesEnvelopeSchemaVersion(raw []byte) error {
+	var probe struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fmt.Errorf("%w: failed to parse instances envelope: %v", errInstancesSchemaContent, err)
+	}
+	if probe.SchemaVersion != InstancesSchemaVersion {
+		return fmt.Errorf("schema_version = %d, want %d", probe.SchemaVersion, InstancesSchemaVersion)
+	}
+	return nil
+}
+
 // instancesArrayInCurrentEnvelope returns the instances member of raw verbatim
 // — no re-marshal of the array — for bytes ProveJSONSchemaVersion has already
 // proved are a well-formed current-version document under the map detector's
@@ -307,9 +336,11 @@ func validateInstancesEnvelope(raw []byte) error {
 // file whose LAST schema_version is a valid integer but an EARLIER one is a
 // string, bool, object, array, or float proves current to the probe yet is
 // corrupt to the struct decoder — and a verbatim return trusts the probe. So
-// decode the envelope struct here and refuse what the rest of the pipeline
-// refuses, restoring the parity the pre-#5169 fast path held by running
-// plan.Validate (the struct decode) even when the probe proved current.
+// validate the schema_version here with the same struct-field assignment
+// semantics but without decoding the instances array, refusing what the rest of
+// the pipeline refuses while the array stays un-materialized, restoring the
+// parity the pre-#5169 fast path held by running plan.Validate (the struct
+// decode) even when the probe proved current.
 //
 // Only a plainly array-shaped member takes the verbatim fast return. Everything
 // else — an absent member, one found under a case-variant key, null, or a
@@ -320,7 +351,7 @@ func validateInstancesEnvelope(raw []byte) error {
 func instancesArrayInCurrentEnvelope(raw []byte) (json.RawMessage, error) {
 	if member, found := lastTopLevelJSONMember(raw, "instances"); found {
 		if trimmed := bytes.TrimSpace(member); len(trimmed) > 0 && trimmed[0] == '[' {
-			if _, err := decodeInstancesEnvelopeStruct(raw); err != nil {
+			if err := proveInstancesEnvelopeSchemaVersion(raw); err != nil {
 				return nil, err
 			}
 			return member, nil
