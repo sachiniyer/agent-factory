@@ -38,6 +38,68 @@ func TestPlaceOverlayCombinedFgBgFade(t *testing.T) {
 	}
 }
 
+// TestFadeSGR exercises fadeSGRColors directly across the SGR shapes that flow
+// through the overlay fade path. Each case asserts the exact faded sequence so
+// that both colors of a combined FG+BG input are provably preserved (#701) and
+// the pre-existing FG-only / BG-only / attribute behavior is unchanged.
+func TestFadeSGR(t *testing.T) {
+	fgCode, bgCode := backdropColors()
+	var (
+		fg = "\x1b[" + fgCode + "m"
+		bg = "\x1b[" + bgCode + "m"
+	)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"reset", "\x1b[0m", "\x1b[0m"},
+		{"empty-reset", "\x1b[m", "\x1b[m"},
+
+		{"bare-fg-256", "\x1b[38;5;232m", fg},
+		{"bare-fg-basic", "\x1b[37m", fg},
+		{"bare-fg-bright", "\x1b[97m", fg},
+		{"bare-fg-truecolor", "\x1b[38;2;10;20;30m", fg},
+
+		{"bare-bg-256", "\x1b[48;5;189m", bg},
+		{"bare-bg-basic", "\x1b[41m", bg},
+		{"bare-bg-bright", "\x1b[101m", bg},
+		{"bare-bg-truecolor", "\x1b[48;2;200;210;220m", bg},
+		{"reverse-video", "\x1b[7m", bg},
+
+		{"combined-256", "\x1b[38;5;232;48;5;189m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"combined-256-reversed", "\x1b[48;5;189;38;5;232m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"combined-truecolor", "\x1b[38;2;10;20;30;48;2;200;210;220m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"combined-mixed", "\x1b[38;5;232;48;2;200;210;220m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+
+		{"bold-fg-256", "\x1b[1;38;5;188m", fg},
+		{"bold-italic-combined", "\x1b[1;3;38;5;232;48;5;189m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"bold-bg", "\x1b[1;41m", bg},
+		{"bold-only", "\x1b[1m", fg},
+		{"underline-fg", "\x1b[4;32m", fg},
+
+		// Default-color resets (#728): SGR 39/49 must be preserved verbatim, not
+		// faded. Before the fix, 49 fell into the default branch and wrongly
+		// produced a faded foreground.
+		{"bare-reset-bg", "\x1b[49m", "\x1b[49m"},
+		{"bare-reset-fg", "\x1b[39m", "\x1b[39m"},
+		{"reset-both", "\x1b[39;49m", "\x1b[39;49m"},
+		// Combined: a real color in one channel is faded; the other channel's
+		// reset is preserved, so colors that ARE set survive alongside the reset.
+		{"fg-color-plus-reset-bg", "\x1b[38;5;232;49m", "\x1b[" + fgCode + ";49m"},
+		{"bg-color-plus-reset-fg", "\x1b[48;5;189;39m", "\x1b[39;" + bgCode + "m"},
+		{"reset-bg-plus-fg-color", "\x1b[49;38;5;232m", "\x1b[" + fgCode + ";49m"},
+		{"basic-bg-plus-reset-fg", "\x1b[41;39m", "\x1b[39;" + bgCode + "m"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fadeSGRColors(tc.in, fgCode, bgCode); got != tc.want {
+				t.Fatalf("fadeSGRColors(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFadeSGRTrueColorCombinedThroughOverlay drives the truecolor combined case
 // end-to-end through PlaceOverlay to confirm both colors survive there too.
 func TestFadeSGRTrueColorCombinedThroughOverlay(t *testing.T) {
