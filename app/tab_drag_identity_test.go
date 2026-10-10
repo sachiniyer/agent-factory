@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -126,4 +127,126 @@ func TestMouse_DragDropOfConcurrentlyClosedTabIsNoOp(t *testing.T) {
 
 	assert.Equal(t, 1, h.store.NumOpenPanes(),
 		"the grabbed tab is gone: the drop opens nothing rather than a different tab")
+}
+
+// closePressedTabMidClick drives the production snapshot-reconcile path that
+// closes the pressed tab between the mouse press and release: builds an
+// InstanceData with the pressed tab removed and feeds it to the given
+// reconcile closure (either reconcileSnapshot directly or Update of a
+// snapshotFetchedMsg), then asserts the roster is now [agent, shell, b].
+func closePressedTabMidClick(t *testing.T, h *home, alpha *session.Instance, reconcile func([]session.InstanceData)) {
+	t.Helper()
+	data := alpha.ToInstanceData()
+	data.Tabs = append(data.Tabs[:2], data.Tabs[3])
+	reconcile([]session.InstanceData{data})
+	require.Equal(t, 3, alpha.TabCount(), "pressed tab closed: roster is now [agent, shell, b]")
+	require.Equal(t, "b", alpha.GetTabs()[2].Name,
+		"the ordinal slot persists and now names a DIFFERENT tab — the seed pairing hazard")
+}
+
+// TestMouse_NoOpTabClickDoesNotSeedDoubleClickTracker: a click whose grabbed
+// tab was concurrently closed mid-press resolves to a no-op (dragTabIndex
+// returns !ok). That swallowed click must NOT seed the double-click tracker —
+// the same #1731/#1774 class as a swallowed modal click. Otherwise a single
+// later click on the same screen row (now holding the replacement tab in the
+// SAME slot/zone id) is misread as a double and enters that tab, rebinding an
+// existing pane to a different tab from one real click.
+//
+// Regression counterpart to TestMouse_DragDropOfConcurrentlyClosedTabIsNoOp:
+// that test pins the active DROP path's staleness guard; this one pins the
+// click path's tracker (the press/release pair with no motion past threshold).
+func TestMouse_NoOpTabClickDoesNotSeedDoubleClickTracker(t *testing.T) {
+	h, alpha, _ := dragRosterHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	require.Equal(t, 1, h.store.NumOpenPanes(), "precondition: one agent pane open")
+	require.Empty(t, h.lastClickZone, "precondition: tracker starts clean")
+
+	// Press tab "a" (index 2); a background snapshot reconcile closes "a"
+	// between the press and the release — exactly the out-of-band window
+	// the dragTabIndex staleness guard exists for (#1813).
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 2))
+	press(h, tab.X, tab.Y)
+	require.NotNil(t, h.tabDrag, "press captures the click candidate")
+	require.False(t, h.tabDrag.active, "no motion: candidate is still a click")
+	closePressedTabMidClick(t, h, alpha, func(d []session.InstanceData) {
+		require.True(t, h.reconcileSnapshot(d))
+	})
+
+	// Release — the grabbed tab is gone, so the click is a no-op.
+	release(h, tab.X, tab.Y)
+
+	require.Nil(t, h.tabDrag, "the no-op release cleared the drag state")
+	assert.Empty(t, h.lastClickZone,
+		"a swallowed no-op click must not seed the double-click tracker (#1731/#1774 class)")
+	assert.Equal(t, 1, h.store.NumOpenPanes(), "the no-op click opens/rebinds no pane")
+	assert.Nil(t, h.store.FindOpenPane(alpha, 2),
+		"the no-op click must not rebind a pane to the replacement tab")
+	assert.NotNil(t, h.store.FindOpenPane(alpha, 0),
+		"the pre-existing agent pane stays bound to its own tab")
+
+	// A single later click on the SAME screen row (now holding "b" in the
+	// same slot, so the SAME zone id) within the double-click window must
+	// stay a plain select — not a false double that enters the tab and
+	// rebinds the existing pane to it.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeTab(alpha.Title, 2))
+
+	assert.Nil(t, h.store.FindOpenPane(alpha, 2),
+		"a single click must not false-double into the replacement tab")
+	assert.NotNil(t, h.store.FindOpenPane(alpha, 0),
+		"the existing agent pane is not stolen by a false double from a single click")
+	assert.False(t, h.interactive,
+		"a single click must not enter interactive mode")
+	assert.Equal(t, stateDefault, h.state)
+	sel := h.sidebar.GetSelection()
+	require.True(t, sel.IsTab, "the single click selects the replacement tab row")
+	assert.Equal(t, 2, sel.TabIndex)
+}
+
+// TestMouse_NoOpTabClickViaSnapshotFetchedMsgDoesNotSeedTracker drives the
+// mid-press close through the REAL event-loop entry point (Update of a
+// snapshotFetchedMsg), which runs handleSnapshot -> reconcileSnapshot ->
+// ReconcileTabsFromData exactly as a background daemon poll does. It confirms
+// the clearStaleClickTrackerAfter chokepoint does NOT rescue the seed: a
+// snapshotFetchedMsg leaves the state at stateDefault, so it early-returns and
+// a no-op-click tracker seeded (the bug) survives — exactly the production
+// reachability of the false double-click.
+func TestMouse_NoOpTabClickViaSnapshotFetchedMsgDoesNotSeedTracker(t *testing.T) {
+	h, alpha, _ := dragRosterHome(t)
+	clock := newFakeClock(h)
+	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
+	_, _ = stubLiveTermFactory(t)
+
+	require.Empty(t, h.lastClickZone, "precondition: tracker starts clean")
+
+	tab := zoneRect(t, h, zones.TreeTab(alpha.Title, 2))
+	press(h, tab.X, tab.Y)
+	require.False(t, h.tabDrag.active, "no motion: candidate is still a click")
+
+	closePressedTabMidClick(t, h, alpha, func(d []session.InstanceData) {
+		model, _ := h.Update(snapshotFetchedMsg{repoID: h.repoID, data: d})
+		h = model.(*home)
+	})
+	require.Equal(t, stateDefault, h.state,
+		"a snapshot reconcile does not change TUI state, so clearStaleClickTrackerAfter early-returns")
+
+	// Release — the grabbed tab is gone, so the click is a no-op through the
+	// production snapshot path.
+	release(h, tab.X, tab.Y)
+
+	assert.Empty(t, h.lastClickZone,
+		"a no-op click routed through snapshotFetchedMsg must not seed the tracker")
+	assert.Nil(t, h.store.FindOpenPane(alpha, 2), "no pane rebound from the no-op click")
+	assert.NotNil(t, h.store.FindOpenPane(alpha, 0), "the existing agent pane stays bound")
+
+	// Single click on the same row within the window must not false-double.
+	clock.advance(50 * time.Millisecond)
+	clickZone(t, h, zones.TreeTab(alpha.Title, 2))
+	assert.Nil(t, h.store.FindOpenPane(alpha, 2),
+		"a single click must not false-double through the production snapshot path")
+	assert.False(t, h.interactive)
+	assert.Equal(t, stateDefault, h.state)
 }
