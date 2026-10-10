@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -33,6 +34,12 @@ func main() {
 		}
 		return agentaccount.Selected(home, agent, name)
 	}
+	// The exec shim cross-checks the env-supplied launch proof against what the
+	// launcher would have produced for this pane's resolved operator config;
+	// the env var is writable by the same shell that re-invokes af under the
+	// marker, so the derivation is what an overwriting shell cannot forge
+	// (#3123, #4731 review).
+	sessionenv.AccountLaunchProofResolver = session.ResolveAccountLaunchProof
 	sessionenv.HandleInternalExec()
 	sessiontmux.HandleDedicatedServerExec()
 	// Consume the internal __upgrade-recovery invocation (the persistent recovery

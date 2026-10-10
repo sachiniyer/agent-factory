@@ -519,7 +519,7 @@ func TestAddProcessTabWaitsForTheLaunchShimBeforeWatching(t *testing.T) {
 	// its final image. macOS's /bin/sh re-execs itself, and an argv read across
 	// that exec fails, which reads as the pane having left the shim.
 	launcher := exec.Command("/bin/sh", "-c",
-		"echo ready; read line; : "+sessionenv.AccountEnvironmentExecMarker+" claude 0 work '' 0 ./slow.sh")
+		"echo ready; read line; : "+sessionenv.AccountEnvironmentExecMarker+" claude 0 work ./slow.sh")
 	launcher.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	hold, err := launcher.StdinPipe()
 	require.NoError(t, err)
