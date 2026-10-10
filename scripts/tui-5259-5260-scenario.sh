@@ -321,11 +321,39 @@ fold_burst() {
 
 # --- legs --------------------------------------------------------------------
 
+# purge_archived — af_reset_sandbox wipes instances/ + sibling worktrees and
+# deletes every non-master branch, but archived worktrees live under
+# $AGENT_FACTORY_HOME/archived/ — NOT in its wipe list — and git refuses
+# `branch -D` on a branch still checked out there. A re-run then collides:
+# "dev/<name> is already checked out at .../archived/...". Drop the archived
+# dir, prune the registrations, and delete the now-freed branches. Same
+# fail-closed sandbox-path guard af_reset_sandbox uses.
+purge_archived() {
+    case "$AGENT_FACTORY_HOME" in
+        */sandbox/* | */sandbox | /tmp/* | */af-driver*) ;;
+        *)
+            _af_fail "purge_archived: refusing — '$AGENT_FACTORY_HOME' is not a sandbox path"
+            return 1
+            ;;
+    esac
+    rm -rf "$AGENT_FACTORY_HOME/archived"
+    if [ -d "$AF_DRIVER_REPO/.git" ]; then
+        git -C "$AF_DRIVER_REPO" worktree prune 2>/dev/null || true
+        local b
+        for b in $(git -C "$AF_DRIVER_REPO" for-each-ref \
+            --format='%(refname:short)' refs/heads/ 2>/dev/null \
+            | grep -vE '^(master|main)$' || true); do
+            git -C "$AF_DRIVER_REPO" branch -D "$b" 2>/dev/null || true
+        done
+    fi
+}
+
 run_leg() { # <master|branch> <binary>
     local label="$1"
     export AF_DRIVER_BIN="$2"
 
     af_reset_sandbox
+    purge_archived
     af_set_config 'default_program = "claude"
 
 [program_overrides]
