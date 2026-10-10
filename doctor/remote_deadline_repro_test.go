@@ -263,12 +263,10 @@ func TestRemoteCoderWhoami_ExternalSignalDeathNotReportedAsTimeout(t *testing.T)
 // TestRemoteCoderWhoami_ExternalSIGKILLNotReportedAsTimeout verifies that a
 // coder process killed by an external SIGKILL (OOM killer, kill -9) near the
 // deadline is reported as "failed" with its captured output, not "timed out".
-// An external SIGKILL produces the same ExitError signal as the context's own
-// SIGKILL, so killedByContextSignal alone cannot distinguish them. The fix uses
-// processExitedBeforeCancel in the Cancel function to probe the process state
-// before Kill: if the process has already exited (zombie or reaped), the context
-// did not kill it and ctxKilled stays false, so the death is reported as a
-// failure with its output rather than a timeout.
+// The process self-exits with SIGKILL well before the 1s deadline, so
+// Process.Wait reaps it before Cancel fires; Kill then returns os.ErrProcessDone
+// and ctxKilled stays false, so the death is reported as a failure with its
+// output rather than a timeout.
 func TestRemoteCoderWhoami_ExternalSIGKILLNotReportedAsTimeout(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
