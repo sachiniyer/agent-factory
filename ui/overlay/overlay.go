@@ -49,20 +49,6 @@ func extendedColorLen(tokens []string, i int) int {
 	return 1
 }
 
-// fadeSGR rewrites a single SGR sequence to its faded equivalent. It detects
-// whether the sequence sets a foreground and/or background color (or any other
-// fadeable attribute) and emits faded gray codes for whichever are present,
-// combining both into one sequence when the input was combined. Pure resets
-// (\x1b[0m, \x1b[m) and sequences with no fadeable parameters are preserved
-// unchanged so styled regions still close correctly. Default-color resets
-// (SGR 39 foreground, 49 background) are preserved verbatim rather than faded,
-// so a region that returns to the terminal default stays default instead of
-// gaining a spurious gray (#728).
-func fadeSGR(match string) string {
-	fg, bg := backdropColors()
-	return fadeSGRColors(match, fg, bg)
-}
-
 func fadeSGRColors(match, fadedFg, fadedBg string) string {
 	params := strings.TrimSuffix(strings.TrimPrefix(match, "\x1b["), "m")
 	if params == "" || params == "0" {

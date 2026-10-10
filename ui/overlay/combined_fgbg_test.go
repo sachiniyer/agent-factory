@@ -38,14 +38,15 @@ func TestPlaceOverlayCombinedFgBgFade(t *testing.T) {
 	}
 }
 
-// TestFadeSGR exercises fadeSGR directly across the SGR shapes that flow
+// TestFadeSGR exercises fadeSGRColors directly across the SGR shapes that flow
 // through the overlay fade path. Each case asserts the exact faded sequence so
 // that both colors of a combined FG+BG input are provably preserved (#701) and
 // the pre-existing FG-only / BG-only / attribute behavior is unchanged.
 func TestFadeSGR(t *testing.T) {
+	fgCode, bgCode := backdropColors()
 	var (
-		fg = "\x1b[" + testBackdropFG() + "m"
-		bg = "\x1b[" + testBackdropBG() + "m"
+		fg = "\x1b[" + fgCode + "m"
+		bg = "\x1b[" + bgCode + "m"
 	)
 	cases := []struct {
 		name string
@@ -66,13 +67,13 @@ func TestFadeSGR(t *testing.T) {
 		{"bare-bg-truecolor", "\x1b[48;2;200;210;220m", bg},
 		{"reverse-video", "\x1b[7m", bg},
 
-		{"combined-256", "\x1b[38;5;232;48;5;189m", "\x1b[" + testBackdropFG() + ";" + testBackdropBG() + "m"},
-		{"combined-256-reversed", "\x1b[48;5;189;38;5;232m", "\x1b[" + testBackdropFG() + ";" + testBackdropBG() + "m"},
-		{"combined-truecolor", "\x1b[38;2;10;20;30;48;2;200;210;220m", "\x1b[" + testBackdropFG() + ";" + testBackdropBG() + "m"},
-		{"combined-mixed", "\x1b[38;5;232;48;2;200;210;220m", "\x1b[" + testBackdropFG() + ";" + testBackdropBG() + "m"},
+		{"combined-256", "\x1b[38;5;232;48;5;189m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"combined-256-reversed", "\x1b[48;5;189;38;5;232m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"combined-truecolor", "\x1b[38;2;10;20;30;48;2;200;210;220m", "\x1b[" + fgCode + ";" + bgCode + "m"},
+		{"combined-mixed", "\x1b[38;5;232;48;2;200;210;220m", "\x1b[" + fgCode + ";" + bgCode + "m"},
 
 		{"bold-fg-256", "\x1b[1;38;5;188m", fg},
-		{"bold-italic-combined", "\x1b[1;3;38;5;232;48;5;189m", "\x1b[" + testBackdropFG() + ";" + testBackdropBG() + "m"},
+		{"bold-italic-combined", "\x1b[1;3;38;5;232;48;5;189m", "\x1b[" + fgCode + ";" + bgCode + "m"},
 		{"bold-bg", "\x1b[1;41m", bg},
 		{"bold-only", "\x1b[1m", fg},
 		{"underline-fg", "\x1b[4;32m", fg},
@@ -85,15 +86,15 @@ func TestFadeSGR(t *testing.T) {
 		{"reset-both", "\x1b[39;49m", "\x1b[39;49m"},
 		// Combined: a real color in one channel is faded; the other channel's
 		// reset is preserved, so colors that ARE set survive alongside the reset.
-		{"fg-color-plus-reset-bg", "\x1b[38;5;232;49m", "\x1b[" + testBackdropFG() + ";49m"},
-		{"bg-color-plus-reset-fg", "\x1b[48;5;189;39m", "\x1b[39;" + testBackdropBG() + "m"},
-		{"reset-bg-plus-fg-color", "\x1b[49;38;5;232m", "\x1b[" + testBackdropFG() + ";49m"},
-		{"basic-bg-plus-reset-fg", "\x1b[41;39m", "\x1b[39;" + testBackdropBG() + "m"},
+		{"fg-color-plus-reset-bg", "\x1b[38;5;232;49m", "\x1b[" + fgCode + ";49m"},
+		{"bg-color-plus-reset-fg", "\x1b[48;5;189;39m", "\x1b[39;" + bgCode + "m"},
+		{"reset-bg-plus-fg-color", "\x1b[49;38;5;232m", "\x1b[" + fgCode + ";49m"},
+		{"basic-bg-plus-reset-fg", "\x1b[41;39m", "\x1b[39;" + bgCode + "m"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := fadeSGR(tc.in); got != tc.want {
-				t.Fatalf("fadeSGR(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := fadeSGRColors(tc.in, fgCode, bgCode); got != tc.want {
+				t.Fatalf("fadeSGRColors(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
