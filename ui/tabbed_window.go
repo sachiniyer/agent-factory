@@ -601,7 +601,7 @@ func (w *TabbedWindow) BeginScrollFill() {
 // tree selection, scroll mode — is set off with "—", and only the fragments
 // INSIDE each identity are joined with " · " (#2579). All three used to pick a
 // different mark for the same relationship, and with two sessions whose tab
-// labels match, `alpha · ◆ Agent · selected: beta · ◆ Agent` flattened into four
+// labels match, `alpha · ◆ Agent · cursor: beta · ◆ Agent` flattened into four
 // indistinguishable fragments. That clause is the only signal that the
 // workspace is not showing the row under the cursor, so it has to read at a
 // glance.
@@ -615,7 +615,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 		label := tabLabelFor(inst, w.activeTab())
 		text = fmt.Sprintf(" %s · %s ", inst.Title, label)
 		if w.selectionHint != "" {
-			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
+			text = fmt.Sprintf(" %s · %s — cursor: %s ", inst.Title, label, w.selectionHint)
 		}
 	} else {
 		text = " Select a session "
