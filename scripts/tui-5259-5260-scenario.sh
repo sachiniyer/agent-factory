@@ -202,15 +202,30 @@ seed_rows() { # <label>
     (cd "$AF_DRIVER_REPO" && "$bin" sessions archive archone >"$EVID/$1-archive.log" 2>&1)
     af_wait_for 'Archived' "$AF_DRIVER_TIMEOUT" 'Archived folder header appears'
 
-    # lostone -> Lost: kill the backing tmux session with no kill intent on
-    # record — the canonical #1108 outage class. The daemon observes the death
-    # and marks the row lost: '[lost] lostone' title prefix + the right-edge ◌
-    # glyph. A settled Lost row is resting (IsResting) with no in-flight op.
-    local ts
+    # lostone -> Lost, DURABLY. lifecycle.sh documents that a bare kill-session
+    # is NOT enough: the daemon's #1108 restore loop re-spawns a killed pane in
+    # ~4s (it heals even a missing worktree), so the row flashes Lost and comes
+    # back. To keep it resting the restore must fail instead: remove the
+    # worktree AND delete its branch so Recover cannot rebuild the runtime.
+    # Verified live: no af_*_lostone session ever reappears and the row keeps
+    # its ▾ binding — exactly the resting row the fold test needs.
+    local ts wt br
     ts="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '_lostone$' | head -1 || true)"
     [ -n "$ts" ] || { _af_fail "could not find lostone's tmux session"; return 1; }
+    wt="$(git -C "$AF_DRIVER_REPO" worktree list | awk '/lostone/ {print $1; exit}')"
+    br="$(git -C "$AF_DRIVER_REPO" worktree list | awk '/lostone/ {print $NF; exit}' | tr -d '[]')"
+    [ -n "$wt" ] && git -C "$AF_DRIVER_REPO" worktree remove --force "$wt" >/dev/null 2>&1
+    [ -n "$br" ] && git -C "$AF_DRIVER_REPO" branch -D "$br" >/dev/null 2>&1
     tmux kill-session -t "=$ts"
     af_wait_for '\[lost\] +lostone' 30 'lostone marked lost'
+    # Durability gate: the session must still be absent 8s later — well past
+    # the ~4s self-heal lifecycle.sh measured — before any footer evidence is
+    # collected from the row.
+    sleep 8
+    if tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qE '_lostone$'; then
+        _af_fail "lostone was auto-restored — row is not durably Lost"
+        return 1
+    fi
     af_capture >"$EVID/$1-seeded.txt"
 }
 
