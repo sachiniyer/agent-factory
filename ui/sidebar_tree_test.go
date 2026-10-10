@@ -354,6 +354,37 @@ func TestSidebarTreeSwapPreservesTabSelection(t *testing.T) {
 	assert.Same(t, rebuilt, s.GetSelectedInstance())
 }
 
+// TestSidebarTreeSwapClearsCollapse pins the #765 same-title kill+recreate
+// swap with an active explicit collapse: the old session's treeCollapsed
+// override (keyed by pointer) must NOT pass through to the replacement. The
+// replacement starts auto-expanded (▾ marker, tab rows visible) rather than
+// folded, matching the treeCollapsed contract that every newly selected
+// instance starts auto-expanded.
+func TestSidebarTreeSwapClearsCollapse(t *testing.T) {
+	s := newTreeSidebar(t, 1)
+	s.SetSize(40, 24)
+	s.SetSelectedInstance(0)
+	require.Equal(t, 2, tabRowCount(s))
+
+	s.CollapseSection() // user collapses the subtree
+	require.Equal(t, 0, tabRowCount(s))
+	require.NotNil(t, s.treeCollapsed)
+
+	// #765 kill+recreate: same title, different instance pointer.
+	inst := s.proj.GetInstances()[0]
+	rebuilt, err := session.NewInstance(session.InstanceOptions{
+		Title: inst.Title, Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	addAgentShellTabs(rebuilt)
+	require.True(t, s.proj.ReplaceInstance(inst, rebuilt)) // re-points p.selected to rebuilt
+	s.syncFromStore()
+
+	assert.Nil(t, s.treeCollapsed, "stale collapse should be cleared after same-title swap")
+	assert.True(t, s.instanceExpanded(rebuilt), "replacement should be auto-expanded")
+	assert.Equal(t, 2, tabRowCount(s), "replacement tab subtree should be visible")
+}
+
 // TestSidebarTreeTransientRowsCollapse pins the tree treatment of transient
 // rows: a Deleting (or Loading) instance is never expandable — its tab
 // children fold and the ▾ arrow disappears, even while it is the selection.
