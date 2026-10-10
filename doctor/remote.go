@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -128,6 +129,20 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	defer cancel()
 	cmd := exec.CommandContext(ctx, coderPath, "whoami")
 	cmd.WaitDelay = waitDelay
+	// Record whether the context's cancellation actually killed the process,
+	// rather than inferring it from ctx.Err() after CombinedOutput returns: a
+	// pipe-holding descendant can keep CombinedOutput blocked past the deadline,
+	// making ctx.Err() == DeadlineExceeded even when the process self-terminated
+	// before the context fired. CommandContext's default Cancel is called by the
+	// exec runtime only while the process is still alive (the watchCtx goroutine
+	// sends its result before the context fires if the process already exited),
+	// so the flag is set only for a genuine context-killed timeout. We override
+	// the default to set the flag while preserving the same Kill behavior.
+	var ctxKilled atomic.Bool
+	cmd.Cancel = func() error {
+		ctxKilled.Store(true)
+		return cmd.Process.Kill()
+	}
 	out, err := cmd.CombinedOutput()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// coder exited zero and answered; only a descendant held the capture
@@ -137,12 +152,13 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	if err != nil {
 		detail := "coder whoami failed"
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() < 0 && ctx.Err() == context.DeadlineExceeded {
-			// A negative exit code combined with a fired deadline means the
-			// process was signal-killed by the context (SIGKILL), not that it
-			// crashed or was externally signalled — a pre-deadline signal death
-			// (OOM, external SIGTERM, segfault) has ExitCode < 0 but
-			// ctx.Err() == nil and is reported as a failure below.
+		if errors.As(err, &exitErr) && exitErr.ExitCode() < 0 && ctxKilled.Load() {
+			// ctxKilled is set only by cmd.Cancel, which the exec runtime calls
+			// while the process is still alive (the watchCtx goroutine sends its
+			// result before the context fires if the process already exited).
+			// A pre-deadline signal death (OOM, external SIGTERM, self-signal)
+			// has ExitCode < 0 but ctxKilled is false — reported as a failure
+			// with its captured output below.
 			detail = "coder whoami timed out"
 		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line
