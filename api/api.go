@@ -157,8 +157,9 @@ func repoPathsOf(matches []session.InstanceData) []string {
 	return paths
 }
 
-// diskRepoPathsForTitle returns the distinct repo paths holding the title across
-// the union of `known` and every PERSISTED row on disk.
+// diskRepoPathsForTitle widens an unscoped title lookup from the daemon snapshot
+// to the local disk, so a lone snapshot match cannot hide a second repo that also
+// holds the title.
 //
 // It backstops the daemon-snapshot read path: the snapshot only mirrors the
 // daemon's in-memory instances, and refresh skips rows it cannot restore, so a
@@ -166,30 +167,73 @@ func repoPathsOf(matches []session.InstanceData) []string {
 // Corrupted per-repo files are skipped — this is a best-effort widening of an
 // already-successful lookup, so it must never turn a working read into an error.
 //
-// The second return names repos whose file could not be READ, so the caller can
+// The FIRST return counts distinct PROJECTS by repoID (the storage map key,
+// never empty). The snapshot carries no repoID, so its own ambiguity check keys
+// on Path; keying THIS widening on Path too would let DedupeSorted drop an empty
+// value and collapse two repos into one — the asymmetry that left the disk twin
+// (findInstanceByTitle, keys on repoID) robust while this backstop was not.
+//
+// The snapshot holder is folded into this count too: an in-flight pendingCreates
+// row is exposed by daemon.SnapshotWithSkipped but not written to instances.json
+// until creation completes (daemon/manager_create.go), so a lone snapshot match
+// may be a project the disk widening cannot see. Its Path is the only handle;
+// when non-empty and no disk row shares it, the holder is added as a synthetic id
+// so the >1 count still flags the collision. An empty-Path holder is left to the
+// disk repoID count (its Path can't be matched to a disk repo, and counting it
+// would over-refuse a unique empty-Path match).
+//
+// The SECOND return keeps the human-readable repo Paths for the
+// AmbiguousTitleError message: a repoID is an opaque hash, so the message names
+// paths. When every holder has Path "" the path set is empty and
+// AmbiguousTitleError falls back to its defensive wording.
+//
+// The third return names repos whose file could not be READ, so the caller can
 // say the widening was incomplete instead of implying it was exhaustive (#3479).
 // Reported rather than refused, unlike the daemon's twin of this guard
 // (collectTitleRepoPathsOnDisk): that one gates the DESTRUCTIVE paths, which
 // resolve through findSession, while this backstops a read where breaking a
 // working lookup costs more than the wrong project name it would prevent.
-func diskRepoPathsForTitle(title string, known []string) ([]string, []config.RepoInstancesSkip, error) {
+func diskRepoPathsForTitle(title string, known []string) (repoIDs, repoPaths []string, unreadable []config.RepoInstancesSkip, err error) {
 	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	ids := make([]string, 0, len(allInstances))
 	paths := append([]string(nil), known...)
-	for _, raw := range allInstances {
+	for repoID, raw := range allInstances {
 		var rows []session.InstanceData
 		if err := json.Unmarshal(raw, &rows); err != nil {
 			continue
 		}
 		for i := range rows {
 			if rows[i].Title == title {
+				// Count the repo once by its storage key (never ""), and
+				// collect its human-readable Path for the error message. A
+				// per-repo file holds at most one row of a given title
+				// (titles are unique per-repo), so the first match is the
+				// whole story for this repo.
+				ids = append(ids, repoID)
 				paths = append(paths, rows[i].Path)
+				break
 			}
 		}
 	}
-	return session.DedupeSorted(paths), unreadable, nil
+	// Retain the snapshot holder (known) in the project count: an in-flight
+	// pendingCreates row is not on disk, so fold its non-empty Path in as a
+	// synthetic id when no disk row shares it. An empty-Path holder is skipped
+	// (can't be matched to a disk repo; would over-refuse a unique match).
+	diskPaths := make(map[string]bool, len(paths)-len(known))
+	for _, p := range paths[len(known):] {
+		if p != "" {
+			diskPaths[p] = true
+		}
+	}
+	for _, p := range known {
+		if p != "" && !diskPaths[p] {
+			ids = append(ids, p)
+		}
+	}
+	return session.DedupeSorted(ids), session.DedupeSorted(paths), unreadable, nil
 }
 
 // corruptedRepoRepairHint is the one-line remedy appended to every corruption
