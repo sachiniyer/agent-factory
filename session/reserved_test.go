@@ -25,9 +25,9 @@ func TestReservedTitleCollisionCatchesDerivedNames(t *testing.T) {
 			if got := ReservedTitleCollision(title); got != RootSessionTitle {
 				t.Fatalf("ReservedTitleCollision(%q) = %q, want %q", title, got, RootSessionTitle)
 			}
-			err := ReservedTitleRefusal(title)
+			err := ReservedTitleRefusalFor(title, "")
 			if err == nil {
-				t.Fatalf("ReservedTitleRefusal(%q) admitted a title that claims the reserved name", title)
+				t.Fatalf("ReservedTitleRefusalFor(%q, \"\") admitted a title that claims the reserved name", title)
 			}
 			// Actionable means: it names the title the caller asked for, the
 			// reserved title it collides with, and what to do instead.
@@ -62,8 +62,8 @@ func TestReservedTitleCollisionLeavesDistinctTitlesAlone(t *testing.T) {
 			if got := ReservedTitleCollision(title); got != "" {
 				t.Fatalf("ReservedTitleCollision(%q) = %q, want no collision", title, got)
 			}
-			if err := ReservedTitleRefusal(title); err != nil {
-				t.Fatalf("ReservedTitleRefusal(%q) refused an unrelated title: %v", title, err)
+			if err := ReservedTitleRefusalFor(title, ""); err != nil {
+				t.Fatalf("ReservedTitleRefusalFor(%q, \"\") refused an unrelated title: %v", title, err)
 			}
 		})
 	}
