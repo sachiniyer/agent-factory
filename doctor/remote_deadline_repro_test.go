@@ -15,6 +15,27 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
+// killOrphanedSleep sends SIGKILL to the backgrounded sleep process whose
+// PID the coder script wrote to pidFile. The sleep is an orphan (its parent
+// shell exited), so the test process cannot Wait on it; the host's init
+// reaps the resulting zombie. This is only needed when the coder exits before
+// the deadline — when the deadline fires, Cancel kills the entire process
+// group (Setpgid), which already terminates the sleep.
+func killOrphanedSleep(t *testing.T, pidFile string) {
+	t.Helper()
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return
+	}
+	if proc, err := os.FindProcess(pid); err == nil {
+		_ = proc.Signal(syscall.SIGKILL)
+	}
+}
+
 // TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout
 // reproduces the classification bug in checkCoderStatus: when `coder whoami`
 // self-exits non-zero (e.g. a 401) and a pipe-holding descendant pushes
@@ -45,7 +66,8 @@ func TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout(t *testin
 	//
 	// The backgrounded sleep survives the test as an orphan (WaitDelay closes
 	// the inherited pipes but does not terminate descendants), so the script
-	// records the child PID and t.Cleanup reaps it.
+	// records the child PID and t.Cleanup sends SIGKILL to it. The host's init
+	// reaps the resulting zombie.
 	pidFile := filepath.Join(dir, "sleep.pid")
 	writeExecutable(t, binDir, "coder",
 		"#!/bin/sh\n"+
@@ -55,19 +77,7 @@ func TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout(t *testin
 			"echo $! > \""+pidFile+"\"\n"+
 			"exit 1\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			return
-		}
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Signal(syscall.SIGKILL)
-		}
-	})
+	t.Cleanup(func() { killOrphanedSleep(t, pidFile) })
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
 	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
@@ -148,7 +158,8 @@ func TestRemoteCoderWhoami_SignalDeathNearDeadlineNotReportedAsTimeout(t *testin
 	//
 	// The backgrounded sleep survives the test as an orphan (WaitDelay closes
 	// the inherited pipes but does not terminate descendants), so the script
-	// records the child PID and t.Cleanup reaps it.
+	// records the child PID and t.Cleanup sends SIGKILL to it. The host's init
+	// reaps the resulting zombie.
 	pidFile := filepath.Join(dir, "sleep.pid")
 	writeExecutable(t, binDir, "coder",
 		"#!/bin/sh\n"+
@@ -158,19 +169,7 @@ func TestRemoteCoderWhoami_SignalDeathNearDeadlineNotReportedAsTimeout(t *testin
 			"echo $! > \""+pidFile+"\"\n"+
 			"kill -KILL $$\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			return
-		}
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Signal(syscall.SIGKILL)
-		}
-	})
+	t.Cleanup(func() { killOrphanedSleep(t, pidFile) })
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
 	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
@@ -214,7 +213,8 @@ func TestRemoteCoderWhoami_ExternalSignalDeathNotReportedAsTimeout(t *testing.T)
 	// the process self-terminated before the context fired.
 	//
 	// The backgrounded sleep survives the test as an orphan, so the script
-	// records the child PID and t.Cleanup reaps it.
+	// records the child PID and t.Cleanup sends SIGKILL to it. The host's init
+	// reaps the resulting zombie.
 	pidFile := filepath.Join(dir, "sleep.pid")
 	writeExecutable(t, binDir, "coder",
 		"#!/bin/sh\n"+
@@ -224,19 +224,7 @@ func TestRemoteCoderWhoami_ExternalSignalDeathNotReportedAsTimeout(t *testing.T)
 			"echo $! > \""+pidFile+"\"\n"+
 			"kill -TERM $$\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			return
-		}
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Signal(syscall.SIGKILL)
-		}
-	})
+	t.Cleanup(func() { killOrphanedSleep(t, pidFile) })
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
 	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
@@ -277,7 +265,8 @@ func TestRemoteCoderWhoami_ExternalSIGKILLNotReportedAsTimeout(t *testing.T) {
 	// the process self-terminated before the context fired.
 	//
 	// The backgrounded sleep survives the test as an orphan, so the script
-	// records the child PID and t.Cleanup reaps it.
+	// records the child PID and t.Cleanup sends SIGKILL to it. The host's init
+	// reaps the resulting zombie.
 	pidFile := filepath.Join(dir, "sleep.pid")
 	writeExecutable(t, binDir, "coder",
 		"#!/bin/sh\n"+
@@ -287,19 +276,7 @@ func TestRemoteCoderWhoami_ExternalSIGKILLNotReportedAsTimeout(t *testing.T) {
 			"echo $! > \""+pidFile+"\"\n"+
 			"kill -KILL $$\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Cleanup(func() {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			return
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			return
-		}
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Signal(syscall.SIGKILL)
-		}
-	})
+	t.Cleanup(func() { killOrphanedSleep(t, pidFile) })
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
 	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}

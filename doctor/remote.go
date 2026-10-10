@@ -130,6 +130,12 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	defer cancel()
 	cmd := exec.CommandContext(ctx, coderPath, "whoami")
 	cmd.WaitDelay = waitDelay
+	// Run coder in its own process group so the deadline can tear down the
+	// whole process tree rather than orphaning a descendant that still holds
+	// the capture pipe — the same pattern used by execBinaryVersion in
+	// skew.go.  Without this, a coder wrapper that spawns a helper and hangs
+	// would leave the helper running after Cancel kills only the wrapper PID.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Record whether the context's cancellation actually killed the process,
 	// rather than inferring it from ctx.Err() after CombinedOutput returns: a
 	// pipe-holding descendant can keep CombinedOutput blocked past the deadline,
@@ -150,6 +156,10 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		if err == nil {
 			ctxKilled.Store(true)
 		}
+		// Kill the entire process group to clean up any descendant processes
+		// the wrapper may have spawned (e.g. a helper that holds the capture
+		// pipe). Setpgid ensures the group id matches the process id.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return err
 	}
 	out, err := cmd.CombinedOutput()
@@ -172,12 +182,12 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		// that races the deadline can also set ctxKilled (Kill returns nil for a
 		// zombie), but the ExitError retains the original signal — report it as
 		// a failure with any captured output rather than a timeout. An external
-		// SIGKILL (OOM killer, kill -9) that races the deadline is handled by
-		// processExitedBeforeCancel in the Cancel function: it probes the
-		// process state before Kill, so a zombie or reaped process does not set
-		// ctxKilled. killedByContextSignal is a secondary guard for the narrow
-		// race between the waitid probe and Kill (process exits after the probe
-		// but before Kill reaches it).
+		// SIGKILL (OOM killer, kill -9) that races the deadline while the process
+		// is still a live or zombie can still set ctxKilled (Kill returns nil for
+		// both), and the ExitError reports SIGKILL, so killedByContextSignal
+		// classifies it as a timeout. This narrow race — the process dies just
+		// before the context fires, before Wait reaps it — is the same extremely
+		// rare case accepted as not worth a pre-kill probe (see #2733).
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
 			if ctxKilled.Load() && killedByContextSignal(exitErr) {
