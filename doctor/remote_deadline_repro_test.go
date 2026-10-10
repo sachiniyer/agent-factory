@@ -193,3 +193,69 @@ func TestRemoteCoderWhoami_SignalDeathNearDeadlineNotReportedAsTimeout(t *testin
 	require.False(t, checks[0].Problem, "coder auth warnings must not fail doctor")
 	require.Zero(t, report.UnresolvedCount(), "coder auth warnings must not fail doctor")
 }
+
+// TestRemoteCoderWhoami_ExternalSignalDeathNotReportedAsTimeout verifies that a
+// coder process killed by a non-context signal (SIGTERM) near the deadline is
+// reported as "failed" with its captured output, not "timed out". Even if
+// ctxKilled is set (Kill returns nil for a zombie that an external signal already
+// killed), the ExitError retains the original signal — SIGTERM, not the SIGKILL
+// the context's Cancel sends — so killedByContextSignal rejects it and the
+// output is preserved. This guards the race the prior SIGKILL test cannot: a
+// SIGKILL self-exit leaves ctxKilled false (Kill returns ErrProcessDone after
+// Wait reaps the zombie), but a different signal that arrives in the narrow
+// window between process death and Wait's doRelease could set ctxKilled true.
+func TestRemoteCoderWhoami_ExternalSignalDeathNotReportedAsTimeout(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	// The fake coder self-exits with SIGTERM after 100ms. A pipe-holding
+	// descendant (sleep 30 &) keeps CombinedOutput's pipe readers alive past
+	// the 1s deadline, making ctx.Err() return DeadlineExceeded even though
+	// the process self-terminated before the context fired.
+	//
+	// The backgrounded sleep survives the test as an orphan, so the script
+	// records the child PID and t.Cleanup reaps it.
+	pidFile := filepath.Join(dir, "sleep.pid")
+	writeExecutable(t, binDir, "coder",
+		"#!/bin/sh\n"+
+			"sleep 0.1\n"+
+			"echo 'Error: terminated' >&2\n"+
+			"sleep 30 &\n"+
+			"echo $! > \""+pidFile+"\"\n"+
+			"kill -TERM $$\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(syscall.SIGKILL)
+		}
+	})
+
+	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
+	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
+
+	opts := withRemote(testOptions(t, false), hooks)
+	opts.coderProbeTimeout = time.Second
+	opts.coderProbeWaitDelay = 2 * time.Second
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	checks := findCheckRows(report, "coder")
+	require.Len(t, checks, 1)
+	require.Equal(t, StatusWarn, checks[0].Status)
+	require.NotContains(t, checks[0].Detail, "timed out",
+		"coder was killed by an external signal (SIGTERM), not by the context deadline")
+	require.Contains(t, checks[0].Detail, "failed")
+	require.Contains(t, checks[0].Detail, "Error: terminated")
+	require.Equal(t, "run `coder login`", checks[0].Remediation)
+	require.False(t, checks[0].Problem, "coder auth warnings must not fail doctor")
+	require.Zero(t, report.UnresolvedCount(), "coder auth warnings must not fail doctor")
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -138,8 +139,11 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	// and macOS a signal delivered to an already-exited (zombie) process is
 	// accepted and returns nil, so a non-zero self-exit that races the deadline
 	// can still set ctxKilled. The classification below therefore gives a real
-	// exit code (ExitCode >= 0) precedence over ctxKilled to avoid discarding
-	// useful diagnostics such as a 401.
+	// exit code (ExitCode >= 0) precedence over ctxKilled, and for signal deaths
+	// (ExitCode < 0) checks the actual signal: only a SIGKILL death (the signal
+	// the context's Cancel sends) is a genuine context-killed timeout; a signal
+	// death from a different signal (SIGTERM, OOM, crash) survived the deadline
+	// and its output should be preserved.
 	var ctxKilled atomic.Bool
 	cmd.Cancel = func() error {
 		err := cmd.Process.Kill()
@@ -161,13 +165,16 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		// reaped with Kill() returning nil (the signal was accepted by the
 		// already-exited process), setting ctxKilled even though the context
 		// did not cause the exit. Reporting it as a timeout would discard
-		// useful diagnostics such as a 401. Only when there is no real exit
-		// code — a signal death (ExitCode < 0) or the successful-exit
-		// deadline race (context.DeadlineExceeded with no *exec.ExitError) —
-		// does ctxKilled indicate a genuine context-killed timeout.
+		// useful diagnostics such as a 401. For a signal death (ExitCode < 0),
+		// check the actual signal: the context's Cancel sends SIGKILL, so only
+		// a SIGKILL death is consistent with the context having killed the
+		// process. A signal death from a different signal (SIGTERM, OOM, crash)
+		// that races the deadline can also set ctxKilled (Kill returns nil for a
+		// zombie), but the ExitError retains the original signal — report it as
+		// a failure with any captured output rather than a timeout.
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
-			if ctxKilled.Load() {
+			if ctxKilled.Load() && killedByContextSignal(exitErr) {
 				detail = "coder whoami timed out"
 			} else if line := firstNonEmptyLine(string(out)); line != "" {
 				detail += ": " + line
@@ -183,6 +190,24 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		who = "authenticated"
 	}
 	report.Pass(sectionRemote, "coder", who)
+}
+
+// killedByContextSignal reports whether exitErr represents a process killed by
+// the signal the context's Cancel sends (os.Process.Kill → SIGKILL on Unix). A
+// non-context signal death (SIGTERM, OOM, crash) that races the deadline can set
+// ctxKilled via a successful Kill on the zombie, but the ExitError retains the
+// original signal. Only a SIGKILL death is consistent with the context having
+// killed the process. When exitErr is nil (a pure context error with no
+// ExitError), there is no signal to check and the timeout is genuine.
+func killedByContextSignal(exitErr *exec.ExitError) bool {
+	if exitErr == nil {
+		return true
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		return true
+	}
+	return ws.Signaled() && ws.Signal() == syscall.SIGKILL
 }
 
 func remoteHooksMentionCoder(hooks *config.RemoteHooks) bool {
