@@ -2,6 +2,10 @@ package doctor
 
 import (
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -35,13 +39,32 @@ func TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout(t *testin
 	// deadline, making ctx.Err() return DeadlineExceeded even though the
 	// process itself self-exited. The 2s wait delay guarantees the deadline
 	// fires before WaitDelay closes the pipe.
+	//
+	// The backgrounded sleep survives the test as an orphan (WaitDelay closes
+	// the inherited pipes but does not terminate descendants), so the script
+	// records the child PID and t.Cleanup reaps it.
+	pidFile := filepath.Join(dir, "sleep.pid")
 	writeExecutable(t, binDir, "coder",
 		"#!/bin/sh\n"+
 			"sleep 0.1\n"+
 			"echo 'Error: 401 Unauthorized' >&2\n"+
 			"sleep 30 &\n"+
+			"echo $! > \""+pidFile+"\"\n"+
 			"exit 1\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(syscall.SIGKILL)
+		}
+	})
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
 	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
