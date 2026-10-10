@@ -451,13 +451,13 @@ func (m *Menu) addInstanceOptions() {
 	}
 
 	// A resting (Archived/Lost/Dead) row has no live surface: nothing to attach
-	// to, no tab roster the TUI may edit, no pane it can show. Feeding it the
-	// full instance menu advertises verbs that cannot run — and worse, the width
-	// drop order sheds `r restore` long before those dead verbs (`t`, `w`,
-	// `1-9`), so at a real bar width the footer lies both ways (#4755). Give it
-	// its own compact menu: the lifecycle verbs a resting row can actually take
-	// plus the global keys. `c` still advertises for a pending handoff delivery
-	// that outlived its session — retry/confirm remain meaningful there.
+	// to, no tab roster the TUI may edit. Feeding it the full instance menu
+	// advertises verbs that cannot run — and worse, the width drop order sheds
+	// `r restore` long before those dead verbs (`t`, `w`, `1-9`), so at a real
+	// bar width the footer lies both ways (#4755). Give it its own compact
+	// menu: the lifecycle verbs a resting row can actually take plus the global
+	// keys. `c` still advertises for a pending handoff delivery that outlived
+	// its session — retry/confirm remain meaningful there.
 	if lifecycleAction == session.LifecycleActionRestore {
 		m.options = []keys.KeyName{keys.KeyNew}
 		if canKill {
@@ -466,6 +466,14 @@ func (m *Menu) addInstanceOptions() {
 		m.options = append(m.options, keys.KeyRestore)
 		if canRetryHandoff {
 			m.options = append(m.options, keys.KeyLimitRetry)
+		}
+		// Only an archived row owns no pane surface — pruneDeadPanes closes
+		// its panes on sight. A Lost/Dead row still has one: ui/tab_pane.go
+		// renders its fallback content, and handleOpenPane's only refusals
+		// (a nil binding, an in-flight op) cannot hold on a settled resting
+		// row — so `s` works there and the footer must say so (#5260).
+		if !m.instance.IsArchived() {
+			m.options = append(m.options, keys.KeyOpenPane)
 		}
 		m.options = append(m.options, keys.KeyHelp, keys.KeyQuit)
 		m.groups = []menuGroup{
@@ -742,13 +750,18 @@ var hintDropOrder = [][]keys.KeyName{
 
 // restingHintDropOrder is the compact resting-row menu's shed order (#4755
 // review): `r restore` is the one verb that row exists to offer, so it sheds
-// LAST — after delete and the conditional handoff retry. The shared order
-// above serves the live row, where restore is an early shed and delete the
-// last; applied to the resting menu it hid the primary hint at realistic
-// widths while keeping `D`. n/?/q stay the undroppable floor, as everywhere.
+// LAST — after delete, the conditional handoff retry, and `s open pane`
+// (#5260). The pane hint is a Lost/Dead row's second verb — the diagnostic
+// surface that row alone keeps — so it outlives everything except restore;
+// on an archived row it is not offered at all and this slot is a no-op. The
+// shared order above serves the live row, where restore is an early shed and
+// delete the last; applied to the resting menu it hid the primary hint at
+// realistic widths while keeping `D`. n/?/q stay the undroppable floor, as
+// everywhere.
 var restingHintDropOrder = [][]keys.KeyName{
 	{keys.KeyKill},
 	{keys.KeyLimitRetry},
+	{keys.KeyOpenPane},
 	{keys.KeyRestore},
 }
 
