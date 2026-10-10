@@ -775,6 +775,22 @@ func (m *home) reconcileSnapshotOp(inst *session.Instance, op session.InFlightOp
 			m.adoptedSnapshotOps.forget(inst)
 			return true
 		}
+		// CancelArchive (daemon/archive.go) reverts an in-flight archive to
+		// OpNone while PRESERVING the prior non-terminal liveness — a
+		// third outcome the terminal-liveness-only gate above did not model.
+		// Without this arm, an ADOPTED OpArchiving stays stranded on the row
+		// across every later poll: the snapshot reports OpNone, this branch
+		// is hit, and the non-terminal liveness skips the body. Only a
+		// daemon-owned op is released here — a LOCAL optimistic
+		// OpArchiving/OpKilling has its own completion handler that owns the
+		// clear (instanceArchivedMsg / instanceKilledMsg), and owns(inst)
+		// returns false for it, preserving the kill UX guarded by
+		// TestReconcile_OptimisticKillPreservedForNonTerminal.
+		if m.adoptedSnapshotOps.owns(inst) {
+			_ = inst.Transition(session.ClearOp())
+			m.adoptedSnapshotOps.forget(inst)
+			return true
+		}
 	case session.OpRestoring:
 		if lv != session.LiveArchived {
 			_ = inst.Transition(session.ClearOp())
