@@ -25,6 +25,10 @@ var (
 // without a real service manager, a spawned daemon, or a live control socket.
 // upgradeRecoveryHealthFn drives validatePreviousDaemon's readiness sequence;
 // the start hooks let startPreviousDaemon's owner dispatch be tested hermetically.
+// runRecoveryActorFn returns the supervisor's terminal Phase alongside its exit
+// code so RunUpgradeRecoveryActor can gate the post-commit hand-off on
+// PhaseCommitted rather than on the journal-gone signal, which fires identically
+// after commit, rollback, and abort (all three remove the journal).
 var (
 	upgradeRecoveryHealthFn = Health
 	startPreviousViaUnitFn  = RestartAutostartUnit
@@ -120,26 +124,85 @@ func RunUpgradeRecoveryActor(ctx context.Context, invocation upgradetxn.Recovery
 	}
 
 	supervisor := upgradetxn.Supervisor{Operations: productionSupervisorOperations()}
-	if err := runRecoveryActorFn(ctx, invocation, supervisor); err != nil {
-		return err
+	runErr, phase := runRecoveryActorFn(ctx, invocation, supervisor)
+	if runErr != nil {
+		return runErr
 	}
 
-	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil for
-	// a clean stand-down (a foreign/stale transaction we had no authority over),
-	// ErrRecoveryActive, and a terminal rollback (which restores the previous daemon
-	// under its own owner). Hand off ONLY on a positive commit signal — this was OUR
-	// transaction AND its journal is now gone (Cleanup ran). rollback_failed
-	// deliberately RETAINS the journal, and a newer transaction leaves a different one
-	// — both leave a journal, so both are excluded here. The hand-off is additionally
-	// id-guarded so it can only ever stop our own committed candidate.
-	if !ourTransaction {
+	// A nil error is NOT proof of commit: runRecoveryActorWith also returns nil
+	// for a clean stand-down (a foreign/stale transaction we had no authority
+	// over, ErrRecoveryActive, no active transaction) and for terminal rollback
+	// and abort. PhaseRolledBack and PhaseAborted both call lease.Cleanup() —
+	// removing the journal, the same signal a commit produces — and have their
+	// sentinels (ErrUpgradeRolledBack / ErrUpgradeAborted) converted to nil so
+	// the recovery job exits 0, so all three of commit, rollback, and abort
+	// present "nil + journal gone" to this caller. Gating on "journal gone"
+	// (the old predicate) fired the hand-off after rollback and abort, emitting
+	// "committed upgrade candidate" WARNINGs for a candidate that does not
+	// exist.
+	//
+	// Hand off ONLY on a positive commit signal: this was OUR transaction AND
+	// the supervisor's terminal phase is PhaseCommitted. The phase is the durable
+	// verdict the supervisor persisted before Cleanup removed the journal; it
+	// survives Cleanup in-memory (storage.go cleanup never mutates
+	// txn.journal.Phase), so runRecoveryActorWith returns it alongside the
+	// exit-0 nil. rollback_failed does NOT remove the journal and returns
+	// PhaseRollbackFailed; a newer/foreign transaction stands down before
+	// supervise (empty phase); both are excluded here. The hand-off is
+	// additionally id-guarded (ourTransaction) so it can only ever stop our own
+	// committed candidate.
+	if !ourTransaction || phase != upgradetxn.PhaseCommitted {
 		return nil
 	}
-	if _, loadErr := upgradetxn.Load(invocation.HomeDir); !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
-		return nil // a journal is still present — not a completed commit of our transaction
+	// The phase gate rules out rollback and abort, but NOT a NEWER transaction
+	// that races in after our commit: our Cleanup() removes active.json, and
+	// upgradetxn.Prepare is NOT serialized by the recovery lease (it accepts the
+	// now-absent journal), so a second `af upgrade` can publish a new active.json
+	// in the window between Cleanup and this branch. This old actor still holds
+	// PhaseCommitted in memory and ourTransaction is true, so without a post-run
+	// check it would hand off — stopping the daemon the new transaction has just
+	// recorded as its previous daemon, after which the replacement sees the new
+	// active journal and defers startup (runDaemon's entrypoint gate,
+	// daemon/daemon.go). A re-load ALONE only narrows that window: Load takes no
+	// preparation lock, so a Prepare can publish between the re-load returning and
+	// the hand-off stopping the committed candidate, with the same daemonless
+	// result. Hold the SAME preparation lock Prepare takes (install_lock.go:
+	// WithInstallLock) across the re-load and the hand-off, so a Prepare that
+	// arrives mid-hand-off blocks until the replacement has bound the socket and
+	// a later journal no longer affects a running daemon. Inside the lock: re-load
+	// and skip the hand-off if a DIFFERENT transaction now owns the journal. A
+	// missing journal is the normal post-commit state (Cleanup removed ours); our
+	// own ID is harmless. A read error other than "no active transaction" is not
+	// proof a newer transaction took over, and the hand-off is still id-guarded
+	// above, so we proceed rather than strand a committed upgrade whose arming
+	// already ran.
+	handOff := func() {
+		if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
+			log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
+		}
 	}
-	if err := adoptAfterUpgradeCommitFn(invocation.TransactionID, canonicalExecPath); err != nil {
-		log.WarningLog.Printf("upgrade committed but arming the post-upgrade daemon did not complete; check `af daemon status` and `af doctor`: %v", err)
+	if lockErr := upgradetxn.WithInstallLock(invocation.HomeDir, canonicalExecPath, func() error {
+		if newer, loadErr := upgradetxn.Load(invocation.HomeDir); loadErr == nil {
+			if newer.Journal().ID != invocation.TransactionID {
+				log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal is now for transaction %s; a newer transaction took over before the post-upgrade hand-off, so the committed daemon was not replaced",
+					invocation.TransactionID, newer.Journal().ID)
+				return nil
+			}
+		} else if !errors.Is(loadErr, upgradetxn.ErrNoActiveTransaction) {
+			log.WarningLog.Printf("upgrade committed for transaction %s but the active upgrade journal could not be re-read after commit (%v); proceeding with the hand-off under the id-guarded phase gate",
+				invocation.TransactionID, loadErr)
+		}
+		handOff()
+		return nil
+	}); lockErr != nil {
+		// A lock acquisition failure unwinds the serialization but not a
+		// committed upgrade: the hand-off is id-guarded and phase-gated above, and
+		// the lock only narrows a race window. Proceed without it rather than strand
+		// a committed upgrade whose arming already ran — this is the pre-serialization
+		// path, not a worse one.
+		log.WarningLog.Printf("upgrade committed for transaction %s but the post-upgrade hand-off could not serialize against a concurrent Prepare (%v); proceeding under the id-guarded phase gate",
+			invocation.TransactionID, lockErr)
+		handOff()
 	}
 	return nil
 }
