@@ -430,7 +430,7 @@ func selectedAgentNames(agent string, selectors []string) map[string]struct{} {
 // so the untrusted layer rejects such a value instead (config.LoadInRepoConfig).
 //
 // The agent is derived from the command rather than taken from the caller,
-// because that is exactly what the launch paths do (TmuxSession.launchEnvironment
+// because that is exactly what the launch paths do (TmuxSession.prepareLaunchEnvironment
 // and hookProvisioner.environmentAgent both call AgentForCommand). A check that
 // re-derived it differently could disagree with the resolution it is guarding —
 // the key a repo files an override under does not have to name the agent the
