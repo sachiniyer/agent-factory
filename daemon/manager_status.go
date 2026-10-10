@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // statusPollLease bounds how long a single PauseStatusPoll silences an
@@ -254,6 +255,88 @@ func (m *Manager) sweepPausedPollState() {
 	}
 }
 
+// taskRunTurnWatchEntry keys a run's chrome watcher by the evidence it may
+// legitimately observe: the resolved agent (a mid-run handoff swaps the pane's
+// signatures) and the task-prompt boundary (a redelivery discards primed rows
+// that predate it, so an already-running turn cannot release the fresh window
+// as though it were the new prompt's — #5221 review).
+type taskRunTurnWatchEntry struct {
+	agent    string
+	boundary time.Time
+	watch    *task.TurnWatch
+}
+
+// noteTaskRunTurnEvidence feeds this tick's pane capture through the run's
+// chrome watcher and, when the agent's own in-turn chrome is demonstrated,
+// stamps the run's turn boundary (#5219). Boot output, the prompt's own echo,
+// and ACP init all arrive as ordinary churn — only the chrome proves the agent
+// took the turn, so only it (or the fallback's sustained quiet) may release a
+// held idle edge. Returns true when the boundary was newly recorded, so the
+// caller can force the row durable even while the session stays Running.
+//
+// The watcher state lives under pausedMu — the paused-path observation feeds
+// the same map — while the evidence write follows the observation epoch fence,
+// same as RecordPaneChurnCheckpointAtEpoch above.
+func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, content string, capturedAt time.Time, epoch uint64) bool {
+	if !instance.TaskRunActive() || content == "" {
+		return false
+	}
+	// ResolvedAgent, not Program: the pane runs what the last handoff or
+	// program override installed, and only that agent's chrome proves a turn.
+	// Read under i.mu BEFORE pausedMu — the sweep takes the two separately and
+	// never nests them.
+	agent := instance.ResolvedAgent()
+	boundary := instance.TaskRunPromptAttemptAt()
+	m.pausedMu.Lock()
+	entry, ok := m.taskRunTurnWatches[key]
+	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
+		// A mid-run handoff swaps the signatures the pane can produce, and a
+		// redelivery retires primed state from the previous window — either way
+		// the watcher must be rebuilt rather than read the pane through rules
+		// or a prev frame that no longer belong to this boundary (#5221 review).
+		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
+		m.taskRunTurnWatches[key] = entry
+	}
+	turning := entry.watch.Observe(content, capturedAt)
+	m.pausedMu.Unlock()
+	if !turning {
+		return false
+	}
+	return instance.RecordTaskRunTurnAtEpoch(nowFunc(), epoch)
+}
+
+// sweepTaskRunTurnWatches drops per-run chrome watchers whose run is no longer
+// in flight — the watcher exists only to fence the run's completion edge, so a
+// finished run or a torn-down row never needs it again. The map is keyed by
+// stableSessionKey, so a same-title replacement session cannot inherit the old
+// run's partially-fed watcher either. Called once per poll from
+// RefreshStatuses, beside sweepRemoteLossStates; m.mu and pausedMu are taken
+// separately, never nested, per pausedPolls' lock discipline.
+func (m *Manager) sweepTaskRunTurnWatches() {
+	m.pausedMu.Lock()
+	size := len(m.taskRunTurnWatches)
+	m.pausedMu.Unlock()
+	if size == 0 {
+		return // nothing armed: skip the instance walk in the common case
+	}
+	m.mu.Lock()
+	live := make(map[string]struct{}, size)
+	for key, inst := range m.instances {
+		if inst.TaskRunActive() {
+			repoID, _ := splitDaemonInstanceKey(key)
+			live[stableSessionKey(repoID, inst)] = struct{}{}
+		}
+	}
+	m.mu.Unlock()
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	for key := range m.taskRunTurnWatches {
+		if _, ok := live[key]; !ok {
+			delete(m.taskRunTurnWatches, key)
+		}
+	}
+}
+
 // isPollPaused reports whether an instance's poll is currently paused (#1160).
 // A present-but-expired lease is lazily deleted and reported unpaused, so a
 // crashed TUI that never sent Resume auto-resumes within one lease — the
@@ -338,6 +421,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	}
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
+	// The pane capture happens inside SnapshotAgent — possibly across a remote
+	// transport — so the request's start is the earliest moment the frame could
+	// have been taken. Feeding it to the turn watch keeps the boundary-age
+	// check from being inflated by the round trip's own latency (#5221 review).
+	capturedAt := nowFunc()
 	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
@@ -351,6 +439,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	churnCheckpoint := false
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	}
+	if m.noteTaskRunTurnEvidence(key, instance, obs.Content, capturedAt, epoch) {
+		// The turn boundary is durable evidence: checkpoint it even when nothing
+		// else this tick writes, so a restart cannot reopen a closed window.
+		churnCheckpoint = true
 	}
 	if obs.Baseline || obs.Updated || obs.HasPrompt {
 		// Updated/prompt proves the run remains active; a baseline cannot establish
@@ -393,9 +486,11 @@ func (m *Manager) RefreshStatuses() {
 
 	// Drop debounce state for sessions that are gone or replaced, colocated with
 	// the pass that creates it (#1794), and backstop timers for sessions no longer
-	// paused (#2015) — both maps the poll itself populates.
+	// paused (#2015) — both maps the poll itself populates. Same for the per-run
+	// chrome watchers (#5219): a finished run's watcher answers nothing.
 	m.sweepRemoteLossStates()
 	m.sweepPausedPollState()
+	m.sweepTaskRunTurnWatches()
 
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
@@ -564,6 +659,10 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// that final transport check, while the epoch fences Instance mutations.
 	releaseObservationSettlement := instance.HoldAgentObservationSettlement()
 	defer releaseObservationSettlement()
+	// Same request-start bound as the paused-path feed below: the pane is
+	// captured inside SnapshotAgent, so the boundary-age check measures from
+	// before the round trip, not after it (#5221 review).
+	capturedAt := nowFunc()
 	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
 	if observedOp != session.OpNone {
 		m.clearRemoteLoss(key)
@@ -609,6 +708,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// The first churn after a prompt is checkpointed below even if the row stays
 		// Running; later spinner churn does not create an event/write storm.
 		_, settlementCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	}
+	if m.noteTaskRunTurnEvidence(key, instance, content, capturedAt, epoch) {
+		// Feed the run's chrome watcher BEFORE the idle branch may settle the
+		// liveness: the turn boundary is what lets a held idle edge release, and
+		// it must be recorded while the observation that produced it still owns
+		// the epoch. Checkpoint forces a write — a restart must not reopen a
+		// window the observation already closed.
+		settlementCheckpoint = true
 	}
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts

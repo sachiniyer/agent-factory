@@ -629,6 +629,20 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 		inst.MarkStartupStateUnknown()
 		changed = true
 	}
+	// Mirror the daemon's durable mechanical evidence BEFORE the liveness
+	// transition below (#5221 review): the task-run completion gate consults it
+	// inside the transition, and a Ready snapshot can carry a turn observation
+	// the edge needs to see. The run marker itself is mirrored outright — a
+	// client that missed the snapshot carrying the evidence (always possible:
+	// the final Ready snapshot scrubs the window fields with the run) cannot
+	// re-derive the end locally, so the daemon's decision is authoritative.
+	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt,
+		d.TaskRunPromptAttemptAt, d.TaskRunTurnObservedAt) {
+		changed = true
+	}
+	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
+		changed = true
+	}
 	// Mirror the daemon's authoritative LIVENESS onto the row (#960 PR 5, #1195):
 	// the daemon poll computes Running/Ready/Lost/Archived/LimitReached (the #935
 	// liveness) and the TUI renders it. Applied UNCONDITIONALLY — daemon liveness
@@ -694,12 +708,6 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	// that durable terminal axis independently so an already-open TUI surfaces the
 	// reason immediately rather than only after cold-start materialization.
 	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
-		changed = true
-	}
-	// Mirror the daemon's durable mechanical evidence independently of liveness.
-	// An interactive send can change delivery status while the row remains Ready,
-	// and pane churn can race the next Running transition (#3168).
-	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt) {
 		changed = true
 	}
 	// Same shape for the re-created-root notice (#2629): it appears when the

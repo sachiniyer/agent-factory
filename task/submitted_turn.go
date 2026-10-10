@@ -245,12 +245,86 @@ func rowElapsed(row string) (time.Duration, bool) {
 //   - the elapsed time must grow. Equal is a row that stood still; smaller is a
 //     different row, never the same timer.
 func timedRowTicked(prev, cur map[string]timedRow) bool {
+	_, ok := tickingTimedRow(prev, cur)
+	return ok
+}
+
+// TurnWatch accumulates one session's consecutive pane captures and reports
+// when the agent's own in-turn chrome is demonstrated — the signal that
+// separates a live turn from boot or prompt-echo noise (#5219). It is the
+// poll-cadence sibling of submittedTurnVisible: same vocabulary, fed one
+// capture per status tick instead of inside the submit window. A task run's
+// idle edge may only spend the session once this fires (or the quieter
+// fallback qualifies), because nothing else the pane renders proves the agent
+// — rather than its own boot output — began the turn.
+type TurnWatch struct {
+	agent string
+	// boundary is the prompt attempt this watch answers for. Only a turn that
+	// demonstrably BEGAN after it counts — a ticking row alone can belong to
+	// unrelated work already in flight when a redelivery reset the boundary
+	// (#5221 review): elapsed is such a row's own clock, and an indicator that
+	// never leaves the pane across the boundary proves nothing about the new
+	// prompt.
+	boundary time.Time
+	prev     map[string]timedRow
+	armed    bool
+}
+
+// NewTurnWatch returns the chrome watcher for the agent the pane actually runs
+// — pass the resolved (runtime) agent so a handoff or program override picks
+// the right signature, and the prompt boundary the watch answers for. An agent
+// with no in-turn signature never reports; callers cover it with the quieter
+// fallback evidence instead.
+func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
+	return &TurnWatch{agent: agent, boundary: boundary}
+}
+
+// Observe folds one captured frame into the watch and reports whether it
+// proves a turn began after the boundary. `at` must be the frame's CAPTURE
+// (or request-start) instant, not the caller's apply time: for a remote
+// session the pane is captured inside the sandbox and processed after
+// transport, and measuring the boundary's age at apply time would let that
+// unbounded latency inflate it until a pre-boundary turn's row fits (#5221
+// review). For the timed-row agents (claude, devin) a row's presence is not
+// enough — scrollback can hold a stale one — so the row's elapsed timer must
+// have advanced against the previous capture, the same contract
+// submittedTurnVisible applies inside the submit window; and the ticking
+// row's own elapsed must fit inside the boundary's age at capture, or a turn
+// already running when the prompt went out gets attributed to it. The other
+// agents' indicators are scoped to their live frame but carry no clock, so
+// they must be seen absent once before a present frame can count — the start
+// edge the elapsed check expresses for timed rows.
+func (w *TurnWatch) Observe(content string, at time.Time) bool {
+	switch w.agent {
+	case tmux.ProgramClaude, tmux.ProgramDevin:
+		cur := timedTurnRowsByIdentity(content)
+		row, ticked := tickingTimedRow(w.prev, cur)
+		w.prev = cur
+		// rowElapsed reads a whole-second display, so its truncation leaves a
+		// sub-second gap: a turn started a fraction of a second before the
+		// boundary could otherwise satisfy elapsed <= age. The margin is the
+		// display's own resolution — real elapsed is strictly less than
+		// displayed+1s, so demanding that fit inside the boundary's age makes a
+		// strictly-pre-boundary turn unrepresentable (#5221 review).
+		return ticked && row.elapsed+time.Second <= at.Sub(w.boundary)
+	default:
+		if !submittedTurnContent(content, w.agent) {
+			w.armed = true
+			return false
+		}
+		return w.armed
+	}
+}
+
+// tickingTimedRow is timedRowTicked lifted to name the row that moved, so the
+// caller can check the ticking row's own elapsed against the prompt boundary.
+func tickingTimedRow(prev, cur map[string]timedRow) (timedRow, bool) {
 	for id, now := range cur {
 		before, ok := prev[id]
 		if ok && before.count == 1 && now.count == 1 &&
 			before.fromBottom == now.fromBottom && now.elapsed > before.elapsed {
-			return true
+			return now, true
 		}
 	}
-	return false
+	return timedRow{}, false
 }
