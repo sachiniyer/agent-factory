@@ -38,7 +38,8 @@ mkdir -p "$EVID"
 # --- provenance --------------------------------------------------------------
 # /src is a linked worktree: its .git is a FILE pointing at the host's gitdir,
 # unreachable inside the container, so git cannot answer rev-parse/archive
-# here. The driver supplies the two SHAs and the master source as a tar:
+# here. `testbox.sh scenario` sees this script consume them and supplies the
+# two SHAs and the master source as a tar:
 #   AF_BRANCH_SHA  — `git rev-parse HEAD` of the worktree mounted at /src
 #   AF_MASTER_SHA  — `git rev-parse origin/master` at run time
 #   AF_MASTER_TAR  — container path of `git archive <master-sha>` output

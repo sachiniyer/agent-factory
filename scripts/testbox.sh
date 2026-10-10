@@ -614,8 +614,28 @@ scenario)
         PLAYTEST_NAME="af-driver-scenario-$(_uniq)"; teardown=yes
     fi
     ensure_playtest_up
+    # Scenarios that run a master control leg consume provenance inputs
+    # (AF_BRANCH_SHA / AF_MASTER_SHA / AF_MASTER_TAR). Inside the sandbox the
+    # mounted /src may be a linked worktree whose .git file points at a
+    # host-only gitdir, so the script cannot rev-parse or archive there —
+    # produce the inputs here whenever the script declares them.
+    exec_env=()
+    if grep -qE 'AF_(BRANCH|MASTER)_SHA|AF_MASTER_TAR' "$REPO_ROOT/$scenario_rel"; then
+        branch_sha="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+        master_sha="$(git -C "$REPO_ROOT" rev-parse origin/master 2>/dev/null \
+            || git -C "$REPO_ROOT" rev-parse master 2>/dev/null || true)"
+        [ -n "$branch_sha" ] && exec_env+=(-e "AF_BRANCH_SHA=$branch_sha")
+        if [ -n "$master_sha" ]; then
+            master_tar="$(mktemp "${TMPDIR:-/tmp}/af-master.XXXXXX.tar")"
+            if git -C "$REPO_ROOT" archive --format=tar "$master_sha" > "$master_tar"; then
+                "$ENGINE" cp "$master_tar" "$PLAYTEST_NAME:/tmp/af-master-src.tar" >/dev/null
+                exec_env+=(-e "AF_MASTER_SHA=$master_sha" -e "AF_MASTER_TAR=/tmp/af-master-src.tar")
+            fi
+            rm -f "$master_tar"
+        fi
+    fi
     rc=0
-    "$ENGINE" exec "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
+    "$ENGINE" exec "${exec_env[@]}" "$PLAYTEST_NAME" bash "/src/$scenario_rel" || rc=$?
     if [ "$teardown" = yes ]; then
         "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
     fi
