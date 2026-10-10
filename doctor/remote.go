@@ -60,7 +60,7 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 		report.Pass(sectionRemote, "remote hooks", "not configured for this repo")
 		return
 	}
-	checkCoderStatus(hooks, report)
+	checkCoderStatus(hooks, report, ctx.opts.coderProbeTimeout, ctx.opts.coderProbeWaitDelay)
 
 	configHint := "in [remote_hooks]"
 	if repoRoot != "" {
@@ -107,7 +107,7 @@ func checkRemoteSetup(ctx *scanContext, report *Report) {
 	// doctor deliberately does not run it.
 }
 
-func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
+func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDelay time.Duration) {
 	mentionsCoder := remoteHooksMentionCoder(hooks)
 	coderPath, lookErr := exec.LookPath("coder")
 	if lookErr != nil {
@@ -124,10 +124,10 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, coderPath, "whoami")
-	cmd.WaitDelay = 500 * time.Millisecond
+	cmd.WaitDelay = waitDelay
 	out, err := cmd.CombinedOutput()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// coder exited zero and answered; only a descendant held the capture
@@ -137,7 +137,12 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 	if err != nil {
 		detail := "coder whoami failed"
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() < 0 {
+		if errors.As(err, &exitErr) && exitErr.ExitCode() < 0 && ctx.Err() == context.DeadlineExceeded {
+			// A negative exit code combined with a fired deadline means the
+			// process was signal-killed by the context (SIGKILL), not that it
+			// crashed or was externally signalled — a pre-deadline signal death
+			// (OOM, external SIGTERM, segfault) has ExitCode < 0 but
+			// ctx.Err() == nil and is reported as a failure below.
 			detail = "coder whoami timed out"
 		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line

@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -13,23 +14,30 @@ import (
 // TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout
 // reproduces the classification bug in checkCoderStatus: when `coder whoami`
 // self-exits non-zero (e.g. a 401) and a pipe-holding descendant pushes
-// CombinedOutput past the 3s context deadline, the old code checked
+// CombinedOutput past the context deadline, the old code checked
 // ctx.Err() == DeadlineExceeded and labelled it "timed out" even though the
 // process had already completed with a real error message. The fix uses
-// ExitError.ExitCode() < 0 (signal-killed) as the timeout discriminator, so a
-// non-zero self-exit (ExitCode >= 0) is reported as "failed" with its output
-// regardless of whether the caller's timer also fired.
+// ExitError.ExitCode() < 0 (signal-killed) combined with ctx.Err() ==
+// DeadlineExceeded as the timeout discriminator, so a non-zero self-exit
+// (ExitCode >= 0) is reported as "failed" with its output regardless of
+// whether the caller's timer also fired.
+//
+// The probe timeout and wait delay are injected so the test does not depend on
+// the 3s production deadline: a 1s timeout with a 2s wait delay gives the
+// process a wide margin to self-exit before the deadline while still
+// guaranteeing the deadline fires before WaitDelay closes the pipe.
 func TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
 	binDir := t.TempDir()
-	// The fake coder exits non-zero at 2.6s — close enough to the 3s deadline
-	// that a pipe-holding descendant (sleep 30 &) keeps CombinedOutput's pipe
-	// readers alive past the deadline, making ctx.Err() return
-	// DeadlineExceeded even though the process itself self-exited.
+	// The fake coder exits non-zero after 100ms. A pipe-holding descendant
+	// (sleep 30 &) keeps CombinedOutput's pipe readers alive past the 1s
+	// deadline, making ctx.Err() return DeadlineExceeded even though the
+	// process itself self-exited. The 2s wait delay guarantees the deadline
+	// fires before WaitDelay closes the pipe.
 	writeExecutable(t, binDir, "coder",
 		"#!/bin/sh\n"+
-			"sleep 2.6\n"+
+			"sleep 0.1\n"+
 			"echo 'Error: 401 Unauthorized' >&2\n"+
 			"sleep 30 &\n"+
 			"exit 1\n")
@@ -38,7 +46,11 @@ func TestRemoteCoderWhoami_NonZeroExitNearDeadlineNotReportedAsTimeout(t *testin
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
 	hooks := &config.RemoteHooks{LaunchCmd: hook, DeleteCmd: hook}
 
-	report, err := Run(withRemote(testOptions(t, false), hooks))
+	opts := withRemote(testOptions(t, false), hooks)
+	opts.coderProbeTimeout = time.Second
+	opts.coderProbeWaitDelay = 2 * time.Second
+
+	report, err := Run(opts)
 	require.NoError(t, err)
 
 	checks := findCheckRows(report, "coder")
@@ -62,7 +74,10 @@ func TestRemoteCoderWhoami_GenuineTimeoutStillReportedAsTimeout(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
 	binDir := t.TempDir()
-	writeExecutable(t, binDir, "coder", "#!/bin/sh\nsleep 300\n")
+	// exec replaces the shell with sleep so CommandContext's SIGKILL reaches the
+	// sleep process directly (rather than killing the shell and orphaning sleep
+	// for 5 minutes).
+	writeExecutable(t, binDir, "coder", "#!/bin/sh\nexec sleep 300\n")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	hook := writeHookScript(t, dir, "coder-hook.sh", "#!/bin/sh\necho '[]'\n")
