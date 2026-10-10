@@ -33,7 +33,9 @@ type operandTailMemo struct {
 	envScans map[envScanKey]envScanSummary
 	// envArgvUnprovable: does any word from here on fail envArgvWord.
 	envArgvUnprovable map[*syntax.Word]bool
-	// wrapperTails: the unrecognized-wrapper tail scan from here, per head kind.
+	// wrapperTails: the unrecognized-wrapper tail scan from here, per head
+	// kind and (for strace) whether the scan is still inside strace's option
+	// region.
 	wrapperTails map[wrapperTailKey]bool
 	// wrapperOptions: a modeled wrapper's option loop from here, per loop state.
 	wrapperOptions map[wrapperOptionKey]unwrapResult
@@ -122,8 +124,10 @@ type envScanSummary struct {
 }
 
 type wrapperTailKey struct {
-	word   *syntax.Word
-	strace bool
+	word     *syntax.Word
+	strace   bool
+	inOption bool
+	pending  bool
 }
 
 // envArgvWord literalizes one env operand the way env itself parses it: a
