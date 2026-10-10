@@ -69,11 +69,12 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 
 	// The SCANNING process is never an occupant of its own gate. The daemon is
 	// routinely auto-started by an `af` invocation whose cwd is a managed worktree
-	// and inherits it (startDaemonChild leaves cmd.Dir unset), so a later blind
-	// kill or archive would positively match the daemon itself and refuse — on
-	// every retry, forever, until the daemon happened to be restarted elsewhere.
-	// A guard whose failure mode is permanent is worse than the rare deletion it
-	// prevents.
+	// and inherits it (startDaemonChild leaves cmd.Dir unset); runDaemon chdirs
+	// to the AF home early, but a blind kill or archive landing in the spawn
+	// window before that chdir would positively match the daemon itself and
+	// refuse — on every retry, forever, until the daemon happened to be restarted
+	// elsewhere. A guard whose failure mode is permanent is worse than the rare
+	// deletion it prevents.
 	//
 	// ONLY this process, never its subtree. The daemon spawns the sessions, so its
 	// descendants include exactly the escapees this gate exists to find; skipping

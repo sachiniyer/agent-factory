@@ -322,10 +322,10 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// load-bearing for the same reason the pane-exit wait is: the editor's cwd is
 	// the worktree, and moving a directory out from under a live code-server
 	// leaves it serving a path that no longer exists. It is daemon-owned
-	// infrastructure, not a tab, so ArchiveTeardown does not cover it. No-ops when
-	// the session never had a vscode tab.
+	// infrastructure, not a tab, so ArchiveTeardownWithClaim does not cover it.
+	// No-ops when the session never had a vscode tab.
 	//
-	// The tab itself is KEPT by ArchiveTeardown (it is metadata-only: stopping the
+	// The tab itself is KEPT by ArchiveTeardownWithClaim (it is metadata-only: stopping the
 	// editor destroys nothing the tab holds) and persisted with the archived
 	// record, so a restore renders it again and the next proxy request lazily
 	// respawns an editor on a fresh port. That is what makes stopping here safe —

@@ -55,6 +55,12 @@ func TestMain(m *testing.M) {
 	// that forgets IsolateTmux can never create or sweep sessions on the
 	// developer's real server.
 	restoreTmux := testguard.SandboxTmux()
+	// #5206: in-process RunDaemon callers must not chdir the test process off
+	// its cwd. chdirToNeutralHomeFn's real implementation calls os.Chdir to the
+	// AF home, which is a temp dir a test set via t.Setenv and removes on
+	// cleanup — leaving later tests' os.Getwd() failing with "no such file or
+	// directory". The daemon_cwd_test.go tests exercise the real chdir directly.
+	chdirToNeutralHomeFn = func() {}
 	log.Initialize(false)
 	code := m.Run()
 	log.Close()

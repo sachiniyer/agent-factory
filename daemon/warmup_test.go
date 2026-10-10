@@ -306,7 +306,7 @@ func TestRunDaemon_BindsSocketBeforeRestoreCompletes(t *testing.T) {
 
 	// Shutdown must end a warming daemon promptly — it cannot wait for the
 	// restore (which this test never releases until cleanup).
-	result, err := RequestShutdown()
+	result, _, err := RequestShutdown()
 	if err != nil {
 		t.Fatalf("RequestShutdown during warm-up: %v", err)
 	}

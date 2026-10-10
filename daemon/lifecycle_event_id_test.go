@@ -48,7 +48,7 @@ func TestKillEventCarriesStableID(t *testing.T) {
 
 	_, ch := manager.events.subscribe()
 	var resp KillSessionResponse
-	if err := cs.KillSession(KillSessionRequest{Title: "kill-id-evt", RepoID: repo.ID}, &resp); err != nil {
+	if err := cs.KillSession(&KillSessionRequest{Title: "kill-id-evt", RepoID: repo.ID}, &resp); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
 
@@ -74,7 +74,7 @@ func TestArchiveAndRestoreEventsCarryStableID(t *testing.T) {
 	_, ch := manager.events.subscribe()
 
 	var aResp ArchiveSessionResponse
-	if err := cs.ArchiveSession(ArchiveSessionRequest{Title: "arch-id-evt", RepoID: repo.ID}, &aResp); err != nil {
+	if err := cs.ArchiveSession(&ArchiveSessionRequest{Title: "arch-id-evt", RepoID: repo.ID}, &aResp); err != nil {
 		t.Fatalf("ArchiveSession: %v", err)
 	}
 	archived := drainNextSessionEvent(t, ch, agentproto.EventSessionArchived)

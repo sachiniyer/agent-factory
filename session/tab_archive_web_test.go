@@ -34,7 +34,8 @@ func TestArchiveTeardown_KeepsWebTabsDropsProcessTabs(t *testing.T) {
 
 	// The mock worktree has no real git repo behind it, so the relocation errors;
 	// finalize (the tab reconciliation under test) runs regardless.
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	tabs := inst.GetTabs()
 	require.Len(t, tabs, 2, "the agent tab and the web tab survive archive; the process tab drops")
@@ -60,7 +61,8 @@ func TestArchiveTeardown_WebTabsSurvivePersistRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	makeArchiveSourceClaimable(t, inst)
 
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	// Serialize the archived record exactly as the daemon persists it, then rebuild
 	// it the way a restore does.
@@ -93,7 +95,8 @@ func TestArchiveTeardown_PreservesWebTabRelativeOrder(t *testing.T) {
 	require.NoError(t, err)
 	makeArchiveSourceClaimable(t, inst)
 
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	tabs := inst.GetTabs()
 	require.Len(t, tabs, 3, "agent + both web tabs; the interleaved process tab drops")
@@ -122,7 +125,8 @@ func TestArchiveTeardown_KeepsVSCodeTabs(t *testing.T) {
 
 	// The mock worktree has no real git repo behind it, so the relocation errors;
 	// finalize (the tab reconciliation under test) runs regardless.
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	tabs := inst.GetTabs()
 	require.Len(t, tabs, 2, "the agent tab and the vscode tab survive archive; the process tab drops")
@@ -148,7 +152,8 @@ func TestArchiveTeardown_VSCodeTabsSurvivePersistRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	makeArchiveSourceClaimable(t, inst)
 
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	// Serialize the archived record exactly as the daemon persists it, then rebuild
 	// it the way a restore does.
@@ -180,7 +185,8 @@ func TestArchiveTeardown_KeepsEveryTmuxlessKindTogether(t *testing.T) {
 	require.NoError(t, err)
 	makeArchiveSourceClaimable(t, inst)
 
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	tabs := inst.GetTabs()
 	require.Len(t, tabs, 3, "agent + web + vscode; the interleaved process tab drops")
@@ -217,7 +223,8 @@ func TestArchiveTeardown_AgentOnlyUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	makeArchiveSourceClaimable(t, inst)
 
-	_ = inst.ArchiveTeardown(t.TempDir())
+	claim, _ := inst.ClaimWorktreeRelocationForRetry()
+	_, _ = inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 
 	tabs := inst.GetTabs()
 	require.Len(t, tabs, 1, "only the agent tab survives when there are no web tabs")

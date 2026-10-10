@@ -292,38 +292,76 @@ func tomlInlineTableBody(line, section string) (start, end int, ok bool) {
 func tomlInlineMembers(body string) []tomlInlineMember {
 	starts := []int{0}
 	commas := make([]int, 0)
-	inSingle, inDouble, escape := false, false, false
+	// String state is tracked by the open DELIMITER, not a per-quote toggle.
+	// A """ or ''' delimiter is a three-byte UNIT: reading it as three open/close
+	// flips (the per-quote toggle this used to have) lets an unescaped " or '
+	// mid-string flip the scanner "outside", so a comma sitting INSIDE a
+	// one-line multiline member was recorded as a member separator and
+	// setTOMLInlineTableMember emitted unloadable TOML. This mirrors
+	// scanTrailingComment's open-delimiter state machine (#3459); an inline
+	// table is a single line, so a """ / ''' member opens and closes on the
+	// same line and there is no stillOpen to carry.
+	open := ""
 	braceDepth, bracketDepth := 0, 0
-	for i := 0; i < len(body); i++ {
+	for i := 0; i < len(body); {
+		if open != "" {
+			// Basic strings process backslash escapes, so an escaped quote is
+			// content and cannot close anything. Literal strings process none
+			// at all, which is exactly what lets a lone backslash sit inside one.
+			if open[0] == '"' && body[i] == '\\' {
+				i += 2
+				continue
+			}
+			if !strings.HasPrefix(body[i:], open) {
+				i++
+				continue
+			}
+			i += len(open)
+			if len(open) == 3 {
+				// TOML lets a multiline string's content end with one or two of
+				// its own quote characters, so the delimiter is the LAST three
+				// of the run: """a"""" is the string a". Consuming the whole run
+				// keeps a stray quote from opening a phantom string that would
+				// swallow the sibling after it.
+				for i < len(body) && body[i] == open[0] {
+					i++
+				}
+			}
+			open = ""
+			continue
+		}
 		c := body[i]
 		switch {
-		case inSingle:
-			if c == '\'' {
-				inSingle = false
-			}
-		case inDouble:
-			if escape {
-				escape = false
-			} else if c == '\\' {
-				escape = true
-			} else if c == '"' {
-				inDouble = false
-			}
-		case c == '\'':
-			inSingle = true
+		case strings.HasPrefix(body[i:], tomlMultilineBasic):
+			open = tomlMultilineBasic
+			i += len(tomlMultilineBasic)
+		case strings.HasPrefix(body[i:], tomlMultilineLiteral):
+			open = tomlMultilineLiteral
+			i += len(tomlMultilineLiteral)
 		case c == '"':
-			inDouble = true
+			open = `"`
+			i++
+		case c == '\'':
+			open = `'`
+			i++
 		case c == '{':
 			braceDepth++
+			i++
 		case c == '}':
 			braceDepth--
+			i++
 		case c == '[':
 			bracketDepth++
+			i++
 		case c == ']':
 			bracketDepth--
+			i++
 		case c == ',' && braceDepth == 0 && bracketDepth == 0:
 			commas = append(commas, i)
 			starts = append(starts, i+1)
+			i++
+		default:
+			i++
 		}
 	}
 
@@ -378,7 +416,16 @@ func setTOMLInlineTableMember(line, section, leaf, encoded string) (string, bool
 	trailing := len(strings.TrimRight(body, " \t"))
 	separator := ""
 	if strings.TrimSpace(body) != "" {
-		separator = ", "
+		// go-toml accepts a trailing comma in an inline table
+		// (`section = { a = 1, }`), so the loader never rejects one a user
+		// hand-edited in. Reusing that comma as the separator — a single
+		// space instead of another ", " — keeps the edit from emitting ",,",
+		// which the write gate's re-parse would refuse.
+		if trailing > 0 && body[trailing-1] == ',' {
+			separator = " "
+		} else {
+			separator = ", "
+		}
 	}
 	body = body[:trailing] + separator + leaf + " = " + encoded + body[trailing:]
 	return line[:start] + body + line[end:], true
@@ -397,7 +444,12 @@ func deleteTOMLInlineTableMember(line, section, leaf string) (string, bool) {
 	member := members[target]
 	switch {
 	case len(members) == 1:
-		body = body[:member.trimStart] + body[member.trimEnd:]
+		// Removing the only member must leave an empty table. Excising the
+		// member's trimmed range alone strands the comma that followed it
+		// (`ssh = { , }` when the table had a trailing comma; `ssh = {  }`
+		// otherwise), so collapse the whole body rather than stitch the
+		// surrounding whitespace.
+		body = ""
 	case target < len(members)-1:
 		body = body[:member.trimStart] + body[members[target+1].trimStart:]
 	default:

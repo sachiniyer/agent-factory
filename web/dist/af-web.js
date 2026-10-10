@@ -8514,7 +8514,6 @@ var TerminalSoftInput = class {
 // src/terminal-keybar.ts
 var ARROW_SUFFIXES = { "\u2190": "D", "\u2191": "A", "\u2193": "B", "\u2192": "C" };
 var SPECIAL_BYTES = { Esc: "\x1B", Tab: "	", "^C": "" };
-var KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
 function keyBytes(key, ctrl = false, alt = false, applicationCursor = false) {
   const sequence = userSequence(key);
   if (sequence) return encodeSequence(sequence, (alt ? 2 : 0) | (ctrl ? 4 : 0), key);

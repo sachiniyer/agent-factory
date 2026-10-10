@@ -1,7 +1,5 @@
 package sessionenv
 
-import "strings"
-
 // The LOGIN PANE's environment (#3854), which is a different thing from an
 // account-scoped session's and must stay one.
 //
@@ -73,28 +71,4 @@ func AccountLoginEnvironment(agent string) []string {
 		return nil
 	}
 	return append([]string(nil), entries...)
-}
-
-// AccountLoginEnvironmentNames returns just the names, in the same order.
-//
-// The names travel separately from the values because the launcher needs them in
-// three places and the value in only one: the pane's exec shim re-filters
-// os.Environ() against a default-deny allowlist immediately before exec, so the
-// name has to be admitted there or the value never reaches the agent; the
-// daemon's own copy has to be stripped from the client environment af hands
-// tmux; and tmux's update-environment list has to name it so an existing server
-// unsets a stale copy instead of reviving it in the new session.
-func AccountLoginEnvironmentNames(agent string) []string {
-	entries := accountLoginEnvironment[agent]
-	if len(entries) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name, _, ok := strings.Cut(entry, "=")
-		if ok {
-			names = append(names, name)
-		}
-	}
-	return names
 }

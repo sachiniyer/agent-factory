@@ -109,24 +109,6 @@ export function touchScrollClaimsGesture(originY: number, y: number): boolean {
 }
 
 /**
- * Convert one step of a one-finger drag into whole terminal rows (#2682).
- *
- * The sign convention is xterm's own: a finger moving UP the screen (clientY
- * decreasing) scrolls toward the NEWEST output, which is what a positive wheel
- * deltaY does — so the drag is expressed as that wheel and shares its arithmetic,
- * including the sub-row remainder that keeps a slow drag moving at all.
- */
-export function touchHistoryScrollPlan(
-  lastY: number,
-  y: number,
-  rows: number,
-  rowHeight: number,
-  remainder: number,
-): HistoryWheelPlan {
-  return historyWheelPlan({ deltaMode: 0, deltaY: lastY - y }, rows, rowHeight, remainder);
-}
-
-/**
  * How long a finger must rest before its touch is a long press rather than a tap.
  *
  * 500ms is the platform convention on both Android and iOS, so it is what a thumb

@@ -78,6 +78,18 @@ func (m *home) paneSelectionHint(p *store.OpenPane) string {
 	if selected == nil {
 		return ""
 	}
+	if selected.IsArchived() || selected.GetInFlightOp() == session.OpRestoring {
+		// The sticky binding keeps an archived session marked (▾) so the
+		// footer's restore verb can act on it (#4755), but no pane can ever
+		// show it. Lost and dead rows are different — tab_pane.go renders
+		// their fallback content, so the hint there names a real divergence,
+		// not a stale claim. Read the liveness axis (IsArchived, not
+		// ShownArchived — the eager re-home flips that predicate false the
+		// moment OpRestoring starts) plus the restoring op, so the whole
+		// restore window stays suppressed while no pane can serve (#4755
+		// review).
+		return ""
+	}
 	if m.paneMatchesSelection(p) {
 		return ""
 	}
