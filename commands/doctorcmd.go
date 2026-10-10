@@ -139,7 +139,20 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 (advisory warnings may still be present).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
-		defer log.Close()
+		// Close mode-aware so the success path matches the os.Exit path
+		// below and the api.jsonOut precedent (#3169): in --json stderr
+		// must stay machine-parseable, so log.CloseQuiet suppresses the
+		// "wrote logs to <path>" hint that log.Close prints when the run
+		// recorded a WARNING/ERROR (dirty=true, log/log.go:564). stdout and
+		// the exit code are unchanged; only the os.Stderr bookkeeping line
+		// differs by mode.
+		defer func() {
+			if doctorJSONFlag {
+				log.CloseQuiet()
+			} else {
+				log.Close()
+			}
+		}()
 		// Doctor reports config warnings as findings; echoing them on stderr
 		// too would say everything twice (#4599).
 		config.SetInteractiveWarningWriter(nil)
@@ -160,7 +173,7 @@ non-empty. Exits 0 when no actionable issues remain and no checks are incomplete
 			// printing a redundant error line.
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
-			// os.Exit does not run the deferred log.Close() above
+			// os.Exit does not run the deferred close above
 			// (https://pkg.go.dev/os#Exit), so the plain-mode "wrote logs
 			// to <path>" hint that log.Close prints when the run recorded a
 			// WARNING/ERROR (dirty=true, log/log.go:564) would be lost on
