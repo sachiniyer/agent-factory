@@ -31,7 +31,7 @@ audit (#1937) found gaps pointing in every direction:
   ([#1936](https://github.com/sachiniyer/agent-factory/issues/1936) — now
   closed; the naming form grew a `shift+tab` initial-prompt field). The
   `Prompt` field was plumbed end-to-end to the daemon
-  (`app/session_control.go:106`) and its only construction site never
+  (`app/session_control.go`) and its only construction site never
   populated it — the plumbing was finished and simply never fed.
 - **The CLI was behind both UIs** on limit-retry: the TUI had `c` and the web
   gained a Retry button in
@@ -399,7 +399,7 @@ only the second is dangerous.
 - **Reachable ≠ user-settable** *(under-reports — the dangerous direction)*. The
   AST proves a construction site *sets* a field, not that a user can *choose* its
   value. `session.create.opt.prompt` (#1936) was the canonical trap:
-  `app/session_control.go:106` sets `Prompt`, so the field read as covered while
+  `app/session_control.go` sets `Prompt`, so the field read as covered while
   the TUI's naming flow never populated it upstream. The gap is closed (the
   naming form now has a `shift+tab` initial-prompt field), but the category
   remains — a field-level pass does not excuse reading the flow.
