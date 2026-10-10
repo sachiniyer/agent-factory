@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
@@ -135,31 +134,18 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	// rather than inferring it from ctx.Err() after CombinedOutput returns: a
 	// pipe-holding descendant can keep CombinedOutput blocked past the deadline,
 	// making ctx.Err() == DeadlineExceeded even when the process self-terminated
-	// before the context fired. ctxKilled is set only when Kill returns nil AND
-	// the process was still alive when Cancel fired: processExitedBeforeCancel
-	// is a non-waiting exit probe (Linux /proc state 'Z', Darwin sysctl SZOMB),
-	// so a process that already exited before the deadline — including an
-	// external SIGKILL (OOM killer, kill -9) — returns os.ErrProcessDone and
-	// leaves ctxKilled false, so the death is reported as a failure with its
-	// output rather than a timeout. The classification below gives a real exit
-	// code (ExitCode >= 0) precedence over ctxKilled, and for signal deaths
-	// (ExitCode < 0) checks the actual signal: only a SIGKILL death (the signal
-	// the context's Cancel sends) is a genuine context-killed timeout; a signal
-	// death from a different signal (SIGTERM, OOM, crash) is reported as a
-	// failure with its output. killedByContextSignal is a secondary guard for
-	// the narrow TOCTOU between the exit probe and Kill: a process that exits
-	// after the probe reports it alive but before Kill reaches it can still set
-	// ctxKilled, and only the retained signal distinguishes that case.
+	// before the context fired. ctxKilled is set only when Kill returns nil,
+	// which on Unix is true for both a live process and a zombie (an already-
+	// exited process not yet reaped by Wait). The classification below gives a
+	// real exit code (ExitCode >= 0) precedence over ctxKilled, and for signal
+	// deaths (ExitCode < 0) checks the actual signal: only a SIGKILL death (the
+	// signal the context's Cancel sends) is a genuine context-killed timeout; a
+	// signal death from a different signal (SIGTERM, OOM, crash) is reported as a
+	// failure with its output. When the process has already been reaped by Wait
+	// before Cancel fires, Kill returns os.ErrProcessDone and ctxKilled stays
+	// false, so a pre-deadline self-exit is correctly reported as a failure.
 	var ctxKilled atomic.Bool
 	cmd.Cancel = func() error {
-		if processExitedBeforeCancel(cmd.Process.Pid) {
-			// The process had already exited (zombie or reaped) before the
-			// deadline fired, so the context did not kill it: report the death
-			// as a failure with its output rather than a timeout. Returning
-			// ErrProcessDone keeps ctxKilled false and tells the exec runtime
-			// not to bother killing an already-dead process.
-			return os.ErrProcessDone
-		}
 		err := cmd.Process.Kill()
 		if err == nil {
 			ctxKilled.Store(true)
@@ -186,11 +172,12 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		// that races the deadline can also set ctxKilled (Kill returns nil for a
 		// zombie), but the ExitError retains the original signal — report it as
 		// a failure with any captured output rather than a timeout. An external
-		// SIGKILL (OOM killer, kill -9) that exits before the deadline is caught
-		// by processExitedBeforeCancel in the Cancel function: the non-waiting
-		// exit probe returns ErrProcessDone so ctxKilled stays false and the
-		// death is reported as a failure with its output. killedByContextSignal
-		// is a secondary guard for the narrow race between that probe and Kill.
+		// SIGKILL (OOM killer, kill -9) that races the deadline is handled by
+		// processExitedBeforeCancel in the Cancel function: it probes the
+		// process state before Kill, so a zombie or reaped process does not set
+		// ctxKilled. killedByContextSignal is a secondary guard for the narrow
+		// race between the waitid probe and Kill (process exits after the probe
+		// but before Kill reaches it).
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
 			if ctxKilled.Load() && killedByContextSignal(exitErr) {
@@ -209,41 +196,6 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		who = "authenticated"
 	}
 	report.Pass(sectionRemote, "coder", who)
-}
-
-// processExitedBeforeCancel reports whether pid is no longer running — a
-// zombie (exited but not yet collected by its parent) or already reaped — using
-// a NON-WAITING probe so it is safe to call from cmd.Cancel while the exec
-// runtime's Wait owns the child's wait slot.
-//
-// This is the Darwin-safe exit probe the prior revisions reached for with
-// wait4/waitid, which deadlocked on Darwin by competing with that Wait over the
-// child's wait slot (XNU's wait blocks on a wait-collision before reaching its
-// WNOHANG handling). proctree.Lookup reads the process table instead — Linux
-// /proc state 'Z', Darwin sysctl SZOMB — so it never issues a wait syscall and
-// never collides. A merely STOPPED Darwin child is not SZOMB, so it is reported
-// as alive here and the context's Kill proceeds, which is correct: a stopped
-// process is still alive, and a deadline that kills it is a genuine timeout.
-//
-// On a platform with no proctree backend, Lookup returns ErrUnsupportedPlatform,
-// which this function treats as "cannot tell" (false): the context's Kill then
-// runs as before and ctxKilled is set, preserving the timeout classification
-// there. That is the documented fallback for platforms we cannot inspect.
-func processExitedBeforeCancel(pid int) bool {
-	_, err := proctree.Lookup(pid)
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, proctree.ErrProcessExited) {
-		return true
-	}
-	// Already reaped: the kernel's /proc entry (Linux) or kern.proc.pid response
-	// (Darwin) is gone, which readProc surfaces as a not-exist error rather than
-	// ErrProcessExited.
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-		return true
-	}
-	return false
 }
 
 // killedByContextSignal reports whether exitErr represents a process killed by
