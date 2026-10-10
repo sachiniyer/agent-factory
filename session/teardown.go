@@ -819,11 +819,12 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 	}
 	if m.claim != nil {
 		// This is the first path-use boundary for the consumed claim. Only transfer
-		// ownership here: an earlier return (including a vanished worktree handle)
-		// must leave ArchiveTeardownWithClaim responsible for rematerializing it.
-		if m.claimHandled != nil {
-			*m.claimHandled = true
-		}
+		// ownership at the move itself (below): an earlier return (including a
+		// vanished worktree handle or an ErrHookTeardownUnconfirmed safety
+		// refusal) must leave ArchiveTeardownWithClaim responsible for
+		// rematerializing it. Setting claimHandled before those returns would let
+		// the caller skip PreserveWorktreeRelocationClaimForRetry and leak the
+		// in-memory activeRelocationClaim, wedging same-process retries.
 		// Resolution was a point-in-time assertion made before pane teardown.
 		// Revalidate it at the operator hook's use boundary; failure is a safety
 		// error, not a best-effort hook error, so the move below must not run.
@@ -862,6 +863,12 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 	// finalize to have run) fires as before.
 	var moveErr error
 	if m.claim != nil {
+		// Ownership transfers only at the move itself: this is the point where the
+		// claim is actually settled/consumed, so every earlier return leaves
+		// claimHandled == false and ArchiveTeardownWithClaim re-preserves it.
+		if m.claimHandled != nil {
+			*m.claimHandled = true
+		}
 		moveErr = gw.ArchiveWorktreeWithClaim(m.dest, *m.claim)
 	} else {
 		moveErr = gw.ArchiveWorktree(m.dest)
