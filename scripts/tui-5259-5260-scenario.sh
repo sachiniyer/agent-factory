@@ -86,6 +86,33 @@ wait_menu_gone() {
     done
 }
 
+# tui_provenance <label> <bin> — prove WHICH binary the running TUI is (per
+# approval: a leg that silently ran the wrong binary voids the control). The
+# TUI is launched as `cd <repo> && <abs bin>` — a direct child of the drive
+# pane's shell — so resolve that child's /proc/<pid>/exe and sha256 it against
+# the binary this leg intended. Fails loud on any mismatch.
+tui_provenance() {
+    local label="$1" bin="$2" pane_pid tui_pid exe sha want comm
+    pane_pid="$(tmux display-message -p -t "$AF_DRIVER_SESSION" '#{pane_pid}')"
+    comm="$(basename "$bin")"
+    tui_pid="$(pgrep -P "$pane_pid" -x "$comm" 2>/dev/null | head -1 || true)"
+    if [ -z "$tui_pid" ]; then
+        tui_pid="$(ps -eo pid=,ppid=,args= 2>/dev/null | awk -v pp="$pane_pid" -v b="$bin" '$2 == pp && $3 == b { print $1; exit }' || true)"
+    fi
+    [ -n "$tui_pid" ] || { _af_fail "$label: no TUI process found (child of pane shell $pane_pid named '$comm')"; return 1; }
+    exe="$(readlink "/proc/$tui_pid/exe")"
+    sha="$(sha256sum "$exe" | cut -d' ' -f1)"
+    want="$(sha256sum "$bin" | cut -d' ' -f1)"
+    {
+        echo "$label tui pid:    $tui_pid"
+        echo "$label tui exe:    $exe"
+        echo "$label tui sha256: $sha"
+        echo "$label bin sha256:  $want ($bin)"
+    } | tee "$EVID/$label-tui-provenance.txt"
+    [ "$exe" = "$bin" ] || { _af_fail "$label: running TUI exe '$exe' != intended '$bin'"; return 1; }
+    [ "$sha" = "$want" ] || { _af_fail "$label: running TUI sha256 != $bin"; return 1; }
+}
+
 menu_has() { # <regex> <label> — assert the CURRENT menu row matches
     local row; row="$(menu_row)"
     if ! printf '%s' "$row" | grep -qE -- "$1"; then
@@ -189,9 +216,13 @@ park_on_sessions_header() {
 
 # raw_resize <cols> <rows> — resize WITHOUT the af_resize settle: the burst
 # capture that follows is the whole point, so no polling delay may interpose.
+# Sets RESIZED_NS to the nanosecond timestamp the resize landed, so the first
+# painted frame's capture time can be reported relative to it (the #5259
+# window is ~100ms — the offsets are part of the evidence).
 raw_resize() {
     tmux set-option -t "$AF_DRIVER_SESSION" window-size manual >/dev/null 2>&1 || true
     tmux resize-window -t "$AF_DRIVER_SESSION" -x "$1" -y "$2"
+    RESIZED_NS="$(date +%s%N)"
 }
 
 # first_painted_menu <want:present|absent> <regex> <evidence-prefix>
@@ -205,12 +236,15 @@ raw_resize() {
 #             repaint. (The folded row's title can't be the sentinel: the
 #             workspace preview may render the bound row's name every frame.)
 first_painted_menu() {
-    local want="$1" re="$2" i c
+    local want="$1" re="$2" i c hit_ns
     for i in $(seq 1 120); do
         c="$(af_capture)"
         if { [ "$want" = present ] && printf '%s' "$c" | grep -qE -- "$re"; } ||
            { [ "$want" = absent ] && ! printf '%s' "$c" | grep -qE -- "$re"; }; then
+            hit_ns="$(date +%s%N)"
+            FRAME_MS=$(( (hit_ns - RESIZED_NS) / 1000000 ))
             printf '%s' "$c" >"$EVID/$3.txt"
+            printf 'first-frame capture: +%sms after resize-window\n' "$FRAME_MS" >"$EVID/$3-meta.txt"
             printf '%s' "$c" | _af_menu_row
             return 0
         fi
@@ -222,29 +256,37 @@ first_painted_menu() {
 
 # fold_burst <label> — one shrink+grow flip while the cursor is parked on the
 # Sessions header with 'lostone' as the ▾-bound resting row. Sets globals
-# stale_shrink / stale_grow:
+# stale_shrink / stale_grow and appends a CSV row per direction to $FRAMES_CSV
+# (first-frame capture offset in ms relative to the resize landing, per the
+# approved plan's timing record):
 #   stale_shrink=1 — first small frame still advertised 'r restore' although
 #                    the bound row just scrolled off screen
-#   stale_grow=1   — first restored frame still lacked 'r restore' although the
-#                    bound row just scrolled back into view
+#   stale_grow=1   — first restored frame still lacked 'r restore' although
+#                    the bound row just scrolled back into view
 fold_burst() {
-    local label="$1" m
+    local label="$1" m ms
     wait_menu "$R_REST" 10 "$label: adoption footer before shrink" || return 1
     af_capture >"$EVID/$label-pre.txt"
 
     raw_resize 100 12
-    m="$(first_painted_menu present "$FOLD_MARK" "$label-shrink")" || return 1
+    first_painted_menu present "$FOLD_MARK" "$label-shrink" >"$EVID/$label-shrink-menu.txt" || return 1
+    m="$(cat "$EVID/$label-shrink-menu.txt")"
+    ms="$(sed -nE 's/.*\+([0-9]+)ms.*/\1/p' "$EVID/$label-shrink-meta.txt")"
     stale_shrink=0
     if printf '%s' "$m" | grep -qE -- "$R_REST"; then stale_shrink=1; fi
+    printf '%s,shrink,+%sms,stale=%s\n' "$label" "${ms:-?}" "$stale_shrink" >>"$FRAMES_CSV"
 
     # Let the ~100ms tick correct the control leg before the next flip, so the
     # grow burst starts from the settled (correct) small-size menu.
     wait_menu_gone "$R_REST" 10 "$label: footer corrected after shrink" || return 1
 
     raw_resize 100 34
-    m="$(first_painted_menu absent "$FOLD_MARK" "$label-grow")" || return 1
+    first_painted_menu absent "$FOLD_MARK" "$label-grow" >"$EVID/$label-grow-menu.txt" || return 1
+    m="$(cat "$EVID/$label-grow-menu.txt")"
+    ms="$(sed -nE 's/.*\+([0-9]+)ms.*/\1/p' "$EVID/$label-grow-meta.txt")"
     stale_grow=0
     if ! printf '%s' "$m" | grep -qE -- "$R_REST"; then stale_grow=1; fi
+    printf '%s,grow,+%sms,stale=%s\n' "$label" "${ms:-?}" "$stale_grow" >>"$FRAMES_CSV"
     wait_menu "$R_REST" 10 "$label: adoption footer restored after grow" || return 1
 }
 
@@ -260,6 +302,9 @@ run_leg() { # <master|branch> <binary>
 [program_overrides]
 claude = "bash"'
     af_boot
+    # Prove the running TUI is THIS leg's binary before trusting any capture
+    # (the control is void if it silently ran the branch build).
+    tui_provenance "$label" "$2" || return 1
     seed_rows "$label"
     sleep 4 # let any create/notice line expire out of the status bar
 
@@ -293,6 +338,8 @@ claude = "bash"'
     wait_menu "$R_REST" 10 "$label: header adopts bound lost row" || return 1
 
     local flip; SHRINK_STALES=0; GROW_STALES=0
+    FRAMES_CSV="$EVID/$label-frames.csv"
+    printf 'burst,direction,first_frame_offset_ms,stale\n' >"$FRAMES_CSV"
     for flip in 1 2 3 4 5 6; do
         fold_burst "$label-fold$flip" || return 1
         SHRINK_STALES=$((SHRINK_STALES + stale_shrink))
