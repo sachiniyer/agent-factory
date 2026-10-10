@@ -27,7 +27,7 @@ func TestNewHomeRegistryModeSkipsRepoScopedTUIViewState(t *testing.T) {
 		return nil, nil
 	}))
 
-	h := newHome(context.Background(), "bash", nil)
+	h := newHome(context.Background(), "bash", "", nil)
 
 	require.Empty(t, h.repoID, "a nil repo must exercise registry mode")
 	require.NotContains(t, warnings.String(), "invalid repo id: empty",

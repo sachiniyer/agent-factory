@@ -60,9 +60,18 @@ func (m *home) handleTaskCreate() tea.Cmd {
 	if err != nil {
 		return m.handleError(fmt.Errorf("invalid path: %v", err))
 	}
-	if program == "" {
-		program = m.program
-	}
+	// Re-read the live default_program synchronously before saving (#4889): the
+	// cache labels the form's "Use config default" choice, and a save is the
+	// moment that label turns into stored intent, so it is where staleness
+	// would silently commit. The read is bounded and local-only — a remote
+	// target keeps the launch-time value, and a read error keeps the cache.
+	m.refreshDefaultProgram()
+	// An empty program field is "Use config default" and stays empty in the
+	// stored task: task/task.go's runner resolves default_program against the
+	// task's own repo at RUN time. Folding m.defaultProgram() in here would
+	// bake the launch-time cache — possibly a stale agent — into the task
+	// permanently, and it would keep running that program after
+	// default_program moved (#4889 review).
 	id, err := task.GenerateID()
 	if err != nil {
 		return m.handleError(fmt.Errorf("failed to generate task id: %v", err))
