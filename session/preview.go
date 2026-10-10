@@ -77,10 +77,6 @@ func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnaps
 	}
 	snapshot.Modes = state.Modes
 	snapshot.HasModes = true
-	// Deliberately NOT setting LinesAbove from state.HistorySize. This
-	// display-message is a SEPARATE command from the capture, so its count does not
-	// describe the returned bytes — see CaptureVisibleWithScrollback, which is where
-	// a completeness claim can honestly come from (#3169 review).
 	return snapshot
 }
 
