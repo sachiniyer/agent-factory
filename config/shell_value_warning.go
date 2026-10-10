@@ -3,10 +3,12 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Operator-authored config values that af hands to `/bin/sh -c`, warned about at
@@ -143,24 +145,224 @@ func (s shellValueSet) warnExecSeparator(prettyPath string) {
 	sort.Slice(affected, func(i, j int) bool { return affected[i].key < affected[j].key })
 	for _, value := range affected {
 		lead := fmt.Sprintf("Config issue in %s: %s", prettyPath, value.key)
-		// Once per (source, key, value). A config load is not a rare event — the
-		// daemon issues ~10 per session-create, and `af config set` re-parses the
-		// file twice around its own write — and #2496 already paid for the
-		// version of this that said the same thing on every one of them. Keying
-		// on the value keeps a LATER edit that reintroduces the shape audible.
-		if _, seen := shellValueWarned.LoadOrStore(lead+"\x00"+value.value, struct{}{}); seen {
-			continue
-		}
-		log.WarningLog.Printf(
-			"%s begins with `exec --`, and af runs that value through /bin/sh, where the separator is not "+
+		warnShellValueOnce(lead, "exec-separator", value.value,
+			" begins with `exec --`, and af runs that value through /bin/sh, where the separator is not "+
 				"portable; dash — /bin/sh on Debian and Ubuntu — gives its exec builtin no options, so it takes "+
 				"`--` as the command name and the command exits 127 with `exec: --: not found`. Remove the "+
 				"`--`: af runs the same command written `exec <program> …`. This is a warning, not an error — "+
 				"bash (/bin/sh on macOS), busybox ash and zsh in sh mode all accept the separator, so the value "+
 				"is correct as written on those shells, and a docker or ssh backend runs it on another machine's "+
-				"shell entirely.%s",
-			lead, value.note)
+				"shell entirely.",
+			value.note)
 	}
+}
+
+// warnLaunchFlagMismap warns on agent-program values that would misroute the flags
+// injectSystemPrompt appends to the END of the resolved program string:
+//
+//   - a `--` end-of-options terminator anywhere after an optional `exec` prefix
+//     (claude: `--plugin-dir`, aider: `--read`), which silently demotes the
+//     appended flag to a positional so the agent starts without af's guidance —
+//     for claude the af plugin does not register and the `/af-*` slash commands
+//     are unavailable, with no diagnostic. This is the silent-failure surface the
+//     warning is about: the scoped account boundary refuses the shape, but an
+//     UNSCOPED session skips that boundary, so the mis-positioned flag reaches
+//     `/bin/sh -c` unchanged. The first `--` after the program makes everything
+//     after it positional, so a `--` in the middle (`claude -- --resume`) is as
+//     bad as a trailing one: injection always appends at the end.
+//
+//   - a shell control operator (|, &&, ||, ;, &) or compound construct, which
+//     routes the appended flag to the wrong command in the pipeline rather than
+//     to the agent. A statement terminator on an otherwise single call (`claude;`
+//     or `claude<newline>`) is included: appending after it starts a new
+//     statement, so the flag runs on its own.
+//
+//   - a trailing `#` shell comment that is the final content on the last line,
+//     which swallows the appended flag whole: everything after a `#` on that line
+//     is a comment, so `claude # use the default profile` becomes
+//     `claude # use the default profile --plugin-dir '…'` and claude starts
+//     without the af plugin. A trailing newline after the comment starts a new
+//     statement that carries the flag, which the control-operator case above
+//     already warns about, so the comment case fires only when the comment is the
+//     last content on the last line.
+//
+//   - a shell interpreter's `-c` flag (e.g. `sh -c 'claude'`), which makes the
+//     agent the script and the appended flag a positional to the interpreter,
+//     not an argument to the agent — the agent inside the script never sees it.
+//
+//   - a here-document redirect (`<<`/`<<-`) whose body is the last content on the
+//     last line: the appended flag lands inside the here-document (or breaks the
+//     closing delimiter, which makes the body consume it), so the agent does not
+//     receive it. A trailing newline after the closing delimiter is already a
+//     control operator; this fires only when the heredoc is the final content.
+//
+// Like warnExecSeparator it is a WARNING, never a refusal: program_overrides is
+// owner config, and af does not rewrite the value. It applies only to keys
+// whose values reach injectSystemPrompt as the resolved agent command
+// (isAgentProgramKey) AND whose resolved command actually enters a
+// flag-appending injection branch (commandAppendsLaunchFlag): the plain
+// shell-command keys (on_archive_command, post_worktree_commands, sandbox.ssh)
+// run their values verbatim through a shell, where a trailing `--` or a pipe is
+// a correct use of the language, and an agent whose launch seam does not append
+// at the end (codex/gemini/amp use a file or env seam, opencode prefixes an
+// env var) cannot misroute an appended flag because there is none.
+func (s shellValueSet) warnLaunchFlagMismap(prettyPath string) {
+	type flagged struct {
+		shellValue
+		kind string
+		body string
+	}
+	var affected []flagged
+	for _, value := range s {
+		if !isAgentProgramKey(value.key) {
+			continue
+		}
+		agent, appends := launchFlagAgent(value.value)
+		if !appends {
+			continue
+		}
+		switch {
+		case sessionenv.CommandEndsOptionsTerminator(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "options-terminator", body: "" +
+				" contains a lone `--` end-of-options terminator. af appends its agent-specific flags " +
+				"(e.g. claude's `--plugin-dir`) to the end of this value, and everything after a `--` is a " +
+				"positional argument rather than a flag — so the injected flag would be silently ignored and " +
+				"the agent would start without af's guidance (for claude the af plugin does not register and " +
+				" the `/af-*` slash commands are unavailable, with no error). Remove the `--`. This is a " +
+				"warning, not an error"})
+		case sessionenv.CommandHasControlOperator(value.value, agent):
+			affected = append(affected, flagged{shellValue: value, kind: "control-operator", body: "" +
+				" contains a shell control operator (|, &&, ||, ;, &), so af's appended agent-specific flag " +
+				"(e.g. claude's `--plugin-dir`) would be routed to the wrong command rather than to the agent. " +
+				"Use a single command for the agent. This is a warning, not an error"})
+		case sessionenv.CommandHasTrailingComment(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "trailing-comment", body: "" +
+				" ends with a `#` shell comment, and af appends its agent-specific flag (e.g. claude's " +
+				"`--plugin-dir`) to the end of this value, so the flag lands inside the comment and is " +
+				"discarded — the agent would start without af's guidance. Remove the comment or move it to " +
+				"its own line above the command. This is a warning, not an error"})
+		case sessionenv.CommandInvokesAgentViaInterpreter(value.value, agent):
+			affected = append(affected, flagged{shellValue: value, kind: "interpreter-wrapper", body: "" +
+				" runs the agent through a shell interpreter's `-c` flag (e.g. `sh -c 'claude'`), so af's " +
+				"appended agent-specific flag (e.g. claude's `--plugin-dir`) is passed to the interpreter " +
+				"as a positional argument, not to the agent inside the script — the agent starts without af's " +
+				"guidance. Run the agent directly, not under `sh -c`. This is a warning, not an error"})
+		case sessionenv.CommandHasHeredoc(value.value):
+			affected = append(affected, flagged{shellValue: value, kind: "heredoc", body: "" +
+				" uses a here-document redirect (`<<`), and af appends its agent-specific flag (e.g. claude's " +
+				"`--plugin-dir`) to the end of this value, so the flag lands inside the here-document body (or " +
+				"breaks the closing delimiter, which makes the body consume it) and never reaches the agent. " +
+				"Remove the here-document, or move the flag the agent needs into the command before the " +
+				"here-document. This is a warning, not an error"})
+		}
+	}
+	sort.Slice(affected, func(i, j int) bool {
+		if affected[i].key != affected[j].key {
+			return affected[i].key < affected[j].key
+		}
+		return affected[i].kind < affected[j].kind
+	})
+	for _, f := range affected {
+		lead := fmt.Sprintf("Config issue in %s: %s", prettyPath, f.key)
+		warnShellValueOnce(lead, f.kind, f.value, f.body, f.note)
+	}
+}
+
+// isAgentProgramKey reports whether key names an agent launch command whose value
+// reaches injectSystemPrompt as the resolved program — the values af appends
+// agent-specific flags to — as opposed to a plain shell-command key
+// (on_archive_command, post_worktree_commands, sandbox.ssh) af runs verbatim,
+// where a trailing `--` or a pipe is a correct use of the shell language.
+func isAgentProgramKey(key string) bool {
+	if strings.HasPrefix(key, "program_overrides.") {
+		return true
+	}
+	if key == "root_agent.program" {
+		return true
+	}
+	if strings.HasPrefix(key, "root_agents[") {
+		return true
+	}
+	return false
+}
+
+// appendLaunchFlagAgents are the agents injectSystemPrompt launches by appending
+// an agent-specific flag to the END of the resolved program string (claude gets
+// --plugin-dir, aider gets --read, devin gets the workspace-trust flag). A
+// trailing `--` or a control operator in such a value misroutes the appended flag;
+// agents launched by other seams (codex/gemini/amp use a file or env seam,
+// opencode prefixes an env var) do not append at the end, so their values cannot
+// misroute an appended flag. The source of truth is session.injectSystemPrompt;
+// this list mirrors it, and the resolved command is classified with the same
+// tmux.DetectAgentFromCommand injectSystemPrompt uses, so the warning and the
+// injection agree on which agent a value runs.
+var appendLaunchFlagAgents = map[string]bool{
+	tmux.ProgramClaude: true,
+	tmux.ProgramAider:  true,
+	tmux.ProgramDevin:  true,
+}
+
+// commandAppendsLaunchFlag reports whether the resolved command value reaches an
+// injectSystemPrompt branch that appends an agent-specific flag to the END of the
+// value — the only shapes warnLaunchFlagMismap can misroute. A program_overrides
+// key names one agent but its value may resolve to another (e.g.
+// `program_overrides.claude = "bash --"` runs bash, which gets no appended flag,
+// and `program_overrides.codex = "codex --"` runs codex, whose seam is a file not
+// an appended flag), so the key alone is not enough: the resolved value must enter
+// a flag-appending branch for the warning to apply.
+//
+// devin is the one flag-appending agent that can already carry its flag: the
+// workspace-trust flag is appended only when the command does not already set it
+// (tmux.EnsureDevinWorkspaceTrustSuppressed returns the command unchanged when it
+// does). A devin command that already carries --respect-workspace-trust gets no
+// appended flag, so a trailing `--` or control operator in it cannot misroute
+// one — warning about it would be a false positive (#5167 review: "Exclude Devin
+// commands that already set its trust flag").
+func commandAppendsLaunchFlag(resolved string) bool {
+	_, appends := launchFlagAgent(resolved)
+	return appends
+}
+
+// launchFlagAgent is commandAppendsLaunchFlag with the detected agent returned
+// alongside the boolean, so warnLaunchFlagMismap can pass the agent to
+// CommandHasControlOperator. A compound command (|, &&, ||) appends to the
+// rightmost command, so the flag is misrouted only when that command is not the
+// agent the value resolves to — `true && claude` routes the flag to claude and is
+// not a misroute, while `claude | tee` routes it to tee and is
+// (#5167 review: "Do not flag compound commands whose final command is the
+// agent"). The agent is "" when no flag is appended, which keeps the prior
+// behavior of flagging every compound.
+func launchFlagAgent(resolved string) (string, bool) {
+	agent := tmux.DetectAgentFromCommand(resolved)
+	if !appendLaunchFlagAgents[agent] {
+		return "", false
+	}
+	if agent == tmux.ProgramDevin && tmux.EnsureDevinWorkspaceTrustSuppressed(resolved) == resolved {
+		return "", false
+	}
+	return agent, true
+}
+
+// warnShellValueOnce logs one warning for (lead, kind, value) if it has not
+// already been logged in this process. The kind discriminator lets the
+// exec-separator and launch-flag-mismap warnings BOTH fire on a value that
+// triggers both (e.g. `exec -- claude --`): they describe different problems
+// with different fixes, so suppressing either would hide a real issue.
+//
+// Body is the fixed part of the message (beginning with the space that separates
+// it from the lead), and note is the per-value qualifier (the detected-claude
+// alias clause) appended at the end, matching the shape warnExecSeparator used
+// before the kind was threaded in.
+func warnShellValueOnce(lead, kind, value, body, note string) {
+	// Once per (source, key, kind, value). A config load is not a rare event —
+	// the daemon issues ~10 per session-create, and `af config set` re-parses
+	// the file twice around its own write — and #2496 already paid for the
+	// version of this that said the same thing on every one of them. Keying
+	// on the value keeps a LATER edit that reintroduces the shape audible.
+	if _, seen := shellValueWarned.LoadOrStore(lead+"\x00"+kind+"\x00"+value, struct{}{}); seen {
+		return
+	}
+	log.WarningLog.Printf("%s%s%s", lead, body, note)
 }
 
 // warnGlobalShellValues is the global file's set. It is a named function rather
@@ -180,6 +382,7 @@ func warnGlobalShellValues(config *Config, prettyConfigPath string) {
 	values.add("root_agent.program", config.RootAgent.Program)
 	values.addRootAgents(config.RootAgents)
 	values.warnExecSeparator(prettyConfigPath)
+	values.warnLaunchFlagMismap(prettyConfigPath)
 }
 
 // shellValueWarned memoizes the (source, key, value) triples already warned

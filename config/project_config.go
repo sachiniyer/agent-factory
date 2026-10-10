@@ -239,6 +239,7 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	shellValues.add("on_archive_command", cfg.OnArchiveCommand)
 	shellValues.add("root_agent.program", cfg.RootAgent.Program)
 	shellValues.warnExecSeparator(prettyPath)
+	shellValues.warnLaunchFlagMismap(prettyPath)
 
 	normalizedCandidates, err := normalizeLimitAccountCandidates(cfg.LimitAccountCandidates)
 	if err != nil {
