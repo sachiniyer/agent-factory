@@ -2048,9 +2048,9 @@ List disk reclaimable from old archived sessions (dry run)
 Report archived sessions older than --older-than, measured from each
 session's archive time.
 
-This is strictly a dry run: it lists each archived session a reclaim would
-remove (title, archive time, allocated bytes) plus a total, and the reasons
-every other session was skipped. It changes nothing — no deletion, no record
+This is a dry run: it lists each archived session a reclaim would remove
+(title, archive time, allocated bytes) plus a total, and the reasons every
+other session was skipped. af writes nothing — no deletion, no record
 update, no git mutation — so it is safe to run at any time.
 
 Only archived sessions are eligible; live, lost, dead or in-flight sessions,

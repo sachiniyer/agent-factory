@@ -3,6 +3,7 @@ package daemon
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -416,4 +417,19 @@ func TestPruneSessions_RequiresScopeAndDuration(t *testing.T) {
 	// cross-repo skips.
 	_, err = manager.PruneSessions(PruneSessionsRequest{RepoID: "x", All: true, OlderThan: "1ms"})
 	require.ErrorContains(t, err, "mutually exclusive")
+}
+
+// TestPruneSessions_EmptyRunMarshalsCandidatesAsArray: candidates is a
+// required array on the wire — a nil slice marshals as null and breaks
+// clients iterating without a null special case (#5136 Codex round 8). A
+// run over a manager holding nothing must emit "candidates":[].
+func TestPruneSessions_EmptyRunMarshalsCandidatesAsArray(t *testing.T) {
+	manager, repoID, _ := newStatusTestManager(t)
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	payload, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(payload), `"candidates":[]`,
+		"an empty run must serialize the required array, not null")
 }

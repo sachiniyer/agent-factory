@@ -19,9 +19,9 @@ import (
 // motivating fleet measured ~146G under <AF home>/archived). Slice 1 is the
 // READ-ONLY half — the dry-run listing: it reports which archived sessions a
 // future --apply would reclaim, what each would free, and why the ineligible
-// rows refuse. It writes NOTHING: no deletion, no tombstone, no record
+// rows refuse. af writes NOTHING: no deletion, no tombstone, no record
 // update — every probe below is a bounded read (lstat, git status, git
-// worktree list), and the zero-write property is proven by a test that
+// worktree list), and the af-writes-nothing property is proven by a test that
 // fingerprints the AF home and the archive before and after a run. The apply
 // half — deletion, tombstones, the confirmed-plan binding — lands in the
 // follow-up issue filed from this PR's review.
@@ -89,11 +89,14 @@ type PruneSessionsResponse struct {
 }
 
 // PruneSessions evaluates archived sessions against req and lists the ones
-// whose worktree bytes are reclaimable. It is strictly read-only — the
+// whose worktree bytes are reclaimable. af writes nothing — the
 // delete+tombstone apply lands in the follow-up issue referenced in the file
 // header.
 func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse, error) {
-	resp := PruneSessionsResponse{OK: true}
+	// Candidates is a required array on the wire: a nil slice marshals as
+	// null and breaks clients that iterate without a null special case, so
+	// the empty-result response must carry [] (#5136 Codex round 8).
+	resp := PruneSessionsResponse{OK: true, Candidates: []PruneCandidate{}}
 	olderThan := strings.TrimSpace(req.OlderThan)
 	if olderThan == "" {
 		return resp, fmt.Errorf("older_than is required — prune is deliberately opt-in and never guesses a retention period")
@@ -164,7 +167,9 @@ func (m *Manager) pruneCandidates(req PruneSessionsRequest, cutoff time.Time) ([
 	warnings = append(warnings, ghostWarns...)
 	skipped = append(skipped, ghosts...)
 
-	var candidates []PruneCandidate
+	// See PruneSessions: the slice must be non-nil so a zero-candidate run
+	// marshals [] rather than null.
+	candidates := []PruneCandidate{}
 	for _, row := range rows {
 		if deleting[row.repoID] {
 			continue
@@ -296,9 +301,9 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 // reclaimable (#5136 review).
 //
 // Every probe is a bounded READ (BoundedLstat, the pointer-check flights, the
-// bounded git runner): nothing here writes, and a plain os.Stat on a stalled
-// FUSE/NFS mount could wedge the scan behind the mount forever — bounded
-// probes cap that at their flight timeout.
+// bounded git runner): af writes nothing here, and a plain os.Stat on a
+// stalled FUSE/NFS mount could wedge the scan behind the mount forever —
+// bounded probes cap that at their flight timeout.
 //
 // A missing path needs no identity proof — there is nothing to reclaim, so
 // the row lists as a zero-byte candidate rather than a refusal.

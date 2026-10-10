@@ -30,9 +30,9 @@ var sessionsPruneCmd = &cobra.Command{
 	Long: `Report archived sessions older than --older-than, measured from each
 session's archive time.
 
-This is strictly a dry run: it lists each archived session a reclaim would
-remove (title, archive time, allocated bytes) plus a total, and the reasons
-every other session was skipped. It changes nothing — no deletion, no record
+This is a dry run: it lists each archived session a reclaim would remove
+(title, archive time, allocated bytes) plus a total, and the reasons every
+other session was skipped. af writes nothing — no deletion, no record
 update, no git mutation — so it is safe to run at any time.
 
 Only archived sessions are eligible; live, lost, dead or in-flight sessions,
@@ -50,10 +50,10 @@ one — a read must not write even a socket or a log. With no daemon up it
 refuses with guidance; pass --daemon-url or start af first.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// No log.Initialize: it creates/rotates the AF log file, and a
-		// strictly read-only listing must not write anything — not even a
-		// log (#5136 Codex round 6). The package's discard loggers already
-		// satisfy anything that logs along the way.
+		// No log.Initialize: it creates/rotates the AF log file, and this
+		// listing must not write anything — not even a log (#5136 Codex
+		// round 6). The package's discard loggers already satisfy anything
+		// that logs along the way.
 		if sessionsPruneAllFlag && repoFlag != "" {
 			return jsonError(fmt.Errorf("--repo and --all are mutually exclusive: --repo names one project, --all spans every project"))
 		}

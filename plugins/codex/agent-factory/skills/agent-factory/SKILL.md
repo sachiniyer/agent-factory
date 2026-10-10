@@ -22,7 +22,7 @@ Sessions (one agent per isolated worktree):
   af sessions retry-limit <title>                      Retry a usage-limit resume or an inspected, unconfirmed handoff
   af sessions retry-limit <title> --delivered           Mark an inspected handoff mission delivered (no resend); only after confirming it landed
   af sessions restore <title>                          Restore an archived, lost, or dead session
-  af sessions prune --older-than <dur> [--all]            Dry-run: list reclaimable archived-session worktrees (changes nothing)
+  af sessions prune --older-than <dur> [--all]            Dry-run: list reclaimable archived-session worktrees (af writes nothing)
 
 Never rebind an af worktree to another lane's branch with "git checkout -B", "git switch -C", or a direct ref/HEAD write. Those commands bypass Git's ordinary worktree collision refusal and can turn the other lane's unchanged index into a staged revert when the branch moves. Use "af sessions handoff --to <agent> -- <title>" to continue in the existing worktree, or create a session on a different branch.
 

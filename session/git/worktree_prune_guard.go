@@ -35,9 +35,9 @@ import (
 func WorktreeDirtyFiles(worktreePath string) (int, error) {
 	// --no-optional-locks makes the probe a pure read: without it `git
 	// status` opportunistically rewrites the worktree index's stat cache,
-	// which would break slice 1's "the dry run writes nothing, anywhere"
-	// promise (#5136 — the AF-home/archive byte-identical guarantee extends
-	// to the repo's .git too). core.fsmonitor is unset explicitly: the lock
+	// which would break slice 1's "af writes nothing anywhere" promise
+	// (#5136 — the AF-home/archive byte-identical guarantee extends to the
+	// repo's .git too). core.fsmonitor is unset explicitly: the lock
 	// hint does NOT stop status consulting a configured fsmonitor hook or
 	// builtin daemon, and that consultation can spawn the monitor or write
 	// its cookie — a write this probe must not cause (#5136 Codex round 6).
