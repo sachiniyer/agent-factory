@@ -200,6 +200,7 @@ func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		id             string
 		op             InFlightOp
 		startupUnknown bool
+		pendingSwap    bool
 		want           bool
 	}{
 		{name: "settled stable row", id: "ready-id", want: true},
@@ -208,9 +209,13 @@ func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "replacing already owns the teardown fence", id: "handoff-id", op: OpReplacing},
 		{name: "restoring cannot be killed mid-restore", id: "restore-id", op: OpRestoring},
 		{name: "id-less cannot address teardown"},
+		{name: "pending account swap cannot be killed post-restart", id: "swap-id", pendingSwap: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := &Instance{ID: tc.id, liveness: LiveReady, inFlightOp: tc.op, startupStateUnknown: tc.startupUnknown}
+			if tc.pendingSwap {
+				inst.pendingAccountSwap = &AccountSwapData{From: "ambient", To: "work"}
+			}
 			require.Equal(t, tc.want, inst.CanKill(), "TUI domain decision")
 			require.Equal(t, tc.want, inst.ToInstanceData().CanKill, "web projection decision")
 		})

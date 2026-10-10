@@ -686,6 +686,31 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 	tabSpawn := newPending()
 	require.ErrorContains(t, tabSpawn.TabSpawnBlocked(), "account swap",
 		"a durable identity change must fence new credential-bearing panes until replacement completes")
+
+	// Kill is the lone lifecycle surface the original feature commit left
+	// unfenced. The durability asymmetry is what makes it reachable: pre-restart
+	// a pending swap carries op == OpRespawning and is already hidden by the
+	// OpRespawning exclusion, but a daemon restart scrubs InFlightOp to OpNone
+	// (session/storage.go ForStorage) while the pendingAccountSwap marker
+	// survives in the persisted record. canKillFor must fence the durable
+	// marker on the same axis every other mutating surface already does.
+	kill := newPending()
+	require.False(t, kill.CanKill(),
+		"a row carrying an undelivered account-swap obligation must not advertise Kill: "+
+			"the daemon kill path (KillSession, deleteSessionRecord) never consults "+
+			"pendingAccountSwap, so a kill would destroy the swap obligation — the Mission "+
+			"brief plus the AccountAgent, Program, and ConversationID fields that exist "+
+			"only inside pendingAccountSwap on that row — with no warning")
+	require.False(t, kill.ToInstanceData().CanKill,
+		"the web projection must hide Kill on the same pending-swap row")
+
+	// ClearPendingAccountSwap retires the marker once the replacement's
+	// delivery completes; with no durable obligation remaining, Kill is an
+	// ordinary teardown handle again on both surfaces, exactly as it re-appears
+	// when the OpRespawning/OpRestoring fence drops.
+	require.True(t, kill.ClearPendingAccountSwap("ambient", "work"), "the marker retired")
+	require.True(t, kill.CanKill(), "Kill re-appears once the swap obligation is delivered")
+	require.True(t, kill.ToInstanceData().CanKill, "and so does its web projection")
 }
 
 // TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry is the #4393 deadlock
