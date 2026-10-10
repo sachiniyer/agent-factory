@@ -1,7 +1,7 @@
 import { TerminalSoftInput } from "./terminal-soft-input.js";
 
-const ARROW_SUFFIXES: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
-const SPECIAL_BYTES: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
+export const ARROW_SUFFIXES: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
+export const SPECIAL_BYTES: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
 
 /** Phone terminal controls and xterm-compatible key encodings. */
 export function keyBytes(key: string, ctrl = false, alt = false, applicationCursor = false): string {
