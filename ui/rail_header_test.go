@@ -30,10 +30,13 @@ func (f railHeaderFacts) supersetOf(g railHeaderFacts) bool {
 	return f.noun >= g.noun && (f.count || !g.count) && (f.hint || !g.hint)
 }
 
-func readRailHeaderFacts(line, noun, count, hint string) railHeaderFacts {
-	f := railHeaderFacts{
-		count: strings.Contains(line, count),
-		hint:  strings.Contains(line, hint),
+func readRailHeaderFacts(line, noun string, counts []string, hint string) railHeaderFacts {
+	f := railHeaderFacts{hint: strings.Contains(line, hint)}
+	for _, count := range counts {
+		if strings.Contains(line, count) {
+			f.count = true
+			break
+		}
 	}
 	// The noun, if present at all, is the longest of its prefixes the line
 	// renders — " Projects", " Proj…", or nothing. Sliced by RUNE, so a noun
@@ -54,7 +57,7 @@ type railHeaderCase struct {
 	name          string
 	render        func(t *testing.T, w int) string
 	noun          string
-	count         string
+	counts        []string // every spelling the count may take across rungs
 	hint          string
 	minInfoWidth  int // at and above this width the count must be intact
 	minHintWidth  int // at and above this width the affordance must be intact
@@ -72,11 +75,16 @@ func railHeaderCases() []railHeaderCase {
 				a.SetRect(layout.Rect{W: w, H: 4})
 				return strings.TrimRight(strings.Split(stripANSI(a.View()), "\n")[0], " ")
 			},
-			noun: "Automations", count: "(2)",
+			// #5153: the count changes spelling as rungs shed — "(2)", then the
+			// compact "2 (2 on)", then the bare primary "2" — and the noun is
+			// whole-or-omitted rather than ellipsized, so present-at-all and
+			// complete are the same width.
+			noun:          "Automations",
+			counts:        []string{"(2)", "2 (2 on)", " 2 "},
 			hint:          railHelpKey(keys.KeyTaskList) + " manage",
 			minInfoWidth:  15,
 			minHintWidth:  15,
-			minNounWidth:  20,
+			minNounWidth:  27,
 			fullNounWidth: 27,
 		},
 		{
@@ -89,7 +97,7 @@ func railHeaderCases() []railHeaderCase {
 				p.SetRect(layout.Rect{X: 0, Y: 0, W: w, H: 6})
 				return strings.TrimRight(strings.Split(stripANSI(p.String()), "\n")[0], " ")
 			},
-			noun: "Projects", count: "(1)",
+			noun: "Projects", counts: []string{"(1)"},
 			hint:          railActionHint(keys.KeySwitchProjectRow, "switch"),
 			minInfoWidth:  15,
 			minHintWidth:  15,
@@ -116,10 +124,10 @@ func railHeaderCases() []railHeaderCase {
 func TestRailHeaderLadderIsMonotonic(t *testing.T) {
 	for _, tc := range railHeaderCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			prev := readRailHeaderFacts(tc.render(t, 7), tc.noun, tc.count, tc.hint)
+			prev := readRailHeaderFacts(tc.render(t, 7), tc.noun, tc.counts, tc.hint)
 			for w := 8; w <= 60; w++ {
 				line := tc.render(t, w)
-				cur := readRailHeaderFacts(line, tc.noun, tc.count, tc.hint)
+				cur := readRailHeaderFacts(line, tc.noun, tc.counts, tc.hint)
 				require.Truef(t, cur.supersetOf(prev),
 					"width %d shows less than width %d: %v vs %v\n  %d: %q\n  %d: %q",
 					w, w-1, cur, prev, w-1, tc.render(t, w-1), w, line)
@@ -144,8 +152,12 @@ func TestRailHeaderKeepsItsSeparatorCountAndAffordance(t *testing.T) {
 						"width %d: the separator must keep its leading space: %q", w, line)
 				}
 				if w >= tc.minInfoWidth {
-					require.Containsf(t, line, tc.count,
-						"width %d: the count is the only information the header carries: %q", w, line)
+					found := false
+					for _, count := range tc.counts {
+						found = found || strings.Contains(line, count)
+					}
+					require.Truef(t, found,
+						"width %d: the count is the only information the header carries, in any of its rungs' spellings %v: %q", w, tc.counts, line)
 				}
 				if w >= tc.minHintWidth {
 					require.Containsf(t, line, tc.hint,

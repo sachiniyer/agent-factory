@@ -246,10 +246,10 @@ func TestAutomationsDiagnosesAMalformedExpression(t *testing.T) {
 	assert.NotContains(t, out, "next ", "and no fire time is promised")
 }
 
-// TestAutomationsDiagnosisSurvivesTheRailMinimum: at 22 columns the detail line
-// keeps 16 cells and is clipped from the right, so a reason placed behind the
-// expression leaves the mark unexplained — which is the whole failure the mark
-// exists to prevent, one level down.
+// TestAutomationsDiagnosisSurvivesTheRailMinimum: at 22 columns the reason
+// fragment is wider than the rail itself, so the whole-or-omit rule (#5153)
+// omits it entirely rather than clipping it to an unreadable prefix — the [!]
+// mark still flags the row and the detail shows the fields that DO fit whole.
 func TestAutomationsDiagnosisSurvivesTheRailMinimum(t *testing.T) {
 	broken := stripTasks()[0]
 	broken.CronExpr, broken.Unschedulable = "99 * * * *", true
@@ -259,8 +259,11 @@ func TestAutomationsDiagnosisSurvivesTheRailMinimum(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "Invalid cron",
-		"enough of the reason has to survive the clip to read as one:\n%s", out)
+	assert.Contains(t, out, "[!]", "the row keeps its warning mark:\n%s", out)
+	assert.Contains(t, out, "last Jul 01 03:00",
+		"a field the rail can show whole is what fills the detail:\n%s", out)
+	assert.NotContains(t, out, "…",
+		"the reason is omitted whole, never clipped mid-token:\n%s", out)
 }
 
 // TestAutomationsMarksAnUnassessableRowUnknown: a record whose health could not
@@ -323,8 +326,13 @@ func TestAutomationsLeadsWithBothUnschedulableDiagnoses(t *testing.T) {
 
 		a.SetRect(layout.Rect{W: 22, H: 4})
 		narrow := a.View()
-		assert.Contains(t, narrow, tc.want[:8],
-			"%q: enough of it survives the rail minimum to read as a reason:\n%s", tc.expr, narrow)
+		if layout.Cells(tc.want) <= 22 {
+			assert.Contains(t, narrow, tc.want,
+				"%q: the reason fits whole at the rail minimum:\n%s", tc.expr, narrow)
+		} else {
+			assert.NotContains(t, narrow, tc.want[:8],
+				"%q: the reason is omitted whole rather than clipped mid-token:\n%s", tc.expr, narrow)
+		}
 	}
 }
 
@@ -350,8 +358,14 @@ func TestAutomationsDiagnosesEveryUnschedulableShape(t *testing.T) {
 		assert.Equal(t, 1, strings.Count(wide, tc.want), "%q: said once", tc.expr)
 
 		a.SetRect(layout.Rect{W: 22, H: 4})
-		assert.Contains(t, a.View(), tc.want[:8],
-			"%q: the reason survives the rail minimum", tc.expr)
+		narrow := a.View()
+		if layout.Cells(tc.want) <= 22 {
+			assert.Contains(t, narrow, tc.want,
+				"%q: the reason fits whole at the rail minimum", tc.expr)
+		} else {
+			assert.NotContains(t, narrow, tc.want[:8],
+				"%q: the reason is omitted whole rather than clipped mid-token", tc.expr)
+		}
 	}
 }
 
