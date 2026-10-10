@@ -276,6 +276,11 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		}
 		return "", m.persistUnresolvedRestoreFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
+	// The worktree is back where af put it, so a worktree-missing flag on this
+	// row is stale — most plausibly a probe that raced an earlier move — and the
+	// commit below must not carry it (#5102). The flag is sticky by design: only
+	// af re-placing the worktree clears it, and this is such a placement.
+	instance.ClearWorktreeMissing()
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
 	// it exists only in memory, exactly as on the cut-off branch above.

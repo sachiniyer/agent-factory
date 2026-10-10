@@ -638,16 +638,50 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	if gw == nil {
 		return fmt.Errorf("cannot rename archived session %q: it has no worktree to relocate", i.Title)
 	}
+	// Decide how the record follows the rename BEFORE renaming the branch, so a
+	// refusal leaves the branch and any checkout of it exactly as they were.
+	//
+	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
+	// updates gw's stored worktree path — all under i.mu here, matching how
+	// ToInstanceData reads the worktree path under i.mu.RLock.
+	//
+	// An archived row whose worktree was deleted outside af has no bytes to move,
+	// and MoveWorktree would fail ENOENT — blocking reuse of its own title forever
+	// (#5102). Re-aim the record at the new title-keyed path instead, so its
+	// basename keeps claiming the renamed title exactly as a moved archive's does;
+	// restore then rebuilds there from the kept branch. Only a conclusive Absent
+	// takes this route: Unknown falls through to the move, which refuses on its
+	// own terms rather than letting a guess discard a worktree that may exist.
+	//
+	// Absent is also what a user's own `git worktree move` of the archive looks
+	// like from the recorded path, and that checkout is intact where git now
+	// registers the branch. Re-aiming the record (and renaming the branch under
+	// it) would orphan it, and restore would later refuse it as a foreign
+	// placement. So the repoint is taken only when git has the branch live
+	// nowhere; a live checkout, or a listing that cannot be read, refuses.
+	var relocate func(string) error = gw.MoveWorktree
+	if gw.ProbeWorktreePresence() == git.WorktreePresenceAbsent {
+		moved, live, err := liveBranchCheckout(gw)
+		if err != nil {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w", i.Title, gw.GetWorktreePath(), err)
+		}
+		if live {
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s, remove it with 'git worktree remove', or kill the session", i.Title, moved, gw.GetWorktreePath())
+		}
+		relocate = func(dest string) error {
+			if err := gw.RepointAbsentWorktreePath(dest); err != nil {
+				return fmt.Errorf("cannot rename archived session %q: its missing worktree path could not be repointed: %w", i.Title, err)
+			}
+			return nil
+		}
+	}
 	oldBranch := gw.GetBranchName()
 	if newBranch != "" && newBranch != oldBranch {
 		if err := gw.RenameBranch(newBranch); err != nil {
 			return fmt.Errorf("cannot free the archived branch of %q: %w", i.Title, err)
 		}
 	}
-	// MoveWorktree relocates the bytes + repairs git's registration and, on success,
-	// updates gw's stored worktree path — all under i.mu here, matching how
-	// ToInstanceData reads the worktree path under i.mu.RLock.
-	if err := gw.MoveWorktree(dest); err != nil {
+	if err := relocate(dest); err != nil {
 		if newBranch != "" && newBranch != oldBranch {
 			// Best-effort: the move already failed, so this is recovery, and a
 			// second failure must not mask the first. It is reported with it —

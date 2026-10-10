@@ -397,6 +397,15 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepRemoteLossStates()
 	m.sweepPausedPollState()
 
+	// Worktree presence first, on its own bounded fan-out (#5102): it is a
+	// filesystem probe, not a tmux one, and running it inline here would let one
+	// stalled mount cost a deadline per session on it, serially.
+	probes := make([]worktreeProbeTarget, 0, len(entries))
+	for _, e := range entries {
+		probes = append(probes, worktreeProbeTarget{repoID: e.repoID, instance: e.instance})
+	}
+	m.refreshWorktreesMissing(probes)
+
 	for _, e := range entries {
 		m.refreshInstanceStatus(e.repoID, e.instance)
 	}

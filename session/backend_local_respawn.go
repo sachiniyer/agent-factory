@@ -157,6 +157,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	}
 	if restoreResult == tmux.RestoreRespawned {
 		i.setRuntimeLaunch(declarationBase, ts)
+		// af just recreated the missing worktree AND started a fresh agent pane
+		// in it, which is the one event that makes a worktree-missing row
+		// deliverable again (#5102). Both halves matter: a pathname reappearing
+		// on its own leaves an old pane cwd'd in the unlinked inode, and a rebuild
+		// followed by a reattach to that old pane does too.
+		if rebuilt {
+			i.ClearWorktreeMissing()
+		}
 	} else {
 		// Restore established only that the persisted tmux name exists. The pane
 		// root's recorded (pid, start-time) identity decides whether it still
