@@ -157,14 +157,18 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	}
 	if err != nil {
 		detail := "coder whoami failed"
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() < 0 && ctxKilled.Load() {
-			// ctxKilled is set only by cmd.Cancel, which the exec runtime calls
-			// while the process is still alive (the watchCtx goroutine sends its
-			// result before the context fires if the process already exited).
+		if ctxKilled.Load() {
+			// ctxKilled is set only by cmd.Cancel when Kill succeeds, so the
+			// context's cancellation genuinely killed the process. Report a
+			// timeout regardless of the error shape: a successful-exit race
+			// (coder exits zero at the same instant the deadline fires) can
+			// have ctxKilled true while CombinedOutput returns
+			// context.DeadlineExceeded instead of *exec.ExitError, so
+			// requiring a signal-shaped exit status (ExitCode < 0) would
+			// misclassify it as a failure and discard the timeout signal.
 			// A pre-deadline signal death (OOM, external SIGTERM, self-signal)
-			// has ExitCode < 0 but ctxKilled is false — reported as a failure
-			// with its captured output below.
+			// has ctxKilled false — reported as a failure with its captured
+			// output below.
 			detail = "coder whoami timed out"
 		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line
