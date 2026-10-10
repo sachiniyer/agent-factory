@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -57,4 +58,26 @@ func validateCreateProgram(program string) error {
 			program, tmux.SupportedProgramsString())
 	}
 	return nil
+}
+
+// trimProgramEnumIfBare trims surrounding whitespace from program ONLY when the
+// trimmed value is a canonical supported agent enum (for example " claude " ->
+// "claude"). It leaves every other accepted command string verbatim.
+//
+// validateCreateProgram accepts full agent command strings, not just enum names:
+// a program like `claude --append-system-prompt foo\ ` whose final argument
+// intentionally ends in an escaped space would be corrupted by an unconditional
+// TrimSpace (it strips the space but leaves the backslash, so tmux would run a
+// literal trailing backslash). The trim is only needed to normalize a bare enum
+// with surrounding whitespace so ResolveProgram's exact program_overrides lookup
+// matches the override key; for a real command the override key never applies,
+// so the untrimmed value must be preserved. tmux.IsSupportedProgram answers the
+// bare-enum membership question against the same slice validateCreateProgram's
+// error message renders, so the two can never disagree about what counts as an
+// enum.
+func trimProgramEnumIfBare(program string) string {
+	if trimmed := strings.TrimSpace(program); tmux.IsSupportedProgram(trimmed) {
+		return trimmed
+	}
+	return program
 }
