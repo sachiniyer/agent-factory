@@ -182,7 +182,16 @@ type InstanceData struct {
 	CreatedAt                time.Time                     `json:"created_at"`
 	// UpdatedAt is the last session state mutation, preserved across saves and loads.
 	UpdatedAt time.Time `json:"updated_at"`
-	Prompt    string    `json:"prompt,omitempty"`
+	// ArchivedAt is when this session's archive committed — the durable anchor
+	// `af sessions prune --older-than` measures from (#5136). It is a separate
+	// field rather than UpdatedAt reused, because a record can keep mutating
+	// after it is shelved (prune itself is one such mutation). omitempty +
+	// additive: rows archived before this field existed carry no value and the
+	// prune cutoff falls back to UpdatedAt, which only ever moves FORWARD —
+	// never to a time before the real archive — so the fallback can only make a
+	// legacy row look younger and therefore under-delete, never over-delete.
+	ArchivedAt time.Time `json:"archived_at,omitzero"`
+	Prompt     string    `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is cleared only after the exact mission lands (or is

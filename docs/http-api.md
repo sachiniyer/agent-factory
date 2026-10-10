@@ -240,6 +240,26 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `sent-unverified` means the paste and Enter were accepted while a readable pane
 did not render exact prompt content; `could-not-confirm` means the pane observer
 itself was unavailable. Neither status claims delivery.
+`PruneSessions` returns
+`{ "ok": true, "older_than": "<duration>", "archived_before": "<rfc3339>", "candidates": [<entry>…], "skipped"?: [<entry>…], "reclaimable_bytes": <int>, "warnings"?: [<string>…] }`:
+the read-only dry run for the archived-session reclaim — it lists in
+`candidates` each archived session a reclaim would remove —
+`{ "id"?, "title", "repo_id", "branch", "archived_at", "reclaimable_bytes" }` —
+while af writes nothing: no deletion, no record update, no git write. (The apply
+half lands in the follow-up to #5142.) `skipped` entries
+(`{ "title", "repo_id", "reason" }`) were evaluated and refused. An archived
+worktree still holding uncommitted or ignored files is **refused**, not
+counted: the kept branch does not contain them and they are the only copy —
+restore the session or clean the tree first. `older_than` is required and
+must be a positive Go duration measured from each session's archive time;
+the request needs a scope — `repo_id` or `all: true`, which are mutually
+exclusive. `reclaimable_bytes` counts **allocated** disk
+blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
+hard-linked file is credited only when deleting the tree removes its last
+link — it is what a deletion would actually free, not apparent file size. A
+session whose recorded origin repository
+is gone is refused — with the repo deleted there is no kept branch, so the
+archived worktree may be the last copy of the work;
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a
@@ -270,6 +290,7 @@ RFC 3339 timestamps:
 | --- | --- |
 | `created_at` | When the session was created. |
 | `updated_at` | When the session state last mutated: lifecycle, identity, prompt delivery, tab roster, or pane activity. Reads, serialization, and cache refreshes do not advance it. |
+| `archived_at` | When the session's archive move committed; `--older-than` for `PruneSessions` is measured from it. Omitted on live sessions; records archived before the field existed report nothing and prune falls back to `updated_at`. |
 
 `updated_at` survives saves and restarts. Older records retain their last save
 time; a missing or zero stored value falls back to `created_at` when loaded.

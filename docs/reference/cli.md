@@ -54,6 +54,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -1642,6 +1643,7 @@ af sessions
 - [`af sessions kill`](#af-sessions-kill) — Permanently delete a session and af-owned resources
 - [`af sessions list`](#af-sessions-list) — List sessions in the current project
 - [`af sessions preview`](#af-sessions-preview) — Preview a session's terminal content
+- [`af sessions prune`](#af-sessions-prune) — List disk reclaimable from old archived sessions (dry run)
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
@@ -2029,6 +2031,52 @@ af sessions preview <title> [flags]
 | `--tab` | `int` | Tab slot to capture, 0-based as the tab bar reads left to right (slot 0 is the agent tab) (default `0`) |
 | `--tab-id` | `string` | Stable id of the tab to capture (#1738); wins over --tab-name and --tab |
 | `--tab-name` | `string` | Name of the tab to capture, as reported by "af sessions get" (not the TUI's "Agent"/"Terminal" label); wins over --tab |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions prune
+
+List disk reclaimable from old archived sessions (dry run)
+
+Report archived sessions older than --older-than, measured from each
+session's archive time.
+
+This is a dry run: it lists each archived session a reclaim would remove
+(title, archive time, allocated bytes) plus a total, and the reasons every
+other session was skipped. af writes nothing — no deletion, no record
+update, no git mutation — so it is safe to run at any time.
+
+Only archived sessions are eligible; live, lost, dead or in-flight sessions,
+archives whose move is incomplete, and worktrees still holding uncommitted or
+ignored files are skipped with their reasons. A session whose origin
+repository is gone is refused too: the archived tree may be the work's last
+copy, so it is reported, not counted reclaimable.
+
+Bytes are ALLOCATED disk space (what rm -rf would free), not apparent file
+size — sparse holes and hard links whose other end lives outside the tree are
+not counted.
+
+The listing reads the running daemon's in-flight claims and will not spawn
+one — a read must not write even a socket or a log. With no daemon up it
+refuses with guidance; pass --daemon-url or start af first.
+
+```
+af sessions prune --older-than <duration> [--repo <path> | --all] [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--all` |  | Span every project instead of only the current/--repo one |
+| `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
 
 **Global flags**
 

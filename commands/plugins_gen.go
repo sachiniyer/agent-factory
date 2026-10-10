@@ -81,6 +81,10 @@ var pluginReleaseDigests = []string{
 	"ae2b7057ea8fc398586676ae3dc4e34240e9a24c9e4f4ab8569c62a7bb41a768", // 3.16 — root-agent config forms and adopted-session remediation (#4087)
 	"3a9901060da8792f1540a636f7bc853acda06dcd0f54fa60abf03fbf1b9515ec", // 3.17 — retry-limit --delivered: the mark-delivered exit for ambiguous handoff delivery (#4429)
 	"77fa36ac207b2370db0c505c9503930610bed63e52af1d4601b7ac1d6405418f", // 3.18 — task verbs accept <id-or-name>; name resolution and ambiguity rules (#4676)
+	"afd97508371edfb2165341fd2d902be3dd24a948c579baae10c9a3c6732286ba", // 3.19 — document af sessions prune for old archived sessions (#5136)
+	"514bf82ab28f806a7b0756dbc915cedc8a994291ad0cb958e97df93b53b3f54b", // 3.20 — prune reclaims only af-owned worktrees; provider transcripts are never touched (#5136)
+	"acae86681aa0448958ad9e9cd4a6c7ffe06e59c5e6331aad52d6606e125daa3a", // 3.21 — prune ships its strictly read-only dry run first; no --apply yet (#5136)
+	"8d6e2863cbfc360a858b43c07376b0c7fa82dd6ecb9dc917dec21c39d505ff96", // 3.22 — prune's dry-run claim narrows to "af writes nothing" (#5136)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

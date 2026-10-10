@@ -314,6 +314,15 @@ type Instance struct {
 	// Persisted so a daemon restart cannot re-arm the destructive path.
 	startupStateUnknown bool
 
+	// archivedAt records when this session's archive committed — the moment the
+	// worktree move and teardown were declared done, local or remote (#5136).
+	// It is the timestamp `af sessions prune --older-than` measures age from:
+	// UpdatedAt cannot serve because it also advances on unrelated mutations
+	// after the archive. Persisted; records archived before the field existed
+	// carry no value and the prune cutoff falls back to UpdatedAt, which for an
+	// untouched archived row still approximates its archive time. Guarded by mu.
+	archivedAt time.Time
+
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend
 	// preResolvedProgram is the exact command an outer sandbox runtime already
