@@ -150,6 +150,17 @@ func TestTaskPaneUnavailableOpenEditorPreservesEditsAndBlocksActions(t *testing.
 			pane.HandleKeyPress(keyRunes("z"))
 			require.Contains(t, pane.editName.Value(), "z", "text editing continues during failed refresh")
 			pane.SetUnavailable(nil)
+			// After recovery the glyph TYPES at the still-focused Name field
+			// (no longer swallowed) and routes as a verb only once the user
+			// steps to a selector stop.
+			pane.HandleKeyPress(keyRunes(key))
+			require.Contains(t, pane.editName.Value(), key,
+				"after recovery the verb glyph types at a text field")
+			require.False(t, pane.HasPendingTrigger())
+			require.True(t, pane.GetTasks()[0].Enabled)
+			require.Empty(t, pane.ConsumeDeleted())
+
+			pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // Name -> Trigger
 			pane.HandleKeyPress(keyRunes(key))
 			switch key {
 			case "r":
@@ -157,7 +168,10 @@ func TestTaskPaneUnavailableOpenEditorPreservesEditsAndBlocksActions(t *testing.
 			case "x":
 				require.False(t, pane.GetTasks()[0].Enabled)
 			case "D":
-				require.Len(t, pane.GetTasks(), 1)
+				// D is app-confirmed from edit mode; the pane itself does not
+				// delete, so the task remains until the confirmation runs.
+				require.Len(t, pane.GetTasks(), 2)
+				require.True(t, pane.IsEditing())
 			}
 		})
 	}

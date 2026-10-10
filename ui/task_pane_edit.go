@@ -67,28 +67,49 @@ func (s *TaskPane) validateForm() (string, int) {
 	return "", -1
 }
 
+// textFocusStop reports whether the focused form stop accepts free-text input.
+// The list verbs r/x/D route only at selector/button stops, so a text field
+// always receives the rune as a typed character rather than triggering the
+// verb: typing r, x, or D into Name, the watch command, the prompt, the
+// target session, or the path must insert the character. The cron trigger
+// value is a text stop too — although its numeric cells ignore letters, the
+// schedule picker's Custom/raw-cron cell is a free-text input that r/x/D must
+// reach — so the verbs never fire while the trigger value is focused.
+func (s *TaskPane) textFocusStop() bool {
+	switch s.focusIndex {
+	case taskFocusName, taskFocusTriggerValue, taskFocusPrompt, taskFocusTarget, taskFocusPath:
+		return true
+	}
+	return false
+}
+
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 	// Retain unsaved form text after a failed refresh, but do not act on the
 	// stale selected task until a successful refresh restores availability.
+	// In recovery the verb glyphs are inert at every stop — no run, toggle,
+	// or delete, and not typed either — so a stale keystroke can't act on a
+	// task the pane cannot safely touch; ordinary letters still type.
 	if s.unavailable != "" && s.editing && !s.creating {
 		switch msg.String() {
 		case "r", "x", "D":
 			return true
 		}
 	}
-	if s.editing && !s.creating {
+	// The list verbs stay reachable from selector/button stops so the #1249
+	// one-step edit flow does not hide them (#1288). They are routed ONLY at
+	// non-text stops: when Name, the watch command, the prompt, the target
+	// session, the path, or the cron picker's raw-cron cell is focused, r/x/D
+	// must be typed characters, not triggers. D is deliberately absent here —
+	// an edit-form delete is confirmed by the app layer (handleStateTasks)
+	// exactly like list mode, so a text field can type a capital D and no
+	// delete is ever immediate.
+	if s.editing && !s.creating && !s.textFocusStop() {
 		switch msg.String() {
 		case "r":
 			s.runSelectedTask()
 			return true
 		case "x":
 			s.toggleSelectedTask()
-			return true
-		case "D":
-			s.deleteSelectedTask()
-			s.editing = false
-			s.editError = ""
-			s.editErrorField = -1
 			return true
 		}
 	}

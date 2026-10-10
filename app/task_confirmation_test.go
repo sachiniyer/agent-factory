@@ -36,6 +36,59 @@ func TestTaskDeleteConfirmationRetainsTargetAndFocus(t *testing.T) {
 	require.Equal(t, []task.Task{b}, pane.GetTasks())
 }
 
+// TestTaskEditModeDeleteIsConfirmedLikeListMode is the edit-mode half of the
+// delete-confirmation contract: a D pressed while a text field is focused must
+// fall through to the form and TYPE (no confirmation, no deletion), and a D
+// pressed at a selector/button stop must open the same confirmation list mode
+// uses — never deleting immediately. Confirming closes the edit form and
+// removes the task; canceling returns to the form with the task intact.
+func TestTaskEditModeDeleteIsConfirmedLikeListMode(t *testing.T) {
+	h := newTestHome(t)
+	h.termWidth, h.termHeight = 120, 36
+	h.relayout()
+	pane := h.automations.TaskPane()
+	pane.SetTasks([]task.Task{{
+		ID: "a", Name: "Daily review", CronExpr: "* * * * *", Program: "claude", Enabled: true,
+	}})
+	pane.SetFocus(true)
+	pane.EnterEditSelected()
+	require.True(t, pane.IsEditing())
+	h.state = stateTasks
+
+	// Focus opens on the Name text field: D must NOT confirm or delete.
+	h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.Nil(t, h.confirmationOverlay, "D typed into a text field must not open a confirmation")
+	require.NotEqual(t, stateConfirm, h.state)
+	require.True(t, pane.IsEditing(), "typing D must keep the edit form open")
+	require.Len(t, pane.GetTasks(), 1, "typing D must not delete the task")
+
+	// Tab to the trigger type selector (a non-text stop): D there confirms.
+	h.handleStateTasks(tea.KeyMsg{Type: tea.KeyTab})
+	require.False(t, pane.IsTextFieldFocused(), "Trigger is a selector stop, not a text field")
+	h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.Equal(t, stateConfirm, h.state, "edit-mode D at a selector stop must confirm before deleting")
+	require.NotNil(t, h.confirmationOverlay)
+	require.Len(t, pane.GetTasks(), 1, "opening the confirmation must not delete")
+	require.True(t, pane.IsEditing(), "the edit form stays open while the delete is pending")
+
+	// Cancel returns to the edit form with the task intact.
+	h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateTasks, h.state)
+	require.Nil(t, h.confirmationOverlay)
+	require.True(t, pane.IsEditing(), "cancel must return to the edit form")
+	require.Len(t, pane.GetTasks(), 1)
+
+	// Confirm deletes and returns the pane to list mode, exactly like list
+	// mode's confirmed D.
+	h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.Equal(t, stateConfirm, h.state)
+	h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	require.Equal(t, stateTasks, h.state)
+	require.False(t, pane.IsEditing(), "confirming the delete must close the edit form")
+	require.Empty(t, pane.GetTasks())
+	require.Len(t, pane.ConsumeDeleted(), 1)
+}
+
 func TestUnavailableTasksDoNotOpenDeleteConfirmation(t *testing.T) {
 	h := newTestHome(t)
 	h.state = stateTasks
