@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 )
 
 // #4755: the archived row the user sees as selected must be the row the verbs
@@ -323,4 +325,146 @@ func TestTabPickerRefusal_PrefersCapabilityGate(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "only local sessions",
 		"the permanent capability refusal must outrank the restore hint")
+}
+
+// restingFoldHome arranges the #5259 reproduction: the display binding on the
+// OLDEST archived row — the newest-first folder's tail — with the tree cursor
+// parked on the expanded Archived folder header. A tall terminal keeps the
+// bound row inside the fitted window; a short one pushes it below the fold
+// with no cursor move and no row-list rebuild.
+func restingFoldHome(t *testing.T) (*home, *session.Instance) {
+	t.Helper()
+	h := newTestHome(t)
+	h.store.AddInstance(archiveActionInstance(t, "live-one", session.Ready))
+	var archivedRows []*session.Instance
+	for i := 0; i < 12; i++ {
+		inst := archiveActionInstance(t, fmt.Sprintf("arch-%02d", i), session.Archived)
+		archivedRows = append(archivedRows, inst)
+		h.store.AddInstance(inst)
+	}
+	bound := archivedRows[0]
+	archivedHeaderState(t, h, bound)
+	return h, bound
+}
+
+// TestResize_RestFooterDropsOffscreenBoundRow is the #5259 shrink direction: a
+// resize that moves the header-adopted resting row below the fold must drop
+// the footer's `r`/`D` hints (and their click zones) in the SAME update —
+// pre-fix the menu kept the stale target until the next selectionChanged,
+// ~100ms of the footer naming verbs for a row no longer on screen.
+func TestResize_RestFooterDropsOffscreenBoundRow(t *testing.T) {
+	h, bound := restingFoldHome(t)
+
+	resizeHome(h, 80, 40)
+	require.Same(t, bound, h.sidebar.RowVerbTarget(),
+		"precondition: the bound tail row fits at the tall layout")
+	_ = h.selectionChanged()
+	require.Contains(t, h.menu.String(), "restore",
+		"precondition: the footer advertises the bound row's verb")
+
+	resizeHome(h, 80, 15)
+	require.Nil(t, h.sidebar.RowVerbTarget(),
+		"precondition: the bound row is off-screen at the short layout")
+	out := h.menu.String()
+	require.NotContains(t, out, "restore",
+		"the footer must drop the off-screen row's verb in the same update")
+	require.NotContains(t, out, "delete session")
+
+	// The hint's click zone dies with it — zones register per rendered hint.
+	_ = h.View()
+	_, ok := h.zones.Find(zones.StatusHint("r"))
+	require.False(t, ok, "the stale restore hint must not keep a live click zone")
+}
+
+// TestResize_RestFooterAdoptsBoundRowOnGrow is the symmetric grow direction:
+// when a resize brings the bound resting row back inside the fitted window,
+// the footer must name its verbs in the same update — not after the next
+// ~100ms preview tick runs selectionChanged.
+func TestResize_RestFooterAdoptsBoundRowOnGrow(t *testing.T) {
+	h, bound := restingFoldHome(t)
+
+	resizeHome(h, 80, 15)
+	require.Nil(t, h.sidebar.RowVerbTarget(),
+		"precondition: the bound tail row starts below the fold")
+	_ = h.selectionChanged()
+	out := h.menu.String()
+	require.NotContains(t, out, "restore",
+		"precondition: nothing is advertised while the bound row is off-screen")
+	require.NotContains(t, out, "delete session")
+
+	resizeHome(h, 80, 40)
+	require.Same(t, bound, h.sidebar.RowVerbTarget(),
+		"precondition: the bound row is back inside the fitted window")
+	out = h.menu.String()
+	require.Contains(t, out, "restore",
+		"the footer must pick the bound row's verb back up in the same update")
+	require.Contains(t, out, "delete session")
+}
+
+// TestSelectionChanged_RestFooterOpenPaneByLiveness is the #5260 truth table
+// at the app seam: Lost and Dead rows still own a pane surface — tab_pane.go
+// renders their fallback content and `s` opens it — so the compact resting
+// footer must name it; an archived row's panes are pruned on sight, so the
+// key stays withheld there.
+func TestSelectionChanged_RestFooterOpenPaneByLiveness(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    session.Status
+		wantOffer bool
+	}{
+		{name: "archived", status: session.Archived, wantOffer: false},
+		{name: "lost", status: session.Lost, wantOffer: true},
+		{name: "dead", status: session.Dead, wantOffer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			h.store.AddInstance(archiveActionInstance(t, "live-one", session.Ready))
+			inst := archiveActionInstance(t, "resting", tc.status)
+			h.store.AddInstance(inst)
+			h.sidebar.SetSelectedInstance(1)
+			require.Same(t, inst, h.sidebar.GetSelectedInstance(),
+				"precondition: the cursor is on the resting row")
+
+			resizeHome(h, 80, 24)
+			_ = h.selectionChanged()
+
+			out := h.menu.String()
+			require.Contains(t, out, "restore")
+			if tc.wantOffer {
+				require.Contains(t, out, "open pane",
+					"a %s row's pane renders its fallback content — `s` works and must be advertised (#5260)", tc.name)
+			} else {
+				require.NotContains(t, out, "open pane",
+					"an archived row can never show a pane — `s` must stay withheld")
+			}
+		})
+	}
+}
+
+// TestSelectionChanged_AdoptedLostRowAdvertisesOpenPane is the #5260 case
+// through the header-adopted path (#4755): parked on the Sessions header
+// while the bound lost row keeps its ▾ marker, the compact footer must name
+// the same `s` it offers with the cursor on the row itself — the verb
+// resolves the same bound instance either way.
+func TestSelectionChanged_AdoptedLostRowAdvertisesOpenPane(t *testing.T) {
+	h := newTestHome(t)
+	lost := archiveActionInstance(t, "lost-one", session.Lost)
+	h.store.AddInstance(archiveActionInstance(t, "live-one", session.Ready))
+	h.store.AddInstance(lost)
+	h.store.SelectInstance(lost)
+	// Park the cursor on the Sessions header with the section expanded:
+	// collapse it once and re-expand so the click lands back on the header.
+	h.sidebar.ClickHeaderKind(ui.SectionInstances)
+	h.sidebar.ClickHeaderKind(ui.SectionInstances)
+
+	require.Same(t, lost, h.sidebar.RowVerbTarget(),
+		"precondition: the Sessions header adopts the bound lost row")
+	resizeHome(h, 80, 24)
+	_ = h.selectionChanged()
+
+	out := h.menu.String()
+	require.Contains(t, out, "restore")
+	require.Contains(t, out, "delete session")
+	require.Contains(t, out, "open pane",
+		"a lost row keeps a pane surface — `s` works and must be advertised (#5260)")
 }
