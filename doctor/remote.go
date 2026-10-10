@@ -136,7 +136,8 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report) {
 	}
 	if err != nil {
 		detail := "coder whoami failed"
-		if ctx.Err() == context.DeadlineExceeded {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() < 0 {
 			detail = "coder whoami timed out"
 		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line
