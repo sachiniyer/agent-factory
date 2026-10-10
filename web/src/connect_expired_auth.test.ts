@@ -92,6 +92,11 @@ function stage(): Stage {
     connectionGeneration: 0,
     resolvingRoute: false,
     pendingRestoreResync: false,
+    // connect() flushes these after startStream when a committed task toggle / limit
+    // retry was queued while a reconnect was in flight; false here means the happy-
+    // path control never reaches the in-flight deferral.
+    pendingReconnectTasksRefresh: false,
+    pendingReconnectResync: false,
     token: null as string | null,
   };
 
