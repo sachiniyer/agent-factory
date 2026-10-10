@@ -155,6 +155,28 @@ func (m *home) createNewTab(selected *session.Instance, kind session.TabKind) (t
 	// the exact tmux session the daemon reported (#1957); a VS Code tab is metadata
 	// only and carries no tmux session at all. Neither path spawns or persists a
 	// second tab.
+	//
+	// #2377 minted a stable id per CreateTab response and made the local attach
+	// refuse a same-name row that already belongs to a different id (an identity-
+	// hijacking guard in resolveAttachedTabLocked). That refusal is reachable
+	// here only through the stale-roster race — another client closed the
+	// same-name tab and the local TUI has not yet processed its next snapshot
+	// (snapshotRefreshInterval) — by which point the daemon has already created
+	// and persisted the tab. Surfacing the refusal as a raw error makes the user
+	// think the tab was not created, inviting a retry that spawns a SECOND tab
+	// (#4820). Mirror handleStateRenameTab: the daemon has the tab, so skip the
+	// local projection, defer to the next snapshot poll (it reconciles the
+	// roster and the tab appears), and tell the user the tab was created rather
+	// than showing the refusal as a total failure. The guard is gated on the
+	// non-empty id the collision depends on — an empty id is the pre-#1738
+	// legacy daemon's name-keyed fallback, where the attach never collides
+	// (resolveAttachedTabLocked just returns the same-name row), so genuine pane
+	// failures (e.g., a `Restore("")` that cannot reconnect) still fall through
+	// to handleError below.
+	if response.ID != "" && localTabNameTaken(selected, &session.Tab{ID: response.ID}, response.Name) {
+		log.InfoLog.Printf("tab %q created in %q; local reflection deferred to the next snapshot: the local roster still holds that name", response.Name, selected.Title)
+		return m, m.handleNotice(fmt.Errorf("tab created in %q; it will appear after the next snapshot", selected.Title))
+	}
 	var attachErr error
 	if kind == session.TabKindVSCode {
 		_, attachErr = selected.AttachVSCodeTab(response.Name, response.ID)
