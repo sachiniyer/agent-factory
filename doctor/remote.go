@@ -137,11 +137,17 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	// exec runtime only while the process is still alive (the watchCtx goroutine
 	// sends its result before the context fires if the process already exited),
 	// so the flag is set only for a genuine context-killed timeout. We override
-	// the default to set the flag while preserving the same Kill behavior.
+	// the default to set the flag only when Kill succeeds: if the process
+	// already exited (Kill returns os.ErrProcessDone), the context did not
+	// kill it and the flag stays false so a signal death is reported as a
+	// failure, not a timeout.
 	var ctxKilled atomic.Bool
 	cmd.Cancel = func() error {
-		ctxKilled.Store(true)
-		return cmd.Process.Kill()
+		err := cmd.Process.Kill()
+		if err == nil {
+			ctxKilled.Store(true)
+		}
+		return err
 	}
 	out, err := cmd.CombinedOutput()
 	if errors.Is(err, exec.ErrWaitDelay) {
