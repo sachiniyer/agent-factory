@@ -141,21 +141,23 @@ network.listen_addr — anything that is not 127.0.0.1, ::1 or localhost — and
 full control plane, which can run commands on this machine, on the network.
 
 So if the user asks for access from anywhere other than this machine, set both, in
-the same breath, without being asked:
+the same breath, without being asked — the token FIRST, because af refuses to write
+a non-loopback network.listen_addr while it is still off:
 
-    af config set network.listen_addr <the address they want>
     af config set network.require_token true
+    af config set network.listen_addr <the address they want>
 
 and tell them plainly why: without the token, anyone who can reach that address can
 drive their agents and their machine.
 
 Never write a non-loopback network.listen_addr with network.require_token = false on your own
-initiative. af allows that pairing — the daemon starts, serves, and warns once — so
-it is the user's call to make, not a configuration that fails loudly and teaches
-them. That is exactly why you must not make it for them. If they ask for it anyway,
-write it, and say in the same breath that anyone who can reach the address can drive
-their agents, and that the token or a loopback bind reached over SSH or Tailscale
-port-forwarding is the alternative. Note that network.require_loopback_token does not
+initiative. af refuses that pairing outright — af config set rejects the write, and
+a hand-edited file leaves the listener unbound with the reason logged as an ERROR — so
+opting out takes an explicit network.allow_unauthenticated_network = true. If they ask
+for it anyway, set that first so the listen_addr write is accepted, then write it, and
+say in the same breath that anyone who can reach the address can drive their agents,
+and that the token or a loopback bind reached over SSH or Tailscale port-forwarding
+is the alternative. Note that network.require_loopback_token does not
 substitute for network.require_token here — it changes nothing while network.require_token is false.
 
 One more thing to tell them if they go off this machine: af serves plain HTTP and

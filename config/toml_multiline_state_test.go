@@ -319,7 +319,11 @@ echo done'''
 // half end to end: setting a grouped key while a multiline value contains that
 // very header must produce a real table, not a line spliced into the string.
 func TestSetGlobalConfigValueDecoySectionHeaderRoundTrip(t *testing.T) {
+	// allow_unauthenticated_network is on so the routable listen_addr write is
+	// the opt-in's allowed case — without it #5137 refuses the write before the
+	// decoy-header behavior under test is ever reached.
 	const body = `schema_version = 1
+allow_unauthenticated_network = true
 on_archive_command = '''echo start
 [network]
 listen_addr = "decoy:1"

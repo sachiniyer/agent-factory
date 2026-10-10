@@ -162,24 +162,26 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		}
 	}
 
-	// No auth-posture gate here, deliberately (#2168 Phase 0). #2090 made a
-	// tokenless network listener a FATAL startup refusal at this exact spot; the
-	// owner reversed that: binding 0.0.0.0 with no token is allowed, and the
-	// exposure is surfaced as a warning instead of decided for the user.
+	// No process-level auth-posture gate here, deliberately — the #5137 refusal
+	// is scoped to the TCP LISTENER, not the daemon. #2090 made a tokenless
+	// network listener a FATAL startup refusal at this exact spot, and the
+	// autostart unit's Restart=on-failure could not tell a config the daemon
+	// rejects on every attempt from a crash, so it restarted every 5s forever
+	// (#2168 §1.2). #2168 Phase 0 then went to warn-and-serve, which #5137
+	// reversed by owner decision: a non-loopback listen_addr with the token off
+	// is refused unless network.allow_unauthenticated_network is set. What is
+	// refused is the BIND — webListeners.reconcile declines the socket, logs the
+	// reason at ERROR, and records it for `af daemon status` and `af doctor` —
+	// while this process keeps starting and keeps serving the unix control
+	// socket, so the TUI, CLI, and sessions are never hostages to a network
+	// posture. Breaking the install path would be worse than the exposure.
 	//
-	// Two reasons it does not simply move up here as a log line. The exposure is
-	// only real once the listener actually binds — a warning emitted here would
-	// still fire when the web port is taken and nothing gets served — and the
-	// "say it exactly once" requirement is easiest to keep honest at the single
-	// site that opens the port. So the notice
-	// (config.ListenerExposureNotice) is emitted by startHTTPServer, which
-	// RunDaemon calls once, below.
-	//
-	// The refusal's other effect was the #2168 incident: a config rejected on
-	// every attempt is not transient, but the autostart unit's
-	// Restart=on-failure could not tell that apart from a crash, so the unit
-	// restarted every 5s forever. Nothing here exits non-zero on config posture
-	// any more.
+	// The reason it does not simply move up here as a log line is unchanged:
+	// the posture is only real at bind time, and the "say it exactly once"
+	// requirement is easiest to keep honest at the single site that decides the
+	// socket — so both the exposure notice (config.ListenerExposureNotice, on an
+	// opted-in bind) and the refusal (config.ListenerBindRefusal) are emitted by
+	// the listener owner startHTTPServer reaches below.
 
 	// Refuse to run two daemons against the same control socket. EnsureDaemon
 	// pings before launching, but a daemon started directly (af --daemon, the

@@ -242,8 +242,13 @@ func TestApplyConfig_UnrelatedChangeKeepsSandboxCredentials(t *testing.T) {
 func TestApplyConfig_UnrelatedChangeWhileExposedDoesNotResurfaceExposureNotice(t *testing.T) {
 	m := applyConfigTestManager(t)
 
-	// Enter the exposed posture: non-loopback listen_addr + require_token=false.
-	_, err := config.SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
+	// Enter the exposed posture: non-loopback listen_addr + require_token=false,
+	// opted in — since #5137 the same pair without allow_unauthenticated_network
+	// is a refused write, not an exposure, so the warn-and-serve surface this
+	// test pins only exists under the explicit opt-in.
+	_, err := config.SetGlobalConfigValue("network.allow_unauthenticated_network", "true")
+	require.NoError(t, err)
+	_, err = config.SetGlobalConfigValue("network.listen_addr", "0.0.0.0:8443")
 	require.NoError(t, err)
 	_, err = config.SetGlobalConfigValue("network.require_token", "false")
 	require.NoError(t, err)
