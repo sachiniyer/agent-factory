@@ -58,6 +58,22 @@ func TestAgentForCommandAuthenticatesEnvWrapper(t *testing.T) {
 		}
 	}
 }
+func TestAgentForCommandDashTerminatesEnvOptions(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    string
+	}{
+		{command: "env - claude", want: "claude"},
+		{command: "env - -i claude"},
+		{command: "env - -C /evilpath claude"},
+		{command: "/usr/bin/env - -i claude"},
+		{command: "env -i -u PATH claude", want: "claude"},
+	} {
+		if got := AgentForCommand(test.command); got != test.want {
+			t.Errorf("AgentForCommand(%q) = %q, want %q", test.command, got, test.want)
+		}
+	}
+}
 
 func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 	for _, test := range []struct {

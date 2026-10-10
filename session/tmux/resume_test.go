@@ -490,6 +490,20 @@ func TestResumeProgram_QuotedCodexPath(t *testing.T) {
 	require.Equal(t, "'/path with space/codex' resume --last --model gpt-5", got)
 }
 
+// TestResumeProgram_DashTerminatedEnvDoesNotInjectResume verifies that a bare
+// `env -` (or `env --`) that ends option parsing leaves the later agent-shaped
+// word as an argument to env's option-looking command, not the running agent,
+// so Restore does not append a resume flag to a non-agent command (#5036/#5052).
+func TestResumeProgram_DashTerminatedEnvDoesNotInjectResume(t *testing.T) {
+	for _, in := range []string{
+		"env - -u claude",
+		"env -- -u claude",
+		"env - -C /evilpath codex",
+	} {
+		require.Equal(t, in, resumeProgram(in))
+	}
+}
+
 func TestClaudeProgramWithSessionID(t *testing.T) {
 	const id = "019f386f-7206-7fc2-803b-f7045e07a242"
 	cases := []struct {
