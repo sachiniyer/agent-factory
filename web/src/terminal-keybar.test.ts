@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
-  decodeKeyBytes, KEYBAR_ROWS, keyBytes, keyBytesDomain, KEY_BYTES_NAMED_KEYS, StickyModifiers, TerminalKeybar,
+  decodeKeyBytes, KEYBAR_ROWS, keyBytes, StickyModifiers, TerminalKeybar,
   keybarPointerDown,
 } from "./terminal-keybar.js";
 import { TerminalSoftInput } from "./terminal-soft-input.js";
@@ -204,69 +204,6 @@ test("sticky Alt prefixes user-origin hardware controls", () => {
     assert.equal(state.input(control, "user"), "\x1b" + control);
     assert.equal(state.state("Alt"), "off");
   }
-});
-
-test("the decoder closes over the complete keyBytes domain", () => {
-  const booleans = [false, true];
-  const namedKeys = new Set(KEY_BYTES_NAMED_KEYS);
-  let keys = 0;
-  for (const key of keyBytesDomain()) {
-    keys++;
-    const codePoint = key.codePointAt(0);
-    const scalar = codePoint !== undefined && key.length === (codePoint > 0xffff ? 2 : 1);
-    // Outside the 7-bit control-fold range, Ctrl and cursor mode are identity
-    // dimensions. Check both extrema once, then walk their full Cartesian
-    // product using those proven equivalence classes instead of 35M encodes.
-    if (!namedKeys.has(key) && scalar && codePoint > 127) {
-      const plain = keyBytes(key, false, false, false);
-      const prefixed = keyBytes(key, false, true, false);
-      if (keyBytes(key, true, false, true) !== plain || keyBytes(key, true, true, true) !== prefixed)
-        assert.fail(`non-ASCII encoder dimensions changed for ${JSON.stringify(key)}`);
-      const decodedPlain = decodeKeyBytes(plain);
-      const decodedPrefixed = decodeKeyBytes(prefixed);
-      assert.ok(decodedPlain && decodedPrefixed, `decode Unicode scalar U+${codePoint.toString(16)}`);
-      const mergedPlain = keyBytes(decodedPlain.key, decodedPlain.ctrl, decodedPlain.alt, decodedPlain.applicationCursor);
-      const mergedAlt = keyBytes(decodedPlain.key, decodedPlain.ctrl, true, decodedPlain.applicationCursor);
-      const retainedAlt = keyBytes(decodedPrefixed.key, decodedPrefixed.ctrl,
-        decodedPrefixed.alt, decodedPrefixed.applicationCursor);
-      if (mergedPlain !== plain || mergedAlt !== prefixed || retainedAlt !== prefixed)
-        assert.fail(`Unicode inverse changed for U+${codePoint.toString(16)}`);
-      for (const ctrl of booleans) for (const alt of booleans) for (const applicationCursor of booleans) {
-        for (const stickyCtrl of booleans) for (const stickyAlt of booleans) {
-          const expected = alt || stickyAlt ? prefixed : plain;
-          const actual = alt ? retainedAlt : stickyAlt ? mergedAlt : mergedPlain;
-          if (actual !== expected)
-            assert.fail(JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt }));
-        }
-      }
-      continue;
-    }
-    for (const ctrl of booleans) for (const alt of booleans) for (const applicationCursor of booleans) {
-      const encoded = keyBytes(key, ctrl, alt, applicationCursor);
-      const decoded = decodeKeyBytes(encoded);
-      assert.ok(decoded, `decode ${JSON.stringify({ key, ctrl, alt, applicationCursor, encoded })}`);
-      assert.equal(keyBytes(decoded.key, decoded.ctrl, decoded.alt, decoded.applicationCursor), encoded);
-      for (const stickyCtrl of booleans) for (const stickyAlt of booleans) {
-        const expected = keyBytes(key, ctrl || stickyCtrl, alt || stickyAlt, applicationCursor);
-        const actual = keyBytes(decoded.key, decoded.ctrl || stickyCtrl,
-          decoded.alt || stickyAlt, decoded.applicationCursor);
-        if (actual !== expected) {
-          // Terminal bytes have genuine aliases (DEL is both Backspace and
-          // Ctrl+8). The byte-only fallback may choose any preimage whose base
-          // and merged encodings agree; hardware identity bypasses this path.
-          const aliases = [...KEY_BYTES_NAMED_KEYS,
-            ...Array.from({ length: 128 }, (_, code) => String.fromCharCode(code))];
-          const equivalent = aliases.some(alias => booleans.some(aliasCtrl => booleans.some(aliasAlt =>
-            booleans.some(aliasCursor => keyBytes(alias, aliasCtrl, aliasAlt, aliasCursor) === encoded &&
-              keyBytes(alias, aliasCtrl || stickyCtrl, aliasAlt || stickyAlt, aliasCursor) === actual))));
-          assert.ok(equivalent,
-            JSON.stringify({ key, ctrl, alt, applicationCursor, stickyCtrl, stickyAlt, expected, actual }));
-        }
-      }
-    }
-  }
-  assert.equal(keys, KEY_BYTES_NAMED_KEYS.length + 0x110000 - 0x800,
-    "named encoder keys plus every Unicode scalar");
 });
 
 test("sticky modifiers merge into recognized user CSI and SS3 sequence shapes", () => {

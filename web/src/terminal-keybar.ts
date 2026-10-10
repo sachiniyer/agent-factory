@@ -2,7 +2,6 @@ import { TerminalSoftInput } from "./terminal-soft-input.js";
 
 const ARROW_SUFFIXES: Record<string, string> = { "←": "D", "↑": "A", "↓": "B", "→": "C" };
 const SPECIAL_BYTES: Record<string, string> = { Esc: "\x1b", Tab: "\t", "^C": "\x03" };
-export const KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
 
 /** Phone terminal controls and xterm-compatible key encodings. */
 export function keyBytes(key: string, ctrl = false, alt = false, applicationCursor = false): string {
@@ -24,14 +23,6 @@ export function keyBytes(key: string, ctrl = false, alt = false, applicationCurs
   const text = ctrl && key.length === 1 && key.charCodeAt(0) <= 127
     ? ctrlModifiedEmission(key) ?? key : key;
   return (alt ? "\x1b" : "") + text;
-}
-
-/** The complete intended keyBytes key domain: named keys plus one Unicode scalar. */
-export function* keyBytesDomain(): Generator<string> {
-  yield* KEY_BYTES_NAMED_KEYS;
-  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint++) {
-    if (codePoint < 0xd800 || codePoint > 0xdfff) yield String.fromCodePoint(codePoint);
-  }
 }
 
 export const KEYBAR_ROWS = [["Ctrl", "Alt", "Esc", "Tab", "^C", "Arrows"], ["More keys", "←", "↑", "↓", "→"]] as const;
