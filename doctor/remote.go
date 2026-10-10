@@ -133,14 +133,13 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	// rather than inferring it from ctx.Err() after CombinedOutput returns: a
 	// pipe-holding descendant can keep CombinedOutput blocked past the deadline,
 	// making ctx.Err() == DeadlineExceeded even when the process self-terminated
-	// before the context fired. CommandContext's default Cancel is called by the
-	// exec runtime only while the process is still alive (the watchCtx goroutine
-	// sends its result before the context fires if the process already exited),
-	// so the flag is set only for a genuine context-killed timeout. We override
-	// the default to set the flag only when Kill succeeds: if the process
-	// already exited (Kill returns os.ErrProcessDone), the context did not
-	// kill it and the flag stays false so a signal death is reported as a
-	// failure, not a timeout.
+	// before the context fired. We set the flag only when Kill succeeds, but
+	// Kill returning nil does not prove the context caused the exit — on Linux
+	// and macOS a signal delivered to an already-exited (zombie) process is
+	// accepted and returns nil, so a non-zero self-exit that races the deadline
+	// can still set ctxKilled. The classification below therefore gives a real
+	// exit code (ExitCode >= 0) precedence over ctxKilled to avoid discarding
+	// useful diagnostics such as a 401.
 	var ctxKilled atomic.Bool
 	cmd.Cancel = func() error {
 		err := cmd.Process.Kill()
@@ -157,19 +156,22 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	}
 	if err != nil {
 		detail := "coder whoami failed"
-		if ctxKilled.Load() {
-			// ctxKilled is set only by cmd.Cancel when Kill succeeds, so the
-			// context's cancellation genuinely killed the process. Report a
-			// timeout regardless of the error shape: a successful-exit race
-			// (coder exits zero at the same instant the deadline fires) can
-			// have ctxKilled true while CombinedOutput returns
-			// context.DeadlineExceeded instead of *exec.ExitError, so
-			// requiring a signal-shaped exit status (ExitCode < 0) would
-			// misclassify it as a failure and discard the timeout signal.
-			// A pre-deadline signal death (OOM, external SIGTERM, self-signal)
-			// has ctxKilled false — reported as a failure with its captured
-			// output below.
-			detail = "coder whoami timed out"
+		// Give a real (non-signal) exit code precedence over ctxKilled: a
+		// process that exits nonzero just before the deadline can still be
+		// reaped with Kill() returning nil (the signal was accepted by the
+		// already-exited process), setting ctxKilled even though the context
+		// did not cause the exit. Reporting it as a timeout would discard
+		// useful diagnostics such as a 401. Only when there is no real exit
+		// code — a signal death (ExitCode < 0) or the successful-exit
+		// deadline race (context.DeadlineExceeded with no *exec.ExitError) —
+		// does ctxKilled indicate a genuine context-killed timeout.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
+			if ctxKilled.Load() {
+				detail = "coder whoami timed out"
+			} else if line := firstNonEmptyLine(string(out)); line != "" {
+				detail += ": " + line
+			}
 		} else if line := firstNonEmptyLine(string(out)); line != "" {
 			detail += ": " + line
 		}

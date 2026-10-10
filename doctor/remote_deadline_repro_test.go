@@ -21,10 +21,13 @@ import (
 // CombinedOutput past the context deadline, the old code checked
 // ctx.Err() == DeadlineExceeded and labelled it "timed out" even though the
 // process had already completed with a real error message. The fix uses
-// ExitError.ExitCode() < 0 (signal-killed) combined with ctx.Err() ==
-// DeadlineExceeded as the timeout discriminator, so a non-zero self-exit
-// (ExitCode >= 0) is reported as "failed" with its output regardless of
-// whether the caller's timer also fired.
+// ExitError.ExitCode() < 0 (signal-killed) combined with the ctxKilled flag
+// (set only by cmd.Cancel when Kill succeeds) as the timeout discriminator,
+// so a non-zero self-exit (ExitCode >= 0) is reported as "failed" with its
+// output regardless of whether the caller's timer also fired. This also
+// handles the race where Kill returns nil for a zombie that already exited
+// with a non-zero code: ExitCode >= 0 takes precedence over ctxKilled, so
+// the diagnostics are preserved rather than mislabeled as a timeout.
 //
 // The probe timeout and wait delay are injected so the test does not depend on
 // the 3s production deadline: a 1s timeout with a 2s wait delay gives the
