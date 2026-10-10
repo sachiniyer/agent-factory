@@ -36,11 +36,25 @@ EVID="$HOME/sandbox/footer-5259-5260"
 mkdir -p "$EVID"
 
 # --- provenance --------------------------------------------------------------
+# /src is a linked worktree: its .git is a FILE pointing at the host's gitdir,
+# unreachable inside the container, so git cannot answer rev-parse/archive
+# here. The driver supplies the two SHAs and the master source as a tar:
+#   AF_BRANCH_SHA  — `git rev-parse HEAD` of the worktree mounted at /src
+#   AF_MASTER_SHA  — `git rev-parse origin/master` at run time
+#   AF_MASTER_TAR  — container path of `git archive <master-sha>` output
+# (falling back to in-container git only if a non-worktree /src ever has one).
 git config --global --add safe.directory /src 2>/dev/null || true
-BRANCH_SHA="$(git -C /src rev-parse HEAD)"
-MASTER_SHA="$(git -C /src rev-parse origin/master)"
+BRANCH_SHA="${AF_BRANCH_SHA:-$(git -C /src rev-parse HEAD 2>/dev/null || true)}"
+MASTER_SHA="${AF_MASTER_SHA:-$(git -C /src rev-parse origin/master 2>/dev/null || true)}"
+[ -n "$BRANCH_SHA" ] || { _af_fail "branch SHA unknown — pass AF_BRANCH_SHA"; exit 1; }
+[ -n "$MASTER_SHA" ] || { _af_fail "master SHA unknown — pass AF_MASTER_SHA"; exit 1; }
 MASTER_SRC="$(mktemp -d /tmp/af-master.XXXXXX)"
-git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"
+if [ -n "${AF_MASTER_TAR:-}" ]; then
+    tar -xf "$AF_MASTER_TAR" -C "$MASTER_SRC"
+elif ! git -C /src archive "$MASTER_SHA" | tar -x -C "$MASTER_SRC"; then
+    _af_fail "no master source: pass AF_MASTER_TAR (or give /src a reachable gitdir)"
+    exit 1
+fi
 (cd "$MASTER_SRC" && go build -buildvcs=false -o "$HOME/bin/af.master" .)
 {
     echo "branch HEAD (bin/af):      $BRANCH_SHA"
