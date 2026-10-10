@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/terminal"
@@ -68,10 +69,10 @@ type liveTermAttachment interface {
 }
 
 // newLiveTermPaneFn is the attachment creation seam. Production dials the daemon
-// WS PTY stream for (title, repoID, tab); tests swap in a fake factory. Read on
-// the event loop only.
-var newLiveTermPaneFn = func(title, repoID, tabID string, tab, width, height int) liveTermAttachment {
-	return termpane.New(streamDialer(title, repoID, tabID, tab), width, height)
+// WS PTY stream for (session, tab); tests swap in a fake factory.
+// Read on the event loop only.
+var newLiveTermPaneFn = func(s apiclient.StreamSession, tabID string, tab, width, height int) liveTermAttachment {
+	return termpane.New(streamDialer(s, tabID, tab), width, height)
 }
 
 // syncLiveTermPane reconciles the live attachments with current focus, pane
@@ -164,7 +165,7 @@ func (m *home) reconcileLiveTermPanes() {
 // rather than the pane itself (full-screen attach, an active preview); this
 // function only answers whether the pane can stream.
 func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool) {
-	key, title, repoID, tabID, tab, ok := m.liveBindCandidate(p)
+	key, addr, tabID, tab, ok := m.liveBindCandidate(p)
 	if !ok {
 		return "", false
 	}
@@ -188,7 +189,7 @@ func (m *home) bindLiveTermPaneFor(p *store.OpenPane, create bool) (string, bool
 		return key, true
 	}
 	m.closeLiveTermPaneFor(p.ID())
-	tp := newLiveTermPaneFn(title, repoID, tabID, tab, width, height)
+	tp := newLiveTermPaneFn(addr, tabID, tab, width, height)
 	m.liveTerms[p.ID()] = tp
 	m.liveKeys[p.ID()] = key
 	w.SetLive(tp)
@@ -412,19 +413,19 @@ func (m *home) focusedLiveTerm() (liveTermAttachment, *store.OpenPane) {
 	return m.liveTerms[p.ID()], p
 }
 
-// liveBindCandidate resolves a pane to its bind key + stream coordinates (title,
-// repoID, tab), or ok=false when the pane is not eligible for a live attachment
+// liveBindCandidate resolves a pane to its bind key + stream coordinates
+// (the session address — see streamAddress — then tabID, tab), or ok=false when the pane is not eligible for a live attachment
 // (remote instances, not-started/transitional/dead instances, tabs with no
 // session). The key changes whenever the pane, its tab index, or the underlying
 // session name changes, which is exactly when a rebind is needed.
-func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID string, tab int, ok bool) {
+func (m *home) liveBindCandidate(p *store.OpenPane) (key string, addr apiclient.StreamSession, tabID string, tab int, ok bool) {
 	if p == nil {
-		return "", "", "", "", 0, false
+		return "", apiclient.StreamSession{}, "", 0, false
 	}
 	tab = p.Tab()
 	name := liveSessionName(p.Instance(), tab)
 	if name == "" {
-		return "", "", "", "", 0, false
+		return "", apiclient.StreamSession{}, "", 0, false
 	}
 	inst := p.Instance()
 	// Address the stream by the tab's STABLE id (#1738) so a reorder/close can't
@@ -438,7 +439,7 @@ func (m *home) liveBindCandidate(p *store.OpenPane) (key, title, repoID, tabID s
 	// connection forever and could send keystrokes to a different tab after another
 	// client reorders/closes a lower one. Keying on the id makes id adoption itself
 	// a rebind, so the pane reconnects with ?tab_id= the moment one is known.
-	return fmt.Sprintf("%d/%d/%s/%s", p.ID(), tab, name, tabID), inst.Title, m.repoID, tabID, tab, true
+	return fmt.Sprintf("%d/%d/%s/%s", p.ID(), tab, name, tabID), streamAddress(inst, m.repoID), tabID, tab, true
 }
 
 // liveSessionName resolves an (instance, tab) to the tmux session a live

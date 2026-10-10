@@ -573,12 +573,20 @@ func taskPromptTargetLivenessError(title string, liveness session.Liveness, task
 // return the tracked instance's cached agent-server singleton whose ring
 // buffer/subscribers persist.
 func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentServer, *session.Instance, error) {
-	instance, resolvedRepoID, title, err := m.resolveStreamSession(idOrTitle, repoID)
+	return m.agentServerForStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
+}
+
+func (m *Manager) agentServerForStreamTarget(target streamTarget) (session.AgentServer, *session.Instance, error) {
+	instance, resolvedRepoID, title, err := m.resolveStreamTarget(target)
 	if err != nil {
 		return nil, nil, err
 	}
 	if instance == nil {
-		return nil, nil, fmt.Errorf("session %q not found", idOrTitle)
+		name := target.title
+		if name == "" {
+			name = target.stableID
+		}
+		return nil, nil, fmt.Errorf("session %q not found", name)
 	}
 	// Reject a new subscription while a kill is in flight for this session, the
 	// same killsInFlight gate SendPrompt checks (#1632). Streaming previously
@@ -606,7 +614,13 @@ func (m *Manager) agentServerForStream(idOrTitle, repoID string) (session.AgentS
 // while an unscoped Web ID gets first refusal after refresh before legacy title
 // fallback (#2187/#2279 review).
 func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Instance, string, string, error) {
-	target := authoritativeStreamTarget(idOrTitle, repoID)
+	return m.resolveStreamTarget(authoritativeStreamTarget(idOrTitle, repoID))
+}
+
+func (m *Manager) resolveStreamTarget(target streamTarget) (*session.Instance, string, string, error) {
+	if target.idOnly {
+		return m.resolveStreamSessionByIDOnly(target.stableID)
+	}
 	m.mu.Lock()
 	if instance, rid, title := m.trackedStreamSessionLocked(target); instance != nil {
 		m.mu.Unlock()
@@ -620,14 +634,40 @@ func (m *Manager) resolveStreamSession(idOrTitle, repoID string) (*session.Insta
 	return instance, resolvedRepoID, instance.Title, err
 }
 
-// streamTarget makes the route's two authority shapes mutually exclusive. A
-// scoped target can carry only {repo,title}; an unscoped target may carry the
-// stable-id interpretation of the same opaque segment. No resolver phase can
-// accidentally give a foreign global ID precedence over an explicit repo scope.
+// resolveStreamSessionByIDOnly is the by=id shape: the tracked map, then one
+// refresh, then the same id lookup again — and a miss is a refusal. It never
+// consults the title namespace, because the caller has told us the segment is an
+// id: a stale one reinterpreted as a title could open an input stream to a
+// DIFFERENT session (#4760 review).
+func (m *Manager) resolveStreamSessionByIDOnly(id string) (*session.Instance, string, string, error) {
+	if id == "" {
+		return nil, "", "", fmt.Errorf("session id is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if instance, rid := m.trackedSessionByIDLocked(id); instance != nil {
+		return instance, rid, instance.Title, nil
+	}
+	if err := m.refreshLocked(); err != nil {
+		return nil, "", "", err
+	}
+	if instance, rid := m.trackedSessionByIDLocked(id); instance != nil {
+		return instance, rid, instance.Title, nil
+	}
+	return nil, "", "", fmt.Errorf("session with id %q %w", id, errSessionNotFound)
+}
+
+// streamTarget makes the route's authority shapes mutually exclusive. A scoped
+// target can carry only {repo,title}; an unscoped target may carry the
+// stable-id interpretation of the same opaque segment; an id-only target
+// carries no title at all. No resolver phase can accidentally give a foreign
+// global ID precedence over an explicit repo scope, nor a title precedence
+// over an explicit id.
 type streamTarget struct {
 	stableID string
 	title    string
 	repoID   string
+	idOnly   bool
 }
 
 func authoritativeStreamTarget(idOrTitle, repoID string) streamTarget {

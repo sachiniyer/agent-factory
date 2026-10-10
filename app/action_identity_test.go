@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -146,4 +147,25 @@ func TestFailedActionCompletionDoesNotClearSameTitleReplacementOperation(t *test
 				"the old failure must not clear the replacement's own operation")
 		})
 	}
+}
+
+// The interactive WS stream is the other retained-intent path that used to
+// address sessions by title: the pane's dialer and the deferred full-screen
+// attach both outlive the moment the user picked the row, so they must carry
+// the stable id the /v1/sessions/{idOrTitle}/stream resolver already supports
+// — unscoped (empty repo) so the id namespace applies, never repo-scoped where
+// a non-empty repo_id would re-select title addressing.
+func TestStreamAddress_AddressesSessionByStableIDWhenPresent(t *testing.T) {
+	inst := newKillableInstance(t, "worker")
+	require.NotEmpty(t, inst.ID, "test instance should carry a minted stable ID")
+
+	require.Equal(t, apiclient.StreamSession{ID: inst.ID}, streamAddress(inst, "repo-123"),
+		"a session with a stable ID must stream-address by it alone — no title the daemon could fall back to, no repo scope that would select the title namespace")
+}
+
+func TestStreamAddress_LegacyRecordKeepsRepoScopedTitle(t *testing.T) {
+	legacy := &session.Instance{Title: "legacy-row"} // pre-#1195 record: no ID
+
+	require.Equal(t, apiclient.StreamSession{Title: "legacy-row", RepoID: "repo-123"}, streamAddress(legacy, "repo-123"),
+		"a title-addressed stream keeps its repo scope so same-title rows in other repos are not confused")
 }

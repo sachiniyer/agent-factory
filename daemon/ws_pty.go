@@ -96,8 +96,11 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
-	id := r.PathValue("id")
-	repoID := r.URL.Query().Get("repo_id")
+	target, err := streamTargetFromQuery(r.PathValue("id"), r.URL.Query())
+	if err != nil {
+		writeHTTPError(w, r, http.StatusBadRequest, err)
+		return
+	}
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
 		writeHTTPError(w, r, http.StatusBadRequest, err)
@@ -108,7 +111,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, r, http.StatusBadRequest, err)
 		return
 	}
-	as, instance, err := cs.manager.agentServerForStream(id, repoID)
+	as, instance, err := cs.manager.agentServerForStreamTarget(target)
 	if err != nil {
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
@@ -544,9 +547,12 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
 		return
 	}
-	id := r.PathValue("id")
-	repoID := r.URL.Query().Get("repo_id")
-	as, _, err := cs.manager.agentServerForStream(id, repoID)
+	target, err := streamTargetFromQuery(r.PathValue("id"), r.URL.Query())
+	if err != nil {
+		writeHTTPError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	as, _, err := cs.manager.agentServerForStreamTarget(target)
 	if err != nil {
 		writeHTTPError(w, r, http.StatusNotFound, err)
 		return
@@ -560,18 +566,22 @@ func (cs *controlServer) streamInfoHandler(w http.ResponseWriter, r *http.Reques
 	if ep.URL != "" {
 		resp.URL = ep.URL // a remote/container runtime's own authed URL (Phase 4)
 	} else {
-		resp.URL = localStreamPath(id, repoID)
+		resp.URL = localStreamPath(target)
 	}
 	writeHTTPSuccess(w, r, resp)
 }
 
 // localStreamPath builds the relative stream URL for a local session, escaping
-// the id and carrying repo_id through so the client dials the same session the
-// info request named.
-func localStreamPath(id, repoID string) string {
-	p := "/v1/sessions/" + url.PathEscape(id) + "/stream"
-	if repoID != "" {
-		p += "?repo_id=" + url.QueryEscape(repoID)
+// the id and carrying the address shape (repo_id, or by=id) through so the
+// client dials the same session the info request named.
+func localStreamPath(target streamTarget) string {
+	if target.idOnly {
+		return "/v1/sessions/" + url.PathEscape(target.stableID) + "/stream?" +
+			agentproto.StreamAddressQueryParam + "=" + agentproto.StreamAddressByID
+	}
+	p := "/v1/sessions/" + url.PathEscape(target.title) + "/stream"
+	if target.repoID != "" {
+		p += "?repo_id=" + url.QueryEscape(target.repoID)
 	}
 	return p
 }
@@ -599,4 +609,22 @@ func parseTab(raw string) (int, error) {
 		return 0, fmt.Errorf("invalid tab index %q", raw)
 	}
 	return v, nil
+}
+
+// streamTargetFromQuery reads the route's address shape. by=id with a repo_id
+// is contradictory — one names the id namespace, the other the title namespace
+// — so it is refused rather than silently resolved as either.
+func streamTargetFromQuery(idOrTitle string, q url.Values) (streamTarget, error) {
+	repoID := q.Get("repo_id")
+	switch by := q.Get(agentproto.StreamAddressQueryParam); by {
+	case "":
+		return authoritativeStreamTarget(idOrTitle, repoID), nil
+	case agentproto.StreamAddressByID:
+		if repoID != "" {
+			return streamTarget{}, fmt.Errorf("%s=%s cannot be combined with repo_id", agentproto.StreamAddressQueryParam, by)
+		}
+		return streamTarget{stableID: idOrTitle, idOnly: true}, nil
+	default:
+		return streamTarget{}, fmt.Errorf("unknown %s=%q; want %q or none", agentproto.StreamAddressQueryParam, by, agentproto.StreamAddressByID)
+	}
 }
