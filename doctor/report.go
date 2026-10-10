@@ -214,7 +214,7 @@ func renderRows(r *Report, fixMode, verbose bool) []renderRow {
 // and test-residue-dir because the box #4170 was filed from held 7,642 of them.
 func collapsibleFinding(check string) bool {
 	switch check {
-	case "orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home",
+	case "orphaned-process", "escaped-process", "foreign-home-process", "foreign-home-unresolved", "possible-orphan", "runaway-cpu", "stale-temp-home",
 		checkLeakedDaemon, checkDeadSocketHome, checkTestResidueDir:
 		return true
 	default:
@@ -239,7 +239,7 @@ func collapseProcessFindings(findings []Finding, fixMode bool, incomplete []stri
 		partial[check] = true
 	}
 	var rows []renderRow
-	for _, check := range []string{"orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home",
+	for _, check := range []string{"orphaned-process", "escaped-process", "foreign-home-process", "foreign-home-unresolved", "possible-orphan", "runaway-cpu", "stale-temp-home",
 		checkLeakedDaemon, checkDeadSocketHome, checkTestResidueDir} {
 		group := byCheck[check]
 		if len(group) == 0 {
@@ -352,6 +352,10 @@ func collapsedProcessName(check string) string {
 		return "orphaned-processes"
 	case "escaped-process":
 		return "escaped-processes"
+	case "foreign-home-process":
+		return "foreign-home-processes"
+	case "foreign-home-unresolved":
+		return "foreign-home-unresolved"
 	case "possible-orphan":
 		return "possible-orphans"
 	case "runaway-cpu":
@@ -399,6 +403,18 @@ func collapsedProcessDetail(check string, total, unproven, fixable, fixed, faile
 		return strings.Join(parts, ", ")
 	case "escaped-process":
 		return fmt.Sprintf("%s escaped live session pane trees", plural(total, "process", "processes"))
+	case "foreign-home-process":
+		return fmt.Sprintf("%s from another agent-factory home — not attributed to this install", plural(total, "process", "processes"))
+	case "foreign-home-unresolved":
+		// Ownership here is UNPROVEN, not confirmed foreign: a relative
+		// AF_HOME marker is relative to its launching frame, which the
+		// doctor cannot recover, so the detector refused to identify a
+		// specific install. The collapsed row must not assert the definite
+		// "from another agent-factory home" claim the foreign-home-process
+		// row makes — that would state, in the default view, exactly the
+		// conclusion the detector withheld (the same harm the
+		// stale-temp-home hedge exists for).
+		return fmt.Sprintf("%s carry an agent-factory home marker that could not be resolved to a specific install — not attributed to this install", plural(total, "process", "processes"))
 	case "possible-orphan":
 		return fmt.Sprintf("%s belong to dead tmux servers without agent-factory markers", plural(total, "process", "processes"))
 	case "runaway-cpu":
@@ -505,6 +521,10 @@ func collapsedProcessRemediation(check string, fixable int, fixMode bool) string
 		return "rerun with `--verbose` for per-process details; inspect report-only processes manually"
 	case "escaped-process":
 		return "rerun with `--verbose` for details; inspect the live session or stop the process manually"
+	case "foreign-home-process":
+		return "rerun with `--verbose` for per-process details; run `af doctor` with the other AGENT_FACTORY_HOME active to manage them"
+	case "foreign-home-unresolved":
+		return "rerun with `--verbose` for per-process details; the marker is relative, so its home cannot be identified from here"
 	case "possible-orphan":
 		return "rerun with `--verbose` for details; verify ownership before killing anything manually"
 	case "runaway-cpu":
@@ -657,6 +677,10 @@ func findingRemediation(f Finding, fixMode bool) string {
 	switch f.Check {
 	case "escaped-process", "runaway-cpu":
 		return "inspect the live session or stop the process manually"
+	case "foreign-home-process":
+		return "run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually"
+	case "foreign-home-unresolved":
+		return "the AF_HOME marker is relative; inspect the process's launching frame to identify its agent-factory home"
 	case "possible-orphan":
 		return "verify ownership, then kill the process manually if stale"
 	case "orphaned-process":

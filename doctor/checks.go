@@ -635,6 +635,77 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					if capturedPIDs[p.PID] || !observations.stillPresent(p) {
 						continue
 					}
+					// The same foreign-home attribution that the dead-session
+					// arm applies below: on the shared default tmux server a
+					// session name is derived from repo path + title and does
+					// not encode AF_HOME, so a surviving process from another
+					// install can carry a name that now matches one of OUR live
+					// sessions (temporal reuse once that install's session died).
+					// Its AF_HOME proves it is not ours, so report it as such
+					// rather than attributing the escape to this install. The
+					// escaped arm remains report-only either way — no kill path
+					// is added here.
+					home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
+					if homeStatus == proctree.EnvFound {
+						// A relative AGENT_FACTORY_HOME is stamped unchanged by
+						// session/tmux.afHomeDir, so it is relative to the launching
+						// af process's frame, not the doctor's. normalizeHome resolves
+						// a path in THIS process's frame, which would resolve a
+						// relative marker against the directory doctor was invoked
+						// from — collapsing two distinct homes (each launched from a
+						// different working directory with AF_HOME=.af) onto the same
+						// doctor-relative path and letting a genuine foreign escapee
+						// compare equal to ours, falling through as an escapee of this
+						// install. The marker's originating frame is not recoverable
+						// from here, so treat a relative marker as unproven rather
+						// than normalizing it in the current frame: report it under the
+						// foreign-home key without attributing the escape to us.
+						if !filepath.IsAbs(home) {
+							// A relative marker is unproven ownership, not a
+							// confirmed foreign home: the marker's originating
+							// frame is not recoverable from here, so the
+							// collapsed row must not assert the definite "from
+							// another agent-factory home" claim the absolute
+							// arm makes. A distinct check key keeps this out of
+							// the foreign-home-process collapse, whose summary
+							// ("N processes from another agent-factory home")
+							// would otherwise state a conclusion the detector
+							// withheld for a relative marker in the default
+							// (non-verbose) CLI and JSON output.
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-unresolved",
+								Detail: fmt.Sprintf("%s carries live session %s's name but its AF_HOME (%s) "+
+									"is a relative path that cannot be resolved to a specific agent-factory "+
+									"home — not attributed to this install", describeProc(p), name, home),
+							})
+							continue
+						}
+						// Canonicalize both sides through normalizeHome (the same
+						// home-identity normalization checkForeignDaemons uses) rather
+						// than filepath.Clean: Clean is lexical and leaves a symlinked
+						// AGENT_FACTORY_HOME — or macOS /var vs /private/var — comparing
+						// unequal to the same home, which would report a genuine
+						// escapee as foreign. Compare by filesystem identity first
+						// (os.SameFile via sameHome): on a case-insensitive macOS
+						// volume EvalSymlinks preserves the spelling of non-symlink
+						// components, so ".Agent-Factory" and ".agent-factory" are the
+						// same directory but compare unequal as normalized strings;
+						// os.SameFile sees through the case difference and keeps a
+						// genuine same-home escapee off the foreign-home report.
+						if !sameHome(home, ctx.opts.ConfigDir) {
+							// A distinct check key keeps this out of the escaped-process
+							// collapse, whose row ("N processes escaped live session
+							// pane trees") would re-attribute a foreign process to this
+							// install in the default (non-verbose) CLI and JSON output.
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-process",
+								Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
+									"agent-factory home (%s) — not attributed to this install",
+									describeProc(p), name, home),
+							})
+							continue
+						}
+					}
 					report.addAdvisoryFinding(Finding{
 						Check: "escaped-process",
 						Detail: fmt.Sprintf("%s escaped the pane tree of live session %s "+
