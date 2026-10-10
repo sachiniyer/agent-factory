@@ -82,6 +82,7 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	t.Cleanup(func() { newSessionGeneration = oldNewSessionGeneration })
 
 	ptyFactory := NewMockPtyFactory(t)
+	workdir := t.TempDir()
 	created := false
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(cmd *exec.Cmd) error {
@@ -95,11 +96,13 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 			if len(cmd.Args) >= 2 && cmd.Args[1] == "show-options" {
 				return nil, fmt.Errorf("no server running")
 			}
+			if strings.Contains(cmd.String(), "pane_start_path") {
+				return []byte(workdir + "\n"), nil
+			}
 			return []byte("output"), nil
 		},
 	}
 
-	workdir := t.TempDir()
 	session := newTmuxSession(toTmuxName("marked", ""), "claude", ptyFactory, cmdExec)
 	require.NoError(t, session.Start(workdir))
 	require.NotEmpty(t, ptyFactory.cmds)

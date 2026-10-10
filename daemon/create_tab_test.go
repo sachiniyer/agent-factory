@@ -133,8 +133,15 @@ func startedLocalTabInstance(t *testing.T, m *Manager, repoID, repoPath, title, 
 	exec := tabNameKeyedExec(map[string]bool{agentName: true})
 	pty := tabPtyFactory{t: t, cmdExec: exec}
 
+	// The worktree must exist on disk: the spawn seam refuses new-session into
+	// a missing directory (#5172), so a fixture-only wt path fails the pre-spawn
+	// stat long before anything these tests exercise.
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wtPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll fixture worktree: %v", err)
+	}
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), title,
+		repoPath, wtPath, title,
 		title+"-branch", "", false, true)
 	if err != nil {
 		t.Fatalf("NewGitWorktreeFromStorage: %v", err)

@@ -33,8 +33,12 @@ func startedMockInstance(t *testing.T, agentName string, extraAlive ...string) *
 	pty := persistPtyFactory{t: t, cmdExec: exec}
 
 	repoPath := "/tmp/tab-lifecycle-" + agentName
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
 	gw, err := git.NewGitWorktreeFromStorage(
-		repoPath, filepath.Join(t.TempDir(), "wt"), agentName,
+		repoPath, worktreeDir, agentName,
 		agentName+"-branch", "", false, true)
 	require.NoError(t, err)
 

@@ -71,10 +71,10 @@ func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
 func TestValidatedAccountSwapFencesLazyVSCodeStartBeforeCommit(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
 	require.NoError(t, inst.ValidateAccountSwap("work"))
-	require.ErrorContains(t, inst.TabSpawnBlocked(), "account swap",
+	require.ErrorContains(t, inst.TabSpawnBlocked(TabKindProcess), "account swap",
 		"a preflighted swap must fence an existing VS Code tab from lazily starting its old-identity editor")
 	require.True(t, inst.EndLimitResume())
-	require.NoError(t, inst.TabSpawnBlocked(),
+	require.NoError(t, inst.TabSpawnBlocked(TabKindProcess),
 		"an aborted pre-commit swap must not strand the lazy-start fence")
 }
 
@@ -684,7 +684,7 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 		"the pending notice must remain deliverable")
 
 	tabSpawn := newPending()
-	require.ErrorContains(t, tabSpawn.TabSpawnBlocked(), "account swap",
+	require.ErrorContains(t, tabSpawn.TabSpawnBlocked(TabKindProcess), "account swap",
 		"a durable identity change must fence new credential-bearing panes until replacement completes")
 }
 

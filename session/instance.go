@@ -689,7 +689,7 @@ func (i *Instance) AttachShellTab(name, tmuxName, tabID string) (*Tab, error) {
 	// a lost race only needs to release the local attach client we opened and drop
 	// the projection; the next reconcile re-adds the tab if it still exists
 	// server-side.
-	killed := !i.started || i.tabSpawnBlockedLocked() != nil
+	killed := !i.started || i.tabSpawnBlockedLocked(TabKindShell) != nil
 	if !killed {
 		i.Tabs = append(i.Tabs, tab)
 		i.touchLocked()

@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,9 @@ type tmuxModel struct {
 	// model makes the shim refuse; the pane then reads as its failOnStart pane.
 	launching map[string]*launchingPane
 	output    map[string]string
+	// startDirs records each spawn's -c dir, reported on the pane_start_path
+	// query as a real tmux stores it (#5172).
+	startDirs map[string]string
 	started   []string
 	killed    []string
 	missing   *exec.ExitError
@@ -54,7 +58,8 @@ func newTmuxModel(t *testing.T, alive ...string) *tmuxModel {
 	m := &tmuxModel{
 		t: t, alive: map[string]bool{}, finished: map[string]finishedPane{},
 		failOnStart: map[string]finishedPane{}, launching: map[string]*launchingPane{}, output: map[string]string{},
-		missing: missing,
+		startDirs: map[string]string{},
+		missing:   missing,
 	}
 	for _, name := range alive {
 		m.alive[name] = true
@@ -130,6 +135,7 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 	case strings.Contains(joined, "new-session"):
 		m.started = append(m.started, name)
 		m.alive[name] = true
+		m.startDirs[name] = argAfter(c.Args, "-c")
 		if pane, ok := m.failOnStart[name]; ok && m.launching[name] == nil {
 			m.finished[name] = pane
 		}
@@ -155,7 +161,14 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 		m.killed = append(m.killed, name)
 		delete(m.alive, name)
 		delete(m.finished, name)
+		delete(m.startDirs, name)
 		return nil, nil
+	}
+	if strings.Contains(joined, "pane_start_path") {
+		if dir, ok := m.startDirs[name]; ok {
+			return []byte(dir + "\n"), nil
+		}
+		return nil, fmt.Errorf("no recorded start path for session %q", name)
 	}
 	if shim := m.launching[name]; shim != nil {
 		// Only a query for pane_dead is the watch asking after the pane. Start
@@ -243,7 +256,11 @@ func scopedInstance(t *testing.T, m *tmuxModel, account string, tabs ...TabData)
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
-	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scope-repo", filepath.Join(t.TempDir(), "wt"), "scope",
+	worktreeDir := filepath.Join(t.TempDir(), "wt")
+	// The spawn seam refuses a missing start directory (#5172), so the mock
+	// worktree must exist on disk for tab spawns to run against it.
+	require.NoError(t, os.MkdirAll(worktreeDir, 0755))
+	gw, err := git.NewGitWorktreeFromStorage("/tmp/4506-scope-repo", worktreeDir, "scope",
 		"scope-branch", "", false, true)
 	require.NoError(t, err)
 	inst := &Instance{
@@ -520,6 +537,10 @@ func TestAddProcessTabWaitsForTheLaunchShimBeforeWatching(t *testing.T) {
 	// that exec fails, which reads as the pane having left the shim.
 	launcher := exec.Command("/bin/sh", "-c",
 		"echo ready; read line; : "+sessionenv.AccountEnvironmentExecMarker+" claude 0 work '' 0 ./slow.sh")
+	// The post-spawn cwd check reads /proc/<pane_pid>/cwd before the tmux
+	// fields — the shim is a real process standing in for the pane root, so it
+	// must actually run inside the worktree it pretends to have spawned into.
+	launcher.Dir = inst.GetWorktreePath()
 	launcher.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	hold, err := launcher.StdinPipe()
 	require.NoError(t, err)
