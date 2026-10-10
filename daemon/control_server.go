@@ -742,7 +742,12 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	}
 	managerDelegated = true
 	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
-	if err != nil {
+	// A committed retained auto-create (#3357) — the absent-target branch
+	// routed through Manager.CreateSession, which provisioned a sandbox but
+	// could not confirm its teardown/startup — lands in the envelope so the
+	// marker survives the net/rpc hop that would otherwise flatten it to a
+	// plain rpc.ServerError string. A genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Status = status

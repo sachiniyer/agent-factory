@@ -14,7 +14,15 @@ type taskPromptDeliveryResult struct {
 // the watch path needs the retained bit to avoid queueing a duplicate.
 func deliverPromptForTaskRPC(req DeliverPromptRequest) (taskPromptDeliveryResult, error) {
 	var resp DeliverPromptResponse
-	if err := callDaemon("DeliverPrompt", req, &resp); err != nil {
+	err := callDaemon("DeliverPrompt", req, &resp)
+	// callDaemon classifies the committed outcome generically off the
+	// embedded MutationOutcome; keep the result on that path — a retained
+	// committed auto-create (#3357) durably recorded its session/workspace, so
+	// the committed error must survive to deliverTaskPromptOutcome (and any
+	// public caller) rather than be swallowed as nil. Only a clean failure has
+	// no result to report. Mirrors CreateSession/KillSession's committed
+	// preservation.
+	if err != nil && !isMutationCommitted(err) {
 		return taskPromptDeliveryResult{}, err
 	}
 	if !resp.DeliveryStatus.Valid() {
@@ -23,5 +31,5 @@ func deliverPromptForTaskRPC(req DeliverPromptRequest) (taskPromptDeliveryResult
 	return taskPromptDeliveryResult{
 		status: resp.Status, deliveryStatus: resp.DeliveryStatus,
 		promptRetained: resp.PromptRetained,
-	}, nil
+	}, err
 }
