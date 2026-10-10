@@ -134,18 +134,31 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	// rather than inferring it from ctx.Err() after CombinedOutput returns: a
 	// pipe-holding descendant can keep CombinedOutput blocked past the deadline,
 	// making ctx.Err() == DeadlineExceeded even when the process self-terminated
-	// before the context fired. We set the flag only when Kill succeeds, but
-	// Kill returning nil does not prove the context caused the exit — on Linux
-	// and macOS a signal delivered to an already-exited (zombie) process is
-	// accepted and returns nil, so a non-zero self-exit that races the deadline
-	// can still set ctxKilled. The classification below therefore gives a real
-	// exit code (ExitCode >= 0) precedence over ctxKilled, and for signal deaths
-	// (ExitCode < 0) checks the actual signal: only a SIGKILL death (the signal
-	// the context's Cancel sends) is a genuine context-killed timeout; a signal
-	// death from a different signal (SIGTERM, OOM, crash) survived the deadline
-	// and its output should be preserved.
+	// before the context fired. We set the flag only when the process was still
+	// alive at Cancel time — not just when Kill returns nil, because Kill on a
+	// zombie (an already-exited process not yet reaped by Wait) also returns nil
+	// on Unix. processExitedBeforeCancel uses Wait4(WNOHANG|WNOWAIT) to probe
+	// whether the process has already exited before Kill, so an external signal
+	// death (SIGKILL, SIGTERM, OOM) that races the deadline does not set
+	// ctxKilled and is correctly reported as a failure with its captured output.
+	// The classification below gives a real exit code (ExitCode >= 0) precedence
+	// over ctxKilled, and for signal deaths (ExitCode < 0) also checks the actual
+	// signal as a secondary guard against the narrow race between the Wait4 probe
+	// and Kill: only a SIGKILL death (the signal the context's Cancel sends) is a
+	// genuine context-killed timeout; a signal death from a different signal
+	// (SIGTERM, OOM, crash) that somehow still sets ctxKilled is reported as a
+	// failure with its output.
 	var ctxKilled atomic.Bool
 	cmd.Cancel = func() error {
+		// If the process has already exited (is a zombie or has been reaped),
+		// the context did not kill it. Wait4(WNOHANG|WNOWAIT) reports the
+		// process state without reaping it, so the exec package's Wait can
+		// still collect the exit status. A non-zero return (zombie) or an
+		// ECHILD error (reaped) means the process is dead; returning
+		// ErrProcessDone tells the exec package the process already finished.
+		if cmd.Process != nil && processExitedBeforeCancel(cmd.Process.Pid) {
+			return os.ErrProcessDone
+		}
 		err := cmd.Process.Kill()
 		if err == nil {
 			ctxKilled.Store(true)
@@ -171,7 +184,13 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 		// process. A signal death from a different signal (SIGTERM, OOM, crash)
 		// that races the deadline can also set ctxKilled (Kill returns nil for a
 		// zombie), but the ExitError retains the original signal — report it as
-		// a failure with any captured output rather than a timeout.
+		// a failure with any captured output rather than a timeout. An external
+		// SIGKILL (OOM killer, kill -9) that races the deadline is handled by
+		// processExitedBeforeCancel in the Cancel function: it probes the
+		// process state before Kill, so a zombie or reaped process does not set
+		// ctxKilled. killedByContextSignal is a secondary guard for the narrow
+		// race between the Wait4 probe and Kill (process exits after the probe
+		// but before Kill reaches it).
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
 			if ctxKilled.Load() && killedByContextSignal(exitErr) {
@@ -192,6 +211,38 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 	report.Pass(sectionRemote, "coder", who)
 }
 
+// processExitedBeforeCancel reports whether the process has already exited
+// before the context's Cancel fires. It uses Wait4 with WNOHANG|WNOWAIT to
+// probe the process state without reaping it, so the exec package's Wait can
+// still collect the exit status. A non-zero return means the process is a
+// zombie (has exited but not been reaped); an ECHILD error means the process
+// has been reaped. In either case the context did not kill the process — it
+// was already dead when the deadline fired — so Cancel should not set
+// ctxKilled and should return ErrProcessDone so the exec package knows the
+// process already finished. A zero return means the process is still running,
+// so the context's Kill is the cause of death and ctxKilled should be set.
+//
+// This distinguishes a genuine context-killed timeout (process was alive when
+// Cancel fired) from an external signal death that races the deadline (process
+// was already a zombie). Without this probe, Kill returns nil for both a live
+// process and a zombie, and the ExitError's SIGKILL is indistinguishable
+// between the context's Kill and an external OOM/kill -9.
+func processExitedBeforeCancel(pid int) bool {
+	var ws syscall.WaitStatus
+	wpid, err := syscall.Wait4(pid, &ws, syscall.WNOHANG|syscall.WNOWAIT, nil)
+	if err != nil {
+		// ECHILD: the process has been reaped (no child to wait for).
+		// Other errors (EINVAL, ENOSYS): can't determine the state; be
+		// conservative and assume the process is still running so Kill
+		// can decide.
+		return err == syscall.ECHILD
+	}
+	// wpid == 0: the process is still running (no state change available).
+	// wpid == pid: the process is a zombie (has exited, not yet reaped).
+	// WNOWAIT leaves the zombie unreaped so the exec package's Wait collects it.
+	return wpid != 0
+}
+
 // killedByContextSignal reports whether exitErr represents a process killed by
 // the signal the context's Cancel sends (os.Process.Kill → SIGKILL on Unix). A
 // non-context signal death (SIGTERM, OOM, crash) that races the deadline can set
@@ -199,6 +250,14 @@ func checkCoderStatus(hooks *config.RemoteHooks, report *Report, timeout, waitDe
 // original signal. Only a SIGKILL death is consistent with the context having
 // killed the process. When exitErr is nil (a pure context error with no
 // ExitError), there is no signal to check and the timeout is genuine.
+//
+// This is a secondary guard: processExitedBeforeCancel in the Cancel function
+// prevents ctxKilled from being set when the process is already a zombie, so
+// an external SIGKILL that races the deadline does not reach this check. But
+// in the narrow race between the Wait4 probe and Kill, a process can exit after
+// the probe returns 0 (alive) and before Kill reaches it — in that window an
+// external signal death sets ctxKilled and the ExitError retains the external
+// signal, which this function distinguishes from the context's SIGKILL.
 func killedByContextSignal(exitErr *exec.ExitError) bool {
 	if exitErr == nil {
 		return true
