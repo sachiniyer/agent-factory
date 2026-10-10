@@ -265,6 +265,9 @@ func (v LifecycleView) Activity() Activity {
 	if v.PendingAccountSwap {
 		data.PendingAccountSwap = &AccountSwapData{}
 	}
+	if v.PendingHandoffMission {
+		data.PendingHandoffMission = "pending"
+	}
 	activity, _ := ClassifyActivity(data)
 	return activity
 }
