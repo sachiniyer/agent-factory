@@ -31,7 +31,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
 		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil),
-		CanKill:                  canKillFor(i.ID, i.inFlightOp),
+		CanKill:                  canKillFor(i.ID, i.inFlightOp, i.pendingAccountSwap != nil),
 		CanHandoff:               i.canHandoffLocked(),
 		CurrentAgent:             i.currentAgentNameLocked(),
 		IsRoot:                   IsReservedTitle(i.Title),
