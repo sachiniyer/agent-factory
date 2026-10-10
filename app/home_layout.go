@@ -168,8 +168,16 @@ func newlyAutoHiddenPane(previousVisible, nextVisible, openPanes []*store.OpenPa
 // fragments stay ordered worst-first, so what survives is which pane went away,
 // and since #2618 the clipped tail is readable in full with `E details`.
 func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
-	// Suppress the auto-hide notice during a config-agent spawn (handleConfigAgent).
-	if p == nil || paneCount <= 1 || m.configAgentSpawning {
+	// Suppress the auto-hide notice during a config-agent spawn
+	// (handleConfigAgent) and an account-login takeover (handleAccountLogin):
+	// both raise a deliberately-persistent "Starting…" notice via
+	// setTransientNotice with no auto-clear, and an unsuppressed auto-hide
+	// notice would replace it and bump transientNoticeID past the spawn's
+	// captured noticeID during the daemon round trip (#4955 and its
+	// account-login twin). The suppressed path never sets
+	// pendingPaneAutoHideStatus, so consumePaneAutoHideStatus's existing
+	// `pending == ""` early-return skips the second raise as well.
+	if p == nil || paneCount <= 1 || m.configAgentSpawning || m.accountLoginInFlight {
 		return
 	}
 	subject := "a pane is hidden"
