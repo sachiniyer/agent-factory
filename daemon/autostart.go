@@ -227,6 +227,16 @@ func InstallAutostart() (string, error) {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return "", fmt.Errorf("failed to create systemd user directory: %w", err)
 		}
+		// AGENT_FACTORY_HOME is captured verbatim into the unit's Environment=
+		// line below, so a relative value would survive into the daemon the unit
+		// starts — where config.ConfigDirFor now refuses it, leaving Restart=on-
+		// failure to retry a unit that can never come up. Validate it here the way
+		// the macOS branch does (config.GetConfigDir refuses a relative home), so
+		// the install fails fast with a clear error rather than writing a unit the
+		// daemon cannot start.
+		if _, err := config.GetConfigDir(); err != nil {
+			return "", fmt.Errorf("failed to get config directory: %w", err)
+		}
 		unitPath := filepath.Join(dir, autostartUnitName)
 		content := systemdAutostartUnit(execPath, os.Getenv("PATH"), os.Getenv("SHELL"), os.Getenv("AGENT_FACTORY_HOME"))
 		// Refuses a symlinked unit path, and removeAutostartUnitFile refuses the

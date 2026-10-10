@@ -173,6 +173,40 @@ func ConfigDirFor(envDir string) (string, error) {
 		if strings.HasPrefix(envDir, "~") && expanded == envDir {
 			return "", fmt.Errorf("failed to expand home directory in AGENT_FACTORY_HOME %q", envDir)
 		}
+		// AGENT_FACTORY_HOME must be absolute (a real path or ~/…). It does
+		// not stay in this process: it is read by child processes — the daemon
+		// and the session pane shim — whose working directory is not the
+		// setter's, so a relative value survives into those children and is
+		// resolved against whichever cwd they happen to run in. For account
+		// scoping that means `--account work` resolves the account directory
+		// (and thus the injected CODEX_HOME / CLAUDE_CONFIG_DIR /
+		// GEMINI_CLI_HOME credential root) against an attacker-controllable
+		// cwd, silently substituting a planted same-named account for the
+		// operator's real one. Refusing the relative spelling at the source
+		// closes both the daemon/pane-cwd disagreement and the run-af-from-
+		// inside-the-clone shapes; a boundary-site filepath.Abs cannot (the
+		// pane's cwd is the hostile worktree, so absolutizing there bakes the
+		// planted path). Same boundary class as ResolveDaemonHostPath below,
+		// and the sibling accountMountSource / vscodeSocketPath defenses.
+		if !filepath.IsAbs(expanded) {
+			return "", fmt.Errorf("AGENT_FACTORY_HOME %q must be an absolute path (or start with ~/): it is read by child processes (the session pane shim, the daemon) whose working directory is not the setter's, so a relative value silently resolves account-by-name selection against an attacker-controllable cwd and substitutes a planted same-named account", envDir)
+		}
+		// Syntactic absoluteness is not enough: a per-process procfs magic
+		// symlink such as /proc/self/cwd is absolute to filepath.IsAbs yet
+		// resolves relative to the READING process. AGENT_FACTORY_HOME is read
+		// by the daemon and the session pane shim (which tmux starts in the
+		// session worktree), so each child resolves /proc/self/cwd against its
+		// own cwd — re-introducing the cwd-dependence the IsAbs guard above
+		// closes. An operator who sets AGENT_FACTORY_HOME=/proc/self/cwd/.af
+		// from the operator's directory resolves the real account there, while
+		// the pane resolves the same accepted value to an attacker-controlled
+		// <worktree>/.af and injects a planted same-named account — the same
+		// silent substitution a relative home enables. /proc/<pid>/cwd with a
+		// concrete pid is stable and stays valid; only the per-process
+		// /proc/self and /proc/thread-self aliases are rejected here.
+		if isProcessRelativeProcfsPath(expanded) {
+			return "", fmt.Errorf("AGENT_FACTORY_HOME %q resolves through a per-process procfs symlink (/proc/self or /proc/thread-self): it is read by child processes whose working directory is not the setter's, so the value resolves to a different physical directory in each reader and re-introduces the cwd-dependence the absolute-path guard closes; use a concrete path or /proc/<pid>/cwd instead", envDir)
+		}
 		return expanded, nil
 	}
 
@@ -181,6 +215,27 @@ func ConfigDirFor(envDir string) (string, error) {
 		return "", fmt.Errorf("failed to get config home directory: %w", err)
 	}
 	return filepath.Join(homeDir, ".agent-factory"), nil
+}
+
+// isProcessRelativeProcfsPath reports whether path references a per-process
+// procfs magic symlink — /proc/self or /proc/thread-self on Linux — that
+// resolves relative to the process reading it rather than to a stable
+// directory. Such a path is syntactically absolute (filepath.IsAbs accepts
+// it) but is not stable across the child-process boundary ConfigDirFor
+// protects: the daemon and the session pane shim both read AGENT_FACTORY_HOME
+// from different processes (the pane runs in the session worktree), so each
+// resolves /proc/self/cwd/... against its own cwd and lands on a different
+// physical directory. A concrete /proc/<pid>/cwd is stable for a given pid
+// and is NOT rejected; only the per-process self/thread-self aliases are.
+func isProcessRelativeProcfsPath(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "/proc/self" || strings.HasPrefix(clean, "/proc/self/") {
+		return true
+	}
+	if clean == "/proc/thread-self" || strings.HasPrefix(clean, "/proc/thread-self/") {
+		return true
+	}
+	return false
 }
 
 // Config represents the application configuration. Every field carries both

@@ -515,57 +515,50 @@ func TestVSCodeSocket_OpenVSCodeServesTheWorktree(t *testing.T) {
 	}
 }
 
-// TestVSCodeSocket_RelativeAFHomeStillReachable is the codex P1 on #1883, and the
-// bug is one the socket transport introduced: the endpoint became a PATH, and a
-// path is meaningless without the cwd it is resolved against.
+// TestVSCodeSocket_RelativeAFHomeRefused sits at the intersection of the #1873
+// socket-transport hazard and the credential-root cwd-dependence closed at the
+// config layer: the endpoint became a PATH, and a path is meaningless without
+// the cwd it is resolved against.
 //
 // GetConfigDir hands back AGENT_FACTORY_HOME as written — tilde expanded, not
-// absolutized — so a relative home yields a relative socket path. The daemon would
-// dial it against the DAEMON's cwd while the editor bound it against cmd.Dir, the
-// session's worktree: two different files, and the child's parent directory does
-// not exist there, so it dies on bind and the pane never comes up. A port number
-// was immune, which is why nothing caught this before the endpoint moved.
+// absolutized — so a relative home once yielded a relative socket path. The
+// daemon would dial it against the DAEMON's cwd while the editor bound it against
+// cmd.Dir, the session's worktree: two different files, and the child's parent
+// directory does not exist there, so it dies on bind and the pane never comes up.
+// A port number was immune, which is why nothing caught this before the endpoint
+// moved.
 //
-// The test's own cwd is deliberately NOT the worktree — that separation is the
-// whole point, and without it the bug hides.
-func TestVSCodeSocket_RelativeAFHomeStillReachable(t *testing.T) {
-	// SocketTempDir, not t.TempDir, for the cwd: the relative home resolves
-	// AGAINST it, so a long cwd pushes the socket past sun_path and the editor's
-	// own length guard (correctly) rejects it before this test can exercise what
-	// it is actually about — that a relative home resolves to an absolute path.
-	// The cwd's length is incidental here; its separation from the worktree is not.
-	t.Chdir(testguard.SocketTempDir(t))       // the daemon's cwd
+// ConfigDirFor now REFUSES a relative AGENT_FACTORY_HOME at the source: the
+// credential-root cwd-dependence that this same spelling creates at the
+// account-selection boundary (a relative home resolves `--account work` against
+// an attacker-controllable cwd and substitutes a planted same-named account) is
+// closed at the input rather than patched at each downstream boundary, so the
+// editor-socket boundary never sees a relative home. The filepath.Abs in
+// vscodeSocketDirPath stays as defense-in-depth, but relative homes no longer
+// reach it. This test pins the refusal: an operator who spells the home
+// relatively gets a named error pointing at the knob, not a silently-broken (or
+// silently-substituted) session.
+func TestVSCodeSocket_RelativeAFHomeRefused(t *testing.T) {
+	t.Chdir(testguard.SocketTempDir(t))       // the daemon's cwd; irrelevant now, but kept to pin the refusal is at the input, not the cwd
 	t.Setenv("AGENT_FACTORY_HOME", "af-home") // relative, as an operator may write it
 
-	binary := writeFakeVSCodeBinary(t, "code-server", nil)
-	v := newVSCodeSupervisor()
-	v.configuredBinary = func() string { return binary }
-	v.startGrace = 10 * time.Second
-	v.cooldown = 10 * time.Millisecond
-	t.Cleanup(v.Stop)
+	if _, err := vscodeSocketDir(); err == nil {
+		t.Fatalf("vscodeSocketDir accepted a relative AGENT_FACTORY_HOME; ConfigDirFor should refuse it " +
+			"(the config layer rejects a relative home so credential-root selection can no longer resolve " +
+			"against an attacker-controllable cwd)")
+	} else if !strings.Contains(err.Error(), "AGENT_FACTORY_HOME") || !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("error %q does not name AGENT_FACTORY_HOME and require an absolute path; the operator needs "+
+			"the knob spelled out to fix it", err)
+	}
 
-	worktree := t.TempDir() // NOT the daemon's cwd
-	ep, err := v.ensureServer("repo/session", worktree)
-	if err != nil {
-		t.Fatalf("the editor would not start under a relative AGENT_FACTORY_HOME: %v", err)
-	}
-	if !filepath.IsAbs(ep.SocketPath) {
-		t.Fatalf("the editor endpoint %q is relative; the daemon and the child resolve it "+
-			"against different directories", ep.SocketPath)
-	}
-	// The endpoint is real and OURS: dial it the way the proxy does.
-	client := &http.Client{Transport: ep.Transport, Timeout: 5 * time.Second}
-	resp, err := client.Get(vscodeUpstreamURL + "/")
-	if err != nil {
-		t.Fatalf("the editor is unreachable on %s: %v", ep.SocketPath, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("reading the response: %v", err)
-	}
-	if !strings.Contains(string(body), fakeVSCodeMarker) {
-		t.Fatalf("the endpoint is not served by our editor: %q", body)
+	// The boundary itself — vscodeSocketDirPath — must agree, so the error
+	// surfaces everywhere the socket directory is resolved (sweep discovery,
+	// ensureServer). A second spelling that disagrees would let the editor
+	// start through one path while the other path refuses.
+	if _, err := vscodeSocketDirPath(); err == nil {
+		t.Fatalf("vscodeSocketDirPath accepted a relative AGENT_FACTORY_HOME; the two socket-dir spellings disagree")
+	} else if !strings.Contains(err.Error(), "AGENT_FACTORY_HOME") {
+		t.Errorf("vscodeSocketDirPath error %q does not name AGENT_FACTORY_HOME", err)
 	}
 }
 

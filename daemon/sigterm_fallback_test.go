@@ -979,23 +979,36 @@ func TestPidBelongsToThisHome_TestBinaryNotExcluded(t *testing.T) {
 }
 
 // TestPidBelongsToThisHome_RelativeHomeResolvedAgainstDaemonCwd pins the
-// recorded-PID classifier's frame for a RELATIVE AGENT_FACTORY_HOME. Two
-// daemons launched with the same relative value ("rel") from DIFFERENT
+// recorded-PID classifier's frame for a RELATIVE AGENT_FACTORY_HOME carried by a
+// daemon. Two daemons launched with the same relative value ("rel") from DIFFERENT
 // directories serve different homes; resolving both against the CALLER's cwd
 // (verifyScopedDaemon's canonicalDir) labelled the foreign one "ours" and let a
-// stale PID file signal it. classifyDaemonHome now resolves a relative home
-// against the DAEMON's own working directory, so the daemon sharing the
-// caller's cwd is ours and the one launched from elsewhere is foreign.
+// stale PID file signal it. classifyDaemonHome resolves a relative home against
+// the DAEMON's own working directory, so the daemon sharing the caller's cwd is
+// ours and the one launched from elsewhere is foreign.
+//
+// config.ConfigDirFor now REFUSES a relative AGENT_FACTORY_HOME for the CALLER, so
+// the caller's home is the ABSOLUTE <callerCwd>/rel (resolved before the classifier
+// runs). The DAEMONS still carry the relative "rel" — the case this test exists
+// for: a daemon started by an older af (or any process) with a relative home must
+// still be classified in its own frame so a stale PID file on a same-UID foreign
+// daemon is not signalled. The classifier's daemon-side relative resolution is
+// the load-bearing logic; the caller-side refusal just means the caller reaches
+// it with an absolute wantHome.
 func TestPidBelongsToThisHome_RelativeHomeResolvedAgainstDaemonCwd(t *testing.T) {
 	if _, err := os.Stat("/proc"); err != nil {
 		t.Skip("scoping by AF home needs /proc")
 	}
-	// The caller is on a RELATIVE home; our wantHome resolves against OUR cwd.
+	// The caller's home is the ABSOLUTE form of the same path the "ours" daemon
+	// resolves to from its own cwd: <callerCwd>/rel. config.ConfigDirFor would
+	// refuse the bare relative "rel" the caller used to spell, so the caller
+	// now spells the absolute equivalent that the daemon-side resolution must
+	// still reproduce from the daemon's relative env + cwd.
 	callerCwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("get caller cwd: %v", err)
 	}
-	t.Setenv("AGENT_FACTORY_HOME", "rel")
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(callerCwd, "rel"))
 
 	// Binary outside /tmp/Test* so isTestBinaryArgs never fires and the test
 	// isolates the cwd-frame variable.

@@ -439,8 +439,12 @@ func dockerAccountMount(accountName, source string, relabel bool) ([]string, err
 //
 // ABSOLUTE, always. Docker reads a relative bind source by its own rules — it is
 // not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
-// (a supported configuration) would bind something that is not the account, or
-// create a volume named after the path.
+// would bind something that is not the account, or create a volume named after
+// the path. config.ConfigDirFor now refuses a relative home at the source (the
+// same spelling resolves account-by-name selection against an attacker-
+// controllable cwd at the credential boundary), so an account.Dir reaching here is
+// already absolute; filepath.Abs stays as defense-in-depth — an account.Dir from
+// before the refusal or any future regression still yields an absolute source.
 //
 // One definition, shared by the code that BUILDS the mount and by the runtime
 // verification that later proves that mount is the one the kernel installed
