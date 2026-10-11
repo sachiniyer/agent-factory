@@ -148,23 +148,3 @@ func TestArchiveSession_RefusesAnUnprovenOccupiedDestination(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "not af's", string(data))
 }
-
-// Restoring a row archived with its worktree already gone keeps the pre-#5102
-// behavior in this slice: the relocation claim finds nothing to move back and
-// restore refuses, leaving the row archived, flagged, and its branch intact.
-// Rebuilding it from the branch is deferred to #5150.
-func TestRestoreArchived_VanishedWorktreeStillRefuses(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	inst, wtPath := registerGoneWorktree(t, manager, repoID, repoPath, "vanished")
-	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "vanished", RepoID: repoID})
-	require.NoError(t, err)
-
-	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "vanished", RepoID: repoID})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), wtPath)
-	assert.Equal(t, session.LiveArchived, inst.GetLiveness())
-	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
-	missing, _ := inst.WorktreeMissing()
-	assert.True(t, missing, "a refused restore must not clear the flag")
-	requireBranchExists(t, repoPath, "af/vanished")
-}

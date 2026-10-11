@@ -85,3 +85,38 @@ func (i *Instance) ReturnWorktreeClaimUnverified(claim git.RelocationClaim) {
 		gw.ReturnClaimUnverified(claim)
 	}
 }
+
+// RebuildAbsentArchivedWorktree restores an archived session whose worktree
+// is conclusively absent — deleted outside af, before or after the archive
+// (#5102). There are no bytes to move back, only the kept branch, so the record
+// is re-aimed at dest (RepointAbsentWorktreePath, which re-proves the recorded
+// path absent and dest free under relocationMu) and the worktree is checked
+// out there again from the branch, the same rebuild the Lost-recovery respawn
+// performs. It never creates a branch: a branch that is gone fails the rebuild.
+//
+// On a failed rebuild the record is re-aimed back at the recorded path, so the
+// row stays the archived-missing row it was. If dest is no longer absent —
+// a `git worktree add` that failed after creating it — the record stays at
+// dest and still flagged missing, and every later restore then refuses the
+// unverified directory rather than adopting it. The caller persists either
+// outcome. The flag itself is left for the caller to clear once the restore
+// commits.
+func (i *Instance) RebuildAbsentArchivedWorktree(dest string) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore %q: instance has no worktree", i.Title)
+	}
+	orig := gw.GetWorktreePath()
+	if err := gw.RepointAbsentWorktreePath(dest); err != nil {
+		return err
+	}
+	if err := gw.RebuildFromExistingBranch(); err != nil {
+		if backErr := gw.RepointAbsentWorktreePath(orig); backErr != nil {
+			return errors.Join(err, fmt.Errorf("the record now names %s: %w", dest, backErr))
+		}
+		return err
+	}
+	return nil
+}

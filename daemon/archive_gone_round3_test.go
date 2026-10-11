@@ -83,17 +83,27 @@ func TestArchiveSession_FlaggedRowWithARecreatedPathRefusesThenArchivesOnceClear
 	assert.True(t, archived.Worktree.Missing)
 }
 
-// The restore-side twin: a moved-back worktree is one af placed, so a flag on
-// the archived row does not survive the restore.
-func TestRestoreArchived_MovedRestoreClearsAStaleMissingFlag(t *testing.T) {
+// The restore-side twin of the archive refusal above: a flagged archived row
+// whose archive path answers again holds a directory af cannot vouch for, so
+// restore must neither move it back nor start the agent in it (#5102).
+func TestRestoreArchived_FlaggedRowWithAPresentArchiveRefuses(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := seedArchivedSession(t, manager, repoID, repoPath, "stale-restore", "stale-restore")
-	inst.SetWorktreeMissing("tracked worktree path /x does not exist (deleted outside af)")
+	archivedPath := inst.GetWorktreePath()
+	inst.SetWorktreeMissing(session.WorktreeMissingDeletedReason(archivedPath))
 
 	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "stale-restore", RepoID: repoID})
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded as deleted outside af")
+	assert.Contains(t, err.Error(), archivedPath)
+	assert.Equal(t, session.LiveArchived, inst.GetLiveness())
+	assert.Equal(t, session.OpNone, inst.GetInFlightOp())
+	assert.Equal(t, archivedPath, inst.GetWorktreePath(), "nothing was moved")
 	missing, _ := inst.WorktreeMissing()
-	assert.False(t, missing)
+	assert.True(t, missing, "a refusal must not clear the sticky flag")
+	dirty, readErr := os.ReadFile(filepath.Join(archivedPath, "dirty.txt"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "uncommitted-stale-restore", string(dirty))
 }
 
 // On the adopted route the bytes are already in the archive, so the on-archive

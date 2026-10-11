@@ -2,7 +2,9 @@ package session
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -107,4 +109,55 @@ func TestRenameArchived_FlaggedRowWithARecreatedPathRefuses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "unverified", string(data))
 	assert.NoDirExists(t, dest, "nothing may be moved to the renamed path")
+}
+
+// Restore of an archived-missing row rebuilds the worktree from the kept
+// branch at the chosen destination (#5102); a failed rebuild re-aims the record
+// back at the recorded path so the row stays the archived-missing row it was.
+func TestRebuildAbsentArchivedWorktree(t *testing.T) {
+	setup := func(t *testing.T, title string) (*Instance, *git.GitWorktree, string, string) {
+		t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+		repoRoot := initTempGitRepo(t)
+		runRenameGit(t, repoRoot, "commit", "--allow-empty", "-m", "init")
+		wtPath := filepath.Join(filepath.Dir(repoRoot), title)
+		runRenameGit(t, repoRoot, "worktree", "add", "-b", "af/"+title, wtPath)
+		require.NoError(t, os.RemoveAll(wtPath))
+		inst, err := NewInstance(InstanceOptions{Title: title, Path: repoRoot, Program: "claude"})
+		require.NoError(t, err)
+		gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, title, "af/"+title, "", false, true)
+		require.NoError(t, err)
+		inst.gitWorktree = gw
+		inst.liveness = LiveArchived
+		inst.SetWorktreeMissing(WorktreeMissingArchivedReason(wtPath))
+		return inst, gw, repoRoot, wtPath
+	}
+
+	t.Run("rebuilds from the branch at dest", func(t *testing.T) {
+		inst, gw, repoRoot, _ := setup(t, "rebuilt")
+		dest := filepath.Join(filepath.Dir(repoRoot), "rebuilt-restored")
+		require.NoError(t, inst.RebuildAbsentArchivedWorktree(dest))
+		assert.Equal(t, dest, gw.GetWorktreePath())
+		out, err := exec.Command("git", "-C", dest, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+		require.NoError(t, err, string(out))
+		assert.Equal(t, "af/rebuilt", strings.TrimSpace(string(out)))
+	})
+
+	t.Run("a missing branch fails and re-aims back", func(t *testing.T) {
+		inst, gw, repoRoot, wtPath := setup(t, "branchless")
+		runRenameGit(t, repoRoot, "worktree", "prune")
+		runRenameGit(t, repoRoot, "branch", "-D", "af/branchless")
+		dest := filepath.Join(filepath.Dir(repoRoot), "branchless-restored")
+		require.Error(t, inst.RebuildAbsentArchivedWorktree(dest))
+		assert.Equal(t, wtPath, gw.GetWorktreePath())
+		assert.NoDirExists(t, dest)
+	})
+
+	t.Run("a recorded path that exists is not repointed", func(t *testing.T) {
+		inst, gw, repoRoot, wtPath := setup(t, "present")
+		require.NoError(t, os.Mkdir(wtPath, 0o755))
+		dest := filepath.Join(filepath.Dir(repoRoot), "present-restored")
+		require.Error(t, inst.RebuildAbsentArchivedWorktree(dest))
+		assert.Equal(t, wtPath, gw.GetWorktreePath())
+		assert.NoDirExists(t, dest)
+	})
 }
