@@ -281,8 +281,15 @@ function listenerExposureIdentity(w: string): string {
 //      address as [::]:<port>, so channel 1's 0.0.0.0 and channel 2's [::] are
 //      the same listener. normalizeListenHost canonicalizes IPv6 hosts to their
 //      RFC 5952 form (so 0:0:0:0:0:0:0:0 and :: compare equal) and maps the
-//      IPv4/IPv6 wildcards and the empty host (":8443") to the same "0.0.0.0";
-//      a concrete host (loopback, LAN IP) is returned as-is.
+//      empty host (":8443") to the same "0.0.0.0"; a concrete host (loopback,
+//      LAN IP) is returned as-is. The cross-family wildcard equivalence (:: ->
+//      0.0.0.0) is gated on bindSucceeded: on a host with IPV6_V6ONLY the IPv6
+//      and IPv4 wildcards expose different address families, so only a
+//      successful rebind (the daemon bound the configured address and
+//      net.Addr().String() reported the other family) confirms they are the
+//      same bind. Without that confirmation (a require_token flip, or a
+//      failed/deferred rebind) the configured [::] and the serving 0.0.0.0 may
+//      be different sockets, and the forecast and the notice must both surface.
 //   2. Resolved port (bindSucceeded only): a successful rebind resolves the
 //      configured port to the kernel-assigned serving port — :0 (the ephemeral
 //      wildcard) to a concrete port, and a service name (e.g. "http-alt",
@@ -343,7 +350,7 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
   if (!wAddr || !aAddr) {
     return false;
   }
-  if (normalizeListenHost(wAddr.host) !== normalizeListenHost(aAddr.host)) {
+  if (normalizeListenHost(wAddr.host, bindSucceeded) !== normalizeListenHost(aAddr.host, bindSucceeded)) {
     // A successful listener rebind resolves a non-literal configured host (a
     // hostname the validator accepts, e.g. the machine's hostname) to the
     // literal serving address net.Addr().String() reports. The browser cannot
@@ -452,13 +459,34 @@ function splitListenHostPort(addr: string): { host: string; port: string } | nul
 // IPv6 unspecified address ("::") is the all-interfaces wildcard on a
 // dual-stack host and maps to the IPv4 "0.0.0.0" wildcard, matching the
 // long-standing dual-stack equivalence.
-function normalizeListenHost(host: string): string {
+//
+// The cross-family :: -> 0.0.0.0 mapping is gated on bindSucceeded: on a host
+// with IPV6_V6ONLY, [::]:8443 and 0.0.0.0:8443 expose different address
+// families, so only a successful rebind (the daemon bound the configured
+// address and net.Addr().String() reported the other family) confirms they are
+// the same bind. Without that confirmation (a require_token flip, or a
+// failed/deferred rebind) the configured [::] and the serving 0.0.0.0 may be
+// different sockets, so both the forecast and the notice must surface. The
+// within-family canonicalization (RFC 5952 form, IPv4-mapped -> IPv4) is not
+// gated — it is a same-address comparison, not a cross-family equivalence.
+function normalizeListenHost(host: string, bindSucceeded: boolean): string {
   if (host === "") {
     return "0.0.0.0";
   }
   if (host.includes(":")) {
     const v6 = canonicalizeIPv6Host(host);
-    return v6 === "::" ? "0.0.0.0" : v6;
+    // The IPv6 unspecified address ("::") is the all-interfaces wildcard on a
+    // dual-stack host. Map it to the IPv4 "0.0.0.0" wildcard only when
+    // bindSucceeded: a successful rebind confirms the configured and serving
+    // addresses are the same bind (the daemon bound the configured address and
+    // net.Addr().String() reported the other family). On a host with
+    // IPV6_V6ONLY the two families expose different interfaces, so without that
+    // confirmation (a require_token flip, or a failed/deferred rebind) the
+    // configured [::] and the serving 0.0.0.0 may be different sockets.
+    if (v6 === "::") {
+      return bindSucceeded ? "0.0.0.0" : "::";
+    }
+    return v6;
   }
   return host;
 }
@@ -475,6 +503,9 @@ function normalizeListenHost(host: string): string {
 // IP.To4(); a dual-stack net.Listen("tcp", "[::ffff:0.0.0.0]:0") reports
 // "[::]:<port>", and ::ffff:0.0.0.0 canonicalizes to 0.0.0.0 (the IPv4
 // wildcard) which normalizeListenHost already maps to the same value as ::.
+// A zone identifier (%zone, RFC 4007) is stripped before parsing — Go accepts a
+// scoped address like "0:0:0:0:0:0:0:0%lo" but net.Addr().String() drops the
+// zone, so canonicalizing the bare address matches the serving form.
 // Returns the input unchanged when it is not a parseable bare IPv6 address
 // (a hostname or an IPv4 host).
 function canonicalizeIPv6Host(host: string): string {
@@ -486,9 +517,14 @@ function canonicalizeIPv6Host(host: string): string {
   // bytes are zero and bytes 10-11 are 0xffff (mapped) or 0 (compatible). Go's
   // net.IP.To4() collapses both to a 4-byte IPv4, and net.IP.String() emits the
   // dotted-quad, so canonicalizing to the IPv4 form matches the serving
-  // address net.Addr().String() reports for a bind the validator accepts.
+  // address net.Addr().String() reports for a bind the validator accepts. The
+  // all-zeros address (::) is excluded: it is the IPv6 unspecified address (the
+  // wildcard), not an IPv4-compatible address, and normalizeListenHost gates its
+  // cross-family equivalence to 0.0.0.0 on bindSucceeded (on a host with
+  // IPV6_V6ONLY, [::] and 0.0.0.0 expose different address families).
   if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 &&
-      (groups[5] === 0xffff || groups[5] === 0)) {
+      (groups[5] === 0xffff || groups[5] === 0) &&
+      !(groups[5] === 0 && groups[6] === 0 && groups[7] === 0)) {
     const hi = groups[6];
     const lo = groups[7];
     return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
@@ -536,7 +572,16 @@ function canonicalizeIPv6Host(host: string): string {
 // "::ffff:0.0.0.0"). The IPv4 tail occupies the final two 16-bit groups.
 // Returns null for anything that is not a parseable IPv6 address (a hostname or
 // an IPv4 host without a colon).
+//
+// A zone identifier (%zone, RFC 4007 — e.g. "0:0:0:0:0:0:0:0%lo") is stripped
+// before parsing: Go's net.Listen accepts a scoped address but net.Addr().String()
+// drops the zone from the bound address, so canonicalizing the bare address
+// matches the serving form. The zone is never part of the canonical form.
 function parseIPv6Groups(host: string): number[] | null {
+  const pct = host.indexOf("%");
+  if (pct >= 0) {
+    host = host.slice(0, pct);
+  }
   const dbl = host.indexOf("::");
   if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
   let head: string[];

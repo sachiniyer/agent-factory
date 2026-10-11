@@ -7676,7 +7676,7 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded) {
   if (!wAddr || !aAddr) {
     return false;
   }
-  if (normalizeListenHost(wAddr.host) !== normalizeListenHost(aAddr.host)) {
+  if (normalizeListenHost(wAddr.host, bindSucceeded) !== normalizeListenHost(aAddr.host, bindSucceeded)) {
     if (!(bindSucceeded && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
       return false;
     }
@@ -7711,13 +7711,16 @@ function splitListenHostPort(addr) {
   if (colon < 0) return null;
   return { host: addr.slice(0, colon), port: addr.slice(colon + 1) };
 }
-function normalizeListenHost(host) {
+function normalizeListenHost(host, bindSucceeded) {
   if (host === "") {
     return "0.0.0.0";
   }
   if (host.includes(":")) {
     const v6 = canonicalizeIPv6Host(host);
-    return v6 === "::" ? "0.0.0.0" : v6;
+    if (v6 === "::") {
+      return bindSucceeded ? "0.0.0.0" : "::";
+    }
+    return v6;
   }
   return host;
 }
@@ -7726,7 +7729,7 @@ function canonicalizeIPv6Host(host) {
   if (groups === null) {
     return host;
   }
-  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && (groups[5] === 65535 || groups[5] === 0)) {
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && (groups[5] === 65535 || groups[5] === 0) && !(groups[5] === 0 && groups[6] === 0 && groups[7] === 0)) {
     const hi = groups[6];
     const lo = groups[7];
     return `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
@@ -7765,6 +7768,10 @@ function canonicalizeIPv6Host(host) {
   return parts.join(":");
 }
 function parseIPv6Groups(host) {
+  const pct = host.indexOf("%");
+  if (pct >= 0) {
+    host = host.slice(0, pct);
+  }
   const dbl = host.indexOf("::");
   if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
   let head;
