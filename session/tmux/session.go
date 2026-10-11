@@ -188,13 +188,6 @@ type TmuxSession struct {
 	// re-filters the environment before exec, so a value tmux holds and the
 	// allowlist does not admit never reaches the agent.
 	accountLoginEnv []string
-	// injectedEnv holds the NAME=VALUE entries af generated for THIS launch —
-	// today only opencode's OPENCODE_CONFIG pointing at the af-owned config.
-	// They ride the pane environment rather than the command string: a leading
-	// NAME=VALUE assignment is repository-authored text under the
-	// credential-grant predicate, so af's own injection moved off the command
-	// line (#5265 review). Guarded by programMu with program.
-	injectedEnv []string
 	// generatedArgs are the argument words af authored for program, declared so
 	// the account boundary can verify af's output instead of refusing it (#3083,
 	// #3108). Guarded by programMu with program itself, because a launch reads

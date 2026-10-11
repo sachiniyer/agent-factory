@@ -262,13 +262,12 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		if path == "" {
 			return resolved
 		}
-		// The env seam cannot ride the command string: a leading
-		// OPENCODE_CONFIG= assignment is repository-authored text under the
-		// credential-grant predicate, which would strip opencode's own grant
-		// (#5265 review). The af-owned files are written here, and
-		// injectedSessionEnvironment installs the variable on the pane's
-		// environment at launch instead — the same seam, one channel over.
-		return resolved
+		// Prefix, not append: an env assignment must precede the command. tmux
+		// runs the program string through a shell, and both DetectAgentFromCommand
+		// and preflight's shared launch resolver skip leading VAR=VALUE words
+		// (the `env FOO=1 <agent>` wrapper case, #742), so the agent is still
+		// detected at the right token.
+		return "OPENCODE_CONFIG=" + shellQuote(path) + " " + resolved
 	case tmux.ProgramAider:
 		// Aider takes a flag, not a file drop: it has no auto-discovered global
 		// skills folder. A write failure (or a non-af file at our path) yields an
@@ -296,26 +295,4 @@ func injectSystemPrompt(resolved string, target skillTarget) string {
 		return tmux.EnsureDevinWorkspaceTrustSuppressed(resolved)
 	}
 	return resolved
-}
-
-// injectedSessionEnvironment returns the NAME=VALUE entries af generated for
-// the pane this command launches — today only opencode's OPENCODE_CONFIG,
-// which cannot ride the command string: a leading assignment is
-// repository-authored text under the credential-grant predicate, so af's own
-// injection moved to the environment the pane inherits (#5265 review). The
-// entries follow program into the launch through SetLaunchProgram /
-// SetProgramWithEnvironment, and prepareLaunchEnvironment admits their names
-// to the exec shim's extras so the value survives the pane's own re-filter.
-func injectedSessionEnvironment(command string) []string {
-	if tmux.DetectAgentFromCommand(command) != tmux.ProgramOpencode {
-		return nil
-	}
-	if opencodeCarriesConfigEnv(command) {
-		return nil
-	}
-	path, err := ensureOpencodeAfConfig()
-	if err != nil || path == "" {
-		return nil
-	}
-	return []string{"OPENCODE_CONFIG=" + path}
 }

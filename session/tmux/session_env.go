@@ -167,20 +167,19 @@ func (t *TmuxSession) SetAccountShellEnvironmentForAgent(agent, name string) err
 // words, so either half of that tear refuses the launch and the pane exits
 // immediately. The call site pairing them is not enough: it makes the two writes
 // adjacent, not atomic.
-func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountLaunchProof, injectedEnv []string) {
+func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountLaunchProof) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.program = program
 	t.generatedArgs = append([]string(nil), proof.GeneratedArgs...)
 	t.trustedExecutable = proof.TrustedExecutable
-	t.injectedEnv = append([]string(nil), injectedEnv...)
 }
 
 // launchSnapshot reads every field a launch needs in ONE hold, for the same
 // reason SetLaunchProgram writes them in one: Start used to read program through
 // its own lock and the declaration through another, so a rewrite landing between
 // them paired an old command with a new declaration.
-func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool, accountLoginEnv, injectedEnv []string) {
+func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool, accountLoginEnv []string) {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
 	return t.program, sessionenv.AccountLaunchProof{
@@ -191,8 +190,7 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 		t.account,
 		t.accountAgent,
 		t.accountEnvironmentOnly,
-		append([]string(nil), t.accountLoginEnv...),
-		append([]string(nil), t.injectedEnv...)
+		append([]string(nil), t.accountLoginEnv...)
 }
 
 // It SNAPSHOTS rather than taking the program as a parameter: the caller used to
@@ -210,7 +208,7 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 // pieces an absolute-inside-tree answer cannot change (account session env,
 // the scoped default command).
 func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string, []string, []string, string, error) {
-	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv, injectedEnv := t.launchSnapshot()
+	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
 	source := os.Environ()
 	// Two different questions, two classifiers: the credential GRANT is bound
 	// to the shared predicate (only an operator-attributable executable may
@@ -228,10 +226,8 @@ func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string
 	// cannot mistake af's own additions for the operator's and drop them. The
 	// exec shim re-filters os.Environ() against exactly this list immediately
 	// before exec, so a name missing here is a value the agent never sees (#3854).
-	injectedNames := environmentEntryNames(injectedEnv)
-	if len(loginEnv) > 0 || len(injectedNames) > 0 {
-		extra, err = sessionenv.NormalizeExtraNames(append(extra,
-			append(environmentEntryNames(loginEnv), injectedNames...)...))
+	if len(loginEnv) > 0 {
+		extra, err = sessionenv.NormalizeExtraNames(append(extra, environmentEntryNames(loginEnv)...))
 		if err != nil {
 			return "", nil, nil, nil, "", err
 		}
@@ -293,14 +289,7 @@ func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string
 		launchEnv = removeEnvironmentNames(launchEnv, markers)
 		importNames = appendMissingEnvironmentNames(importNames, markers)
 	}
-	// af's generated entries win over the client environment the same way the
-	// account boundary's do: strip their names from the inherited list and
-	// name them for update-environment, then install af's own values below.
-	if len(injectedNames) > 0 {
-		launchEnv = removeEnvironmentNames(launchEnv, injectedNames)
-		importNames = appendMissingEnvironmentNames(importNames, injectedNames)
-	}
-	sessionEnv := append([]string(nil), injectedEnv...)
+	var sessionEnv []string
 	if account != "" {
 		// The login pane's browser-free names go through the SAME three steps as
 		// the account boundary's, and for the same reason: af has to be the one
@@ -355,7 +344,7 @@ func accountSessionBoundaryNames(agent string) []string {
 }
 
 func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
-	_, _, _, account, accountAgent, _, _, _ := t.launchSnapshot()
+	_, _, _, account, accountAgent, _, _ := t.launchSnapshot()
 	if account == "" {
 		return nil
 	}

@@ -70,8 +70,9 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 		{command: "exec -- codex", want: "codex"},
 		{command: "/usr/bin/env codex", want: "codex"},
 		{command: "env codex", want: "codex"},
-		// The one tolerated assignment: the agent's own cloud-mode selector,
-		// whose spelling a checked-in config cannot produce.
+		// Non-resolution assignments are all tolerated: POSIX lookup does not
+		// consult them, and a checked-in config is refused assignment-carrying
+		// overrides at load — only operator layers can spell one (#5265 review).
 		{command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
 		{command: "env CLAUDE_CODE_USE_VERTEX=1 claude", want: "claude"},
 		{command: "GOOGLE_GENAI_USE_VERTEXAI=true gemini", want: "gemini"},
@@ -79,11 +80,11 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 		{command: "/opt/bin/codex"},
 		{command: "exec -- ./codex"},
 		{command: "/usr/bin/env /opt/bin/codex"},
-		{command: "TERM=xterm-256color codex"},
-		{command: "env LANG=C codex"},
-		{command: "LD_PRELOAD=./steal.so codex"},
-		{command: "env -u HOME codex"},
-		{command: "CLAUDE_CODE_USE_BEDROCK=1 codex"},
+		{command: "TERM=xterm-256color codex", want: "codex"},
+		{command: "env LANG=C codex", want: "codex"},
+		{command: "LD_PRELOAD=./steal.so codex", want: "codex"},
+		{command: "env -u HOME codex", want: "codex"},
+		{command: "CLAUDE_CODE_USE_BEDROCK=1 codex", want: "codex"},
 		{command: "PATH=/workspace codex"},
 		{command: "env PATH=/workspace codex"},
 		{command: "env -u PATH codex"},
@@ -101,7 +102,7 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 // attribute to the operator: a bare name whose first PATH hit is an absolute
 // directory outside the session's working directory, or an absolute path
 // outside it. Every spelling that lets the checked-out repository pick the
-// file or the code — a relative path, a command-local environment change, an
+// file — a relative path, a resolution-changing environment mutation, an
 // env wrapper that itself fails attribution, an empty or relative PATH entry
 // ahead of the executable, an absolute path inside workDir — earns no grant,
 // for every supported agent (#5265).
@@ -144,15 +145,19 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 		{name: "env relative", command: "env ./codex"},
 		{name: "exec relative", command: "exec -- ./codex"},
 		{name: "exec absolute", command: "exec -- /opt/codex", want: "codex"},
-		{name: "term assignment", command: "TERM=xterm-256color codex"},
-		{name: "agent home assignment", command: "CODEX_HOME=/tmp/codex-home codex"},
-		{name: "preload assignment", command: "LD_PRELOAD=./steal.so codex"},
+		// Non-resolution assignments keep the grant: the string alone cannot
+		// tell an operator's own override (ANTHROPIC_BASE_URL=… claude) from a
+		// repo-authored one, so checked-in config is refused them at load
+		// instead (config.LoadInRepoConfig, #5265 review).
+		{name: "term assignment", command: "TERM=xterm-256color codex", want: "codex"},
+		{name: "agent home assignment", command: "CODEX_HOME=/tmp/codex-home codex", want: "codex"},
+		{name: "preload assignment", command: "LD_PRELOAD=./steal.so codex", want: "codex"},
 		{name: "cloud selector assignment", command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
 		{name: "cloud selector env assignment", command: "env CLAUDE_CODE_USE_VERTEX=1 claude", want: "claude"},
-		{name: "cloud selector on other agent", command: "CLAUDE_CODE_USE_BEDROCK=1 codex"},
+		{name: "cloud selector on other agent", command: "CLAUDE_CODE_USE_BEDROCK=1 codex", want: "codex"},
 		{name: "trusted env", command: "/usr/bin/env codex", want: "codex"},
-		{name: "env non-resolution assignment", command: "env LANG=C codex"},
-		{name: "env unset", command: "env -u HOME codex"},
+		{name: "env non-resolution assignment", command: "env LANG=C codex", want: "codex"},
+		{name: "env unset non-PATH", command: "env -u HOME codex", want: "codex"},
 		{name: "bare env attributed", command: "env codex", environ: []string{"PATH=" + with}, want: "codex"},
 		{name: "bare env unattributable", command: "env codex", environ: []string{"PATH=."}},
 		{name: "bare env all-absolute no hit", command: "env codex", environ: []string{"PATH=" + without}, want: "codex"},
@@ -210,9 +215,9 @@ func TestGrantAgentForRemoteCommand(t *testing.T) {
 		{name: "relative nested", command: "bin/codex"},
 		{name: "absolute inside workspace", command: filepath.Join(workDir, "codex"), workDir: workDir},
 		{name: "env wrapped relative", command: "env ./codex"},
-		{name: "assignment", command: "TERM=xterm-256color codex"},
-		{name: "env mutation", command: "env -u HOME codex"},
-		{name: "selector on wrong agent", command: "CLAUDE_CODE_USE_BEDROCK=1 codex"},
+		{name: "assignment", command: "TERM=xterm-256color codex", want: "codex"},
+		{name: "env mutation non-PATH", command: "env -u HOME codex", want: "codex"},
+		{name: "selector on wrong agent", command: "CLAUDE_CODE_USE_BEDROCK=1 codex", want: "codex"},
 		{name: "selector on its agent", command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
 		{name: "untrusted env path", command: "/tmp/env codex"},
 		{name: "not an agent", command: "make build"},

@@ -629,6 +629,22 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 					"relative path; set the absolute override in %s if you intend it",
 				prettyPath, key, executable, globalConfigLocation)
 		}
+		// A command-local ENVIRONMENT change is refused on the same line. At
+		// launch the grant predicate sees only a command string, so it cannot
+		// tell LD_PRELOAD=./x.so codex in a checked-in file apart from
+		// ANTHROPIC_BASE_URL=… claude in the operator's own global config —
+		// and a bare deny would strip the second, a documented override
+		// shape. Config load is the one place that knows which layer the
+		// value came from: refuse the mutation here and keep launch
+		// semantics unchanged for operator-authored commands (#5265 review).
+		if sessionenv.AgentCommandSetsEnvironment(value) {
+			return nil, nil, fmt.Errorf(
+				"in-repo config %s: program_overrides.%s sets command-local environment, which af cannot "+
+					"attribute to you rather than this repository — an assignment or env mutation can preload "+
+					"code or redirect the agent's own configuration. A checked-in config may name a bare agent "+
+					"or a relative path with flags; set the environment-bearing override in %s if you intend it",
+				prettyPath, key, globalConfigLocation)
+		}
 	}
 
 	// The same shape warning (#3566), beside the same key check above. This file

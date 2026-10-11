@@ -107,11 +107,6 @@ func TestInRepoProgramOverrideStillAllowsOrdinaryCommands(t *testing.T) {
 	}{
 		{"wrapper command", `{"program_overrides": {"claude": "ionice -c 3 claude"}}`},
 		{"non-agent command", `{"program_overrides": {"claude": "bash"}}`},
-		// An assignment that is NOT a cloud selector is none of this guard's
-		// business — it grants no credential group.
-		{"unrelated assignment", `{"program_overrides": {"claude": "NO_COLOR=1 claude"}}`},
-		// Turning a mode OFF is safety-increasing, never a widening.
-		{"selector explicitly disabled", `{"program_overrides": {"claude": "CLAUDE_CODE_USE_BEDROCK=0 claude"}}`},
 	}
 
 	for _, c := range cases {
