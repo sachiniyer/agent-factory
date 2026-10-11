@@ -104,7 +104,9 @@ func TestUpdatedAtMutations(t *testing.T) {
 		}, func(t *testing.T, i *Instance) {
 			i.ClearLostRestoreFailureAtObservation(AgentObservationGeneration{value: 1})
 		}},
-		{"prompt observation", nil, func(t *testing.T, i *Instance) { i.recordPromptAttemptForObservation(PromptDelivered, clock, nil) }},
+		{"prompt observation", nil, func(t *testing.T, i *Instance) {
+			i.recordPromptAttemptForObservation(PromptDelivered, clock, nil, false)
+		}},
 		{"program swap", func(t *testing.T, i *Instance) { i.started = true }, func(t *testing.T, i *Instance) {
 			_, err := i.SwapAgentProgram("codex", "switch", "", false)
 			require.NoError(t, err)

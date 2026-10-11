@@ -373,7 +373,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		// streak must break here too, not merely fail to extend, or the next
 		// success inside the gap horizon inherits silence nobody watched
 		// (#5221 review).
-		instance.NotePaneCaptureFailed()
+		instance.NotePaneCaptureFailed(epoch)
 		m.dropTaskRunTurnWatch(key)
 		return
 	}
@@ -385,7 +385,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// too: the blind window could hide churn, so the next success must
 	// re-anchor observed silence from its own instant (#5221 review).
 	if !obs.Captured {
-		instance.NotePaneCaptureFailed()
+		instance.NotePaneCaptureFailed(epoch)
 		m.dropTaskRunTurnWatch(key)
 		return
 	}
@@ -398,7 +398,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// the frame could exist, this one needs the moment its knowledge actually
 	// landed. A re-anchored streak means the last frame sat across an
 	// unobserved hole — the watcher pairs frames, so it resets too (#5221 review).
-	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop)) {
+	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop), epoch) {
 		m.dropTaskRunTurnWatch(key)
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
@@ -721,7 +721,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// transport was down, so the next success must re-anchor silence from
 		// its own instant — not inherit a streak across the outage (#5221
 		// review).
-		instance.NotePaneCaptureFailed()
+		instance.NotePaneCaptureFailed(epoch)
 		m.dropTaskRunTurnWatch(key)
 		m.settleRemoteProbeFailure(
 			repoID,
@@ -748,15 +748,17 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	if obs.Captured {
 		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
 		// A re-anchored streak means this frame sat across an unobserved hole —
-		// the watcher pairs frames, so it resets too (#5221 review).
-		if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval)) {
+		// the watcher pairs frames, so it resets too (#5221 review). The epoch
+		// fence inside keeps a pre-boundary frame — captured before a send that
+		// raced the snapshot — from stamping the new window's streak.
+		if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval), epoch) {
 			m.dropTaskRunTurnWatch(key)
 		}
 	} else {
 		// A failed capture is not merely absent evidence — it is a blind
 		// window in which churn could hide, so the streak breaks outright
 		// rather than aging out through the gap horizon (#5221 review).
-		instance.NotePaneCaptureFailed()
+		instance.NotePaneCaptureFailed(epoch)
 		m.dropTaskRunTurnWatch(key)
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)

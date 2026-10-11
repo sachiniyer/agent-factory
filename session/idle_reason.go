@@ -117,6 +117,9 @@ func (d InstanceData) WithoutIdleEvidence() InstanceData {
 }
 
 // RecordPromptAttempt stores the observation made by an actual prompt send.
+// The send carried no readiness proof — a caller whose wait proved the
+// composer idle beforehand goes through SendPromptWithEvidence's proven form
+// so a rebind may keep that idleness as its stillness edge (#5221 review).
 // attemptedAt must be captured before delivery begins, so a pane observation
 // racing the send can still be ordered after it. Invalid local values normalize
 // to honest uncertainty; a zero timestamp establishes no order and is ignored.
@@ -126,7 +129,7 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.recordPromptAttemptLocked(status, attemptedAt)
+	return i.recordPromptAttemptLocked(status, attemptedAt, false)
 }
 
 // recordPromptAttemptForObservation commits only while runtime still owns the
@@ -136,6 +139,7 @@ func (i *Instance) recordPromptAttemptForObservation(
 	status PromptDeliveryStatus,
 	attemptedAt time.Time,
 	runtime *agentObservationRuntime,
+	paneIdleProven bool,
 ) bool {
 	if attemptedAt.IsZero() {
 		return false
@@ -145,11 +149,15 @@ func (i *Instance) recordPromptAttemptForObservation(
 	if i.agentObservation != runtime {
 		return false
 	}
-	return i.recordPromptAttemptLocked(status, attemptedAt)
+	return i.recordPromptAttemptLocked(status, attemptedAt, paneIdleProven)
 }
 
 // recordPromptAttemptLocked stores a prompt boundary. Caller holds i.mu.
-func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time) bool {
+// paneIdleProven carries the send path's own readiness proof: a wait that
+// just confirmed the composer idle knows the pane was not working at the
+// send, which is observed idleness a rebind may keep — unlike a stale churn
+// stamp, it cannot be a static working frame (#5221 review).
+func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemptedAt time.Time, paneIdleProven bool) bool {
 	if !status.Valid() {
 		status = PromptCouldNotConfirm
 	}
@@ -185,12 +193,13 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 		// Post-boundary churn may stand in for the turn only if the pane was
 		// observed still at-or-after the attempt (#5221 review). A first bind
 		// seeds the base at the send — boot/echo churn is the very window the
-		// quiet arm exists to absorb. A rebind never seeds: an old churn
-		// timestamp is not observed idleness — an agent holding a static
-		// mid-turn indicator (amp/opencode) churns nothing while it works —
-		// so the base stays owed until a confirmed-unchanged capture with no
-		// working or waiting content re-earns it (#5221 review).
-		if !rebind {
+		// quiet arm exists to absorb. A rebind seeds only on the send path's
+		// own readiness proof — a stale churn stamp is NOT observed idleness
+		// (an agent holding a static mid-turn indicator churns nothing while
+		// it works), while a wait that just confirmed the composer idle
+		// cannot have passed a working frame. Unproven rebinds keep the base
+		// owed until a confirmed-unchanged capture re-earns it (#5221 review).
+		if !rebind || paneIdleProven {
 			i.taskRunStillBaseAt = attemptedAt
 		} else {
 			i.taskRunStillBaseAt = time.Time{}

@@ -35,8 +35,22 @@ import (
 // went unobserved, which the release arms must not count.
 func observeContinuously(inst *Instance, from time.Time) {
 	for at := from; !at.After(time.Now()); at = at.Add(5 * time.Second) {
-		inst.NotePaneCaptureObserved(at, time.Second)
+		noteCaptureObserved(inst, at, time.Second)
 	}
+}
+
+// noteCaptureObserved stamps a successful capture for tests against the
+// instance's CURRENT epoch — production callers pass the epoch they sampled
+// before their snapshot, which is precisely what the stamp's fence checks.
+func noteCaptureObserved(inst *Instance, at time.Time, interval time.Duration) bool {
+	_, epoch := inst.InFlightOpAndEpoch()
+	return inst.NotePaneCaptureObserved(at, interval, epoch)
+}
+
+// noteCaptureFailed is the same test convenience for a failed probe.
+func noteCaptureFailed(inst *Instance) {
+	_, epoch := inst.InFlightOpAndEpoch()
+	inst.NotePaneCaptureFailed(epoch)
 }
 
 // taskRunSession returns a task-spawned session with its run in flight,
@@ -409,7 +423,7 @@ func TestTaskRunStillEdgeRetiresCandidateOnBlindWindow(t *testing.T) {
 	// A failed capture inside the candidate's window ends the run — the
 	// blind interval could hide the churn that proves it was a pause.
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second), epoch))
-	inst.NotePaneCaptureFailed()
+	noteCaptureFailed(inst)
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second+taskRunStillGrace), epoch),
 		"the failed capture retires the candidate; this frame re-opens it")
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second+taskRunStillGrace+time.Second), epoch))
@@ -418,9 +432,9 @@ func TestTaskRunStillEdgeRetiresCandidateOnBlindWindow(t *testing.T) {
 
 	// The same holds for a stall past the gap horizon: the re-anchor clears
 	// the candidate before this frame's still stamp re-opens it.
-	inst.NotePaneCaptureObserved(t1.Add(30*time.Second), time.Second)
+	noteCaptureObserved(inst, t1.Add(30*time.Second), time.Second)
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second), epoch))
-	inst.NotePaneCaptureObserved(t1.Add(40*time.Second+2*paneObservationSlack), time.Second)
+	noteCaptureObserved(inst, t1.Add(40*time.Second+2*paneObservationSlack), time.Second)
 	require.True(t, inst.taskRunStillCandidateAt.IsZero(),
 		"a re-anchored streak clears the candidate it straddled")
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second+2*paneObservationSlack), epoch))
@@ -769,7 +783,7 @@ func TestTaskRunSilentArmDoesNotRideOutBoot(t *testing.T) {
 	inst := taskRunSession(t)
 	// Recent attempt, no churn — the 30s quiet arm can't fire either.
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
-	inst.NotePaneCaptureObserved(time.Now(), time.Second)
+	noteCaptureObserved(inst, time.Now(), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
@@ -823,7 +837,7 @@ func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
 	// The first post-restart capture lands (request-start stamp). Only now
 	// does the quiet clock have a floor — one unchanged frame cannot satisfy
 	// the whole 30s window.
-	reloaded.NotePaneCaptureObserved(time.Now(), time.Second)
+	noteCaptureObserved(reloaded, time.Now(), time.Second)
 	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveRunning)))
 	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, reloaded.TaskRunActive(),
@@ -865,8 +879,8 @@ func TestTaskRunQuietArmRebasesAfterObservationGap(t *testing.T) {
 
 	// The poll watched from the send through t0+40s, then went dark — failed
 	// snapshots or a stalled loop — long past the stall horizon.
-	inst.NotePaneCaptureObserved(t0.Add(40*time.Second), time.Second)
-	inst.NotePaneCaptureObserved(time.Now(), time.Second)
+	noteCaptureObserved(inst, t0.Add(40*time.Second), time.Second)
+	noteCaptureObserved(inst, time.Now(), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
@@ -896,7 +910,7 @@ func TestTaskRunQuietArmPreservesScheduledBackstopCadence(t *testing.T) {
 		time.Now().Add(-backstop),
 		time.Now(),
 	} {
-		inst.NotePaneCaptureObserved(at, backstop)
+		noteCaptureObserved(inst, at, backstop)
 	}
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
@@ -920,7 +934,7 @@ func TestTaskRunArmsHoldAfterObservationGoesStale(t *testing.T) {
 	// One confirmed capture a minute back, then nothing that counts — failed
 	// probes leave no stamp. Churn-plus-grace is long satisfied on the
 	// calendar, but the observation is stale.
-	inst.NotePaneCaptureObserved(t0.Add(time.Minute), time.Second)
+	noteCaptureObserved(inst, t0.Add(time.Minute), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
@@ -944,8 +958,8 @@ func TestTaskRunSilentArmRebasesAfterObservationGap(t *testing.T) {
 
 	// One post-attempt capture, then the loop went dark past the stall
 	// horizon — a hole the pane could have churned inside.
-	inst.NotePaneCaptureObserved(t0, time.Second)
-	inst.NotePaneCaptureObserved(time.Now(), time.Second)
+	noteCaptureObserved(inst, t0, time.Second)
+	noteCaptureObserved(inst, time.Now(), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
@@ -968,11 +982,11 @@ func TestTaskRunFailedCaptureBreaksObservationStreak(t *testing.T) {
 
 	backstop := 30 * time.Second
 	base := time.Now().Add(-50 * time.Second)
-	inst.NotePaneCaptureObserved(base, backstop)
-	inst.NotePaneCaptureFailed()
+	noteCaptureObserved(inst, base, backstop)
+	noteCaptureFailed(inst)
 	// The straddling success lands 30s after the anchor — under the 90s gap
 	// horizon, so an unbroken streak would still satisfy churn+30s quiet.
-	inst.NotePaneCaptureObserved(base.Add(backstop), backstop)
+	noteCaptureObserved(inst, base.Add(backstop), backstop)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
@@ -991,12 +1005,12 @@ func TestNotePaneCaptureObservedHonorsPriorExpiryAcrossCadence(t *testing.T) {
 	inst := taskRunSession(t)
 	t0 := time.Now()
 
-	inst.NotePaneCaptureObserved(t0, 30*time.Second) // backstop probe: expiry t0+40s
-	require.False(t, inst.NotePaneCaptureObserved(t0.Add(29*time.Second), time.Second),
+	noteCaptureObserved(inst, t0, 30*time.Second) // backstop probe: expiry t0+40s
+	require.False(t, noteCaptureObserved(inst, t0.Add(29*time.Second), time.Second),
 		"inside the expiry the slower cadence declared, a faster one must not rebase")
 	// The live capture's own expiry is t0+29s+11s = t0+40s — a capture past
 	// it IS a hole regardless of which cadence declares the judgment.
-	require.True(t, inst.NotePaneCaptureObserved(t0.Add(41*time.Second), time.Second),
+	require.True(t, noteCaptureObserved(inst, t0.Add(41*time.Second), time.Second),
 		"past the declared expiry is a hole the streak cannot borrow")
 }
 
@@ -1039,7 +1053,57 @@ func TestTaskRunStillCandidateRetiresOnPromptWait(t *testing.T) {
 func TestNotePaneCaptureObservedSlowerCadenceDoesNotExtendExpiry(t *testing.T) {
 	inst := taskRunSession(t)
 	t0 := time.Now()
-	inst.NotePaneCaptureObserved(t0, time.Second) // live poll: expiry t0+11s
-	require.True(t, inst.NotePaneCaptureObserved(t0.Add(29*time.Second), 30*time.Second),
+	noteCaptureObserved(inst, t0, time.Second) // live poll: expiry t0+11s
+	require.True(t, noteCaptureObserved(inst, t0.Add(29*time.Second), 30*time.Second),
 		"a slower cadence cannot extend the window the previous capture vouched")
+}
+
+// A rebind whose send carried a readiness proof keeps the stillness edge:
+// WaitForReady just proved the composer idle — unlike a stale churn stamp,
+// that observation cannot be a parked working frame (#5221 review).
+func TestTaskRunRebindSeedsOnReadinessProof(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(10*time.Second + taskRunCompletionQuietGrace)
+	inst.mu.Lock()
+	require.True(t, inst.recordPromptAttemptLocked(PromptSentUnverified, t1, true))
+	inst.mu.Unlock()
+	require.Equal(t, t1, inst.taskRunStillBaseAt,
+		"a send proven composer-idle seeds the rebind's stillness edge")
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(5*time.Second), epoch))
+	observeContinuously(inst, t0)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"a readiness-proven redelivery keeps the ordinary churn→quiet contract")
+}
+
+// A capture applied under an epoch the instance has left — a send or
+// lifecycle change landed between the daemon's epoch sample and its streak
+// apply — writes nothing (#5221 review): the pre-boundary frame cannot
+// extend the new boundary's observed streak, and a stale failure cannot
+// break it either.
+func TestNotePaneCaptureStampsFenceOnBoundaryEpoch(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	// A stamp that landed before any boundary re-anchors (first sight).
+	require.True(t, inst.NotePaneCaptureObserved(t0, time.Second, epoch))
+
+	// A boundary lands: the epoch the daemon sampled is now stale, so the
+	// racing capture's stamp and its failure verdict both drop.
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0.Add(time.Second)))
+	require.False(t, inst.NotePaneCaptureObserved(t0.Add(2*time.Second), time.Second, epoch),
+		"a pre-boundary capture must not stamp the new boundary's streak")
+	inst.NotePaneCaptureFailed(epoch) // stale: no-op — the streak survives
+
+	_, epoch = inst.InFlightOpAndEpoch()
+	require.False(t, inst.NotePaneCaptureObserved(t0.Add(3*time.Second), time.Second, epoch),
+		"the in-epoch stamp CONTINUES the live streak — the stale failure could not break it")
 }

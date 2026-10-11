@@ -227,7 +227,10 @@ func WaitForReadyAndSubmitPrompt(
 	}
 
 	if prompt != "" {
-		status, err := instance.SendPromptWithEvidence(prompt, time.Now)
+		// The readiness wait above just proved the composer idle — carry that
+		// proof so a task-run rebind may keep it as the stillness edge its
+		// churn attribution needs (#5221 review).
+		status, err := instance.SendPromptWithEvidence(prompt, time.Now, true)
 		if err != nil {
 			return status, fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}

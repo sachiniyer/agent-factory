@@ -107,8 +107,12 @@ func (i *Instance) AgentObservationCurrent(generation AgentObservationGeneration
 
 // SendPromptWithEvidence starts the attempt timestamp only after any pane
 // snapshot already in flight has completed, then records the delivery verdict
-// before another snapshot can begin.
-func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (PromptDeliveryStatus, error) {
+// before another snapshot can begin. paneIdleProven carries the caller's own
+// pre-send readiness proof: a wait that just confirmed the composer idle is
+// observed idleness a task-run rebind may keep as its stillness edge — while
+// sends with no such wait (RPC, post-respawn) must leave the edge owed
+// (#5221 review).
+func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, paneIdleProven bool) (PromptDeliveryStatus, error) {
 	for {
 		target := i.agentObservationTarget()
 		target.runtime.mu.Lock()
@@ -121,7 +125,7 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 		}
 		attemptedAt := now()
 		status, err := SendPromptWithStatus(target.server, prompt)
-		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime)
+		i.recordPromptAttemptForObservation(status, attemptedAt, target.runtime, paneIdleProven)
 		target.runtime.mu.Unlock()
 		return status, err
 	}
@@ -154,13 +158,24 @@ const paneObservationSlack = 10 * time.Second
 // pairs captures across the hole (a turn watcher's absence clock, a
 // previous-frame latch) must reset with the streak, the same reset a failed
 // capture forces (#5221 review).
-func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration) bool {
+//
+// observedEpoch fences the stamp the same way the churn and stillness writes
+// are fenced: a capture that completed BEFORE a prompt boundary or lifecycle
+// change landed carries no knowledge of the pane under the new state, and a
+// send racing the post-snapshot apply would otherwise let the pre-prompt
+// frame keep the silent arm "fully observed" through a window whose whole
+// turn happened between captures (#5221 review). A mismatched stamp is
+// dropped whole — the next in-epoch capture re-anchors the streak.
+func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration, observedEpoch uint64) bool {
 	if at.IsZero() {
 		return false
 	}
 	maxGap := expectedInterval + paneObservationSlack
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch {
+		return false
+	}
 	reanchored := i.paneObservationExpiresAt.IsZero() || at.After(i.paneObservationExpiresAt)
 	if reanchored {
 		i.paneObservationStreakAt = at
@@ -184,10 +199,14 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 // stale streak from staying live through the blind window. An open stillness
 // candidate dies too: the still run owes CONTINUOUS sight, and the blind
 // interval inside it could hide the churn that proves it was a pause (#5221
-// review).
-func (i *Instance) NotePaneCaptureFailed() {
+// review). observedEpoch fences the clear like the stamp above — a probe
+// outcome about a state the instance already left writes nothing.
+func (i *Instance) NotePaneCaptureFailed(observedEpoch uint64) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch {
+		return
+	}
 	i.lastPaneCaptureAt = time.Time{}
 	i.paneObservationStreakAt = time.Time{}
 	i.paneObservationExpiresAt = time.Time{}

@@ -61,7 +61,7 @@ func TestSnapshotAgentSamplesEpochInsideObservationFence(t *testing.T) {
 
 	deliveryDone := make(chan error, 1)
 	go func() {
-		_, err := inst.SendPromptWithEvidence("ship it", time.Now)
+		_, err := inst.SendPromptWithEvidence("ship it", time.Now, false)
 		deliveryDone <- err
 	}()
 	<-backend.sendStarted
@@ -135,7 +135,7 @@ func TestPromptDeliveryWaitsForSnapshotAndFencesItsApply(t *testing.T) {
 		_, err := inst.SendPromptWithEvidence("ship it", func() time.Time {
 			close(clockCalled)
 			return attemptedAt
-		})
+		}, false)
 		deliveryDone <- err
 	}()
 	<-deliveryStarted
@@ -187,7 +187,7 @@ func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
 	inst.ClearIdleEvidence()
 	deliveryDone := make(chan error, 1)
 	go func() {
-		_, err := inst.SendPromptWithEvidence("continue", time.Now)
+		_, err := inst.SendPromptWithEvidence("continue", time.Now, false)
 		deliveryDone <- err
 	}()
 	select {
