@@ -461,6 +461,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		return
 	}
 	if err != nil {
+		// A transport error is the same blind window a failed capture is: the
+		// streak must break here too, not merely fail to extend, or the next
+		// success inside the gap horizon inherits silence nobody watched
+		// (#5221 review).
+		instance.NotePaneCaptureFailed()
 		return
 	}
 	// A probe that cannot answer is dropped whole — the doc above's own rule.
@@ -752,6 +757,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// If both probes are unanswerable, the last-known liveness is deliberately
 		// retained: connectivity alone cannot distinguish a dead sandbox from a
 		// live one holding unpushed work.
+		//
+		// A probe that cannot answer is ALSO a blind window for the
+		// observed-silence streak: the pane may have churned while the
+		// transport was down, so the next success must re-anchor silence from
+		// its own instant — not inherit a streak across the outage (#5221
+		// review).
+		instance.NotePaneCaptureFailed()
 		m.settleRemoteProbeFailure(
 			repoID,
 			key,
@@ -771,9 +783,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// overruns the tick — is scheduled, not a hole, while a stall past that
 	// slack still rebases the observation streak. A snapshot that answered
 	// without capturing (obs.Captured false — the local backend swallows
-	// transient capture-pane failures into an all-false frame) is no
-	// observation: skipping the stamp leaves lastPaneCaptureAt aging until a
-	// real frame lands and rebases the streak (#5221 review).
+	// transient capture-pane failures into an all-false frame) is a blind
+	// window, not a quiet frame: it breaks the streak outright so the next
+	// success re-anchors silence from its own instant (#5221 review).
 	if obs.Captured {
 		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
 		instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval))
