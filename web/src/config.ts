@@ -264,9 +264,20 @@ function isListenerExposureWarning(w: string): boolean {
 // versions of the same exposure would render. listenerExposureDedup handles that
 // relaxation; see its comment for the constraint that keeps the failed-rebind
 // case (two different concrete addresses) distinct.
+//
+// The address is quoted with Go's %q, which escapes a literal " as \" (and \ as
+// \\). An IPv6 zone identifier can contain a " (e.g. [::%foo"bar]:0), and a
+// non-greedy [^"]+ would stop at the escaped quote, leaving a truncated identity
+// that splitListenHostPort cannot parse and preventing dedup. The regex
+// (?:[^"\\]|\\.)* matches either a non-quote/non-backslash character or a
+// backslash escape (\" or \\), so the closing quote is the real terminator. The
+// captured group is then unescaped (\" → ", \\ → \) to recover the literal
+// address Go's net.Addr().String() reports.
 function listenerExposureIdentity(w: string): string {
-  const m = w.match(/^(\S+) "([^"]+)"/);
-  return m ? `${m[1]} ${m[2]}` : "";
+  const m = w.match(/^(\S+) "((?:[^"\\]|\\.)*)"/);
+  if (!m) return "";
+  const addr = m[2].replace(/\\(.)/g, "$1");
+  return `${m[1]} ${addr}`;
 }
 
 // listenerExposureDedup returns true when a write-side exposure forecast
@@ -337,7 +348,7 @@ function listenerExposureIdentity(w: string): string {
 // Service names the table does NOT carry (http-alt, mysql, … — net.LookupPort
 // reads /etc/services, which is larger than the browser-side fallback) are handled
 // by the same resolved-port relaxation on a successful rebind.
-function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: boolean): boolean {
+function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: boolean, rebindAttempted: boolean): boolean {
   if (writeId === applyId) {
     return true;
   }
@@ -368,7 +379,23 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
     // serving a different address) is preserved: a failed rebind is "deferred",
     // not "applied", so bindSucceeded is false and the strict host comparison
     // keeps two different concrete addresses distinct.
-    if (!(bindSucceeded && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
+    //
+    // The hostname relaxation additionally requires rebindAttempted — positive
+    // evidence that a rebind was actually attempted for this listener on this
+    // save (the saved key is the listener key). A non-listener save (e.g.
+    // network.require_token) does not rebind the listener when the configured
+    // address is unchanged: the daemon only calls bindWebLocked when the
+    // configured address text differs from webConfigAddr. apply_outcome "applied"
+    // for a non-listener key and the absence of a rebind failure warning do not
+    // confirm a rebind — the listener may already be at the configured address,
+    // in which case no bind happened and the serving IP (channel 2) is the
+    // stale DNS resolution from the previous bind. If DNS changed since that
+    // bind, channel 1's hostname forecast names the hostname that will resolve
+    // to a different IP after restart, so suppressing it would hide a distinct
+    // future-state warning. Gating on rebindAttempted (the saved key is the
+    // listener key) ensures the relaxation fires only when the daemon actually
+    // rebound and resolved the hostname at this save's bind time.
+    if (!(bindSucceeded && rebindAttempted && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
       return false;
     }
   }
@@ -721,11 +748,14 @@ function parseIPv4Embedded(s: string): [number, number] | null {
 
 // parseHexGroup parses a single 1-4 hex-digit IPv6 group (0–0xffff). Returns
 // -1 for anything else so parseIPv6Groups can reject the whole address.
+// parseInt(s, 16) silently stops at the first non-hex character (parseInt("1z", 16)
+// === 1), so a malformed group like "1z" would be accepted as a valid group and
+// canonicalize identically to a valid address (e.g. [2001:db8::1z] → [2001:db8::1]),
+// suppressing a distinct future-state forecast. The entire group must match
+// 1-4 hex digits before parsing.
 function parseHexGroup(s: string): number {
-  if (s === "" || s.length > 4) return -1;
-  const n = parseInt(s, 16);
-  if (Number.isNaN(n) || n < 0 || n > 0xffff) return -1;
-  return n;
+  if (!/^[0-9a-fA-F]{1,4}$/.test(s)) return -1;
+  return parseInt(s, 16);
 }
 
 // WELL_KNOWN_TCP_SERVICES maps the common TCP service names that
@@ -970,11 +1000,29 @@ export function saveNotice(resp: ConfigSetResponse): string {
           // rebind either succeeded or was not needed (the listener is already at
           // the configured address), and in both cases the serving address IS the
           // resolved form of the configured address, so the dedup relaxations
-          // (wildcard host, resolved port, hostname) are safe. The presence of a
-          // rebind failure warning means the listener is still serving the old
-          // address, so the configured address is a future state the kernel has
-          // not resolved and the relaxations are unsafe (two different concrete
+          // (wildcard host, resolved port) are safe. The presence of a rebind
+          // failure warning means the listener is still serving the old address,
+          // so the configured address is a future state the kernel has not
+          // resolved and the relaxations are unsafe (two different concrete
           // addresses, not the same bind in a different form).
+          //
+          // The hostname relaxation additionally requires rebindAttempted —
+          // positive evidence that a rebind was actually attempted for this
+          // listener on this save (the saved key is the listener key). A
+          // non-listener save does not rebind the listener when the configured
+          // address is unchanged: the daemon only calls bindWebLocked when the
+          // configured address text differs from webConfigAddr, so a
+          // non-listener save leaves the serving IP as the stale DNS resolution
+          // from the previous bind. If DNS changed since that bind, channel 1's
+          // hostname forecast names the hostname that will resolve to a different
+          // IP after restart, so the hostname relaxation must not suppress it
+          // without a confirmed rebind. rebindAttempted is the saved key being
+          // the listener key, which means the daemon attempted a rebind for this
+          // listener (a non-listener save does not, even if it retried a pending
+          // rebind — the serving IP in that case is still the freshly resolved
+          // one, but the browser cannot distinguish a retried rebind from a no-op
+          // save, so the relaxation is gated on the saved key to be conservative
+          // and surface the warning when the serving IP may be stale).
           //
           // For a listener key whose rebind succeeded, apply_outcome is "applied"
           // and no rebind failure warning is present, so the rebind is recognized
@@ -984,7 +1032,8 @@ export function saveNotice(resp: ConfigSetResponse): string {
           // outcome before the rebind-failure check.
           const wKey = id.indexOf(" ") >= 0 ? id.slice(0, id.indexOf(" ")) : "";
           const rebindSucceeded = resp.apply_outcome === "applied" && !listenerRebindFailedFor(applyWarnings, wKey);
-          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded))) {
+          const rebindAttempted = resp.result.key === wKey;
+          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded, rebindAttempted))) {
             return false;
           }
         }

@@ -634,22 +634,22 @@ test("saveNotice deduplicates a successful hostname rebind for the preview liste
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
 });
 
-test("saveNotice deduplicates a hostname forecast on a non-listener save with no rebind failure warning", () => {
+test("saveNotice keeps a hostname forecast on a non-listener save (no rebind, DNS may have changed)", () => {
   // A non-listener save (network.require_token) with apply_outcome "applied" and
-  // no rebind failure warning in channel 2 means the listener is at the
-  // configured address — either no rebind was needed (the listener was already at
-  // the configured address) or ApplyConfig retried a pending rebind that
-  // succeeded (listener_rebind.go reconciles every save, so a bind that failed
-  // on the listener save can succeed on the require_token flip that retried it).
-  // In both cases the serving address (channel 2) IS the resolved form of the
-  // configured hostname (channel 1), so the hostname relaxation (a non-literal
-  // configured host matched to the literal serving IP) is safe: the rebind
-  // failure warning in channel 2 is absent, so listenerRebindFailedFor returns
-  // false and the rebind is recognized as succeeded. The per-key apply_outcome is
-  // "applied" for the saved key (network.require_token applies live) and does
-  // not reflect the listener rebind, whose outcome the daemon reports only via a
-  // rebind failure warning in channel 2; the absence of that warning is the
-  // signal that the rebind did not fail.
+  // no rebind failure warning in channel 2 does not confirm a listener rebind.
+  // The daemon only calls bindWebLocked when the configured address text differs
+  // from webConfigAddr, so a non-listener save does not rebind the listener at
+  // all — the listener is already at the configured address. apply_outcome
+  // "applied" is for the saved key (network.require_token applies live), and the
+  // absence of a rebind failure warning means no rebind was attempted (not that
+  // one succeeded). If DNS changed since the previous bind, the serving IP
+  // (channel 2, from net.Addr().String() at the last bind) is the stale
+  // resolution while channel 1 names the configured hostname that will resolve to
+  // a different IP after restart, so the hostname relaxation (a non-literal
+  // configured host matched to the literal serving IP) would suppress a distinct
+  // future-state warning. The hostname relaxation requires rebindAttempted (the
+  // saved key is the listener key), so a non-listener save does not relax the
+  // host comparison and both the serving notice and the forecast surface.
   const configuredAddr = "myhost:9443";
   const servingAddr = "192.0.2.1:9443";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -663,11 +663,10 @@ test("saveNotice deduplicates a hostname forecast on a non-listener save with no
       warnings: [applyWarning],
     }),
   );
-  // Channel 2 (the serving IP the hostname resolved to) only; the channel-1
-  // forecast for the configured hostname is the same bind (the rebind either
-  // succeeded or was not needed, so the serving address is the resolved form of
-  // the configured hostname) and is suppressed by the hostname relaxation.
-  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+  // Both the channel-2 notice (the stale serving IP) and the channel-1 forecast
+  // (the configured hostname) surface: the saved key is not the listener key, so
+  // no rebind was attempted and the hostname relaxation does not fire.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice keeps the exposure forecast for a hostname when a non-listener save's rebind failed", () => {
@@ -1296,6 +1295,98 @@ test("saveNotice deduplicates a hex-service-name forecast on a successful rebind
   // service name the rebind resolved, and the relaxation matches it to the
   // concrete serving port on the successful rebind.
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps a malformed IPv6 group (2001:db8::1z) distinct from 2001:db8::1", () => {
+  // parseInt("1z", 16) returns 1 (it stops at the first non-hex character), so
+  // a malformed IPv6 host like [2001:db8::1z] would canonicalize to 2001:db8::1
+  // (the same as a valid address) if parseHexGroup accepted it. Go's net.Listen
+  // treats [2001:db8::1z] as a hostname (not a valid IPv6 address), so the
+  // configured [2001:db8::1z]:8443 and the serving 2001:db8::1:8443 are different
+  // hosts, and the dedup must not collapse them. parseHexGroup now requires the
+  // entire group to match 1-4 hex digits, so "1z" is rejected and the address is
+  // treated as a hostname (isListenHostLiteral returns false for a colon-less
+  // non-IPv4), and canonicalizeIPv6Host returns it unchanged.
+  const configuredAddr = "[2001:db8::1z]:8443";
+  const servingAddr = "[2001:db8::1]:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — 2001:db8::1z is not a valid IPv6 group (parseHexGroup rejects
+  // "1z" as non-hex), so canonicalizeIPv6Host returns it unchanged and the two
+  // addresses do not compare equal.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice deduplicates a scoped IPv6 address with an escaped quote in the zone", () => {
+  // Go's %q escapes a literal " in a zone identifier as \", so the warning text
+  // contains an escaped quote in the address (e.g. [::%foo"bar]:0 →
+  // "[::%foo\"bar]:0" in the warning). The old regex [^"]+ stopped at the first
+  // unescaped quote, truncating the identity at the backslash and leaving an
+  // unparseable address that splitListenHostPort could not split — preventing
+  // dedup. The regex now handles Go's %q escapes (\" and \\), so the full
+  // address is extracted and the dedup proceeds.
+  // Go's net.Listen("tcp", "[::%foo\"bar]:0") succeeds and reports [::]:<port>
+  // (the zone is dropped from the bound wildcard address), so a successful rebind
+  // deduplicates the zoned wildcard forecast against the [::] serving notice.
+  const configuredAddr = '[::%foo"bar]:0';
+  const servingAddr = "[::]:9443";
+  // Go's %q wraps the address in double quotes and escapes the inner " as \":
+  const writeWarning = `network.listen_addr "${configuredAddr.replace(/"/g, '\\"')}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the [::] wildcard the zoned address resolved to) only; the
+  // escaped quote in the zone is parsed by the regex and the zone is stripped
+  // by canonicalizeIPv6Host for the all-zeros wildcard, so the forecast
+  // deduplicates against the [::] serving notice.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps a hostname forecast on a non-listener save with a stale serving IP (DNS may have changed)", () => {
+  // The finding: when the configured listener is an unchanged hostname, a
+  // non-listener save (network.require_token=false) performs no bind at all —
+  // the daemon only calls bindWebLocked when the configured address text differs
+  // from webConfigAddr. If DNS changed since startup (the hostname originally
+  // bound IP A but now resolves to IP B), channel 2 names the currently serving
+  // IP A while channel 1 names the hostname that will resolve to IP B after
+  // restart. The hostname relaxation (a non-literal configured host matched to
+  // the literal serving IP) requires rebindAttempted (the saved key is the
+  // listener key), so a non-listener save does not relax the host comparison
+  // and the distinct future-state warning surfaces.
+  const configuredAddr = "myhost:9443";
+  const servingAddr = "192.0.2.1:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both the channel-2 notice (the stale serving IP) and the channel-1 forecast
+  // (the configured hostname that will re-resolve after restart) surface: the
+  // saved key is not the listener key, so no rebind was attempted and the
+  // hostname relaxation does not fire.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice tolerates an older daemon that sends no address", () => {

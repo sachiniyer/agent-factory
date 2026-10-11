@@ -7656,10 +7656,12 @@ function isListenerExposureWarning(w) {
   return w.includes("is reachable from the network");
 }
 function listenerExposureIdentity(w) {
-  const m = w.match(/^(\S+) "([^"]+)"/);
-  return m ? `${m[1]} ${m[2]}` : "";
+  const m = w.match(/^(\S+) "((?:[^"\\]|\\.)*)"/);
+  if (!m) return "";
+  const addr = m[2].replace(/\\(.)/g, "$1");
+  return `${m[1]} ${addr}`;
 }
-function listenerExposureDedup(writeId, applyId, bindSucceeded) {
+function listenerExposureDedup(writeId, applyId, bindSucceeded, rebindAttempted) {
   if (writeId === applyId) {
     return true;
   }
@@ -7677,7 +7679,7 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded) {
     return false;
   }
   if (normalizeListenHost(wAddr.host, bindSucceeded) !== normalizeListenHost(aAddr.host, bindSucceeded)) {
-    if (!(bindSucceeded && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
+    if (!(bindSucceeded && rebindAttempted && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
       return false;
     }
   }
@@ -7847,10 +7849,8 @@ function parseIPv4Embedded(s) {
   return [vals[0] << 8 | vals[1], vals[2] << 8 | vals[3]];
 }
 function parseHexGroup(s) {
-  if (s === "" || s.length > 4) return -1;
-  const n = parseInt(s, 16);
-  if (Number.isNaN(n) || n < 0 || n > 65535) return -1;
-  return n;
+  if (!/^[0-9a-fA-F]{1,4}$/.test(s)) return -1;
+  return parseInt(s, 16);
 }
 var WELL_KNOWN_TCP_SERVICES = new Map(
   // The entries below are the IANA well-known TCP services (port < 1024) that
@@ -7931,7 +7931,8 @@ function saveNotice(resp) {
       const id = listenerExposureIdentity(w);
       const wKey = id.indexOf(" ") >= 0 ? id.slice(0, id.indexOf(" ")) : "";
       const rebindSucceeded = resp.apply_outcome === "applied" && !listenerRebindFailedFor(applyWarnings, wKey);
-      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded))) {
+      const rebindAttempted = resp.result.key === wKey;
+      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded, rebindAttempted))) {
         return false;
       }
     }
