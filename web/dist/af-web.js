@@ -7658,8 +7658,37 @@ function isListenerExposureWarning(w) {
 function listenerExposureIdentity(w) {
   const m = w.match(/^(\S+) "((?:[^"\\]|\\.)*)"/);
   if (!m) return "";
-  const addr = m[2].replace(/\\(.)/g, "$1");
+  const addr = goUnquote(m[2]);
   return `${m[1]} ${addr}`;
+}
+function goUnquote(s) {
+  return s.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)/g, (_m, esc) => {
+    if (esc.startsWith("x")) return String.fromCharCode(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("u")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("U")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    switch (esc) {
+      case "n":
+        return "\n";
+      case "t":
+        return "	";
+      case "r":
+        return "\r";
+      case "a":
+        return "\x07";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      case "\\":
+        return "\\";
+      case '"':
+        return '"';
+      default:
+        return esc;
+    }
+  });
 }
 function listenerExposureDedup(writeId, applyId, bindSucceeded, rebindAttempted) {
   if (writeId === applyId) {

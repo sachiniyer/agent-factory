@@ -1354,6 +1354,35 @@ test("saveNotice deduplicates a scoped IPv6 address with an escaped quote in the
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
 });
 
+test("saveNotice decodes Go %q multi-char escapes so a U+200B zone stays distinct from literal u200b", () => {
+  // Go's %q serializes a non-ASCII code point in an IPv6 zone identifier as a
+  // multi-character escape: U+200B (zero-width space) becomes \u200b. The old
+  // unescape (\\(.) → $1) stripped only the backslash, turning \u200b into the
+  // literal ASCII zone "u200b". If a failed rebind leaves the daemon serving
+  // [fe80::1%u200b]:8443 (a zone that is literally the ASCII string "u200b")
+  // while [fe80::1%<U+200B>]:8443 is configured, the two distinct interfaces
+  // would compare equal and the future-state exposure warning would be
+  // suppressed. goUnquote decodes \uNNNN (and \xNN, \UNNNNNNNN) faithfully so
+  // the decoded U+200B zone does not match the literal "u200b" zone.
+  const configuredAddr = "[fe80::1%\u200B]:8443";
+  const servingAddr = "[fe80::1%u200b]:8443";
+  // Go's %q escapes the U+200B in the configured address as \u200b:
+  const writeWarning = `network.listen_addr "[fe80::1%\\u200b]:8443" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the configured U+200B zone decodes to a character distinct
+  // from the literal ASCII "u200b" zone, so the two do not compare equal.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
 test("saveNotice keeps a hostname forecast on a non-listener save with a stale serving IP (DNS may have changed)", () => {
   // The finding: when the configured listener is an unchanged hostname, a
   // non-listener save (network.require_token=false) performs no bind at all —

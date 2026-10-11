@@ -271,13 +271,47 @@ function isListenerExposureWarning(w: string): boolean {
 // that splitListenHostPort cannot parse and preventing dedup. The regex
 // (?:[^"\\]|\\.)* matches either a non-quote/non-backslash character or a
 // backslash escape (\" or \\), so the closing quote is the real terminator. The
-// captured group is then unescaped (\" → ", \\ → \) to recover the literal
-// address Go's net.Addr().String() reports.
+// captured group is then unescaped with goUnquote (\" → ", \\ → \, \xNN → byte,
+// \uNNNN → BMP code point, \UNNNNNNNN → full code point) to recover the literal
+// address Go's net.Addr().String() reports. A zone identifier can contain
+// non-ASCII characters (e.g. U+200B) that %q serializes as \u200b; stripping
+// only the backslash would turn that into the literal ASCII zone "u200b", making
+// two distinct interfaces compare equal and suppressing a future-state warning,
+// so the full Go-quote escape grammar is decoded.
 function listenerExposureIdentity(w: string): string {
   const m = w.match(/^(\S+) "((?:[^"\\]|\\.)*)"/);
   if (!m) return "";
-  const addr = m[2].replace(/\\(.)/g, "$1");
+  const addr = goUnquote(m[2]);
   return `${m[1]} ${addr}`;
+}
+
+// goUnquote reverses Go's strconv.Quote (%q) escaping for the captured address
+// group. %q emits \\, \", and the control-character escapes (\a, \b, \f, \n, \r,
+// \t, \v) as two-character sequences, but non-ASCII bytes and code points as
+// multi-character escapes: \xNN (byte), \uNNNN (BMP code point), \UNNNNNNNN (full
+// code point). A simple backslash-strip (\\(.) → $1) turns \u200b into the
+// literal ASCII "u200b" instead of U+200B, which would make two distinct zone
+// identifiers compare equal and suppress a distinct exposure warning. This
+// decodes every Go escape form so the recovered address matches what
+// net.Addr().String() reports.
+function goUnquote(s: string): string {
+  return s.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)/g, (_m, esc: string) => {
+    if (esc.startsWith("x")) return String.fromCharCode(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("u")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("U")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    switch (esc) {
+      case "n": return "\n";
+      case "t": return "\t";
+      case "r": return "\r";
+      case "a": return "\x07";
+      case "b": return "\x08";
+      case "f": return "\x0c";
+      case "v": return "\x0b";
+      case "\\": return "\\";
+      case '"': return '"';
+      default: return esc;
+    }
+  });
 }
 
 // listenerExposureDedup returns true when a write-side exposure forecast
