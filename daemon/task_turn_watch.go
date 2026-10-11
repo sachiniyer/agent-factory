@@ -66,13 +66,14 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 		// or a prev frame that no longer belong to this boundary (#5221 review).
 		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
 		// A boundary carrying stillness proof — seeded at the send behind
-		// WaitForReady, or latched by a still run since — already observed the
-		// absent half of the scoped contract: priming keeps a turn that began
-		// before the first daemon capture from being read as indicator noise
-		// (#5221 review). A contended boundary proves nothing, so its watcher
-		// still owes the absence grace.
+		// WaitForReady, or latched by a still run since — already observed
+		// the pane not in a turn: priming keeps a turn that began before
+		// the first daemon capture from being read as stale chrome (scoped)
+		// or from failing the elapsed fit on every tick (timed) (#5221
+		// review). A contended boundary proves nothing, so its watcher
+		// still owes the absence grace and the fit.
 		if stillProven {
-			entry.watch.PrimeScopedAbsence()
+			entry.watch.PrimeProvenIdle()
 		}
 		m.taskRunTurnWatches[key] = entry
 	}

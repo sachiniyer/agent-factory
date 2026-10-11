@@ -291,16 +291,18 @@ func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
 	return &TurnWatch{agent: agent, boundary: boundary}
 }
 
-// PrimeScopedAbsence marks the indicator's absence already proven — for a
-// boundary that bound over a pane provably not in a turn: a fresh session's
-// prompt was delivered behind WaitForReady, an uncontended redelivery found
-// the pane still for a full grace, or a still run has since latched (#5221
-// review). The absent half of the turn contract was observed at that proof,
-// so the first present frame can count as the turn without waiting out the
-// grace again — a fresh task whose agent starts turning before the first
-// daemon capture otherwise discards its own chrome. No-op for the timed-row
-// agents, whose proof is the row's own clock.
-func (w *TurnWatch) PrimeScopedAbsence() { w.armed = true }
+// PrimeProvenIdle marks the boundary proven idle — for a boundary that bound
+// over a pane provably not in a turn: a fresh session's prompt was delivered
+// behind WaitForReady, an uncontended redelivery found the pane still for a
+// full grace, or a still run has since latched (#5221 review). For the
+// scoped agents the absent half of the turn contract was observed at that
+// proof, so the first present frame can count as the turn without waiting
+// out the grace again. For the timed-row agents the elapsed-fit check stands
+// down: a row ticking after a proven-idle boundary can only be the new turn,
+// and a turn starting sub-second after the prompt could never satisfy the
+// fit — its elapsed is the boundary's age minus the offset, permanently just
+// short (#5221 review).
+func (w *TurnWatch) PrimeProvenIdle() { w.armed = true }
 
 // Observe folds one captured frame into the watch and reports whether it
 // proves a turn began after the boundary. capturedAt must be the earliest
@@ -333,6 +335,13 @@ func (w *TurnWatch) Observe(content string, capturedAt, observedAt time.Time) bo
 		// display's own resolution — real elapsed is strictly less than
 		// displayed+1s, so demanding that fit inside the boundary's age makes a
 		// strictly-pre-boundary turn unrepresentable (#5221 review).
+		if w.armed {
+			// A proven-idle boundary needs no fit: no turn could have been
+			// running when the pane proved still, so any ticking row
+			// postdates it — and a turn starting sub-second after the
+			// prompt would fail the fit on every tick (#5221 review).
+			return ticked
+		}
 		return ticked && row.elapsed+time.Second <= capturedAt.Sub(w.boundary)
 	default:
 		if !submittedTurnContent(content, w.agent) {

@@ -141,14 +141,18 @@ const paneObservationSlack = 10 * time.Second
 // NotePaneCaptureObserved stamps pane evidence at the completion of a
 // successful pane capture (#5221 review). expectedInterval is the cadence the
 // CALLER's observation schedule intends — the live poll passes its configured
-// tick, the paused backstop passes its probe period — so captures arriving on
-// schedule keep the observation streak while a hole rebases it: an unobserved
-// interval is not silence, however short the wall-clock hole. A starved
-// streak merely holds the run until observation resumes; the release arms
-// measure observed silence, never elapsed wall time. The return reports the
-// re-anchor — per-frame state that pairs captures across the hole (a turn
-// watcher's absence clock, a previous-frame latch) must reset with the
-// streak, the same reset a failed capture forces (#5221 review).
+// tick, the paused backstop passes its probe period. Each capture declares
+// the expiry its own cadence earned, and continuity is judged against THAT
+// stored expiry rather than this capture's horizon: a cadence transition —
+// the backstop's 30s probe handing off to the live poll's 1s tick — must not
+// retroactively void a window the previous capture already vouched for
+// (#5221 review). An unobserved interval is not silence, however short the
+// wall-clock hole: a starved streak merely holds the run until observation
+// resumes; the release arms measure observed silence, never elapsed wall
+// time. The return reports the re-anchor — per-frame state that pairs
+// captures across the hole (a turn watcher's absence clock, a previous-frame
+// latch) must reset with the streak, the same reset a failed capture forces
+// (#5221 review).
 func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration) bool {
 	if at.IsZero() {
 		return false
@@ -156,7 +160,7 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	maxGap := expectedInterval + paneObservationSlack
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	reanchored := i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap
+	reanchored := i.paneObservationExpiresAt.IsZero() || at.After(i.paneObservationExpiresAt)
 	if reanchored {
 		i.paneObservationStreakAt = at
 		// A stillness candidate open across the hole never saw the pane

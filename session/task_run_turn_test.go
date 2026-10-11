@@ -937,8 +937,8 @@ func TestTaskRunSilentArmRebasesAfterObservationGap(t *testing.T) {
 }
 
 // A FAILED capture inside the gap horizon is a blind window, not a quiet
-// frame: success–fail–success spaced inside the paused path's 90s slack would
-// otherwise leave the old streak intact and let the blind window
+// frame: success–fail–success spaced inside the paused path's 40s expiry
+// would otherwise leave the old streak intact and let the blind window
 // retroactively count as silence (#5221 review). The next success re-anchors
 // observed silence from its own instant.
 func TestTaskRunFailedCaptureBreaksObservationStreak(t *testing.T) {
@@ -961,4 +961,24 @@ func TestTaskRunFailedCaptureBreaksObservationStreak(t *testing.T) {
 	require.True(t, inst.TaskRunActive(),
 		"the frame after a failed capture re-anchors the streak — only 20s of observed silence, not 50s")
 	require.True(t, inst.taskRunTurnGateHeld)
+}
+
+// A cadence transition must not retroactively void the window the previous
+// capture declared (#5221 review): the backstop's 30s probe earned the
+// streak continuity through +40s, so the first live-poll capture after a
+// detach at +29s lands inside that promise even though its own 1s cadence
+// would only have earned +11s. Judging continuity by the new capture's
+// horizon instead of the stored expiry would re-anchor the streak — and
+// drop the turn watcher — on evidence the pane never lost.
+func TestNotePaneCaptureObservedHonorsPriorExpiryAcrossCadence(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+
+	inst.NotePaneCaptureObserved(t0, 30*time.Second) // backstop probe: expiry t0+40s
+	require.False(t, inst.NotePaneCaptureObserved(t0.Add(29*time.Second), time.Second),
+		"inside the expiry the slower cadence declared, a faster one must not rebase")
+	// The live capture's own expiry is t0+29s+11s = t0+40s — a capture past
+	// it IS a hole regardless of which cadence declares the judgment.
+	require.True(t, inst.NotePaneCaptureObserved(t0.Add(41*time.Second), time.Second),
+		"past the declared expiry is a hole the streak cannot borrow")
 }

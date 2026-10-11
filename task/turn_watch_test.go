@@ -100,6 +100,32 @@ func TestTurnWatch_PreBoundaryTurnNeverFires(t *testing.T) {
 	}
 }
 
+// A proven-idle boundary stands the elapsed fit down (#5221 review): the
+// pane provably held no turn at the prompt, so a ticking row can only be the
+// new turn — including one whose own clock started a fraction of a second
+// after the boundary, which the fit could never prove: its elapsed is always
+// the boundary's age minus the sub-second offset.
+func TestTurnWatch_PrimedTimedRowSkipsElapsedFit(t *testing.T) {
+	boundary := time.Now()
+	// A turn starting ~200ms post-boundary shows a row whose elapsed trails
+	// the boundary's age by that offset — 2s elapsed against 2.2s of age
+	// fails the +1s margin, on every tick, forever.
+	frame := func(elapsed string) string {
+		return "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ "
+	}
+	unprimed := NewTurnWatch("claude", boundary)
+	unprimed.Observe(frame("1s"), boundary.Add(1200*time.Millisecond), boundary.Add(1200*time.Millisecond))
+	if unprimed.Observe(frame("2s"), boundary.Add(2200*time.Millisecond), boundary.Add(2200*time.Millisecond)) {
+		t.Fatal("unprimed: a sub-second-post-boundary turn cannot satisfy the elapsed fit")
+	}
+	primed := NewTurnWatch("claude", boundary)
+	primed.PrimeProvenIdle()
+	primed.Observe(frame("1s"), boundary.Add(1200*time.Millisecond), boundary.Add(1200*time.Millisecond))
+	if !primed.Observe(frame("2s"), boundary.Add(2200*time.Millisecond), boundary.Add(2200*time.Millisecond)) {
+		t.Fatal("a ticking row after a proven-idle boundary is the turn — no fit needed")
+	}
+}
+
 // The scoped-indicator agents keep presence as their proof — their working
 // frame is anchored to the live region, so it cannot be transcript text. But
 // presence carries no clock: an indicator already up when the watch begins
