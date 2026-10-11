@@ -888,9 +888,11 @@ function parseHexGroup(s: string): number {
 // strict port comparison keeps the forecast and the serving notice distinct
 // (the service name is a future state the kernel has not resolved).
 //
-// Only a Go-style signed decimal port string is treated as numeric — Go's
-// net.LookupPort parses decimal digits only (strconv.Atoi on the service-name
-// fallback rejects hex and exponent spellings), so JavaScript's Number("0x50")
+// Only a Go-style decimal port string is treated as numeric — Go's net.LookupPort
+// accepts a decimal port with optional leading ASCII whitespace and an optional sign
+// (net.LookupPort/net.Listen trim leading whitespace via the service-name resolver,
+// and parsePort accepts the sign; -0 is valid and yields 0) but rejects trailing
+// whitespace, hexadecimal, and exponent spellings, so JavaScript's Number("0x50")
 // (hex) or Number("1e2") (exponent) must not be coerced to a decimal port: on
 // a host whose /etc/services maps "0x50" to a different port, the coercion
 // would make a failed-rebind forecast (a future state the kernel has not
@@ -904,18 +906,24 @@ function normalizeListenPort(port: string): string {
   return port;
 }
 
-// isDecimalPort reports whether a port string is a Go-style decimal port: an
-// optional leading sign (+ or -) followed by a non-empty run of ASCII digits,
-// matching the grammar Go's net.LookupPort treats as a numeric port (strconv.Atoi,
-// which accepts an optional sign; -0 is valid and yields 0). The empty string (an
-// omitted port, e.g. "0.0.0.0:") is also a decimal port — net.LookupPort resolves
-// it to 0 (the ephemeral wildcard) — so it normalizes to "0" via normalizeListenPort.
-// JavaScript's Number("0x50") (hex) and Number("1e2") (exponent) are NOT decimal
-// ports: Go routes them through the service-name database (net.LookupPort), where
-// /etc/services may map them to a different port than the hex/exponent value, so
-// they must not be coerced to a decimal port in the browser.
+// isDecimalPort reports whether a port string is a Go-style decimal port: optional
+// leading ASCII whitespace (space, tab, etc.), an optional sign (+ or -), and a
+// non-empty run of ASCII digits, matching the grammar Go's net.LookupPort/net.Listen
+// accept as a numeric port. Go's parsePort handles the sign directly (strconv.Atoi
+// on the decimal path; -0 is valid and yields 0), and leading whitespace is accepted
+// because net.LookupPort routes a non-decimal form through the service-name resolver,
+// which trims leading ASCII whitespace before resolving it to the decimal port — so
+// net.Listen("tcp", "0.0.0.0: 8080") binds 8080. Trailing whitespace is NOT accepted:
+// net.LookupPort("8080 ") fails (the resolver does not trim trailing whitespace), so
+// a trailing-whitespace port is a service name the kernel does not resolve to a
+// decimal port. The empty string (an omitted port, e.g. "0.0.0.0:") is also a decimal
+// port — net.LookupPort resolves it to 0 (the ephemeral wildcard) — so it normalizes
+// to "0" via normalizeListenPort. JavaScript's Number("0x50") (hex) and Number("1e2")
+// (exponent) are NOT decimal ports: Go routes them through the service-name database
+// (net.LookupPort), where /etc/services may map them to a different port than the
+// hex/exponent value, so they must not be coerced to a decimal port in the browser.
 function isDecimalPort(port: string): boolean {
-  return port === "" || /^[+-]?\d+$/.test(port);
+  return port === "" || /^[ \t\n\r\f\v]*[+-]?\d+$/.test(port);
 }
 
 // listenerRebindFailedFor reports whether a listener rebind failed during the

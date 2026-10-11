@@ -7893,7 +7893,7 @@ function normalizeListenPort(port) {
   return port;
 }
 function isDecimalPort(port) {
-  return port === "" || /^[+-]?\d+$/.test(port);
+  return port === "" || /^[ \t\n\r\f\v]*[+-]?\d+$/.test(port);
 }
 function listenerRebindFailedFor(warnings, listenerKey) {
   const prefix = "apply " + listenerKey + " ";

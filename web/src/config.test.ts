@@ -1837,3 +1837,65 @@ test("saveNotice normalizes a signed decimal port (+8080) to the decimal serving
   // both sides, and the strict port comparison matches the normalized forms.
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
 });
+
+test("saveNotice normalizes a leading-whitespace decimal port to the decimal serving port", () => {
+  // Go's net.LookupPort and net.Listen accept leading ASCII whitespace in the port
+  // string: net.Listen("tcp", "0.0.0.0: 8080") binds 8080 because net.LookupPort
+  // routes the whitespace-prefixed form through the service-name resolver, which
+  // trims the leading whitespace and resolves it to the decimal port. So a
+  // configured listener at "0.0.0.0: 8080" serves on 8080, but the previous
+  // isDecimalPort classified " 8080" as a service name (no leading-whitespace
+  // grammar). On a non-listener save (rebindAttempted is false) the service-name
+  // relaxation cannot compensate, so the write forecast names " 8080" while the
+  // serving notice names "8080" and both exposure warnings render. isDecimalPort
+  // now accepts leading ASCII whitespace, so normalizeListenPort(" 8080") returns
+  // "8080" via Number(" 8080"), matching the serving port and deduplicating the
+  // two channels. Trailing whitespace ("8080 ") is still a service name: Go's
+  // resolver does not trim trailing whitespace, so net.LookupPort("8080 ") fails
+  // and the browser must not coerce it to a decimal port either.
+  const configuredAddr = "0.0.0.0: 8080";
+  const servingAddr = "0.0.0.0:8080";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // " 8080" normalizes to "8080" via isDecimalPort (Go's net.LookupPort trims
+  // leading whitespace), matching the serving port "8080". The empty apply_outcome
+  // means no rebind is confirmed, so the wildcard host normalization keeps 0.0.0.0
+  // on both sides, and the strict port comparison matches the normalized forms.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps a trailing-whitespace port as a distinct service name (Go does not trim trailing whitespace)", () => {
+  // Go's net.LookupPort does NOT trim trailing whitespace: net.LookupPort("8080 ")
+  // fails (unknown port), so a configured "0.0.0.0:8080 " does not resolve to a
+  // decimal port and isDecimalPort must not coerce it. The write forecast names
+  // "8080 " (a service name the kernel does not resolve) and the serving notice
+  // names whatever the daemon is actually bound on, so the two channels stay
+  // distinct and both warnings surface.
+  const configuredAddr = "0.0.0.0:8080 ";
+  const servingAddr = "0.0.0.0:8080";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const rebindFailure = `apply network.listen_addr "${configuredAddr}": listen tcp ${configuredAddr}: bind: address already in use — daemon still serving on the previous address "${servingAddr}"`;
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [rebindFailure, applyWarning],
+    }),
+  );
+  // "8080 " is NOT a decimal port (trailing whitespace is not in Go's accepted
+  // grammar), so normalizeListenPort returns it unchanged and the strict port
+  // comparison ("8080 " vs "8080") does not collapse the forecast onto the serving
+  // notice.
+  assert.equal(notice, `${restartNotice} · ${rebindFailure} · ${applyWarning} · ${writeWarning}`);
+});
