@@ -135,7 +135,7 @@ func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
 
 	// The poll has been capturing since the send — the daemon stamps the
 	// evidence floor at the first good frame before any quiet evaluation.
-	inst.NotePaneCaptureObserved(attemptedAt)
+	inst.NotePaneCaptureObserved(attemptedAt, time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
@@ -162,7 +162,7 @@ func TestTaskRunQuietFallbackReleaseLogsDistinctly(t *testing.T) {
 
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
-	inst.NotePaneCaptureObserved(attemptedAt)
+	inst.NotePaneCaptureObserved(attemptedAt, time.Second)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive())
 	out := buf.String()
@@ -292,7 +292,7 @@ func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
 	// tracks it) but the task boundary must stay at the task's send.
 	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0.Add(taskRunCompletionQuietGrace+10*time.Second)))
 
-	inst.NotePaneCaptureObserved(t0)
+	inst.NotePaneCaptureObserved(t0, time.Second)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"a refused manual send does not unsatisfy the window the task's churn already earned")
@@ -516,7 +516,7 @@ func TestTaskRunSilentTurnReleasesAfterLongGrace(t *testing.T) {
 	// with zero churn recorded at any point. The poll has been watching since
 	// the send — the window is elapsed OBSERVED silence, not wall time.
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now().Add(-10*time.Second)))
-	inst.NotePaneCaptureObserved(time.Now().Add(-10 * time.Second))
+	inst.NotePaneCaptureObserved(time.Now().Add(-10*time.Second), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
@@ -533,7 +533,7 @@ func TestTaskRunSilentArmDoesNotRideOutBoot(t *testing.T) {
 	inst := taskRunSession(t)
 	// Recent attempt, no churn — the 30s quiet arm can't fire either.
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
-	inst.NotePaneCaptureObserved(time.Now())
+	inst.NotePaneCaptureObserved(time.Now(), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
@@ -587,7 +587,7 @@ func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
 	// The first post-restart capture lands (request-start stamp). Only now
 	// does the quiet clock have a floor — one unchanged frame cannot satisfy
 	// the whole 30s window.
-	reloaded.NotePaneCaptureObserved(time.Now())
+	reloaded.NotePaneCaptureObserved(time.Now(), time.Second)
 	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveRunning)))
 	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, reloaded.TaskRunActive(),
@@ -629,11 +629,66 @@ func TestTaskRunQuietArmRebasesAfterObservationGap(t *testing.T) {
 
 	// The poll watched from the send through t0+40s, then went dark — failed
 	// snapshots or a stalled loop — long past the stall horizon.
-	inst.NotePaneCaptureObserved(t0.Add(40 * time.Second))
-	inst.NotePaneCaptureObserved(time.Now())
+	inst.NotePaneCaptureObserved(t0.Add(40*time.Second), time.Second)
+	inst.NotePaneCaptureObserved(time.Now(), time.Second)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
 		"the hidden interval is not silence — the quiet clock restarts at the capture that ends the gap")
+	require.True(t, inst.taskRunTurnGateHeld)
+}
+
+// Captures arriving on their declared schedule are continuous observation,
+// however far apart the schedule spaces them (#5221 review): a TUI-attached
+// task run is probed only once per 30s backstop, so a horizon sized for the
+// 1s live tick would rebase the streak on every paused probe and the quiet
+// arm could never satisfy. The streak's gap slack follows the caller's own
+// cadence — a paused probe 30s after the last is scheduled, not a hole.
+func TestTaskRunQuietArmPreservesScheduledBackstopCadence(t *testing.T) {
+	inst := taskRunSession(t)
+	backstop := 30 * time.Second
+	t0 := time.Now().Add(-5 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(time.Minute), epoch))
+
+	// Backstop probes at their 30s cadence — every gap equals the declared
+	// schedule, so the streak runs unbroken from the first probe.
+	for _, at := range []time.Time{
+		time.Now().Add(-2 * backstop),
+		time.Now().Add(-backstop),
+		time.Now(),
+	} {
+		inst.NotePaneCaptureObserved(at, backstop)
+	}
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"scheduled backstop probes are continuous observation — the quiet arm keeps its progress")
+}
+
+// The silent arm answers the same question the quiet arm does — "did the
+// daemon watch the pane sit still" — so a hole in the streak rebases its
+// clock exactly the same way (#5221 review). A >grace outage after the first
+// capture used to leave the arm satisfied on the first frame back: elapsed
+// wall time read as silence. It must start the observed window over.
+func TestTaskRunSilentArmRebasesAfterObservationGap(t *testing.T) {
+	oldGrace := taskRunCompletionSilentGrace
+	taskRunCompletionSilentGrace = 2 * time.Second
+	defer func() { taskRunCompletionSilentGrace = oldGrace }()
+
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-10 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	// One post-attempt capture, then the loop went dark past the stall
+	// horizon — a hole the pane could have churned inside.
+	inst.NotePaneCaptureObserved(t0, time.Second)
+	inst.NotePaneCaptureObserved(time.Now(), time.Second)
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the first capture after a hole starts the observed window over — the outage was not silence")
 	require.True(t, inst.taskRunTurnGateHeld)
 }

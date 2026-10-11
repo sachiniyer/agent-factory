@@ -233,16 +233,19 @@ func WaitForReadyAndSubmitPrompt(
 		}
 		// The agent's own mid-turn chrome serves two verdicts here (#4429,
 		// #5219): for sent-unverified it is the one positive delivery proof
-		// left, and for delivered it is the run's turn boundary when the
-		// scoped indicator can appear before the daemon's first poll — a
-		// daemon watcher's first sight of it already present can never be
-		// attributed, so the turn would wait for the quiet fallback.
-		// Readiness proved the composer idle before the send, so chrome in
-		// this window is this submission's work starting. A miss claims
-		// nothing; signatureless agents have no chrome to find, so they skip
-		// the watch rather than burn its budget.
+		// left, and for delivered on a TASK RUN it is the run's turn boundary
+		// when the scoped indicator can appear before the daemon's first poll
+		// — a daemon watcher's first sight of it already present can never be
+		// attributed, so the turn would wait for the quiet fallback. An
+		// ordinary prompted create has no run boundary to record, so a
+		// delivered send there skips the watch rather than burn its budget
+		// (#5221 review). Readiness proved the composer idle before the send,
+		// so chrome in this window is this submission's work starting. A miss
+		// claims nothing; signatureless agents have no chrome to find, so
+		// they skip the watch as well.
 		if turnSignaturedAgent(instance.ResolvedAgent()) &&
-			(status == session.PromptDelivered || status == session.PromptSentUnverified) &&
+			(status == session.PromptSentUnverified ||
+				(status == session.PromptDelivered && instance.TaskRunActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {
 			instance.RecordTaskRunTurn(time.Now())
 			if status == session.PromptSentUnverified {

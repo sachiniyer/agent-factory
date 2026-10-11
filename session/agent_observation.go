@@ -127,32 +127,33 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 	}
 }
 
-// paneObservationMaxGap is the stall horizon for the quiet arm's observation
-// streak: at the daemon's ~1s poll cadence a successful-capture gap beyond
-// this is an observation hole — failed probes or a stalled serial loop — in
-// which churn could hide, never a scheduling jitter. Generous to a loaded
-// host's loop time; a starved streak merely degrades the run to the bounded
-// silent arm rather than releasing on unobserved time.
-const paneObservationMaxGap = 10 * time.Second
+// paneObservationMinGap floors the continuity horizon: two successful
+// captures further apart than this AND than thrice the caller's declared
+// cadence mark the interval between them unobserved — a hole (failed probes,
+// a stalled serial walk) in which churn could hide. The floor keeps a
+// sub-second tick from declaring a hole on ordinary scheduler jitter.
+const paneObservationMinGap = 10 * time.Second
 
 // NotePaneCaptureObserved stamps pane evidence at the completion of a
-// successful pane capture (#5221 review): the first capture floors the
-// silent arm's clock (startup materialization, sequential Start(false)
-// calls, or a process pause can never count as quiet), and any hole in the
-// successful-capture streak rebases the quiet arm's clock to the capture
-// that ends it — an unobserved interval is not silence, before OR after the
-// first frame.
-func (i *Instance) NotePaneCaptureObserved(at time.Time) {
+// successful pane capture (#5221 review). expectedInterval is the cadence the
+// CALLER's observation schedule intends — the live poll passes its configured
+// tick, the paused backstop passes its probe period — so captures arriving on
+// schedule keep the observation streak while a hole rebases it: an unobserved
+// interval is not silence, however short the wall-clock hole. A starved
+// streak merely holds the run until observation resumes; the release arms
+// measure observed silence, never elapsed wall time.
+func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration) {
 	if at.IsZero() {
 		return
 	}
+	maxGap := 3 * expectedInterval
+	if maxGap < paneObservationMinGap {
+		maxGap = paneObservationMinGap
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.paneEvidenceFloorAt.IsZero() {
-		i.paneEvidenceFloorAt = at
-	}
-	if i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > paneObservationMaxGap {
-		i.paneQuietStreakAt = at
+	if i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap {
+		i.paneObservationStreakAt = at
 	}
 	i.lastPaneCaptureAt = at
 }

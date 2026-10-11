@@ -198,24 +198,18 @@ type Instance struct {
 	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
 	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
-	// paneEvidenceFloorAt is the earliest instant THIS daemon process can
-	// vouch for pane facts: stamped at the first successful pane capture,
-	// zero until one lands. Churn after the first post-prompt edge is
-	// deliberately not re-checkpointed, so a restart can hand back a
-	// lastPaneChurnAt far older than the pane's true last output — the silent
-	// arm's clock measures from the later of the attempt and this floor
-	// rather than treating an unobserved interval as elapsed silence (#5221
-	// review).
-	paneEvidenceFloorAt time.Time
-	// paneQuietStreakAt is the START of the current uninterrupted observation
-	// streak: the first capture, or the first capture after a hole (failed
-	// snapshots or a stalled status loop) in which churn could hide. The quiet
-	// arm measures its 30s from the later of the durable churn stamp and this
-	// streak — a gap never counts as observed silence (#5221 review).
-	paneQuietStreakAt time.Time
+	// paneObservationStreakAt is the START of the current uninterrupted
+	// observation streak: the first successful capture, or the first capture
+	// after a hole (failed snapshots, a stalled serial walk) in which churn
+	// could hide. Both release arms measure their silence from it — the
+	// quiet arm from the later of the durable churn stamp and the streak,
+	// the silent arm from the later of the attempt and the streak — because
+	// an unobserved interval is never silence (#5221 review). Zero until
+	// this process has actually seen the pane.
+	paneObservationStreakAt time.Time
 	// lastPaneCaptureAt is the completion stamp of the latest successful
 	// capture, used to detect the observation holes that rebase
-	// paneQuietStreakAt.
+	// paneObservationStreakAt.
 	lastPaneCaptureAt   time.Time
 	loadRuntimeReplaced bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation

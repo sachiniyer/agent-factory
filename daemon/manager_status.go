@@ -450,13 +450,14 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if err != nil {
 		return
 	}
-	// First good frame of this process's life: the quiet arm's evidence floor
-	// starts when the capture RETURNS, not when the request left — a slow
-	// remote round-trip is not observed silence (#5221 review). The
-	// request-start `capturedAt` stays the turn-age bound below: that check
-	// needs the earliest instant the frame could exist, this one needs the
-	// moment its knowledge actually landed.
-	instance.NotePaneCaptureObserved(nowFunc())
+	// Stamped when the capture RETURNS, not when the request left — a slow
+	// remote round-trip is not observed silence (#5221 review). The declared
+	// cadence is the backstop probe's own: captures arriving one probe period
+	// apart are scheduled, not a hole (#5221 review). The request-start
+	// `capturedAt` stays the turn-age bound below: that check needs the
+	// earliest instant the frame could exist, this one needs the moment its
+	// knowledge actually landed.
+	instance.NotePaneCaptureObserved(nowFunc(), taskRunPollBackstop)
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
@@ -721,10 +722,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		)
 		return
 	}
-	// First good frame of this process's life: the quiet arm's evidence floor
-	// starts when the capture RETURNS, not when the request left — a slow
-	// remote round-trip is not observed silence (#5221 review).
-	instance.NotePaneCaptureObserved(nowFunc())
+	// Stamped when the capture RETURNS, not when the request left — a slow
+	// remote round-trip is not observed silence (#5221 review). The declared
+	// cadence is the configured tick: a slower operator-set poll interval is
+	// scheduled, not a hole, while a stall past its slack still rebases the
+	// observation streak.
+	pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
+	instance.NotePaneCaptureObserved(nowFunc(), pollInterval)
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	settlementCheckpoint := false

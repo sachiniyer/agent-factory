@@ -320,23 +320,24 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 	// current uninterrupted capture streak. A zero streak means nothing has
 	// been observed since (re)start, and a hole mid-window means the churn it
 	// hid resets the clock: unobserved time is never silence (#5221 review).
-	if i.paneQuietStreakAt.IsZero() {
+	if i.paneObservationStreakAt.IsZero() {
 		return false
 	}
 	base := i.lastPaneChurnAt
-	if i.paneQuietStreakAt.After(base) {
-		base = i.paneQuietStreakAt
+	if i.paneObservationStreakAt.After(base) {
+		base = i.paneObservationStreakAt
 	}
 	return time.Since(base) >= taskRunCompletionQuietGrace
 }
 
 // taskRunSilentReleaseLocked is the bounded release for a turn the poll can
 // miss completely: no chrome, and not even churn — the pane never changed
-// after the attempt. It measures from the later of the ATTEMPT and this
-// process's first observed capture — elapsed wall time is not silence, and
-// unobserved restart/stall time cannot complete the window (#5221 review) —
-// at a grace an order of magnitude past the quiet arm so a slow boot cannot
-// ride it out.
+// after the attempt. It measures from the later of the ATTEMPT and the START
+// of the current uninterrupted observation streak — elapsed wall time is not
+// silence, and a hole (restart materialization, failed probes, a stalled
+// loop) cannot complete the window because whatever it hid is precisely the
+// churn this arm exists to catch (#5221 review) — at a grace an order of
+// magnitude past the quiet arm so a slow boot cannot ride it out.
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunSilentReleaseLocked() bool {
@@ -346,12 +347,12 @@ func (i *Instance) taskRunSilentReleaseLocked() bool {
 		// output. The silent arm is only for a pane that never moved at all.
 		return false
 	}
-	if i.paneEvidenceFloorAt.IsZero() {
+	if i.paneObservationStreakAt.IsZero() {
 		return false
 	}
 	base := i.taskRunPromptAttemptAt
-	if i.paneEvidenceFloorAt.After(base) {
-		base = i.paneEvidenceFloorAt
+	if i.paneObservationStreakAt.After(base) {
+		base = i.paneObservationStreakAt
 	}
 	return time.Since(base) >= taskRunCompletionSilentGrace
 }
