@@ -44,6 +44,9 @@ func TestExecInvocationHonorsInlineClaudeCloudMode(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
 	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
+	pathDir := t.TempDir()
+	writeExecutableFixture(t, pathDir, "claude")
+	t.Setenv("PATH", pathDir)
 	wantErr := errors.New("stop before exec")
 	var gotEnvironment []string
 	previous := processExec
@@ -246,6 +249,13 @@ func TestExecInvocationDoesNotTrustDiscoverableAgentServerPath(t *testing.T) {
 // the working directory must all reach exec with the agent names stripped —
 // for every supported agent, not only codex (#5265).
 func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T) {
+	// A bare agent name earns its grant only when the PATH walk finds it: the
+	// fixture directory stands in for an operator-controlled absolute entry.
+	pathDir := t.TempDir()
+	for _, agent := range []string{"codex", "claude", "gemini", "opencode", "amp"} {
+		writeExecutableFixture(t, pathDir, agent)
+	}
+	t.Setenv("PATH", pathDir)
 	type row struct {
 		command string
 		want    bool
@@ -340,20 +350,32 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 }
 
 // A bare name resolves through the PATH the pane actually carries, which is
-// the filtered operator environment: an empty or relative entry — a dot, a
-// relative directory, or a leading/trailing colon — resolves into the
-// pane's working directory, which is repository content. The grant cannot
-// attribute that file to the operator (#5265).
-func TestExecInvocationDeniesGrantWhenSearchPathIsRelative(t *testing.T) {
-	for _, path := range []string{
-		".:/usr/bin",
-		"/usr/bin:bin",
-		"/usr/bin:",
-		":/usr/bin",
-		"",
+// the filtered operator environment. The guard walks it the way execvp does:
+// the first directory holding the executable decides, so a relative or empty
+// entry denies only when it comes BEFORE that hit — an operator's trailing
+// ':' after the directory that holds the agent keeps the grant (#5265
+// review), while a dot or relative entry ahead of it would resolve into the
+// pane's working directory, which is repository content.
+func TestExecInvocationSearchPathGrantFollowsFirstHit(t *testing.T) {
+	with := t.TempDir()
+	writeExecutableFixture(t, with, "codex")
+	without := t.TempDir()
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{path: ".:" + with},
+		{path: without + ":bin"},
+		{path: without + ":"},
+		{path: ":" + with},
+		{path: ""},
+		{path: without},
+		{path: with + ":", want: true},
+		{path: with + ":.", want: true},
+		{path: without + ":" + with, want: true},
 	} {
-		t.Run("PATH="+path, func(t *testing.T) {
-			t.Setenv("PATH", path)
+		t.Run("PATH="+test.path, func(t *testing.T) {
+			t.Setenv("PATH", test.path)
 			t.Setenv("OPENAI_API_KEY", "fixture")
 			wantErr := errors.New("stop before exec")
 			var gotEnvironment []string
@@ -367,8 +389,8 @@ func TestExecInvocationDeniesGrantWhenSearchPathIsRelative(t *testing.T) {
 			if err := execInvocation([]string{"codex", "0", "codex"}, false); !errors.Is(err, wantErr) {
 				t.Fatalf("execInvocation() error = %v, want test sentinel", err)
 			}
-			if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
-				t.Fatalf("bare codex on PATH %q kept the Codex credential", path)
+			if kept := slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture"); kept != test.want {
+				t.Fatalf("bare codex on PATH %q kept the Codex credential = %v, want %v", test.path, kept, test.want)
 			}
 		})
 	}

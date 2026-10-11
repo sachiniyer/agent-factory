@@ -3,6 +3,7 @@ package sessionenv
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -123,20 +124,22 @@ func credentialAgentForCommand(command string) string {
 // GrantAgentForCommand is the ONE predicate every credential-grant site
 // shares: the tmux launcher (session_env.go), the pane exec shim
 // (execInvocation), and the backend provisioners that install credential
-// material (docker mounts, hook environments). It returns the supported
-// agent command invokes ONLY when the file POSIX resolution selects is
-// attributable to the operator — a bare name resolved through an
-// all-absolute inherited PATH, or an absolute path outside workDir. Any
-// spelling that lets the checked-out repository pick the file earns no
-// grant, because program_overrides is an in-repo config key and a repo can
-// therefore name an executable it ships (#5265):
+// material (docker mounts, hook environments — via the remote variant
+// below). It returns the supported agent command invokes ONLY when the
+// file POSIX resolution selects is attributable to the operator — a bare
+// name whose first PATH hit is an absolute directory outside workDir, or
+// an absolute path outside workDir. Any spelling that lets the checked-out
+// repository pick the file earns no grant, because program_overrides is an
+// in-repo config key and a repo can therefore name an executable it ships
+// (#5265):
 //
 //   - a RELATIVE executable (./codex, bin/codex, ../codex) resolves against
 //     the pane's working directory;
 //   - a command that respells resolution (a PATH=… assignment, env PATH=…,
 //     env -u PATH, env -i, env -C) selects the directory itself;
-//   - a PATH in environ containing an empty or relative entry resolves a
-//     bare name into or relative to the pane's working directory;
+//   - an inherited PATH whose walk reaches an empty or relative entry
+//     before the executable resolves a bare name into or relative to the
+//     pane's working directory;
 //   - an ABSOLUTE path inside workDir is inside the checked-out tree.
 //
 // AgentForCommand remains the identity classifier ("what does this command
@@ -152,6 +155,22 @@ func credentialAgentForCommand(command string) string {
 // directory — a remote hook host — passes "" and still denies every
 // non-absolute spelling.
 func GrantAgentForCommand(command string, environ []string, workDir string) string {
+	return grantAgentForCommand(command, environ, workDir)
+}
+
+// GrantAgentForRemoteCommand is GrantAgentForCommand for a provisioner whose
+// resolved executable lives on a filesystem the host cannot enumerate — a
+// docker image's rootfs or an ssh target. The remote PATH walk cannot be
+// stat'ed from here, so a bare name is attributed the way it was before the
+// grant predicate existed: the remote's PATH is image or sshd state, which the
+// repository does not control through program_overrides. Every spelling the
+// repository CAN control — a relative or in-workspace executable, a
+// resolution-mutating command — is denied exactly as it is locally.
+func GrantAgentForRemoteCommand(command, workDir string) string {
+	return grantAgentForCommand(command, nil, workDir)
+}
+
+func grantAgentForCommand(command string, environ []string, workDir string) string {
 	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
 	if !ok {
 		return ""
@@ -185,58 +204,93 @@ func executableAttributableToOperator(invocation agentCommand, environ []string,
 		// A path-qualified executable names its file directly: only an
 		// absolute path is operator-attributable, and not one inside the
 		// session's own working tree, which is repository content whatever
-		// its spelling. ResolveForCompare canonicalizes both sides, so a
-		// symlinked worktree root cannot evade containment.
+		// its spelling.
 		if !filepath.IsAbs(invocation.executable) {
 			return false
 		}
-		if workDir == "" {
-			return true
-		}
-		resolvedDir, err := filepath.Abs(workDir)
-		if err != nil {
-			// The working tree cannot be located, so the executable cannot be
-			// proven outside it. Deny the grant rather than let an unknowable
-			// containment answer default open.
-			return false
-		}
-		return !pathutil.IsAtOrInside(
-			pathutil.ResolveForCompare(invocation.executable),
-			pathutil.ResolveForCompare(resolvedDir))
+		return pathOutsideWorkDir(invocation.executable, workDir)
 	}
 	// A bare name resolves through PATH: the inherited environment is the
 	// attribution channel. A command that already respelled resolution, or
-	// an inherited PATH with an empty or relative entry, lets repository
-	// content supply the file.
+	// an inherited PATH walk that lands in or relative to the working
+	// directory, lets repository content supply the file.
 	if invocation.executableResolutionChanged {
 		return false
 	}
-	return searchPathAbsolute(environ)
+	return searchPathAttributesExecutable(environ, invocation.executable, workDir)
 }
 
-// searchPathAbsolute reports whether every entry in environ's PATH is
-// absolute — the condition under which execvp's resolution of a bare name
-// cannot land in or relative to the working directory. An absent PATH
-// resolves through execvp's compiled-in default, which is absolute; an empty
-// PATH or any empty entry means the working directory.
-func searchPathAbsolute(environ []string) bool {
-	// Every PATH= entry is checked rather than only the last, which is the one
-	// exec semantics would honor: a duplicate-PATH environment is pathological
-	// enough that failing closed costs nothing, while trusting an early safe
-	// value and missing a later relative one would open the resolution the
-	// check exists to close.
-	for _, entry := range environ {
-		value, found := strings.CutPrefix(entry, "PATH=")
-		if !found {
+// pathOutsideWorkDir reports whether path resolves outside workDir — outside
+// the checked-out tree, where repository content cannot supply the file.
+// ResolveForCompare canonicalizes both sides, so a symlinked worktree root or
+// a symlinked target cannot evade containment. An unresolvable workDir denies
+// rather than letting an unknowable containment answer default open; an empty
+// workDir leaves the check open for a caller that cannot know the directory.
+func pathOutsideWorkDir(path, workDir string) bool {
+	if workDir == "" {
+		return true
+	}
+	resolvedDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return false
+	}
+	return !pathutil.IsAtOrInside(
+		pathutil.ResolveForCompare(path),
+		pathutil.ResolveForCompare(resolvedDir))
+}
+
+// searchPathAttributesExecutable models execvp's real walk of environ's PATH:
+// directories are tried in order and the first one holding the executable
+// wins, so the grant follows when that first hit is absolute AND outside
+// workDir. An empty or relative entry resolves in or relative to the working
+// directory — repository content — and denies before any absolute hit, while
+// an absolute entry that does not hold the file is skipped exactly as execvp
+// skips it (ENOENT and EACCES alike continue the walk). A PATH that never
+// holds the executable denies: execvp then fails, and nothing attributable
+// runs. An absent PATH resolves through execvp's compiled-in default, which
+// is absolute and operator-controlled.
+//
+// The stat is advisory only — the filesystem can change between this check
+// and the shell's own resolution at exec (TOCTOU). Exploiting the gap needs
+// the file to vanish from the winning absolute directory and reappear under a
+// later empty/relative entry inside the race window, which requires write
+// access to an operator-controlled PATH directory — outside the repository's
+// reach by definition.
+func searchPathAttributesExecutable(environ []string, name, workDir string) bool {
+	searchPath, found := firstEnvValue(environ, "PATH")
+	if !found {
+		return true
+	}
+	for _, dir := range strings.Split(searchPath, ":") {
+		if !filepath.IsAbs(dir) {
+			return false
+		}
+		if !pathEntryHoldsExecutable(dir, name) {
 			continue
 		}
-		for _, dir := range strings.Split(value, ":") {
-			if !filepath.IsAbs(dir) {
-				return false
-			}
+		return pathOutsideWorkDir(filepath.Join(dir, name), workDir)
+	}
+	return false
+}
+
+// pathEntryHoldsExecutable reports whether dir contains an executable file
+// named name — the local-filesystem stat the search-path walk uses for
+// execvp's "first entry that holds it" question.
+func pathEntryHoldsExecutable(dir, name string) bool {
+	info, err := os.Stat(filepath.Join(dir, name))
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+// firstEnvValue returns the value of the FIRST name= entry in environ — the
+// one getenv, and therefore execvp's PATH walk, honors when an environment
+// carries a name twice.
+func firstEnvValue(environ []string, name string) (string, bool) {
+	for _, entry := range environ {
+		if value, found := strings.CutPrefix(entry, name+"="); found {
+			return value, true
 		}
 	}
-	return true
+	return "", false
 }
 
 func shellAssignmentsChangeExecutableResolution(assignments []*syntax.Assign) bool {

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -229,7 +228,10 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 }
 
 func (w *sandboxWorkspace) agentName() string {
-	agentName := sessionenv.GrantAgentForCommand(w.program, os.Environ(), w.WorkspacePath())
+	// The remote variant: the executable resolves on the ssh target, whose
+	// filesystem the host cannot stat. The workspace path is still the remote
+	// tree the containment check guards (#5265).
+	agentName := sessionenv.GrantAgentForRemoteCommand(w.program, w.WorkspacePath())
 	if agentName == "" && strings.TrimSpace(w.program) == "" {
 		return tmux.ProgramClaude
 	}
