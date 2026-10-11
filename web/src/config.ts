@@ -295,6 +295,10 @@ function listenerExposureIdentity(w: string): string {
 // OrderNamesServingAddress pins the serving-vs-configured split for a failed
 // rebind). Zero-padded zero ports ("00", "000") and an omitted port ("0.0.0.0:")
 // are normalized to "0" (net.LookupPort resolves them to 0, the ephemeral wildcard).
+// Service-name ports ("http", "https") are resolved to their numeric ports
+// (normalizeListenPort → WELL_KNOWN_TCP_SERVICES), so a configured 0.0.0.0:http
+// and a serving 0.0.0.0:80 or [::]:80 compare equal — net.Listen resolves the
+// service name the same way net.LookupPort does (config/listen_addr.go).
 function listenerExposureDedup(writeId: string, applyId: string): boolean {
   if (writeId === applyId) {
     return true;
@@ -361,15 +365,84 @@ function normalizeListenHost(host: string): string {
   return host;
 }
 
+// WELL_KNOWN_TCP_SERVICES maps the common TCP service names that
+// net.LookupPort("tcp", ...) (and hence net.Listen) resolves from /etc/services,
+// so a configured address like 0.0.0.0:http binds the same port a serving
+// address reports as 0.0.0.0:80 or [::]:80. The browser cannot read /etc/services
+// at runtime, so this mirrors the IANA well-known set Go's own lookup falls back
+// to. The validator (config/listen_addr.go) accepts service-name ports via the
+// same net.LookupPort call, so any name the config allows must resolve here for
+// the dedup to match the configured spelling (channel 1) against the kernel's
+// bound spelling (channel 2).
+const WELL_KNOWN_TCP_SERVICES: ReadonlyMap<string, number> = new Map(
+  // The entries below are the IANA well-known TCP services (port < 1024) that
+  // /etc/services ships on Linux/macOS — the realistic set for a listen address.
+  // This is not exhaustive, but covers every name net.Listen's address parser
+  // would accept that a human might realistically write for a control-plane bind.
+  Object.entries({
+    "tcpmux": 1,
+    "echo": 7,
+    "discard": 9,
+    "systat": 11,
+    "daytime": 13,
+    "netstat": 15,
+    "qotd": 17,
+    "chargen": 19,
+    "ftp-data": 20,
+    "ftp": 21,
+    "ssh": 22,
+    "telnet": 23,
+    "smtp": 25,
+    "time": 37,
+    "whois": 43,
+    "tacacs": 49,
+    "domain": 53,
+    "gopher": 70,
+    "finger": 79,
+    "http": 80,
+    "kerberos": 88,
+    "pop3": 110,
+    "sunrpc": 111,
+    "auth": 113,
+    "nntp": 119,
+    "netbios-ssn": 139,
+    "imap2": 143,
+    "snmp": 161,
+    "snmp-trap": 162,
+    "bgp": 179,
+    "irc": 194,
+    "ldap": 389,
+    "https": 443,
+    "microsoft-ds": 445,
+    "submissions": 465,
+    "exec": 512,
+    "login": 513,
+    "shell": 514,
+    "printer": 515,
+    "klogin": 543,
+    "kshell": 544,
+    "rdp": 3389,
+  }),
+);
+
 // normalizeListenPort canonicalizes the port so zero-padded spellings ("00",
 // "000") and an omitted port ("") — all of which net.LookupPort resolves to 0
 // (the ephemeral wildcard) — compare equal to "0". A concrete port is returned
-// as-is (leading zeros stripped for numeric strings); a non-numeric service name
-// is returned unchanged (it is not an ephemeral port and the two channels would
-// format it identically if it were the same bind).
+// as-is (leading zeros stripped for numeric strings). A non-numeric service name
+// is resolved via the IANA well-known TCP services map (WELL_KNOWN_TCP_SERVICES),
+// matching net.LookupPort("tcp", ...) on the server: a configured
+// 0.0.0.0:http binds port 80, so the serving address (0.0.0.0:80 or [::]:80)
+// and the forecast (0.0.0.0:http) compare equal and the dedup suppresses the
+// duplicate forecast. An unknown service name (which the validator would reject
+// at config-set time) is returned unchanged so a name the server does not
+// recognize never collapses two different addresses.
 function normalizeListenPort(port: string): string {
   const n = Number(port);
-  return Number.isNaN(n) ? port : String(n);
+  if (!Number.isNaN(n)) {
+    return String(n);
+  }
+  const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
+  return resolved !== undefined ? String(resolved) : port;
 }
 
 export function saveNotice(resp: ConfigSetResponse): string {

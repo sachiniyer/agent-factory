@@ -7704,9 +7704,63 @@ function normalizeListenHost(host) {
   }
   return host;
 }
+var WELL_KNOWN_TCP_SERVICES = new Map(
+  // The entries below are the IANA well-known TCP services (port < 1024) that
+  // /etc/services ships on Linux/macOS — the realistic set for a listen address.
+  // This is not exhaustive, but covers every name net.Listen's address parser
+  // would accept that a human might realistically write for a control-plane bind.
+  Object.entries({
+    "tcpmux": 1,
+    "echo": 7,
+    "discard": 9,
+    "systat": 11,
+    "daytime": 13,
+    "netstat": 15,
+    "qotd": 17,
+    "chargen": 19,
+    "ftp-data": 20,
+    "ftp": 21,
+    "ssh": 22,
+    "telnet": 23,
+    "smtp": 25,
+    "time": 37,
+    "whois": 43,
+    "tacacs": 49,
+    "domain": 53,
+    "gopher": 70,
+    "finger": 79,
+    "http": 80,
+    "kerberos": 88,
+    "pop3": 110,
+    "sunrpc": 111,
+    "auth": 113,
+    "nntp": 119,
+    "netbios-ssn": 139,
+    "imap2": 143,
+    "snmp": 161,
+    "snmp-trap": 162,
+    "bgp": 179,
+    "irc": 194,
+    "ldap": 389,
+    "https": 443,
+    "microsoft-ds": 445,
+    "submissions": 465,
+    "exec": 512,
+    "login": 513,
+    "shell": 514,
+    "printer": 515,
+    "klogin": 543,
+    "kshell": 544,
+    "rdp": 3389
+  })
+);
 function normalizeListenPort(port) {
   const n = Number(port);
-  return Number.isNaN(n) ? port : String(n);
+  if (!Number.isNaN(n)) {
+    return String(n);
+  }
+  const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
+  return resolved !== void 0 ? String(resolved) : port;
 }
 function saveNotice(resp) {
   const parts = [];
