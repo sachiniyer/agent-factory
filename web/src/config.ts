@@ -279,15 +279,21 @@ function listenerExposureIdentity(w: string): string {
 //      serving [::] (IPv6 wildcard) are the same "all interfaces" bind on a
 //      dual-stack host — net.Listen("tcp", "0.0.0.0:0") can report its bound
 //      address as [::]:<port>, so channel 1's 0.0.0.0 and channel 2's [::] are
-//      the same listener. normalizeListenHost canonicalizes 0.0.0.0, ::, and the
-//      empty host (":8443") so they compare equal; a concrete host (loopback,
-//      LAN IP) is returned as-is.
-//   2. Ephemeral port: a configured port of :0 (the OS-assigned wildcard) matches
-//      any concrete serving port the kernel assigned for the same listener and
-//      host. The apply channel names the serving bound address (never a wildcard),
-//      so a :0 in the forecast is the only direction the wildcard appears; the
-//      inverse — a concrete forecast against a :0 notice — does not arise and is
-//      not relaxed.
+//      the same listener. normalizeListenHost canonicalizes IPv6 hosts to their
+//      RFC 5952 form (so 0:0:0:0:0:0:0:0 and :: compare equal) and maps the
+//      IPv4/IPv6 wildcards and the empty host (":8443") to the same "0.0.0.0";
+//      a concrete host (loopback, LAN IP) is returned as-is.
+//   2. Resolved port (bindSucceeded only): a successful rebind resolves the
+//      configured port to the kernel-assigned serving port — :0 (the ephemeral
+//      wildcard) to a concrete port, and a service name (e.g. "http-alt",
+//      "mysql") to its numeric port via net.LookupPort (a set far larger than
+//      the WELL_KNOWN_TCP_SERVICES fallback in normalizeListenPort). The
+//      browser cannot reproduce either resolution, so when the rebind SUCCEEDED
+//      (bindSucceeded) a :0 or service-name forecast matches any concrete
+//      numeric serving port for the same listener and (normalized) host. Gated
+//      on bindSucceeded: a failed rebind leaves the serving address as the OLD
+//      bound address, so a :0 or service-name forecast names a future bind
+//      distinct from the current serving notice, and both must surface.
 //   3. Hostname bind (bindSucceeded only): a configured non-literal host (a
 //      hostname like "myhost" the validator accepts) resolves to a literal IP at
 //      bind time, so channel 1 names the configured hostname while channel 2 names
@@ -310,10 +316,14 @@ function listenerExposureIdentity(w: string): string {
 // OrderNamesServingAddress pins the serving-vs-configured split for a failed
 // rebind). Zero-padded zero ports ("00", "000") and an omitted port ("0.0.0.0:")
 // are normalized to "0" (net.LookupPort resolves them to 0, the ephemeral wildcard).
-// Service-name ports ("http", "https") are resolved to their numeric ports
-// (normalizeListenPort → WELL_KNOWN_TCP_SERVICES), so a configured 0.0.0.0:http
-// and a serving 0.0.0.0:80 or [::]:80 compare equal — net.Listen resolves the
-// service name the same way net.LookupPort does (config/listen_addr.go).
+// Service-name ports the table knows ("http", "https", …) are resolved to their
+// numeric ports (normalizeListenPort → WELL_KNOWN_TCP_SERVICES), so a configured
+// 0.0.0.0:http and a serving 0.0.0.0:80 or [::]:80 compare equal. Service names
+// the table does NOT carry (http-alt, mysql, … — net.LookupPort reads /etc/services,
+// which is larger than the browser-side fallback) are handled by the
+// bindSucceeded-gated resolved-port relaxation above, which does not depend on the
+// table: on a successful rebind the configured port IS the serving port whether
+// or not the browser can resolve its name.
 function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: boolean): boolean {
   if (writeId === applyId) {
     return true;
@@ -354,10 +364,30 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
   if (wPort === aPort) {
     return true;
   }
-  // A :0 forecast (ephemeral) matches any concrete serving port for the same
-  // listener and host. The apply channel never carries :0 (it names the serving
-  // bound address), so only the forecast direction needs the wildcard.
-  return wPort === "0" && aPort !== "0";
+  // A successful rebind resolves the configured port to the kernel-assigned
+  // serving port. Two configured forms the browser cannot reproduce on its own:
+  //   - :0 (the ephemeral wildcard) → a concrete kernel-assigned port.
+  //   - a service name (e.g. "http-alt", "mysql") → its numeric port, via
+  //     net.LookupPort reading /etc/services — a set far larger than the
+  //     WELL_KNOWN_TCP_SERVICES fallback in normalizeListenPort, so the table
+  //     cannot cover every name the validator accepts (config/listen_addr.go).
+  // When the rebind SUCCEEDED (bindSucceeded), the configured port IS the
+  // serving port — the kernel resolved it — so a :0 or service-name forecast
+  // matches any concrete numeric serving port for the same listener and
+  // (normalized) host. This is gated on bindSucceeded: a failed rebind leaves
+  // the serving address as the OLD bound address, so a :0 or service-name
+  // forecast names a future bind distinct from the current serving notice, and
+  // both must surface (TestApplyConfigExposureNoticePerKeyOrderNamesServing
+  // Address pins the serving-vs-configured split for a failed rebind). The
+  // apply channel never carries :0 (it names the serving bound address), so
+  // only the forecast direction needs the relaxation; the inverse — a concrete
+  // forecast against a :0 notice — does not arise.
+  if (bindSucceeded && aPort !== "0" && !isNaN(Number(aPort))) {
+    if (wPort === "0" || isNaN(Number(wPort))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // isListenHostLiteral reports whether a host part (already split by
@@ -408,11 +438,123 @@ function splitListenHostPort(addr: string): { host: string; port: string } | nul
 // "0.0.0.0:0") reports on dual-stack hosts) compare equal. An empty host (e.g.
 // ":8443") also binds every interface. A concrete host (loopback, LAN IP) is
 // returned as-is.
+//
+// IPv6 hosts are parsed and re-emitted in their RFC 5952 canonical form
+// (canonicalizeIPv6Host), so a non-canonical configured spelling the validator
+// accepts — e.g. "0:0:0:0:0:0:0:0" — compares equal to the compressed "::"
+// form net.Addr().String() reports for the serving address. Matching only the
+// already-compressed "::" left the uncompressed wildcard and its canonical form
+// as different literals, so both versions of the same exposure rendered. The
+// IPv6 unspecified address ("::") is the all-interfaces wildcard on a
+// dual-stack host and maps to the IPv4 "0.0.0.0" wildcard, matching the
+// long-standing dual-stack equivalence.
 function normalizeListenHost(host: string): string {
-  if (host === "" || host === "0.0.0.0" || host === "::") {
+  if (host === "") {
     return "0.0.0.0";
   }
+  if (host.includes(":")) {
+    const v6 = canonicalizeIPv6Host(host);
+    return v6 === "::" ? "0.0.0.0" : v6;
+  }
   return host;
+}
+
+// canonicalizeIPv6Host parses a bare (bracket-stripped) IPv6 host into its 8
+// 16-bit groups and re-emits the RFC 5952 canonical form: lowercase hex, a
+// single "::" compressing the longest run of consecutive zero groups (length
+// >= 2), and no leading zeros per group. net.Addr().String() already emits
+// this form for the serving address (channel 2), so canonicalizing a
+// non-canonical configured spelling (channel 1, e.g. "0:0:0:0:0:0:0:0")
+// lets the two compare equal. Returns the input unchanged when it is not a
+// parseable bare IPv6 address (a hostname, an IPv4 host, or an IPv4-embedded
+// tail like "::ffff:1.2.3.4" whose canonical form Go emits as the bare IPv4
+// — left unmatched rather than approximated, since it is not a realistic
+// control-plane bind and reproducing net.IP.String()'s v4 detection is out
+// of scope here).
+function canonicalizeIPv6Host(host: string): string {
+  const groups = parseIPv6Groups(host);
+  if (groups === null) {
+    return host;
+  }
+  // Find the longest run of consecutive zero groups (length >= 2) to compress.
+  let bestStart = -1;
+  let bestLen = 0;
+  let curStart = -1;
+  let curLen = 0;
+  for (let i = 0; i < 8; i++) {
+    if (groups[i] === 0) {
+      if (curStart < 0) curStart = i;
+      curLen++;
+      if (curLen > bestLen) {
+        bestLen = curLen;
+        bestStart = curStart;
+      }
+    } else {
+      curStart = -1;
+      curLen = 0;
+    }
+  }
+  if (bestLen < 2) bestStart = -1;
+  const parts: string[] = [];
+  let i = 0;
+  while (i < 8) {
+    if (bestStart >= 0 && i === bestStart) {
+      // The "::" is the join of two empty entries; push an empty before and
+      // after the run so join emits "::", "::1", "1::", or "a::b" correctly.
+      if (bestStart === 0) parts.push("");
+      parts.push("");
+      i += bestLen;
+      if (i === 8) parts.push("");
+    } else {
+      parts.push(groups[i].toString(16));
+      i++;
+    }
+  }
+  return parts.join(":");
+}
+
+// parseIPv6Groups parses a bare IPv6 host (brackets already stripped) into its
+// 8 16-bit groups, handling a single "::" zero-run compression. Returns null
+// for anything that is not a pure-hex IPv6 address (a hostname, an IPv4 host,
+// or an IPv4-embedded tail), so callers leave those unchanged.
+function parseIPv6Groups(host: string): number[] | null {
+  const dbl = host.indexOf("::");
+  if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
+  let head: string[];
+  let tail: string[];
+  if (dbl < 0) {
+    const parts = host.split(":");
+    if (parts.length !== 8) return null;
+    head = parts;
+    tail = [];
+  } else {
+    const h = host.slice(0, dbl);
+    const t = host.slice(dbl + 2);
+    head = h === "" ? [] : h.split(":");
+    tail = t === "" ? [] : t.split(":");
+    if (head.length + tail.length >= 8) return null;
+  }
+  const groups = new Array(8).fill(0);
+  for (let i = 0; i < head.length; i++) {
+    const g = parseHexGroup(head[i]);
+    if (g < 0) return null;
+    groups[i] = g;
+  }
+  for (let i = 0; i < tail.length; i++) {
+    const g = parseHexGroup(tail[i]);
+    if (g < 0) return null;
+    groups[8 - tail.length + i] = g;
+  }
+  return groups;
+}
+
+// parseHexGroup parses a single 1-4 hex-digit IPv6 group (0–0xffff). Returns
+// -1 for anything else so parseIPv6Groups can reject the whole address.
+function parseHexGroup(s: string): number {
+  if (s === "" || s.length > 4) return -1;
+  const n = parseInt(s, 16);
+  if (Number.isNaN(n) || n < 0 || n > 0xffff) return -1;
+  return n;
 }
 
 // WELL_KNOWN_TCP_SERVICES maps the common TCP service names that
@@ -423,7 +565,14 @@ function normalizeListenHost(host: string): string {
 // to. The validator (config/listen_addr.go) accepts service-name ports via the
 // same net.LookupPort call, so any name the config allows must resolve here for
 // the dedup to match the configured spelling (channel 1) against the kernel's
-// bound spelling (channel 2).
+// bound spelling (channel 2) — when the rebind did not succeed and the
+// resolved-port relaxation (listenerExposureDedup, gated on bindSucceeded) does
+// not apply. Names this table does not carry (http-alt, mysql, …) are handled by
+// that relaxation on a successful rebind, where the configured port IS the
+// serving port the kernel resolved it to and the browser need not reproduce
+// net.LookupPort; a name neither the table nor a successful rebind covers is
+// returned unchanged so a name the server does not recognize never collapses two
+// different addresses.
 const WELL_KNOWN_TCP_SERVICES: ReadonlyMap<string, number> = new Map(
   // The entries below are the IANA well-known TCP services (port < 1024) that
   // /etc/services ships on Linux/macOS — the realistic set for a listen address.

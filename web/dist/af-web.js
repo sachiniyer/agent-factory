@@ -7686,7 +7686,12 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded) {
   if (wPort === aPort) {
     return true;
   }
-  return wPort === "0" && aPort !== "0";
+  if (bindSucceeded && aPort !== "0" && !isNaN(Number(aPort))) {
+    if (wPort === "0" || isNaN(Number(wPort))) {
+      return true;
+    }
+  }
+  return false;
 }
 function isListenHostLiteral(host) {
   if (host.includes(":")) {
@@ -7707,10 +7712,88 @@ function splitListenHostPort(addr) {
   return { host: addr.slice(0, colon), port: addr.slice(colon + 1) };
 }
 function normalizeListenHost(host) {
-  if (host === "" || host === "0.0.0.0" || host === "::") {
+  if (host === "") {
     return "0.0.0.0";
   }
+  if (host.includes(":")) {
+    const v6 = canonicalizeIPv6Host(host);
+    return v6 === "::" ? "0.0.0.0" : v6;
+  }
   return host;
+}
+function canonicalizeIPv6Host(host) {
+  const groups = parseIPv6Groups(host);
+  if (groups === null) {
+    return host;
+  }
+  let bestStart = -1;
+  let bestLen = 0;
+  let curStart = -1;
+  let curLen = 0;
+  for (let i2 = 0; i2 < 8; i2++) {
+    if (groups[i2] === 0) {
+      if (curStart < 0) curStart = i2;
+      curLen++;
+      if (curLen > bestLen) {
+        bestLen = curLen;
+        bestStart = curStart;
+      }
+    } else {
+      curStart = -1;
+      curLen = 0;
+    }
+  }
+  if (bestLen < 2) bestStart = -1;
+  const parts = [];
+  let i = 0;
+  while (i < 8) {
+    if (bestStart >= 0 && i === bestStart) {
+      if (bestStart === 0) parts.push("");
+      parts.push("");
+      i += bestLen;
+      if (i === 8) parts.push("");
+    } else {
+      parts.push(groups[i].toString(16));
+      i++;
+    }
+  }
+  return parts.join(":");
+}
+function parseIPv6Groups(host) {
+  const dbl = host.indexOf("::");
+  if (dbl >= 0 && host.indexOf("::", dbl + 2) >= 0) return null;
+  let head;
+  let tail;
+  if (dbl < 0) {
+    const parts = host.split(":");
+    if (parts.length !== 8) return null;
+    head = parts;
+    tail = [];
+  } else {
+    const h2 = host.slice(0, dbl);
+    const t = host.slice(dbl + 2);
+    head = h2 === "" ? [] : h2.split(":");
+    tail = t === "" ? [] : t.split(":");
+    if (head.length + tail.length >= 8) return null;
+  }
+  const groups = new Array(8).fill(0);
+  for (let i = 0; i < head.length; i++) {
+    const g = parseHexGroup(head[i]);
+    if (g < 0) return null;
+    groups[i] = g;
+  }
+  for (let i = 0; i < tail.length; i++) {
+    const g = parseHexGroup(tail[i]);
+    if (g < 0) return null;
+    groups[8 - tail.length + i] = g;
+  }
+  return groups;
+}
+function parseHexGroup(s) {
+  if (s === "" || s.length > 4) return -1;
+  const n = parseInt(s, 16);
+  if (Number.isNaN(n) || n < 0 || n > 65535) return -1;
+  return n;
 }
 var WELL_KNOWN_TCP_SERVICES = new Map(
   // The entries below are the IANA well-known TCP services (port < 1024) that
