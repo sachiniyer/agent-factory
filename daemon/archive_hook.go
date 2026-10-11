@@ -136,6 +136,20 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	}
 	defer cancel()
 
+	// The scratch working directory for a session whose worktree is gone is
+	// created BEFORE the hook log is opened: the log is closed and read back only
+	// at the end of the run, so a failure between the two would leak its
+	// descriptor and leave an empty log behind on every archive.
+	scratch := ""
+	if hookCtx.worktreeGone {
+		dir, err := os.MkdirTemp("", "af-on-archive-")
+		if err != nil {
+			return fmt.Errorf("create a working directory for the on-archive hook of a session whose worktree is gone: %w", err)
+		}
+		defer os.RemoveAll(dir)
+		scratch = dir
+	}
+
 	outputFile, err := hooklog.Open(hooklog.OnArchive)
 	if err != nil {
 		return fmt.Errorf("create daemon-independent on-archive hook output log: %w", err)
@@ -154,12 +168,7 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	program, argv := systemdunit.UnboundScopeArgv(scopeUnit, "sh", "-c", command)
 	cmd := exec.CommandContext(ctx, program, argv...)
 	cmd.Dir = hookCtx.worktree
-	if hookCtx.worktreeGone {
-		scratch, err := os.MkdirTemp("", "af-on-archive-")
-		if err != nil {
-			return fmt.Errorf("create a working directory for the on-archive hook of a session whose worktree is gone: %w", err)
-		}
-		defer os.RemoveAll(scratch)
+	if scratch != "" {
 		cmd.Dir = scratch
 	}
 	cmd.Env = append(
