@@ -257,9 +257,53 @@ function isListenerExposureWarning(w: string): boolean {
 // not an authoritative copy of a forecast for the other. Returns "" for a
 // warning that is not an exposure warning; callers gate on
 // isListenerExposureWarning first.
+//
+// The identity is exact-address. When the configured address is ephemeral (port
+// :0), a successful rebind resolves it to a concrete kernel-assigned port that
+// channel 2 names, so the exact-address identity would not match and both
+// versions of the same exposure would render. listenerExposureDedup handles that
+// relaxation; see its comment for the constraint that keeps the failed-rebind
+// case (two different concrete addresses) distinct.
 function listenerExposureIdentity(w: string): string {
   const m = w.match(/^(\S+) "([^"]+)"/);
   return m ? `${m[1]} ${m[2]}` : "";
+}
+
+// listenerExposureDedup returns true when a write-side exposure forecast
+// (channel 1, exposureWarning) is the same hazard an apply-side notice (channel 2,
+// ListenerExposureNotice/PreviewListenerExposureNotice) already covers
+// authoritatively. It compares listenerExposureIdentity values, with one
+// relaxation: a configured address of port :0 (the ephemeral wildcard the OS
+// resolves to a concrete port on a successful rebind) matches the apply
+// channel's concrete bound port for the same listener and host. The apply
+// channel names the serving bound address (never a wildcard), so a :0 in the
+// forecast is the only direction the wildcard appears; the inverse — a concrete
+// forecast against a :0 notice — does not arise and is not relaxed. The
+// failed-rebind case where both addresses are concrete and differ is preserved:
+// two different concrete ports for the same host do not match, and two different
+// hosts do not match regardless of the port (TestApplyConfigExposureNoticePerKey
+// OrderNamesServingAddress pins the serving-vs-configured split for a failed
+// rebind).
+function listenerExposureDedup(writeId: string, applyId: string): boolean {
+  if (writeId === applyId) {
+    return true;
+  }
+  // <key> <host>:<port> — the address always carries a port (ListenerExposureNotice
+  // and exposureWarning format a net.Addr, and the configured value is validated).
+  const wColon = writeId.lastIndexOf(":");
+  const aColon = applyId.lastIndexOf(":");
+  if (wColon < 0 || aColon < 0) {
+    return false;
+  }
+  if (writeId.slice(0, wColon) !== applyId.slice(0, aColon)) {
+    return false;
+  }
+  const wPort = writeId.slice(wColon + 1);
+  const aPort = applyId.slice(aColon + 1);
+  // A :0 forecast (ephemeral) matches any concrete serving port for the same
+  // listener and host. The apply channel never carries :0 (it names the serving
+  // bound address), so only the forecast direction needs the wildcard.
+  return wPort === "0" && aPort !== "0";
 }
 
 export function saveNotice(resp: ConfigSetResponse): string {
@@ -288,7 +332,12 @@ export function saveNotice(resp: ConfigSetResponse): string {
    //      failed rebind can leave the serving address (channel 2) different from
    //      the configured address (channel 1), in which case the forecast names a
    //      future state the notice does not cover. listenerExposureIdentity matches
-   //      them.
+   //      them, with one relaxation: when the configured address is ephemeral
+   //      (port :0), a successful rebind resolves it to a concrete kernel-assigned
+   //      port that channel 2 names, so a :0 forecast matches any concrete serving
+   //      port for the same listener and host (listenerExposureDedup). The
+   //      failed-rebind case has two different concrete addresses and is not
+   //      relaxed.
   //
   // Other per-write advisories (the unregistered-account warning, the
   // project-scoped branch_prefix notice) have no apply-side counterpart and are
@@ -300,7 +349,7 @@ export function saveNotice(resp: ConfigSetResponse): string {
         }
         if (isListenerExposureWarning(w)) {
           const id = listenerExposureIdentity(w);
-          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureIdentity(aw) === id)) {
+          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw)))) {
             return false;
           }
         }

@@ -371,6 +371,57 @@ test("saveNotice keeps the exposure forecast when channel 2 names a different ad
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
+test("saveNotice deduplicates a successful ephemeral rebind (configured :0 vs concrete serving port)", () => {
+  // When a listener is saved with the supported address 0.0.0.0:0, a successful
+  // rebind resolves the ephemeral port to a concrete kernel-assigned port. The
+  // per-write exposureWarning (channel 1) names the configured address (:0) while
+  // the apply-time ListenerExposureNotice (channel 2) names the concrete serving
+  // address the kernel assigned (e.g. 0.0.0.0:54321) — the daemon test at
+  // daemon/config_apply_preview_exposure_test.go:298-313 pins this wire shape.
+  // The :0 is the ephemeral wildcard and the concrete port is what it resolved to
+  // on the same rebind, so the two are the same exposure; the :0 forecast is
+  // suppressed and only the authoritative channel-2 notice (with the address the
+  // daemon is actually reachable on) surfaces.
+  const configuredAddr = "0.0.0.0:0";
+  const servingAddr = "0.0.0.0:54321";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the concrete serving address) only; the :0 forecast is the same
+  // exposure and is suppressed.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps the exposure forecast for a :0 configured address when channel 2 names a different host", () => {
+  // The :0 relaxation matches only the SAME listener and host: a failed rebind
+  // can leave the serving address on a different host while config carries a :0
+  // the listener never bound. In that case the forecast (:0 on the configured
+  // host) describes a future state the serving notice (a different host) does not
+  // cover, so both surface — the :0 wildcard does not collapse across hosts.
+  const configuredAddr = "0.0.0.0:0";
+  const servingAddr = "127.0.0.1:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the :0 forecast is for 0.0.0.0 and the serving notice is for
+  // 127.0.0.1, so the host differs and the dedup does not fire.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
 test("saveNotice tolerates an older daemon that sends no address", () => {
   // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
   // form must not render "undefined" at the user.

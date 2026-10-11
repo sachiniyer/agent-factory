@@ -7659,6 +7659,22 @@ function listenerExposureIdentity(w) {
   const m = w.match(/^(\S+) "([^"]+)"/);
   return m ? `${m[1]} ${m[2]}` : "";
 }
+function listenerExposureDedup(writeId, applyId) {
+  if (writeId === applyId) {
+    return true;
+  }
+  const wColon = writeId.lastIndexOf(":");
+  const aColon = applyId.lastIndexOf(":");
+  if (wColon < 0 || aColon < 0) {
+    return false;
+  }
+  if (writeId.slice(0, wColon) !== applyId.slice(0, aColon)) {
+    return false;
+  }
+  const wPort = writeId.slice(wColon + 1);
+  const aPort = applyId.slice(aColon + 1);
+  return wPort === "0" && aPort !== "0";
+}
 function saveNotice(resp) {
   const parts = [];
   const writeWarnings = resp.result.warnings ?? [];
@@ -7669,7 +7685,7 @@ function saveNotice(resp) {
     }
     if (isListenerExposureWarning(w)) {
       const id = listenerExposureIdentity(w);
-      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureIdentity(aw) === id)) {
+      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw)))) {
         return false;
       }
     }
