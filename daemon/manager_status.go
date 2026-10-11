@@ -581,7 +581,12 @@ var statusSweepFloorCap = 30 * time.Second
 // scheduled interval alone applies.
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	if sweep := time.Duration(lastStatusSweepNs.Load()); sweep > scheduled {
-		return min(sweep, statusSweepFloorCap)
+		// The sweep is the honest spacing only up to the cap — and the cap
+		// itself never goes below the caller's own declared cadence: an
+		// operator-set interval slower than the cap already accepts that much
+		// spacing, so compressing it to the cap would read every on-schedule
+		// capture as a hole (#5221 review).
+		return min(sweep, max(scheduled, statusSweepFloorCap))
 	}
 	return scheduled
 }

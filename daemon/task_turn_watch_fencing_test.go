@@ -109,6 +109,13 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 		"a stalled pass is not normalized as cadence: its blindness must rebase streaks")
 	require.Equal(t, taskRunPollBackstop, statusSweepExpectedInterval(taskRunPollBackstop),
 		"the paused backstop cadence is unaffected by a stalled pass")
+
+	// An operator-set interval slower than the cap is itself the declared
+	// cadence: a sweep overrunning it stays within the operator's own bound,
+	// so the expected interval must not be compressed to the cap.
+	lastStatusSweepNs.Store(int64(3 * time.Minute))
+	require.Equal(t, 2*time.Minute, statusSweepExpectedInterval(2*time.Minute),
+		"a configured cadence above the cap is preserved, not compressed")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
