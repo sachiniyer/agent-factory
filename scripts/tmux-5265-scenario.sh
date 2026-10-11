@@ -83,9 +83,11 @@ AF_MASTER="$HOME/bin/af.master"
 } | tee "$EVID/provenance.txt"
 
 # --- fixture --------------------------------------------------------------
-# The fake agent records WHICH file ran ($0), its cwd and pid, then dumps the
-# whole inherited environment — the env the REAL agent process carries — and
-# parks on `sleep` so the pane stays alive for the process-tree record.
+# The fake agent records WHICH file ran ($0), its cwd and pid, dumps the whole
+# inherited environment — the env the REAL agent process carries — then prints
+# the line-leading '›' codex composer glyph so the daemon's waitForReady sees
+# the session as ready (ResolvedAgent classifies every spelling here as codex),
+# and parks on `sleep` so the pane stays alive for the process-tree record.
 write_agent() {
     mkdir -p "$(dirname "$1")"
     cat >"$1" <<'EOS'
@@ -97,6 +99,7 @@ write_agent() {
     env | sort
 } > /tmp/af-5265-dump.env || exit 42
 echo "af-5265 fake agent started"
+printf '› \n'
 exec sleep 3600
 EOS
     chmod +x "$1"
