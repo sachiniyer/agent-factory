@@ -384,6 +384,13 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// live the quiet arm could release mid-outage. The streak breaks outright
 	// too: the blind window could hide churn, so the next success must
 	// re-anchor observed silence from its own instant (#5221 review).
+	// A frame that returns past the observation slack is stale the same way:
+	// it depicts a pane that may have moved inside the round trip, so for
+	// pane-evidence purposes the late arrival IS a blind window (#5221
+	// review).
+	if obs.Captured && nowFunc().Sub(capturedAt) > session.PaneObservationSlack {
+		obs.Captured = false
+	}
 	if !obs.Captured {
 		instance.NotePaneCaptureFailed(epoch)
 		m.dropTaskRunTurnWatch(key)
@@ -748,7 +755,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// without capturing (obs.Captured false — the local backend swallows
 	// transient capture-pane failures into an all-false frame) is a blind
 	// window, not a quiet frame: it breaks the streak outright so the next
-	// success re-anchors silence from its own instant (#5221 review).
+	// success re-anchors silence from its own instant (#5221 review). A
+	// frame that returns past the observation slack is stale the same way:
+	// it depicts a pane that may have churned inside the round trip, so the
+	// still-now evidence it carries cannot stand — the trip itself was the
+	// blind window, and nothing downstream may read it (#5221 review).
+	if obs.Captured && nowFunc().Sub(capturedAt) > session.PaneObservationSlack {
+		obs.Captured = false
+	}
 	if obs.Captured {
 		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
 		// A re-anchored streak means this frame sat across an unobserved hole —

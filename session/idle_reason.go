@@ -132,6 +132,20 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 	return i.recordPromptAttemptLocked(status, attemptedAt, false)
 }
 
+// RecordPromptAttemptProven is RecordPromptAttempt for a caller carrying its
+// own pre-send readiness proof — a wait that just confirmed the composer
+// idle. Only such a bind may seed the task run's stillness edge: an unproven
+// one owes it until a confirmed-unchanged capture re-earns it, since the
+// pane may already be running unrelated work (#5221 review).
+func (i *Instance) RecordPromptAttemptProven(status PromptDeliveryStatus, attemptedAt time.Time) bool {
+	if attemptedAt.IsZero() {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.recordPromptAttemptLocked(status, attemptedAt, true)
+}
+
 // recordPromptAttemptForObservation commits only while runtime still owns the
 // delivery. A replacement can proceed without waiting for predecessor I/O; a
 // send that returns afterwards must not seed evidence onto the successor.
@@ -184,22 +198,23 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if i.taskRunActive && status != PromptNotDelivered &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
-		rebind := !i.taskRunPromptAttemptAt.IsZero()
 		i.taskRunPromptAttemptAt = attemptedAt
 		// The new boundary re-derives its stillness edge from scratch — a
 		// candidate open under the old attempt proves nothing past the new
 		// send (#5221 review).
 		i.taskRunStillCandidateAt = time.Time{}
 		// Post-boundary churn may stand in for the turn only if the pane was
-		// observed still at-or-after the attempt (#5221 review). A first bind
-		// seeds the base at the send — boot/echo churn is the very window the
-		// quiet arm exists to absorb. A rebind seeds only on the send path's
-		// own readiness proof — a stale churn stamp is NOT observed idleness
-		// (an agent holding a static mid-turn indicator churns nothing while
-		// it works), while a wait that just confirmed the composer idle
-		// cannot have passed a working frame. Unproven rebinds keep the base
-		// owed until a confirmed-unchanged capture re-earns it (#5221 review).
-		if !rebind || paneIdleProven {
+		// observed still at-or-after the attempt (#5221 review). The seed
+		// requires the send path's own readiness proof — a wait that just
+		// confirmed the composer idle cannot have passed a working frame,
+		// while a stale churn stamp is NOT observed idleness (an agent
+		// holding a static mid-turn indicator churns nothing while it
+		// works). Unproven binds owe the base until a confirmed-unchanged
+		// capture re-earns it — including a FIRST bind: an original send
+		// that answered PromptNotDelivered leaves this boundary to an
+		// unproven redelivery whose pane may already run unrelated work
+		// (#5221 review).
+		if paneIdleProven {
 			i.taskRunStillBaseAt = attemptedAt
 		} else {
 			i.taskRunStillBaseAt = time.Time{}

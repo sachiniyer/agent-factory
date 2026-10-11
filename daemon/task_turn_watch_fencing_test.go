@@ -164,6 +164,59 @@ func TestStatusSweepExpectedIntervalCoversPositionDrift(t *testing.T) {
 		"a stalled pass owes only the capped position term, never its own blindness")
 }
 
+// A frame whose round trip outlives the observation slack depicts a pane
+// that may have moved inside the trip — its still-now claims cannot stand,
+// so the late arrival is the same blind window a failed capture is: the
+// streak re-anchors and the paired watcher drops on BOTH poll paths
+// (#5221 review).
+func TestLateFrameDropsTaskRunTurnWatch(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	now := time.Now()
+	backend := &slowTransportBackend{FakeBackend: session.NewFakeBackend(), now: &now, delay: 2 * session.PaneObservationSlack}
+	inst := registerStarted(t, manager, repoID, repoPath, "watch-late", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	boundary := now
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	seed := func() {
+		manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+			agent: inst.ResolvedAgent(), boundary: boundary,
+			watch: task.NewTurnWatch(inst.ResolvedAgent(), boundary),
+		}
+	}
+
+	// The paused backstop's stale-arrival path.
+	seed()
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a frame arriving past the observation slack is a blind window")
+
+	// The normal poll's stale-arrival path.
+	now = now.Add(time.Second)
+	seed()
+	manager.refreshInstanceStatus(repoID, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "the normal poll drops the same stale frame wholesale")
+}
+
+// slowTransportBackend advances the shared test clock inside the capture,
+// simulating a remote snapshot whose response returns its frame late
+// (#5221 review).
+type slowTransportBackend struct {
+	*session.FakeBackend
+	now   *time.Time
+	delay time.Duration
+}
+
+func (b *slowTransportBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
+	*b.now = b.now.Add(b.delay)
+	return false, false, "", false, true
+}
+
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
 // the (false,false,"",false) shape a local capture-pane error produces inside
 // SnapshotAgent — until flipped to confirmed (#5221 review).
@@ -481,9 +534,9 @@ func TestNoteTaskRunTurnEvidencePrimesFromSeededStillBase(t *testing.T) {
 	require.True(t, inst.TaskRunActive(), "precondition: a task-spawned session starts with its run in flight")
 
 	boundary := time.Now()
-	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	require.True(t, inst.RecordPromptAttemptProven(session.PromptSentUnverified, boundary))
 	require.False(t, inst.TaskRunStillBaseAt().IsZero(),
-		"a first bind seeds the still base — the send proved the pane still")
+		"a readiness-proven bind seeds the still base — the send proved the pane still")
 	_, epoch := inst.InFlightOpAndEpoch()
 
 	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
@@ -498,6 +551,52 @@ func TestNoteTaskRunTurnEvidencePrimesFromSeededStillBase(t *testing.T) {
 			Captured: true,
 		}, boundary.Add(time.Millisecond), epoch),
 		"proven-absence boundary: the first present frame is the turn")
+}
+
+// A stillness proof that arrives AFTER the watch exists applies to it too
+// (#5221 review): a contended boundary's unprimed timed watch fails the
+// elapsed fit forever for a turn that began a fraction of a second past the
+// prompt; once a still run latches the base the live entry is primed, so the
+// same row shape that could not fire then counts.
+func TestNoteTaskRunTurnEvidencePrimesExistingWatchOnLateBase(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "turn-late-prime", Path: t.TempDir(), Program: "claude", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(),
+		"precondition: an unproven bind owes the still edge")
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "turn-late-prime"
+	frame := func(elapsed string) session.Observation {
+		return session.Observation{
+			Content:  "transcript\n✻ Whirring… (" + elapsed + " · esc to interrupt)\n❯ ",
+			Captured: true,
+		}
+	}
+
+	// The watch builds unprimed: a row whose own elapsed trails the
+	// boundary's age by a sub-second offset can never satisfy the fit.
+	require.False(t, m.noteTaskRunTurnEvidence(key, inst, frame("1s"), boundary.Add(1200*time.Millisecond), epoch))
+	require.False(t, m.noteTaskRunTurnEvidence(key, inst, frame("2s"), boundary.Add(2200*time.Millisecond), epoch),
+		"unprimed: a sub-second-post-boundary turn fails the elapsed fit")
+
+	// A still run then latches the base — idleness proven after the watch
+	// already exists.
+	inst.NotePaneStillAtEpoch(boundary.Add(3*time.Second), epoch)
+	require.True(t, inst.NotePaneStillAtEpoch(boundary.Add(9*time.Second), epoch))
+	require.False(t, inst.TaskRunStillBaseAt().IsZero())
+
+	// The same ticking-row shape now primes the live entry and fires — no
+	// rebuild, no missed turn.
+	require.True(t, m.noteTaskRunTurnEvidence(key, inst, frame("3s"), boundary.Add(3200*time.Millisecond), epoch),
+		"a base latched under an existing watch primes it — the turn counts")
 }
 
 // A run that ends on a Ready→Ready observation changes no liveness, and

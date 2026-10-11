@@ -65,17 +65,19 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 		// the watcher must be rebuilt rather than read the pane through rules
 		// or a prev frame that no longer belong to this boundary (#5221 review).
 		entry = &taskRunTurnWatchEntry{agent: agent, boundary: boundary, watch: task.NewTurnWatch(agent, boundary)}
-		// A boundary carrying stillness proof — seeded at the send behind
-		// WaitForReady, or latched by a still run since — already observed
-		// the pane not in a turn: priming keeps a turn that began before
-		// the first daemon capture from being read as stale chrome (scoped)
-		// or from failing the elapsed fit on every tick (timed) (#5221
-		// review). A contended boundary proves nothing, so its watcher
-		// still owes the absence grace and the fit.
-		if stillProven {
-			entry.watch.PrimeProvenIdle()
-		}
 		m.taskRunTurnWatches[key] = entry
+	}
+	// A boundary carrying stillness proof — seeded at the send behind
+	// WaitForReady, or latched by a still run since — already observed
+	// the pane not in a turn: priming keeps a turn that began before
+	// the first daemon capture from being read as stale chrome (scoped)
+	// or from failing the elapsed fit on every tick (timed) (#5221
+	// review). A contended boundary proves nothing, so its watcher
+	// still owes the absence grace and the fit — until the base latches
+	// under it, which can happen AFTER the watch exists; the proof
+	// applies to the live entry too, and priming is idempotent.
+	if stillProven {
+		entry.watch.PrimeProvenIdle()
 	}
 	turning := entry.watch.Observe(content, capturedAt, nowFunc())
 	m.pausedMu.Unlock()

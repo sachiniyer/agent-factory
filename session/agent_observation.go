@@ -131,7 +131,7 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, p
 	}
 }
 
-// paneObservationSlack bounds the lateness a capture may carry past one
+// PaneObservationSlack bounds the lateness a capture may carry past one
 // declared cadence before the interval between them counts as unobserved —
 // a hole (failed probes, a stalled serial walk) in which churn could hide.
 // The slack must stay under the shortest completion arm's grace: a gap that
@@ -139,8 +139,11 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time, p
 // so the horizon is one cadence plus this slack rather than a multiple of
 // the cadence — capping the cadence input would have left the multiplied
 // horizon uncapped (#5221 review). Ten seconds keeps ordinary scheduler and
-// transport jitter inside the streak while a longer stall rebases it.
-const paneObservationSlack = 10 * time.Second
+// transport jitter inside the streak while a longer stall rebases it. The
+// daemon reuses it as the round-trip freshness bound: a snapshot whose
+// response lands past this long after the request left carries a depiction
+// too stale to stand as current pane evidence.
+const PaneObservationSlack = 10 * time.Second
 
 // NotePaneCaptureObserved stamps pane evidence at the completion of a
 // successful pane capture (#5221 review). expectedInterval is the expiry
@@ -170,7 +173,7 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	if at.IsZero() {
 		return false
 	}
-	maxGap := expectedInterval + paneObservationSlack
+	maxGap := expectedInterval + PaneObservationSlack
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != observedEpoch {

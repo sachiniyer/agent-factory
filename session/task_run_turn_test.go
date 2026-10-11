@@ -151,7 +151,7 @@ func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
 	inst := taskRunSession(t)
 
 	attemptedAt := time.Now().Add(-2 * taskRunCompletionQuietGrace)
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, attemptedAt))
 
 	// Churn post-attempt, but long enough ago that the pane has sat silent
 	// past the grace — a completed unit of work gone quiet, not a boot burst.
@@ -178,7 +178,7 @@ func TestTaskRunQuietFallbackReleaseLogsDistinctly(t *testing.T) {
 
 	inst := taskRunSession(t)
 	attemptedAt := time.Now().Add(-2 * taskRunCompletionQuietGrace)
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, attemptedAt))
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, attemptedAt))
 
 	// Held while no evidence exists: the arm has not run, nothing logged.
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
@@ -307,7 +307,7 @@ func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
 	inst := taskRunSession(t)
 
 	t0 := time.Now().Add(-2 * taskRunCompletionQuietGrace)
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, t0))
 
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(taskRunCompletionQuietGrace), epoch))
@@ -434,11 +434,11 @@ func TestTaskRunStillEdgeRetiresCandidateOnBlindWindow(t *testing.T) {
 	// the candidate before this frame's still stamp re-opens it.
 	noteCaptureObserved(inst, t1.Add(30*time.Second), time.Second)
 	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second), epoch))
-	noteCaptureObserved(inst, t1.Add(40*time.Second+2*paneObservationSlack), time.Second)
+	noteCaptureObserved(inst, t1.Add(40*time.Second+2*PaneObservationSlack), time.Second)
 	require.True(t, inst.taskRunStillCandidateAt.IsZero(),
 		"a re-anchored streak clears the candidate it straddled")
-	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second+2*paneObservationSlack), epoch))
-	require.Equal(t, t1.Add(40*time.Second+2*paneObservationSlack), inst.taskRunStillCandidateAt,
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second+2*PaneObservationSlack), epoch))
+	require.Equal(t, t1.Add(40*time.Second+2*PaneObservationSlack), inst.taskRunStillCandidateAt,
 		"the post-hole still frame opens a fresh candidate")
 }
 
@@ -898,7 +898,7 @@ func TestTaskRunQuietArmPreservesScheduledBackstopCadence(t *testing.T) {
 	inst := taskRunSession(t)
 	backstop := 30 * time.Second
 	t0 := time.Now().Add(-5 * time.Minute)
-	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	require.True(t, inst.RecordPromptAttemptProven(PromptSentUnverified, t0))
 
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(time.Minute), epoch))
@@ -1081,6 +1081,24 @@ func TestTaskRunRebindSeedsOnReadinessProof(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"a readiness-proven redelivery keeps the ordinary churn→quiet contract")
+}
+
+// A FIRST bind is not exempt from the proof requirement (#5221 review): an
+// original send that answered PromptNotDelivered never bound the boundary,
+// so an unproven redelivery is the first attempt — and its pane may already
+// be running unrelated work. Its still edge stays owed until a confirmed-
+// unchanged capture earns it; pre-boundary chrome cannot pass as the turn.
+func TestTaskRunUnprovenFirstBindOwesStillBase(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0),
+		"a refused delivery records the attempt without binding the boundary")
+
+	t1 := time.Now().Add(-10 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	require.True(t, inst.taskRunStillBaseAt.IsZero(),
+		"an unproven first bind owes the still edge — no readiness wait proved the pane idle")
 }
 
 // A capture applied under an epoch the instance has left — a send or
