@@ -501,8 +501,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// scheduled, not a hole (#5221 review). The request-start `capturedAt`
 	// stays the turn-age bound below: that check needs the earliest instant
 	// the frame could exist, this one needs the moment its knowledge actually
-	// landed.
-	instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop))
+	// landed. A re-anchored streak means the last frame sat across an
+	// unobserved hole — the watcher pairs frames, so it resets too (#5221 review).
+	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop)) {
+		m.dropTaskRunTurnWatch(key)
+	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
@@ -838,7 +841,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// success re-anchors silence from its own instant (#5221 review).
 	if obs.Captured {
 		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
-		instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval))
+		// A re-anchored streak means this frame sat across an unobserved hole —
+		// the watcher pairs frames, so it resets too (#5221 review).
+		if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval)) {
+			m.dropTaskRunTurnWatch(key)
+		}
 	} else {
 		// A failed capture is not merely absent evidence — it is a blind
 		// window in which churn could hide, so the streak breaks outright

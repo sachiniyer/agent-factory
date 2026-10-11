@@ -183,6 +183,10 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
 		rebind := !i.taskRunPromptAttemptAt.IsZero()
 		i.taskRunPromptAttemptAt = attemptedAt
+		// The new boundary re-derives its stillness edge from scratch — a
+		// candidate open under the old attempt proves nothing past the new
+		// send (#5221 review).
+		i.taskRunStillCandidateAt = time.Time{}
 		// Post-boundary churn may stand in for the turn only if the pane was
 		// observed still at-or-after the attempt (#5221 review). A first bind
 		// seeds the base at the send — boot/echo churn is the very window the
@@ -225,6 +229,10 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 		churnAt.After(i.lastPromptAttemptAt) &&
 		!i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
 	i.lastPaneChurnAt = churnAt
+	// An updated frame ends the still run — a candidate mid-grace was not
+	// the turn's end, so the owed edge re-derives from the next unchanged
+	// stretch (#5221 review).
+	i.taskRunStillCandidateAt = time.Time{}
 	i.touchLocked()
 	return true, checkpoint
 }
@@ -320,14 +328,25 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 	return !i.taskRunQuietReleaseLocked() && !i.taskRunSilentReleaseLocked()
 }
 
+// taskRunStillGrace is how long a post-attempt pane must sit continuously
+// unchanged before that stillness counts as the owed edge: a single static
+// frame — a paused spinner, an idle prompt redraw — is one sample, not proof
+// the prior turn ended (#5221 review). The floor matches the turn watcher's
+// absence grace: the same "transient vs sustained" cut on the pane side. A
+// var so tests can compress it.
+var taskRunStillGrace = 5 * time.Second
+
 // NotePaneStillAtEpoch latches the stillness edge a contended boundary owes
-// (#5221 review): the first confirmed-UNCHANGED capture at-or-after the run's
-// prompt attempt. A boundary bound while the pane was already churning —
-// a redelivery landing mid-turn — cannot attribute churn that began before
-// the send, so only churn following this edge may stand in for the turn.
-// Later quiet frames are the same edge and do not move it; a still capture
-// predating the attempt proves nothing about the activity it interrupted.
-// Epoch-fenced like RecordPaneChurnCheckpointAtEpoch.
+// (#5221 review): confirmed-UNCHANGED captures at-or-after the run's prompt
+// attempt, sustained for taskRunStillGrace. A boundary bound while the pane
+// was already churning — a redelivery landing mid-turn — cannot attribute
+// churn that began before the send, so only churn following this edge may
+// stand in for the turn. The edge latches at the START of the sustained still
+// run: one unchanged sample may be a static thinking frame, so the first
+// capture only opens the candidate and churn between samples retires it —
+// stillness that did not survive taskRunStillGrace never proved the old turn
+// ended. A still capture predating the attempt proves nothing about the
+// activity it interrupted. Epoch-fenced like RecordPaneChurnCheckpointAtEpoch.
 func (i *Instance) NotePaneStillAtEpoch(at time.Time, observedEpoch uint64) bool {
 	if at.IsZero() {
 		return false
@@ -338,7 +357,14 @@ func (i *Instance) NotePaneStillAtEpoch(at time.Time, observedEpoch uint64) bool
 		at.Before(i.taskRunPromptAttemptAt) || !i.taskRunStillBaseAt.IsZero() {
 		return false
 	}
-	i.taskRunStillBaseAt = at
+	if i.taskRunStillCandidateAt.IsZero() {
+		i.taskRunStillCandidateAt = at
+		return false
+	}
+	if at.Sub(i.taskRunStillCandidateAt) < taskRunStillGrace {
+		return false
+	}
+	i.taskRunStillBaseAt = i.taskRunStillCandidateAt
 	i.touchLocked()
 	return true
 }
@@ -432,6 +458,18 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.lastPromptAttemptAt = time.Time{}
 	i.lastPromptDeliveryStatus = ""
 	i.lastPaneChurnAt = time.Time{}
+	// The observation streak describes the retired pane's captures: a
+	// replacement owns none of them, and at slow cadences its unexpired
+	// horizon would let the new pane's first frame count watch time nobody
+	// spent on it — the silent arm could then satisfy its grace on wall
+	// clock that ran during the swap (#5221 review).
+	if !i.lastPaneCaptureAt.IsZero() || !i.paneObservationStreakAt.IsZero() ||
+		!i.paneObservationExpiresAt.IsZero() {
+		i.lastPaneCaptureAt = time.Time{}
+		i.paneObservationStreakAt = time.Time{}
+		i.paneObservationExpiresAt = time.Time{}
+		changed = true
+	}
 	// The task-run boundary and turn observation are pane-relative evidence of
 	// the RETIRED runtime: a replacement pane owns neither the send it did not
 	// make nor the chrome it did not show, so the delivery window does not
@@ -441,6 +479,7 @@ func (i *Instance) ClearIdleEvidence() bool {
 		i.taskRunPromptAttemptAt = time.Time{}
 		i.taskRunTurnObservedAt = time.Time{}
 		i.taskRunStillBaseAt = time.Time{}
+		i.taskRunStillCandidateAt = time.Time{}
 		changed = true
 	}
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the

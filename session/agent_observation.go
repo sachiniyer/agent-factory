@@ -141,10 +141,13 @@ const paneObservationMinGap = 10 * time.Second
 // schedule keep the observation streak while a hole rebases it: an unobserved
 // interval is not silence, however short the wall-clock hole. A starved
 // streak merely holds the run until observation resumes; the release arms
-// measure observed silence, never elapsed wall time.
-func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration) {
+// measure observed silence, never elapsed wall time. The return reports the
+// re-anchor — per-frame state that pairs captures across the hole (a turn
+// watcher's absence clock, a previous-frame latch) must reset with the
+// streak, the same reset a failed capture forces (#5221 review).
+func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.Duration) bool {
 	if at.IsZero() {
-		return
+		return false
 	}
 	maxGap := 3 * expectedInterval
 	if maxGap < paneObservationMinGap {
@@ -152,11 +155,13 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap {
+	reanchored := i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap
+	if reanchored {
 		i.paneObservationStreakAt = at
 	}
 	i.lastPaneCaptureAt = at
 	i.paneObservationExpiresAt = at.Add(maxGap)
+	return reanchored
 }
 
 // NotePaneCaptureFailed breaks the observation streak on a probe the daemon

@@ -339,13 +339,56 @@ func TestTaskRunRedeliveryMidTurnDoesNotReleaseOnOldChurn(t *testing.T) {
 	require.True(t, inst.TaskRunActive(),
 		"the old turn's churn→quiet must not satisfy the redelivered prompt's window")
 
-	// The old turn ending — a confirmed-still capture — lets the bounded
-	// arm spend the run on the silence that followed ALL activity.
+	// One unchanged capture only OPENS the still edge — a static thinking
+	// frame is a sample, not proof the old turn ended (#5221 review).
 	_, epoch = inst.InFlightOpAndEpoch() // the held transition advanced the epoch
-	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	require.True(t, inst.taskRunStillBaseAt.IsZero(),
+		"a single still frame must not latch the edge")
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the old turn may resume after one static frame — no release yet")
+	// Stillness sustained past the grace latches the edge at its START, and
+	// the bounded arm spends the run on the silence that followed ALL
+	// activity.
+	_, epoch = inst.InFlightOpAndEpoch() // the held transition advanced the epoch
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second+taskRunStillGrace), epoch))
+	require.Equal(t, t1.Add(15*time.Second), inst.taskRunStillBaseAt,
+		"the edge latches where the sustained stillness began")
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"once every arm's evidence is attributable, the held edge may release")
+}
+
+// A still run interrupted by churn before the grace never latches: the
+// unchanged frames were a pause in the old turn, not its end — the edge
+// re-derives from the next uninterrupted quiet stretch (#5221 review).
+func TestTaskRunStillEdgeRetiresCandidateOnChurn(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(20 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	// Still for half the grace, then the old turn resumes: the candidate
+	// dies with the run it sampled.
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second), epoch))
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(10*time.Second+taskRunStillGrace/2), epoch))
+	require.True(t, inst.taskRunStillCandidateAt.IsZero(),
+		"churn inside the grace retires the open candidate")
+
+	// The next still run starts its own window — it cannot borrow the
+	// interrupted one's elapsed time.
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(20*time.Second), epoch))
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(20*time.Second+taskRunStillGrace-time.Second), epoch),
+		"the second run does not latch early on borrowed time")
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(20*time.Second+taskRunStillGrace), epoch))
+	require.Equal(t, t1.Add(20*time.Second), inst.taskRunStillBaseAt,
+		"the edge latches at the uninterrupted run's start")
 }
 
 // The same contended boundary releases on the quiet arm when the pane goes
@@ -363,11 +406,13 @@ func TestTaskRunRedeliveryMidTurnReleasesOnPostStillChurn(t *testing.T) {
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
 	_, epoch = inst.InFlightOpAndEpoch()
 
-	// The pre-boundary turn ends; the still edge latches.
-	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	// The pre-boundary turn ends — stillness sustained past the grace
+	// latches the edge at its start.
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second+taskRunStillGrace), epoch))
 	// The redelivered prompt's own turn churns and finishes — more than a
 	// quiet grace ago, so the arm's silence is already satisfied.
-	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(16*time.Second), epoch))
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(16*time.Second+taskRunStillGrace), epoch))
 	observeContinuously(inst, t0)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))

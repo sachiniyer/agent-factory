@@ -206,6 +206,15 @@ type Instance struct {
 	// continued output can never stand in for the new prompt's turn (#5221
 	// review). Zero means the edge is still owed.
 	taskRunStillBaseAt time.Time
+	// taskRunStillCandidateAt is the first sample of the current
+	// uninterrupted still run while taskRunStillBaseAt is owed. One
+	// unchanged frame is not the edge — a static thinking frame reads
+	// identical too — so the edge latches only once stillness survives
+	// taskRunStillGrace; churn between samples retires the candidate.
+	// Transient by design: a restore re-derives the edge from live
+	// captures rather than trusting a pre-restart half-window (#5221
+	// review).
+	taskRunStillCandidateAt time.Time
 	// paneObservationStreakAt is the START of the current uninterrupted
 	// observation streak: the first successful capture, or the first capture
 	// after a hole (failed snapshots, a stalled serial walk) in which churn
