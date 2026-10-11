@@ -467,8 +467,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// A local capture-pane failure returns inside SnapshotAgent as an
 	// all-false observation with no error; settling it would read the pane
 	// IDLE on no evidence, and with the last confirmed capture's streak still
-	// live the quiet arm could release mid-outage (#5221 review).
+	// live the quiet arm could release mid-outage. The streak breaks outright
+	// too: the blind window could hide churn, so the next success must
+	// re-anchor observed silence from its own instant (#5221 review).
 	if !obs.Captured {
+		instance.NotePaneCaptureFailed()
 		return
 	}
 	// Stamped when the capture RETURNS, not when the request left — a slow
@@ -774,6 +777,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	if obs.Captured {
 		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
 		instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pollInterval))
+	} else {
+		// A failed capture is not merely absent evidence — it is a blind
+		// window in which churn could hide, so the streak breaks outright
+		// rather than aging out through the gap horizon (#5221 review).
+		instance.NotePaneCaptureFailed()
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content

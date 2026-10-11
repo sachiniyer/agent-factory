@@ -158,3 +158,19 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	i.lastPaneCaptureAt = at
 	i.paneObservationExpiresAt = at.Add(maxGap)
 }
+
+// NotePaneCaptureFailed breaks the observation streak on a confirmed FAILED
+// capture — a probe the daemon attempted and lost. Skipping the stamp is not
+// enough: two successful captures straddling one failure can sit inside the
+// gap horizon (60s apart under the paused path's 90s slack), leaving the old
+// streak intact while the failed frame in between could have hidden active
+// churn (#5221 review). Clearing lastPaneCaptureAt makes the next success
+// re-anchor a fresh streak from its own instant; clearing the expiry keeps a
+// stale streak from staying live through the blind window.
+func (i *Instance) NotePaneCaptureFailed() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.lastPaneCaptureAt = time.Time{}
+	i.paneObservationStreakAt = time.Time{}
+	i.paneObservationExpiresAt = time.Time{}
+}

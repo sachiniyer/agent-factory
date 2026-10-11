@@ -727,3 +727,30 @@ func TestTaskRunSilentArmRebasesAfterObservationGap(t *testing.T) {
 		"the first capture after a hole starts the observed window over — the outage was not silence")
 	require.True(t, inst.taskRunTurnGateHeld)
 }
+
+// A FAILED capture inside the gap horizon is a blind window, not a quiet
+// frame: success–fail–success spaced inside the paused path's 90s slack would
+// otherwise leave the old streak intact and let the blind window
+// retroactively count as silence (#5221 review). The next success re-anchors
+// observed silence from its own instant.
+func TestTaskRunFailedCaptureBreaksObservationStreak(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-5 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(time.Minute), epoch))
+
+	backstop := 30 * time.Second
+	base := time.Now().Add(-50 * time.Second)
+	inst.NotePaneCaptureObserved(base, backstop)
+	inst.NotePaneCaptureFailed()
+	// The straddling success lands 30s after the anchor — under the 90s gap
+	// horizon, so an unbroken streak would still satisfy churn+30s quiet.
+	inst.NotePaneCaptureObserved(base.Add(backstop), backstop)
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the frame after a failed capture re-anchors the streak — only 20s of observed silence, not 50s")
+	require.True(t, inst.taskRunTurnGateHeld)
+}
