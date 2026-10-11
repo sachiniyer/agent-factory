@@ -99,11 +99,24 @@ func TestReconfirmAdoptedWorktree(t *testing.T) {
 		assert.Error(t, gw.ReconfirmAdoptedWorktree(), "the proof is spent once it failed")
 	})
 
-	t.Run("a vanished directory is reported without a fence", func(t *testing.T) {
+	t.Run("a vanished directory is fenced until the path is proven absent", func(t *testing.T) {
 		gw, dest := adopt(t)
 		require.NoError(t, os.Rename(dest, dest+".moved"))
 		err := gw.ReconfirmAdoptedWorktree()
 		require.ErrorIs(t, err, os.ErrNotExist)
+		require.ErrorIs(t, err, ErrRelocateStateUnknown)
+		recovery, fenced := gw.GetRelocationRecovery()
+		require.True(t, fenced, "a directory recreated at the path later must not be accepted unverified")
+		assert.Equal(t, RelocationRecoveryStalled, recovery.State)
+		assert.False(t, recovery.IdentityKnown)
+
+		// A stranger at the path keeps the fence up …
+		require.NoError(t, os.Mkdir(dest, 0o755))
+		assert.False(t, gw.SettleAbsentIdentityUnknownStall())
+		assert.True(t, gw.HasUnresolvedRelocation())
+		// … and proven absence settles it.
+		require.NoError(t, os.Remove(dest))
+		assert.True(t, gw.SettleAbsentIdentityUnknownStall())
 		assert.False(t, gw.HasUnresolvedRelocation())
 	})
 

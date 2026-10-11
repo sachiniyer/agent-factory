@@ -212,6 +212,12 @@ type Manager struct {
 	// reservedArchiveDestinations holds active archive moves by (repoID, path).
 	// The owning instance identifies both the refusal and the release authority.
 	reservedArchiveDestinations map[string]*session.Instance
+	// worktreeMissingUndurable holds rows (by stableSessionKey) whose in-memory
+	// worktree-missing flag transition has not reached disk yet because the write
+	// ceded to an in-flight operation or failed (#5102). The poll retries them; the
+	// flag itself is sticky, so the probe alone would never report the transition
+	// again. Guarded by mu.
+	worktreeMissingUndurable map[string]struct{}
 	// reservedRemoteNames holds in-flight remote-hook slug reservations, keyed by
 	// the BARE slug — deliberately global, unlike every other name a session owns.
 	//

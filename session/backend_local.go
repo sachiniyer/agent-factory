@@ -263,7 +263,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil && worktreeMissing && !retainsInertInstance(err) {
-			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row inert so it stays archivable and killable", i.Title, err)
+			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
 			return nil
 		}
 		if err != nil {

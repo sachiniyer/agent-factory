@@ -58,7 +58,7 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 		}
 		if live {
 			return refuse(fmt.Errorf(
-				"cannot archive session %q: its worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s, remove it with 'git worktree remove', or kill the session",
+				"cannot archive session %q: its worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s and retry, or remove it with 'git worktree remove' and retry to archive it as deleted",
 				title, moved, source))
 		}
 		return m.archiveSessionWorktreeGone(repoID, title, instance, false)
@@ -107,6 +107,24 @@ func (m *Manager) archiveSessionSourceAbsent(repoID, title string, instance *ses
 // relocating route performs on a late failure, but not the rule it protects
 // (#3448/#3335): a committed outcome is claimed only once it is durable.
 func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *session.Instance, adopted bool) (string, session.InstanceData, error) {
+	origPath := instance.GetWorktreePath()
+	// Settle the worktree-missing flag to what this route has just proven,
+	// BEFORE any exit below persists the row — the cancel paths included.
+	if adopted {
+		// AdoptLandedArchiveMove proved, by git registration and back-binding,
+		// that the directory at the re-aimed path is this session's worktree.
+		// A flag the poll set while the record still named the vacated source
+		// is stale; persisting it beside the adopted path would make the
+		// sticky-flag archive guard refuse this verified worktree forever.
+		instance.ClearWorktreeMissing()
+	} else {
+		// The claim just proved the tracked path absent with no relocation
+		// behind it — the probe's own evidence. Record it now, not only at the
+		// commit: if teardown then finds a directory back at the path and fences
+		// the row, the flag is what makes every retry refuse that unverified
+		// directory instead of moving it (#5102).
+		instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(origPath))
+	}
 	vscodeKey := daemonInstanceKey(repoID, title)
 	if err := m.stopVSCodeForInstance(vscodeKey, instance.ID); err != nil {
 		_ = instance.Transition(session.CancelArchive())
@@ -125,15 +143,6 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 		}
 	}
 
-	origPath := instance.GetWorktreePath()
-	if !adopted {
-		// The claim just proved the tracked path absent with no relocation behind
-		// it — the probe's own evidence — so record it now, before teardown,
-		// rather than only at the commit. If teardown then finds a directory back
-		// at the path and fences the row, the flag is what makes every retry
-		// refuse that unverified directory instead of moving it (#5102).
-		instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(origPath))
-	}
 	// What the outcome messages say happened to the worktree.
 	whereabouts := fmt.Sprintf("its worktree was already absent at %s", origPath)
 	if adopted {
@@ -168,6 +177,14 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 		// adopted worktree where it now is, or, for a deletion, in one its
 		// rebuild recreates from the branch, the same self-heal a restore would
 		// perform.
+		if adopted && errors.Is(err, os.ErrNotExist) {
+			// The directory git proved vanished during teardown. Record that
+			// durably, exactly as a deletion outside af is recorded: the sticky
+			// flag is what keeps a directory recreated at this path later from
+			// being accepted as the session's by respawn, archive or rename —
+			// the stall the teardown installed settles once the path is absent.
+			instance.SetWorktreeMissing(session.WorktreeMissingDeletedReason(origPath))
+		}
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
 			return failedArchiveResult(instance, failedArchiveWithHook(title, fmt.Errorf(
@@ -187,11 +204,7 @@ func (m *Manager) archiveSessionWorktreeGone(repoID, title string, instance *ses
 	}
 
 	_ = instance.Transition(session.CommitArchive())
-	if adopted {
-		// git proved the bytes are at the path the record now names; any flag
-		// a probe set while the record still named the vacated source is stale.
-		instance.ClearWorktreeMissing()
-	} else {
+	if !adopted {
 		instance.SetWorktreeMissing(session.WorktreeMissingArchivedReason(origPath))
 	}
 	// Revocation follows the committed state exactly as on the relocating route
