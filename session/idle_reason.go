@@ -214,8 +214,13 @@ func (i *Instance) RecordPaneChurnAtEpoch(churnAt time.Time, observedEpoch uint6
 }
 
 // RecordPaneChurnCheckpointAtEpoch additionally reports the first accepted pane
-// churn after the latest prompt. That edge must be persisted even while the row
-// remains Running; later spinner churn needs no write on every poll.
+// churn after the latest prompt — and the first after a latched stillness
+// base. Both edges must be persisted even while the row remains Running:
+// the prompt edge marks answer-start evidence, and the base edge is the
+// attributable churn the quiet arm reads after a restore — a restart that
+// kept only pre-base churn would see a pane that never moved post-base and
+// demote the release from the quiet arm to the five-minute silent arm
+// (#5221 review). Later spinner churn needs no write on every poll.
 func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedEpoch uint64) (bool, bool) {
 	if churnAt.IsZero() {
 		return false, false
@@ -225,9 +230,12 @@ func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedE
 	if i.stateEpoch != observedEpoch || !churnAt.After(i.lastPaneChurnAt) {
 		return false, false
 	}
-	checkpoint := !i.lastPromptAttemptAt.IsZero() &&
+	checkpoint := (!i.lastPromptAttemptAt.IsZero() &&
 		churnAt.After(i.lastPromptAttemptAt) &&
-		!i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
+		!i.lastPaneChurnAt.After(i.lastPromptAttemptAt)) ||
+		(!i.taskRunStillBaseAt.IsZero() &&
+			churnAt.After(i.taskRunStillBaseAt) &&
+			!i.lastPaneChurnAt.After(i.taskRunStillBaseAt))
 	i.lastPaneChurnAt = churnAt
 	// An updated frame ends the still run — a candidate mid-grace was not
 	// the turn's end, so the owed edge re-derives from the next unchanged

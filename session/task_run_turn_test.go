@@ -428,6 +428,41 @@ func TestTaskRunStillEdgeRetiresCandidateOnBlindWindow(t *testing.T) {
 		"the post-hole still frame opens a fresh candidate")
 }
 
+// Churn AFTER the latched still base is the attributable evidence the quiet
+// arm consumes — and it is durable state, so its first frame must force a
+// write even when an earlier post-attempt churn already spent the
+// prompt-edge checkpoint: a restart keeping only pre-base churn would see a
+// pane that never moved post-base and demote the release to the silent arm
+// (#5221 review).
+func TestTaskRunPostBaseChurnForcesCheckpoint(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	_, epoch := inst.InFlightOpAndEpoch()
+	// The in-flight turn is still churning when the redelivery lands.
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(20 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	// The old turn churns past the rebind — spending the prompt-edge
+	// checkpoint — then stillness latches the base.
+	_, promptCheckpoint := inst.RecordPaneChurnCheckpointAtEpoch(t1.Add(10*time.Second), epoch)
+	require.True(t, promptCheckpoint, "first post-attempt churn checkpoints")
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second+taskRunStillGrace), epoch))
+
+	// The new turn's first churn sits after the base: attributable evidence,
+	// and durable — a second checkpoint must carry it.
+	_, baseCheckpoint := inst.RecordPaneChurnCheckpointAtEpoch(t1.Add(16*time.Second+taskRunStillGrace), epoch)
+	require.True(t, baseCheckpoint,
+		"the first post-base churn must persist — it is the quiet arm's evidence on restore")
+	// Spinner churn after it is the same turn continuing, not a new edge.
+	_, again := inst.RecordPaneChurnCheckpointAtEpoch(t1.Add(20*time.Second+taskRunStillGrace), epoch)
+	require.False(t, again, "no write storm for ordinary churn")
+}
+
 // The same contended boundary releases on the quiet arm when the pane goes
 // still and then churns AGAIN — output after the still edge is attributable
 // to the redelivered prompt, not to whatever was running before it (#5221
