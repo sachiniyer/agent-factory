@@ -508,6 +508,13 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
+	// The run-marker flip is durable on its own: a held gate releasing on a
+	// Ready→Ready observation moves no liveness, and nothing else on this
+	// path writes — a restart would resurrect the finished run into its held
+	// concurrency slot until the fallback matured again (#5221 review).
+	if taskRunWasActive && !instance.TaskRunActive() {
+		churnCheckpoint = true
+	}
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 	// The run may have just ended here, on the one path that cannot act on it: the
 	// attach owns this session's tmux. Park the declared lifecycle so the first
@@ -552,17 +559,29 @@ func (m *Manager) RefreshStatuses() {
 	lastStatusSweepNs.Store(int64(nowFunc().Sub(sweepStart)))
 }
 
+// statusSweepFloorCap bounds how much of one serial pass's duration may count
+// as scheduled spacing between a pane's captures. The floor exists because a
+// pass that legitimately overruns the tick still lands every capture on
+// schedule — but only this much of it is scheduling: a pass slower than the
+// shortest completion arm's window is a stall in which panes went genuinely
+// unwatched, and normalizing it as cadence would let a stale streak survive
+// blindness long enough to hide a whole turn (#5221 review). A fleet whose
+// sweeps routinely exceed it is being asked for evidence its cadence cannot
+// produce; capped at the backstop's own scale so that failure is bounded.
+var statusSweepFloorCap = 30 * time.Second
+
 // statusSweepExpectedInterval returns the cadence the pane-observation streak
 // may assume between consecutive captures of the same session: the larger of
-// the caller's scheduled interval and the previous serial sweep's duration.
-// The tick bounds captures only when the whole fleet's pass fits inside it —
-// when a sweep overruns, every capture in it lands on schedule anyway, and
-// counting that on-schedule spacing as an observation hole would rebase the
-// quiet/silent streak on every frame (#5221 review). The first sweep after
-// daemon start has no predecessor, so the scheduled interval alone applies.
+// the caller's scheduled interval and the previous serial sweep's duration,
+// floored at statusSweepFloorCap. The tick bounds captures only when the whole
+// fleet's pass fits inside it — when a sweep overruns, every capture in it
+// lands on schedule anyway, and counting that on-schedule spacing as an
+// observation hole would rebase the quiet/silent streak on every frame (#5221
+// review). The first sweep after daemon start has no predecessor, so the
+// scheduled interval alone applies.
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	if sweep := time.Duration(lastStatusSweepNs.Load()); sweep > scheduled {
-		return sweep
+		return min(sweep, statusSweepFloorCap)
 	}
 	return scheduled
 }
@@ -903,6 +922,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		}
 	}
 
+	// The run-marker flip is durable on its own: a held gate releasing on a
+	// Ready→Ready observation moves no liveness, and with on_complete=keep
+	// nothing below writes either — a restart would resurrect the finished
+	// run into its held concurrency slot until the fallback matured again
+	// (#5221 review).
+	if taskRunWasActive && !instance.TaskRunActive() {
+		settlementCheckpoint = true
+	}
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
 	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, settlementCheckpoint)
 

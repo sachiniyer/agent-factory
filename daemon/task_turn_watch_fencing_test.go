@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // A frame captured BEFORE a redelivery's boundary must not reach the new
@@ -82,7 +85,9 @@ func TestNoteTaskRunTurnEvidenceDistinguishesConfirmedEmpty(t *testing.T) {
 // The streak's expected cadence must follow the serial sweep, not just the
 // configured tick: a fleet pass longer than its tick still captures every
 // session on schedule, and only a gap beyond that honest spacing may rebase
-// the observation streak (#5221 review).
+// the observation streak (#5221 review). The floor is CAPPED, though: a pass
+// slower than the cap is a stall that left panes genuinely unwatched, not a
+// schedule to normalize — blindness that long must rebase the streak.
 func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 	old := lastStatusSweepNs.Load()
 	t.Cleanup(func() { lastStatusSweepNs.Store(old) })
@@ -95,11 +100,15 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 	require.Equal(t, time.Second, statusSweepExpectedInterval(time.Second),
 		"a sweep faster than the tick does not shorten the expected cadence")
 
-	lastStatusSweepNs.Store(int64(90 * time.Second))
-	require.Equal(t, 90*time.Second, statusSweepExpectedInterval(time.Second),
-		"a sweep slower than the tick becomes the expected cadence")
-	require.Equal(t, 90*time.Second, statusSweepExpectedInterval(taskRunPollBackstop),
-		"the paused backstop cadence floors at the sweep too")
+	lastStatusSweepNs.Store(int64(20 * time.Second))
+	require.Equal(t, 20*time.Second, statusSweepExpectedInterval(time.Second),
+		"an honest overrun within the cap becomes the expected cadence")
+
+	lastStatusSweepNs.Store(int64(10 * time.Minute))
+	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"a stalled pass is not normalized as cadence: its blindness must rebase streaks")
+	require.Equal(t, taskRunPollBackstop, statusSweepExpectedInterval(taskRunPollBackstop),
+		"the paused backstop cadence is unaffected by a stalled pass")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
@@ -151,4 +160,43 @@ func TestRefreshInstanceStatusKeepsLivenessOnFailedCapture(t *testing.T) {
 	manager.refreshInstanceStatus(repoID, inst)
 	require.Equal(t, session.LiveReady, inst.GetLiveness(),
 		"a confirmed unchanged frame settles Ready")
+}
+
+// A run that ends on a Ready→Ready observation changes no liveness, and
+// on_complete=keep writes nothing either — yet the marker flip is durable
+// state a restart reads. Without a forced checkpoint the on-disk row keeps
+// TaskRunActive=true and a daemon restart resurrects the finished run into
+// its held concurrency slot until the fallback matures again (#5221 review).
+func TestRefreshInstanceStatusPersistsReadyToReadyRunEnd(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerTaskSpawnedSession(t, manager, repoID, repoPath, "held-run", "task-keep")
+	stubTaskLifecycle(t, "task-keep", task.OnCompleteKeep)
+
+	// The row already sits Ready before the polls — the hole is the unchanged
+	// frame, so no liveness edge may carry the write.
+	inst.SetStatusForTest(session.Ready)
+	// Seed the durable precondition this bug strand leaves behind: the on-disk
+	// row still carries the in-flight marker from the run's own writes.
+	seeded, err := json.Marshal([]session.InstanceData{
+		{Title: "held-run", Path: repoPath, Status: session.Ready, TaskRunActive: true},
+	})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, time.Now()))
+	manager.refreshInstanceStatus(repoID, inst)
+	require.True(t, inst.TaskRunActive(),
+		"the first idle edge inside the turn gate holds — the agent has not demonstrably turned")
+
+	require.True(t, inst.RecordTaskRunTurn(time.Now()))
+	manager.refreshInstanceStatus(repoID, inst)
+	require.False(t, inst.TaskRunActive(), "post-turn Ready→Ready releases the held edge")
+
+	raw, err := config.LoadRepoInstances(repoID)
+	require.NoError(t, err)
+	var rows []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &rows))
+	require.Len(t, rows, 1)
+	require.False(t, rows[0].TaskRunActive,
+		"the marker flip must reach disk even though the poll moved no liveness")
 }

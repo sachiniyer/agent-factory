@@ -159,8 +159,9 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	i.paneObservationExpiresAt = at.Add(maxGap)
 }
 
-// NotePaneCaptureFailed breaks the observation streak on a confirmed FAILED
-// capture — a probe the daemon attempted and lost. Skipping the stamp is not
+// NotePaneCaptureFailed breaks the observation streak on a probe the daemon
+// attempted and lost — a confirmed failed capture, or a snapshot whose
+// transport errored before any frame could answer. Skipping the stamp is not
 // enough: two successful captures straddling one failure can sit inside the
 // gap horizon (60s apart under the paused path's 90s slack), leaving the old
 // streak intact while the failed frame in between could have hidden active
