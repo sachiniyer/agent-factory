@@ -72,3 +72,39 @@ func TestRenameArchived_RefusesAUserMovedArchive(t *testing.T) {
 	runRenameGit(t, repoRoot, "show-ref", "--verify", "refs/heads/af/archived-title")
 	assert.DirExists(t, elsewhere)
 }
+
+// An archived row flagged worktree-missing whose path was later recreated holds
+// an unverified directory there. Rename — run automatically on title reuse —
+// must refuse rather than move it, and must not rename the branch first (#5102).
+func TestRenameArchived_FlaggedRowWithARecreatedPathRefuses(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	runRenameGit(t, repoRoot, "commit", "--allow-empty", "-m", "init")
+	wtPath := filepath.Join(filepath.Dir(repoRoot), "flagged-title")
+	runRenameGit(t, repoRoot, "worktree", "add", "-b", "af/flagged-title", wtPath)
+	require.NoError(t, os.RemoveAll(wtPath))
+	require.NoError(t, os.Mkdir(wtPath, 0o755))
+	stranger := filepath.Join(wtPath, "not-the-session.txt")
+	require.NoError(t, os.WriteFile(stranger, []byte("unverified"), 0o644))
+
+	inst, err := NewInstance(InstanceOptions{Title: "flagged-title", Path: repoRoot, Program: "claude"})
+	require.NoError(t, err)
+	gw, err := git.NewGitWorktreeFromStorage(repoRoot, wtPath, "flagged-title", "af/flagged-title", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
+	inst.liveness = LiveArchived
+	inst.SetWorktreeMissing(WorktreeMissingArchivedReason(wtPath))
+
+	dest := filepath.Join(filepath.Dir(repoRoot), "flagged-title-renamed")
+	err = inst.RenameArchived("flagged-title-renamed", dest, "af/flagged-title-renamed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded as deleted outside af")
+	assert.Equal(t, "flagged-title", inst.Title)
+	assert.Equal(t, wtPath, gw.GetWorktreePath())
+	assert.Equal(t, "af/flagged-title", gw.GetBranchName())
+	runRenameGit(t, repoRoot, "show-ref", "--verify", "refs/heads/af/flagged-title")
+	data, err := os.ReadFile(stranger)
+	require.NoError(t, err)
+	assert.Equal(t, "unverified", string(data))
+	assert.NoDirExists(t, dest, "nothing may be moved to the renamed path")
+}

@@ -692,14 +692,24 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 	// it) would orphan it, and restore would later refuse it as a foreign
 	// placement. So the repoint is taken only when git has the branch live
 	// nowhere; a live checkout, or a listing that cannot be read, refuses.
+	//
+	// And a row already flagged worktree-missing recorded that the directory af
+	// tracked is gone, so whatever answers at the path now is not the session's
+	// worktree as far as af can prove: moving it would carry an unverified
+	// directory's bytes under the renamed title. Same invariant as archive's
+	// sticky-flag guard — refuse unless the path is conclusively absent.
 	var relocate func(string) error = gw.MoveWorktree
-	if gw.ProbeWorktreePresence() == git.WorktreePresenceAbsent {
+	presence := gw.ProbeWorktreePresence()
+	if i.worktreeMissing && presence != git.WorktreePresenceAbsent {
+		return fmt.Errorf("cannot rename archived session %q: its worktree %s was recorded as deleted outside af, and the path is not conclusively absent now, so whatever is there is unverified — af will not move it; inspect %s, remove it or move it aside if it is not the session's work, then retry", i.Title, gw.GetWorktreePath(), gw.GetWorktreePath())
+	}
+	if presence == git.WorktreePresenceAbsent {
 		moved, live, err := liveBranchCheckout(gw)
 		if err != nil {
 			return fmt.Errorf("cannot rename archived session %q: its archived worktree %s is gone, and af could not read where git has its branch checked out, so it cannot tell a deletion from a move: %w", i.Title, gw.GetWorktreePath(), err)
 		}
 		if live {
-			return fmt.Errorf("cannot rename archived session %q: its archived worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s, remove it with 'git worktree remove', or kill the session", i.Title, moved, gw.GetWorktreePath())
+			return fmt.Errorf("cannot rename archived session %q: its archived worktree was moved outside af to %s (git has its branch checked out there) — move it back to %s and retry, or remove it with 'git worktree remove' and retry", i.Title, moved, gw.GetWorktreePath())
 		}
 		relocate = func(dest string) error {
 			if err := gw.RepointAbsentWorktreePath(dest); err != nil {

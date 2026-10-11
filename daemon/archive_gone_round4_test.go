@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -119,4 +121,117 @@ func TestKillSession_FencedRowKillableOnceThePathIsGoneAgain(t *testing.T) {
 	_, tracked := manager.instances[daemonInstanceKey(repoID, "refenced-kill")]
 	manager.mu.Unlock()
 	assert.False(t, tracked, "a completed kill removes the row")
+}
+
+// plantStuckEditor makes the next VS Code stop for key fail to confirm exit.
+func plantStuckEditor(t *testing.T, manager *Manager, inst *session.Instance, key, worktree string) {
+	t.Helper()
+	cmd, _ := startOwnedSleep(t)
+	manager.vscode.mu.Lock()
+	manager.vscode.servers[key] = &vscodeServer{
+		worktree: worktree, instanceID: inst.ID, cmd: cmd, exited: make(chan struct{}),
+		stopGrace: 10 * time.Millisecond,
+		killGroup: func(int, syscall.Signal) error { return nil },
+	}
+	manager.vscode.mu.Unlock()
+}
+
+// Once a landed earlier move is adopted, the record names a directory git
+// proved. A worktree-missing flag the poll set against the vacated source must
+// not be persisted beside it — including by a cancel path before teardown — or
+// the sticky-flag guard would refuse this verified worktree forever (#5102).
+func TestArchiveSession_AdoptedRouteCancelPersistsNoStaleMissingFlag(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "adopt-cancel")
+	dest, err := archivedWorktreePath(repoID, "adopt-cancel")
+	require.NoError(t, err)
+	moveWorktreeForTest(t, repoPath, wtPath, dest)
+	manager.RefreshStatuses()
+	missing, _ := inst.WorktreeMissing()
+	require.True(t, missing, "premise: the poll flagged the vacated source")
+
+	key := daemonInstanceKey(repoID, "adopt-cancel")
+	plantStuckEditor(t, manager, inst, key, dest)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "adopt-cancel", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VS Code editor teardown could not be confirmed")
+	rec := recordFor(t, repoID, "adopt-cancel")
+	require.NotNil(t, rec)
+	assert.Equal(t, dest, rec.Worktree.WorktreePath, "the cancel persisted the adopted path")
+	assert.False(t, rec.Worktree.Missing, "and must not have persisted the stale flag beside it")
+
+	manager.vscode.mu.Lock()
+	delete(manager.vscode.servers, key)
+	manager.vscode.mu.Unlock()
+	_, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "adopt-cancel", RepoID: repoID})
+	require.NoError(t, err, "the adopted worktree must stay archivable")
+	assert.Equal(t, session.LiveArchived, archived.Liveness)
+	assert.Equal(t, dest, archived.Worktree.WorktreePath)
+}
+
+// If the adopted directory vanishes during teardown, the disappearance is
+// recorded: the row is fenced and flagged, so a directory created at that path
+// later is refused by archive (and by respawn) instead of being accepted (#5102).
+func TestArchiveSession_AdoptedDirectoryVanishingIsRecordedAsGone(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, wtPath := registerArchivable(t, manager, repoID, repoPath, "adopt-vanish")
+	dest, err := archivedWorktreePath(repoID, "adopt-vanish")
+	require.NoError(t, err)
+	moveWorktreeForTest(t, repoPath, wtPath, dest)
+
+	prev := archiveGoneTeardown
+	archiveGoneTeardown = func(i *session.Instance, before func() error, trust, adopted bool) (error, error) {
+		require.True(t, adopted, "premise: this archive took the adopted route")
+		require.NoError(t, os.Rename(dest, dest+".gone"))
+		return prev(i, before, trust, adopted)
+	}
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "adopt-vanish", RepoID: repoID})
+	archiveGoneTeardown = prev
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fenced")
+	missing, _ := inst.WorktreeMissing()
+	assert.True(t, missing, "the vanished adopted directory must be recorded as gone")
+	rec := recordFor(t, repoID, "adopt-vanish")
+	require.NotNil(t, rec)
+	assert.True(t, rec.Worktree.Missing)
+	assert.NotNil(t, rec.Worktree.RelocationRecovery)
+
+	// A stranger recreated at the path is not accepted.
+	require.NoError(t, os.Mkdir(dest, 0o755))
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "adopt-vanish", RepoID: repoID})
+	require.Error(t, err)
+	assert.NotEqual(t, session.LiveArchived, inst.GetLiveness())
+	assert.DirExists(t, dest)
+}
+
+// A flag transition whose write cedes to an operation that started after the
+// probe must not be persisted mid-operation, and must not be forgotten: the
+// next pass writes it once the operation is gone (#5102).
+func TestRefreshWorktreeMissing_CededWriteIsRetried(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerGoneWorktree(t, manager, repoID, repoPath, "ceded")
+
+	require.NoError(t, inst.Transition(session.BeginArchive()))
+	_, changed := inst.RefreshWorktreeMissing()
+	require.False(t, changed, "premise: the probe itself refuses to stamp under an op")
+	require.NoError(t, inst.Transition(session.CancelArchive()))
+
+	// Stamp it with no op, then raise one before the write, as a racing
+	// operation would.
+	_, changed = inst.RefreshWorktreeMissing()
+	require.True(t, changed)
+	require.NoError(t, inst.Transition(session.BeginArchive()))
+	key := stableSessionKey(repoID, inst)
+	if !manager.persistWorktreeMissing(repoID, inst) {
+		manager.markWorktreeMissingUndurable(key)
+	}
+	rec := recordFor(t, repoID, "ceded")
+	require.NotNil(t, rec)
+	assert.False(t, rec.Worktree.Missing, "a write that cedes to an op must not land")
+
+	require.NoError(t, inst.Transition(session.CancelArchive()))
+	manager.refreshWorktreeMissing(repoID, inst)
+	rec = recordFor(t, repoID, "ceded")
+	require.NotNil(t, rec)
+	assert.True(t, rec.Worktree.Missing, "the ceded transition is retried and lands")
 }

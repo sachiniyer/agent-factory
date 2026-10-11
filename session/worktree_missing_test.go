@@ -163,8 +163,9 @@ func TestRenameArchived_GoneWorktreeRepointsWithoutMove(t *testing.T) {
 
 // The respawn path is where af re-materializes a deleted worktree, so it is where
 // the flag clears — but only when it actually rebuilt the path and started a fresh
-// pane there. A respawn into a path that already existed (someone mkdir'd it)
-// proves nothing about the worktree and must leave the flag set (#5102).
+// pane there. A path that already exists on a flagged row (someone mkdir'd it, or
+// a stranger moved in) is unverified: respawn refuses to start the agent in it
+// and leaves the flag set (#5102).
 func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -175,7 +176,7 @@ func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 		wantMissing bool
 	}{
 		{name: "rebuilt and respawned clears", precreate: false, wantMissing: false},
-		{name: "respawn into an existing path keeps it", precreate: true, wantMissing: true},
+		{name: "an existing path on a flagged row is refused and keeps it", precreate: true, wantMissing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repoRoot := initTempGitRepo(t)
@@ -196,7 +197,14 @@ func TestRecover_ClearsWorktreeMissingOnlyAfterRebuild(t *testing.T) {
 			)
 			instance.SetWorktreeMissing("tracked worktree path " + worktreePath + " does not exist (deleted outside af)")
 
-			require.NoError(t, instance.Recover())
+			err := instance.Recover()
+			if tc.precreate {
+				var unavailable *WorktreeUnavailableError
+				require.ErrorAs(t, err, &unavailable, "a flagged row must not respawn into an unverified directory")
+				assert.Contains(t, err.Error(), "unverified")
+			} else {
+				require.NoError(t, err)
+			}
 			require.DirExists(t, worktreePath)
 			missing, _ := instance.WorktreeMissing()
 			assert.Equal(t, tc.wantMissing, missing)

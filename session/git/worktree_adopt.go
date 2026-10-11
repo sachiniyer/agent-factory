@@ -150,17 +150,23 @@ func (g *GitWorktree) AdoptLandedWorktreeMove(dest string) error {
 
 // ReconfirmAdoptedWorktree checks that the directory AdoptLandedWorktreeMove
 // proved is still the one at the recorded path — device and inode equal to what
-// was proven, not merely something existing under that name.
+// was proven, not merely something existing under that name. Every failure
+// returns an error joined with ErrRelocateStateUnknown and leaves the record
+// fenced, because none of them leaves a directory af can vouch for:
 //
-// A vanished directory returns an error wrapping os.ErrNotExist: nothing is at
-// the path, so there is nothing to protect. A different directory at the path,
-// or a check that cannot be answered (a stalled mount), is worse: the record
-// names a path that may hold unrelated files, and a recovery that starts an
-// agent there or a cleanup that removes it would act on them. So those install a
-// claim_stale recovery record carrying the PROVEN identity before returning an
-// error joined with ErrRelocateStateUnknown. That record is what makes respawn
-// refuse to start an agent and cleanup refuse to delete until a retry
-// re-establishes which directory is the session's.
+//   - A different directory at the path, or a check that cannot be answered (a
+//     stalled mount): the record may name unrelated files, and a recovery that
+//     starts an agent there or a cleanup that removes it would act on them. A
+//     claim_stale record carrying the PROVEN identity is installed; it holds
+//     until a retry re-establishes which directory is the session's.
+//   - The proven directory vanished (the error also wraps os.ErrNotExist).
+//     Nothing is at the path now, but anything created there later is a
+//     stranger, and nothing about the path alone would say so. An
+//     identity-unknown stall is installed — the fence respawn and cleanup honor
+//     while the path exists, which settles by itself once a claim or cleanup
+//     sees the path conclusively absent. The caller records the disappearance
+//     durably as well (the worktree-missing flag), which is what keeps a
+//     reappearing directory unverified after the stall settles.
 func (g *GitWorktree) ReconfirmAdoptedWorktree() error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
@@ -170,11 +176,15 @@ func (g *GitWorktree) ReconfirmAdoptedWorktree() error {
 		return fmt.Errorf("no adopted worktree identity is recorded for %s", current)
 	}
 	err := requireSameDirectory(current, adopted.identity)
-	if err == nil || errors.Is(err, os.ErrNotExist) {
-		return err
+	if err == nil {
+		return nil
 	}
 	if g.relocationRecovery == nil {
-		g.recordStaleClaimLocked(RelocationClaim{Path: current, identity: adopted.identity})
+		if errors.Is(err, os.ErrNotExist) {
+			g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+		} else {
+			g.recordStaleClaimLocked(RelocationClaim{Path: current, identity: adopted.identity})
+		}
 	}
 	g.adoptedWorktree = nil
 	return errors.Join(err, ErrRelocateStateUnknown)
