@@ -28,6 +28,18 @@ func (s *Sidebar) syncFromStore() {
 		return
 	}
 	s.rebuildVisibleItems()
+	// treeCollapsed is the user's fold of the BOUND live row's tab subtree.
+	// Archiving re-homes that row into the flat Archived folder, where the
+	// override no longer folds anything — it only suppresses the ▾ marker the
+	// header fallback keys on, leaving an adoptable row that looks unselected
+	// (#4755 review). Clear the dead override on the transition.
+	if s.treeCollapsed != "" {
+		if sel := s.proj.GetSelectedInstance(); sel == nil ||
+			sel.Title != s.treeCollapsed || sel.ShownArchived() {
+			s.treeCollapsed = ""
+			s.rebuildVisibleItems()
+		}
+	}
 	if s.proj.SelectionSeq() != s.seenSelSeq {
 		if inst := s.proj.GetSelectedInstance(); inst != nil {
 			s.moveCursorToInstance(inst)
@@ -300,6 +312,11 @@ func (s *Sidebar) rebuildVisibleItems() {
 	if s.selectedIdx < 0 {
 		s.selectedIdx = 0
 	}
+	// The fitted window describes the OLD list now — mark it stale so the
+	// next reader (RowVerbTarget via ensureRenderedWindow, or String()'s own
+	// fit) recomputes it against THIS list rather than consulting bounds that
+	// no longer line up with these indices (#4755 review).
+	s.hasRendered = false
 }
 
 // rawSelection returns the currently selected item without syncing against
@@ -708,6 +725,73 @@ func (s *Sidebar) GetSelectedInstance() *session.Instance {
 		return nil
 	}
 	return instances[sel.ItemIndex]
+}
+
+// RowVerbTarget resolves the instance a selection-scoped row verb — the
+// footer's instance hints plus `r`/`D`/`c` dispatch — should act on (#4755).
+// The cursor's own row wins whenever it rests on an instance row. When the
+// cursor rests on a section header, the answer is the store's sticky display
+// binding — but only while all of these hold: the binding is a resting row
+// (resting LIVENESS, not the LifecycleAction verb — a fenced resting row such
+// as startup-unknown still owns its marked row, and each handler gates its
+// own capability); the cursor's header owns the section the bound row renders
+// in (an Archived row under the Archived folder, a lost/dead or mid-restore
+// row under Sessions — a foreign header carries no row's verbs); and the row
+// is inside the rendered window — the ▾ marker exists only there, so a row in
+// a collapsed folder or scrolled past the fitted viewport resolves to nothing.
+// A live binding is never adopted — section headers carry folder verbs only,
+// and the panes legitimately keep displaying that live selection.
+func (s *Sidebar) RowVerbTarget() *session.Instance {
+	if inst := s.GetSelectedInstance(); inst != nil {
+		return inst
+	}
+	sel := s.rawSelection()
+	if !sel.IsHeader {
+		return nil
+	}
+	bound := s.proj.GetSelectedInstance()
+	if bound == nil || !bound.IsResting() {
+		return nil
+	}
+	// The bound row must carry its ▾ marker for a header to borrow it: a
+	// leftover tab-collapse override (a live row folded, then lost/archived)
+	// renders ▸ instead — verbs must not land on a row that reads unselected
+	// (#4755 review). A mid-op row has no arrow at all and is refused the
+	// same way.
+	if !s.instanceExpanded(bound) {
+		return nil
+	}
+	wantSection := SectionInstances
+	if bound.ShownArchived() {
+		wantSection = SectionArchived
+	}
+	if sel.Kind != wantSection {
+		return nil
+	}
+	// The fitted window is only valid for the list it was computed on;
+	// rebuildVisibleItems invalidates it and this refit answers against the
+	// list as it will actually render — a rebuild that just revealed or hid
+	// the bound row gets the right verdict in the same update (#4755 review).
+	s.ensureRenderedWindow()
+	for i, inst := range s.proj.GetInstances() {
+		if inst != bound {
+			continue
+		}
+		for j, item := range s.visibleItems {
+			if isInstanceRow(item) && !item.IsTab && item.ItemIndex == i {
+				// The ▾ marker renders only inside the fitted window
+				// (sidebar_render.go). A bound row beyond it — deeper than
+				// the viewport in a long expanded folder — is on no frame's
+				// screen, so it may not take row verbs.
+				if j < s.renderedStart || j >= s.renderedEnd {
+					return nil
+				}
+				return bound
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 // SetSelectedInstance sets the cursor to point at the given instance index.

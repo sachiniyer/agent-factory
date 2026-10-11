@@ -16,6 +16,7 @@ const ACTIONS_APP_ID = 15368;
 const CHECK_GENERATION_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_SCRIPT = path.join(__dirname, "auto-gate.js");
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
+const PR_VALIDATION_WORKFLOW = path.join(__dirname, "..", "workflows", "pr.yml");
 const AUTO_GATE_AGGREGATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate-aggregate.yml");
 const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gate-pr.md");
 const AUTO_GATE_DOC = path.join(__dirname, "..", "auto-gate.md");
@@ -424,8 +425,8 @@ const workflowGroup = (eventName, event = {}, inputs = {}, runId = 100) => {
       format("pr-{0}-{1}", event.pull_request?.number, event.pull_request?.head?.sha)) ||
     (first(event.issue?.number, event.pull_request?.number) &&
       format("pr-{0}", first(event.issue?.number, event.pull_request?.number))) ||
-    (first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha) &&
-      format("head-{0}", first(event.check_suite?.head_sha, event.workflow_run?.head_sha, event.sha))) ||
+    (first(event.workflow_run?.head_sha, event.sha) &&
+      format("head-{0}", first(event.workflow_run?.head_sha, event.sha))) ||
     runId
   );
 };
@@ -453,8 +454,8 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
       "&& format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) " +
       "|| (github.event.issue.number || github.event.pull_request.number) " +
       "&& format('pr-{0}', github.event.issue.number || github.event.pull_request.number) " +
-      "|| (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
-      "&& format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) " +
+      "|| (github.event.workflow_run.head_sha || github.event.sha) " +
+      "&& format('head-{0}', github.event.workflow_run.head_sha || github.event.sha) " +
       "|| github.run_id",
   );
   // The synchronize guard must precede both the generic pull_request_target
@@ -505,12 +506,8 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
     workflowGroup("issue_comment", { issue: { number: 4060 } }),
     workflowGroup("issue_comment", { issue: { number: 4061 } }),
   );
-  // Commit events coalesce across all three types on the same commit, and only
-  // on the same commit: coverage is exactly the named head.
-  assert.equal(
-    workflowGroup("check_suite", { check_suite: { head_sha: HEAD_SHA } }),
-    `auto-gate-head-${HEAD_SHA}`,
-  );
+  // Commit events coalesce across both subscribed types on the same commit,
+  // and only on the same commit: coverage is exactly the named head.
   assert.equal(
     workflowGroup("workflow_run", { workflow_run: { head_sha: HEAD_SHA } }),
     `auto-gate-head-${HEAD_SHA}`,
@@ -558,7 +555,6 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
   // No event's group may contain the run id except the last-resort fallback:
   // coalescing is decided by coverage, never by arrival order.
   for (const [name, event] of Object.entries({
-    check_suite: { check_suite: { head_sha: HEAD_SHA } },
     issue_comment: { issue: { number: 4060 } },
     pull_request_review: { pull_request: pr(4060) },
     pull_request_review_comment: { pull_request: pr(4060) },
@@ -575,6 +571,131 @@ test("workflow concurrency coalesces only runs with covered invalidation", () =>
     );
   }
   assert.equal(workflowGroup("unrecognized_event", {}, {}, 777), "auto-gate-777");
+});
+
+test("Auto Gate never subscribes to check_suite or check_run (#5177)", () => {
+  // Every run of this workflow leaves a github-actions-owned check suite on
+  // its head, and the platform delivers that suite's completion as a fresh
+  // check_suite event — so a subscription self-feeds forever (~200 runs/hour
+  // measured on one master head for days). No payload filter can prevent it:
+  // on.check_suite accepts only `types`, and a run whose jobs are all skipped
+  // by `if` still completes its check suite, re-firing the same event — the
+  // subscription list is the only place a filtered event costs nothing.
+  // check_run recursion is the same shape through the run's own job runs.
+  // Required-check wakeups are covered by workflow_run[PR Validation] and
+  // status; anything else is the reconciliation pass's job. Do not re-add
+  // either event without a trigger-level app filter.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const triggers = workflow.match(/^on:\n([\s\S]*?)(?=^\S)/m)[1];
+  assert.doesNotMatch(triggers, /^  (check_suite|check_run):/m);
+});
+
+// Parses the jobs: block of a workflow file into name → raw block, walking the
+// two-space job keys by indentation. Enough YAML structure to pin a job's keys
+// without a parser dependency this suite does not have.
+function workflowJobBlocks(workflow) {
+  const jobsText = workflow.slice(workflow.indexOf("\njobs:"));
+  return Object.fromEntries(
+    [...jobsText.matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:|$(?![\s\S]))/gm)].map(
+      (match) => [match[1], match[2]],
+    ),
+  );
+}
+
+// A key's scalar value, or the indented block it opens, inside one job block.
+function jobKey(block, key) {
+  const scalar = block.match(new RegExp(`^    ${key}: (\\S.*)$`, "m"));
+  if (scalar) return scalar[1];
+  return block.match(new RegExp(`^    ${key}:\\n((?:      [^\\n]*\\n?)+)`, "m"))?.[1];
+}
+
+test("PR Validation ends by requesting the reconciliation pass itself (#5179)", () => {
+  // The */5 schedule is best-effort (measured ~3% of expected deliveries) and
+  // the workflow_run wakeup it backs up is dropped under load — 64 of 381 PR
+  // Validation completions over Oct 1–7 2026 produced no gate run within ten
+  // minutes. The dependable backstop is the run whose completion is at risk
+  // POSTing the auto-gate-reconcile dispatch itself: a synchronous API write,
+  // not an event delivery the platform can silently drop, and a warning in
+  // the run log rather than a silent failure. Two load-bearing conditions:
+  // contents:write exists ONLY on this job — the workflow stays read-only and
+  // the job runs nothing PR-controlled (no checkout, no repo scripts) — and
+  // the payload carries no PR-controlled fields.
+  const workflow = fs.readFileSync(PR_VALIDATION_WORKFLOW, "utf8");
+
+  // Workflow-level permissions stay read-only.
+  const topPermissions = workflow.match(/^permissions:\n((?:  \w+: \w+\n)+)/m);
+  assert.ok(topPermissions, "pr.yml must keep a top-level permissions block");
+  assert.deepEqual(
+    topPermissions[1].trim().split("\n").map((line) => line.trim()),
+    ["contents: read"],
+  );
+
+  const jobs = workflowJobBlocks(workflow);
+  const job = jobs["gate-reconcile"];
+  assert.ok(job, "pr.yml needs the gate-reconcile job that sends the dispatch");
+
+  // Run-end placement and no probe cost: build needs every other job and runs
+  // always(), so needing it lands this job at the end of the run. Fork PRs are
+  // skipped outright, and Dependabot's same-repo runs too — GitHub downgrades
+  // both to a read-only token, so the dispatch could never land and skipping
+  // keeps the workflow_run wakeup (their only net) earliest.
+  assert.equal(jobKey(job, "needs"), "[build]");
+  assert.equal(
+    jobKey(job, "if"),
+    "always() && !inputs.probe && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork != true && github.actor != 'dependabot[bot]'))",
+  );
+
+  // The only write permission in the workflow, scoped to this job — and this
+  // job is also the only job allowed to declare permissions at all.
+  assert.deepEqual(
+    Object.entries(jobs).filter(([, block]) => jobKey(block, "permissions")),
+    [["gate-reconcile", job]],
+    "no other pr.yml job may carry a permissions block",
+  );
+  assert.deepEqual(
+    jobKey(job, "permissions").trim().split("\n").map((line) => line.trim()),
+    ["contents: write"],
+  );
+
+  // No checkout, no action, no repo script: one step, a single gh api POST.
+  // Assertions run on code lines only — the job's own comment names what it
+  // must never do, and a negative pattern would match that wording.
+  const code = job.replace(/^[ \t]*#[^\n]*\n/gm, "");
+  assert.doesNotMatch(code, /uses:/);
+  assert.doesNotMatch(code, /checkout|node\s|\.github\/|require\(|git\s/);
+  assert.match(code, /gh api "repos\/\$GITHUB_REPOSITORY\/dispatches" --method POST --input -/);
+  // A failed POST is a warning, never a red check or a silent skip.
+  assert.match(code, /::warning::/);
+  assert.doesNotMatch(code, /exit 1|set -e/);
+
+  // The payload is fixed-shape: event_type plus a client_payload holding only
+  // run-derived fields — never PR-controlled strings.
+  const body = code.match(/\{"event_type":"auto-gate-reconcile","client_payload":\{([^}]*)\}\}/);
+  assert.ok(body, "the dispatch posts exactly the auto-gate-reconcile event");
+  assert.deepEqual(
+    [...body[1].matchAll(/"(\w+)":/g)].map((match) => match[1]).sort(),
+    ["head_sha", "source_event", "source_run_id"],
+  );
+  // Context references anywhere in the job — `${{ }}` expressions and bare
+  // expression keys like `if:` alike — are the whole surface that can pull
+  // event data into this job.
+  const interpolated = new Set();
+  for (const ref of code.matchAll(/\b(?:github|secrets|vars|inputs|needs|steps|matrix|env)\.[\w.]+/g)) {
+    interpolated.add(ref[0]);
+  }
+  assert.deepEqual(
+    [...interpolated].sort(),
+    [
+      "github.actor",
+      "github.event.pull_request.head.repo.fork",
+      "github.event.pull_request.head.sha",
+      "github.event_name",
+      "github.sha",
+      "inputs.probe",
+      "secrets.GITHUB_TOKEN",
+    ],
+    "only run-derived values, platform booleans, the probe gate, and the token may reach this job",
+  );
 });
 
 test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidation", async () => {
@@ -635,7 +756,6 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     "github.event.pull_request.number",
     "inputs.pr_number",
     "github.event.workflow_run.head_sha",
-    "github.event.check_suite.head_sha",
     "github.event.sha",
     "github.event.schedule",
     "github.event.action",
@@ -651,7 +771,6 @@ test("Auto Gate dedupes webhook evaluation jobs only after ungrouped invalidatio
     return `auto-gate-target-${target}-head-${headSha}`;
   };
   const cases = {
-    check_suite: [{ check_suite: { head_sha: HEAD_SHA } }, {}, HEAD_SHA],
     issue_comment: [{ issue: { number: 4060 }, comment: { body: "[gate-ack]" } }, {}, 4060],
     pull_request_review: [{ pull_request: { number: 4060 } }, {}, 4060],
     pull_request_review_comment: [{ pull_request: { number: 4060 } }, {}, 4060],
@@ -11738,8 +11857,8 @@ test("#4210: an already-visible successor head resolves without waiting", async 
 // #5064: the same shape used to throw through the recovery catch. But a poll
 // whose every read still shows the initiating SHA never observed a successor —
 // nothing was missed, the push simply had not landed yet, and when it lands its
-// own events (its check_suite, its synchronize through auto-gate-head.yml, PR
-// Validation's terminal workflow_run) re-evaluate it. The exit is quiet: no
+// own events (its synchronize through auto-gate-head.yml, PR Validation's
+// terminal workflow_run) re-evaluate it. The exit is quiet: no
 // target, no failure comment, no red run — a notice is the audit trail.
 test("#5064: a successor that never appeared ends quietly, not red", async () => {
   const github = fakeGateGithub();

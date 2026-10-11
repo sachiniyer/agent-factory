@@ -280,7 +280,19 @@ func (i *Instance) runLiveBoundary() {
 func (i *Instance) BeginLimitResume() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
+	view := i.lifecycleViewLocked()
+	if pending := i.pendingAccountSwap; pending != nil && pending.To == i.Account {
+		// A committed account swap whose post-commit respawn went blind
+		// (ErrAccountSwapAgentTeardownBlind) is recoverable through the
+		// alreadySet branches of resumeFromLimitLockedOutcome. That error path
+		// marks StartupStateUnknown and clears Started while preserving the
+		// committed swap; the explicit Retry RPC is the inspection the marker
+		// waits for, so the gates that suppress automatic retries until
+		// inspection must not block re-entering the recovery branches.
+		view.StartupStateUnknown = false
+		view.Started = true
+	}
+	if err := view.ValidateRuntimeAction(RuntimeActionResumeLimit); err != nil {
 		return err
 	}
 	return i.transitionLocked(BeginRespawn())
@@ -441,51 +453,6 @@ func (i *Instance) SwapAgent(plan AgentSwapPlan) (InstanceData, error) {
 	// makes it impossible for a caller to checkpoint the target before the
 	// backend has actually established it.
 	return i.handoffStorageCheckpoint(), nil
-}
-
-// ArchiveTeardown tears down every tab's tmux session for an archive AND
-// relocates the worktree to dest in one operation (#1028) — the tmux half of
-// Kill, but it PRESERVES the record and MOVES the worktree instead of deleting
-// it. It routes through the shared teardownTabs core in the archive mode, so the
-// #802 "wait for every pane to exit before touching the worktree" ordering is
-// shared code with Kill rather than the duplicated prose it was when the move
-// lived in a separate daemon step (#1195 Phase 2b). It is deliberately
-// best-effort for tmux (a stuck session only logs, mirroring Kill) and:
-//   - keeps the AGENT tab's tmux binding (its session name) so a failed archive
-//     can re-spawn it in place via the Lost-restore loop;
-//   - drops the shell/process tabs entirely — their tmux sessions were just torn
-//     down, so only the agent session is brought back for them (Sachin's #1028
-//     requirement);
-//   - KEEPS the web tabs (#1809): a web tab has no tmux session and no process —
-//     it is just a URL — so nothing was torn down and it round-trips through the
-//     archived record to render again on un-archive;
-//   - leaves gitWorktree and started untouched, so the daemon caller controls
-//     the final state (started=false + Archived on success; Lost on a failed
-//     move — returned here — where started stays true so the loop re-spawns the
-//     agent).
-//
-// Returns the worktree-move error (nil on success). Local instances only —
-// remote sessions have no local tmux/worktree and the daemon rejects archiving
-// them before reaching here.
-func (i *Instance) ArchiveTeardown(dest string) error {
-	_, err := i.ArchiveTeardownWithHook(dest, nil)
-	return err
-}
-
-// ArchiveTeardownWithHook is ArchiveTeardown with one additional operator
-// callback at the only safe cleanup point: every pane has been confirmed dead,
-// but the worktree still occupies its live path. A callback failure is returned
-// separately from the relocation result and never prevents the move.
-func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error) (hookErr, archiveErr error) {
-	claim, err := i.ClaimWorktreeRelocationForRetry()
-	if err != nil {
-		return nil, err
-	}
-	// false: neither this exported wrapper nor ArchiveTeardown has a production
-	// caller that holds the daemon's archive op-lock (#3413) — only
-	// daemon/archive.go's own direct ArchiveTeardownWithClaim call does, and it
-	// passes true explicitly. See closeTabForDestructiveTeardown.
-	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove, false)
 }
 
 // ArchiveTeardownWithClaim carries the source claim obtained before teardown to

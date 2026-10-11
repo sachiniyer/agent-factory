@@ -7,8 +7,25 @@ on:
   # advancing are not evented here. workflow_dispatch repairs stale
   # observational state, and this is safe for Auto Gate because merge() always
   # performs a fresh full evaluation immediately before its destructive write.
-  check_suite:
-    types: [completed]
+  #
+  # check_suite is deliberately absent (#5177). GitHub does NOT suppress
+  # recursion for Actions-owned suites: every run of this workflow leaves a
+  # github-actions check suite on its head, and that suite's completion
+  # delivers a fresh check_suite event — measured ~200 self-triggered
+  # runs/hour on one master head for days. The documented GITHUB_TOKEN
+  # suppression covers token-authenticated writes only; a suite completing is
+  # a platform lifecycle transition, not a token write. And no payload
+  # predicate can run before the run exists — on.check_suite filters only on
+  # `types`, while a job skipped by `if` still completes its suite (skipped
+  # jobs land in it as completed check runs), so a filter inside the run would
+  # trade real runs for skipped ones and the chain would never die. Nothing
+  # needed is lost: every required check is Actions-owned, PR Validation's
+  # terminal state arrives through workflow_run below, commit statuses through
+  # status, and anything else — including a hypothetical non-Actions required
+  # check, whose pending state the pass already re-evaluates as transient — is
+  # the reconciliation pass's job. A suite completing on the master head never
+  # resolved a pull-request target anyway (no open PR owns that commit), so
+  # merge-triggered verification suites did no fleet re-evaluation here.
   issue_comment:
     types: [created, edited, deleted]
   pull_request_review:
@@ -34,23 +51,27 @@ on:
   # sees the same pull_request_target event it saw before the split.
   workflow_call:
   status:
-  # GitHub suppresses check_suite recursion for Actions-owned suites. The
-  # required Lint and Build checks both belong to PR Validation, so its terminal
-  # workflow_run is the non-recursive wakeup that republishes their final state.
+  # The required Lint and Build checks both belong to PR Validation, so its
+  # terminal workflow_run is the wakeup that republishes their final state.
   workflow_run:
     workflows: [PR Validation]
     types: [completed]
-  # GitHub has intermittently omitted that terminal workflow_run event. Reconcile
-  # only stale decisions that name a PR Validation blocker; one paginated query
-  # batches PR heads/check rollups and at most ten reevaluations start (#4242).
-  # GitHub delivers this schedule every two to five hours, not every five minutes
-  # (#4571), so it is only the backstop. Every other run requests the same pass as
-  # the repository_dispatch below, at most once per five minutes. A pass retains
-  # work it sees too young to select, re-scanning inside its own run until it
-  # matures or resolves, and requests one successor whenever it saw work at all:
-  # unmet leftovers are owed a wakeup, and selected work is applied by
-  # apply-gate — a queued job the platform can still cancel — so a pass that
-  # selected anything hands its own lane to one follower too (#5160).
+  # GitHub has intermittently omitted that terminal workflow_run event (#5179:
+  # 64 of 381 PR Validation completions over Oct 1–7 had no gate run within ten
+  # minutes, clustered under load). Reconcile only stale decisions that name a
+  # PR Validation blocker; one paginated query batches PR heads/check rollups
+  # and at most ten reevaluations start (#4242). GitHub delivers this schedule
+  # every two to five hours, not every five minutes (#4571), so it is the last
+  # backstop. Ahead of it, a PR Validation run requests the same pass itself
+  # when it ends (#5179): a synchronous dispatch POST inside the run whose
+  # completion is at risk, which event fan-out drops cannot lose. Every other
+  # run requests the same pass as the repository_dispatch below, at most once
+  # per five minutes. A pass retains work it sees too young to select,
+  # re-scanning inside its own run until it matures or resolves, and requests
+  # one successor whenever it saw work at all: unmet leftovers are owed a
+  # wakeup, and selected work is applied by apply-gate — a queued job the
+  # platform can still cancel — so a pass that selected anything hands its own
+  # lane to one follower too (#5160).
   schedule:
     - cron: "*/5 * * * *"
   repository_dispatch:
@@ -119,8 +140,8 @@ permissions:
 #   and every transition away from an older head is carried by a synchronize
 #   run that never coalesces — so a burst of comments collapses to at most one
 #   pending run and loses no invalidation.
-# - check_suite / status / workflow_run: one group per named commit. Coverage
-#   is exactly that head, so same-commit copies are identical by construction.
+# - status / workflow_run: one group per named commit. Coverage is exactly
+#   that head, so same-commit copies are identical by construction.
 concurrency:
   group: >-
     auto-gate-${{
@@ -129,7 +150,7 @@ concurrency:
       github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && format('synchronize-{0}-{1}', github.event.before, github.event.after) ||
       github.event_name == 'pull_request_target' && format('pr-{0}-{1}', github.event.pull_request.number, github.event.pull_request.head.sha) ||
       (github.event.issue.number || github.event.pull_request.number) && format('pr-{0}', github.event.issue.number || github.event.pull_request.number) ||
-      (github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.event.sha) ||
+      (github.event.workflow_run.head_sha || github.event.sha) && format('head-{0}', github.event.workflow_run.head_sha || github.event.sha) ||
       github.run_id
     }}
   cancel-in-progress: false
@@ -184,7 +205,6 @@ jobs:
             const knownEventHeads = [...new Set([
               payload.pull_request?.head?.sha,
               payload.after,
-              payload.check_suite?.head_sha,
               payload.workflow_run?.head_sha,
               payload.sha,
               payload.before,
@@ -528,7 +548,7 @@ jobs:
     # github.event.action is reached only by a repository_dispatch pass. Every
     # other subscribed event stops at an earlier field.
     concurrency:
-      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.check_suite.head_sha || github.event.sha || github.event.schedule || github.event.action || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
+      group: auto-gate-target-${{ github.event.issue.number || github.event.pull_request.number || inputs.pr_number || github.event.workflow_run.head_sha || github.event.sha || github.event.schedule || github.event.action || github.run_id }}-head-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false
     uses: ./.github/workflows/auto-gate-aggregate.yml
     with:

@@ -269,6 +269,193 @@ func (v LifecycleView) Activity() Activity {
 	return activity
 }
 
+// LoadedActivity reports the activity the loaded form of a raw InstanceData would
+// have, mirroring LifecycleView.Activity() composed with FromInstanceData's
+// InFlightOp reconstruction. It is the raw-record reader's equivalent of the
+// live arm's v.Activity() — the activity holdsTaskRunSlot sees for a materialized
+// Instance — so a row that failed to materialize can reach the same verdict
+// without an in-memory Instance.
+//
+// It replays FromInstanceData's FULL fence-restoration order before classifying,
+// because a persisted row may carry a rollback fence that projected
+// StartupStateUnknown=true to fence an older binary: RestoreArchiveRollbackFence
+// and RestoreRelocationRecoveryOriginals run first (the loader calls both before
+// any handoff/account-swap restore), then the handoff and account-swap fences. A
+// row whose relocation-recovery metadata is undecodable cannot be materialized by
+// the loader at all; the only durable field the missing original can change is
+// StartupStateUnknown, which is terminal either way for a non-archived sandbox
+// row, so a sandbox ghost whose handoff the loader would NOT fence (no mission,
+// a known ambiguous verdict, or the missing evidence a legacy record carries)
+// and that has no pending account swap or in-flight op has no field its loaded
+// form could be pending on. LoadedActivity reports ActivityTerminal for that
+// shape — holding it pending would wedge the cap forever on a row that can never
+// materialize to clear TaskRunActive — and ActivityPending for the rows that DO
+// carry a fence-requiring or unrecognized handoff, or whose liveness this binary
+// does not recognize, or any non-sandbox row whose loaded form may still be
+// active. A committed kill (UserKilled) is the one definitive terminal marker
+// the loader honors before any fence (ClassifyActivity returns terminal for it
+// first), so a tombstoned row whose relocation recovery is undecodable still
+// releases — the sandbox arm of rawTaskRunHoldsSlot delegates to LoadedActivity
+// instead of the raw UserKilled guard, so honoring the tombstone here is what
+// keeps the kill terminal on the raw path too.
+//
+// The loaded form's activity is computed from the InFlightOp FromInstanceData
+// reconstructs, NOT from the raw PendingHandoffMission. ClassifyActivity on a raw
+// record returns ActivityPending for any non-empty PendingHandoffMission (line 99),
+// but the loader reconstructs OpReplacing only for the verdicts that still own an
+// in-flight obligation the daemon resolves itself — PromptNotDelivered (automatic
+// replay) and PromptDelivered (crash-window settle). An ambiguous verdict
+// (PromptCouldNotConfirm, PromptSentUnverified, or the missing evidence a legacy
+// record carries) loads WITHOUT the fence, so the loaded form has InFlightOp=OpNone.
+// LifecycleView.Activity() reaches the terminal verdict for such a row by omitting
+// PendingHandoffMission from the InstanceData it builds; LoadedActivity does the
+// same for a raw record that never materialized, so a sandbox LiveLost ghost with
+// an ambiguous handoff releases its slot instead of wedging the cap forever. An
+// UNRECOGNIZED future verdict a newer release wrote is not the known ambiguous
+// case, though: it may stand for an obligation still in flight, so LoadedActivity
+// re-raises the mission and reports pending for it (the same version-skew safety
+// raw ClassifyActivity applies to an unrecognized value) rather than release.
+//
+// A non-archived sandbox row that the loader does not short-circuit
+// (StartupStateUnknown / PendingAccountSwap) is rewritten to inert LiveLost on
+// load — started stays false regardless of the stored liveness — so a row
+// ghosted mid-run (persisted LiveRunning/LiveReady/...) releases on the live arm.
+// LoadedActivity applies that same rewrite before classifying, or the raw arm
+// would read the stored LiveRunning as ActivityPending and hold a slot its
+// materialized form releases, wedging the cap on the common pre-restart record.
+// The rewrite is restricted to liveness values this binary recognizes: a future
+// value a newer release wrote stays pending, the same fail-closed direction
+// ClassifyActivity takes for an unrecognized liveness, rather than being
+// converted to LiveLost and releasing a slot whose real state is unknown.
+func LoadedActivity(data InstanceData) (Activity, string) {
+	// A committed kill is terminal even when a rollback fence or undecodable
+	// relocation-recovery record would otherwise leave the verdict unknown.
+	// ClassifyActivity honors UserKilled before any fence (it returns terminal
+	// first), and the sandbox arm of rawTaskRunHoldsSlot now routes through
+	// LoadedActivity instead of the raw UserKilled guard, so this check is what
+	// keeps a tombstoned sandbox ghost — including one whose relocation recovery
+	// cannot be decoded — terminal on the raw path instead of wedging the cap.
+	if data.UserKilled {
+		return ActivityTerminal, "session was killed and its teardown is pending"
+	}
+	data = data.RestoreArchiveRollbackFence()
+	restored, err := data.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		// A relocation-undecodable row cannot be materialized, so there is no
+		// loaded form to read; LoadedActivity infers it. The only durable field
+		// the missing relocation original can change is StartupStateUnknown,
+		// and for a non-archived sandbox row BOTH of its values are terminal
+		// (true -> ClassifyActivity's startup-unknown return; false -> the
+		// loader's inert LiveLost rewrite below). A sandbox ghost whose only
+		// durable fields are a handoff the loader would NOT reconstruct a fence
+		// for (no mission, or a known ambiguous verdict, or the missing
+		// evidence a legacy record carries) therefore has no field that could
+		// make its loaded form pending, and because the row can never
+		// materialize there is no lifecycle edge that clears TaskRunActive —
+		// holding it pending wedges max_concurrent_runs forever on the very
+		// ghost this change exists to release. Reserve the conservative pending
+		// verdict for rows whose durable transaction fields could actually
+		// produce pending activity the loader would hold on — a fence-requiring
+		// handoff (PromptNotDelivered/PromptDelivered) or a verdict this binary
+		// does not recognize — and for a row whose liveness this binary does not
+		// recognize (a future value a newer release wrote, which ClassifyActivity
+		// fails closed to pending). A non-sandbox row's liveness is not
+		// rewritten, so it stays pending too rather than guessing terminal about
+		// a backend whose loaded form may still be active.
+		if isSandboxBackendType(data.BackendType) &&
+			data.PendingAccountSwap == nil &&
+			inFlightOpFromData(data) == OpNone &&
+			livenessIsKnown(livenessFromData(data)) &&
+			!handoffCouldHoldSlot(data.PendingHandoffMission, data.HandoffDeliveryStatus) {
+			return ActivityTerminal, "session is lost (its backing sandbox vanished and its relocation record is undecodable); recover it with 'af sessions restore' before watching again"
+		}
+		return ActivityPending, ""
+	}
+	data = restored
+	data = data.RestoreHandoffRollbackFence()
+	data = data.RestoreAccountSwapRollbackFence()
+	data = data.restoreMissingHandoffMissionEvidence()
+	data = data.restoreMissingAccountSwapMissionEvidence()
+	op := inFlightOpFromData(data)
+	if data.UserKilled {
+		op = OpNone
+	} else if data.PendingHandoffMission != "" && !data.StartupStateUnknown && op == OpNone &&
+		pendingHandoffMissionNeedsFence(data.HandoffDeliveryStatus) {
+		op = OpReplacing
+	}
+	effective := InstanceData{
+		Liveness:            livenessFromData(data),
+		InFlightOp:          op,
+		UserKilled:          data.UserKilled,
+		StartupStateUnknown: data.StartupStateUnknown,
+	}
+	if data.PendingAccountSwap != nil {
+		effective.PendingAccountSwap = &AccountSwapData{}
+	}
+	// A newer release may persist a PendingHandoffMission with a
+	// HandoffDeliveryStatus this binary does not recognize. The two known
+	// in-flight verdicts (PromptNotDelivered/PromptDelivered) reconstruct
+	// OpReplacing above; the known ambiguous verdicts
+	// (PromptCouldNotConfirm/PromptSentUnverified, plus the missing evidence a
+	// legacy record carries, which restoreMissingHandoffMissionEvidence
+	// normalizes to PromptCouldNotConfirm) load without the fence and release
+	// — an operator decision, not an automatic obligation. An UNKNOWN future
+	// verdict may stand for an obligation still in flight, and the pre-#5218
+	// raw path held such a row counted (raw ClassifyActivity returns pending for
+	// any non-empty PendingHandoffMission). Re-raise the mission on the
+	// effective record so ClassifyActivity returns pending for it — the same
+	// version-skew safety it applies to an unrecognized liveness — instead of
+	// letting the inert sandbox rewrite below turn the unknown verdict into a
+	// released slot.
+	if data.PendingHandoffMission != "" && !data.StartupStateUnknown &&
+		data.HandoffDeliveryStatus != "" && !data.HandoffDeliveryStatus.Valid() {
+		effective.PendingHandoffMission = data.PendingHandoffMission
+	}
+	if isSandboxBackendType(data.BackendType) &&
+		!data.StartupStateUnknown && data.PendingAccountSwap == nil &&
+		effective.Liveness != LiveArchived && livenessIsKnown(effective.Liveness) {
+		effective.Liveness = LiveLost
+	}
+	return ClassifyActivity(effective)
+}
+
+// livenessIsKnown reports whether lv is one of the Liveness values this binary
+// understands. A record written by a newer release may carry a value this build
+// has no constant for; the inert-sandbox rewrite in LoadedActivity must not
+// turn that future state into LiveLost (and so into permission to exceed the
+// task cap), because the older daemon cannot know whether the newer state is
+// active. ClassifyActivity already fails such a value closed onto
+// ActivityPending (its liveness switch has no case for it), and the rewrite
+// preserves that by leaving an unknown liveness alone.
+func livenessIsKnown(lv Liveness) bool {
+	switch lv {
+	case LivenessUnset, LiveRunning, LiveReady, LiveLost, LiveDead, LiveArchived, LiveLimitReached:
+		return true
+	}
+	return false
+}
+
+// handoffCouldHoldSlot reports whether a PendingHandoffMission could make a
+// row's loaded form hold its task-run slot. Only a verdict that reconstructs
+// the replacement fence does so: PromptNotDelivered/PromptDelivered rebuild
+// OpReplacing, which keeps the loaded sandbox pending. An UNRECOGNIZED future
+// verdict a newer release wrote may stand for an obligation still in flight,
+// so the conservative raw path holds for it too. A known ambiguous verdict
+// (PromptCouldNotConfirm/PromptSentUnverified) and the missing evidence a
+// legacy record carries (an empty verdict) load WITHOUT the fence — the
+// operator owns the confirm-or-retry decision — so the loaded form is terminal
+// and there is nothing to hold the slot for. LoadedActivity uses this on the
+// relocation-undecodable path, where restoreMissingHandoffMissionEvidence has
+// not yet normalized the empty legacy verdict, so it reads "" as the ambiguous
+// case the loader treats it as.
+func handoffCouldHoldSlot(mission string, status PromptDeliveryStatus) bool {
+	if mission == "" {
+		return false
+	}
+	return pendingHandoffMissionNeedsFence(status) ||
+		(status != "" && !status.Valid())
+}
+
 // classifyActivityByStatus is the legacy-Status fallback for ClassifyActivity,
 // used only for records written before the liveness axis existed (#1195).
 func classifyActivityByStatus(s Status) (Activity, string) {

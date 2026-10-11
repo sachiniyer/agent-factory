@@ -389,11 +389,31 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 // identity has been selected, so an already-due ordinary resume may retain the
 // old identity after an admission or teardown refusal, but never after a failed
 // identity checkpoint.
+//
+// probe is the liveness probe the caller computed BEFORE acquiring the global
+// fences (see resumeFromLimitLockedOutcome and prepareRuntimeForAccountSwap):
+// the slow network round-trip runs outside the fences so neither a manual
+// operator RPC nor the poll-driven scheduler holds the config-apply/account-limit
+// fences for the probe's budget. operatorInitiated is retained for the
+// error-branch re-probe below, which selects its own budget the same way.
+//
+// probeComputed is false when the caller SKIPPED the probe because its
+// unlocked manual precheck (checkManualAccountSwap) failed; the zero-value
+// probe (probeAlive) must never reach prepareRuntimeForAccountSwap as a
+// fabricated live verdict. If the authoritative admission below REVERSES that
+// precheck (a config/registry change made an invalid swap admissible between
+// the unlocked pass and this fenced admission), perform the probe here before
+// teardown. This only happens on the rare reversal, so the fences are held for
+// the probe budget only in that case; the common path computes the probe
+// outside the fences. The auto path always passes probeComputed=true.
 func (m *Manager) commitNewAccountSwapIdentity(
 	repoID, key, requestedTitle string,
 	instance *session.Instance,
 	scheduled *autoAccountSwap,
 	global *config.Config,
+	operatorInitiated bool,
+	probe livenessProbe,
+	probeComputed bool,
 ) (fallbackEligible bool, err error) {
 	fallbackDue := scheduled.fallbackDue
 	var admitted *autoAccountSwap
@@ -411,7 +431,21 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	// completion log must name the identity actually selected.
 	*scheduled = *admitted
 
-	err = m.prepareRuntimeForAccountSwap(key, instance)
+	// The caller skipped the probe when its unlocked precheck failed. If that
+	// precheck was reversed by a config/registry change before this fenced
+	// admission succeeded, the zero-value probe (probeAlive) would fabricate a
+	// live verdict and start teardown on an unprobed runtime. Perform the probe
+	// now so prepareRuntimeForAccountSwap gets a real verdict. This only runs
+	// on the rare reversal; the common path supplied a computed probe.
+	if !probeComputed {
+		if operatorInitiated {
+			probe = probeLivenessForOperator(instance, instance.AgentServer())
+		} else {
+			probe = probeLiveness(instance, instance.AgentServer())
+		}
+	}
+
+	err = m.prepareRuntimeForAccountSwap(key, instance, probe)
 	if err == nil {
 		// The outgoing runtime is conclusively stopped, so its append-only
 		// transcript is final: carry it into the incoming account now, before
@@ -431,7 +465,9 @@ func (m *Manager) commitNewAccountSwapIdentity(
 			return false, errors.Join(refusal, m.persistSettlement(repoID, key, instance))
 		}
 		if scheduled.manual && !instance.LimitReached() {
-			probe := probeLiveness(instance, instance.AgentServer())
+			// Operator one-shot RPC: use the operator probe budget, not the
+			// poll loop's 5s tie-break budget. See remoteloss.go.
+			probe := probeLivenessForOperator(instance, instance.AgentServer())
 			if probe == probeAbsent || probe == probeAnsweredDead {
 				// The agent may have stopped before a sibling refused teardown.
 				// No identity was selected: persist ordinary recovery on the old one.
@@ -724,8 +760,22 @@ func (m *Manager) settleReplacementRuntime(
 // prepareRuntimeForAccountSwap establishes that every old local pane is gone
 // before the replacement is recorded. An unanswered probe refuses, while an
 // absent agent still triggers a sibling-pane recheck for retry safety.
-func (m *Manager) prepareRuntimeForAccountSwap(key string, instance *session.Instance) error {
-	probe := probeLiveness(instance, instance.AgentServer())
+//
+// The liveness probe is computed by the caller (resumeFromLimitLockedOutcome)
+// BEFORE the global config-apply and account-limit fences are acquired, so the
+// operator budget's network round-trip does not hold those fences for its whole
+// duration. Both the manual RPC and the poll-driven auto-resume reach
+// commitNewAccountSwapIdentity through resumeFromLimitLockedOutcome, which takes
+// those fences before calling this function; computing the probe inside it
+// (as the previous revision did) therefore held the fences for the full probe
+// budget on every caller, including the manual RPC. The caller threads the
+// already-computed probe in here, where only the local teardown (stopVSCode,
+// StopForAccountSwap/StopRemainingPanesForAccountSwap) runs under the fences.
+// The per-session op lock the caller already holds keeps the runtime stable
+// across the fence acquisition, so a probe taken before the fences is still
+// current here. See remoteloss.go for the budget selection
+// (probeLivenessForOperator vs probeLiveness).
+func (m *Manager) prepareRuntimeForAccountSwap(key string, instance *session.Instance, probe livenessProbe) error {
 	if probe == probeUnknown {
 		return fmt.Errorf("cannot switch accounts for %q: its current runtime did not answer the liveness probe; not starting another identity while the old one may still be running", instance.Title)
 	}

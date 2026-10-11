@@ -149,7 +149,7 @@ interface PendingViewportAnchor {
 // entirely the moment an agent enables mouse tracking, and unlike the wheel
 // (#2681) it has no modifier to escape with. So af scrolls history itself: on
 // the NORMAL buffer a claimed one-finger drag moves xterm's scrollback
-// (touchScrollClaimsGesture + touchHistoryScrollPlan, sub-row travel carried in
+// (touchScrollClaimsGesture, sub-row travel carried in
 // scrollRem). The drag is terminal-owned, the tap still reaches the
 // application — only the move is ever cancelled, never the touchstart a tap's
 // compatibility mouse events depend on.

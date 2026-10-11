@@ -2216,7 +2216,6 @@ function resolveAggregateHeads({ context, targets = [] }) {
     payload.pull_request?.head?.sha,
     payload.after,
     ...targets.map((target) => target.headSha),
-    payload.check_suite?.head_sha,
     payload.workflow_run?.head_sha,
     payload.sha,
     payload.before,
@@ -6294,7 +6293,7 @@ async function resolveTargets({
   } else if (payload.issue?.pull_request && payload.issue.number) {
     numbers.push(payload.issue.number);
   } else {
-    const sha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
+    const sha = payload.workflow_run?.head_sha || payload.sha;
     if (sha) {
       const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: sha });
       numbers.push(...pulls.map((pull) => pull.number));
@@ -6303,7 +6302,7 @@ async function resolveTargets({
     }
   }
 
-  const sourceSha = payload.check_suite?.head_sha || payload.workflow_run?.head_sha || payload.sha;
+  const sourceSha = payload.workflow_run?.head_sha || payload.sha;
   const targets = [];
   for (const number of [...new Set(numbers.filter(Boolean))]) {
     const pr = previousHead
@@ -6345,8 +6344,8 @@ async function resolveTargets({
 //
 // The exception is a poll that never observed a successor at all (#5064): the
 // update's push has simply not landed yet, every read still showed the
-// initiating SHA, and once the push does land its own events — its check_suite,
-// its synchronize through auto-gate-head.yml, PR Validation's terminal
+// initiating SHA, and once the push does land its own events — its
+// synchronize through auto-gate-head.yml, PR Validation's terminal
 // workflow_run — evaluate the real head. That exit returns null like
 // ineligibility, with a notice, rather than reddening a dispatch that merely
 // outran the push.
