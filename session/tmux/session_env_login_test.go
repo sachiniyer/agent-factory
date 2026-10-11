@@ -118,6 +118,7 @@ func TestAccountScopedSessionsNeverGetTheLoginBrowserLevers(t *testing.T) {
 
 	for _, agent := range []string{ProgramGemini, ProgramClaude, ProgramCodex} {
 		registerLoginAccount(t, agent, "work")
+		forceAgentOnSearchPath(t, agent)
 
 		session := NewTmuxSession("account-"+agent, agent)
 		session.SetAccountForAgent(agent, "work")

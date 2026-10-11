@@ -15,9 +15,11 @@ import (
 // AgentForCommand returns a supported agent only when the complete command is
 // one literal invocation of that agent (optionally through env or exec). Nested
 // agent-server commands are never classified from strings; Docker/SSH use the
-// effect-bound exec protocol instead. This result grants credentials to a
-// process, so an agent-looking argument to an arbitrary executable must never
-// match.
+// effect-bound exec protocol instead. This is the IDENTITY classifier ("what
+// does this command run"); the credential grant a process receives is gated by
+// GrantAgentForCommand, which layers operator attribution on top of it. The
+// identity answer still feeds account boundaries, so an agent-looking argument
+// to an arbitrary executable must never match.
 func AgentForCommand(command string) string {
 	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
 	if !ok {
@@ -55,9 +57,23 @@ func AgentNamespaceForCommand(command string) string {
 }
 
 type agentCommand struct {
-	agent                       string
-	executable                  string
-	executableResolutionChanged bool
+	agent      string
+	executable string
+	// wrapper is the env executable spelling the invocation ran through (""
+	// for a direct invocation). Its resolution is part of the grant's
+	// attribution surface: `env /opt/codex` names an operator file, but a bare
+	// `env` resolving into the repository runs repository code with the grant.
+	wrapper string
+	// environmentMutated records any command-local environment change the
+	// repository could author: a shell assignment prefix or an env-wrapper
+	// mutation. Every name is a code-loading surface for some interpreter
+	// (LD_PRELOAD, BASH_ENV, NODE_OPTIONS, an agent's own config root), so no
+	// ordinary assignment can be proven harmless from the string alone — the
+	// account boundary refuses them on the same reasoning (#2983 review). The
+	// single tolerated class is an agent's cloud-mode selector names: the
+	// in-repo loader refuses to let a checked-in config write those, so a
+	// selector assignment that reaches launch is operator-authored.
+	environmentMutated bool
 }
 
 // literalAgentCommand parses one literal agent invocation, optionally through an
@@ -81,20 +97,27 @@ func literalAgentCommand(command string, envMatch func(string) bool) (agentComma
 		return agentCommand{}, false
 	}
 	executable := args[0]
-	resolutionChanged := shellAssignmentsChangeExecutableResolution(call.Assigns)
+	wrapper := ""
+	var envMutations []envcommand.Mutation
+	envClearedOrMoved := false
 	if envMatch(args[0]) {
 		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
 		if err != nil || invocation.CommandIndex < 0 {
 			return agentCommand{}, false
 		}
+		wrapper = args[0]
 		executable = args[1+invocation.CommandIndex]
-		resolutionChanged = resolutionChanged || envChangesExecutableResolution(invocation)
+		envMutations = invocation.Mutations
+		envClearedOrMoved = invocation.ClearEnvironment || invocation.Chdir != ""
 	}
 	agent := supportedAgent(executable)
 	return agentCommand{
-		agent:                       agent,
-		executable:                  executable,
-		executableResolutionChanged: resolutionChanged,
+		agent:      agent,
+		executable: executable,
+		wrapper:    wrapper,
+		environmentMutated: envClearedOrMoved ||
+			!assignmentsAllOperatorOnly(call.Assigns, agent) ||
+			!mutationsAllOperatorOnly(envMutations, agent),
 	}, agent != ""
 }
 
@@ -106,16 +129,16 @@ func literalAgentCommand(command string, envMatch func(string) bool) (agentComma
 // chdir can select one indirectly.
 //
 // The residual accepted set is a literal bare agent invocation, optionally
-// preceded by exec or one of the modelled system env spellings, with literal
-// non-resolution assignments such as TERM, LANG, and agent cloud selectors.
-// Those remain accepted because POSIX executable lookup does not consult them.
-// Every path-qualified or resolution-changing form is deliberately
-// credential-free: this boundary receives no trusted provenance for the file it
-// selects. The command still launches, and an operator can explicitly authorize
-// required names through session_env_passthrough.
+// preceded by exec or one of the modelled system env spellings with no
+// environment mutation — the only tolerated assignment is an agent's own
+// cloud-mode selector, which checked-in config cannot write. Every
+// path-qualified or environment-changing form is deliberately credential-free:
+// this boundary receives no trusted provenance for the file or the environment
+// it selects. The command still launches, and an operator can explicitly
+// authorize required names through session_env_passthrough.
 func credentialAgentForCommand(command string) string {
 	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
-	if !ok || strings.Contains(invocation.executable, "/") || invocation.executableResolutionChanged {
+	if !ok || strings.Contains(invocation.executable, "/") || invocation.environmentMutated {
 		return ""
 	}
 	return invocation.agent
@@ -135,8 +158,14 @@ func credentialAgentForCommand(command string) string {
 //
 //   - a RELATIVE executable (./codex, bin/codex, ../codex) resolves against
 //     the pane's working directory;
-//   - a command that respells resolution (a PATH=… assignment, env PATH=…,
-//     env -u PATH, env -i, env -C) selects the directory itself;
+//   - a command-local environment change — ANY shell assignment or env
+//     mutation (PATH=…, LD_PRELOAD=…, env -u, env -i, env -C) — selects files
+//     or preloaded code the string itself cannot attribute. The only
+//     tolerated assignment is the agent's own cloud-mode selector, whose
+//     spelling a checked-in config cannot produce;
+//   - an env WRAPPER that itself fails attribution: a bare env resolving
+//     through a repository-controlled PATH entry runs repository code no
+//     matter what its operand names;
 //   - an inherited PATH whose walk reaches an empty or relative entry
 //     before the executable resolves a bare name into or relative to the
 //     pane's working directory;
@@ -197,27 +226,33 @@ func AgentCommandExecutable(command string) string {
 }
 
 // executableAttributableToOperator reports whether POSIX resolution of the
-// parsed invocation's executable can only select a file the operator — not
-// the checked-out repository — controls.
+// parsed invocation's executables can only select files the operator — not
+// the checked-out repository — controls. Both the agent executable and, when
+// the invocation runs through env, the wrapper itself must attribute: `env
+// /opt/codex` names an operator file, but a bare `env` resolving into the
+// repository runs repository code with the grant (#5265 review).
 func executableAttributableToOperator(invocation agentCommand, environ []string, workDir string) bool {
-	if strings.Contains(invocation.executable, "/") {
-		// A path-qualified executable names its file directly: only an
-		// absolute path is operator-attributable, and not one inside the
-		// session's own working tree, which is repository content whatever
-		// its spelling.
-		if !filepath.IsAbs(invocation.executable) {
-			return false
-		}
-		return pathOutsideWorkDir(invocation.executable, workDir)
-	}
-	// A bare name resolves through PATH: the inherited environment is the
-	// attribution channel. A command that already respelled resolution, or
-	// an inherited PATH walk that lands in or relative to the working
-	// directory, lets repository content supply the file.
-	if invocation.executableResolutionChanged {
+	if invocation.environmentMutated {
 		return false
 	}
-	return searchPathAttributesExecutable(environ, invocation.executable, workDir)
+	if invocation.wrapper != "" && !spellingAttributableToOperator(invocation.wrapper, environ, workDir) {
+		return false
+	}
+	return spellingAttributableToOperator(invocation.executable, environ, workDir)
+}
+
+// spellingAttributableToOperator is the attribution rule for one executable
+// spelling. A path-qualified executable names its file directly: only an
+// absolute path is operator-attributable, and not one inside the session's
+// working tree, which is repository content whatever its spelling. A bare
+// name resolves through PATH: the inherited environment is the attribution
+// channel, so the first entry holding the executable must be absolute and
+// outside workDir.
+func spellingAttributableToOperator(executable string, environ []string, workDir string) bool {
+	if strings.Contains(executable, "/") {
+		return filepath.IsAbs(executable) && pathOutsideWorkDir(executable, workDir)
+	}
+	return searchPathAttributesExecutable(environ, executable, workDir)
 }
 
 // pathOutsideWorkDir reports whether path resolves outside workDir — outside
@@ -230,13 +265,27 @@ func pathOutsideWorkDir(path, workDir string) bool {
 	if workDir == "" {
 		return true
 	}
-	resolvedDir, err := filepath.Abs(workDir)
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return false
 	}
-	return !pathutil.IsAtOrInside(
-		pathutil.ResolveForCompare(path),
-		pathutil.ResolveForCompare(resolvedDir))
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	resolvedDir := pathutil.ResolveForCompare(absDir)
+	// LEXICAL containment is checked alongside RESOLVED containment: a
+	// spelling inside the tree names repository content even when the file it
+	// selects resolves out — an in-tree symlink to /bin/sh still lets a later
+	// commit repoint it before exec. Containment is tested against workDir as
+	// spelled and as resolved, so a workDir itself spelled through a link
+	// cannot slide a spelling past the lexical half either.
+	if pathutil.IsAtOrInside(absPath, absDir) ||
+		pathutil.IsAtOrInside(absPath, resolvedDir) ||
+		pathutil.IsAtOrInside(pathutil.ResolveForCompare(absPath), resolvedDir) {
+		return false
+	}
+	return true
 }
 
 // searchPathAttributesExecutable models execvp's real walk of environ's PATH:
@@ -275,10 +324,16 @@ func searchPathAttributesExecutable(environ []string, name, workDir string) bool
 
 // pathEntryHoldsExecutable reports whether dir contains an executable file
 // named name — the local-filesystem stat the search-path walk uses for
-// execvp's "first entry that holds it" question.
+// execvp's "first entry that holds it" question. Mode bits alone are not the
+// answer: execvp's walk is EACCES-aware and skips a file it cannot actually
+// execute, so the probe is the daemon's own effective access — a bit-check
+// that ignores it would attribute a hit the real exec never makes and let
+// resolution fall through to a later relative entry (#5265 review).
 func pathEntryHoldsExecutable(dir, name string) bool {
-	info, err := os.Stat(filepath.Join(dir, name))
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	path := filepath.Join(dir, name)
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() &&
+		info.Mode().Perm()&0o111 != 0 && executableAccess(path)
 }
 
 // firstEnvValue returns the value of the FIRST name= entry in environ — the
@@ -293,23 +348,42 @@ func firstEnvValue(environ []string, name string) (string, bool) {
 	return "", false
 }
 
-func shellAssignmentsChangeExecutableResolution(assignments []*syntax.Assign) bool {
+// assignmentsAllOperatorOnly reports whether every shell assignment prefix
+// names a cloud-mode selector the in-repo loader refuses to let a checked-in
+// config write (config.LoadInRepoConfig rejects the value outright). They are
+// the one assignment class whose spelling cannot originate from repository
+// config, so every surviving form is operator-authored. Any other name —
+// LD_PRELOAD, BASH_ENV, NODE_OPTIONS, an agent config root — is
+// repository-authored text that may load code or redirect configuration
+// before the agent runs, and the account boundary refuses it for the same
+// reason (#2983 review).
+func assignmentsAllOperatorOnly(assignments []*syntax.Assign, agent string) bool {
 	for _, assignment := range assignments {
-		if assignment != nil && assignment.Name != nil && assignment.Name.Value == "PATH" {
-			return true
+		if assignment == nil || assignment.Name == nil ||
+			!operatorOnlyAssignmentName(agent, assignment.Name.Value) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
-func envChangesExecutableResolution(invocation envcommand.Invocation) bool {
-	// Clearing the environment or changing cwd changes lookup whenever PATH is
-	// absent or contains a relative entry. Neither can be proven harmless here.
-	if invocation.ClearEnvironment || invocation.Chdir != "" {
-		return true
+// mutationsAllOperatorOnly is assignmentsAllOperatorOnly for the changes an
+// env wrapper applies. An unset is refused too: removing a name is still a
+// command-local change, and no name is provably safe to delete.
+func mutationsAllOperatorOnly(mutations []envcommand.Mutation, agent string) bool {
+	for _, mutation := range mutations {
+		if mutation.Unset || !operatorOnlyAssignmentName(agent, mutation.Name) {
+			return false
+		}
 	}
-	for _, mutation := range invocation.Mutations {
-		if mutation.Name == "PATH" {
+	return true
+}
+
+// operatorOnlyAssignmentName reports whether name is a cloud-mode selector
+// for agent — an assignment a checked-in config cannot produce.
+func operatorOnlyAssignmentName(agent, name string) bool {
+	for _, conditional := range conditionalAgentNames[agent] {
+		if conditional.selector == name {
 			return true
 		}
 	}

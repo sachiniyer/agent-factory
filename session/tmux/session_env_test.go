@@ -168,9 +168,71 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	}
 }
 
+// A scoped session's account material may only ride an executable af can
+// attribute to the operator — the same grant question the ambient filter
+// answers. A bare program that resolves through a repository-controlled PATH
+// entry must refuse the launch rather than inject the selected account's
+// environment into repository content (#5265 review).
+func TestLaunchEnvironmentRefusesScopedLaunchWhenGrantFails(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	if _, err := agentaccount.Register(home, ProgramCodex, "work"); err != nil {
+		t.Fatal(err)
+	}
+	// A PATH that resolves bare codex through the pane's working directory.
+	t.Setenv("PATH", ".")
+
+	session := NewTmuxSession("scoped-grant-fails", "codex")
+	session.SetAccountForAgent("codex", "work")
+	if _, _, _, err := session.launchEnvironment(); err == nil {
+		t.Fatal("account-scoped launch on a repository-controlled PATH hit was not refused")
+	} else if !strings.Contains(err.Error(), "cannot attribute") {
+		t.Fatalf("scoped grant refusal lost its reason: %v", err)
+	}
+}
+
+// af's generated launch environment entries install on the session, admit
+// their names to the exec shim's extras, and strip any client copy — the
+// opencode OPENCODE_CONFIG seam's channel (#5265 review).
+func TestLaunchEnvironmentInstallsInjectedEnvironment(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("OPENCODE_CONFIG", "/ambient/opencode.jsonc")
+
+	session := NewTmuxSession("injected-env", "opencode")
+	session.SetLaunchProgram("opencode", sessionenv.AccountLaunchProof{},
+		[]string{"OPENCODE_CONFIG=/af/owned/opencode.jsonc"})
+	wrapped, launchEnv, imports, sessionEnv, _, err := session.prepareLaunchEnvironment("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := launchEnvironmentValue(sessionEnv, "OPENCODE_CONFIG"); !ok || got != "/af/owned/opencode.jsonc" {
+		t.Fatalf("injected OPENCODE_CONFIG missing from session env: %v, %q", sessionEnv, got)
+	}
+	if launchEnvironmentHasName(launchEnv, "OPENCODE_CONFIG") {
+		t.Fatal("ambient OPENCODE_CONFIG still rides the inherited launch env")
+	}
+	if !slices.Contains(imports, "OPENCODE_CONFIG") {
+		t.Fatal("injected name missing from update-environment")
+	}
+	if !strings.Contains(wrapped, "OPENCODE_CONFIG") {
+		t.Fatal("injected name did not reach the exec shim's extras")
+	}
+}
+
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	// The scoped agent pane carries account material only on an executable af
+	// can attribute to the operator, so the bare codex name needs a PATH hit.
+	forceAgentOnSearchPath(t, "codex")
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	accountDir, err := agentaccount.Register(home, ProgramCodex, "work")

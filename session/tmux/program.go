@@ -24,11 +24,21 @@ import "github.com/sachiniyer/agent-factory/internal/sessionenv"
 // (#3087): permission has to be typed out. A caller that means to keep a
 // declaration says so with SetLaunchProgram, which sets both together.
 func (t *TmuxSession) SetProgram(program string) {
+	t.SetProgramWithEnvironment(program, nil)
+}
+
+// SetProgramWithEnvironment is SetProgram plus af's generated launch
+// environment entries for callers that install a program outside
+// SetLaunchProgram's proof-bearing path — the account swap installs its
+// prepared plan this way. The env entries follow the same rule: written under
+// the one programMu hold with the program they describe.
+func (t *TmuxSession) SetProgramWithEnvironment(program string, injectedEnv []string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.program = program
 	t.generatedArgs = nil
 	t.trustedExecutable = ""
+	t.injectedEnv = append([]string(nil), injectedEnv...)
 }
 
 // Program returns the command this session's pane runs — after SetProgram,

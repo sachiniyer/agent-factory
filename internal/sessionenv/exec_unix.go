@@ -188,6 +188,15 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 		// disagreement retain only common/explicit values. Agent-server uses its
 		// effect-bound protocol above instead of asking this generic path to
 		// infer identity from nested argv.
+		if scoped {
+			// A scoped launch cannot just strip and continue: the account
+			// boundary below would still inject the selected account's material
+			// into a program this check could not attribute, which is the same
+			// credential leak through a different door. Refuse instead (#5265).
+			return fmt.Errorf(
+				"account-scoped launch refused: %q does not resolve to an operator-attributable %s executable",
+				command, agent)
+		}
 		filterAgent = ""
 	}
 	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)

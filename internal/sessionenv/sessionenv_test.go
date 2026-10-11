@@ -69,14 +69,21 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 		{command: "codex --model o3", want: "codex"},
 		{command: "exec -- codex", want: "codex"},
 		{command: "/usr/bin/env codex", want: "codex"},
-		{command: "TERM=xterm-256color codex", want: "codex"},
-		{command: "env LANG=C codex", want: "codex"},
+		{command: "env codex", want: "codex"},
+		// The one tolerated assignment: the agent's own cloud-mode selector,
+		// whose spelling a checked-in config cannot produce.
 		{command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
 		{command: "env CLAUDE_CODE_USE_VERTEX=1 claude", want: "claude"},
+		{command: "GOOGLE_GENAI_USE_VERTEXAI=true gemini", want: "gemini"},
 		{command: "./codex"},
 		{command: "/opt/bin/codex"},
 		{command: "exec -- ./codex"},
 		{command: "/usr/bin/env /opt/bin/codex"},
+		{command: "TERM=xterm-256color codex"},
+		{command: "env LANG=C codex"},
+		{command: "LD_PRELOAD=./steal.so codex"},
+		{command: "env -u HOME codex"},
+		{command: "CLAUDE_CODE_USE_BEDROCK=1 codex"},
 		{command: "PATH=/workspace codex"},
 		{command: "env PATH=/workspace codex"},
 		{command: "env -u PATH codex"},
@@ -94,14 +101,23 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 // attribute to the operator: a bare name whose first PATH hit is an absolute
 // directory outside the session's working directory, or an absolute path
 // outside it. Every spelling that lets the checked-out repository pick the
-// file — a relative path, a resolution-changing assignment or env option, an
-// empty or relative PATH entry ahead of the executable, an absolute path
-// inside workDir — earns no grant, for every supported agent (#5265).
+// file or the code — a relative path, a command-local environment change, an
+// env wrapper that itself fails attribution, an empty or relative PATH entry
+// ahead of the executable, an absolute path inside workDir — earns no grant,
+// for every supported agent (#5265).
 func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T) {
 	workDir := t.TempDir()
+	// An in-tree symlink whose target is OUTSIDE the tree: the lexical
+	// spelling is repository content whatever its file selects (#5265 review).
+	outside := t.TempDir()
+	writeExecutableFixture(t, outside, "codex")
 	inside := filepath.Join(workDir, "codex")
+	if err := os.Symlink(filepath.Join(outside, "codex"), inside); err != nil {
+		t.Fatal(err)
+	}
 	with := t.TempDir()
 	writeExecutableFixture(t, with, "codex")
+	writeExecutableFixture(t, with, "env")
 	without := t.TempDir()
 	tests := []struct {
 		name    string
@@ -128,10 +144,20 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 		{name: "env relative", command: "env ./codex"},
 		{name: "exec relative", command: "exec -- ./codex"},
 		{name: "exec absolute", command: "exec -- /opt/codex", want: "codex"},
-		{name: "term assignment", command: "TERM=xterm-256color codex", want: "codex"},
-		{name: "agent home assignment", command: "CODEX_HOME=/tmp/codex-home codex", want: "codex"},
+		{name: "term assignment", command: "TERM=xterm-256color codex"},
+		{name: "agent home assignment", command: "CODEX_HOME=/tmp/codex-home codex"},
+		{name: "preload assignment", command: "LD_PRELOAD=./steal.so codex"},
+		{name: "cloud selector assignment", command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
+		{name: "cloud selector env assignment", command: "env CLAUDE_CODE_USE_VERTEX=1 claude", want: "claude"},
+		{name: "cloud selector on other agent", command: "CLAUDE_CODE_USE_BEDROCK=1 codex"},
 		{name: "trusted env", command: "/usr/bin/env codex", want: "codex"},
-		{name: "env non-resolution assignment", command: "env LANG=C codex", want: "codex"},
+		{name: "env non-resolution assignment", command: "env LANG=C codex"},
+		{name: "env unset", command: "env -u HOME codex"},
+		{name: "bare env attributed", command: "env codex", environ: []string{"PATH=" + with}, want: "codex"},
+		{name: "bare env unattributable", command: "env codex", environ: []string{"PATH=."}},
+		{name: "bare env no hit", command: "env codex", environ: []string{"PATH=" + without}},
+		{name: "bare env absolute operand", command: "env /opt/codex", environ: []string{"PATH=" + with}, want: "codex"},
+		{name: "in-tree symlink absolute", command: inside, workDir: workDir},
 		{name: "bare agent dot PATH first", command: "codex", environ: []string{"PATH=.:" + with}},
 		{name: "bare agent relative PATH first", command: "codex", environ: []string{"PATH=bin:" + with}},
 		{name: "bare agent hit before relative PATH", command: "codex", environ: []string{"PATH=" + with + ":bin"}, want: "codex"},
@@ -162,6 +188,68 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 					test.command, test.environ, test.workDir, got, test.want)
 			}
 		})
+	}
+}
+
+// The remote variant cannot stat the remote PATH, so a bare name or an env
+// wrapper is attributed the way it was before the predicate existed — remote
+// PATH is image/sshd state, not repository content. Every spelling the
+// repository CAN control is denied exactly as it is locally.
+func TestGrantAgentForRemoteCommand(t *testing.T) {
+	workDir := t.TempDir()
+	tests := []struct {
+		name    string
+		command string
+		workDir string
+		want    string
+	}{
+		{name: "bare name", command: "codex", want: "codex"},
+		{name: "absolute outside", command: "/opt/codex --fast", want: "codex"},
+		{name: "env wrapped bare", command: "env codex", want: "codex"},
+		{name: "relative", command: "./codex"},
+		{name: "relative nested", command: "bin/codex"},
+		{name: "absolute inside workspace", command: filepath.Join(workDir, "codex"), workDir: workDir},
+		{name: "env wrapped relative", command: "env ./codex"},
+		{name: "assignment", command: "TERM=xterm-256color codex"},
+		{name: "env mutation", command: "env -u HOME codex"},
+		{name: "selector on wrong agent", command: "CLAUDE_CODE_USE_BEDROCK=1 codex"},
+		{name: "selector on its agent", command: "CLAUDE_CODE_USE_BEDROCK=1 claude", want: "claude"},
+		{name: "untrusted env path", command: "/tmp/env codex"},
+		{name: "not an agent", command: "make build"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := GrantAgentForRemoteCommand(test.command, test.workDir); got != test.want {
+				t.Errorf("GrantAgentForRemoteCommand(%q, %q) = %q, want %q",
+					test.command, test.workDir, got, test.want)
+			}
+		})
+	}
+}
+
+// A PATH entry whose file carries an execute BIT the daemon cannot use is not
+// a hit at all: execvp treats EACCES as "does not hold it" and continues the
+// walk, so the grant must too — otherwise resolution falls through to a later
+// repository-controlled entry while af attributes the wrong file (#5265).
+func TestGrantAgentForCommandSkipsInaccessiblePathHit(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("access(2) reports X_OK for root regardless of owner bits")
+	}
+	// Owner-exec cleared, other-exec set: mode bits say executable, but this
+	// process — the file's owner — cannot execute it.
+	noexec := t.TempDir()
+	inaccessible := filepath.Join(noexec, "codex")
+	if err := os.WriteFile(inaccessible, []byte("#!/bin/sh\n"), 0o001); err != nil {
+		t.Fatal(err)
+	}
+	with := t.TempDir()
+	writeExecutableFixture(t, with, "codex")
+
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + noexec + ":" + with}, ""); got != "codex" {
+		t.Errorf("inaccessible entry must be skipped like execvp's EACCES, grant = %q", got)
+	}
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + noexec + ":."}, ""); got != "" {
+		t.Errorf("inaccessible entry then relative entry must deny, grant = %q", got)
 	}
 }
 

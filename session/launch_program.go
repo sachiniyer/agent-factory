@@ -49,5 +49,5 @@ func accountLaunchProof(base, final string, trustBase bool) sessionenv.AccountLa
 func setLaunchProgram(ts *tmux.TmuxSession, final string, proof sessionenv.AccountLaunchProof) {
 	// ONE call, so the two are written under one lock. Adjacent setters would still
 	// let a concurrent launch observe a torn pair (#3083 review).
-	ts.SetLaunchProgram(final, proof)
+	ts.SetLaunchProgram(final, proof, injectedSessionEnvironment(final))
 }
