@@ -239,15 +239,12 @@ func TestInjectSystemPrompt_Opencode(t *testing.T) {
 
 	result := injectSystemPrompt("opencode", skillTarget{})
 
-	// The command is left untouched: the env seam rides the pane environment,
-	// not a command-string assignment — a leading NAME=VALUE is
-	// repository-authored text under the credential-grant predicate (#5265).
-	if result != "opencode" {
+	// The command word must survive verbatim; only an env assignment leads it.
+	if !strings.HasSuffix(result, " opencode") {
 		t.Errorf("expected the opencode command preserved verbatim, got %q", result)
 	}
-	injected := injectedSessionEnvironment(result)
-	if len(injected) != 1 || !strings.HasPrefix(injected[0], "OPENCODE_CONFIG=") {
-		t.Fatalf("expected one OPENCODE_CONFIG env entry, got %v", injected)
+	if !strings.HasPrefix(result, "OPENCODE_CONFIG=") {
+		t.Errorf("expected OPENCODE_CONFIG env prefix, got %q", result)
 	}
 
 	configPath := filepath.Join(afHome, "opencode", "af-config.jsonc")
@@ -256,8 +253,8 @@ func TestInjectSystemPrompt_Opencode(t *testing.T) {
 		t.Fatalf("expected af-owned opencode config at %s: %v", configPath, err)
 	}
 	cfg := string(raw)
-	if injected[0] != "OPENCODE_CONFIG="+configPath {
-		t.Errorf("expected OPENCODE_CONFIG to point at %q, got %q", configPath, injected[0])
+	if !strings.Contains(result, configPath) {
+		t.Errorf("expected OPENCODE_CONFIG to point at %q, got %q", configPath, result)
 	}
 	if !strings.Contains(cfg, afSkillMarker) {
 		t.Errorf("expected af-managed marker in the config, got %q", cfg)
@@ -338,9 +335,6 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
 			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
 		}
-		if injected := injectedSessionEnvironment(resolved); injected != nil {
-			t.Errorf("expected no af-injected env beside a user-set OPENCODE_CONFIG, got %v", injected)
-		}
 	}
 
 	// The mirror: OPENCODE_CONFIG appearing as an ARGUMENT is not an assignment,
@@ -348,11 +342,8 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	// case above with a bare strings.Contains, which would silently drop af
 	// guidance for anyone whose prompt mentions the variable.
 	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
-	if got := injectSystemPrompt(arg, skillTarget{}); got != arg {
-		t.Errorf("expected the command left verbatim, got %q", got)
-	}
-	if injected := injectedSessionEnvironment(arg); len(injected) != 1 || !strings.HasPrefix(injected[0], "OPENCODE_CONFIG=") {
-		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %v", injected)
+	if got := injectSystemPrompt(arg, skillTarget{}); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
 }
 
@@ -375,9 +366,6 @@ func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
 
 	if got := injectSystemPrompt("opencode", skillTarget{}); got != "opencode" {
 		t.Errorf("expected no injection when our path holds a non-af file, got %q", got)
-	}
-	if injected := injectedSessionEnvironment("opencode"); injected != nil {
-		t.Errorf("expected no injected env when our path holds a non-af file, got %v", injected)
 	}
 	back, err := os.ReadFile(instructionsPath)
 	if err != nil || string(back) != userContent {
@@ -464,15 +452,16 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("GEMINI_CLI_HOME", "")
 
-	// opencode's seam moved off the command string entirely: OPENCODE_CONFIG is
-	// repository-hostile as an env-assignment prefix (a repo-authored command
-	// may not carry assignments through the #5265 credential grant), so
-	// injectSystemPrompt leaves opencode commands UNCHANGED and the launcher
-	// supplies the af-authored config via injectedSessionEnvironment instead.
 	tests := []struct {
 		name     string
 		resolved string
 		want     string // "" = resolved must come back unchanged (file seam / no agent)
+		// envPrefix marks the one seam shape that PREPENDS rather than appends:
+		// an env assignment is only honored before the command word, so opencode's
+		// resolved form is preserved as a SUFFIX. Everything else appends, and the
+		// #640 "original preserved verbatim as a prefix" guarantee still holds for
+		// them.
+		envPrefix bool
 	}{
 		// name→name (no override) for all supported agents.
 		{name: "claude bare", resolved: "claude", want: "--plugin-dir"},
@@ -480,7 +469,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		{name: "aider bare", resolved: "aider", want: "--read"},
 		{name: "gemini bare", resolved: "gemini", want: ""},
 		{name: "amp bare", resolved: "amp", want: ""},
-		{name: "opencode bare", resolved: "opencode", want: ""},
+		{name: "opencode bare", resolved: "opencode", want: "OPENCODE_CONFIG=", envPrefix: true},
 
 		// name→path and name→path+flags overrides.
 		{name: "claude override path", resolved: "/opt/claude-next/bin/claude", want: "--plugin-dir"},
@@ -490,8 +479,8 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 		{name: "gemini override path", resolved: "/usr/local/bin/gemini", want: ""},
 		{name: "amp override path", resolved: "/home/me/.amp/bin/amp --no-ide", want: ""},
 		// opencode's default install path — the common case, not an exotic one.
-		{name: "opencode override path", resolved: "/home/me/.opencode/bin/opencode", want: ""},
-		{name: "opencode override path with flags", resolved: "/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5", want: ""},
+		{name: "opencode override path", resolved: "/home/me/.opencode/bin/opencode", want: "OPENCODE_CONFIG=", envPrefix: true},
+		{name: "opencode override path with flags", resolved: "/home/me/.opencode/bin/opencode --model anthropic/claude-opus-4-5", want: "OPENCODE_CONFIG=", envPrefix: true},
 
 		// devin appends its workspace-trust flag, like the flag-seam agents.
 		{name: "devin bare", resolved: "devin", want: "--respect-workspace-trust false"},
@@ -512,6 +501,22 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 			if tt.want == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
+				}
+				return
+			}
+			if tt.envPrefix {
+				// The command must survive VERBATIM after the assignment: an env
+				// prefix that mangled the user's quoting/$VARs would be #640 again.
+				if !strings.HasSuffix(got, " "+tt.resolved) {
+					t.Errorf("expected resolved form preserved verbatim after the env prefix, got %q", got)
+				}
+				if !strings.HasPrefix(got, tt.want) {
+					t.Errorf("expected %q to lead the command (env assignments only apply before it), got %q", tt.want, got)
+				}
+				// The agent must still be detected THROUGH the prefix, or the whole
+				// per-agent machinery (resume, readiness) silently unbinds.
+				if agent := tmux.DetectAgentFromCommand(got); agent != tmux.ProgramOpencode {
+					t.Errorf("DetectAgentFromCommand(%q) = %q, want opencode — the env prefix broke agent detection", got, agent)
 				}
 				return
 			}

@@ -405,14 +405,15 @@ func TestResumeProgram(t *testing.T) {
 			"ionice -c 3 opencode --continue",
 		},
 
-		// Restore feeds resumeProgram t.programCmd(). af's own OPENCODE_CONFIG
-		// seam moved to the pane environment (#5265 review), but the prefix form
-		// still arrives from program_overrides strings and sessions stored
-		// before the move — so the resume append must survive it: the agent
-		// token is no longer token 0, and the path can carry spaces. If the
-		// prefix threw the agent scan off, resume would silently drop and the
-		// session would come back with NO context — the failure resume exists
-		// to prevent, arriving by a route neither change owns alone.
+		// Restore feeds resumeProgram t.programCmd(), which is the INJECTED form —
+		// and opencode's af-guidance seam is an OPENCODE_CONFIG env PREFIX
+		// (injectSystemPrompt), not a flag. So on every restore of an opencode
+		// session these two rewrites compose, and the resume append must survive the
+		// prefix: the agent token is no longer token 0, and the af config path can
+		// carry spaces (AGENT_FACTORY_HOME is user-controlled). If the prefix threw
+		// the agent scan off, resume would silently drop and the session would come
+		// back with NO context — the failure resume exists to prevent, arriving by a
+		// route neither change owns alone.
 		{
 			"opencode with af's OPENCODE_CONFIG env prefix",
 			"OPENCODE_CONFIG='/home/u/.agent-factory/opencode/af-config.jsonc' opencode",

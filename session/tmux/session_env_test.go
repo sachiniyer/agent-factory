@@ -193,40 +193,6 @@ func TestLaunchEnvironmentRefusesScopedLaunchWhenGrantFails(t *testing.T) {
 	}
 }
 
-// af's generated launch environment entries install on the session, admit
-// their names to the exec shim's extras, and strip any client copy — the
-// opencode OPENCODE_CONFIG seam's channel (#5265 review).
-func TestLaunchEnvironmentInstallsInjectedEnvironment(t *testing.T) {
-	forceSessionEnvExecutable(t, "/opt/af")
-	forceNewSessionEnvMarkers(t, true)
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir)
-	t.Setenv("OPENCODE_CONFIG", "/ambient/opencode.jsonc")
-
-	session := NewTmuxSession("injected-env", "opencode")
-	session.SetLaunchProgram("opencode", sessionenv.AccountLaunchProof{},
-		[]string{"OPENCODE_CONFIG=/af/owned/opencode.jsonc"})
-	wrapped, launchEnv, imports, sessionEnv, _, err := session.prepareLaunchEnvironment("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, ok := launchEnvironmentValue(sessionEnv, "OPENCODE_CONFIG"); !ok || got != "/af/owned/opencode.jsonc" {
-		t.Fatalf("injected OPENCODE_CONFIG missing from session env: %v, %q", sessionEnv, got)
-	}
-	if launchEnvironmentHasName(launchEnv, "OPENCODE_CONFIG") {
-		t.Fatal("ambient OPENCODE_CONFIG still rides the inherited launch env")
-	}
-	if !slices.Contains(imports, "OPENCODE_CONFIG") {
-		t.Fatal("injected name missing from update-environment")
-	}
-	if !strings.Contains(wrapped, "OPENCODE_CONFIG") {
-		t.Fatal("injected name did not reach the exec shim's extras")
-	}
-}
-
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)

@@ -512,7 +512,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		return err
 	}
 
-	ts.SetProgramWithEnvironment(plan.program, injectedSessionEnvironment(plan.program))
+	ts.SetProgram(plan.program)
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}

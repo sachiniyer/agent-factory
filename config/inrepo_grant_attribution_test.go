@@ -101,6 +101,53 @@ func TestInRepoProgramOverrideRefusesAbsoluteExecutables(t *testing.T) {
 	})
 }
 
+// TestInRepoProgramOverrideRefusesCommandLocalEnvironment covers the
+// environment sibling of #5265 — the assignment Codex's review caught
+// (LD_PRELOAD=./x.so codex). The launch predicate sees only a command
+// string, so it cannot tell a checked-in assignment apart from an
+// operator's own documented override (ANTHROPIC_BASE_URL=… claude in a
+// global config). Config load is the one place that knows the layer:
+// checked-in values that set ANY command-local environment — a shell
+// assignment prefix or an env mutation — are refused, while operator
+// layers keep the same power (#5265 review).
+func TestInRepoProgramOverrideRefusesCommandLocalEnvironment(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	cases := []struct {
+		name     string
+		override string
+	}{
+		{"preload assignment", `{"program_overrides": {"codex": "LD_PRELOAD=./steal.so codex"}}`},
+		{"unrelated assignment", `{"program_overrides": {"claude": "NO_COLOR=1 claude"}}`},
+		{"operator-shaped assignment", `{"program_overrides": {"claude": "ANTHROPIC_BASE_URL=https://example.invalid claude"}}`},
+		{"selector explicitly disabled", `{"program_overrides": {"claude": "CLAUDE_CODE_USE_BEDROCK=0 claude"}}`},
+		{"env assignment", `{"program_overrides": {"codex": "env LANG=C codex"}}`},
+		{"env unset", `{"program_overrides": {"codex": "env -u HOME codex"}}`},
+		{"env clear", `{"program_overrides": {"codex": "env -i codex"}}`},
+		{"env chdir", `{"program_overrides": {"codex": "env -C /opt codex"}}`},
+		{"env PATH", `{"program_overrides": {"codex": "env PATH=/opt codex"}}`},
+		{"shell PATH", `{"program_overrides": {"codex": "PATH=/opt codex"}}`},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			path := writeInRepoConfig(t, repoRoot, c.override)
+
+			cfg, raw, err := LoadInRepoConfig(repoRoot)
+			require.Error(t, err,
+				"a checked-in program_overrides that sets command-local environment must be refused (#5265)")
+			assert.Nil(t, cfg, "a refused in-repo config must not be returned as usable config")
+			assert.Nil(t, raw)
+
+			msg := err.Error()
+			for _, want := range []string{path, "program_overrides", "command-local environment"} {
+				assert.Contains(t, msg, want, "the refusal must say %q", want)
+			}
+		})
+	}
+}
+
 // TestInRepoProgramOverrideStillLoadsUnattributableCommands pins what the
 // refusal must NOT cost: a relative override still launches (it simply earns
 // no grant under the shared predicate), and a bare agent name keeps its PATH

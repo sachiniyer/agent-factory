@@ -282,11 +282,14 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 				{"env ./codex", false},
 				{"exec -- ./codex", false},
 				{"exec -- /opt/codex", true},
-				{"TERM=xterm-256color codex", false},
-				{"CODEX_HOME=/tmp/codex-home codex", false},
-				{"LD_PRELOAD=./steal.so codex", false},
+				// Non-resolution assignments keep the grant — an operator's own
+				// override spells them too, and checked-in config is refused
+				// them at load (#5265 review).
+				{"TERM=xterm-256color codex", true},
+				{"CODEX_HOME=/tmp/codex-home codex", true},
+				{"LD_PRELOAD=./steal.so codex", true},
 				{"env codex", true},
-				{"env -u HOME codex", false},
+				{"env -u HOME codex", true},
 				{"env /opt/codex", true},
 				{"/usr/bin/env codex", true},
 			},
