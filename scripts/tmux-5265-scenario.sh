@@ -140,6 +140,24 @@ if [ ! -d "$FIXTURE/.git" ]; then
         && git add -A && git commit -qm "fixture for #5265")
 fi
 
+# A SECOND fixture repo for the no-hit leg's seed session: af refuses two
+# live --here sessions on one worktree+branch, so the daemon-seeding create
+# needs its own lane.
+SEED_REPO="$SANDBOX/repo-5265-seed"
+mkdir -p "$SEED_REPO/.agent-factory"
+write_agent "$SEED_REPO/codex" "printf '› \n'"
+if [ ! -d "$SEED_REPO/.git" ]; then
+    (cd "$SEED_REPO" && git init -q -b master \
+        && : >.af-throwaway-sandbox \
+        && git add -A && git commit -qm "seed fixture for #5265")
+fi
+cat >"$SEED_REPO/.agent-factory/config.toml" <<'EOF'
+default_program = "codex"
+
+[program_overrides]
+codex = "./codex"
+EOF
+
 # write_config — stdin becomes the repo's checked-in .agent-factory/config.toml.
 write_config() { cat >"$FIXTURE/.agent-factory/config.toml"; }
 
@@ -324,18 +342,18 @@ run_leg() {
     [ "$verdict" = PASS ]
 }
 
-# run_refused_leg <label> <grep-pattern> [extra af args...] — the in-repo or
-# scoped launch must be refused: create fails naming the refusal (matched
-# against <grep-pattern>), with no session left behind.
+# run_refused_leg <label> <path> <grep-pattern> [extra af args...] — the
+# in-repo or scoped launch must be refused: create fails naming the refusal
+# (matched against <grep-pattern>), with no session left behind.
 run_refused_leg() {
-    local label="$1" pattern="$2"
-    shift 2
+    local label="$1" legpath="$2" pattern="$3"
+    shift 3
     local evidir="$EVID/$label" create_out rc=0 stray dpid=""
     mkdir -p "$evidir"
     rm -f "$DUMP"
     _af_log "=== $label: want refusal matching '$pattern'"
 
-    create_out="$(leg_create "$label" "$AF_BRANCH" "$BASE_PATH" "$@")" || rc=$?
+    create_out="$(leg_create "$label" "$AF_BRANCH" "$legpath" "$@")" || rc=$?
     printf '%s\n' "$create_out" >"$evidir/create.log"
     if [ "$rc" -eq 0 ]; then
         record "$label: FAIL — create SUCCEEDED for a value that must refuse"
@@ -364,9 +382,9 @@ run_refused_leg() {
 # Two-stage setup, because the CLI's preflight resolves the program in ITS OWN
 # environment and would refuse a bare name missing from its PATH before the
 # daemon is ever asked:
-#   1. a seed session under a no-hit PATH (override './codex' resolves
-#      relative to the fixture regardless of PATH) — this spawns the leg's
-#      daemon WITH the no-hit PATH;
+#   1. a seed session in a SECOND fixture repo under a no-hit PATH (its
+#      './codex' override resolves relative to the seed repo regardless of
+#      PATH) — this spawns the leg's daemon WITH the no-hit PATH;
 #   2. the real create under a PATH that DOES hold codex — preflight passes,
 #      the request reaches the already-running daemon, whose environment is
 #      what the grant predicate walks.
@@ -383,15 +401,16 @@ run_nohit_leg() {
     rm -f "$DUMP"
     _af_log "=== $label: daemon PATH lacks codex; grant must still apply"
 
-    # Stage 1: seed daemon under the no-hit PATH.
-    set_override "./codex"
-    create_out="$( (cd "$FIXTURE" && env -i \
+    # Stage 1: seed daemon under the no-hit PATH. The seed session lives in a
+    # SECOND fixture repo so the real create's --here lane cannot collide
+    # with it (af refuses two live sessions on one worktree+branch).
+    create_out="$( (cd "$SEED_REPO" && env -i \
         HOME="$HOME" \
         PATH="$SANDBOX/nohit-a:$SANDBOX/nohit-b:/usr/bin:/bin" \
         AGENT_FACTORY_HOME="$home" \
         AGENT_FACTORY_AUTO_UPDATE=false \
         "${SENTINEL_ENV[@]}" \
-        "$AF_BRANCH" sessions create "$seed" --repo "$FIXTURE" --here 2>&1) )" || rc=$?
+        "$AF_BRANCH" sessions create "$seed" --repo "$SEED_REPO" --here 2>&1) )" || rc=$?
     printf '%s\n' "$create_out" >"$evidir/seed-create.log"
     if [ "$rc" -ne 0 ]; then
         record "$label: FAIL — seed create exited $rc: $(printf '%s' "$create_out" | tail -1)"
@@ -494,16 +513,17 @@ EOF
 tally run_leg global-abs "$AF_BRANCH" "$BASE_PATH" 3
 
 # Checked-in absolute executables refuse at load — the original leg plus the
-# in-tree-symlink spelling, both aimed outside the checkout.
+# in-tree-symlink spelling (whose basename is no agent), both aimed outside
+# the checkout.
 set_override "$FIXTURE/bin/codex"
-tally run_refused_leg branch-absinrepo "absolute executable"
+tally run_refused_leg branch-absinrepo "$BASE_PATH" "absolute executable"
 set_override "$FIXTURE/bin/codex-link"
-tally run_refused_leg branch-insymlink "absolute executable"
+tally run_refused_leg branch-insymlink "$BASE_PATH" "absolute executable"
 
 # A checked-in command-local environment refuses at load on the same line:
 # LD_PRELOAD=./x.so codex is exactly Codex's review repro.
 set_override "LD_PRELOAD=./x.so codex"
-tally run_refused_leg branch-envmut "command-local environment"
+tally run_refused_leg branch-envmut "$BASE_PATH" "command-local environment"
 
 # Bare codex when the daemon's all-absolute PATH holds no codex: the grant
 # still applies — resolution can only fail, never land in the repository.
@@ -515,8 +535,12 @@ set_override "./env codex"
 tally run_leg branch-envrel "$AF_BRANCH" "$FAKEBIN:/usr/bin:/bin" 0
 
 # A scoped launch whose grant fails is REFUSED rather than stripped — the
-# account boundary cannot become a second door to repository content.
-set_override "./codex"
+# account boundary cannot become a second door to repository content. The
+# program must be a provable direct invocation or the earlier account-proof
+# gate refuses first, so the grant failure comes from the PATH walk instead:
+# bare `codex`, with the worktree itself first on PATH — the hit lands inside
+# the checkout, the grant cannot attribute it, and the scoped launch refuses.
+set_override "codex"
 (cd "$FIXTURE" && env -i \
     HOME="$HOME" \
     PATH="$BASE_PATH" \
@@ -524,7 +548,7 @@ set_override "./codex"
     AGENT_FACTORY_AUTO_UPDATE=false \
     "$AF_BRANCH" accounts add codex work) >"$EVID/branch-scoped-accounts.log" 2>&1 || true
 mkdir -p "$EVID/branch-scoped"
-tally run_refused_leg branch-scoped "cannot attribute the launch executable" --account work
+tally run_refused_leg branch-scoped "$FIXTURE:/usr/bin:/bin" "cannot attribute the launch executable" --account work
 
 # An operator's own global override keeps its documented env-assignment
 # power: ANTHROPIC_BASE_URL=… claude both runs and receives the claude grant
