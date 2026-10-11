@@ -249,8 +249,15 @@ in-repo `.agent-factory/config.toml` may set, and a checked-in value carrying on
 of those assignments is **rejected at load** with an error naming the selector:
 otherwise cloning a repository and starting a session would hand that
 repository's agent your cloud credentials. A repo may still choose *which*
-program runs — a path, flags, a wrapper — because that grants nothing. Set the
-selector in your own global config or export it in your shell if you want it.
+program runs — a bare name, a relative path, flags, a wrapper — because that
+grants nothing it cannot prove. An **absolute executable path is also rejected
+at load** in checked-in config: the launcher's credential grant treats absolute
+paths as operator-attributable, and a spelling the repository chooses can be
+aimed at content it controls — a file committed in another checkout of the same
+repo, or a payload `post_worktree_commands` writes during setup. Absolute
+overrides remain available in the global config and the machine-local personal
+per-project file, which only you control. Set the selector — or the absolute
+path — in your own global config or export it in your shell if you want it.
 
 Gemini's cloud modes work the same way, selected by `GOOGLE_GENAI_USE_VERTEXAI`
 or `GOOGLE_GENAI_USE_GCA`. Choosing *which* agent runs is also a repo's to make

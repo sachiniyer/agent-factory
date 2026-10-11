@@ -573,16 +573,6 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 			return nil, nil, err
 		}
 	}
-	// Resolved once for the absolute-inside-repository override check below:
-	// the containment comparison needs a canonical absolute root, and a
-	// relative repoRoot is resolved against this process's cwd — the same
-	// base any relative reference to it would use.
-	resolvedRepoRoot := ""
-	lexicalRepoRoot := ""
-	if absRoot, absErr := filepath.Abs(repoRoot); absErr == nil {
-		lexicalRepoRoot = absRoot
-		resolvedRepoRoot = pathutil.ResolveForCompare(absRoot)
-	}
 	for key, value := range cfg.ProgramOverrides {
 		if err := ValidateProgramEnum(
 			fmt.Sprintf("Config issue in %s: program_overrides key", prettyPath),
@@ -614,32 +604,30 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 					"intend it for every repo, or export it in your own shell",
 				prettyPath, key, selector, cloudProviderForSelector(selector), selector, globalConfigLocation)
 		}
-		// An override whose executable is an ABSOLUTE path inside this
-		// repository is repository content spelled in the one path form the
-		// credential grant accepts: the shared grant predicate (internal/
-		// sessionenv.GrantAgentForCommand) trusts absolute paths outside the
-		// session's working tree, so `<repo>/codex` would hand this repo's own
-		// committed binary the operator's model credentials — the #5265 leak
-		// through a door a worktree-cwd check cannot always see (the session's
-		// working directory may be a linked worktree while the absolute path
-		// points at the main checkout). A checked-in config may choose which
-		// program runs, not aim the grant at content it ships — refuse the
-		// value outright, the same line the cloud-selector refusal above
-		// draws. A RELATIVE override still loads: it simply earns no grant.
-		// The check is lexical as well as resolved: a spelling inside the
-		// repository is repository content even when the file it selects
-		// resolves out — an in-tree symlink to /bin/sh still lets a later
-		// commit repoint it before exec (#5265 review).
-		if executable := sessionenv.AgentCommandExecutable(value); filepath.IsAbs(executable) &&
-			resolvedRepoRoot != "" &&
-			(pathutil.IsAtOrInside(executable, lexicalRepoRoot) ||
-				pathutil.IsAtOrInside(executable, resolvedRepoRoot) ||
-				pathutil.IsAtOrInside(pathutil.ResolveForCompare(executable), resolvedRepoRoot)) {
+		// An ABSOLUTE executable is refused outright, inside the checkout or
+		// anywhere else. A checked-in config is not trusted provenance for a
+		// file outside it: the shared grant predicate (internal/sessionenv.
+		// GrantAgentForCommand) attributes absolute paths to the operator
+		// because the operator is supposed to be the one spelling them, and a
+		// repository that picks the spelling can aim the grant at content it
+		// controls — a committed file in another checkout of the same repo
+		// (the pane's worktree contains only its own tree, so a linked
+		// worktree or the main checkout escapes that containment test), or a
+		// payload post_worktree_commands delivers to /tmp during setup. The
+		// grant cannot tell either apart from the operator's /usr/local/bin
+		// install, so the untrusted layer may not produce the spelling at
+		// all — refuse the value outright, the same line the cloud-selector
+		// refusal above draws. Absolute overrides keep working where their
+		// provenance IS the operator's: the global config and the
+		// machine-local personal project file. A RELATIVE override still
+		// loads: it simply earns no grant (#5265 review).
+		if executable := sessionenv.AgentCommandExecutable(value); filepath.IsAbs(executable) {
 			return nil, nil, fmt.Errorf(
-				"in-repo config %s: program_overrides.%s names an executable inside this repository, which would "+
-					"hand the repository's own file your credentials. A checked-in config may name a bare agent or an "+
-					"absolute path outside the checkout; move the wrapper outside the repository or use the bare %q name",
-				prettyPath, key, key)
+				"in-repo config %s: program_overrides.%s names the absolute executable %q, which af cannot "+
+					"attribute to you rather than this repository — it may point at content the repo ships in "+
+					"another checkout or delivers at setup. A checked-in config may name a bare agent or a "+
+					"relative path; set the absolute override in %s if you intend it",
+				prettyPath, key, executable, globalConfigLocation)
 		}
 	}
 

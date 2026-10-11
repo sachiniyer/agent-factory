@@ -105,7 +105,6 @@ func TestInRepoProgramOverrideStillAllowsOrdinaryCommands(t *testing.T) {
 		name     string
 		override string
 	}{
-		{"absolute path with flags", `{"program_overrides": {"claude": "/opt/tools/claude --model opus"}}`},
 		{"wrapper command", `{"program_overrides": {"claude": "ionice -c 3 claude"}}`},
 		{"non-agent command", `{"program_overrides": {"claude": "bash"}}`},
 		// An assignment that is NOT a cloud selector is none of this guard's

@@ -10,16 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestInRepoProgramOverrideCannotSelectExecutableInsideRepo covers the
-// absolute-path sibling of #5265. A checked-in program_overrides value whose
-// executable is an absolute path INSIDE this repository is repository content
-// spelled in the operator-attributable form the credential grant accepts, so
-// `<repo>/codex` would hand the repo's own committed binary the operator's
-// model credentials exactly as `./codex` did before the launch guard. The
-// checked-in layer refuses the value outright — the same line the
-// cloud-selector refusal draws: the file may choose which program runs, not
-// aim a credential grant at content it ships.
-func TestInRepoProgramOverrideCannotSelectExecutableInsideRepo(t *testing.T) {
+// TestInRepoProgramOverrideRefusesAbsoluteExecutables covers the
+// absolute-path sibling of #5265 — and its two review follow-ups. A checked-in
+// program_overrides value that selects an ABSOLUTE executable is not trusted
+// provenance for a file outside the repository: the file may live in another
+// checkout of the same repo (a linked-worktree session's own-tree check
+// cannot see it), or be a payload post_worktree_commands delivers at setup.
+// The grant cannot tell either apart from the operator's /usr/local/bin
+// install, so the checked-in layer refuses the spelling outright — the same
+// line the cloud-selector refusal draws. Absolute overrides keep working in
+// the operator-owned layers: the global config and the machine-local
+// personal project file.
+func TestInRepoProgramOverrideRefusesAbsoluteExecutables(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	for _, agent := range []string{"codex", "claude", "gemini", "aider", "amp", "opencode", "devin"} {
@@ -31,21 +33,34 @@ func TestInRepoProgramOverrideCannotSelectExecutableInsideRepo(t *testing.T) {
 
 			cfg, raw, err := LoadInRepoConfig(repoRoot)
 			require.Error(t, err,
-				"a checked-in program_overrides whose executable lives inside the repository must be "+
-					"refused: the launch grant accepts absolute paths, so the repo's own file would "+
-					"inherit the operator's credentials (#5265)")
+				"a checked-in program_overrides selecting an absolute executable must be refused: "+
+					"the launch grant accepts absolute paths as operator-attributable, so any file "+
+					"the repository can aim the spelling at inherits the operator's credentials (#5265)")
 			assert.Nil(t, cfg, "a refused in-repo config must not be returned as usable config")
 			assert.Nil(t, raw)
 
 			msg := err.Error()
-			for _, want := range []string{path, "program_overrides", agent, "inside this repository"} {
+			for _, want := range []string{path, "program_overrides", agent, "absolute executable"} {
 				assert.Contains(t, msg, want, "the refusal must say %q", want)
 			}
 		})
 	}
 
+	// An absolute path OUTSIDE this checkout is refused on the same line: a
+	// sibling worktree or a staged payload escapes the pane's own-tree
+	// containment exactly the way a committed binary does.
+	t.Run("absolute path outside repo", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoConfig(t, repoRoot,
+			`{"program_overrides": {"codex": "/opt/tools/codex --fast"}}`)
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "absolute executable")
+	})
+
 	// The spellings af parses around the executable — an env wrapper and an
-	// exec prefix — select the same in-tree file, so they meet the same
+	// exec prefix — select the same absolute file, so they meet the same
 	// refusal. A guard keyed on the raw string would miss both.
 	t.Run("through env wrapper", func(t *testing.T) {
 		repoRoot := t.TempDir()
@@ -55,7 +70,7 @@ func TestInRepoProgramOverrideCannotSelectExecutableInsideRepo(t *testing.T) {
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "inside this repository")
+		assert.Contains(t, err.Error(), "absolute executable")
 	})
 
 	t.Run("through exec prefix", func(t *testing.T) {
@@ -66,13 +81,12 @@ func TestInRepoProgramOverrideCannotSelectExecutableInsideRepo(t *testing.T) {
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "inside this repository")
+		assert.Contains(t, err.Error(), "absolute executable")
 	})
 
 	// A spelling inside the repository is repository content even when the
 	// file it selects resolves out: an in-tree symlink to an outside binary
-	// can be repointed by a later commit before exec, so the lexical spelling
-	// is refused on the same line as a regular in-tree file (#5265 review).
+	// can be repointed by a later commit before exec (#5265 review).
 	t.Run("in-tree symlink resolving outside", func(t *testing.T) {
 		repoRoot := t.TempDir()
 		outside := filepath.Join(t.TempDir(), "codex")
@@ -83,26 +97,14 @@ func TestInRepoProgramOverrideCannotSelectExecutableInsideRepo(t *testing.T) {
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "inside this repository")
-	})
-
-	t.Run("nested deeper inside repo", func(t *testing.T) {
-		repoRoot := t.TempDir()
-		inside := filepath.Join(repoRoot, "tools", "bin", "claude")
-		writeInRepoConfig(t, repoRoot,
-			fmt.Sprintf(`{"program_overrides": {"claude": %q}}`, inside))
-
-		_, _, err := LoadInRepoConfig(repoRoot)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "inside this repository")
+		assert.Contains(t, err.Error(), "absolute executable")
 	})
 }
 
 // TestInRepoProgramOverrideStillLoadsUnattributableCommands pins what the
 // refusal must NOT cost: a relative override still launches (it simply earns
-// no grant under the shared predicate), and an absolute path OUTSIDE the
-// repository is the documented operator-override form the in-repo file may
-// keep choosing.
+// no grant under the shared predicate), and a bare agent name keeps its PATH
+// resolution.
 func TestInRepoProgramOverrideStillLoadsUnattributableCommands(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
@@ -112,7 +114,6 @@ func TestInRepoProgramOverrideStillLoadsUnattributableCommands(t *testing.T) {
 	}{
 		{"relative dot executable", `{"program_overrides": {"codex": "./codex"}}`},
 		{"relative subdir executable", `{"program_overrides": {"claude": "bin/claude --verbose"}}`},
-		{"absolute path outside repo", `{"program_overrides": {"codex": "/opt/tools/codex --fast"}}`},
 		{"bare name", `{"program_overrides": {"gemini": "gemini --model flash"}}`},
 	}
 
@@ -122,7 +123,7 @@ func TestInRepoProgramOverrideStillLoadsUnattributableCommands(t *testing.T) {
 			writeInRepoConfig(t, repoRoot, c.override)
 
 			cfg, _, err := LoadInRepoConfig(repoRoot)
-			require.NoError(t, err, "this value cannot aim the grant at repository content and must still load")
+			require.NoError(t, err, "this value cannot aim the grant at an attributable file and must still load")
 			require.NotNil(t, cfg)
 		})
 	}
