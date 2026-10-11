@@ -287,6 +287,16 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	// never nests them.
 	agent := instance.ResolvedAgent()
 	boundary := instance.TaskRunPromptAttemptAt()
+	// The frame must predate nothing: if a redelivery stamped a boundary
+	// AFTER this capture started, the pane in `content` never saw the new
+	// prompt — feeding it now would arm a fresh watcher off a pre-boundary
+	// frame (an indicator-absent capture primes the scoped agents' absent→
+	// present contract), after which unrelated pre-boundary chrome can pass
+	// as the redelivery's turn. The epoch fence below guards the write; this
+	// timestamp fence guards the watcher's mutation itself (#5221 review).
+	if boundary.After(capturedAt) {
+		return false
+	}
 	m.pausedMu.Lock()
 	entry, ok := m.taskRunTurnWatches[key]
 	if !ok || entry.agent != agent || !entry.boundary.Equal(boundary) {
