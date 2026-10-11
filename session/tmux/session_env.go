@@ -210,7 +210,13 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string, []string, []string, string, error) {
 	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
 	source := os.Environ()
+	// Two different questions, two classifiers: the credential GRANT is bound
+	// to the shared predicate (only an operator-attributable executable may
+	// carry it, #5265), while the account-namespace check below asks the
+	// identity question — which agent this command RUNS — so a named account
+	// does not newly depend on the agent being installed on the daemon's PATH.
 	agent := sessionenv.GrantAgentForCommand(program, source, workDir)
+	identityAgent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
 		return "", nil, nil, nil, "", err
@@ -228,8 +234,8 @@ func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string
 	}
 	var wrapped string
 	if account != "" {
-		if agent != accountAgent && !accountEnvironmentOnly {
-			resolved := agent
+		if identityAgent != accountAgent && !accountEnvironmentOnly {
+			resolved := identityAgent
 			if resolved == "" {
 				resolved = "an unrecognized command"
 			}

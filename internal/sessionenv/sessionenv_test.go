@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -90,15 +91,18 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 }
 
 // The credential grant applies only when the executable is one af can
-// attribute to the operator: a bare name resolved through an all-absolute
-// PATH, or an absolute path outside the session's working directory. Every
-// spelling that lets the checked-out repository pick the file — a relative
-// path, a resolution-changing assignment or env option, a relative or empty
-// PATH entry, an absolute path inside workDir — earns no grant, for every
-// supported agent (#5265).
+// attribute to the operator: a bare name whose first PATH hit is an absolute
+// directory outside the session's working directory, or an absolute path
+// outside it. Every spelling that lets the checked-out repository pick the
+// file — a relative path, a resolution-changing assignment or env option, an
+// empty or relative PATH entry ahead of the executable, an absolute path
+// inside workDir — earns no grant, for every supported agent (#5265).
 func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T) {
 	workDir := t.TempDir()
 	inside := filepath.Join(workDir, "codex")
+	with := t.TempDir()
+	writeExecutableFixture(t, with, "codex")
+	without := t.TempDir()
 	tests := []struct {
 		name    string
 		command string
@@ -107,7 +111,7 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 		want    string
 	}{
 		{name: "bare agent", command: "codex", want: "codex"},
-		{name: "bare agent absolute PATH", command: "codex", environ: []string{"PATH=/usr/bin:/bin"}, want: "codex"},
+		{name: "bare agent PATH with hit", command: "codex", environ: []string{"PATH=" + with}, want: "codex"},
 		{name: "relative dot", command: "./codex"},
 		{name: "relative subdir", command: "bin/codex"},
 		{name: "relative parent", command: "../codex"},
@@ -128,12 +132,13 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 		{name: "agent home assignment", command: "CODEX_HOME=/tmp/codex-home codex", want: "codex"},
 		{name: "trusted env", command: "/usr/bin/env codex", want: "codex"},
 		{name: "env non-resolution assignment", command: "env LANG=C codex", want: "codex"},
-		{name: "bare agent dot PATH", command: "codex", environ: []string{"PATH=.:/usr/bin"}},
-		{name: "bare agent relative PATH entry", command: "codex", environ: []string{"PATH=/usr/bin:bin"}},
-		{name: "bare agent trailing empty PATH", command: "codex", environ: []string{"PATH=/usr/bin:"}},
-		{name: "bare agent leading empty PATH", command: "codex", environ: []string{"PATH=:/usr/bin"}},
+		{name: "bare agent dot PATH first", command: "codex", environ: []string{"PATH=.:" + with}},
+		{name: "bare agent relative PATH first", command: "codex", environ: []string{"PATH=bin:" + with}},
+		{name: "bare agent hit before relative PATH", command: "codex", environ: []string{"PATH=" + with + ":bin"}, want: "codex"},
+		{name: "bare agent miss before relative PATH", command: "codex", environ: []string{"PATH=" + without + ":bin"}},
+		{name: "bare agent leading empty PATH", command: "codex", environ: []string{"PATH=:" + with}},
 		{name: "bare agent empty PATH", command: "codex", environ: []string{"PATH="}},
-		{name: "bare agent relative-only PATH", command: "codex", environ: []string{"PATH=bin"}},
+		{name: "bare agent PATH without hit", command: "codex", environ: []string{"PATH=" + without}},
 		{name: "bare agent no PATH entry", command: "codex", environ: []string{"HOME=/h"}, want: "codex"},
 		{name: "claude bare", command: "claude", want: "claude"},
 		{name: "claude relative", command: "./claude"},
@@ -157,6 +162,69 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 					test.command, test.environ, test.workDir, got, test.want)
 			}
 		})
+	}
+}
+
+// The search-path walk models execvp: directories are tried in order, the
+// first one holding an executable file wins, and only that hit decides the
+// grant — entries AFTER it are never consulted, so an operator's trailing
+// ':' does not cost their agents the credential grant. Entries BEFORE the
+// hit still decide: an empty or relative entry resolves into the pane's
+// working directory, which is repository content (#5265 review).
+func TestGrantAgentForCommandWalksSearchPathLikeExecvp(t *testing.T) {
+	with := t.TempDir()
+	writeExecutableFixture(t, with, "codex")
+	without := t.TempDir()
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "absolute with hit then empty", path: with + ":", want: "codex"},
+		{name: "empty then absolute with hit", path: ":" + with},
+		{name: "miss then dot then hit", path: without + ":.:" + with},
+		{name: "absolute with hit then dot", path: with + ":.", want: "codex"},
+		{name: "miss then hit", path: without + ":" + with, want: "codex"},
+		{name: "miss then relative then hit", path: without + ":bin:" + with},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := GrantAgentForCommand("codex", []string{"PATH=" + test.path}, t.TempDir()); got != test.want {
+				t.Errorf("GrantAgentForCommand on PATH=%q = %q, want %q", test.path, got, test.want)
+			}
+		})
+	}
+
+	// A hit inside the session's working tree is still repository content:
+	// the first-match rule narrows WHICH entry answers, not what containment
+	// means for the one that does.
+	workDir := t.TempDir()
+	writeExecutableFixture(t, workDir, "codex")
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + workDir}, workDir); got != "" {
+		t.Errorf("GrantAgentForCommand with the executable inside workDir = %q, want no grant", got)
+	}
+
+	// A non-executable file is not a hit: execvp continues past EACCES, so
+	// the walk falls through to the relative entry and denies.
+	noexec := t.TempDir()
+	if err := os.WriteFile(filepath.Join(noexec, "codex"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + noexec + ":" + with}, t.TempDir()); got != "codex" {
+		t.Errorf("GrantAgentForCommand past a non-executable same-name file = %q, want %q", got, "codex")
+	}
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + noexec + ":."}, t.TempDir()); got != "" {
+		t.Errorf("GrantAgentForCommand with a non-executable file then a relative entry = %q, want no grant", got)
+	}
+}
+
+// writeExecutableFixture plants an executable file the search-path walk can
+// find — the walk's "does this directory hold the executable" needs a real
+// file with a real execute bit, not a path that merely spells one.
+func writeExecutableFixture(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

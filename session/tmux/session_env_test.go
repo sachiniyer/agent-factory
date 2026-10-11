@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -20,6 +21,21 @@ type captureLaunchEnvPty struct {
 func (p *captureLaunchEnvPty) Start(command *exec.Cmd) (*os.File, error) {
 	p.cmd = command
 	return nil, errors.New("stop after capturing launch command")
+}
+
+// forceAgentOnSearchPath plants executable stubs for the named agents in a
+// private directory and makes it the whole PATH: the launcher's grant
+// predicate models execvp's walk, so a bare agent name earns its credential
+// grant only when a real executable file answers it (#5265).
+func forceAgentOnSearchPath(t *testing.T, names ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
 }
 
 func forceSessionEnvExecutable(t *testing.T, path string) {
@@ -259,6 +275,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
+	forceAgentOnSearchPath(t, "claude")
 	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "fixture")
 	t.Setenv("AZURE_CLIENT_SECRET", "fixture")
