@@ -1,6 +1,8 @@
 package app
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
@@ -66,7 +68,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 			// answer — the same contract a fresh remote form gets (#4889
 			// review).
 			m.remoteDefaultPending = true
-			m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
+			m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
 			m.menu.SetNamingBackend(m.pendingBackend != "")
 			m.menu.SetNamingAccount(m.pendingAccount != "")
 			m.state = stateNew
@@ -90,7 +92,7 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 		m.refreshDefaultProgram()
 		m.pendingProgram = m.defaultProgram()
 	}
-	m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
+	m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
 	m.menu.SetNamingBackend(m.pendingBackend != "")
 	m.menu.SetNamingAccount(m.pendingAccount != "")
 	m.state = stateNew
