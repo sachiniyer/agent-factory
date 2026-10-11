@@ -101,3 +101,54 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 	require.Equal(t, 90*time.Second, statusSweepExpectedInterval(taskRunPollBackstop),
 		"the paused backstop cadence floors at the sweep too")
 }
+
+// flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
+// the (false,false,"",false) shape a local capture-pane error produces inside
+// SnapshotAgent — until flipped to confirmed (#5221 review).
+type flakyCaptureBackend struct {
+	*session.FakeBackend
+	captured bool
+}
+
+func (b *flakyCaptureBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
+	return false, false, "", false, b.captured
+}
+
+// The paused backstop probe must drop an unanswered capture whole: settling
+// the all-false frame would read the pane idle on no evidence, letting the
+// last confirmed capture's still-live streak release the quiet arm mid-outage
+// (#5221 review).
+func TestObserveTaskRunWhilePausedDropsFailedCapture(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-drop", backend, true, session.Running)
+	key := daemonInstanceKey(repoID, inst.Title)
+
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
+		"a failed capture is no observation: nothing may settle off it")
+
+	backend.captured = true
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"a confirmed unchanged frame settles Ready — the failed one was the gate")
+}
+
+// The normal poll keeps the same rule: Alive() may prove the session lives,
+// but a failed pane capture saw nothing of the pane, so the idle branch must
+// not settle Ready off it (#5221 review). Lost detection is untouched — the
+// probe still runs, it just cannot complete the idle path.
+func TestRefreshInstanceStatusKeepsLivenessOnFailedCapture(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "poll-drop", backend, true, session.Running)
+
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, session.LiveRunning, inst.GetLiveness(),
+		"an unanswered capture must not settle the idle branch")
+
+	backend.captured = true
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"a confirmed unchanged frame settles Ready")
+}

@@ -463,21 +463,23 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if err != nil {
 		return
 	}
+	// A probe that cannot answer is dropped whole — the doc above's own rule.
+	// A local capture-pane failure returns inside SnapshotAgent as an
+	// all-false observation with no error; settling it would read the pane
+	// IDLE on no evidence, and with the last confirmed capture's streak still
+	// live the quiet arm could release mid-outage (#5221 review).
+	if !obs.Captured {
+		return
+	}
 	// Stamped when the capture RETURNS, not when the request left — a slow
 	// remote round-trip is not observed silence (#5221 review). The declared
-	// cadence is the backstop probe's own: captures arriving one probe period
-	// apart are scheduled, not a hole (#5221 review). The sweep floor matters
-	// here too — a slow serial pass inflates the backstop spacing the same as
-	// the tick's. An answered snapshot whose own pane probe failed
-	// (obs.Captured false — a local capture-pane can fail without surfacing an
-	// error) is no observation either: the streak must not extend across
-	// frames nobody captured (#5221 review). The request-start `capturedAt`
+	// cadence is the backstop probe's own floored at the sweep's: captures
+	// arriving one probe period — or one slow serial pass — apart are
+	// scheduled, not a hole (#5221 review). The request-start `capturedAt`
 	// stays the turn-age bound below: that check needs the earliest instant
 	// the frame could exist, this one needs the moment its knowledge actually
 	// landed.
-	if obs.Captured {
-		instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop))
-	}
+	instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop))
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
@@ -859,7 +861,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 			// Idle output: settle to Ready, or LimitReached when the pane shows a
 			// usage-limit banner for a claude/codex session (#1146). content is
 			// HasUpdated's capture (no re-capture); see resolveIdleLiveness.
-			m.resolveIdleLiveness(instance, content, epoch)
+			// Only a CONFIRMED capture may settle idle: a failed pane probe
+			// proves liveness through Alive() but saw nothing of the pane, and
+			// settling Ready off "" would let the still-live observation streak
+			// release the quiet arm mid-outage (#5221 review). The row simply
+			// keeps its last-known liveness until a real frame lands.
+			if obs.Captured {
+				m.resolveIdleLiveness(instance, content, epoch)
+			}
 		}
 	}
 	if observedAlive {
