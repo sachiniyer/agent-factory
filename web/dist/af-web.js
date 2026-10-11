@@ -7699,7 +7699,7 @@ function isListenHostLiteral(host) {
   }
   const octets = host.split(".");
   if (octets.length !== 4) return false;
-  return octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
+  return octets.every((o) => /^(0|[1-9]\d{0,2})$/.test(o) && Number(o) <= 255);
 }
 function splitListenHostPort(addr) {
   if (addr.startsWith("[")) {

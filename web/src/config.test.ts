@@ -1204,6 +1204,37 @@ test("saveNotice deduplicates a successful rebind for a hostname that looks like
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
 });
 
+test("saveNotice deduplicates a successful rebind for a hostname that looks like a leading-zero IPv4 (001.2.3.4)", () => {
+  // A dotted-quad with a leading-zero octet (e.g. 001.2.3.4) is not a valid
+  // IPv4 address — Go's net.Listen rejects leading-zero octets and resolves the
+  // name as a hostname, so the serving address (channel 2, from
+  // net.Addr().String()) is a literal IP (e.g. 10.0.0.1). isListenHostLiteral
+  // must reject 001.2.3.4 as a literal so the hostname relaxation matches the
+  // configured hostname to the resolved serving IP on a successful rebind. The
+  // old regex /^\d{1,3}(\.\d{1,3}){3}$/ classified 001.2.3.4 as a literal
+  // (every octet is 1-3 digits), so the hostname relaxation was skipped and the
+  // strict host comparison (001.2.3.4 vs 10.0.0.1) surfaced both the forecast
+  // and the notice for the same successful bind.
+  const configuredAddr = "001.2.3.4:8443";
+  const servingAddr = "10.0.0.1:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the resolved serving IP 10.0.0.1) only; 001.2.3.4 is not a valid
+  // IPv4 literal (leading-zero octet 001), so isListenHostLiteral classifies it
+  // as a hostname and the hostname relaxation matches it to the serving IP on the
+  // successful rebind.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
 test("saveNotice keeps a hex-service-name port forecast on a failed rebind (0x50 is not a decimal port)", () => {
   // JavaScript's Number("0x50") coerces the hex string to 80, but Go's
   // net.LookupPort treats "0x50" as a service name (strconv.Atoi rejects hex),

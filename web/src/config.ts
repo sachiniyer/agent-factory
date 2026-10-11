@@ -423,14 +423,19 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
 // literal. listenerExposureDedup uses this to distinguish the two when a
 // successful rebind resolved the hostname, so a hostname forecast and the literal
 // serving notice are the same bind rather than two different exposures.
-//   - IPv4: a dotted-quad of 1-3 digit octets, each at most 255, matching the
-//     form the validator and net.Listen accept (and net.Addr().String() reports
-//     verbatim). A dotted-quad whose octets are all 1-3 digits but are not all
-//     ≤255 (e.g. 256.1.1.1) is not a valid IPv4 address — Go's net.Listen treats
-//     it as a hostname and resolves it via DNS — so it must not be classified as
-//     a literal; the hostname relaxation then matches it to the serving IP on a
-//     successful rebind instead of treating it as a distinct literal that the
-//     strict host comparison can never equal.
+//   - IPv4: a dotted-quad of canonical decimal octets (no leading zero except
+//     "0" itself), each at most 255, matching the form the validator and
+//     net.Listen accept (and net.Addr().String() reports verbatim). A
+//     dotted-quad whose octets are all 1-3 digits but are not all ≤255
+//     (e.g. 256.1.1.1) is not a valid IPv4 address — Go's net.Listen treats
+//     it as a hostname and resolves it via DNS — so it must not be classified
+//     as a literal; the hostname relaxation then matches it to the serving IP
+//     on a successful rebind instead of treating it as a distinct literal that
+//     the strict host comparison can never equal. A dotted-quad with a leading
+//     zero (e.g. 001.2.3.4) is likewise not a valid IPv4 address — Go's
+//     net.Listen rejects leading-zero octets and resolves the name as a
+//     hostname — so it too must be classified as a non-literal for the
+//     hostname relaxation to match it to the serving IP on a rebind.
 //   - IPv6: any host containing a colon — splitListenHostPort already stripped
 //     the brackets, so "::", "2001:db8::1" etc. are bare IPv6.
 //   - Everything else is a hostname (a name the resolver will look up), including
@@ -442,7 +447,7 @@ function isListenHostLiteral(host: string): boolean {
   }
   const octets = host.split(".");
   if (octets.length !== 4) return false;
-  return octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
+  return octets.every((o) => /^(0|[1-9]\d{0,2})$/.test(o) && Number(o) <= 255);
 }
 
 // splitListenHostPort splits a "<host>:<port>" or "[<host>]:<port>" address into
