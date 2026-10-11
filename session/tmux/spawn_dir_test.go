@@ -1030,3 +1030,203 @@ func TestStartWithholdsNotStartedWhenAbsenceUnproven(t *testing.T) {
 	require.False(t, session.ProvenNoPane())
 	assert.Empty(t, ptyFactory.cmds, "no spawn while the directory state is unproven")
 }
+
+// TestStartRefusesUnenterableWorkDir is the #5174 review fix at admission:
+// a directory that stats fine but cannot be entered is exactly the spawn
+// tmux's fallback claims — new-session's chdir into it cannot succeed, so
+// the pane lands in the server's cwd with pane_start_path still echoing
+// the request. checkSpawnDir must refuse it up front; it is the only point
+// the fallback is preventable at all.
+func TestStartRefusesUnenterableWorkDir(t *testing.T) {
+	workDir := t.TempDir()
+
+	prev := spawnDirEnterable
+	spawnDirEnterable = func(string) error { return syscall.EACCES }
+	t.Cleanup(func() { spawnDirEnterable = prev })
+
+	ptyFactory := NewMockPtyFactory(t)
+	session := newTmuxSession(toTmuxName("unenterable-dir", ""), "claude", ptyFactory, absentSessionExec(t))
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing,
+		"an unenterable start dir is conclusively unusable — chdir cannot succeed into it")
+	require.ErrorIs(t, err, os.ErrNotExist,
+		"the WORKTREE_MISSING classification the rebuild path keys on")
+	assert.Empty(t, ptyFactory.cmds, "new-session must never run for an unenterable start dir")
+}
+
+// TestStartRejectsDeadPaneOverUnenterableDir is the #5174 review fix for the
+// no-source arm: a pane tmux marked dead before verification has no live
+// evidence — procfs stays off (the retained pid may be recycled),
+// pane_current_path expands empty by design, and pane_start_path is the
+// request's own echo, powerless to approve. The verdict then turns on the
+// pathname's own facts: chdir is tmux's only fallback trigger, and it cannot
+// have succeeded into a directory that cannot be entered. A dead pane over
+// an unenterable path is a finished process that may have run in the
+// fallback cwd — refuse and tear down; nothing live is lost (#5174 review).
+func TestStartRejectsDeadPaneOverUnenterableDir(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Enterable at admission, denied at verification — the mid-spawn
+	// permission loss is what keeps the spawn reachable so the dead arm
+	// itself is what convicts.
+	var accessCalls atomic.Int32
+	prevAccess := spawnDirEnterable
+	spawnDirEnterable = func(string) error {
+		if accessCalls.Add(1) == 1 {
+			return nil
+		}
+		return syscall.EACCES
+	}
+	t.Cleanup(func() { spawnDirEnterable = prevAccess })
+
+	var killed, probed bool
+	sessionName := toTmuxName("dead-pane-silent", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if killed || !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				switch {
+				case strings.Contains(s, "#{pane_dead}") && strings.Contains(s, "#{pane_pid}"):
+					// paneRowFormat — teardown's panePID. The retained dead
+					// pane answers its dead row, so the teardown observes
+					// the pane and concludes conclusively.
+					return []byte("98765|1|\n"), nil
+				case strings.Contains(s, "#{pane_dead}"):
+					return []byte("1\n"), nil // affirmatively dead
+				case strings.Contains(s, "#{pane_start_path}"):
+					return []byte(workDir + "\n"), nil // the request's echo — powerless
+				}
+				// pane_current_path stays silent: tmux expands it empty for
+				// a dead pane by design.
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				return nil, nil // conclusive teardown: no live processes
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	err := session.Start(workDir)
+	require.Error(t, err,
+		"a dead pane over a path it provably could not enter is never approved — "+
+			"a fallback-cwd run must not record success")
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed,
+		"a spawn af cannot place is torn down, not left holding the name")
+}
+
+// TestStartAcceptsFinishedPaneOverEnterableDir is the other half of the
+// dead-pane verdict — and what keeps the finished-command surface alive: a
+// pane that exited before verification carries no live evidence, but needs
+// none when the pathname verdict is affirmative. The admitted inode still
+// answers the path and can still be entered, and chdir is tmux's only
+// fallback trigger — it could not have failed on that directory, so the
+// finished pane provably ran inside the worktree. The spawn succeeds and
+// the retained pane's exit stays for the caller's finish surface to read
+// (#5174 review).
+func TestStartAcceptsFinishedPaneOverEnterableDir(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("dead-pane-enterable", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":       "1",
+			"pane_start_path": workDir,
+		}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a finished pane over the still-enterable admitted inode provably ran inside it")
+	assert.False(t, killed, "a pane that provably landed is never torn down")
+}
+
+// TestStartWithholdsNotStartedAfterBlindTeardown is the #5174 review fix for
+// the cleanup-authorizing sentinel on the misplaced-pane teardown: when the
+// misplaced pane exits between the placement read and the teardown's
+// pane-PID capture, CloseAndWaitForPaneExit reports PaneStateKnown while its
+// ancestry scan ran blind — on a session that never exported the AF_SESSION
+// marker that sweep is vacuous, so a detached descendant can still hold the
+// worktree. The misplaced verdict still reports, but the error must NOT
+// carry ErrSessionNotStarted — the marker that authorizes deleting the tree.
+func TestStartWithholdsNotStartedAfterBlindTeardown(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	workDir := t.TempDir()
+	fallback := t.TempDir()
+
+	var killed, probed, gone bool
+	sessionName := toTmuxName("blind-teardown", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if killed || gone || !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				switch {
+				case strings.Contains(s, "#{pane_dead}") && strings.Contains(s, "#{pane_pid}"):
+					// paneRowFormat — teardown's panePID. The pane exited
+					// between the placement read and this capture: exit-0
+					// empty is tmux's missing-session answer, the
+					// errPaneQueryFoundNoPane half of the blind verdict.
+					gone = true
+					return nil, nil
+				case strings.Contains(s, "#{pane_dead}"):
+					return []byte("0\n"), nil // affirmatively live at verify time
+				case strings.Contains(s, "#{pane_current_path}"):
+					return []byte(fallback + "\n"), nil // positive placement mismatch
+				}
+				return nil, nil
+			case strings.Contains(s, "list-panes"):
+				// tmux's real missing-session answer — the
+				// ErrSessionVanishedBeforeCapture half of blind.
+				return nil, tmuxCantFindSessionError(t, sessionName)
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing,
+		"the misplaced-pane verdict still reports")
+	require.NotErrorIs(t, err, ErrSessionNotStarted,
+		"a teardown that never observed a pane cannot authorize deleting the worktree — "+
+			"a detached descendant may still hold it")
+}

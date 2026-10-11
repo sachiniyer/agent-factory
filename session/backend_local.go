@@ -265,7 +265,18 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
-			if errors.Is(err, tmux.ErrSpawnDirMissing) {
+			// ErrSessionNotStarted is what makes the missing verdict
+			// loadable: it proves no pane can still be rooted in this
+			// worktree — either the strict probe proved the tmux name
+			// absent before the spawn was refused, or the misplaced pane
+			// af spawned was torn down conclusively. Without it the refusal
+			// may sit beside a LIVE misplaced pane still holding the name,
+			// and marking the row Lost here would let the next idle poll's
+			// name-only IsAlive promote that pane to Ready (#5174 review).
+			// A Missing verdict without the not-started proof propagates
+			// like any other refusal: the row is held and retried, never
+			// declared lost-and-cleanable.
+			if errors.Is(err, tmux.ErrSpawnDirMissing) && errors.Is(err, tmux.ErrSessionNotStarted) {
 				// The tmux name is positively absent AND the persisted
 				// worktree is unusable — respawning would have landed the
 				// pane in tmux's fallback cwd (the daemon's own directory)

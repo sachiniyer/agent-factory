@@ -175,6 +175,63 @@ func TestFromInstanceData_LiveRowPaneInWrongDirLoadsAsLost(t *testing.T) {
 		"the fixture must exercise a spawn tmux accepted and misplaced")
 }
 
+// TestFromInstanceData_LiveRowMisplacedUnconfirmedTeardownHeldForRetry is the
+// #5174 review fix for the lost-marking arm: a spawn proven misplaced whose
+// teardown could not be CONFIRMED returns ErrSpawnDirMissing without
+// ErrSessionNotStarted — the misplaced pane may still be live under the name.
+// Marking that row Lost+started would let the next idle poll's name-only
+// IsAlive promote the surviving misplaced pane to Ready. The verdict must
+// propagate like every other refusal: the row drops this pass and retries —
+// never declared lost-and-cleanable while its pane's fate is unproven.
+func TestFromInstanceData_LiveRowMisplacedUnconfirmedTeardownHeldForRetry(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_misplaced_unconfirmed_agent"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+
+	var newSessions int
+	fallbackDir := t.TempDir()
+	inner := countingExec(map[string]bool{}, &newSessions)
+	exec := cmd_test.MockCmdExec{
+		RunFunc: inner.Run,
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "pane_current_path") &&
+				tmuxTargetName(cmd.Args) == agentName:
+				return []byte(fallbackDir + "\n"), nil // positive placement mismatch
+			case strings.Contains(s, "list-panes"):
+				// An unestablishable process set: the wait-for-exit
+				// teardown reports inconclusive, so the misplaced verdict
+				// returns WITHOUT the not-started proof.
+				return []byte("not-a-pane-pid\n"), nil
+			}
+			return inner.Output(cmd)
+		},
+	}
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	data := deadInstanceData(t, Running, agentName, shellName)
+	require.NoError(t, os.MkdirAll(data.Worktree.WorktreePath, 0755))
+	restored, err := FromInstanceData(data)
+
+	require.Error(t, err,
+		"a misplaced pane whose teardown was unconfirmed must not load as a lost row")
+	require.Nil(t, restored,
+		"the row is held for retry — materializing it would let the live misplaced pane promote to Ready")
+	require.ErrorIs(t, err, tmux.ErrSpawnDirMissing,
+		"the misplaced-pane verdict still reports")
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"the fixture's inconclusive teardown never produced the not-started proof")
+}
+
 // TestFromInstanceData_LiveRowUnverifiableWorktreeHeldForRetry: a start-dir
 // stat error that is NOT ENOENT is not evidence the worktree is gone — the
 // spawn is refused without the missing verdict and the row is dropped (held),

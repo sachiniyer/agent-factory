@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -25,10 +27,10 @@ import (
 // Two classifications, mirroring the codebase's known/unknown convention:
 //
 //   - Missing (ErrSpawnDirMissing): the requested directory is conclusively
-//     unusable — absent, empty, not a directory, or unreachable through a
-//     non-directory component (ENOTDIR) — or the spawned pane provably landed
-//     elsewhere. Every restore/respawn route maps this to the lost row with
-//     the WORKTREE_MISSING reason.
+//     unusable — absent, empty, not a directory, unenterable, or unreachable
+//     through a non-directory component (ENOTDIR) — or the spawned pane
+//     provably landed elsewhere. Every restore/respawn route maps this to
+//     the lost row with the WORKTREE_MISSING reason.
 //   - Unknown (ErrSpawnDirUnknown): the requested directory's state could
 //     not be established — a stat error other than ENOENT. Not evidence the
 //     worktree is gone: the row is held and retried on a later pass rather
@@ -40,6 +42,18 @@ import (
 // non-ENOENT stat failures — permission and I/O errors — that a real
 // filesystem cannot produce portably (a root test runner ignores chmod).
 var statSpawnDir = os.Stat
+
+// spawnDirEnterable answers the question tmux's own chdir(2) answers at
+// spawn: can this process enter the directory? unix.Access asks under the
+// real uid — the same credential chdir will apply — so a directory that
+// stats fine but cannot be entered (a mode-6xx worktree, a permission-torn
+// mount) is refused BEFORE tmux's fallback can claim the pane, and a dead
+// pane's verdict can trust "still enterable ⇒ the pane entered" (#5174
+// review). A var for the same reason statSpawnDir is one: a root test
+// runner cannot stage EACCES with chmod.
+var spawnDirEnterable = func(path string) error {
+	return unix.Access(path, unix.X_OK)
+}
 
 // checkSpawnDir refuses a spawn whose start directory is unusable, before any
 // tmux command has run. The error carries ONLY the directory classification —
@@ -61,7 +75,25 @@ func checkSpawnDir(workDir string) (os.FileInfo, error) {
 	info, err := statSpawnDir(workDir)
 	switch {
 	case err == nil && info.IsDir():
-		return info, nil
+		// chdir(2) is tmux's only fallback trigger — the pane can land
+		// outside this directory only when entering it fails. Stat proved
+		// it exists; X_OK proves it enterable, under the real uid chdir
+		// will apply — the one fact that lets a later verdict trust "the
+		// pane landed inside" with no live pane evidence at all.
+		switch aerr := spawnDirEnterable(workDir); {
+		case aerr == nil:
+			return info, nil
+		case errors.Is(aerr, os.ErrPermission) || errors.Is(aerr, os.ErrNotExist) ||
+			errors.Is(aerr, syscall.ENOTDIR):
+			// Unenterable is conclusively unusable for a spawn — as surely
+			// as absent: chdir CANNOT succeed into it, so tmux's fallback
+			// is a certainty, not a risk (#5174 review).
+			return nil, fmt.Errorf("%w: %w: %s exists but cannot be entered",
+				ErrSpawnDirMissing, os.ErrNotExist, workDir)
+		default:
+			return nil, fmt.Errorf("%w: cannot verify %s is enterable: %w",
+				ErrSpawnDirUnknown, workDir, aerr)
+		}
 	case err == nil:
 		// A non-directory at the worktree path is not a working directory;
 		// tmux would fall back exactly as if it were absent.
@@ -137,7 +169,7 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 	// directory between checkSpawnDir and here leaves the PATHNAME dead but
 	// the INODE live, and a pane that entered it stays correctly placed by
 	// identity: only a positive source verdict may convict (#5174 review).
-	inside, known, source, observed := t.observedPanePlacement(want)
+	inside, known, dead, source, observed := t.observedPanePlacement(want)
 	if inside {
 		return nil
 	}
@@ -153,7 +185,8 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 	// becoming a file is the same conclusive disappearance — and like
 	// checkSpawnDir it must still wrap os.ErrNotExist itself, since ENOTDIR
 	// does not Is() to it.
-	switch info, wantErr := statSpawnDir(workDir); {
+	info, wantErr := statSpawnDir(workDir)
+	switch {
 	case errors.Is(wantErr, os.ErrNotExist) || errors.Is(wantErr, syscall.ENOTDIR):
 		return t.resolveSpawnedPaneDir(fmt.Errorf(
 			"%w: start directory %s vanished during spawn: %w: %w",
@@ -163,6 +196,49 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 		return t.resolveSpawnedPaneDir(fmt.Errorf(
 			"%w: start directory %s is no longer a directory",
 			ErrSpawnDirMissing, workDir))
+	}
+	if dead {
+		// tmux marked the pane dead before any live source could verify
+		// it — the remain-on-exit process that finished inside the spawn
+		// window. For a dead pane no live evidence can ever exist: procfs
+		// is off (the pid may be recycled), current_path expands empty by
+		// design, and start_path is the request's own echo. But placement
+		// stays DECIDABLE without it: chdir is tmux's only fallback
+		// trigger, so the verdict turns on the pathname's own facts —
+		// still the admitted inode and still enterable means chdir could
+		// not have failed and the pane provably ran inside; anything else
+		// is a finished process that may have run in the fallback cwd,
+		// which the caller's finish surface must never record as a clean
+		// spawn (#5174 review). Every refusal tears down: a dead pane has
+		// no live work to protect, and the freed name is what a retried
+		// spawn re-uses.
+		switch {
+		case wantErr != nil:
+			return t.resolveSpawnedPaneDir(fmt.Errorf(
+				"%w: cannot verify %s after the pane exited: %w",
+				ErrSpawnDirUnknown, workDir, wantErr))
+		case !os.SameFile(info, want):
+			return t.resolveSpawnedPaneDir(fmt.Errorf(
+				"%w: %s no longer names the directory the pane for session %s was spawned into",
+				ErrSpawnDirMissing, workDir, t.sanitizedName))
+		}
+		switch aerr := spawnDirEnterable(workDir); {
+		case aerr == nil:
+			// The admitted inode still answers the path and can still be
+			// entered — chdir could not have fallen back, so the finished
+			// pane provably ran inside the worktree. Its exit status and
+			// output stay for the caller's finish surface to read.
+			return nil
+		case errors.Is(aerr, os.ErrPermission) || errors.Is(aerr, os.ErrNotExist) ||
+			errors.Is(aerr, syscall.ENOTDIR):
+			return t.resolveSpawnedPaneDir(fmt.Errorf(
+				"%w: pane for session %s exited and %s cannot be entered — it may have run in tmux's fallback directory",
+				ErrSpawnDirMissing, t.sanitizedName, workDir))
+		default:
+			return t.resolveSpawnedPaneDir(fmt.Errorf(
+				"%w: cannot verify %s is enterable after the pane exited: %w",
+				ErrSpawnDirUnknown, workDir, aerr))
+		}
 	}
 	spawnedPaneDirUnusableLogged.Do(func() {
 		log.InfoLog.Printf("session %s: post-spawn cwd check skipped: no tmux source could report the spawned pane's working directory",
@@ -178,13 +254,18 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 // whether that directory is the admitted inode or a descendant. known=false
 // means no source could place the pane at all — unsupported fields, empty
 // expansions, unstat-able paths, unresolvable observations, command silence
-// — which is never evidence in either direction.
+// — which is never evidence in either direction. dead reports the separate
+// affirmative fact tmux gave up front: pane_dead == "1" means the pane's
+// root already exited, so live evidence can never arrive — the caller's
+// no-source arm must then decide on the pathname's own facts (still the
+// admitted inode, still enterable) rather than accepting on silence
+// (#5174 review).
 //
 // A display-message DEADLINE is not a per-format answer: it is the server
 // not answering at all, and every remaining format would pay the same
 // tmuxCommandTimeout for the same silence. The first timeout stops the walk
 // rather than stacking one deadline per source inside Start (#5174 review).
-func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known bool, source, observed string) {
+func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known, dead bool, source, observed string) {
 	// #{pane_dead} first, as its own single-field query — panePID's row
 	// format is deliberately NOT reused here: it is also the teardown path's
 	// pane identification, and conflating the two would let a placement
@@ -210,9 +291,10 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 	// field did not say 1" cannot rule that state out (#5174 review).
 	deadField, timedOut := t.paneFormatField("#{pane_dead}")
 	if timedOut {
-		return false, false, "", ""
+		return false, false, false, "", ""
 	}
 	paneLive := deadField == "0"
+	paneDead := deadField == "1"
 	sources := []struct {
 		name string
 		read func() (string, bool)
@@ -248,9 +330,9 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		in, resolvable := paneDirInside(actual, want)
 		switch {
 		case in && (s.convict || paneLive):
-			return true, true, s.name, actual
+			return true, true, paneDead, s.name, actual
 		case resolvable && s.convict:
-			return false, true, s.name, actual
+			return false, true, paneDead, s.name, actual
 		}
 		// Inconclusive — an observation that cannot be resolved to a
 		// walkable ancestry (a procfs cwd deleted after the spawn: stat on
@@ -260,7 +342,7 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known boo
 		// prove inside OR outside, so it falls through to the next source
 		// rather than convicting or clearing.
 	}
-	return false, false, "", ""
+	return false, false, paneDead, "", ""
 }
 
 // paneDirInside reports whether dir is the admitted directory itself or a
@@ -360,9 +442,15 @@ func (t *TmuxSession) paneProcCwd(paneLive bool) (string, bool) {
 // pane to exit, not just for kill-session to land: kill-session only delivers
 // SIGHUP, and a process still flushing state inside the worktree must be gone
 // before ErrSessionNotStarted authorizes the caller to delete that tree.
+// A blind teardown — the session vanished with no pane ever observed, so the
+// descendant sweep ran on the AF_SESSION marker alone — is conclusive about
+// the pane but not about what it may have detached: on a markerless session
+// (tmux before the per-session environment marker) that sweep is vacuous, so
+// the cleanup-authorizing sentinel stays off while the misplaced-pane verdict
+// still reports (#5174 review).
 func (t *TmuxSession) resolveSpawnedPaneDir(classErr error) error {
-	state, closeErr := t.CloseAndWaitForPaneExit()
-	if state == PaneStateKnown && closeErr == nil {
+	state, blind, closeErr := t.CloseAndWaitForPaneExitReportingBlindness()
+	if state == PaneStateKnown && closeErr == nil && !blind {
 		return fmt.Errorf("%w: %w", ErrSessionNotStarted, classErr)
 	}
 	if closeErr != nil {
