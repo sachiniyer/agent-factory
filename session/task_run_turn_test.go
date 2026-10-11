@@ -309,6 +309,97 @@ func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
 		"a refused manual send does not unsatisfy the window the task's churn already earned")
 }
 
+// A redelivery landing while the pane is still churning binds a CONTENDED
+// boundary (#5221 review): the in-flight turn's continued output is not
+// attributable to the new prompt, so it must not satisfy the churn arm when
+// the old work goes quiet. The still edge — the first confirmed-unchanged
+// capture after the send — is what re-arms churn attribution; without it
+// the bounded silent arm is the only release, measured from the stillness
+// that followed the activity.
+func TestTaskRunRedeliveryMidTurnDoesNotReleaseOnOldChurn(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	// An in-flight turn churns right up to the redelivery.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(20 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	require.True(t, inst.taskRunStillBaseAt.IsZero(),
+		"a boundary bound over a churning pane owes an observed still edge")
+	_, epoch = inst.InFlightOpAndEpoch() // the rebind advanced the epoch
+
+	// The OLD turn keeps churning after the redelivery, then goes quiet for
+	// longer than the quiet grace — the shape that used to release here.
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(10*time.Second), epoch))
+	observeContinuously(inst, t0)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"the old turn's churn→quiet must not satisfy the redelivered prompt's window")
+
+	// The old turn ending — a confirmed-still capture — lets the bounded
+	// arm spend the run on the silence that followed ALL activity.
+	_, epoch = inst.InFlightOpAndEpoch() // the held transition advanced the epoch
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"once every arm's evidence is attributable, the held edge may release")
+}
+
+// The same contended boundary releases on the quiet arm when the pane goes
+// still and then churns AGAIN — output after the still edge is attributable
+// to the redelivered prompt, not to whatever was running before it (#5221
+// review).
+func TestTaskRunRedeliveryMidTurnReleasesOnPostStillChurn(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(20 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	// The pre-boundary turn ends; the still edge latches.
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(15*time.Second), epoch))
+	// The redelivered prompt's own turn churns and finishes — more than a
+	// quiet grace ago, so the arm's silence is already satisfied.
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(16*time.Second), epoch))
+	observeContinuously(inst, t0)
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"churn that began after the observed still edge is the redelivery's own turn evidence")
+}
+
+// A redelivery onto an already-quiet pane is NOT contended: churn stale
+// beyond the quiet grace proves the prior activity ended before the send,
+// so the boundary seeds its stillness base at the attempt and ordinary
+// post-attempt churn counts immediately (#5221 review).
+func TestTaskRunRedeliveryOntoQuietPaneSeedsStillBase(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	// The prior turn ended a full grace before the redelivery.
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(10*time.Second + taskRunCompletionQuietGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	require.Equal(t, t1, inst.taskRunStillBaseAt,
+		"a pane already quiet at the redelivery seeds the stillness base at the send")
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(5*time.Second), epoch))
+	observeContinuously(inst, t0)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.False(t, inst.TaskRunActive(),
+		"an uncontended redelivery keeps the ordinary churn→quiet contract")
+}
+
 // Chrome observed while the boundary says the prompt never landed is not
 // evidence for it (#5221 review): recording it would fake a satisfied window
 // and freeze the boundary so a later redelivery could never re-arm.

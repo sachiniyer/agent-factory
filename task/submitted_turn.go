@@ -268,7 +268,19 @@ type TurnWatch struct {
 	boundary time.Time
 	prev     map[string]timedRow
 	armed    bool
+	// absentSince is when the scoped indicator's current absence began: the
+	// arm needs the absence to PERSIST for the grace below, because a lone
+	// indicator-absent frame inside a still-running pre-boundary turn is a
+	// repaint gap, not a turn end — arming on it would let the old turn's
+	// redrawn indicator pass as the new prompt's work (#5221 review).
+	absentSince time.Time
 }
+
+// turnIndicatorAbsentGrace is how long a scoped agent's indicator must stay
+// absent before an absent→present edge may count as a turn that began after
+// the boundary. Repaint gaps that drop the indicator are transient; a real
+// turn end persists. A var so tests can compress it.
+var turnIndicatorAbsentGrace = 5 * time.Second
 
 // NewTurnWatch returns the chrome watcher for the agent the pane actually runs
 // — pass the resolved (runtime) agent so a handoff or program override picks
@@ -292,8 +304,9 @@ func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
 // row's own elapsed must fit inside the boundary's age at capture, or a turn
 // already running when the prompt went out gets attributed to it. The other
 // agents' indicators are scoped to their live frame but carry no clock, so
-// they must be seen absent once before a present frame can count — the start
-// edge the elapsed check expresses for timed rows.
+// the absence must persist for the arm grace before a present frame can
+// count — the start edge the elapsed check expresses for timed rows, and
+// the proof a single repaint-dropped frame cannot fake (#5221 review).
 func (w *TurnWatch) Observe(content string, at time.Time) bool {
 	switch w.agent {
 	case tmux.ProgramClaude, tmux.ProgramDevin:
@@ -309,9 +322,15 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 		return ticked && row.elapsed+time.Second <= at.Sub(w.boundary)
 	default:
 		if !submittedTurnContent(content, w.agent) {
-			w.armed = true
+			if w.absentSince.IsZero() {
+				w.absentSince = at
+			}
+			if at.Sub(w.absentSince) >= turnIndicatorAbsentGrace {
+				w.armed = true
+			}
 			return false
 		}
+		w.absentSince = time.Time{}
 		return w.armed
 	}
 }

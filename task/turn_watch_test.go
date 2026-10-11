@@ -103,29 +103,67 @@ func TestTurnWatch_PreBoundaryTurnNeverFires(t *testing.T) {
 // The scoped-indicator agents keep presence as their proof — their working
 // frame is anchored to the live region, so it cannot be transcript text. But
 // presence carries no clock: an indicator already up when the watch begins
-// could be a pre-boundary turn, so it must be seen absent once first.
+// could be a pre-boundary turn, so it must be seen absent — for the arm
+// grace, not a lone frame — before a present frame can count.
 func TestTurnWatch_ScopedAgentsFireOnPresence(t *testing.T) {
 	w := NewTurnWatch("codex", time.Now())
-	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", time.Now()) {
-		t.Fatal("a quiet frame is not a turn; it only arms the watch")
+	t0 := time.Now()
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0) {
+		t.Fatal("a quiet frame is not a turn; it only opens the absence")
 	}
-	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", time.Now()) {
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0.Add(turnIndicatorAbsentGrace)) {
+		t.Fatal("a persisted absence arms the watch but is still not a turn")
+	}
+	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", t0.Add(turnIndicatorAbsentGrace+time.Second)) {
 		t.Fatal("codex draws its hint below the composer, where prose cannot reach")
 	}
 }
 
 // The same watch built over a frame where the indicator is ALREADY up cannot
-// attribute the turn to the boundary — wait for it to leave and return.
+// attribute the turn to the boundary — wait for it to leave, stay gone, and
+// return.
 func TestTurnWatch_ScopedIndicatorPresentAtBoundaryDoesNotFire(t *testing.T) {
 	w := NewTurnWatch("codex", time.Now())
-	if w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", time.Now()) {
+	t0 := time.Now()
+	if w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", t0) {
 		t.Fatal("an indicator that never left the pane may predate the boundary")
 	}
-	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", time.Now()) {
-		t.Fatal("the indicator leaving is the pre-boundary turn's end, not a fire")
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0.Add(time.Second)) {
+		t.Fatal("the indicator leaving is not yet the pre-boundary turn's end")
 	}
-	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", time.Now()) {
-		t.Fatal("a fresh appearance after absence is a post-boundary start")
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0.Add(time.Second+turnIndicatorAbsentGrace)) {
+		t.Fatal("the absence persisting is the pre-boundary turn's end, not a fire")
+	}
+	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", t0.Add(2*time.Second+turnIndicatorAbsentGrace)) {
+		t.Fatal("a fresh appearance after sustained absence is a post-boundary start")
+	}
+}
+
+// The arm must survive a REPAINT gap (#5221 review): an indicator present at
+// the boundary belongs to an in-flight pre-boundary turn, and a repaint that
+// drops it for a frame or two is not that turn's end. Only an absence that
+// persists the whole grace arms the watch — the old indicator returning
+// inside the window is the old turn continuing, not the new prompt's.
+func TestTurnWatch_RepaintGapDoesNotArm(t *testing.T) {
+	w := NewTurnWatch("codex", time.Now())
+	t0 := time.Now()
+	// The pre-boundary turn is still up when the watch begins.
+	w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", t0)
+	// A repaint drops the indicator for one frame.
+	if w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0.Add(time.Second)) {
+		t.Fatal("a lone absent frame inside a running turn is a repaint gap")
+	}
+	// The SAME old turn's indicator redraws — it must not pass as the new
+	// prompt's turn.
+	if w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", t0.Add(2*time.Second)) {
+		t.Fatal("the pre-boundary turn's redrawn indicator is not the new prompt's turn")
+	}
+	// The old turn then genuinely ends — the absence persists past the grace.
+	w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0.Add(3*time.Second))
+	w.Observe("\x1b[2J\x1b[H› \r\n\r\n", t0.Add(3*time.Second+turnIndicatorAbsentGrace))
+	// The redelivered prompt's own turn begins and is seen.
+	if !w.Observe("\x1b[2J\x1b[H› [Pasted Content]\r\n\r\n  esc to interrupt\r\n", t0.Add(4*time.Second+turnIndicatorAbsentGrace)) {
+		t.Fatal("an indicator returning after a real turn end is the new prompt's turn")
 	}
 }
 

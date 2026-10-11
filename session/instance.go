@@ -198,6 +198,14 @@ type Instance struct {
 	// Ordering against taskRunPromptAttemptAt does the scoping: a redelivery
 	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
+	// taskRunStillBaseAt is the stillness edge the quiet arm's churn must
+	// follow: the attempt instant when the bind found the pane still, else
+	// the first confirmed-unchanged capture after a boundary bound over an
+	// already-churning pane. A redelivery landing mid-turn leaves it unset
+	// until the in-flight activity provably ends, so the old turn's
+	// continued output can never stand in for the new prompt's turn (#5221
+	// review). Zero means the edge is still owed.
+	taskRunStillBaseAt time.Time
 	// paneObservationStreakAt is the START of the current uninterrupted
 	// observation streak: the first successful capture, or the first capture
 	// after a hole (failed snapshots, a stalled serial walk) in which churn

@@ -173,6 +173,14 @@ type InstanceData struct {
 	// reopen the delivery window an observation already closed. omitempty +
 	// additive: an older record decodes to zero, which releases nothing.
 	TaskRunTurnObservedAt time.Time `json:"task_run_turn_observed_at,omitzero"`
+	// TaskRunStillBaseAt is the stillness edge the quiet arm's churn must
+	// follow (#5221 review): the attempt when the bind found the pane still,
+	// else the first confirmed-unchanged capture after a boundary bound over
+	// an already-churning pane. A redelivery landing mid-turn leaves it zero
+	// until the in-flight activity ends. Restore re-derives a zero value from
+	// the boundary and last churn exactly as the bind does, so omitempty
+	// cannot resurrect an edge the pane still owes.
+	TaskRunStillBaseAt time.Time `json:"task_run_still_base_at,omitzero"`
 	// PendingOnComplete records an on_complete teardown owed to this session's
 	// finished task run (#4162). The daemon files it BEFORE waiting on
 	// post-worktree hooks, so a shutdown that drops the in-flight lifecycle

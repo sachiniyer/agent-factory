@@ -492,6 +492,14 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	churnCheckpoint := false
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	} else if !obs.Baseline {
+		// A confirmed-unchanged frame is the stillness edge a boundary bound
+		// over an already-churning pane owes before its churn may stand in
+		// for the turn (#5221 review). A baseline frame is a first look —
+		// present, but not proven unchanged — so it cannot stamp it.
+		if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+			churnCheckpoint = true
+		}
 	}
 	if m.noteTaskRunTurnEvidence(key, instance, obs, capturedAt, epoch) {
 		// The turn boundary is durable evidence: checkpoint it even when nothing
@@ -828,6 +836,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// The first churn after a prompt is checkpointed below even if the row stays
 		// Running; later spinner churn does not create an event/write storm.
 		_, settlementCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	} else if !obs.Baseline {
+		// A confirmed-unchanged frame is the stillness edge a boundary bound
+		// over an already-churning pane owes before its churn may stand in
+		// for the turn (#5221 review): without it, a redelivery landing
+		// mid-turn could release on the old turn's output going quiet.
+		if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+			settlementCheckpoint = true
+		}
 	}
 	if m.noteTaskRunTurnEvidence(key, instance, obs, capturedAt, epoch) {
 		// Feed the run's chrome watcher BEFORE the idle branch may settle the

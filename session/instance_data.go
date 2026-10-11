@@ -110,6 +110,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// on this row inherit a boundary it never crossed.
 		data.TaskRunTurnObservedAt = i.taskRunTurnObservedAt
 		data.TaskRunPromptAttemptAt = i.taskRunPromptAttemptAt
+		data.TaskRunStillBaseAt = i.taskRunStillBaseAt
 	}
 
 	// An archived row cannot owe its own teardown — reaching Archived IS the
@@ -369,6 +370,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// next run's delivery window.
 		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
 		taskRunPromptAttemptAt:   taskRunAttemptAt,
+		taskRunStillBaseAt:       taskRunStillBaseAtFromData(data, taskRunAttemptAt),
 		limitResetAt:             data.LimitResetAt,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,

@@ -156,6 +156,11 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if i.lastPromptAttemptAt.Equal(attemptedAt) && i.lastPromptDeliveryStatus == status {
 		return false
 	}
+	// Churn within a quiet grace of this send is possibly an in-flight turn —
+	// evaluated BEFORE the fence below can clear the stamp, so a capture that
+	// raced the send counts as activity at the attempt, not as a clean pane.
+	churnNearAttempt := !i.lastPaneChurnAt.IsZero() &&
+		attemptedAt.Sub(i.lastPaneChurnAt) < taskRunCompletionQuietGrace
 	// The attempt and pane snapshots share their runtime's observation lock, while stateEpoch
 	// fences the apply after Snapshot returns. Retire a churn timestamp applied by
 	// an observation that completed immediately before this attempt acquired that
@@ -176,7 +181,20 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if i.taskRunActive && status != PromptNotDelivered &&
 		(i.taskRunPromptAttemptAt.IsZero() ||
 			!i.taskRunTurnObservedAt.After(i.taskRunPromptAttemptAt)) {
+		rebind := !i.taskRunPromptAttemptAt.IsZero()
 		i.taskRunPromptAttemptAt = attemptedAt
+		// Post-boundary churn may stand in for the turn only if the pane was
+		// observed still at-or-after the attempt (#5221 review). A first bind
+		// seeds the base at the send — boot/echo churn is the very window the
+		// quiet arm exists to absorb. A rebind seeds only when the pane had
+		// already gone still for a full grace: a redelivery landing on a
+		// churning pane may be mid-turn, so its churn must wait for the first
+		// confirmed-unchanged capture to be attributable.
+		if !rebind || !churnNearAttempt {
+			i.taskRunStillBaseAt = attemptedAt
+		} else {
+			i.taskRunStillBaseAt = time.Time{}
+		}
 	}
 	i.touchLocked()
 	i.stateEpoch++
@@ -302,6 +320,29 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 	return !i.taskRunQuietReleaseLocked() && !i.taskRunSilentReleaseLocked()
 }
 
+// NotePaneStillAtEpoch latches the stillness edge a contended boundary owes
+// (#5221 review): the first confirmed-UNCHANGED capture at-or-after the run's
+// prompt attempt. A boundary bound while the pane was already churning —
+// a redelivery landing mid-turn — cannot attribute churn that began before
+// the send, so only churn following this edge may stand in for the turn.
+// Later quiet frames are the same edge and do not move it; a still capture
+// predating the attempt proves nothing about the activity it interrupted.
+// Epoch-fenced like RecordPaneChurnCheckpointAtEpoch.
+func (i *Instance) NotePaneStillAtEpoch(at time.Time, observedEpoch uint64) bool {
+	if at.IsZero() {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch || i.taskRunPromptAttemptAt.IsZero() ||
+		at.Before(i.taskRunPromptAttemptAt) || !i.taskRunStillBaseAt.IsZero() {
+		return false
+	}
+	i.taskRunStillBaseAt = at
+	i.touchLocked()
+	return true
+}
+
 // taskRunQuietReleaseLocked reports whether the completion gate is satisfied
 // by the fallback arm alone: post-attempt pane churn followed by silence
 // longer than the completion grace. Satisfied here never means the agent
@@ -311,7 +352,12 @@ func (i *Instance) taskRunAwaitingTurnLocked() bool {
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunQuietReleaseLocked() bool {
-	if !i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt) {
+	// The churn must be ATTRIBUTABLE to this boundary — begun after the pane
+	// was observed still at-or-after the attempt. A bound-over-activity
+	// boundary leaves taskRunStillBaseAt owed until the first confirmed-still
+	// capture, and churn continuous since before the send never qualifies
+	// (#5221 review).
+	if i.taskRunStillBaseAt.IsZero() || !i.lastPaneChurnAt.After(i.taskRunStillBaseAt) {
 		return false
 	}
 	// The durable churn stamp can be far older than the pane's true last
@@ -342,16 +388,23 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunSilentReleaseLocked() bool {
-	if i.lastPaneChurnAt.After(i.taskRunPromptAttemptAt) {
-		// Post-boundary churn means the pane IS answering — that run belongs to
-		// the quiet arm, which demands its own 30s of silence after the last
-		// output. The silent arm is only for a pane that never moved at all.
+	// The pane must have stayed silent since the later of the attempt and the
+	// stillness base: for a boundary bound over in-flight activity, the base
+	// is the first still frame AFTER that activity ended, and the churn that
+	// preceded it belongs to the old work — not a disqualifier, but never the
+	// silence this arm measures either. ATTRIBUTABLE churn (after the base)
+	// means the pane IS answering — that run belongs to the quiet arm, which
+	// demands its own 30s of silence after the last output (#5221 review).
+	base := i.taskRunPromptAttemptAt
+	if i.taskRunStillBaseAt.After(base) {
+		base = i.taskRunStillBaseAt
+	}
+	if i.lastPaneChurnAt.After(base) {
 		return false
 	}
 	if !i.paneObservationLiveLocked() {
 		return false
 	}
-	base := i.taskRunPromptAttemptAt
 	if i.paneObservationStreakAt.After(base) {
 		base = i.paneObservationStreakAt
 	}
@@ -387,6 +440,7 @@ func (i *Instance) ClearIdleEvidence() bool {
 	if !i.taskRunPromptAttemptAt.IsZero() || !i.taskRunTurnObservedAt.IsZero() {
 		i.taskRunPromptAttemptAt = time.Time{}
 		i.taskRunTurnObservedAt = time.Time{}
+		i.taskRunStillBaseAt = time.Time{}
 		changed = true
 	}
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
@@ -497,6 +551,27 @@ func taskRunPromptAttemptAtFromData(data InstanceData) time.Time {
 		return data.LastPromptAttemptAt
 	}
 	return data.TaskRunPromptAttemptAt
+}
+
+// taskRunStillBaseAtFromData restores the stillness edge the quiet arm's
+// churn must follow (#5221 review). A persisted value survives verbatim; a
+// zero one is re-derived exactly as the bind decides it — churn within the
+// quiet grace of the attempt is possibly an in-flight turn, so the edge
+// stays owed, while anything staler seeded the base at the send. Rows that
+// predate the field re-derive the same answer rather than inheriting a
+// blanket seed.
+func taskRunStillBaseAtFromData(data InstanceData, taskRunAttemptAt time.Time) time.Time {
+	if !data.TaskRunActive || taskRunAttemptAt.IsZero() {
+		return time.Time{}
+	}
+	if !data.TaskRunStillBaseAt.IsZero() {
+		return data.TaskRunStillBaseAt
+	}
+	if data.LastPaneChurnAt.IsZero() ||
+		taskRunAttemptAt.Sub(data.LastPaneChurnAt) >= taskRunCompletionQuietGrace {
+		return taskRunAttemptAt
+	}
+	return time.Time{}
 }
 
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in
