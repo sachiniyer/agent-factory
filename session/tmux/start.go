@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -99,6 +100,14 @@ func (t *TmuxSession) Start(workDir string) error {
 		// can exist behind it and a teardown need not gate on liveness (#2985).
 		return t.refuseUnstartedStart(fmt.Errorf("prepare filtered session environment: %v", envErr))
 	}
+	// Hand the pane's exec shim the directory checkSpawnDir just admitted, as
+	// an env assignment inside the launch line itself — the one channel every
+	// supported tmux carries. The shim chdirs to it at the instant the command
+	// would run: that repairs tmux's silent -c fallback outright, and on
+	// failure the pane dies with a refusal verdict (exit code + scrollback
+	// marker) tied to THIS spawn — evidence a point-in-time re-check can never
+	// forge or lose (#5174 review).
+	wrappedProgram = sessionenv.SpawnDirPrefix(workDir) + wrappedProgram
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
 	for _, entry := range sessionEnv {

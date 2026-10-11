@@ -230,7 +230,7 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// conversation isn't lost on lazy respawn after a reboot (#595).
 	require.Equal(t,
 		fmt.Sprintf("tmux new-session -d -s af_missing -c %s %s", workdir,
-			wrappedProgramForTest(t, "/test/af", "claude --continue")),
+			spawnWrappedForTest(t, workdir, "/test/af", "claude --continue")),
 		strings.Join(ptyFactory.cmds[0].Args, " "))
 }
 
@@ -295,7 +295,7 @@ func TestStartTmuxSession(t *testing.T) {
 	// attach-session client (#1592 Phase 2 PR7).
 	require.Equal(t, 1, len(ptyFactory.cmds))
 	require.Equal(t, fmt.Sprintf("tmux new-session -d -s af_test-session -c %s %s", workdir,
-		wrappedProgramForTest(t, "/test/af", "claude")),
+		spawnWrappedForTest(t, workdir, "/test/af", "claude")),
 		strings.Join(ptyFactory.cmds[0].Args, " "))
 
 	require.Equal(t, 1, len(ptyFactory.files))

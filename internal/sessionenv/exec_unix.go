@@ -14,6 +14,25 @@ import (
 
 var processExec = syscall.Exec
 
+// spawnDirChdir is os.Chdir behind the same kind of test seam as processExec:
+// the pane-side chdir it stands for is what the spawn-dir refusal is made of.
+var spawnDirChdir = os.Chdir
+
+// enterSpawnDir applies the pane's own placement enforcement: the directory
+// SpawnDirPrefix baked into the launch line is the ONE the command must run
+// in, so the shim chdirs there itself — repairing tmux's silent -c fallback
+// when the server could not honor it — and reports failure to the caller,
+// which refuses rather than let the command run wherever tmux happened to
+// leave it (#5172, #5174 review). An unset variable means a launcher that
+// predates the prefix: nothing to enforce.
+func enterSpawnDir() error {
+	want := os.Getenv(SpawnDirEnv)
+	if want == "" {
+		return nil
+	}
+	return spawnDirChdir(want)
+}
+
 // WrapCommand builds the shell command handed to tmux. It contains only the af
 // executable path, the selected agent, explicit variable NAMES, and the
 // original pane command; environment values never enter argv.
@@ -198,6 +217,20 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 		if err != nil {
 			return err
 		}
+	}
+	// The spawn's own placement record, authored HERE — inside the pane, at
+	// the instant the command would run. tmux's -c is only a request: an
+	// unusable one is answered by falling back to the server's cwd with no
+	// error (#5172), and no post-spawn filesystem check can later say whether
+	// the chdir tmux attempted succeeded, because an enterability flap can be
+	// undone before the verifier reads it (#5174 review). The shim's chdir is
+	// the last point misplacement can still be prevented: it repairs the
+	// fallback outright, and the refusal — exit code plus scrollback marker —
+	// is evidence tied to this spawn rather than a second point-in-time
+	// accessibility sample.
+	if err := enterSpawnDir(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: %v\n", SpawnDirRefusalMarker, err)
+		os.Exit(SpawnDirRefusalExitCode)
 	}
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands

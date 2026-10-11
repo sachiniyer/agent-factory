@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -149,6 +150,13 @@ var spawnedPaneDirUnusableLogged sync.Once
 //     confirm, a mismatch may never convict (#5174 review). On tmux < 3.4
 //     it expands empty.
 //
+// A pane that exited before any live source could answer gets its verdict
+// from the spawn itself instead: the exec shim chdirs into the admitted
+// directory at the instant the command would run and stamps a refusal (exit
+// code + scrollback marker) when it cannot — so pane_dead_status, or the
+// marker where that field expands empty, is evidence tied to the spawn
+// rather than a later point-in-time accessibility sample (#5174 review).
+//
 // A match is the admitted inode or an inode WALK up to it (paneDirInside), not
 // a path string: a process tab legitimately running `cd frontend && npm run
 // dev` lands inside its own worktree and is a correct spawn, while a tmux
@@ -203,15 +211,39 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 		// window. For a dead pane no live evidence can ever exist: procfs
 		// is off (the pid may be recycled), current_path expands empty by
 		// design, and start_path is the request's own echo. But placement
-		// stays DECIDABLE without it: chdir is tmux's only fallback
-		// trigger, so the verdict turns on the pathname's own facts —
-		// still the admitted inode and still enterable means chdir could
-		// not have failed and the pane provably ran inside; anything else
-		// is a finished process that may have run in the fallback cwd,
-		// which the caller's finish surface must never record as a clean
-		// spawn (#5174 review). Every refusal tears down: a dead pane has
-		// no live work to protect, and the freed name is what a retried
-		// spawn re-uses.
+		// stays DECIDABLE, on evidence the spawn authored itself: the
+		// exec shim chdirs into the requested directory at the instant the
+		// command would run and, failing that, prints a refusal marker and
+		// exits with its own status. A recorded refusal convicts outright:
+		// the pane never ran inside the worktree, which a second
+		// point-in-time accessibility check could never prove — an
+		// enterability flap can be undone between the shim's attempt and
+		// this read (#5174 review).
+		//
+		// The marker is what the verdict keys on, and pane_dead_status only
+		// narrows when the scrollback is read: a real refusal ALWAYS shows
+		// it, while a command that exited with the shim's code by
+		// coincidence, or any other real exit status, does not. The field
+		// expands empty on tmux builds that do not know it AND on a pane
+		// killed by a signal, so "" also has to look. A timed-out status
+		// query means the server is not answering — the scrollback query
+		// would pay the same deadline — and the pathname arm below stays
+		// the decider, the same non-evidence rule every source keeps.
+		if status, statusTimedOut := t.paneFormatField("#{pane_dead_status}"); !statusTimedOut {
+			maybeRefusal := status == "" ||
+				status == strconv.Itoa(sessionenv.SpawnDirRefusalExitCode)
+			if maybeRefusal && t.paneShowsSpawnDirRefusal() {
+				return t.resolveSpawnedPaneDir(fmt.Errorf(
+					"%w: %w: the launch shim could not enter %s — pane for session %s never ran inside it",
+					ErrSpawnDirMissing, os.ErrNotExist, workDir, t.sanitizedName))
+			}
+		}
+		// No refusal on record means the shim entered the directory and
+		// exec'd — placement was proven at the spawn instant, not inferred
+		// from the pathname now. What remains is only the moved-worktree
+		// question: the pathname still has to name the admitted inode,
+		// still enterable, for the finish surface to record a clean spawn
+		// (#5174 review).
 		switch {
 		case wantErr != nil:
 			return t.resolveSpawnedPaneDir(fmt.Errorf(
@@ -225,9 +257,9 @@ func (t *TmuxSession) verifySpawnedPaneDir(workDir string, want os.FileInfo) err
 		switch aerr := spawnDirEnterable(workDir); {
 		case aerr == nil:
 			// The admitted inode still answers the path and can still be
-			// entered — chdir could not have fallen back, so the finished
-			// pane provably ran inside the worktree. Its exit status and
-			// output stay for the caller's finish surface to read.
+			// entered — and the shim provably entered it — so the finished
+			// pane ran inside the worktree. Its exit status and output
+			// stay for the caller's finish surface to read.
 			return nil
 		case errors.Is(aerr, os.ErrPermission) || errors.Is(aerr, os.ErrNotExist) ||
 			errors.Is(aerr, syscall.ENOTDIR):
@@ -343,6 +375,25 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known, de
 		// rather than convicting or clearing.
 	}
 	return false, false, paneDead, "", ""
+}
+
+// paneShowsSpawnDirRefusal reads the dead pane's scrollback for the launch
+// shim's refusal line — the fallback verdict for tmux builds whose
+// pane_dead_status expands empty, and for a pane killed by a signal (tmux
+// leaves the field empty there too, so the marker is what separates "the
+// shim refused to enter" from "the command ran and was signaled"). The pane
+// this session's only window holds is the one remain-on-exit retained, so
+// the session target reads it directly. A failed or empty capture is not
+// evidence either way: the caller falls through to the pathname arm, which
+// asks the moved-worktree question on its own.
+func (t *TmuxSession) paneShowsSpawnDirRefusal() bool {
+	ctx, cancel := tmuxTimeoutContext()
+	out, err := t.outputTmuxBounded(ctx, "capture-pane", "-p", "-t", exactTarget(t.sanitizedName))
+	cancel()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), sessionenv.SpawnDirRefusalMarker)
 }
 
 // paneDirInside reports whether dir is the admitted directory itself or a

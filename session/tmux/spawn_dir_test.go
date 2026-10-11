@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -78,12 +79,27 @@ func liveAfterSpawnExec(t *testing.T, sessionName string, fields map[string]stri
 			case strings.Contains(s, "show-options"):
 				return nil, fmt.Errorf("no server running")
 			case strings.Contains(s, "display-message"):
+				// paneRowFormat carries BOTH #{pane_pid} and #{pane_dead} —
+				// it is the teardown's pane-PID query, not a placement field.
+				// A fixture marking the pane dead answers it as the dead row
+				// tmux would give, so a convicting teardown concludes on the
+				// same pane state the verdict read, not a map-iteration coin
+				// toss between single-field values.
+				if fields["pane_dead"] == "1" && strings.Contains(s, "#{pane_pid}") &&
+					strings.Contains(s, "#{pane_dead}") {
+					return []byte("98765|1|" + fields["pane_dead_status"] + "\n"), nil
+				}
 				for field, answer := range fields {
 					if answer != "" && strings.Contains(s, "#{"+field+"}") {
 						return []byte(answer + "\n"), nil
 					}
 				}
 				return nil, nil
+			case strings.Contains(s, "capture-pane"):
+				// The dead-arm's refusal-marker read. Keyed on a pseudo-field
+				// name so a fixture can hand the dead pane's scrollback; unset
+				// answers empty — no marker, no verdict.
+				return []byte(fields["capture-pane"]), nil
 			case strings.Contains(s, "list-panes"):
 				if *killed {
 					return nil, tmuxCantFindSessionError(t, sessionName)
@@ -1229,4 +1245,103 @@ func TestStartWithholdsNotStartedAfterBlindTeardown(t *testing.T) {
 	require.NotErrorIs(t, err, ErrSessionNotStarted,
 		"a teardown that never observed a pane cannot authorize deleting the worktree — "+
 			"a detached descendant may still hold it")
+}
+
+// TestStartTearsDownOnShimDirRefusal is the spawn-tied half of the #5174
+// dead-pane verdict — and the exact scenario the review named: enterability
+// removed after admission, restored before this check could sample it. A
+// point-in-time Access re-check can only describe the verification instant,
+// so this directory answers enterable NOW — yet pane_dead_status carries the
+// shim's own exit code AND its scrollback the refusal marker, both recorded
+// at the instant the command would have run: proof the pane never ran inside
+// the worktree. The refused pane is torn down, never recorded as a clean
+// spawn.
+func TestStartTearsDownOnShimDirRefusal(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("shim-refusal", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":        "1",
+			"pane_dead_status": fmt.Sprintf("%d", sessionenv.SpawnDirRefusalExitCode),
+			"pane_start_path":  workDir,
+			"capture-pane":     sessionenv.SpawnDirRefusalMarker + ": chdir /x: permission denied\n",
+		}, &killed))
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.ErrorIs(t, err, ErrSessionNotStarted,
+		"a conclusively torn-down refusal means the launch left nothing running")
+	assert.True(t, killed,
+		"a pane the shim could not place is torn down, not kept as a finished tab")
+}
+
+// TestStartAcceptsSameExitCodeWithoutMarker: pane_dead_status carrying the
+// shim's own exit code is NOT alone a refusal verdict — a command that
+// legitimately exits with that number produces the same field. The scrollback
+// marker is the corroborating fact a real refusal always has: without it the
+// pane is a finished command, kept for the caller's finish surface.
+func TestStartAcceptsSameExitCodeWithoutMarker(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("exit-same-code", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":        "1",
+			"pane_dead_status": fmt.Sprintf("%d", sessionenv.SpawnDirRefusalExitCode),
+			"capture-pane":     "the command's own output\n",
+		}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a bare matching exit code is not the refusal — the marker is")
+	assert.False(t, killed)
+}
+
+// TestStartTearsDownOnShimRefusalMarker: where pane_dead_status expands
+// empty — a tmux that does not know the field, or a pane killed by a signal —
+// the same verdict survives in the dead pane's scrollback: the shim's refusal
+// line is the only content a refused pane ever held.
+func TestStartTearsDownOnShimRefusalMarker(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("shim-refusal-marker", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead": "1",
+			// pane_dead_status deliberately absent — the empty-answer path.
+			"capture-pane": sessionenv.SpawnDirRefusalMarker + ": chdir /x: permission denied\n",
+		}, &killed))
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirMissing)
+	assert.True(t, killed, "the scrollback refusal verdict convicts the same way")
+}
+
+// TestStartAcceptsSignalKilledPaneOverEnterableDir is the marker check's
+// negative half — and what keeps a signaled command's finish surface alive:
+// pane_dead_status is ALSO empty for a pane tmux killed by signal, so the
+// scrollback is the only way to tell "the shim refused to enter" from "the
+// command ran inside and was signaled". No marker + the admitted inode still
+// answering the path enterably = the pane provably ran inside; the spawn
+// succeeds and its partial output stays for the finish surface.
+func TestStartAcceptsSignalKilledPaneOverEnterableDir(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed bool
+	sessionName := toTmuxName("signal-killed", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":    "1",
+			"capture-pane": "partial output before the kill\n",
+		}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a dead pane with no refusal verdict and an enterable admitted inode provably ran inside")
+	assert.False(t, killed)
 }
