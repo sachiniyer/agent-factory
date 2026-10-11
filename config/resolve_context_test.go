@@ -165,8 +165,11 @@ func TestRootAgentInspectionSnapshotRejectsCheckoutReplacementDuringCommandRead(
 	require.NoError(t, os.Rename(repoRoot, originalPath))
 	require.NoError(t, exec.Command("git", "init", repoRoot).Run())
 	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, InRepoConfigDirName), 0o755))
+	// Relative spelling: in-repo program_overrides may not name absolute
+	// executables (#5265 review), and the replacement must load cleanly so the
+	// identity-change check is what the read actually reaches.
 	require.NoError(t, os.WriteFile(InRepoTomlConfigPath(repoRoot),
-		[]byte("[program_overrides]\ncodex = '/replacement/codex'\n"), 0o600))
+		[]byte("[program_overrides]\ncodex = 'replacement/codex'\n"), 0o600))
 	close(resumeCommandRead)
 
 	err = <-resolved
