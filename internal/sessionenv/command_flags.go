@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -117,6 +118,125 @@ func credentialAgentForCommand(command string) string {
 		return ""
 	}
 	return invocation.agent
+}
+
+// GrantAgentForCommand is the ONE predicate every credential-grant site
+// shares: the tmux launcher (session_env.go), the pane exec shim
+// (execInvocation), and the backend provisioners that install credential
+// material (docker mounts, hook environments). It returns the supported
+// agent command invokes ONLY when the file POSIX resolution selects is
+// attributable to the operator — a bare name resolved through an
+// all-absolute inherited PATH, or an absolute path outside workDir. Any
+// spelling that lets the checked-out repository pick the file earns no
+// grant, because program_overrides is an in-repo config key and a repo can
+// therefore name an executable it ships (#5265):
+//
+//   - a RELATIVE executable (./codex, bin/codex, ../codex) resolves against
+//     the pane's working directory;
+//   - a command that respells resolution (a PATH=… assignment, env PATH=…,
+//     env -u PATH, env -i, env -C) selects the directory itself;
+//   - a PATH in environ containing an empty or relative entry resolves a
+//     bare name into or relative to the pane's working directory;
+//   - an ABSOLUTE path inside workDir is inside the checked-out tree.
+//
+// AgentForCommand remains the identity classifier ("what does this command
+// run"); GrantAgentForCommand answers the different question "may this
+// command carry the operator's credential grant". credentialAgentForCommand
+// stays deliberately stricter — it serves the effect-bound agent-server
+// handoff, where the program string crosses a wire and even an absolute path
+// has no trusted provenance.
+//
+// Callers pass the environment the command's resolution actually reads (the
+// launcher's own environment, which is what the filtered pane inherits) and
+// the directory the pane launches in. A caller that cannot know the
+// directory — a remote hook host — passes "" and still denies every
+// non-absolute spelling.
+func GrantAgentForCommand(command string, environ []string, workDir string) string {
+	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
+	if !ok {
+		return ""
+	}
+	if !executableAttributableToOperator(invocation, environ, workDir) {
+		return ""
+	}
+	return invocation.agent
+}
+
+// AgentCommandExecutable reports the executable token af's literal agent
+// resolution selected in command — including through a trusted env wrapper —
+// for a caller that must judge the FILE, not only the attributed agent. It
+// answers "" when the command is not one literal supported-agent invocation.
+// LoadInRepoConfig uses it to refuse a checked-in program_overrides value
+// that points the credential grant at an absolute path inside the repository
+// itself (#5265).
+func AgentCommandExecutable(command string) string {
+	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
+	if !ok {
+		return ""
+	}
+	return invocation.executable
+}
+
+// executableAttributableToOperator reports whether POSIX resolution of the
+// parsed invocation's executable can only select a file the operator — not
+// the checked-out repository — controls.
+func executableAttributableToOperator(invocation agentCommand, environ []string, workDir string) bool {
+	if strings.Contains(invocation.executable, "/") {
+		// A path-qualified executable names its file directly: only an
+		// absolute path is operator-attributable, and not one inside the
+		// session's own working tree, which is repository content whatever
+		// its spelling. ResolveForCompare canonicalizes both sides, so a
+		// symlinked worktree root cannot evade containment.
+		if !filepath.IsAbs(invocation.executable) {
+			return false
+		}
+		if workDir == "" {
+			return true
+		}
+		resolvedDir, err := filepath.Abs(workDir)
+		if err != nil {
+			// The working tree cannot be located, so the executable cannot be
+			// proven outside it. Deny the grant rather than let an unknowable
+			// containment answer default open.
+			return false
+		}
+		return !pathutil.IsAtOrInside(
+			pathutil.ResolveForCompare(invocation.executable),
+			pathutil.ResolveForCompare(resolvedDir))
+	}
+	// A bare name resolves through PATH: the inherited environment is the
+	// attribution channel. A command that already respelled resolution, or
+	// an inherited PATH with an empty or relative entry, lets repository
+	// content supply the file.
+	if invocation.executableResolutionChanged {
+		return false
+	}
+	return searchPathAbsolute(environ)
+}
+
+// searchPathAbsolute reports whether every entry in environ's PATH is
+// absolute — the condition under which execvp's resolution of a bare name
+// cannot land in or relative to the working directory. An absent PATH
+// resolves through execvp's compiled-in default, which is absolute; an empty
+// PATH or any empty entry means the working directory.
+func searchPathAbsolute(environ []string) bool {
+	// Every PATH= entry is checked rather than only the last, which is the one
+	// exec semantics would honor: a duplicate-PATH environment is pathological
+	// enough that failing closed costs nothing, while trusting an early safe
+	// value and missing a later relative one would open the resolution the
+	// check exists to close.
+	for _, entry := range environ {
+		value, found := strings.CutPrefix(entry, "PATH=")
+		if !found {
+			continue
+		}
+		for _, dir := range strings.Split(value, ":") {
+			if !filepath.IsAbs(dir) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func shellAssignmentsChangeExecutableResolution(assignments []*syntax.Assign) bool {

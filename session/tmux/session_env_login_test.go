@@ -65,7 +65,7 @@ func TestLoginPaneEnvironmentSelectsTheBrowserFreeFlow(t *testing.T) {
 		pane.SetAccountLoginForAgent(tc.agent, "work")
 		pane.SetAccountLoginForAgent(tc.agent, "work")
 
-		wrapped, launchEnv, imports, sessionEnv, _, err := pane.prepareLaunchEnvironment()
+		wrapped, launchEnv, imports, sessionEnv, _, err := pane.prepareLaunchEnvironment("")
 		if err != nil {
 			t.Fatalf("%s login pane: %v", tc.agent, err)
 		}
@@ -130,7 +130,7 @@ func TestAccountScopedSessionsNeverGetTheLoginBrowserLevers(t *testing.T) {
 		for label, pane := range map[string]*TmuxSession{
 			"agent": session, "process": process, "shell": shell,
 		} {
-			wrapped, launchEnv, _, sessionEnv, defaultCommand, err := pane.prepareLaunchEnvironment()
+			wrapped, launchEnv, _, sessionEnv, defaultCommand, err := pane.prepareLaunchEnvironment("")
 			if err != nil {
 				t.Fatalf("%s %s session: %v", agent, label, err)
 			}
@@ -169,7 +169,7 @@ func TestLoginPaneLeavesAnExplicitBrowserPassthroughAlone(t *testing.T) {
 	}
 	pane.SetAccountLoginForAgent(ProgramClaude, "work")
 
-	wrapped, launchEnv, _, sessionEnv, _, err := pane.prepareLaunchEnvironment()
+	wrapped, launchEnv, _, sessionEnv, _, err := pane.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}

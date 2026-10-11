@@ -171,7 +171,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	}
 	t.Setenv("BASH_ENV", "/tmp/ambient-bashrc")
 	t.Setenv("PS1", "$((CODEX_HOME=42))")
-	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment()
+	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
 		t.Fatal("process sibling exposed the competing ambient API key to the tmux session environment")
 	}
-	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment()
+	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
 	}
-	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment()
+	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment("")
 	if err != nil {
 		t.Fatal(err)
 	}

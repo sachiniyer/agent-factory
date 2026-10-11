@@ -181,12 +181,13 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	}
 	command := args[len(args)-1]
 	filterAgent := agent
-	if !environmentOnly && AgentForCommand(command) != agent {
+	if !environmentOnly && GrantAgentForCommand(command, os.Environ(), paneWorkingDirectory()) != agent {
 		// The argv protocol names an agent, but it is not authority by itself: a
 		// repository can invoke the private marker too. Re-derive the grant from the
-		// direct command, and on disagreement retain only common/explicit values.
-		// Agent-server uses its effect-bound protocol above instead of asking this
-		// generic path to infer identity from nested argv.
+		// direct command through the SAME predicate the launcher used, and on
+		// disagreement retain only common/explicit values. Agent-server uses its
+		// effect-bound protocol above instead of asking this generic path to
+		// infer identity from nested argv.
 		filterAgent = ""
 	}
 	environ := FilterForCommand(os.Environ(), filterAgent, command, extras)
@@ -319,6 +320,19 @@ var paneStampRead = func(ctx context.Context, paneID string) (string, error) {
 	out, err := exec.CommandContext(ctx, "tmux",
 		"display-message", "-p", "-t", paneID, "#{"+PanePidUserOption+"}").Output()
 	return string(out), err
+}
+
+// paneWorkingDirectory reports the directory the pane command resolves
+// against — the working tree the shared grant predicate checks an absolute
+// executable for containment in. Getwd can only fail when the directory has
+// been unlinked out from under the pane, in which case the predicate is told
+// the directory is unknown rather than guessed.
+func paneWorkingDirectory() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 func agentServerExecInvocation(args []string) error {

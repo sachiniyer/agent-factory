@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -233,6 +234,168 @@ func TestExecInvocationDoesNotTrustDiscoverableAgentServerPath(t *testing.T) {
 	}
 	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
 		t.Fatal("a repository-authored handoff authenticated with the discoverable af executable path")
+	}
+}
+
+// The agent credential grant this guard re-derives is bound to the shared
+// predicate: the executable POSIX resolution selects must be attributable to
+// the operator — a bare name on an all-absolute PATH, or an absolute path
+// outside the pane's working directory. program_overrides is an in-repo
+// config key, so a checked-in relative spelling (./codex, bin/codex,
+// ../codex), a command that respells resolution, and an absolute path inside
+// the working directory must all reach exec with the agent names stripped —
+// for every supported agent, not only codex (#5265).
+func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T) {
+	type row struct {
+		command string
+		want    bool
+	}
+	groups := []struct {
+		agent   string
+		envName string
+		rows    []row
+	}{
+		{
+			agent:   "codex",
+			envName: "OPENAI_API_KEY",
+			rows: []row{
+				{"codex", true},
+				{"./codex", false},
+				{"bin/codex", false},
+				{"../codex", false},
+				{"/opt/codex", true},
+				{"sh -c codex", false},
+				{"PATH=/opt codex", false},
+				{"env PATH=/opt codex", false},
+				{"env -i codex", false},
+				{"env -C /opt codex", false},
+				{"env ./codex", false},
+				{"exec -- ./codex", false},
+				{"exec -- /opt/codex", true},
+				{"TERM=xterm-256color codex", true},
+				{"CODEX_HOME=/tmp/codex-home codex", true},
+				{"/usr/bin/env codex", true},
+			},
+		},
+		{
+			agent:   "claude",
+			envName: "ANTHROPIC_API_KEY",
+			rows: []row{
+				{"claude", true},
+				{"./claude", false},
+				{"bin/claude", false},
+				{"../claude", false},
+				{"/usr/local/bin/claude --verbose", true},
+			},
+		},
+		{
+			agent:   "gemini",
+			envName: "GEMINI_API_KEY",
+			rows: []row{
+				{"gemini", true},
+				{"./gemini", false},
+				{"bin/gemini", false},
+				{"/opt/gemini", true},
+			},
+		},
+		{
+			agent:   "opencode",
+			envName: "OPENCODE_CONFIG",
+			rows: []row{
+				{"opencode", true},
+				{"./opencode", false},
+			},
+		},
+		{
+			agent:   "amp",
+			envName: "AMP_API_KEY",
+			rows: []row{
+				{"amp", true},
+				{"bin/amp", false},
+			},
+		},
+	}
+	for _, group := range groups {
+		for _, row := range group.rows {
+			t.Run(group.agent+"/"+row.command, func(t *testing.T) {
+				t.Setenv(group.envName, "fixture")
+				wantErr := errors.New("stop before exec")
+				var gotEnvironment []string
+				previous := processExec
+				processExec = func(_ string, _ []string, environ []string) error {
+					gotEnvironment = append([]string(nil), environ...)
+					return wantErr
+				}
+				t.Cleanup(func() { processExec = previous })
+
+				if err := execInvocation([]string{group.agent, "0", row.command}, false); !errors.Is(err, wantErr) {
+					t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+				}
+				if kept := slices.Contains(gotEnvironment, group.envName+"=fixture"); kept != row.want {
+					t.Fatalf("%s kept = %v for command %q, want %v", group.envName, kept, row.command, row.want)
+				}
+			})
+		}
+	}
+}
+
+// A bare name resolves through the PATH the pane actually carries, which is
+// the filtered operator environment: an empty or relative entry — a dot, a
+// relative directory, or a leading/trailing colon — resolves into the
+// pane's working directory, which is repository content. The grant cannot
+// attribute that file to the operator (#5265).
+func TestExecInvocationDeniesGrantWhenSearchPathIsRelative(t *testing.T) {
+	for _, path := range []string{
+		".:/usr/bin",
+		"/usr/bin:bin",
+		"/usr/bin:",
+		":/usr/bin",
+		"",
+	} {
+		t.Run("PATH="+path, func(t *testing.T) {
+			t.Setenv("PATH", path)
+			t.Setenv("OPENAI_API_KEY", "fixture")
+			wantErr := errors.New("stop before exec")
+			var gotEnvironment []string
+			previous := processExec
+			processExec = func(_ string, _ []string, environ []string) error {
+				gotEnvironment = append([]string(nil), environ...)
+				return wantErr
+			}
+			t.Cleanup(func() { processExec = previous })
+
+			if err := execInvocation([]string{"codex", "0", "codex"}, false); !errors.Is(err, wantErr) {
+				t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+			}
+			if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+				t.Fatalf("bare codex on PATH %q kept the Codex credential", path)
+			}
+		})
+	}
+}
+
+// An absolute path that lands inside the pane's working directory is
+// repository content wearing an operator-attributable spelling: the file the
+// checked-out tree provides is what runs (#5265).
+func TestExecInvocationDeniesGrantForExecutableInsideWorkingDirectory(t *testing.T) {
+	inside := t.TempDir()
+	t.Chdir(inside)
+	t.Setenv("OPENAI_API_KEY", "fixture")
+	wantErr := errors.New("stop before exec")
+	var gotEnvironment []string
+	previous := processExec
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnvironment = append([]string(nil), environ...)
+		return wantErr
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	command := filepath.Join(inside, "codex")
+	if err := execInvocation([]string{"codex", "0", command}, false); !errors.Is(err, wantErr) {
+		t.Fatalf("execInvocation() error = %v, want test sentinel", err)
+	}
+	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
+		t.Fatalf("absolute path %q inside the pane working directory kept the Codex credential", command)
 	}
 }
 
