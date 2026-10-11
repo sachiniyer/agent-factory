@@ -371,6 +371,11 @@ func TestExecInvocationSearchPathGrantFollowsFirstHit(t *testing.T) {
 	writeExecutableFixture(t, with, "codex")
 	without := t.TempDir()
 	without2 := t.TempDir()
+	// A file whose interpreter is missing stats and access-checks cleanly but
+	// execve answers ENOENT — the walk skips it exactly like an absent file
+	// (#5265 review).
+	broken := t.TempDir()
+	writeScriptFixture(t, broken, "codex", "/nonexistent/interp")
 	for _, test := range []struct {
 		path string
 		want bool
@@ -381,11 +386,13 @@ func TestExecInvocationSearchPathGrantFollowsFirstHit(t *testing.T) {
 		{path: ":" + with},
 		{path: ""},
 		{path: without + ":" + without2 + ":bin"},
+		{path: broken + ":."},
 		{path: without, want: true},
 		{path: without + ":" + without2, want: true},
 		{path: with + ":", want: true},
 		{path: with + ":.", want: true},
 		{path: without + ":" + with, want: true},
+		{path: broken + ":" + with, want: true},
 	} {
 		t.Run("PATH="+test.path, func(t *testing.T) {
 			t.Setenv("PATH", test.path)

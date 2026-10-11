@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"slices"
@@ -314,6 +315,219 @@ func TestGrantAgentForCommandWalksSearchPathLikeExecvp(t *testing.T) {
 	}
 	if got := GrantAgentForCommand("codex", []string{"PATH=" + noexec + ":."}, t.TempDir()); got != "" {
 		t.Errorf("GrantAgentForCommand with a non-executable file then a relative entry = %q, want no grant", got)
+	}
+}
+
+// Repository content lives in EVERY checkout of the repository, not only the
+// pane's own worktree: a daemon PATH entry inside the main checkout or a
+// sibling worktree executes repo code with the grant, and an absolute
+// spelling inside one names it just as directly (#5265 review). The walk
+// therefore checks containment against the repository's whole checkout set —
+// enumerated from the shared .git dir — not only the pane's working tree.
+func TestGrantAgentForCommandRejectsSiblingCheckoutPathHits(t *testing.T) {
+	main, worktree1, worktree2 := repoCheckoutFixture(t)
+	for _, dir := range []string{
+		filepath.Join(main, "bin"),
+		filepath.Join(worktree1, "bin"),
+		filepath.Join(worktree2, "bin"),
+	} {
+		writeExecutableFixture(t, dir, "codex")
+	}
+	outside := t.TempDir()
+	writeExecutableFixture(t, outside, "codex")
+
+	tests := []struct {
+		name    string
+		command string
+		path    string
+		want    string
+	}{
+		{name: "bare name hit in main checkout", command: "codex", path: filepath.Join(main, "bin")},
+		{name: "bare name hit in sibling worktree", command: "codex", path: filepath.Join(worktree2, "bin")},
+		{name: "bare name hit outside repository", command: "codex", path: outside, want: "codex"},
+		{name: "absolute spelling in main checkout", command: filepath.Join(main, "bin", "codex")},
+		{name: "absolute spelling in sibling worktree", command: filepath.Join(worktree2, "bin", "codex")},
+		{name: "absolute spelling outside repository", command: filepath.Join(outside, "codex"), want: "codex"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var environ []string
+			if test.path != "" {
+				environ = []string{"PATH=" + test.path}
+			}
+			// The pane is rooted in worktree1: hits in main or worktree2 are
+			// repository content wearing operator-attributable locations.
+			if got := GrantAgentForCommand(test.command, environ, worktree1); got != test.want {
+				t.Errorf("GrantAgentForCommand(%q, %v, %q) = %q, want %q",
+					test.command, environ, worktree1, got, test.want)
+			}
+		})
+	}
+
+	// From the main checkout's side the linked worktrees deny the same way.
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + filepath.Join(worktree1, "bin")}, main); got != "" {
+		t.Errorf("hit inside a linked worktree, pane rooted at the main checkout = %q, want no grant", got)
+	}
+	// A pane outside the repository entirely sees none of this: worktree
+	// enumeration degrades to the workDir-only roots the check had before.
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + filepath.Join(main, "bin")}, t.TempDir()); got != "codex" {
+		t.Errorf("hit inside some OTHER repository's checkout must not deny an unrelated pane = %q, want grant", got)
+	}
+	// And an unresolvable layout falls back rather than failing open or
+	// closed: workDir with no .git keeps only itself as a root.
+	if got := GrantAgentForCommand("codex", []string{"PATH=" + outside}, t.TempDir()); got != "codex" {
+		t.Errorf("non-checkout workDir = %q, want grant", got)
+	}
+}
+
+// repoCheckoutFixture builds the on-disk shape git worktree add leaves
+// behind: a main checkout whose .git is a directory, linked worktrees whose
+// .git files point into <main>/.git/worktrees/<name>, and each worktree's
+// recorded gitdir file pointing back at its own .git path.
+func repoCheckoutFixture(t *testing.T) (main, worktree1, worktree2 string) {
+	t.Helper()
+	repo := t.TempDir()
+	main = filepath.Join(repo, "main")
+	worktree1 = filepath.Join(repo, "worktree1")
+	worktree2 = filepath.Join(repo, "worktree2")
+	for _, wt := range []struct{ name, root string }{
+		{"worktree1", worktree1},
+		{"worktree2", worktree2},
+	} {
+		meta := filepath.Join(main, ".git", "worktrees", wt.name)
+		if err := os.MkdirAll(meta, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(wt.root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(meta, "gitdir"),
+			[]byte(filepath.Join(wt.root, ".git")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt.root, ".git"),
+			[]byte("gitdir: "+meta+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{
+		filepath.Join(main, "bin"),
+		filepath.Join(worktree1, "bin"),
+		filepath.Join(worktree2, "bin"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return main, worktree1, worktree2
+}
+
+// A PATH entry whose file stats and access-checks cleanly still is not the
+// hit when execve cannot start it: a script whose shebang interpreter is
+// missing, or a dynamic ELF whose PT_INTERP loader is gone, returns ENOENT
+// and the walk continues — reaching a later repository-controlled entry
+// while af would have attributed the wrong file (#5265 review).
+func TestGrantAgentForCommandSkipsUnstartablePathHits(t *testing.T) {
+	brokenScript := t.TempDir()
+	writeScriptFixture(t, brokenScript, "codex", "/nonexistent/interp")
+	brokenELF := t.TempDir()
+	writeELFFixture(t, brokenELF, "codex", "/nonexistent/ld.so")
+	staticELF := t.TempDir()
+	writeELFFixture(t, staticELF, "codex", "")
+	// A working interpreter chain: a script whose interpreter is itself a
+	// script on /bin/sh is still a valid hit — chains are followed.
+	chainInterp := t.TempDir()
+	writeScriptFixture(t, chainInterp, "interp", "/bin/sh")
+	chain := t.TempDir()
+	writeScriptFixture(t, chain, "codex", filepath.Join(chainInterp, "interp"))
+	// An interpreter cycle can never start; the depth cap denies it.
+	cycle := t.TempDir()
+	writeScriptFixture(t, cycle, "codex", filepath.Join(cycle, "codex"))
+	with := t.TempDir()
+	writeExecutableFixture(t, with, "codex")
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "missing shebang interp then relative", path: brokenScript + ":."},
+		{name: "missing shebang interp then hit", path: brokenScript + ":" + with, want: "codex"},
+		{name: "missing ELF loader then relative", path: brokenELF + ":."},
+		{name: "missing ELF loader then hit", path: brokenELF + ":" + with, want: "codex"},
+		{name: "static ELF is a hit", path: staticELF, want: "codex"},
+		{name: "script on script interpreter", path: chain, want: "codex"},
+		{name: "interpreter cycle then relative", path: cycle + ":."},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := GrantAgentForCommand("codex", []string{"PATH=" + test.path}, t.TempDir()); got != test.want {
+				t.Errorf("GrantAgentForCommand on PATH=%q = %q, want %q", test.path, got, test.want)
+			}
+		})
+	}
+}
+
+// writeScriptFixture plants an executable "#!" script naming interp as its
+// interpreter — the shebang dependency the exec-start probe follows.
+func writeScriptFixture(t *testing.T, dir, name, interp string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!"+interp+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeELFFixture plants a minimal ELF64 executable with one PT_INTERP
+// program header naming interp — or none when interp is "", which is the
+// static-binary shape that starts without a loader.
+func writeELFFixture(t *testing.T, dir, name, interp string) {
+	t.Helper()
+	header := make([]byte, 64+56)
+	copy(header, []byte{0x7f, 'E', 'L', 'F'})
+	header[4], header[5], header[6] = 2, 1, 1 // ELFCLASS64, little-endian, version
+	order := binary.LittleEndian
+	order.PutUint16(header[16:], 2)    // e_type = ET_EXEC
+	order.PutUint16(header[18:], 0x3e) // e_machine = x86-64
+	order.PutUint32(header[20:], 1)    // e_version
+	order.PutUint64(header[32:], 64)   // e_phoff
+	order.PutUint16(header[52:], 64)   // e_ehsize
+	order.PutUint16(header[54:], 56)   // e_phentsize
+	order.PutUint16(header[56:], 0)    // e_phnum — static: no program headers
+	contents := header
+	if interp != "" {
+		order.PutUint16(header[56:], 1)
+		ph := header[64:]
+		interpBytes := append([]byte(interp), 0)
+		order.PutUint32(ph[0:], 3)                         // p_type = PT_INTERP
+		order.PutUint64(ph[8:], 120)                       // p_offset
+		order.PutUint64(ph[32:], uint64(len(interpBytes))) // p_filesz
+		order.PutUint64(ph[40:], uint64(len(interpBytes))) // p_memsz
+		order.PutUint64(ph[48:], 1)                        // p_align
+		contents = append(contents, interpBytes...)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), contents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// On a case-insensitive volume a path differing only in letter case still
+// names the same file — containment must fold spellings the way the
+// filesystem does (#5265 review).
+func TestIsAtOrInsideCaseFolded(t *testing.T) {
+	tests := []struct {
+		path, root string
+		want       bool
+	}{
+		{"/users/me/repo/codex", "/users/me/repo", true},
+		{"/users/me/repo/codex", "/Users/me/Repo", true},
+		{"/Users/me/Repo", "/users/me/repo", true},
+		{"/users/me/repo", "/users/me/repo2", false},
+		{"/users/me/other/codex", "/Users/me/Repo", false},
+	}
+	for _, test := range tests {
+		if got := isAtOrInsideCaseFolded(test.path, test.root); got != test.want {
+			t.Errorf("isAtOrInsideCaseFolded(%q, %q) = %v, want %v", test.path, test.root, got, test.want)
+		}
 	}
 }
 
