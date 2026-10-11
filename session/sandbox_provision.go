@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -228,7 +229,7 @@ func (w *sandboxWorkspace) agentServerCommand() (string, error) {
 }
 
 func (w *sandboxWorkspace) agentName() string {
-	agentName := sessionenv.AgentForCommand(w.program)
+	agentName := sessionenv.GrantAgentForCommand(w.program, os.Environ(), w.WorkspacePath())
 	if agentName == "" && strings.TrimSpace(w.program) == "" {
 		return tmux.ProgramClaude
 	}

@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -85,6 +86,77 @@ func TestCredentialAgentForCommandRequiresBareExecutable(t *testing.T) {
 		if got := credentialAgentForCommand(test.command); got != test.want {
 			t.Errorf("credentialAgentForCommand(%q) = %q, want %q", test.command, got, test.want)
 		}
+	}
+}
+
+// The credential grant applies only when the executable is one af can
+// attribute to the operator: a bare name resolved through an all-absolute
+// PATH, or an absolute path outside the session's working directory. Every
+// spelling that lets the checked-out repository pick the file — a relative
+// path, a resolution-changing assignment or env option, a relative or empty
+// PATH entry, an absolute path inside workDir — earns no grant, for every
+// supported agent (#5265).
+func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T) {
+	workDir := t.TempDir()
+	inside := filepath.Join(workDir, "codex")
+	tests := []struct {
+		name    string
+		command string
+		environ []string
+		workDir string
+		want    string
+	}{
+		{name: "bare agent", command: "codex", want: "codex"},
+		{name: "bare agent absolute PATH", command: "codex", environ: []string{"PATH=/usr/bin:/bin"}, want: "codex"},
+		{name: "relative dot", command: "./codex"},
+		{name: "relative subdir", command: "bin/codex"},
+		{name: "relative parent", command: "../codex"},
+		{name: "absolute path", command: "/opt/codex", want: "codex"},
+		{name: "absolute path outside workDir", command: "/opt/codex", workDir: workDir, want: "codex"},
+		{name: "absolute path inside workDir", command: inside, workDir: workDir},
+		{name: "absolute path deeper inside workDir", command: filepath.Join(workDir, "bin", "codex"), workDir: workDir},
+		{name: "shell wrapper", command: "sh -c codex"},
+		{name: "PATH assignment", command: "PATH=/opt codex"},
+		{name: "env PATH mutation", command: "env PATH=/opt codex"},
+		{name: "env PATH removal", command: "env -u PATH codex"},
+		{name: "env clear", command: "env -i codex"},
+		{name: "env chdir", command: "env -C /opt codex"},
+		{name: "env relative", command: "env ./codex"},
+		{name: "exec relative", command: "exec -- ./codex"},
+		{name: "exec absolute", command: "exec -- /opt/codex", want: "codex"},
+		{name: "term assignment", command: "TERM=xterm-256color codex", want: "codex"},
+		{name: "agent home assignment", command: "CODEX_HOME=/tmp/codex-home codex", want: "codex"},
+		{name: "trusted env", command: "/usr/bin/env codex", want: "codex"},
+		{name: "env non-resolution assignment", command: "env LANG=C codex", want: "codex"},
+		{name: "bare agent dot PATH", command: "codex", environ: []string{"PATH=.:/usr/bin"}},
+		{name: "bare agent relative PATH entry", command: "codex", environ: []string{"PATH=/usr/bin:bin"}},
+		{name: "bare agent trailing empty PATH", command: "codex", environ: []string{"PATH=/usr/bin:"}},
+		{name: "bare agent leading empty PATH", command: "codex", environ: []string{"PATH=:/usr/bin"}},
+		{name: "bare agent empty PATH", command: "codex", environ: []string{"PATH="}},
+		{name: "bare agent relative-only PATH", command: "codex", environ: []string{"PATH=bin"}},
+		{name: "bare agent no PATH entry", command: "codex", environ: []string{"HOME=/h"}, want: "codex"},
+		{name: "claude bare", command: "claude", want: "claude"},
+		{name: "claude relative", command: "./claude"},
+		{name: "claude relative subdir", command: "bin/claude"},
+		{name: "claude absolute with flags", command: "/usr/local/bin/claude --verbose", want: "claude"},
+		{name: "gemini bare", command: "gemini", want: "gemini"},
+		{name: "gemini relative", command: "./gemini"},
+		{name: "aider relative parent", command: "../aider"},
+		{name: "amp relative subdir", command: "bin/amp"},
+		{name: "opencode bare", command: "opencode", want: "opencode"},
+		{name: "opencode relative", command: "./opencode"},
+		{name: "devin bare", command: "devin", want: "devin"},
+		{name: "devin relative", command: "./devin"},
+		{name: "agent name as data", command: "./collect codex"},
+		{name: "compound command", command: "collect; codex"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := GrantAgentForCommand(test.command, test.environ, test.workDir); got != test.want {
+				t.Errorf("GrantAgentForCommand(%q, %v, %q) = %q, want %q",
+					test.command, test.environ, test.workDir, got, test.want)
+			}
+		})
 	}
 }
 

@@ -198,13 +198,19 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // another, so a rewrite landing between them wrapped an old command with a new
 // declaration (#3083 review).
 func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment()
+	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment("")
 	return wrapped, launchEnv, importNames, err
 }
 
-func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []string, string, error) {
+// workDir is the pane's working directory — the tree the shared grant
+// predicate checks an absolute program executable for containment in. The
+// "" form leaves that check open for callers that only need the launch
+// pieces an absolute-inside-tree answer cannot change (account session env,
+// the scoped default command).
+func (t *TmuxSession) prepareLaunchEnvironment(workDir string) (string, []string, []string, []string, string, error) {
 	program, proof, extra, account, accountAgent, accountEnvironmentOnly, loginEnv := t.launchSnapshot()
-	agent := sessionenv.AgentForCommand(program)
+	source := os.Environ()
+	agent := sessionenv.GrantAgentForCommand(program, source, workDir)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
 		return "", nil, nil, nil, "", err
@@ -255,7 +261,6 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	if accountEnvironmentOnly {
 		filterAgent = accountAgent
 	}
-	source := os.Environ()
 	launchEnv := sessionenv.FilterForCommand(source, filterAgent, program, extra)
 	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
 	if !SessionEnvSupported() {
@@ -325,7 +330,7 @@ func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
 	if account == "" {
 		return nil
 	}
-	_, _, _, sessionEnv, defaultCommand, err := t.prepareLaunchEnvironment()
+	_, _, _, sessionEnv, defaultCommand, err := t.prepareLaunchEnvironment("")
 	if err != nil {
 		return err
 	}
