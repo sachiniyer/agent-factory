@@ -415,8 +415,9 @@ func TestAutomationsHeaderDegradationOrder(t *testing.T) {
 // width the grid can produce (TreeMinWidth–TreeMaxWidth, clamp(22,25%·W,36)):
 // the header and the expanded row's detail show each field whole or omit it
 // entirely — a timestamp is never cut to "Oct…" and the noun never becomes
-// "Autom…". The issue's 80x24 example is the w=22 endpoint: "last Oct 05
-// 11:56" alone under the narrow header.
+// "Autom…". The issue's 80x24 example is the w=22 endpoint: the field budget
+// is rail minus the fixed 6-cell indent, so only the trigger fits and the
+// last run surfaces from w=23 up.
 func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
 	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
 	next := time.Date(2026, time.October, 6, 3, 0, 0, 0, time.UTC)
@@ -461,12 +462,50 @@ func TestAutomationsRailFieldsAreWholeOrOmitted(t *testing.T) {
 		}
 	}
 
-	// The reported frame itself: at the 22-col rail the detail is the last run
-	// alone — the most useful field — and the header is the narrow form.
+	// The reported frame itself: at the 22-col rail the field budget is 16
+	// cells (rail minus the fixed indent), so the detail is the trigger — the
+	// only field that fits; the last run appears from width 23 up.
 	pane.SetRect(layout.Rect{W: 22, H: 4})
 	lines := strings.Split(stripANSI(pane.View()), "\n")
 	require.Equal(t, " 1 (1 on) · m manage", strings.TrimRight(lines[0], " "))
-	require.Equal(t, "last Oct 05 11:56", strings.TrimSpace(lines[2]))
+	require.Equal(t, "0 3 * * *", strings.TrimSpace(lines[2]))
+}
+
+// TestAutomationsDetailIndentIsFixed: the detail hangs under the row title at
+// exactly itemPrefixWidth cells at every rail width — the indent is layout,
+// not budget. The first #5153 play-test caught it yielding to buy room for a
+// field (4 cells at rail 22, 0 at rail 30 — a "detail" line starting at column
+// 0 reads as a top-level row). Fields fit in W-itemPrefixWidth or drop; the
+// indent never moves.
+func TestAutomationsDetailIndentIsFixed(t *testing.T) {
+	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
+	next := time.Date(2026, time.October, 6, 3, 0, 0, 0, time.UTC)
+	last := time.Date(2026, time.October, 5, 11, 56, 0, 0, time.UTC)
+	indent := strings.Repeat(" ", itemPrefixWidth)
+	for _, tc := range []struct {
+		name string
+		tsk  task.Task
+	}{
+		{"healthy", task.Task{
+			ID: "t", Name: "hello-cron", CronExpr: "0 3 * * *", Enabled: true,
+			Arming: task.ArmingArmed, NextRunAt: &next, LastRunAt: &last,
+		}},
+		{"overdue", overdueStripTask()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proj := store.NewProjection()
+			proj.SetTasks([]task.Task{tc.tsk})
+			pane := NewAutomationsPane(proj)
+			pane.SetNowForTest(func() time.Time { return now })
+			pane.Focus()
+			for w := 22; w <= 36; w++ {
+				pane.SetRect(layout.Rect{W: w, H: 4})
+				line := strings.TrimRight(strings.Split(stripANSI(pane.View()), "\n")[2], " ")
+				require.Truef(t, strings.HasPrefix(line, indent) && len(line) > itemPrefixWidth && line[itemPrefixWidth] != ' ',
+					"%s width %d: the detail must start with exactly %d cells of indent: %q", tc.name, w, itemPrefixWidth, line)
+			}
+		})
+	}
 }
 
 // The compact one-liner (#2.6, <80 cols) rides the same ladder and keeps its own

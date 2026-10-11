@@ -524,8 +524,10 @@ type detailField struct {
 // title — the trigger and run facts a collapsed row hides (#1126). Every field
 // renders whole or not at all (#5153): the rail never ellipsizes a timestamp
 // into "Oct…", it keeps the fields that fit in detailPrio* order and omits the
-// rest. The indent yields before a field does — it is decoration, the fields
-// are information — so the line pulls left rather than drop the last run.
+// rest. The fields fit inside the fixed itemPrefixWidth indent — the indent is
+// layout, not budget, and a detail line pulled left of it reads as a top-level
+// row — so a field that does not fit beside it is dropped, never bought with
+// indent cells.
 func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	var fields []detailField
 	push := func(text string, style lipgloss.Style, prio int) {
@@ -567,12 +569,13 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 		return fields[order[i]].prio < fields[order[j]].prio
 	})
 	keptW := 0
+	avail := a.rect.W - itemPrefixWidth
 	for _, i := range order {
 		cost := fields[i].width
 		if keptW > 0 {
 			cost += layout.Cells(railHintSeparator)
 		}
-		if keptW+cost > a.rect.W {
+		if keptW+cost > avail {
 			continue
 		}
 		keep[i] = true
@@ -587,11 +590,7 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 			parts = append(parts, fields[i].styled)
 		}
 	}
-	indent := itemPrefixWidth
-	if room := a.rect.W - keptW; room < indent {
-		indent = room
-	}
-	return fitLine(strings.Repeat(" ", indent)+strings.Join(parts, " · "), a.rect.W)
+	return fitLine(strings.Repeat(" ", itemPrefixWidth)+strings.Join(parts, " · "), a.rect.W)
 }
 
 // attentionCount returns how many of the projection's tasks carry a WARNING —
