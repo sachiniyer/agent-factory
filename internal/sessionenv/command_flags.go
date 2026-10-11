@@ -220,15 +220,14 @@ func grantAgentForCommand(command string, environ []string, workDir string) stri
 // AgentCommandExecutable reports the executable token af's literal agent
 // resolution selected in command — including through a trusted env wrapper —
 // for a caller that must judge the FILE, not only the attributed agent. It
-// answers "" when the command is not one literal supported-agent invocation.
+// answers "" only when the command is not one literal simple call at all —
+// the executable is reported whether or not it classifies as a supported
+// agent, because the in-repo refusal applies to absolute spellings wholesale:
 // LoadInRepoConfig uses it to refuse any checked-in program_overrides value
 // that selects an absolute executable: a repository spelling is not trusted
 // provenance for a file outside it (#5265).
 func AgentCommandExecutable(command string) string {
-	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
-	if !ok {
-		return ""
-	}
+	invocation, _ := literalAgentCommand(command, isTrustedEnvExecutable)
 	return invocation.executable
 }
 
@@ -241,10 +240,7 @@ func AgentCommandExecutable(command string) string {
 // repository-authored one, so the untrusted layer is refused at load while
 // operator layers keep the power (#5265 review).
 func AgentCommandSetsEnvironment(command string) bool {
-	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
-	if !ok {
-		return false
-	}
+	invocation, _ := literalAgentCommand(command, isTrustedEnvExecutable)
 	return invocation.environmentMutated
 }
 
