@@ -1,14 +1,13 @@
 package sessionenv
 
 import (
-	"bytes"
-	"debug/elf"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -214,10 +213,36 @@ func grantAgentForCommand(command string, environ []string, workDir string) stri
 	if !ok {
 		return ""
 	}
-	if !executableAttributableToOperator(invocation, environ, workDir) {
+	if !attributionWithin(invocation, environ, workDir, grantAttributionTimeout) {
 		return ""
 	}
 	return invocation.agent
+}
+
+// grantAttributionTimeout bounds the filesystem walk attribution performs.
+// PATH entries can live on unavailable NFS, FUSE, or automount mounts whose
+// stat blocks indefinitely, and the walk runs daemon-side inside
+// prepareLaunchEnvironment — before the pane process exists — so a hung
+// mount would pin session creation where executable lookup previously only
+// stalled the spawned shell (#5265 review).
+const grantAttributionTimeout = 5 * time.Second
+
+// attributionWithin runs the pure attribution walk on a goroutine and fails
+// closed on expiry: a walk that cannot finish cannot prove the operator
+// owns the executable. The walk has no side effects, so a probe that stays
+// blocked on a dead mount is left to unblock on its own — bounded by how
+// often launches can race a broken filesystem.
+func attributionWithin(invocation agentCommand, environ []string, workDir string, timeout time.Duration) bool {
+	done := make(chan bool, 1)
+	go func() {
+		done <- executableAttributableToOperator(invocation, environ, workDir)
+	}()
+	select {
+	case verdict := <-done:
+		return verdict
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // AgentCommandExecutable reports the executable token af's literal agent
@@ -258,10 +283,10 @@ func executableAttributableToOperator(invocation agentCommand, environ []string,
 		return false
 	}
 	roots := repoWorktreeRoots(workDir)
-	if invocation.wrapper != "" && !spellingAttributableToOperator(invocation.wrapper, environ, roots) {
+	if invocation.wrapper != "" && !spellingAttributableToOperator(invocation.wrapper, environ, roots, 0) {
 		return false
 	}
-	return spellingAttributableToOperator(invocation.executable, environ, roots)
+	return spellingAttributableToOperator(invocation.executable, environ, roots, 0)
 }
 
 // spellingAttributableToOperator is the attribution rule for one executable
@@ -272,12 +297,13 @@ func executableAttributableToOperator(invocation agentCommand, environ []string,
 // channel, so the first entry holding the executable must be absolute and
 // outside every repo root — and an all-absolute walk that finds no hit
 // attributes too, since exec can then only fail rather than land in the
-// repository.
-func spellingAttributableToOperator(executable string, environ []string, roots []string) bool {
+// repository. depth bounds the interpreter/delegate recursion the
+// exec-start probe performs.
+func spellingAttributableToOperator(executable string, environ []string, roots []string, depth int) bool {
 	if strings.Contains(executable, "/") {
 		return filepath.IsAbs(executable) && pathOutsideRepoRoots(executable, roots)
 	}
-	return searchPathAttributesExecutable(environ, executable, roots)
+	return searchPathAttributesExecutable(environ, executable, roots, depth)
 }
 
 // repoWorktreeRoots returns workDir plus every other checkout root of its
@@ -439,7 +465,7 @@ func isAtOrInsideCaseFolded(path, root string) bool {
 // post_worktree_commands — can write into such a directory at any time;
 // spelling attribution cannot prove the CONTENT of a file in an operator
 // location, the same boundary the docker.image residual documents.
-func searchPathAttributesExecutable(environ []string, name string, roots []string) bool {
+func searchPathAttributesExecutable(environ []string, name string, roots []string, depth int) bool {
 	searchPath, found := firstEnvValue(environ, "PATH")
 	if !found {
 		return true
@@ -448,143 +474,12 @@ func searchPathAttributesExecutable(environ []string, name string, roots []strin
 		if !filepath.IsAbs(dir) {
 			return false
 		}
-		if !pathEntryHoldsExecutable(dir, name) {
+		if !pathEntryHoldsExecutable(dir, name, environ, roots, depth) {
 			continue
 		}
 		return pathOutsideRepoRoots(filepath.Join(dir, name), roots)
 	}
 	return true
-}
-
-// pathEntryHoldsExecutable reports whether dir contains an executable file
-// named name that execve can actually start — the local-filesystem probe
-// the search-path walk uses for execvp's "first entry that holds it"
-// question. Mode bits alone are not the answer: execvp's walk is EACCES-aware
-// and skips a file it cannot actually execute, so the probe is the daemon's
-// own effective access — a bit-check that ignores it would attribute a hit
-// the real exec never makes and let resolution fall through to a later
-// relative entry (#5265 review). Access is not enough either: a script whose
-// shebang interpreter is missing, or a dynamic ELF whose PT_INTERP loader is
-// gone, stats and access-checks cleanly but execve returns ENOENT — and the
-// walk continues past it exactly as if the file were absent, reaching a later
-// repository-controlled entry. "Holds" therefore means the file exists AND
-// the loader chain it names exists (#5265 review).
-func pathEntryHoldsExecutable(dir, name string) bool {
-	path := filepath.Join(dir, name)
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() &&
-		info.Mode().Perm()&0o111 != 0 && executableAccess(path) &&
-		execCanStart(path, 0)
-}
-
-// execCanStart reports whether execve can start path — the part of "holds
-// the executable" stat and access cannot see. execve answers ENOENT after a
-// successful stat in exactly the interpreter-dependency cases: a script
-// whose shebang names an interpreter that does not exist, and a dynamic ELF
-// whose PT_INTERP loader does not. Every other failure keeps the hit — an
-// ENOEXEC file is run by the shell itself, and a loader that starts but
-// errors inside has already begun the operator file, not fallen through to
-// the repository. Interpreters are followed transitively (a script's
-// interpreter may itself be a script — the kernel caps recursion at five),
-// with depth bounded so a cyclic chain denies rather than walks forever.
-func execCanStart(path string, depth int) bool {
-	const maxInterpreterDepth = 4
-	if depth > maxInterpreterDepth {
-		return false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	var interpreter string
-	switch {
-	case startsWithShebang(file):
-		interpreter = shebangInterpreter(file)
-	case startsWithELF(file):
-		interpreter = elfInterpreter(file)
-	default:
-		return true
-	}
-	if interpreter == "" {
-		return true
-	}
-	return executableFileExists(interpreter) && execCanStart(interpreter, depth+1)
-}
-
-// executableFileExists reports whether path names a file the loader could
-// execute — an absolute spelling whose target exists, is regular, and passes
-// the same mode/access probe a PATH walk applies. A relative interpreter
-// name cannot exec (execve answers ENOENT for it), so it reports false.
-func executableFileExists(path string) bool {
-	if !filepath.IsAbs(path) {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() &&
-		info.Mode().Perm()&0o111 != 0 && executableAccess(path)
-}
-
-// startsWithShebang reports whether the file's first two bytes are "#!".
-func startsWithShebang(file *os.File) bool {
-	var head [2]byte
-	if _, err := file.ReadAt(head[:], 0); err != nil {
-		return false
-	}
-	return head[0] == '#' && head[1] == '!'
-}
-
-// startsWithELF reports whether the file carries the ELF magic.
-func startsWithELF(file *os.File) bool {
-	var head [4]byte
-	if _, err := file.ReadAt(head[:], 0); err != nil {
-		return false
-	}
-	return head == [4]byte{0x7f, 'E', 'L', 'F'}
-}
-
-// shebangInterpreter extracts the interpreter path from a "#!" script —
-// the first whitespace-delimited field after the marker, matching the
-// kernel's BINPRM parsing (everything up to the first space is the
-// interpreter; the remainder is a single optional argument).
-func shebangInterpreter(file *os.File) string {
-	buf := make([]byte, 256)
-	n, err := file.ReadAt(buf, 0)
-	if err != nil && n == 0 {
-		return ""
-	}
-	line := buf[:n]
-	if i := bytes.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	fields := strings.Fields(string(line[2:]))
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
-// elfInterpreter returns the PT_INTERP dynamic-loader path of an ELF file,
-// or "" for a static executable or an unparseable header — both of which
-// execve treats without a missing-interpreter ENOENT (the second fails
-// ENOEXEC and the shell runs the file itself, so the hit still runs).
-func elfInterpreter(file *os.File) string {
-	parsed, err := elf.NewFile(file)
-	if err != nil {
-		return ""
-	}
-	defer parsed.Close()
-	for _, prog := range parsed.Progs {
-		if prog.Type != elf.PT_INTERP {
-			continue
-		}
-		buf := make([]byte, prog.Filesz)
-		if _, err := prog.ReadAt(buf, 0); err != nil {
-			return ""
-		}
-		return string(bytes.TrimRight(buf, "\x00"))
-	}
-	return ""
 }
 
 // firstEnvValue returns the value of the FIRST name= entry in environ — the
