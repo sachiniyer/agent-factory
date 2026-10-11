@@ -32,6 +32,13 @@ var nowFunc = time.Now
 // Manager, same as nowFunc.
 var lastStatusSweepNs atomic.Int64
 
+// statusSweepStartNs is the in-flight sweep's start instant (0 between
+// sweeps). One pass's duration alone understates one session's capture
+// spacing: entries come from map iteration, so a session near the start of
+// one pass can land near the end of the next — a gap of lastSweep + its
+// elapsed position in the in-flight pass, not just lastSweep (#5221 review).
+var statusSweepStartNs atomic.Int64
+
 // taskRunPollBackstop bounds how long an attached TUI may hide a task run's
 // COMPLETION from the watch-task concurrency cap (#1892).
 //
@@ -445,6 +452,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 // runs with that lock released so it cannot block unrelated manager RPCs.
 func (m *Manager) RefreshStatuses() {
 	sweepStart := nowFunc()
+	statusSweepStartNs.Store(sweepStart.UnixNano())
 	type entry struct {
 		repoID   string
 		instance *session.Instance
@@ -472,6 +480,7 @@ func (m *Manager) RefreshStatuses() {
 		m.refreshInstanceStatus(e.repoID, e.instance)
 	}
 	lastStatusSweepNs.Store(int64(nowFunc().Sub(sweepStart)))
+	statusSweepStartNs.Store(0)
 }
 
 // statusSweepFloorCap bounds how much of one serial pass's duration may count
@@ -487,21 +496,28 @@ var statusSweepFloorCap = 30 * time.Second
 
 // statusSweepExpectedInterval returns the cadence the pane-observation streak
 // may assume between consecutive captures of the same session: the larger of
-// the caller's scheduled interval and the previous serial sweep's duration,
-// floored at statusSweepFloorCap. The tick bounds captures only when the whole
-// fleet's pass fits inside it — when a sweep overruns, every capture in it
-// lands on schedule anyway, and counting that on-schedule spacing as an
-// observation hole would rebase the quiet/silent streak on every frame (#5221
-// review). The first sweep after daemon start has no predecessor, so the
-// scheduled interval alone applies.
+// the caller's scheduled interval and the honest spacing one session's
+// captures can legitimately span — the previous serial sweep's duration PLUS
+// the elapsed position of this capture inside the in-flight one, because map
+// iteration can move a session from the start of one pass to the end of the
+// next (#5221 review). Each sweep term is floored at statusSweepFloorCap: the
+// cap marks how much pass duration counts as schedule before the leftover is
+// a stall, so two capped spans bound the honest per-session spacing without
+// normalizing blindness — and the bound itself never goes below the caller's
+// declared cadence, since an operator-set interval slower than the caps
+// already accepts that much spacing (#5221 review). The first sweep after
+// daemon start has no predecessor and no in-flight pass, so the scheduled
+// interval alone applies.
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
-	if sweep := time.Duration(lastStatusSweepNs.Load()); sweep > scheduled {
-		// The sweep is the honest spacing only up to the cap — and the cap
-		// itself never goes below the caller's own declared cadence: an
-		// operator-set interval slower than the cap already accepts that much
-		// spacing, so compressing it to the cap would read every on-schedule
-		// capture as a hole (#5221 review).
-		return min(sweep, max(scheduled, statusSweepFloorCap))
+	span := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
+	if start := statusSweepStartNs.Load(); start > 0 {
+		elapsed := nowFunc().Sub(time.Unix(0, start))
+		if elapsed > 0 {
+			span += min(elapsed, statusSweepFloorCap)
+		}
+	}
+	if span > scheduled {
+		return min(span, max(scheduled, 2*statusSweepFloorCap))
 	}
 	return scheduled
 }

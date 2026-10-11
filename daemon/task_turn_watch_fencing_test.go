@@ -90,7 +90,9 @@ func TestNoteTaskRunTurnEvidenceDistinguishesConfirmedEmpty(t *testing.T) {
 // schedule to normalize — blindness that long must rebase the streak.
 func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 	old := lastStatusSweepNs.Load()
-	t.Cleanup(func() { lastStatusSweepNs.Store(old) })
+	oldStart := statusSweepStartNs.Load()
+	t.Cleanup(func() { lastStatusSweepNs.Store(old); statusSweepStartNs.Store(oldStart) })
+	statusSweepStartNs.Store(0)
 
 	lastStatusSweepNs.Store(0)
 	require.Equal(t, time.Second, statusSweepExpectedInterval(time.Second),
@@ -116,6 +118,44 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 	lastStatusSweepNs.Store(int64(3 * time.Minute))
 	require.Equal(t, 2*time.Minute, statusSweepExpectedInterval(2*time.Minute),
 		"a configured cadence above the cap is preserved, not compressed")
+}
+
+// One pass's duration alone understates a session's real capture spacing:
+// map iteration can move a session from the start of one sweep to the end of
+// the next, a gap of lastSweep + elapsed — so the expected interval credits
+// the in-flight pass's progress too, each term bounded by the stall cap
+// (#5221 review).
+func TestStatusSweepExpectedIntervalCoversPositionDrift(t *testing.T) {
+	old := lastStatusSweepNs.Load()
+	oldStart := statusSweepStartNs.Load()
+	oldNow := nowFunc
+	t.Cleanup(func() {
+		lastStatusSweepNs.Store(old)
+		statusSweepStartNs.Store(oldStart)
+		nowFunc = oldNow
+	})
+
+	now := time.Now()
+	nowFunc = func() time.Time { return now }
+
+	// A 20s completed sweep, this capture landing 15s into the next pass:
+	// the session that was first last time and sits here now spanned ~35s.
+	lastStatusSweepNs.Store(int64(20 * time.Second))
+	statusSweepStartNs.Store(now.Add(-15 * time.Second).UnixNano())
+	require.Equal(t, 35*time.Second, statusSweepExpectedInterval(time.Second),
+		"first-in-last-pass to here is a 35s on-schedule gap, not a hole")
+
+	// A session near the pass's end gets nearly two sweeps of honest spacing.
+	now = now.Add(19 * time.Second)
+	require.Equal(t, 20*time.Second+statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"position drift across two passes spans lastSweep + elapsed, each capped")
+
+	// Each term stays capped: two stalled passes contribute at most the cap
+	// apiece, never normalizing their own blindness.
+	lastStatusSweepNs.Store(int64(10 * time.Minute))
+	now = now.Add(10 * time.Minute)
+	require.Equal(t, 2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"stalled passes cannot stretch the honest span past two capped terms")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —
