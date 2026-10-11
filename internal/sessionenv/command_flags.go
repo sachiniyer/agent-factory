@@ -1,13 +1,10 @@
 package sessionenv
 
 import (
-	"bytes"
-	"debug/elf"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/envcommand"
@@ -257,189 +254,79 @@ func executableAttributableToOperator(invocation agentCommand, environ []string,
 	if invocation.executableResolutionChanged {
 		return false
 	}
-	roots := repoWorktreeRoots(workDir)
-	if invocation.wrapper != "" && !spellingAttributableToOperator(invocation.wrapper, environ, roots) {
+	if invocation.wrapper != "" && !spellingAttributableToOperator(invocation.wrapper, environ, workDir) {
 		return false
 	}
-	return spellingAttributableToOperator(invocation.executable, environ, roots)
+	return spellingAttributableToOperator(invocation.executable, environ, workDir)
 }
 
 // spellingAttributableToOperator is the attribution rule for one executable
 // spelling. A path-qualified executable names its file directly: only an
-// absolute path is operator-attributable, and not one inside any checkout of
-// the repository, which is repository content whatever its spelling. A bare
+// absolute path is operator-attributable, and not one inside the session's
+// working tree, which is repository content whatever its spelling. A bare
 // name resolves through PATH: the inherited environment is the attribution
 // channel, so the first entry holding the executable must be absolute and
-// outside every repo root — and an all-absolute walk that finds no hit
-// attributes too, since exec can then only fail rather than land in the
-// repository.
-func spellingAttributableToOperator(executable string, environ []string, roots []string) bool {
+// outside workDir — and an all-absolute walk that finds no hit attributes
+// too, since exec can then only fail rather than land in the repository.
+func spellingAttributableToOperator(executable string, environ []string, workDir string) bool {
 	if strings.Contains(executable, "/") {
-		return filepath.IsAbs(executable) && pathOutsideRepoRoots(executable, roots)
+		return filepath.IsAbs(executable) && pathOutsideWorkDir(executable, workDir)
 	}
-	return searchPathAttributesExecutable(environ, executable, roots)
+	return searchPathAttributesExecutable(environ, executable, workDir)
 }
 
-// repoWorktreeRoots returns workDir plus every other checkout root of its
-// repository — the main checkout and the linked worktrees recorded in the
-// shared .git dir. "Outside the repository" spans all of them: a pane rooted
-// in one worktree still executes repository content when the winning PATH
-// entry or spelling lands in the main checkout or a sibling worktree, and a
-// checked-in bare override cannot tell them apart (#5265 review). A workDir
-// whose repository layout cannot be read — or that is not a checkout —
-// keeps its own root only, the same containment the check had before the
-// repository's other checkouts were considered.
-func repoWorktreeRoots(workDir string) []string {
-	roots := []string{workDir}
-	common := commonGitDir(workDir)
-	if common == "" {
-		return roots
-	}
-	add := func(root string) {
-		if root != "" && !slices.Contains(roots, root) {
-			roots = append(roots, root)
-		}
-	}
-	if filepath.Base(common) == ".git" {
-		add(filepath.Dir(common))
-	}
-	entries, err := os.ReadDir(filepath.Join(common, "worktrees"))
-	if err != nil {
-		return roots
-	}
-	for _, entry := range entries {
-		gitdir, err := os.ReadFile(filepath.Join(common, "worktrees", entry.Name(), "gitdir"))
-		if err != nil {
-			continue
-		}
-		// The gitdir file holds the worktree's own .git path; its parent
-		// is the checkout root.
-		add(filepath.Dir(strings.TrimSpace(string(gitdir))))
-	}
-	return roots
-}
-
-// commonGitDir locates the repository's shared .git directory for a pane's
-// working directory: a directory-form workDir/.git is the main checkout's
-// git dir already, while the gitfile form ("gitdir: <path>") points into
-// <common>/worktrees/<name> for a linked worktree — the standard shape af's
-// own worktrees use. Other layouts (submodule gitdirs, unreadable files,
-// non-checkouts) report no common dir and the caller falls back to
-// workDir-only roots.
-func commonGitDir(workDir string) string {
+// pathOutsideWorkDir reports whether path resolves outside workDir — outside
+// the checked-out tree, where repository content cannot supply the file.
+// ResolveForCompare canonicalizes both sides, so a symlinked worktree root or
+// a symlinked target cannot evade containment. An unresolvable workDir denies
+// rather than letting an unknowable containment answer default open; an empty
+// workDir leaves the check open for a caller that cannot know the directory.
+func pathOutsideWorkDir(path, workDir string) bool {
 	if workDir == "" {
-		return ""
+		return true
 	}
-	dot := filepath.Join(workDir, ".git")
-	info, err := os.Stat(dot)
+	absDir, err := filepath.Abs(workDir)
 	if err != nil {
-		return ""
+		return false
 	}
-	if info.IsDir() {
-		return dot
-	}
-	contents, err := os.ReadFile(dot)
-	if err != nil {
-		return ""
-	}
-	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(contents)), "gitdir:")
-	if !ok {
-		return ""
-	}
-	gitdir = strings.TrimSpace(gitdir)
-	if !filepath.IsAbs(gitdir) {
-		gitdir = filepath.Join(workDir, gitdir)
-	}
-	gitdir, err = filepath.EvalSymlinks(gitdir)
-	if err != nil {
-		return ""
-	}
-	// <common>/worktrees/<name> — require the standard shape so a submodule
-	// gitdir (<super>/.git/modules/<name>) is not mistaken for it.
-	if filepath.Base(filepath.Dir(gitdir)) != "worktrees" {
-		return ""
-	}
-	return filepath.Dir(filepath.Dir(gitdir))
-}
-
-// pathOutsideRepoRoots reports whether path resolves outside every checkout
-// root of the repository — where repository content cannot supply the file.
-// ResolveForCompare canonicalizes both sides, so a symlinked worktree root
-// or a symlinked target cannot evade containment. An unresolvable root
-// denies rather than letting an unknowable containment answer default open;
-// an empty root is skipped for a caller that cannot know the directory.
-func pathOutsideRepoRoots(path string, roots []string) bool {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return false
 	}
-	resolvedPath := pathutil.ResolveForCompare(absPath)
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		absDir, err := filepath.Abs(root)
-		if err != nil {
-			return false
-		}
-		resolvedDir := pathutil.ResolveForCompare(absDir)
-		// LEXICAL containment is checked alongside RESOLVED containment: a
-		// spelling inside the tree names repository content even when the
-		// file it selects resolves out — an in-tree symlink to /bin/sh
-		// still lets a later commit repoint it before exec. Containment is
-		// tested against the root as spelled and as resolved, so a root
-		// itself spelled through a link cannot slide a spelling past the
-		// lexical half either.
-		if atOrInsidePlatform(absPath, absDir) ||
-			atOrInsidePlatform(absPath, resolvedDir) ||
-			atOrInsidePlatform(resolvedPath, resolvedDir) {
-			return false
-		}
+	resolvedDir := pathutil.ResolveForCompare(absDir)
+	// LEXICAL containment is checked alongside RESOLVED containment: a
+	// spelling inside the tree names repository content even when the file it
+	// selects resolves out — an in-tree symlink to /bin/sh still lets a later
+	// commit repoint it before exec. Containment is tested against workDir as
+	// spelled and as resolved, so a workDir itself spelled through a link
+	// cannot slide a spelling past the lexical half either.
+	if pathutil.IsAtOrInside(absPath, absDir) ||
+		pathutil.IsAtOrInside(absPath, resolvedDir) ||
+		pathutil.IsAtOrInside(pathutil.ResolveForCompare(absPath), resolvedDir) {
+		return false
 	}
 	return true
-}
-
-// atOrInsidePlatform is pathutil.IsAtOrInside folded to the platform's
-// filesystem semantics. macOS's and Windows's default filesystems resolve
-// names case-insensitively, so containment there must compare spellings
-// case-insensitively too: /users/me/repo/codex names the repository's file
-// on an insensitive volume even though the lexical path differs (#5265
-// review). Folding over-denies on a case-sensitive volume mounted on such a
-// platform — the safe direction for a credential grant.
-func atOrInsidePlatform(path, root string) bool {
-	if filesystemCaseInsensitive {
-		return isAtOrInsideCaseFolded(path, root)
-	}
-	return pathutil.IsAtOrInside(path, root)
-}
-
-func isAtOrInsideCaseFolded(path, root string) bool {
-	return pathutil.IsAtOrInside(strings.ToLower(path), strings.ToLower(root))
 }
 
 // searchPathAttributesExecutable models execvp's real walk of environ's PATH:
 // directories are tried in order and the first one holding the executable
 // wins, so the grant follows when that first hit is absolute AND outside
-// every repo root. An empty or relative entry resolves in or relative to the
-// working directory — repository content — and denies before any absolute
-// hit, while an absolute entry that does not hold the file is skipped exactly
-// as execvp skips it (ENOENT and EACCES alike continue the walk). An
-// ALL-ABSOLUTE walk that never holds the executable still grants: resolution
-// can then only fail, never land in the repository — nothing repo-controlled
-// runs, which is what the grant exists to prevent. An absent PATH resolves
-// through execvp's compiled-in default, which is absolute and
-// operator-controlled.
+// workDir. An empty or relative entry resolves in or relative to the working
+// directory — repository content — and denies before any absolute hit, while
+// an absolute entry that does not hold the file is skipped exactly as execvp
+// skips it (ENOENT and EACCES alike continue the walk). An ALL-ABSOLUTE walk
+// that never holds the executable still grants: resolution can then only
+// fail, never land in the repository — nothing repo-controlled runs, which is
+// what the grant exists to prevent. An absent PATH resolves through execvp's
+// compiled-in default, which is absolute and operator-controlled.
 //
 // The stat is advisory only — the filesystem can change between this check
 // and the shell's own resolution at exec (TOCTOU). Exploiting the gap needs
 // the file to vanish from the winning absolute directory and reappear under a
 // later empty/relative entry inside the race window, which requires write
-// access to an operator-controlled PATH directory. A repository whose
-// checked-in commands already execute as the operator at setup — e.g.
-// post_worktree_commands — can write into such a directory at any time;
-// spelling attribution cannot prove the CONTENT of a file in an operator
-// location, the same boundary the docker.image residual documents.
-func searchPathAttributesExecutable(environ []string, name string, roots []string) bool {
+// access to an operator-controlled PATH directory — outside the repository's
+// reach by definition.
+func searchPathAttributesExecutable(environ []string, name, workDir string) bool {
 	searchPath, found := firstEnvValue(environ, "PATH")
 	if !found {
 		return true
@@ -451,140 +338,23 @@ func searchPathAttributesExecutable(environ []string, name string, roots []strin
 		if !pathEntryHoldsExecutable(dir, name) {
 			continue
 		}
-		return pathOutsideRepoRoots(filepath.Join(dir, name), roots)
+		return pathOutsideWorkDir(filepath.Join(dir, name), workDir)
 	}
 	return true
 }
 
 // pathEntryHoldsExecutable reports whether dir contains an executable file
-// named name that execve can actually start — the local-filesystem probe
-// the search-path walk uses for execvp's "first entry that holds it"
-// question. Mode bits alone are not the answer: execvp's walk is EACCES-aware
-// and skips a file it cannot actually execute, so the probe is the daemon's
-// own effective access — a bit-check that ignores it would attribute a hit
-// the real exec never makes and let resolution fall through to a later
-// relative entry (#5265 review). Access is not enough either: a script whose
-// shebang interpreter is missing, or a dynamic ELF whose PT_INTERP loader is
-// gone, stats and access-checks cleanly but execve returns ENOENT — and the
-// walk continues past it exactly as if the file were absent, reaching a later
-// repository-controlled entry. "Holds" therefore means the file exists AND
-// the loader chain it names exists (#5265 review).
+// named name — the local-filesystem stat the search-path walk uses for
+// execvp's "first entry that holds it" question. Mode bits alone are not the
+// answer: execvp's walk is EACCES-aware and skips a file it cannot actually
+// execute, so the probe is the daemon's own effective access — a bit-check
+// that ignores it would attribute a hit the real exec never makes and let
+// resolution fall through to a later relative entry (#5265 review).
 func pathEntryHoldsExecutable(dir, name string) bool {
 	path := filepath.Join(dir, name)
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular() &&
-		info.Mode().Perm()&0o111 != 0 && executableAccess(path) &&
-		execCanStart(path, 0)
-}
-
-// execCanStart reports whether execve can start path — the part of "holds
-// the executable" stat and access cannot see. execve answers ENOENT after a
-// successful stat in exactly the interpreter-dependency cases: a script
-// whose shebang names an interpreter that does not exist, and a dynamic ELF
-// whose PT_INTERP loader does not. Every other failure keeps the hit — an
-// ENOEXEC file is run by the shell itself, and a loader that starts but
-// errors inside has already begun the operator file, not fallen through to
-// the repository. Interpreters are followed transitively (a script's
-// interpreter may itself be a script — the kernel caps recursion at five),
-// with depth bounded so a cyclic chain denies rather than walks forever.
-func execCanStart(path string, depth int) bool {
-	const maxInterpreterDepth = 4
-	if depth > maxInterpreterDepth {
-		return false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer file.Close()
-	var interpreter string
-	switch {
-	case startsWithShebang(file):
-		interpreter = shebangInterpreter(file)
-	case startsWithELF(file):
-		interpreter = elfInterpreter(file)
-	default:
-		return true
-	}
-	if interpreter == "" {
-		return true
-	}
-	return executableFileExists(interpreter) && execCanStart(interpreter, depth+1)
-}
-
-// executableFileExists reports whether path names a file the loader could
-// execute — an absolute spelling whose target exists, is regular, and passes
-// the same mode/access probe a PATH walk applies. A relative interpreter
-// name cannot exec (execve answers ENOENT for it), so it reports false.
-func executableFileExists(path string) bool {
-	if !filepath.IsAbs(path) {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() &&
 		info.Mode().Perm()&0o111 != 0 && executableAccess(path)
-}
-
-// startsWithShebang reports whether the file's first two bytes are "#!".
-func startsWithShebang(file *os.File) bool {
-	var head [2]byte
-	if _, err := file.ReadAt(head[:], 0); err != nil {
-		return false
-	}
-	return head[0] == '#' && head[1] == '!'
-}
-
-// startsWithELF reports whether the file carries the ELF magic.
-func startsWithELF(file *os.File) bool {
-	var head [4]byte
-	if _, err := file.ReadAt(head[:], 0); err != nil {
-		return false
-	}
-	return head == [4]byte{0x7f, 'E', 'L', 'F'}
-}
-
-// shebangInterpreter extracts the interpreter path from a "#!" script —
-// the first whitespace-delimited field after the marker, matching the
-// kernel's BINPRM parsing (everything up to the first space is the
-// interpreter; the remainder is a single optional argument).
-func shebangInterpreter(file *os.File) string {
-	buf := make([]byte, 256)
-	n, err := file.ReadAt(buf, 0)
-	if err != nil && n == 0 {
-		return ""
-	}
-	line := buf[:n]
-	if i := bytes.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	fields := strings.Fields(string(line[2:]))
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
-// elfInterpreter returns the PT_INTERP dynamic-loader path of an ELF file,
-// or "" for a static executable or an unparseable header — both of which
-// execve treats without a missing-interpreter ENOENT (the second fails
-// ENOEXEC and the shell runs the file itself, so the hit still runs).
-func elfInterpreter(file *os.File) string {
-	parsed, err := elf.NewFile(file)
-	if err != nil {
-		return ""
-	}
-	defer parsed.Close()
-	for _, prog := range parsed.Progs {
-		if prog.Type != elf.PT_INTERP {
-			continue
-		}
-		buf := make([]byte, prog.Filesz)
-		if _, err := prog.ReadAt(buf, 0); err != nil {
-			return ""
-		}
-		return string(bytes.TrimRight(buf, "\x00"))
-	}
-	return ""
 }
 
 // firstEnvValue returns the value of the FIRST name= entry in environ — the
