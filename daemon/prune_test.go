@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 
 	"github.com/stretchr/testify/assert"
@@ -393,6 +394,49 @@ func TestPruneSessions_KillsInFlightClaimIsSkipped(t *testing.T) {
 	require.Len(t, resp.Skipped, 1)
 	assert.Contains(t, resp.Skipped[0].Reason, "in progress")
 	assert.True(t, exists(archivedPath))
+}
+
+// TestPruneSessions_RefusesRepoGoneOriginWithMissingWorktree: an out-of-band
+// directory delete must not launder the repo-gone refusal — the missing tree
+// would otherwise return before the origin probe and list as a zero-byte
+// candidate with a kept branch that no longer exists (#5136 Codex round 10).
+func TestPruneSessions_RefusesRepoGoneOriginWithMissingWorktree(t *testing.T) {
+	manager, repoID, repoPath, _, archivedPath := seedPrunableArchive(t, "gone-missing-row")
+	require.NoError(t, os.RemoveAll(archivedPath))
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "origin repository")
+}
+
+// TestPruneSessions_ReportsUnmaterializedNonArchivedGhost: a persisted live
+// row the daemon could not materialize — broken recovery metadata, a corrupt
+// half-written record — is still an in-scope record. The skipped accounting
+// must name it instead of letting it vanish (#5136 Codex round 10).
+func TestPruneSessions_ReportsUnmaterializedNonArchivedGhost(t *testing.T) {
+	manager, repoID, _ := newStatusTestManager(t)
+	instancesDir := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "instances", repoID)
+	require.NoError(t, os.MkdirAll(instancesDir, 0o755))
+	ghost := []session.InstanceData{{
+		Title: "ghost-row",
+		// Ready ⇒ derived liveness LiveReady: persisted, not archived, and
+		// absent from m.instances — the unmaterializable case.
+		Status: session.Ready,
+	}}
+	body, err := json.Marshal(ghost)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(instancesDir, config.InstancesFileName), body, 0o644))
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Equal(t, "ghost-row", resp.Skipped[0].Title)
+	assert.Contains(t, resp.Skipped[0].Reason, "could not be materialized")
+	assert.Contains(t, resp.Skipped[0].Reason, "not archived")
 }
 
 // TestPruneSessions_RequiresScopeAndDuration: the validation that keeps the

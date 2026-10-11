@@ -280,13 +280,18 @@ func (m *Manager) pruneGhostRows(req PruneSessionsRequest) ([]PruneSkippedEntry,
 			if liveness == session.LivenessUnset {
 				liveness = session.LivenessForStatus(item.Status)
 			}
+			reason := "record could not be materialized by the daemon — inspect it before reclaiming; files were left untouched"
 			if liveness != session.LiveArchived {
-				continue
+				// Report, never drop: an unmaterialized non-archived row
+				// still belongs in the skipped accounting — a silently
+				// vanished record hides the repair the operator owes it
+				// (#5136 Codex round 10).
+				reason = fmt.Sprintf("record could not be materialized by the daemon and is not archived (status %d) — the row needs repair, not reclaim; files were left untouched", item.Status)
 			}
 			skipped = append(skipped, PruneSkippedEntry{
 				Title:  item.Title,
 				RepoID: repoID,
-				Reason: "record could not be materialized by the daemon — inspect it before reclaiming; files were left untouched",
+				Reason: reason,
 			})
 		}
 	}
@@ -320,14 +325,26 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 		repoPath = data.Path
 	}
 	wtPath := data.Worktree.WorktreePath
+	// Probe the origin FIRST: a missing worktree must not skip the repo-gone
+	// refusal — an out-of-band delete plus a gone origin would otherwise list
+	// as a zero-byte candidate with a "kept" branch that no longer exists
+	// (#5136 Codex round 10). The answer feeds both the early return and the
+	// identity checks below.
+	probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath)
 	if _, err := sessiongit.BoundedLstat(wtPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			switch {
+			case errors.Is(probeErr, sessiongit.ErrRepoGone):
+				return fmt.Sprintf("origin repository %s is gone, so the branch prune promises to keep is gone with it — restore the repository first, or preserve the worktree contents and remove it manually", repoPath)
+			case probeErr != nil:
+				return fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
+			}
 			return ""
 		}
 		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, err)
 	}
 
-	switch probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath); {
+	switch {
 	case probeErr == nil:
 		// Repo-present: the same bidirectional evidence the kill path requires
 		// (#3278), PLUS the occupant's registered branch — the pointer alone
