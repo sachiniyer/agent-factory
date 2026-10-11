@@ -188,6 +188,27 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	if len(args) != offset+count+1 {
 		return fmt.Errorf("malformed internal session environment invocation")
 	}
+	// The spawn's own placement record, applied HERE — inside the pane, at the
+	// instant the command would run, and BEFORE anything else reads the pane's
+	// cwd. tmux's -c is only a request: an unusable one is answered by falling
+	// back to the server's cwd with no error (#5172), and no post-spawn
+	// filesystem check can later say whether the chdir tmux attempted succeeded,
+	// because an enterability flap can be undone before the verifier reads it
+	// (#5174 review). The shim's chdir is the last point misplacement can still
+	// be prevented: it repairs the fallback outright, and the refusal — exit
+	// code plus scrollback marker — is evidence tied to this spawn rather than
+	// a second point-in-time accessibility sample.
+	//
+	// The position is load-bearing, not just the act: the grant derivation
+	// below reads the pane's working directory (#5270), and FilterForCommand,
+	// the account boundary, and the final exec must all see the directory the
+	// command will actually run in. Chdir after any of them would judge or
+	// launch against tmux's fallback — the server's cwd, often $HOME — the
+	// exact wrong-directory case this refusal exists for.
+	if err := enterSpawnDir(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "%s: %v\n", SpawnDirRefusalMarker, err)
+		os.Exit(SpawnDirRefusalExitCode)
+	}
 	extras, err := NormalizeExtraNames(args[offset : offset+count])
 	if err != nil {
 		return err
@@ -217,20 +238,6 @@ func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 		if err != nil {
 			return err
 		}
-	}
-	// The spawn's own placement record, authored HERE — inside the pane, at
-	// the instant the command would run. tmux's -c is only a request: an
-	// unusable one is answered by falling back to the server's cwd with no
-	// error (#5172), and no post-spawn filesystem check can later say whether
-	// the chdir tmux attempted succeeded, because an enterability flap can be
-	// undone before the verifier reads it (#5174 review). The shim's chdir is
-	// the last point misplacement can still be prevented: it repairs the
-	// fallback outright, and the refusal — exit code plus scrollback marker —
-	// is evidence tied to this spawn rather than a second point-in-time
-	// accessibility sample.
-	if err := enterSpawnDir(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "%s: %v\n", SpawnDirRefusalMarker, err)
-		os.Exit(SpawnDirRefusalExitCode)
 	}
 	// tmux runs shell-command through the system shell, not the user's login
 	// shell. Keep that POSIX contract: program overrides and injected commands

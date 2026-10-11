@@ -55,3 +55,70 @@ func TestEnterSpawnDirChdir(t *testing.T) {
 	require.ErrorIs(t, enterSpawnDir(), failure,
 		"a failed chdir reports — the caller exits with the refusal verdict")
 }
+
+// TestExecInvocationStripsSpawnDirEnv pins the doc-comment contract on
+// SpawnDirEnv: the name rides the launch line so the SHIM can enforce
+// placement, but it is an af-owned marker and must never reach the exec'd
+// agent's environment. Driven through the processExec seam with the variable
+// live in os.Environ across the three launch shapes — a supported agent, an
+// unattributed command, and an account-scoped launch — because each takes a
+// different filtering path and the name must survive none of them.
+func TestExecInvocationStripsSpawnDirEnv(t *testing.T) {
+	sentinel := errors.New("stop before exec")
+	spawnDir := t.TempDir()
+	t.Setenv(SpawnDirEnv, spawnDir)
+
+	var chdirTo string
+	var gotEnviron []string
+	prevChdir, prevExec := spawnDirChdir, processExec
+	spawnDirChdir = func(dir string) error {
+		chdirTo = dir
+		return nil
+	}
+	processExec = func(_ string, _ []string, environ []string) error {
+		gotEnviron = append([]string(nil), environ...)
+		return sentinel
+	}
+	accountDir := t.TempDir()
+	prevLookup := AccountLookup
+	AccountLookup = func(agent, name string) (Account, error) {
+		return Account{Agent: agent, Name: name, Dir: accountDir}, nil
+	}
+	t.Cleanup(func() { spawnDirChdir, processExec, AccountLookup = prevChdir, prevExec, prevLookup })
+
+	// An account-scoped launch through the real wrapper: the proof declaration
+	// must survive argv the same way production builds it, or ApplyAccount
+	// refuses and the environ assertion never runs.
+	trustedExecutable := "/opt/af detected/claude"
+	scopedCommand := shellquote.Quote(trustedExecutable) + " --session-id abc-123"
+	wrapped, err := WrapAccountCommand("/usr/local/bin/af", "claude", "work",
+		AccountLaunchProof{TrustedExecutable: trustedExecutable, GeneratedArgs: []string{"--session-id", "abc-123"}},
+		nil, scopedCommand)
+	require.NoError(t, err)
+	call, ok := singleSimpleCall(wrapped)
+	require.True(t, ok, "the wrapped launch must be a single simple command")
+	scopedWords, ok := literalCommandArgs(call.Args)
+	require.True(t, ok, "every scoped word must survive quoting as a literal")
+
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		scoped bool
+	}{
+		{"supported agent", []string{"claude", "0", "claude"}, false},
+		{"unattributed command", []string{"codex", "0", "echo not-an-agent"}, false},
+		{"account-scoped launch", scopedWords[2:], true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chdirTo, gotEnviron = "", nil
+			err := execInvocation(tc.args, tc.scoped)
+			require.ErrorIs(t, err, sentinel,
+				"reaching the exec seam proves the launch was not refused")
+			require.Equal(t, spawnDir, chdirTo,
+				"the shim must have consumed AF_SPAWN_DIR itself before exec")
+			_, leaked := envValue(gotEnviron, SpawnDirEnv)
+			require.False(t, leaked,
+				"AF_SPAWN_DIR reached the exec'd environment — it names an af-owned marker the agent must never see")
+		})
+	}
+}
