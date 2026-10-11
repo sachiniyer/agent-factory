@@ -34,6 +34,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// established about this name, it is about to be re-established or replaced.
 	t.setProvenNoPane(false)
 	t.setClosedConclusively(false)
+	t.setSpawnAttempted(false)
 	// The teardown mark is NOT a proof and is not superseded by the attempt: on a
 	// same-object restart (agent swap) it describes the session af just closed,
 	// which is still what the status monitor would report gone if this Start
@@ -100,14 +101,16 @@ func (t *TmuxSession) Start(workDir string) error {
 		// can exist behind it and a teardown need not gate on liveness (#2985).
 		return t.refuseUnstartedStart(fmt.Errorf("prepare filtered session environment: %v", envErr))
 	}
-	// Hand the pane's exec shim the directory checkSpawnDir just admitted, as
-	// an env assignment inside the launch line itself — the one channel every
-	// supported tmux carries. The shim chdirs to it at the instant the command
-	// would run: that repairs tmux's silent -c fallback outright, and on
-	// failure the pane dies with a refusal verdict (exit code + scrollback
-	// marker) tied to THIS spawn — evidence a point-in-time re-check can never
-	// forge or lose (#5174 review).
-	wrappedProgram = sessionenv.SpawnDirPrefix(workDir) + wrappedProgram
+	// Hand the pane's exec shim the directory checkSpawnDir just admitted —
+	// and its inode identity — as env assignments inside the launch line
+	// itself, the one channel every supported tmux carries. The shim chdirs
+	// to it at the instant the command would run and then verifies the
+	// entered inode is the admitted one: that repairs tmux's silent -c
+	// fallback outright and closes the rename-and-replace window between
+	// admission and chdir, and on failure the pane dies with a refusal
+	// verdict (exit code + scrollback marker) tied to THIS spawn — evidence
+	// a point-in-time re-check can never forge or lose (#5174 review).
+	wrappedProgram = sessionenv.SpawnDirPrefix(workDir, admittedSpawnDir) + wrappedProgram
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
 	for _, entry := range sessionEnv {
@@ -175,6 +178,10 @@ func (t *TmuxSession) Start(workDir string) error {
 		return t.refuseUnstartedStart(fmt.Errorf("error starting tmux session: %w", err))
 	}
 
+	// The launch process began: new-session has reached the server, so every
+	// failure from here can leave an af pane behind the name — the boundary a
+	// caller's cleanup retention keys on (#5174 review).
+	t.setSpawnAttempted(true)
 	t.observeStart(StartBeforeExistencePoll)
 	// Poll for session existence with exponential backoff. Break only on a probe
 	// that ANSWERED "exists" (known && exists): reading the lossy bool here let a

@@ -101,7 +101,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 		return nil, fmt.Errorf("failed to prepare shell tab: %w", err)
 	}
 	if err := shellTmux.Start(worktreePath); err != nil {
-		i.retainFailedTabCleanup(tmuxName, err)
+		i.retainFailedTabCleanup(shellTmux, tmuxName, err)
 		return nil, fmt.Errorf("failed to start shell tab: %w", err)
 	}
 
@@ -132,7 +132,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 		// spawned and are abandoning; no worktree action follows.
 		if _, cerr := shellTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add shell tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
-			i.retainFailedTabCleanup(tmuxName, fmt.Errorf("abandoned-spawn close unconfirmed: %w", cerr))
+			i.retainFailedTabCleanup(shellTmux, tmuxName, fmt.Errorf("abandoned-spawn close unconfirmed: %w", cerr))
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
 	}
@@ -191,7 +191,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// held pane its exit status is unobservable (#4479).
 	procTmux.SetRemainOnExit()
 	if err := procTmux.Start(worktreePath); err != nil {
-		i.retainFailedTabCleanup(tmuxName, err)
+		i.retainFailedTabCleanup(procTmux, tmuxName, err)
 		return nil, fmt.Errorf("failed to start process tab: %w", err)
 	}
 	// Before remain-on-exit, a command that failed at once took its session
@@ -200,7 +200,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	exit := awaitImmediateProcessExit(procTmux)
 	if exit != nil && exit.StatusKnown && exit.Status != 0 {
 		ferr := failedProcessTabError(procTmux, command, exit.Status)
-		i.retainFailedTabCleanup(tmuxName, ferr)
+		i.retainFailedTabCleanup(procTmux, tmuxName, ferr)
 		return nil, ferr
 	}
 
@@ -225,7 +225,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 		// Pane state deliberately ignored: same abandoned-spawn cleanup as above.
 		if _, cerr := procTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add process tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
-			i.retainFailedTabCleanup(tmuxName, fmt.Errorf("abandoned-spawn close unconfirmed: %w", cerr))
+			i.retainFailedTabCleanup(procTmux, tmuxName, fmt.Errorf("abandoned-spawn close unconfirmed: %w", cerr))
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
 	}
@@ -408,6 +408,16 @@ func awaitImmediateProcessExit(ts *tmux.TmuxSession) *TabExit {
 // wraps ErrSessionNotStarted — the same "nothing can be running" contract
 // Start keeps — so the caller's cleanup retention keys on the usual sentinel
 // instead of a bespoke signal (#5174 review).
+//
+// The close is the waiting, blindness-reporting path, not Close: a process
+// command can launch a background descendant before its root exits, and
+// Close only STARTS asynchronous reaping while discarding capture failures —
+// PaneStateKnown means the tmux commands answered, not that the pane's
+// descendants are gone. Attaching the sentinel on that reading would drop
+// the only cleanup handle while a survivor still writes into the worktree a
+// kill/archive is about to move, and a blind capture can strand it
+// permanently. The sentinel is emitted only after a conclusive non-blind
+// teardown (#5174 review).
 func failedProcessTabError(ts *tmux.TmuxSession, command string, status int) error {
 	output := ts.FinishedPaneOutput(5)
 	msg := fmt.Sprintf("process tab command %q exited immediately with status %d", command, status)
@@ -415,11 +425,16 @@ func failedProcessTabError(ts *tmux.TmuxSession, command string, status int) err
 		msg += ":\n" + output
 	}
 	err := fmt.Errorf("failed to start process tab: %s", msg)
-	if state, cerr := ts.Close(); cerr == nil && state == tmux.PaneStateKnown {
+	state, blind, cerr := ts.CloseAndWaitForPaneExitReportingBlindness()
+	switch {
+	case cerr == nil && state == tmux.PaneStateKnown && !blind:
 		return fmt.Errorf("%w: %w", tmux.ErrSessionNotStarted, err)
-	} else if cerr != nil {
+	case cerr != nil:
 		return fmt.Errorf("%s\n(its finished tmux session %s could not be removed: %v)",
 			err.Error(), ts.SanitizedName(), cerr)
+	case blind || state != tmux.PaneStateKnown:
+		return fmt.Errorf("%s\n(its finished tmux session %s could not be confirmed gone — it may still hold processes)",
+			err.Error(), ts.SanitizedName())
 	}
 	return err
 }

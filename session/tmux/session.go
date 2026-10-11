@@ -241,6 +241,15 @@ type TmuxSession struct {
 	// behind it, and a teardown must gate on liveness for all of them. Only Start
 	// can establish otherwise, and only at the two points below.
 	provenNoPane bool
+	// spawnAttempted records that a Start reached the point of issuing tmux
+	// new-session — the boundary between "this Start error cannot have created
+	// an af pane" and "this Start error may have left one". Guarded by provenMu;
+	// cleared at the top of every Start, set only after the tracked launch
+	// process actually begins (#5174 review). It is the caller-side answer the
+	// pending-cleanup retention needs: a pre-attempt failure (a wedged probe, a
+	// spawn-dir refusal) never ran new-session, so the only session the name
+	// could possibly hold belongs to someone else.
+	spawnAttempted bool
 	// closedConclusively records that closeAndWaitForPaneExit completed a
 	// conclusive non-blind close — the pane was observed to exit. It is scoped to
 	// the account-swap redundant-stop path: a redundant stopForAccountSwap can skip
@@ -580,6 +589,23 @@ func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() bool {
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
+	t.provenMu.Unlock()
+}
+
+// SpawnAttempted reports whether this Start actually issued tmux new-session.
+// Callers that keep a cleanup handle for a failed spawn must check it: a
+// Start that never reached the launch could not have left an af pane behind
+// the name, so the handle would point the exact-name kill at a session some
+// other owner may hold (#5174 review).
+func (t *TmuxSession) SpawnAttempted() bool {
+	t.provenMu.Lock()
+	defer t.provenMu.Unlock()
+	return t.spawnAttempted
+}
+
+func (t *TmuxSession) setSpawnAttempted(attempted bool) {
+	t.provenMu.Lock()
+	t.spawnAttempted = attempted
 	t.provenMu.Unlock()
 }
 

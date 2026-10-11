@@ -421,6 +421,54 @@ func TestAddShellTab_RetainsNameWhenSpawnTeardownUnconfirmed(t *testing.T) {
 		"the failed spawn's tmux name must be retained for the startup sweep, not dropped with the session object")
 }
 
+// TestAddShellTab_DoesNotRetainWhenSpawnNeverAttempted is the #5174 review
+// fix for the retention boundary: a Start that never reached new-session —
+// here refused by checkSpawnDir because the worktree path does not exist —
+// cannot have left an af pane behind the name. When the has-session probe
+// also fails to prove the name absent (a plain error, not tmux's determinate
+// answer), staging a cleanup handle would point the sweep's exact-name kill
+// at a pane this attempt never created — a foreign session hiding under the
+// wedged probe. The attempted boundary is what keeps the handle off the
+// list (#5174 review).
+func TestAddShellTab_DoesNotRetainWhenSpawnNeverAttempted(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_spawn-refused_agent"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	mockExec, aliveFn, _ := cleanupExec(map[string]bool{agentName: true}, nil)
+	pty := persistPtyFactory{t: t, cmdExec: mockExec}
+
+	repoPath := "/tmp/spawn-refused-repo"
+	// The worktree path names a directory that does NOT exist: the spawn-dir
+	// seam refuses before new-session, so no pane this attempt made can sit
+	// behind the name.
+	worktreeDir := filepath.Join(t.TempDir(), "wt-missing")
+	gw, err := git.NewGitWorktreeFromStorage(repoPath, worktreeDir, agentName,
+		agentName+"-branch", "", false, true)
+	require.NoError(t, err)
+
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, mockExec)
+	inst := &Instance{
+		Title:       agentName,
+		Path:        repoPath,
+		Program:     "claude",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs:        []*Tab{newAgentTab(agentTs)},
+	}
+
+	_, err = inst.AddShellTab()
+	require.Error(t, err)
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"the probe's plain error cannot prove the name absent — the error stays unproven")
+	assert.False(t, aliveFn(shellName), "fixture: new-session never ran, so nothing af made owns the name")
+	assert.Empty(t, inst.PendingTabCleanup(),
+		"a spawn that never reached new-session must not stage an exact-name kill")
+}
+
 // TestAddShellTab_DoesNotRetainWhenNameTaken is the control half: a name held
 // by a LIVE session is not af's to clean up. ErrSessionNameTaken wraps
 // ErrSessionNotStarted deliberately — staging a handle here would let the

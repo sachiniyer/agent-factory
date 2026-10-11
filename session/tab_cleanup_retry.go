@@ -91,8 +91,16 @@ func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
 // ErrSessionNameTaken wraps ErrSessionNotStarted deliberately, so a name
 // legitimately held by a live session is never staged here — the sweep's
 // exact-name kill would otherwise reap someone else's pane.
-func (i *Instance) retainFailedTabCleanup(tmuxName string, startErr error) {
-	if tmuxName == "" || startErr == nil || errors.Is(startErr, tmux.ErrSessionNotStarted) {
+//
+// The spawn-attempted boundary is the other half of the same protection: a
+// Start that never reached new-session (a wedged has-session probe, a
+// spawn-dir refusal, an env-preparation failure) cannot have left an af pane
+// behind the name — but the failed probe may itself have hidden an existing
+// untracked session under it. Retaining there would point the exact-name
+// kill at a pane this attempt never created (#5174 review).
+func (i *Instance) retainFailedTabCleanup(ts *tmux.TmuxSession, tmuxName string, startErr error) {
+	if tmuxName == "" || startErr == nil || ts == nil || !ts.SpawnAttempted() ||
+		errors.Is(startErr, tmux.ErrSessionNotStarted) {
 		return
 	}
 	i.mu.Lock()

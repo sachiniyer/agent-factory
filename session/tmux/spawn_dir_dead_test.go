@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -17,21 +19,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestStartRejectsDeadPaneOverUnenterableDir is the #5174 review fix for the
-// no-source arm: a pane tmux marked dead before verification has no live
-// evidence — procfs stays off (the retained pid may be recycled),
-// pane_current_path expands empty by design, and pane_start_path is the
-// request's own echo, powerless to approve. The verdict then turns on the
-// pathname's own facts: chdir is tmux's only fallback trigger, and it cannot
-// have succeeded into a directory that cannot be entered. A dead pane over
-// an unenterable path is a finished process that may have run in the
-// fallback cwd — refuse and tear down; nothing live is lost (#5174 review).
-func TestStartRejectsDeadPaneOverUnenterableDir(t *testing.T) {
+// TestStartPreservesFinishedPaneAcrossPostExitPermissionChange is the #5174
+// review fix for the dead arm's verdict source: a pane tmux marked dead
+// before verification has no live evidence, but placement is already proven
+// by the spawn itself — the exec shim chdirs into the admitted directory at
+// the instant the command would run and stamps a refusal (exit code +
+// scrollback marker) when it cannot. The refusal channel answering with NO
+// refusal is the only post-exit proof that exists: a second point-in-time
+// accessibility sample — here, the worktree losing its execute bit after the
+// pane exited — describes the verification instant, not the spawn, and must
+// never convict a pane the shim proved entered (#5174 review).
+func TestStartPreservesFinishedPaneAcrossPostExitPermissionChange(t *testing.T) {
 	workDir := t.TempDir()
 
-	// Enterable at admission, denied at verification — the mid-spawn
-	// permission loss is what keeps the spawn reachable so the dead arm
-	// itself is what convicts.
+	// Enterable at admission, denied by the time the walk finishes — the
+	// post-exit flap the retired second sample would have read as a
+	// historical spawn failure.
 	var accessCalls atomic.Int32
 	prevAccess := spawnDirEnterable
 	spawnDirEnterable = func(string) error {
@@ -68,33 +71,32 @@ func TestStartRejectsDeadPaneOverUnenterableDir(t *testing.T) {
 			case strings.Contains(s, "display-message"):
 				switch {
 				case strings.Contains(s, "#{pane_dead}") && strings.Contains(s, "#{pane_pid}"):
-					// paneRowFormat — teardown's panePID. The retained dead
-					// pane answers its dead row, so the teardown observes
-					// the pane and concludes conclusively.
+					// paneRowFormat — teardown's panePID.
 					return []byte("98765|1|\n"), nil
 				case strings.Contains(s, "#{pane_dead}"):
 					return []byte("1\n"), nil // affirmatively dead
+				case strings.Contains(s, "#{pane_dead_status}"):
+					return []byte("0\n"), nil // the shim's channel answered: command ran
 				case strings.Contains(s, "#{pane_start_path}"):
-					return []byte(workDir + "\n"), nil // the request's echo — powerless
+					return []byte(workDir + "\n"), nil
 				}
 				// pane_current_path stays silent: tmux expands it empty for
 				// a dead pane by design.
 				return nil, nil
 			case strings.Contains(s, "list-panes"):
-				return nil, nil // conclusive teardown: no live processes
+				return nil, nil
 			}
 			return []byte("output"), nil
 		},
 	}
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
 
-	err := session.Start(workDir)
-	require.Error(t, err,
-		"a dead pane over a path it provably could not enter is never approved — "+
-			"a fallback-cwd run must not record success")
-	require.ErrorIs(t, err, ErrSpawnDirMissing)
-	assert.True(t, killed,
-		"a spawn af cannot place is torn down, not left holding the name")
+	require.NoError(t, session.Start(workDir),
+		"a post-exit accessibility change cannot convict a pane the shim proved entered")
+	assert.False(t, killed,
+		"a pane that provably ran inside the admitted directory is never torn down")
+	assert.EqualValues(t, 1, accessCalls.Load(),
+		"the admission check is the only enterability sample — no post-exit re-sample")
 }
 
 // TestStartAcceptsFinishedPaneOverEnterableDir is the other half of the
@@ -368,23 +370,10 @@ func deadFlipExec(t *testing.T, sessionName string, deadAnswers []string, fields
 // and pane_current_path go silent as the pane exits, and pane_start_path —
 // the request's own echo — is the only answer still standing. A stale
 // paneLive would let that echo approve itself; the revalidation sees the
-// fresh dead mark instead, drops to the dead arm, and the now-unenterable
-// worktree convicts (#5174 review).
+// fresh dead mark instead, drops to the dead arm, and the shim's recorded
+// refusal convicts (#5174 review).
 func TestStartRevalidatesDeathBeforeEchoConfirms(t *testing.T) {
 	workDir := t.TempDir()
-
-	// Enterable at admission, unenterable by verification — the flap that
-	// makes the fresh dead mark the only evidence that matters.
-	prev := spawnDirEnterable
-	enterCalls := 0
-	spawnDirEnterable = func(string) error {
-		enterCalls++
-		if enterCalls == 1 {
-			return nil
-		}
-		return syscall.EACCES
-	}
-	t.Cleanup(func() { spawnDirEnterable = prev })
 
 	var killed bool
 	sessionName := toTmuxName("midwalk-dead-echo", "")
@@ -392,42 +381,37 @@ func TestStartRevalidatesDeathBeforeEchoConfirms(t *testing.T) {
 		deadFlipExec(t, sessionName, []string{"0", "1"}, map[string]string{
 			"pane_pid":        "99999999", // no /proc entry — procfs goes silent
 			"pane_start_path": workDir,    // the request's own echo
+			// The dead arm's convict: the shim's own refusal channel —
+			// the spawn-tied evidence the echo could never produce.
+			"pane_dead_status": strconv.Itoa(sessionenv.SpawnDirRefusalExitCode),
+			"capture-pane":     sessionenv.SpawnDirRefusalMarker + ": chdir /x: permission denied\n",
 		}, &killed))
 
 	err := session.Start(workDir)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrSpawnDirMissing,
-		"a pane dead by verification over an unenterable dir ran in the fallback — the echo must not approve it")
+		"a pane dead by verification is judged on the shim's refusal channel — the echo must not approve it")
 	assert.True(t, killed)
 }
 
 // TestStartRevalidatesDeathBeforeSilenceAccepts is the no-source half: every
 // placement source answers empty, and the pane_dead bit cached at the walk's
 // open still reads live. The fresh re-probe finds the dead mark, so the
-// verdict reaches the dead arm — which convicts the unenterable worktree —
-// instead of the silence-accept the stale bit would have taken (#5174
-// review).
+// verdict reaches the dead arm — which convicts on the shim's refusal
+// channel — instead of the silence-accept the stale bit would have taken
+// (#5174 review).
 func TestStartRevalidatesDeathBeforeSilenceAccepts(t *testing.T) {
 	workDir := t.TempDir()
-
-	// Enterable at admission, unenterable by verification — see the echo
-	// half above for why the sequencing matters.
-	prev := spawnDirEnterable
-	enterCalls := 0
-	spawnDirEnterable = func(string) error {
-		enterCalls++
-		if enterCalls == 1 {
-			return nil
-		}
-		return syscall.EACCES
-	}
-	t.Cleanup(func() { spawnDirEnterable = prev })
 
 	var killed bool
 	sessionName := toTmuxName("midwalk-dead-silent", "")
 	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
 		deadFlipExec(t, sessionName, []string{"0", "1"}, map[string]string{
 			"pane_pid": "", // paneLive makes proc-cwd ask, but nothing answers
+			// See the echo half — the dead arm convicts on the shim's
+			// recorded refusal, never on later accessibility samples.
+			"pane_dead_status": strconv.Itoa(sessionenv.SpawnDirRefusalExitCode),
+			"capture-pane":     sessionenv.SpawnDirRefusalMarker + ": chdir /x: permission denied\n",
 		}, &killed))
 
 	err := session.Start(workDir)
@@ -533,4 +517,139 @@ func TestStartDoesNotConvictOnUnwalkableObservation(t *testing.T) {
 	require.NoError(t, session.Start(workDir),
 		"a stat failure inside the ancestry walk is inconclusive, never an outside verdict")
 	assert.False(t, killed)
+}
+
+// TestStartDiscardsProcCwdWhenPaneDiesMidWalk is the #5174 review fix for
+// the procfs source's stale-liveness window: pane_dead answers "0" when the
+// walk opens, so /proc/<pane_pid>/cwd is read — and shows a directory
+// OUTSIDE the worktree, exactly what a recycled pid's owner would report.
+// Before the answer may convict, pane_dead is re-read: the pane exited
+// between the two samples, so the procfs record is a stranger's and must be
+// discarded. The verdict falls to the dead arm, where the shim's channel
+// (status "0", no refusal) proves the pane entered the admitted directory
+// (#5174 review).
+func TestStartDiscardsProcCwdWhenPaneDiesMidWalk(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("procfs fallback is Linux-only")
+	}
+	workDir := t.TempDir()
+	strangerDir := t.TempDir() // the recycled pid's real cwd — outside workDir
+
+	const pid = "98765001"
+	procRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(procRoot, pid), 0755))
+	require.NoError(t, os.Symlink(strangerDir, filepath.Join(procRoot, pid, "cwd")))
+	prev := procfsRoot
+	procfsRoot = procRoot
+	t.Cleanup(func() { procfsRoot = prev })
+
+	var killed bool
+	sessionName := toTmuxName("proc-died-midwalk", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		deadFlipExec(t, sessionName, []string{"0", "1"}, map[string]string{
+			"pane_pid":         pid,
+			"pane_dead_status": "0", // the shim's channel: command ran, no refusal
+		}, &killed))
+
+	require.NoError(t, session.Start(workDir),
+		"a procfs cwd read after the pane's death names a recycled pid, never a verdict")
+	assert.False(t, killed)
+}
+
+// TestStartHoldsFinishedPaneWhenRefusalChannelUnread is the inconclusive
+// half of the shim-verdict arm: pane_dead_status expands empty AND the
+// scrollback capture fails — nothing then established whether the shim
+// passed or refused, so the dead pane is held with an Unknown verdict
+// instead of accepted on silence or torn down on a guess (#5174 review).
+func TestStartHoldsFinishedPaneWhenRefusalChannelUnread(t *testing.T) {
+	workDir := t.TempDir()
+
+	var killed, probed bool
+	sessionName := toTmuxName("dead-channel-unread", "")
+	exec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "has-session"):
+				if killed || !probed {
+					probed = true
+					return fmt.Errorf("can't find session")
+				}
+				return nil
+			case strings.Contains(s, "kill-session"):
+				killed = true
+				return nil
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
+			s := cmd.String()
+			switch {
+			case strings.Contains(s, "show-options"):
+				return nil, fmt.Errorf("no server running")
+			case strings.Contains(s, "display-message"):
+				switch {
+				case strings.Contains(s, "#{pane_dead}") && strings.Contains(s, "#{pane_pid}"):
+					return []byte("98765|1|\n"), nil
+				case strings.Contains(s, "#{pane_dead}"):
+					return []byte("1\n"), nil
+				}
+				// pane_dead_status and everything else: this tmux does not
+				// answer — the refusal channel's status half is unread.
+				return nil, nil
+			case strings.Contains(s, "capture-pane"):
+				// The scrollback half fails too — a server hiccup, a wedged
+				// pane, anything. An unread channel is inconclusive, never
+				// "no refusal".
+				return nil, fmt.Errorf("capture-pane refused")
+			case strings.Contains(s, "list-panes"):
+				return nil, nil
+			}
+			return []byte("output"), nil
+		},
+	}
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t), exec)
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirUnknown,
+		"an unread refusal channel is inconclusive — held for retry, not approved")
+	assert.False(t, killed,
+		"no positive mismatch means the dead pane keeps its finish surface")
+}
+
+// TestStartPreservesFinishedPaneWhenPathStatUnverifiable is the pathname
+// arm's inconclusive half: the pane is dead, the shim's channel answered
+// clean, but the no-source re-stat of the worktree path fails with
+// something other than ENOENT — an EACCES/EIO that says nothing about
+// where the pane ran. Inconclusive evidence preserves the survivor under
+// an Unknown verdict rather than tearing it down (#5174 review).
+func TestStartPreservesFinishedPaneWhenPathStatUnverifiable(t *testing.T) {
+	workDir := t.TempDir()
+
+	// Admission stats cleanly; the dead arm's re-stat hits a permission
+	// wall — inconclusive, never a disappearance.
+	var statCalls atomic.Int32
+	prevStat := statSpawnDir
+	statSpawnDir = func(path string) (os.FileInfo, error) {
+		if path == workDir && statCalls.Add(1) > 1 {
+			return nil, &os.PathError{Op: "stat", Path: path, Err: syscall.EACCES}
+		}
+		return prevStat(path)
+	}
+	t.Cleanup(func() { statSpawnDir = prevStat })
+
+	var killed bool
+	sessionName := toTmuxName("dead-stat-unread", "")
+	session := newTmuxSession(sessionName, "claude", NewMockPtyFactory(t),
+		liveAfterSpawnExec(t, sessionName, map[string]string{
+			"pane_dead":        "1",
+			"pane_dead_status": "0",
+		}, &killed))
+
+	err := session.Start(workDir)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSpawnDirUnknown)
+	assert.False(t, killed,
+		"an unverifiable pathname must not tear down the pane it cannot place")
 }

@@ -2,6 +2,7 @@ package session
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,7 +49,17 @@ type tmuxModel struct {
 	startDirs map[string]string
 	started   []string
 	killed    []string
-	missing   *exec.ExitError
+	// unkillable names sessions whose kill-session refuses — the survivor an
+	// unconfirmed teardown leaves behind (#5174 review).
+	unkillable map[string]bool
+	// vanishAfterExit names sessions that drop out of tmux the instant the
+	// exit watch has read their finished pane — the teardown that follows
+	// then asks after a session that was there at kill-intent and is gone at
+	// kill time, the blind-close race (#5174 review). exitObserved flips
+	// internal once the paneExitFormat answer lands.
+	vanishAfterExit map[string]bool
+	exitObserved    map[string]bool
+	missing         *exec.ExitError
 }
 
 func newTmuxModel(t *testing.T, alive ...string) *tmuxModel {
@@ -58,8 +69,9 @@ func newTmuxModel(t *testing.T, alive ...string) *tmuxModel {
 	m := &tmuxModel{
 		t: t, alive: map[string]bool{}, finished: map[string]finishedPane{},
 		failOnStart: map[string]finishedPane{}, launching: map[string]*launchingPane{}, output: map[string]string{},
-		startDirs: map[string]string{},
-		missing:   missing,
+		startDirs: map[string]string{}, unkillable: map[string]bool{},
+		vanishAfterExit: map[string]bool{}, exitObserved: map[string]bool{},
+		missing: missing,
 	}
 	for _, name := range alive {
 		m.alive[name] = true
@@ -157,7 +169,23 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 			return []byte(paneFieldsBlank.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
 		}
 		return nil, m.gone(name)
+	case m.exitObserved[name] && m.vanishAfterExit[name]:
+		// The exit watch read the finished pane, and the very next query
+		// finds the session gone — the pane-vanishes-before-close race the
+		// teardown must report blind rather than success (#5174 review).
+		delete(m.alive, name)
+		delete(m.exitObserved, name)
+		if strings.Contains(joined, "display-message") {
+			return []byte(paneFieldsBlank.Replace(c.Args[len(c.Args)-1]) + "\n"), nil
+		}
+		return nil, m.gone(name)
 	case strings.Contains(joined, "kill-session"):
+		if m.unkillable[name] {
+			// The refusal leaves the session standing: the teardown's own
+			// probe then reports it unconfirmed — the shape a failed close
+			// must not launder into "conclusively gone" (#5174 review).
+			return nil, errors.New("kill-session refused")
+		}
 		m.killed = append(m.killed, name)
 		delete(m.alive, name)
 		delete(m.finished, name)
@@ -186,6 +214,11 @@ func (m *tmuxModel) answer(c *exec.Cmd) ([]byte, error) {
 		m.finished[name] = m.failOnStart[name]
 	}
 	if pane, ok := m.finished[name]; ok {
+		if strings.Contains(joined, "#{pane_dead_time}") && m.vanishAfterExit[name] {
+			// The exit watch's format — armed only after the exit has been
+			// read, so the finished pane still answers the observation.
+			m.exitObserved[name] = true
+		}
 		if answer, ok := pane.answer(c); ok {
 			return []byte(answer), nil
 		}
@@ -515,6 +548,58 @@ func TestAddProcessTabReportsACommandThatFailsAtOnce(t *testing.T) {
 	assert.NotContains(t, err.Error(), "Pane is dead")
 	assert.Equal(t, 1, inst.TabCount(), "no tab is added for a command that never ran")
 	assert.Equal(t, 1, m.killCount(name), "the held pane is removed")
+	require.ErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"a conclusively removed pane carries the same nothing-running authority as any unstarted spawn")
+	assert.Empty(t, inst.PendingTabCleanup(),
+		"nothing survives to need a cleanup handle")
+}
+
+// TestAddProcessTab_RetainsNameWhenFinishedPaneCloseUnconfirmed is the #5174
+// review fix for the finished-pane teardown: when the held pane's session
+// cannot be confirmed gone — here kill-session refuses outright — the error
+// must NOT carry ErrSessionNotStarted, and the caller must stage the exact
+// tmux name on pendingTabCleanup so the startup sweep can retry it. Without
+// either half the survivor is invisible to every later teardown and blocks
+// every spawn that would re-derive the name (#5174 review).
+func TestAddProcessTab_RetainsNameWhenFinishedPaneCloseUnconfirmed(t *testing.T) {
+	m := newTmuxModel(t, scopeAgent)
+	inst := scopedInstance(t, m, "")
+	name := scopeAgent + "__watch"
+	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000"}
+	m.unkillable[name] = true
+
+	_, err := inst.AddProcessTab("./watch.sh", "watch")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "exited immediately with status 127")
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"an unconfirmed teardown cannot claim nothing is running")
+	assert.Equal(t, []TabCleanupData{{TmuxName: name}}, inst.PendingTabCleanup(),
+		"the unconfirmed survivor's exact name must reach the startup sweep")
+}
+
+// TestAddProcessTab_RetainsNameWhenFinishedPaneVanishesBeforeClose is the
+// blind-teardown half of the same fix — and the fail-first pair for the
+// waiting, blindness-reporting close: the finished pane's session drops out
+// of tmux between the exit watch and the teardown, so the close runs with
+// no pane ever observed and the descendant capture blind. Close() alone
+// reports that "session gone" as success — PaneStateKnown — and the old
+// path attached ErrSessionNotStarted on it, telling callers nothing could
+// still be writing into the worktree a kill/archive is about to move. The
+// blindness-reporting close refuses to launder it: the error stays
+// non-sentinel and the name stays reachable by the sweep (#5174 review).
+func TestAddProcessTab_RetainsNameWhenFinishedPaneVanishesBeforeClose(t *testing.T) {
+	m := newTmuxModel(t, scopeAgent)
+	inst := scopedInstance(t, m, "")
+	name := scopeAgent + "__watch"
+	m.failOnStart[name] = finishedPane{status: "127", at: "1726000000"}
+	m.vanishAfterExit[name] = true
+
+	_, err := inst.AddProcessTab("./watch.sh", "watch")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, tmux.ErrSessionNotStarted,
+		"a teardown that never observed a pane cannot claim nothing survives")
+	assert.Equal(t, []TabCleanupData{{TmuxName: name}}, inst.PendingTabCleanup(),
+		"a blind teardown's name must stay reachable by the startup sweep")
 }
 
 // On a loaded host af's launch shim can take longer than the watch before the

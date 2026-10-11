@@ -18,6 +18,10 @@ var processExec = syscall.Exec
 // the pane-side chdir it stands for is what the spawn-dir refusal is made of.
 var spawnDirChdir = os.Chdir
 
+// spawnDirStat is os.Stat behind the same seam: the entered-directory inode
+// check must be drivable without a real chdir (#5174 review).
+var spawnDirStat = os.Stat
+
 // enterSpawnDir applies the pane's own placement enforcement: the directory
 // SpawnDirPrefix baked into the launch line is the ONE the command must run
 // in, so the shim chdirs there itself — repairing tmux's silent -c fallback
@@ -30,7 +34,43 @@ func enterSpawnDir() error {
 	if want == "" {
 		return nil
 	}
-	return spawnDirChdir(want)
+	if err := spawnDirChdir(want); err != nil {
+		return err
+	}
+	return verifyEnteredInode()
+}
+
+// verifyEnteredInode checks that the chdir landed on the inode af ADMITTED,
+// not just the pathname af recorded: between checkSpawnDir's stat and this
+// chdir, a rename-and-replace or a retargeted worktree symlink can make the
+// recorded path resolve to a directory af never approved — and once the
+// command execs there, no post-spawn teardown can undo its filesystem or
+// network side effects (#5174 review). The launch line carries the admitted
+// inode pair in SpawnDirInodeEnv; an unset value means a launcher that
+// predates the pair — nothing to verify — while a SET but malformed value
+// refuses, because a corrupted identity claim must not silently skip the
+// check it exists to perform.
+func verifyEnteredInode() error {
+	devIno := os.Getenv(SpawnDirInodeEnv)
+	if devIno == "" {
+		return nil
+	}
+	wantDev, wantIno, ok := parseSpawnDirInode(devIno)
+	if !ok {
+		return fmt.Errorf("malformed %s %q", SpawnDirInodeEnv, devIno)
+	}
+	info, err := spawnDirStat(".")
+	if err != nil {
+		return fmt.Errorf("stat the entered directory: %w", err)
+	}
+	gotDev, gotIno, ok := spawnDirInodeID(info)
+	if !ok {
+		return fmt.Errorf("the entered directory exposes no inode identity")
+	}
+	if gotDev != wantDev || gotIno != wantIno {
+		return fmt.Errorf("entered directory is not the admitted inode")
+	}
+	return nil
 }
 
 // WrapCommand builds the shell command handed to tmux. It contains only the af

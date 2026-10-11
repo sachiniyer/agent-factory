@@ -43,7 +43,11 @@ func wrappedProgramForTest(t *testing.T, executable, program string) string {
 // record the pane's exec shim enforces at the spawn instant (#5174 review).
 func spawnWrappedForTest(t *testing.T, workdir, executable, program string) string {
 	t.Helper()
-	return sessionenv.SpawnDirPrefix(workdir) + wrappedProgramForTest(t, executable, program)
+	info, err := os.Stat(workdir)
+	if err != nil {
+		t.Fatalf("spawnWrappedForTest needs a real workdir to admit: %v", err)
+	}
+	return sessionenv.SpawnDirPrefix(workdir, info) + wrappedProgramForTest(t, executable, program)
 }
 
 // TestStartDoesNotGiveTmuxAmbientSecrets exercises Start's production spawn
