@@ -982,3 +982,34 @@ func TestNotePaneCaptureObservedHonorsPriorExpiryAcrossCadence(t *testing.T) {
 	require.True(t, inst.NotePaneCaptureObserved(t0.Add(41*time.Second), time.Second),
 		"past the declared expiry is a hole the streak cannot borrow")
 }
+
+// A confirmation dialog is an active waiting state, not stillness (#5221
+// review): a prompt frame between the unchanged samples retires the still
+// candidate, so stillness must re-earn the whole grace prompt-free — a turn
+// parked at y/n must not latch the edge and let its resumed output pass as
+// the new prompt's attributable churn.
+func TestTaskRunStillCandidateRetiresOnPromptWait(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-5 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	_, epoch := inst.InFlightOpAndEpoch()
+	// Contend the boundary so the still base is owed, not seeded.
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(time.Second), epoch))
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0.Add(2*time.Second)))
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	still := t0.Add(time.Minute)
+	require.False(t, inst.NotePaneStillAtEpoch(still, epoch))
+	require.Equal(t, still, inst.taskRunStillCandidateAt, "the first still frame opens the candidate")
+
+	inst.NotePaneWaitingAtEpoch(epoch)
+	require.True(t, inst.taskRunStillCandidateAt.IsZero(),
+		"a waiting-dialog frame retires the stillness candidate")
+
+	resumed := still.Add(taskRunStillGrace + time.Second)
+	require.False(t, inst.NotePaneStillAtEpoch(resumed, epoch),
+		"the interrupted run re-opens the candidate rather than latching")
+	require.True(t, inst.NotePaneStillAtEpoch(resumed.Add(taskRunStillGrace+time.Second), epoch),
+		"an uninterrupted run past the grace latches the edge")
+	require.False(t, inst.TaskRunStillBaseAt().IsZero())
+}

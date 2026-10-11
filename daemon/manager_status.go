@@ -405,13 +405,21 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
 	} else if obs.Captured && !obs.Baseline {
-		// A confirmed-unchanged frame is the stillness edge a boundary bound
-		// over an already-churning pane owes before its churn may stand in
-		// for the turn (#5221 review). A baseline frame is a first look —
-		// present, but not proven unchanged — so it cannot stamp it. The
-		// !obs.Captured return above makes the captured gate belt-and-braces,
-		// kept local so the invariant survives a reorder (#5221 review).
-		if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+		if obs.HasPrompt {
+			// A confirmation dialog is an active waiting state, not
+			// stillness (#5221 review): withhold the stamp and retire an
+			// open candidate — the still run must be prompt-free or a
+			// turn parked at a dialog would latch the edge and let its
+			// resumed output pass as the new prompt's churn.
+			instance.NotePaneWaitingAtEpoch(epoch)
+		} else if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+			// A confirmed-unchanged frame is the stillness edge a boundary
+			// bound over an already-churning pane owes before its churn may
+			// stand in for the turn (#5221 review). A baseline frame is a
+			// first look — present, but not proven unchanged — so it cannot
+			// stamp it. The !obs.Captured return above makes the captured
+			// gate belt-and-braces, kept local so the invariant survives a
+			// reorder (#5221 review).
 			churnCheckpoint = true
 		}
 	}
@@ -773,7 +781,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// unanswered capture is all-false here — Updated AND Baseline — so it
 		// must be gated out explicitly or the blind frame would stamp the
 		// edge it cannot see (#5221 review).
-		if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
+		if hasPrompt {
+			// A confirmation dialog is an active waiting state, not
+			// stillness (#5221 review): withhold the stamp and retire an
+			// open candidate — the still run must be prompt-free or a
+			// turn parked at a dialog would latch the edge and let its
+			// resumed output pass as the new prompt's churn.
+			instance.NotePaneWaitingAtEpoch(epoch)
+		} else if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
 			settlementCheckpoint = true
 		}
 	}

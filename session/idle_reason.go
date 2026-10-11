@@ -377,6 +377,22 @@ func (i *Instance) NotePaneStillAtEpoch(at time.Time, observedEpoch uint64) bool
 	return true
 }
 
+// NotePaneWaitingAtEpoch retires an open stillness candidate on affirmative
+// evidence the pane is mid-turn awaiting input (#5221 review): a
+// confirmation dialog is an active waiting state, not stillness, so a still
+// run interrupted by one must re-earn the whole grace prompt-free. The
+// already-latched base is untouched — it records a still edge the pane
+// genuinely showed earlier, and a later dialog cannot un-prove that past.
+// Epoch-fenced like NotePaneStillAtEpoch.
+func (i *Instance) NotePaneWaitingAtEpoch(observedEpoch uint64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stateEpoch != observedEpoch {
+		return
+	}
+	i.taskRunStillCandidateAt = time.Time{}
+}
+
 // taskRunQuietReleaseLocked reports whether the completion gate is satisfied
 // by the fallback arm alone: post-attempt pane churn followed by silence
 // longer than the completion grace. Satisfied here never means the agent

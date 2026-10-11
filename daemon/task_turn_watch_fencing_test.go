@@ -170,6 +170,65 @@ func (b *flakyCaptureBackend) HasUpdatedObserved(*session.Instance) (bool, bool,
 	return false, false, "", false, b.captured
 }
 
+// promptWaitBackend answers HasUpdatedObserved with a confirmed-unchanged
+// frame — optionally carrying a confirmation-dialog prompt flag, the shape a
+// turn parked at a y/n dialog produces (#5221 review).
+type promptWaitBackend struct {
+	*session.FakeBackend
+	captured bool
+	prompt   bool
+}
+
+func (b *promptWaitBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
+	return false, b.prompt, "confirm? [y/n]", false, b.captured
+}
+
+// A confirmation dialog is an active waiting state, not pane stillness
+// (#5221 review): an unchanged frame carrying HasPrompt must withhold the
+// still stamp AND retire an open candidate, or a turn parked at the dialog
+// latches the edge and its resumed output passes as the new prompt's churn.
+func TestPromptWaitRetiresTaskRunStillCandidate(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &promptWaitBackend{FakeBackend: session.NewFakeBackend(), captured: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "wait-still", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	// A contended boundary owes the still base rather than seeding it.
+	boundary := now.Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(now.Add(-30*time.Second), epoch))
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, now.Add(-15*time.Second)))
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(), "precondition: a contended bind owes the stillness edge")
+
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	now = now.Add(2 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+
+	// The dialog appears — the waiting frame must retire the candidate.
+	backend.prompt = true
+	now = now.Add(2 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+
+	// Stillness resumes past where the interrupted run would have latched:
+	// the 5s grace re-earns from the first prompt-free frame, so the base
+	// must still be owed one full uninterrupted run.
+	backend.prompt = false
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(),
+		"a dialog-interrupted still run reopened rather than latching")
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.False(t, inst.TaskRunStillBaseAt().IsZero(),
+		"an uninterrupted run past the grace latches the edge")
+}
+
 // The paused backstop probe must drop an unanswered capture whole: settling
 // the all-false frame would read the pane idle on no evidence, letting the
 // last confirmed capture's still-live streak release the quiet arm mid-outage
