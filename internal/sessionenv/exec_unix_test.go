@@ -360,11 +360,14 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 // entry denies only when it comes BEFORE that hit — an operator's trailing
 // ':' after the directory that holds the agent keeps the grant (#5265
 // review), while a dot or relative entry ahead of it would resolve into the
-// pane's working directory, which is repository content.
+// pane's working directory, which is repository content. An ALL-ABSOLUTE
+// walk with no hit grants too: exec can then only fail, never land in the
+// repository — the bare agent name is simply not installed.
 func TestExecInvocationSearchPathGrantFollowsFirstHit(t *testing.T) {
 	with := t.TempDir()
 	writeExecutableFixture(t, with, "codex")
 	without := t.TempDir()
+	without2 := t.TempDir()
 	for _, test := range []struct {
 		path string
 		want bool
@@ -374,7 +377,9 @@ func TestExecInvocationSearchPathGrantFollowsFirstHit(t *testing.T) {
 		{path: without + ":"},
 		{path: ":" + with},
 		{path: ""},
-		{path: without},
+		{path: without + ":" + without2 + ":bin"},
+		{path: without, want: true},
+		{path: without + ":" + without2, want: true},
 		{path: with + ":", want: true},
 		{path: with + ":.", want: true},
 		{path: without + ":" + with, want: true},

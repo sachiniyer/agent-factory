@@ -189,6 +189,9 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	ptyFactory := NewMockPtyFactory(t)
 
 	// First two has-session calls report missing (the outer Restore check, then
@@ -261,6 +264,9 @@ func TestStartTmuxSession(t *testing.T) {
 	// marker injection is covered by TestStartInjectsEnvMarkers.
 	forceNewSessionEnvMarkers(t, false)
 	forceSessionEnvExecutable(t, "/test/af")
+	// The expected argv carries the claude marker; a controlled PATH fixture
+	// keeps the launcher's grant from depending on the host's PATH (#5265).
+	forceAgentOnSearchPath(t, "claude")
 	ptyFactory := NewMockPtyFactory(t)
 
 	created := false

@@ -150,11 +150,12 @@ func credentialAgentForCommand(command string) string {
 // material (docker mounts, hook environments — via the remote variant
 // below). It returns the supported agent command invokes ONLY when the
 // file POSIX resolution selects is attributable to the operator — a bare
-// name whose first PATH hit is an absolute directory outside workDir, or
-// an absolute path outside workDir. Any spelling that lets the checked-out
-// repository pick the file earns no grant, because program_overrides is an
-// in-repo config key and a repo can therefore name an executable it ships
-// (#5265):
+// name whose first PATH hit is an absolute directory outside workDir or
+// whose all-absolute PATH walk never lands a hit (exec can then only fail,
+// never run repository content), or an absolute path outside workDir. Any
+// spelling that lets the checked-out repository pick the file earns no
+// grant, because program_overrides is an in-repo config key and a repo can
+// therefore name an executable it ships (#5265):
 //
 //   - a RELATIVE executable (./codex, bin/codex, ../codex) resolves against
 //     the pane's working directory;
@@ -247,7 +248,8 @@ func executableAttributableToOperator(invocation agentCommand, environ []string,
 // working tree, which is repository content whatever its spelling. A bare
 // name resolves through PATH: the inherited environment is the attribution
 // channel, so the first entry holding the executable must be absolute and
-// outside workDir.
+// outside workDir — and an all-absolute walk that finds no hit attributes
+// too, since exec can then only fail rather than land in the repository.
 func spellingAttributableToOperator(executable string, environ []string, workDir string) bool {
 	if strings.Contains(executable, "/") {
 		return filepath.IsAbs(executable) && pathOutsideWorkDir(executable, workDir)
@@ -294,10 +296,11 @@ func pathOutsideWorkDir(path, workDir string) bool {
 // workDir. An empty or relative entry resolves in or relative to the working
 // directory — repository content — and denies before any absolute hit, while
 // an absolute entry that does not hold the file is skipped exactly as execvp
-// skips it (ENOENT and EACCES alike continue the walk). A PATH that never
-// holds the executable denies: execvp then fails, and nothing attributable
-// runs. An absent PATH resolves through execvp's compiled-in default, which
-// is absolute and operator-controlled.
+// skips it (ENOENT and EACCES alike continue the walk). An ALL-ABSOLUTE walk
+// that never holds the executable still grants: resolution can then only
+// fail, never land in the repository — nothing repo-controlled runs, which is
+// what the grant exists to prevent. An absent PATH resolves through execvp's
+// compiled-in default, which is absolute and operator-controlled.
 //
 // The stat is advisory only — the filesystem can change between this check
 // and the shell's own resolution at exec (TOCTOU). Exploiting the gap needs
@@ -319,7 +322,7 @@ func searchPathAttributesExecutable(environ []string, name, workDir string) bool
 		}
 		return pathOutsideWorkDir(filepath.Join(dir, name), workDir)
 	}
-	return false
+	return true
 }
 
 // pathEntryHoldsExecutable reports whether dir contains an executable file
