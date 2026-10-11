@@ -210,9 +210,12 @@ export function shouldCloseSavedField(
  * 2: a write warning already copied into channel 2 verbatim by the server's
  * failed/unconfirmed merge, and the tokenless-exposure forecast (exposureWarning)
  * for a listener channel 2 already carries the authoritative notice
- * (ListenerExposureNotice/PreviewListenerExposureNotice) for — matched by
- * listener key, so a notice for network.listen_addr does not suppress a forecast
- * for network.preview_listen_addr. Other per-write advisories (the
+ * (ListenerExposureNotice/PreviewListenerExposureNotice) for — matched by listener
+ * key AND address, so a notice for network.listen_addr at one address does not
+ * suppress a forecast for network.listen_addr at a different address (a failed
+ * rebind can leave the serving address and the configured address different), nor
+ * a notice for network.listen_addr suppress a forecast for
+ * network.preview_listen_addr. Other per-write advisories (the
  * unregistered-account warning, the project-scoped branch_prefix notice) have no
  * apply-side counterpart and are always preserved.
  *
@@ -235,20 +238,28 @@ function isListenerExposureWarning(w: string): boolean {
   return w.includes("is reachable from the network");
 }
 
-// listenerExposureKey returns the listener key an exposure warning describes —
-// `network.listen_addr` or `network.preview_listen_addr` — so a forecast for one
-// listener is deduplicated only against an authoritative notice for the SAME
-// listener. Both channels format the exposure identically: the key, then a
-// quoted address, then "is reachable from the network ...", so the key is the
-// prefix before the first quoted address. Two different listeners can each
-// carry an exposure notice (a successful control-plane rebind on channel 2
-// while a preview rebind failed on channel 1, or the inverse), and a notice for
-// one is not an authoritative copy of a forecast for the other. Returns "" for a
+// listenerExposureIdentity returns the listener key AND the quoted address an
+// exposure warning describes — e.g. `network.listen_addr 0.0.0.0:9443` — so a
+// forecast is deduplicated only against an authoritative notice for the SAME
+// listener at the SAME address. Both channels format the exposure identically:
+// the key, then a quoted address, then "is reachable from the network ...", so
+// the identity is the key plus the address between the first quotes. Matching by
+// key alone is not enough: when a listener rebind has failed and the serving
+// address differs from the configured one, channel 2 (ListenerExposureNotice)
+// names the serving bound address while channel 1 (exposureWarning) forecasts the
+// configured address that will be exposed after restart
+// (TestApplyConfigExposureNoticePerKeyOrderNamesServingAddress pins the serving
+// vs requested split). A notice for the serving address is not an authoritative
+// copy of a forecast for a different address the listener has not yet bound, so
+// the address is part of the identity. Two different listeners can each carry an
+// exposure notice (a successful control-plane rebind on channel 2 while a
+// preview rebind failed on channel 1, or the inverse), and a notice for one is
+// not an authoritative copy of a forecast for the other. Returns "" for a
 // warning that is not an exposure warning; callers gate on
 // isListenerExposureWarning first.
-function listenerExposureKey(w: string): string {
-  const m = w.match(/^(\S+) "/);
-  return m ? m[1] : "";
+function listenerExposureIdentity(w: string): string {
+  const m = w.match(/^(\S+) "([^"]+)"/);
+  return m ? `${m[1]} ${m[2]}` : "";
 }
 
 export function saveNotice(resp: ConfigSetResponse): string {
@@ -270,10 +281,14 @@ export function saveNotice(resp: ConfigSetResponse): string {
   //      ListenerExposureNotice/PreviewListenerExposureNotice). Both channels
   //      phrase that hazard differently and the server keeps channel 2
   //      authoritative on a successful exposure transition, so the forecast is
-  //      dropped only when channel 2 carries the notice for the SAME listener —
-  //      network.listen_addr and network.preview_listen_addr are independent
-  //      listeners, and a notice for one is not an authoritative copy of a
-  //      forecast for the other. listenerExposureKey matches them.
+   //      dropped only when channel 2 carries the notice for the SAME listener at
+   //      the SAME address — network.listen_addr and network.preview_listen_addr
+   //      are independent listeners, and a notice for one is not an authoritative
+   //      copy of a forecast for the other; and even for the same listener a
+   //      failed rebind can leave the serving address (channel 2) different from
+   //      the configured address (channel 1), in which case the forecast names a
+   //      future state the notice does not cover. listenerExposureIdentity matches
+   //      them.
   //
   // Other per-write advisories (the unregistered-account warning, the
   // project-scoped branch_prefix notice) have no apply-side counterpart and are
@@ -284,8 +299,8 @@ export function saveNotice(resp: ConfigSetResponse): string {
           return false;
         }
         if (isListenerExposureWarning(w)) {
-          const key = listenerExposureKey(w);
-          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureKey(aw) === key)) {
+          const id = listenerExposureIdentity(w);
+          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureIdentity(aw) === id)) {
             return false;
           }
         }
