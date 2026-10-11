@@ -339,6 +339,18 @@ func pruneFilesystemRefusal(data session.InstanceData) string {
 			case probeErr != nil:
 				return fmt.Sprintf("could not establish whether repo %s is present: %v", repoPath, probeErr)
 			}
+			// Repo present but the tree is gone, so the recorded branch is
+			// the ONLY recovery handle the candidate still promises — it
+			// must resolve before the row lists as reclaimable (#5136 Codex
+			// round 11). The probe's error is UNKNOWN, not absent
+			// (#3243): refuse rather than guess either way.
+			branch := pruneBranchFor(data)
+			switch exists, berr := boundedLocalBranchExists(repoPath, branch); {
+			case berr != nil:
+				return fmt.Sprintf("could not verify recovery branch %s in %s: %v", branch, repoPath, berr)
+			case !exists:
+				return fmt.Sprintf("recovery branch %s no longer exists in %s — the record has no kept branch to promise", branch, repoPath)
+			}
 			return ""
 		}
 		return fmt.Sprintf("could not inspect %s before deletion: %v", wtPath, err)
@@ -393,6 +405,35 @@ func pruneBranchFor(data session.InstanceData) string {
 	}
 	return data.Worktree.BranchName
 }
+
+// boundedLocalBranchExists wraps sessiongit.LocalBranchExists — whose own
+// stat/git probes are unbounded — in the same goroutine-flight concession
+// DirSizeBytes makes for its walk (session/prune.go): a stalled origin must
+// surface as a deadline to the listing, not an unbounded syscall. The parked
+// worker is the same accepted leak the bounded walk carries.
+func boundedLocalBranchExists(repoRoot, branch string) (bool, error) {
+	type result struct {
+		ok  bool
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ok, err := sessiongit.LocalBranchExists(repoRoot, branch)
+		done <- result{ok, err}
+	}()
+	select {
+	case r := <-done:
+		return r.ok, r.err
+	case <-time.After(pruneProbeDeadline):
+		return false, fmt.Errorf("branch probe for %s in %s did not answer within %s", branch, repoRoot, pruneProbeDeadline)
+	}
+}
+
+// pruneProbeDeadline bounds the filesystem/git probes the listing wraps
+// itself (the branch check above). It matches the deadline session's own
+// bounded helpers use — long enough for a healthy repo, short enough that a
+// stalled mount fails the listing instead of hanging it.
+const pruneProbeDeadline = 10 * time.Second
 
 // PruneSessions is the control-socket/HTTP handler for the prune RPC. The
 // run is a pure read — no admission gate beyond manager readiness, matching

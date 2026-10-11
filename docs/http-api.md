@@ -256,7 +256,9 @@ the request needs a scope — `repo_id` or `all: true`, which are mutually
 exclusive. `reclaimable_bytes` counts **allocated** disk
 blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
 hard-linked file is credited only when deleting the tree removes its last
-link — it is what a deletion would actually free, not apparent file size. A
+link. It is an upper bound on what a deletion frees, not apparent file size:
+extents shared with a copy-on-write reflink clone outside the tree are still
+counted, so on Btrfs/XFS the free space recovered can be less than the total. A
 session whose recorded origin repository
 is gone is refused — with the repo deleted there is no kept branch, so the
 archived worktree may be the last copy of the work;

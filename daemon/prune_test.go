@@ -412,6 +412,29 @@ func TestPruneSessions_RefusesRepoGoneOriginWithMissingWorktree(t *testing.T) {
 	assert.Contains(t, resp.Skipped[0].Reason, "origin repository")
 }
 
+// TestPruneSessions_RefusesMissingWorktreeWithDeletedBranch: when the tree
+// was deleted out of band AND the recorded branch was deleted from the
+// origin, the candidate's only remaining recovery handle is gone — the row
+// must refuse, not list a "kept" branch that does not exist (#5136 Codex
+// round 11).
+func TestPruneSessions_RefusesMissingWorktreeWithDeletedBranch(t *testing.T) {
+	manager, repoID, repoPath, _, archivedPath := seedPrunableArchive(t, "gone-branch-row")
+	require.NoError(t, os.RemoveAll(archivedPath))
+	runGit := func(args ...string) {
+		out, err := exec.Command("git", append([]string{"-C", repoPath}, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	// Clear the stale registration so git will delete the branch it held.
+	runGit("worktree", "prune", "--expire=now")
+	runGit("branch", "-D", "af/gone-branch-row")
+
+	resp, err := manager.PruneSessions(pruneReq(repoID))
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates)
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "recovery branch")
+}
+
 // TestPruneSessions_ReportsUnmaterializedNonArchivedGhost: a persisted live
 // row the daemon could not materialize — broken recovery metadata, a corrupt
 // half-written record — is still an in-scope record. The skipped accounting

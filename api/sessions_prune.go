@@ -41,9 +41,11 @@ ignored files are skipped with their reasons. A session whose origin
 repository is gone is refused too: the archived tree may be the work's last
 copy, so it is reported, not counted reclaimable.
 
-Bytes are ALLOCATED disk space (what rm -rf would free), not apparent file
-size — sparse holes and hard links whose other end lives outside the tree are
-not counted.
+Bytes are ALLOCATED disk space, not apparent file size — sparse holes and
+hard links whose other end lives outside the tree are not counted. It is an
+upper bound on what a reclaim frees: extents shared with a copy-on-write
+reflink clone outside the tree are still counted, so on Btrfs/XFS the free
+space recovered can be less than the total.
 
 The listing reads the running daemon's in-flight claims and will not spawn
 one — a read must not write even a socket or a log. With no daemon up it
