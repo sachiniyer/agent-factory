@@ -416,6 +416,55 @@ func TestStreakReanchorDropsTaskRunTurnWatch(t *testing.T) {
 	require.False(t, ok, "a re-anchored streak must invalidate the watcher")
 }
 
+// The backstop timer gates the paused probe to one per taskRunPollBackstop,
+// but the probe still only runs on a daemon poll tick: a configured
+// daemon_poll_interval slower than the backstop is the probe's real cadence,
+// and the reserve it declares must reach it or every on-schedule capture
+// reads as a hole and re-anchors (#5221 review).
+func TestPausedProbeReserveFollowsDaemonCadence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	cfg := *manager.Config()
+	cfg.DaemonPollInterval = int((2 * time.Minute) / time.Millisecond)
+	manager.live.Store(&cfg)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend(), captured: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-cadence", backend, true, session.Running)
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	oldSweep := lastStatusSweepNs.Load()
+	oldStart := statusSweepStartNs.Load()
+	t.Cleanup(func() {
+		nowFunc = oldNow
+		lastStatusSweepNs.Store(oldSweep)
+		statusSweepStartNs.Store(oldStart)
+	})
+
+	// A capture at the head of its pass under the two-minute cadence
+	// declares ~2min of reserve; the next on-tick probe an honest minute
+	// later — well past the 30s backstop plus slack the old code declared —
+	// must stay continuous.
+	lastStatusSweepNs.Store(0)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+		agent: inst.ResolvedAgent(), boundary: now,
+		watch: task.NewTurnWatch(inst.ResolvedAgent(), now),
+	}
+	now = now.Add(time.Minute)
+	statusSweepStartNs.Store(now.UnixNano())
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.True(t, ok, "a probe on the configured cadence keeps the streak and its watcher")
+
+	// A genuinely blind window still re-anchors under the slower cadence.
+	now = now.Add(3 * time.Minute)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a hole past the declared reserve still breaks the streak")
+}
+
 // A boundary that bound over proven stillness — a fresh task's first bind
 // seeds the still base at the send behind WaitForReady — already observed
 // the absent half of the scoped contract: the watcher the feed builds for

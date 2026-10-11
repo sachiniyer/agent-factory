@@ -391,14 +391,17 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	}
 	// Stamped when the capture RETURNS, not when the request left — a slow
 	// remote round-trip is not observed silence (#5221 review). The declared
-	// cadence is the backstop probe's own floored at the sweep's: captures
-	// arriving one probe period — or one slow serial pass — apart are
-	// scheduled, not a hole (#5221 review). The request-start `capturedAt`
-	// stays the turn-age bound below: that check needs the earliest instant
-	// the frame could exist, this one needs the moment its knowledge actually
-	// landed. A re-anchored streak means the last frame sat across an
-	// unobserved hole — the watcher pairs frames, so it resets too (#5221 review).
-	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(taskRunPollBackstop), epoch) {
+	// cadence is the probe's own: the backstop timer gates it to one per
+	// taskRunPollBackstop, but it still only runs on a daemon poll tick, so a
+	// configured daemon_poll_interval slower than the backstop is the real
+	// spacing and must pace the reserve or every on-schedule capture reads
+	// as a hole (#5221 review). The request-start `capturedAt` stays the
+	// turn-age bound below: that check needs the earliest instant the frame
+	// could exist, this one needs the moment its knowledge actually landed.
+	// A re-anchored streak means the last frame sat across an unobserved
+	// hole — the watcher pairs frames, so it resets too (#5221 review).
+	pausedCadence := max(time.Duration(m.Config().DaemonPollInterval)*time.Millisecond, taskRunPollBackstop)
+	if instance.NotePaneCaptureObserved(nowFunc(), statusSweepExpectedInterval(pausedCadence), epoch) {
 		m.dropTaskRunTurnWatch(key)
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
