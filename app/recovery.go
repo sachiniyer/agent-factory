@@ -1,6 +1,8 @@
 package app
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
@@ -30,7 +32,7 @@ func (m *home) restoreFailedCreate() bool {
 	m.pendingProgram, m.pendingPrompt = req.Program, failed.rawPrompt
 	m.pendingBackend, m.pendingAccount = req.Backend, req.Account
 	m.pendingAccountChosen = true
-	m.menu.SetNamingHasPrompt(m.pendingPrompt != "")
+	m.menu.SetNamingHasPrompt(strings.TrimSpace(m.pendingPrompt) != "")
 	m.menu.SetNamingBackend(m.pendingBackend != "")
 	m.menu.SetNamingAccount(m.pendingAccount != "")
 	m.state = stateNew
