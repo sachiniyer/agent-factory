@@ -166,6 +166,12 @@ type Instance struct {
 	// archiveWarning retains a daemon snapshot's projection-only notice so thin
 	// client renderers do not drop incomplete-archive state during reconstruction.
 	archiveWarning string
+	// worktreeMissing is true once a bounded probe proved the tracked worktree
+	// path absent with no af relocation owning it — deleted outside af (#5102).
+	// Persisted with the worktree record; see worktree_missing.go for who sets
+	// and clears it. Mutex-protected.
+	worktreeMissing       bool
+	worktreeMissingReason string
 	// Durable delivery and pane-churn evidence; never a semantic claim (#3168).
 	lastPromptAttemptAt      time.Time
 	lastPromptDeliveryStatus PromptDeliveryStatus

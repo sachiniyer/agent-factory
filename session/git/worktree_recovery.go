@@ -334,6 +334,10 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	if primary == "" {
 		return RelocationClaim{}, fmt.Errorf("cannot claim an empty worktree path")
 	}
+	// An identity-unknown stall over a path that is now conclusively absent
+	// guards nothing; discharge it so this claim gives the plain record-free
+	// ENOENT every caller already routes, instead of the same unknown forever.
+	g.settleAbsentIdentityUnknownStallLocked()
 	recovery := g.relocationRecovery
 	if recovery == nil {
 		identity, err := boundedRelocationPathIdentity(primary)
@@ -978,4 +982,6 @@ func (g *GitWorktree) checkpointRelocationPublication(
 func (g *GitWorktree) setWorktreeLocationLocked(dest string) {
 	g.worktreePath = dest
 	g.worktreeDir = filepath.Dir(dest)
+	// A proof about the previous location says nothing about this one.
+	g.adoptedWorktree = nil
 }

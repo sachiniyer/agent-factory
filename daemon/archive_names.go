@@ -147,24 +147,32 @@ func (m *Manager) checkArchiveDestination(repoID string, inst *session.Instance,
 	if dest == "" {
 		return "", fmt.Errorf("cannot archive session %q: archive destination is empty", inst.Title)
 	}
-	key := archiveDestinationKey(repoID, dest)
-	m.mu.Lock()
-	if owner := m.reservedArchiveDestinations[key]; owner != nil {
-		ownerTitle := owner.Title
-		m.mu.Unlock()
-		return "", fmt.Errorf("cannot archive session %q: destination %s is being claimed by session %q", inst.Title, dest, ownerTitle)
+	if err := m.reserveArchiveDestination(repoID, inst, dest); err != nil {
+		return "", err
 	}
-	if m.reservedArchiveDestinations == nil {
-		m.reservedArchiveDestinations = make(map[string]*session.Instance)
-	}
-	m.reservedArchiveDestinations[key] = inst
-	m.mu.Unlock()
 	defer func() {
 		if err != nil {
 			m.releaseArchiveDestination(repoID, inst, dest)
 		}
 	}()
 	return m.inspectArchiveDestination(repoID, inst, dest, source)
+}
+
+// reserveArchiveDestination takes dest for inst so no concurrent archive can
+// claim it, refusing when another session already holds it. The caller releases
+// it with releaseArchiveDestination.
+func (m *Manager) reserveArchiveDestination(repoID string, inst *session.Instance, dest string) error {
+	key := archiveDestinationKey(repoID, dest)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if owner := m.reservedArchiveDestinations[key]; owner != nil {
+		return fmt.Errorf("cannot archive session %q: destination %s is being claimed by session %q", inst.Title, dest, owner.Title)
+	}
+	if m.reservedArchiveDestinations == nil {
+		m.reservedArchiveDestinations = make(map[string]*session.Instance)
+	}
+	m.reservedArchiveDestinations[key] = inst
+	return nil
 }
 
 // inspectArchiveDestination runs before editors, hooks, or tabs are stopped.

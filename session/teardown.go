@@ -533,6 +533,9 @@ func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, 
 	if gw.CleanupRetryPending() {
 		return teardownKill{}, noop, fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
 	}
+	// Same discharge as kill admission (#5102): it may have run before the
+	// tombstone, but the path's absence is re-proven here at teardown.
+	gw.SettleAbsentIdentityUnknownStall()
 	_, recovery, unresolved := gw.RelocationSnapshot()
 	if !unresolved {
 		// Record-free archived teardown re-establishes the origin at the point
@@ -783,6 +786,16 @@ type teardownArchive struct {
 	// trustLiveGeneration is set only by ArchiveTeardownWithClaim's caller when
 	// it holds this session's exclusive lifecycle lock (#3413); see closeTab.
 	trustLiveGeneration bool
+	// worktreeGone selects the no-move route for a worktree deleted outside af
+	// (#5102): the tabs tear down exactly as usual, but there is nothing to
+	// relocate, so handleWorktree only re-confirms the absence. claim is nil.
+	worktreeGone bool
+	// worktreeAdopted is the other no-move route: an earlier archive's move
+	// landed at the destination before the daemon could record it, and the
+	// record was re-aimed there after git proved it (#5102). The bytes are
+	// already where the archive puts them, so handleWorktree only re-confirms
+	// they are still there. claim is nil.
+	worktreeAdopted bool
 }
 
 // closeTab waits for the pane to exit before handleWorktree relocates the
@@ -831,6 +844,14 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 			return stateUnknown, fmt.Errorf("archive %q: worktree identity changed before on-archive hook: %w", title, err)
 		}
 	}
+	if m.worktreeAdopted {
+		// The adoption proof was about one directory, and editor and tmux
+		// teardown have run since. Re-confirm it before the operator hook runs
+		// in it, not only before commit (#5102).
+		if state, err := reconfirmAdoptedForArchive(gw, title); err != nil {
+			return state, err
+		}
+	}
 	if m.beforeMove != nil {
 		// Cleanup policy is deliberately best-effort. Record its failure for the
 		// daemon to surface after the archive commits, then always relocate the
@@ -849,6 +870,13 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 		if m.hookErr != nil {
 			*m.hookErr = beforeMoveErr
 		}
+	}
+	if m.worktreeGone {
+		return confirmGoneForArchive(gw, title)
+	}
+	if m.worktreeAdopted {
+		// And again after the hook, which can run for minutes.
+		return reconfirmAdoptedForArchive(gw, title)
 	}
 	// The move is now BOUNDED, which is the case this comment used to reserve:
 	// "if the move is ever bounded, a tripped deadline must return stateUnknown

@@ -189,9 +189,7 @@ func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
 func (g *GitWorktree) SettleStalledRelocationForAbsentPath() error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
-	if g.activeRelocationClaim != nil || g.relocationRecovery == nil ||
-		g.relocationRecovery.State != RelocationRecoveryStalled ||
-		g.relocationRecovery.IdentityKnown {
+	if !g.identityUnknownStallLocked() {
 		return fmt.Errorf("no identity-unknown stalled relocation record to settle")
 	}
 	if _, err := BoundedLstat(g.worktreePath); !errors.Is(err, os.ErrNotExist) {
@@ -199,4 +197,43 @@ func (g *GitWorktree) SettleStalledRelocationForAbsentPath() error {
 	}
 	g.relocationRecovery = nil
 	return nil
+}
+
+// identityUnknownStallLocked reports whether the only lifecycle state is an
+// identity-unknown stalled record with no alternate candidate — the shape a
+// timed-out relocation probe and FenceUnverifiedWorktree install. It names no
+// directory and no second location, so nothing but the recorded path itself can
+// be at stake.
+func (g *GitWorktree) identityUnknownStallLocked() bool {
+	r := g.relocationRecovery
+	return g.activeRelocationClaim == nil && r != nil && r.State == RelocationRecoveryStalled &&
+		!r.IdentityKnown && r.AlternatePath == ""
+}
+
+// SettleAbsentIdentityUnknownStall is settleAbsentIdentityUnknownStallLocked
+// for callers outside the package: every destructive gate that refuses on an
+// unresolved record (kill admission, kill teardown) runs it first, so the one
+// record that provably guards nothing cannot strand the row.
+func (g *GitWorktree) SettleAbsentIdentityUnknownStall() bool {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	return g.settleAbsentIdentityUnknownStallLocked()
+}
+
+// settleAbsentIdentityUnknownStallLocked clears that record once the recorded
+// path conclusively answers ENOENT (#5102). With no identity and no alternate,
+// the record can only have been guarding whatever sits at the recorded path;
+// when nothing does, keeping it is what makes the row permanently unarchivable
+// and unkillable, because every claim and cleanup would refuse on the same
+// unknown. It never clears while the path exists or the lstat cannot answer —
+// that is exactly the state the fence exists for. Reports whether it cleared.
+func (g *GitWorktree) settleAbsentIdentityUnknownStallLocked() bool {
+	if !g.identityUnknownStallLocked() {
+		return false
+	}
+	if _, err := BoundedLstat(g.worktreePath); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	g.relocationRecovery = nil
+	return true
 }

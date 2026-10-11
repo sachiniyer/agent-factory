@@ -79,6 +79,12 @@ type GitWorktree struct {
 	// is unlinked. The daemon installs it only for an explicit kill transaction;
 	// it is process-local and never part of the persisted worktree shape.
 	repoGoneFinalizationCheckpoint func() error
+	// adoptedWorktree is the directory identity AdoptLandedWorktreeMove proved
+	// at the path it adopted (#5102), kept so the archive can re-confirm that
+	// the same directory is still there after teardown. Process-local; it names
+	// a point-in-time proof, not durable state. Cleared whenever the recorded
+	// path changes. Guarded by relocationMu.
+	adoptedWorktree *adoptedWorktreeIdentity
 	// archiveReport is durable metadata for every archive copy that deliberately
 	// omitted unreadable files. It shares relocationMu with the
 	// worktree path so persistence cannot pair a report with the wrong location.

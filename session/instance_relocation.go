@@ -145,6 +145,9 @@ func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	if gw == nil {
 		return nil
 	}
+	// An identity-unknown stall over a conclusively absent path guards nothing
+	// and must not make the kill inadmissible forever (#5102).
+	gw.SettleAbsentIdentityUnknownStall()
 	path, recovery, unresolved := gw.RelocationSnapshot()
 	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
 		return nil
