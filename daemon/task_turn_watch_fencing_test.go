@@ -169,6 +169,39 @@ func TestRefreshInstanceStatusKeepsLivenessOnFailedCapture(t *testing.T) {
 		"a confirmed unchanged frame settles Ready")
 }
 
+// A blind window must invalidate the run's chrome watcher (#5221 review):
+// the scoped agents' absence grace and the timed agents' prev-row pairing
+// both assume CONTINUOUS sight, so a capture failure that leaves them
+// intact lets the outage stand in for evidence — a repaint gap bracketing
+// the hole would arm the watch on frames it never actually saw.
+func TestFailedCaptureDropsTaskRunTurnWatch(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &flakyCaptureBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "watch-drop", backend, true, session.Running)
+	key := daemonInstanceKey(repoID, inst.Title)
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	seed := func() {
+		manager.taskRunTurnWatches[key] = &taskRunTurnWatchEntry{
+			agent: inst.ResolvedAgent(), boundary: boundary,
+			watch: task.NewTurnWatch(inst.ResolvedAgent(), boundary),
+		}
+	}
+
+	// The paused backstop's unanswered-capture path.
+	seed()
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	_, ok := manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a failed capture must invalidate the paused path's watcher")
+
+	// The normal poll's unanswered-capture path.
+	seed()
+	manager.refreshInstanceStatus(repoID, inst)
+	_, ok = manager.taskRunTurnWatches[key]
+	require.False(t, ok, "a failed capture must invalidate the normal path's watcher")
+}
+
 // A run that ends on a Ready→Ready observation changes no liveness, and
 // on_complete=keep writes nothing either — yet the marker flip is durable
 // state a restart reads. Without a forced checkpoint the on-disk row keeps

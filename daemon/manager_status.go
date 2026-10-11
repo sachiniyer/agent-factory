@@ -333,6 +333,19 @@ func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance
 	return instance.RecordTaskRunTurnAtEpoch(nowFunc(), epoch)
 }
 
+// dropTaskRunTurnWatch invalidates a run's chrome watcher on a blind window
+// (#5221 review): a failed capture or a snapshot transport error leaves the
+// pane unobserved, and a watcher kept across it would count the outage
+// toward proofs that need CONTINUOUS sight — the scoped agents' absence
+// grace armed by frames that bracket the hole, or a timed agent's prev row
+// pairing across it. The next confirmed frame rebuilds the watch from
+// scratch inside noteTaskRunTurnEvidence.
+func (m *Manager) dropTaskRunTurnWatch(key string) {
+	m.pausedMu.Lock()
+	delete(m.taskRunTurnWatches, key)
+	m.pausedMu.Unlock()
+}
+
 // sweepTaskRunTurnWatches drops per-run chrome watchers whose run is no longer
 // in flight — the watcher exists only to fence the run's completion edge, so a
 // finished run or a torn-down row never needs it again. The map is keyed by
@@ -466,6 +479,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		// success inside the gap horizon inherits silence nobody watched
 		// (#5221 review).
 		instance.NotePaneCaptureFailed()
+		m.dropTaskRunTurnWatch(key)
 		return
 	}
 	// A probe that cannot answer is dropped whole — the doc above's own rule.
@@ -477,6 +491,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// re-anchor observed silence from its own instant (#5221 review).
 	if !obs.Captured {
 		instance.NotePaneCaptureFailed()
+		m.dropTaskRunTurnWatch(key)
 		return
 	}
 	// Stamped when the capture RETURNS, not when the request left — a slow
@@ -492,11 +507,13 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	churnCheckpoint := false
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
-	} else if !obs.Baseline {
+	} else if obs.Captured && !obs.Baseline {
 		// A confirmed-unchanged frame is the stillness edge a boundary bound
 		// over an already-churning pane owes before its churn may stand in
 		// for the turn (#5221 review). A baseline frame is a first look —
-		// present, but not proven unchanged — so it cannot stamp it.
+		// present, but not proven unchanged — so it cannot stamp it. The
+		// !obs.Captured return above makes the captured gate belt-and-braces,
+		// kept local so the invariant survives a reorder (#5221 review).
 		if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
 			churnCheckpoint = true
 		}
@@ -796,6 +813,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// its own instant — not inherit a streak across the outage (#5221
 		// review).
 		instance.NotePaneCaptureFailed()
+		m.dropTaskRunTurnWatch(key)
 		m.settleRemoteProbeFailure(
 			repoID,
 			key,
@@ -826,6 +844,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// window in which churn could hide, so the streak breaks outright
 		// rather than aging out through the gap horizon (#5221 review).
 		instance.NotePaneCaptureFailed()
+		m.dropTaskRunTurnWatch(key)
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
@@ -836,11 +855,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// The first churn after a prompt is checkpointed below even if the row stays
 		// Running; later spinner churn does not create an event/write storm.
 		_, settlementCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
-	} else if !obs.Baseline {
+	} else if obs.Captured && !obs.Baseline {
 		// A confirmed-unchanged frame is the stillness edge a boundary bound
 		// over an already-churning pane owes before its churn may stand in
 		// for the turn (#5221 review): without it, a redelivery landing
-		// mid-turn could release on the old turn's output going quiet.
+		// mid-turn could release on the old turn's output going quiet. An
+		// unanswered capture is all-false here — Updated AND Baseline — so it
+		// must be gated out explicitly or the blind frame would stamp the
+		// edge it cannot see (#5221 review).
 		if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
 			settlementCheckpoint = true
 		}
