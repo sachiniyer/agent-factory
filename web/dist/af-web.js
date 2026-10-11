@@ -7714,8 +7714,8 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded, rebindAttempted)
       return false;
     }
   }
-  const wPort = normalizeListenPort(wAddr.port, bindSucceeded && rebindAttempted);
-  const aPort = normalizeListenPort(aAddr.port, bindSucceeded && rebindAttempted);
+  const wPort = normalizeListenPort(wAddr.port);
+  const aPort = normalizeListenPort(aAddr.port);
   if (wPort === aPort) {
     return true;
   }
@@ -7751,7 +7751,7 @@ function normalizeListenHost(host, bindSucceeded) {
     return "0.0.0.0";
   }
   if (host.includes(":")) {
-    const v6 = canonicalizeIPv6Host(host);
+    const v6 = canonicalizeIPv6Host(host, bindSucceeded);
     if (v6 === "::") {
       return bindSucceeded ? "0.0.0.0" : "::";
     }
@@ -7759,7 +7759,7 @@ function normalizeListenHost(host, bindSucceeded) {
   }
   return host;
 }
-function canonicalizeIPv6Host(host) {
+function canonicalizeIPv6Host(host, bindSucceeded) {
   let zone = "";
   const pct = host.indexOf("%");
   if (pct >= 0) {
@@ -7774,7 +7774,11 @@ function canonicalizeIPv6Host(host) {
   if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 65535) {
     const hi = groups[6];
     const lo = groups[7];
-    return `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
+    const ipv4 = `${hi >> 8 & 255}.${hi & 255}.${lo >> 8 & 255}.${lo & 255}`;
+    if (ipv4 === "0.0.0.0" && !bindSucceeded) {
+      return "::ffff:0.0.0.0";
+    }
+    return ipv4;
   }
   let bestStart = -1;
   let bestLen = 0;
@@ -7882,65 +7886,11 @@ function parseHexGroup(s) {
   if (!/^[0-9a-fA-F]{1,4}$/.test(s)) return -1;
   return parseInt(s, 16);
 }
-var WELL_KNOWN_TCP_SERVICES = new Map(
-  // The entries below are the IANA well-known TCP services (port < 1024) that
-  // /etc/services ships on Linux/macOS — the realistic set for a listen address.
-  // This is not exhaustive, but covers every name net.Listen's address parser
-  // would accept that a human might realistically write for a control-plane bind.
-  Object.entries({
-    "tcpmux": 1,
-    "echo": 7,
-    "discard": 9,
-    "systat": 11,
-    "daytime": 13,
-    "netstat": 15,
-    "qotd": 17,
-    "chargen": 19,
-    "ftp-data": 20,
-    "ftp": 21,
-    "ssh": 22,
-    "telnet": 23,
-    "smtp": 25,
-    "time": 37,
-    "whois": 43,
-    "tacacs": 49,
-    "domain": 53,
-    "gopher": 70,
-    "finger": 79,
-    "http": 80,
-    "kerberos": 88,
-    "pop3": 110,
-    "sunrpc": 111,
-    "auth": 113,
-    "nntp": 119,
-    "netbios-ssn": 139,
-    "imap2": 143,
-    "snmp": 161,
-    "snmp-trap": 162,
-    "bgp": 179,
-    "irc": 194,
-    "ldap": 389,
-    "https": 443,
-    "microsoft-ds": 445,
-    "submissions": 465,
-    "exec": 512,
-    "login": 513,
-    "shell": 514,
-    "printer": 515,
-    "klogin": 543,
-    "kshell": 544,
-    "rdp": 3389
-  })
-);
-function normalizeListenPort(port, bindSucceeded) {
+function normalizeListenPort(port) {
   if (isDecimalPort(port)) {
     return String(Number(port));
   }
-  if (!bindSucceeded) {
-    return port;
-  }
-  const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
-  return resolved !== void 0 ? String(resolved) : port;
+  return port;
 }
 function isDecimalPort(port) {
   return port === "" || /^\d+$/.test(port);
