@@ -7652,11 +7652,15 @@ function canCommit(shown, current) {
 function shouldCloseSavedField(status, editing, statusIsNew) {
   return statusIsNew && status !== null && !status.error && status.key === editing;
 }
+function isListenerExposureWarning(w) {
+  return w.includes("is reachable from the network");
+}
 function saveNotice(resp) {
   const parts = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
-  const warnings = applyWarnings.length > 0 ? applyWarnings : writeWarnings;
+  const applyHasExposure = applyWarnings.some(isListenerExposureWarning);
+  const warnings = applyWarnings.length > 0 ? [...applyWarnings, ...writeWarnings.filter((w) => !(isListenerExposureWarning(w) && applyHasExposure))] : writeWarnings;
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }

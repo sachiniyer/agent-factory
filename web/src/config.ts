@@ -198,16 +198,22 @@ export function shouldCloseSavedField(
  * exactly that case, which is the one place that tells an operator, at save
  * time, that the account they defaulted to is unregistered and how to fix it.
  *
- * The form reads channel 2 first, then channel 1 only when channel 2 is empty
- * — the same contract the TUI (`ui/config_target.go`) already implements. The
- * server's completeConfigSaveWarnings keeps channel 2 authoritative: on a
- * successful apply it retains only the apply-time wording (dropping the
- * writer's forecast) to avoid showing the same hazard twice when the two
- * surfaces phrase it differently, and on a failed/unconfirmed apply it merges
- * both channels into channel 2. So channel 2 already carries the complete,
- * deduped set whenever the apply produced anything; channel 1 is needed only as
- * the fallback for the silent-apply case, where channel 2 is empty and channel
- * 1 carries the sole warning.
+ * Channel 2 is NOT the complete set on a successful apply, however. The server's
+ * completeConfigSaveWarnings keeps it authoritative on a failed/unconfirmed
+ * apply (merging both channels into it) but on a successful apply it returns
+ * ONLY the apply warnings, dropping the writer's per-write advisories. A
+ * pending listener rebind retried on an UNRELATED save (e.g. a
+ * `default_accounts` write) produces a rebind failure on channel 2 while
+ * channel 1 carries the unregistered-account advisory the write produced, and
+ * a channel-2-only read would lose it. The form therefore MERGES both channels
+ * rather than choosing one, with a single exception: the tokenless-exposure
+ * forecast the writer emits (exposureWarning) is the same hazard the
+ * apply-time notice (ListenerExposureNotice) describes in different words, and
+ * the server keeps channel 2 authoritative for that one on a successful
+ * exposure transition — the forecast is dropped when channel 2 already carries
+ * the notice, so the hazard is shown once in the authoritative wording. Other
+ * per-write advisories (the unregistered-account warning, the project-scoped
+ * branch_prefix notice) have no apply-side counterpart and are always preserved.
  *
  * The restart notice is normally shown only for a key that requires a restart,
  * since "Applied" under every field is noise. A warning overrides that gate:
@@ -217,20 +223,39 @@ export function shouldCloseSavedField(
  * owed, and for this form it is the address the browser must be re-pointed at.
  * Exported so config.test.ts locks the real rule rather than a copy.
  */
+// isListenerExposureWarning identifies the tokenless-network-listener exposure
+// notice — the one hazard both warning channels describe. The writer's
+// exposureWarning (config/configset.go, channel 1) and the applier's
+// ListenerExposureNotice / PreviewListenerExposureNotice (config/authposture.go,
+// channel 2) all phrase it as "<key> ... is reachable from the network ...".
+// The rebind-failure error ("apply network.listen_addr ...") and the
+// unregistered-account advisory ("no <agent> account named ...") do not.
+function isListenerExposureWarning(w: string): boolean {
+  return w.includes("is reachable from the network");
+}
+
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
-  // Channel 2 (apply-time) is authoritative: completeConfigSaveWarnings keeps it
-  // as the complete, deduped set on a successful apply (dropping the writer's
-  // differently-worded forecast so the same hazard is not shown twice) and
-  // merges both channels into it on a failed/unconfirmed apply. Channel 1
-  // (per-write) is the fallback for the silent-apply case — a `default_accounts`
-  // write is EffectAppliedLive and produces no apply warning, so channel 2 is
-  // empty and the unregistered-account advisory rides channel 1 alone. Matches
-  // the TUI (ui/config_target.go), which reads channel 2 then falls back to
-  // channel 1 for the same reason.
-  const warnings = applyWarnings.length > 0 ? applyWarnings : writeWarnings;
+  // Merge both warning channels so independent per-write advisories (e.g. an
+  // unregistered-account warning on a default_accounts write) survive even when
+  // channel 2 carries an unrelated apply warning (e.g. a pending rebind retried
+  // on that same save). The ONE exception is the tokenless-exposure forecast:
+  // both the writer (exposureWarning, channel 1) and the applier
+  // (ListenerExposureNotice, channel 2) describe that hazard in different words,
+  // and the server keeps channel 2 authoritative on a successful exposure
+  // transition. Suppress the forecast when channel 2 already carries the
+  // notice so the hazard shows once, in the authoritative wording. Other
+  // per-write advisories have no apply-side counterpart and are always shown.
+  // isListenerExposureWarning identifies the exposure notice by the phrase
+  // "... is reachable from the network ..." that exposureWarning and
+  // ListenerExposureNotice/PreviewListenerExposureNotice both use; neither the
+  // rebind-failure error nor the unregistered-account advisory contains it.
+  const applyHasExposure = applyWarnings.some(isListenerExposureWarning);
+  const warnings = applyWarnings.length > 0
+    ? [...applyWarnings, ...writeWarnings.filter(w => !(isListenerExposureWarning(w) && applyHasExposure))]
+    : writeWarnings;
   // A warning makes the apply outcome actionable even for an ordinarily-live
   // key. In that case the restart notice must not be hidden by the key's static
   // requires-restart classification: it describes what happened to this save.

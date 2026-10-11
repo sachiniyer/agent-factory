@@ -203,40 +203,44 @@ test("saveNotice surfaces a write-only warning for an ordinarily-live key with n
   assert.equal(notice, warning);
 });
 
-test("saveNotice reads channel 2 when both channels are populated", () => {
-  // Channel 2 is the authoritative set: on a failed/unconfirmed apply the
-  // server's completeConfigSaveWarnings already merged the per-write warnings
-  // into it, and on a successful apply it keeps only the apply-time wording.
-  // So when channel 2 is non-empty the form reads it and does not also read
-  // channel 1 — reading both would re-add the writer's forecast the server
-  // deliberately suppressed, rendering the same hazard twice when the two
-  // surfaces phrase it differently.
+test("saveNotice preserves independent channel-1 warnings alongside channel 2", () => {
+  // The pending-rebind scenario the second review thread flagged: a
+  // `default_accounts.claude = missing` write (channel 1: the
+  // unregistered-account advisory) retries a pending listener rebind on apply
+  // (channel 2: the rebind failure). The apply is DaemonApplyApplied (the rebind
+  // failure is a warning, not a failed apply), so completeConfigSaveWarnings
+  // returns ONLY the apply warnings — channel 2 is not the complete set here.
+  // A channel-2-only read would lose the per-write advisory, which is the one
+  // place that tells the operator the account they defaulted to is unregistered.
+  // The advisory is independent of the rebind failure (no apply-side counterpart),
+  // so it is preserved alongside channel 2.
   const writeWarning =
     'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
-  const applyWarning = "rebind failed: address already in use";
+  const applyWarning = "apply network.listen_addr \"0.0.0.0:9443\": listen tcp 0.0.0.0:9443: bind: address already in use — daemon still serving on 127.0.0.1:8443";
   const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
   const notice = saveNotice(
     setResp({
-      result: { key: "network.listen_addr", value: "0.0.0.0:9443", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
       restart_notice: restartNotice,
       warnings: [applyWarning],
-      apply_outcome: "failed",
     }),
   );
-  // Channel 2 (apply-time) only; channel 1's per-write advisory is not shown
-  // because the server already carried it on channel 2 in the failed-apply case.
-  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+  // Channel 2 (apply-time rebind failure) then channel 1 (per-write
+  // unregistered-account advisory) — both are independent and both surface.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice prefers the authoritative apply warning when both channels describe the same hazard", () => {
   // The tokenless-network-listener exposure case the review flagged: the writer
-  // (channel 1) and the applier (channel 2) both describe the same hazard in
-  // different words. completeConfigSaveWarnings keeps the authoritative
-  // apply-time copy on channel 2 and drops the writer's forecast from it on a
-  // successful apply, so the form reads channel 2 only — a union would show the
-  // hazard twice (once in each wording).
-  const writeWarning = "saved value exposes a tokenless network listener";
-  const applyWarning = "tokenless listener is now accepting external connections — set network.require_token or bind to localhost";
+  // (channel 1, exposureWarning) and the applier (channel 2,
+  // ListenerExposureNotice) both describe the same hazard in different words.
+  // The server's completeConfigSaveWarnings keeps the authoritative apply-time
+  // copy on channel 2 and drops the writer's forecast from it on a successful
+  // apply. The form suppresses the forecast on channel 1 when channel 2 already
+  // carries the notice (both contain "... is reachable from the network ..."),
+  // so the hazard is shown once in the authoritative wording.
+  const writeWarning = 'network.listen_addr "0.0.0.0:9443" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.';
+  const applyWarning = 'network.listen_addr "0.0.0.0:9443" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (`af token show` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only';
   const notice = saveNotice(
     setResp({
       result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
@@ -245,25 +249,50 @@ test("saveNotice prefers the authoritative apply warning when both channels desc
     }),
   );
   // Channel 2 (authoritative) only; channel 1's differently-worded forecast
-  // is not shown.
+  // is suppressed because channel 2 already carries the exposure notice.
   assert.equal(notice, `Applied — the running daemon is using the new value now. · ${applyWarning}`);
 });
 
-test("saveNotice preserves channel 2 order with multiple apply warnings", () => {
-  // Channel 2 carries the authoritative set; the form reads it in the order the
-  // daemon produced. Channel 1 is the fallback for the silent-apply case and is
-  // not shown when channel 2 is non-empty, even if it carries unrelated notes.
-  const w2 = "saved value exposes a tokenless network listener";
-  const w3 = "rebind failed: address already in use";
+test("saveNotice keeps the exposure forecast when channel 2 lacks the exposure notice", () => {
+  // The exposure forecast (channel 1) is the SAME hazard as the apply-time
+  // exposure notice (channel 2), so it is suppressed ONLY when channel 2
+  // already carries the notice. When channel 2 has an unrelated apply warning
+  // (e.g. a rebind failure on a network.listen_addr write whose rebind failed
+  // so no exposure transition occurred) the forecast is the only copy of the
+  // exposure warning and must surface — the write still moved the config into an
+  // exposed posture on disk even if the listener did not rebind live.
+  const writeWarning = 'network.listen_addr "0.0.0.0:9443" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.';
+  const applyWarning = "apply network.listen_addr \"0.0.0.0:9443\": listen tcp 0.0.0.0:9443: bind: address already in use — daemon still serving on 127.0.0.1:8443";
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
   const notice = saveNotice(
     setResp({
-      result: { key: "network.listen_addr", value: "0.0.0.0:9443", path: "/tmp/config.toml", requires_restart: false, warnings: ["unrelated per-write note that must not surface when channel 2 is non-empty"] },
+      result: { key: "network.listen_addr", value: "0.0.0.0:9443", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (rebind failure) then channel 1 (exposure forecast) — the
+  // forecast is not a duplicate because channel 2 does not carry the exposure
+  // notice (no transition occurred on the failed rebind).
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice preserves channel 2 order with multiple apply warnings and appends independent channel-1 notes", () => {
+  // Channel 2 carries the authoritative set; the form reads it in the order the
+  // daemon produced. Channel 1's independent per-write notes are appended after
+  // channel 2 — they have no apply-side counterpart and must not be lost.
+  const w2 = "apply network.listen_addr \"0.0.0.0:9443\": listen tcp 0.0.0.0:9443: bind: address already in use — daemon still serving on 127.0.0.1:8443";
+  const w3 = "network.require_token is now false: revoked 2 sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody.";
+  const w1 = 'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [w1] },
       restart_notice: "Saved — could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).",
       warnings: [w2, w3],
     }),
   );
-  // Channel 2 in authored order; channel 1 is not shown.
-  assert.equal(notice, `Saved — could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason). · ${w2} · ${w3}`);
+  // Channel 2 in authored order, then channel 1's independent advisory.
+  assert.equal(notice, `Saved — could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason). · ${w2} · ${w3} · ${w1}`);
 });
 
 test("saveNotice tolerates an older daemon that sends no address", () => {
