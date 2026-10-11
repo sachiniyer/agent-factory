@@ -1,9 +1,11 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // Retrying an unconfirmed tab teardown (#2669).
@@ -65,6 +67,43 @@ func (i *Instance) RetryPendingTabCleanup() (retired, remaining int) {
 		retired++
 	}
 	return retired, remaining
+}
+
+// retainFailedTabCleanup records a cleanup handle for a just-spawned tab tmux
+// session whose Start failed WITHOUT proving nothing is running. Start
+// attaches ErrSessionNotStarted only when the pane is conclusively gone —
+// every other failure (a proven-misplaced pane whose teardown is unconfirmed,
+// a wedged probe, a post-spawn timeout) can leave a live or remain-on-exit
+// pane holding this exact name. A caller that drops the session object on
+// that error orphans the pane: invisible to later kill/archive teardown, and
+// its name still blocks every spawn that would re-derive it. The handle puts
+// the survivor on the same durable list the startup sweep retries by exact
+// name and uniqueTabTmuxName already reserves against (#5174 review). It is
+// in-memory like closeRemovedTabRetainingCleanup's handle — strictly better
+// than dropping it, and the next successful persist carries it to disk.
+//
+// Fresh spawns only: a RESTORE path must not call this — the tab row itself
+// still durably owns that name, and a stale handle would let a later sweep
+// kill the session the tab successfully re-binds to (the same double-count
+// the CloseTabByIDWithCommit rollback guards). Reattach survivors are the
+// deferred quarantine half of that work (#5192).
+//
+// ErrSessionNameTaken wraps ErrSessionNotStarted deliberately, so a name
+// legitimately held by a live session is never staged here — the sweep's
+// exact-name kill would otherwise reap someone else's pane.
+func (i *Instance) retainFailedTabCleanup(tmuxName string, startErr error) {
+	if tmuxName == "" || startErr == nil || errors.Is(startErr, tmux.ErrSessionNotStarted) {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	for _, h := range i.pendingTabCleanup {
+		if h.TmuxName == tmuxName {
+			return
+		}
+	}
+	i.pendingTabCleanup = append(i.pendingTabCleanup, TabCleanupData{TmuxName: tmuxName})
+	i.touchLocked()
 }
 
 // killTabCleanupSession tears down one leftover session by its EXACT persisted

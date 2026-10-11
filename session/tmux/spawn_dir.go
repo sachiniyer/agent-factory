@@ -346,9 +346,11 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known, de
 		{"pane_current_path", func() (string, bool) { return t.paneFormatField("#{pane_current_path}") }, true},
 		{"pane_start_path", func() (string, bool) { return t.paneFormatField("#{pane_start_path}") }, false},
 	}
+	walkTimedOut := false
 	for _, s := range sources {
 		actual, timedOut := s.read()
 		if timedOut {
+			walkTimedOut = true
 			break
 		}
 		if !filepath.IsAbs(actual) {
@@ -360,6 +362,19 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known, de
 			continue
 		}
 		in, resolvable := paneDirInside(actual, want)
+		if in && !s.convict {
+			// A confirm-only answer may stand on live proof, but the bit
+			// sampled before the walk can already be stale: a short
+			// remain-on-exit command that exits mid-walk leaves paneLive
+			// true while procfs and pane_current_path go silent, and the
+			// request's own echo must never approve placement on its own
+			// (#5174 review). Revalidate before it confirms — and let a
+			// fresh dead mark reach the caller's dead arm, which may then
+			// convict on evidence the echo could not see.
+			freshLive, freshDead := t.paneLiveOrDeadNow()
+			paneLive = freshLive
+			paneDead = paneDead || freshDead
+		}
 		switch {
 		case in && (s.convict || paneLive):
 			return true, true, paneDead, s.name, actual
@@ -374,7 +389,30 @@ func (t *TmuxSession) observedPanePlacement(want os.FileInfo) (inside, known, de
 		// prove inside OR outside, so it falls through to the next source
 		// rather than convicting or clearing.
 	}
+	// The stale bit cuts the other way too: a pane can die while the sources
+	// are read, producing exactly this no-source shape (procfs gone,
+	// current_path empty) under a dead flag sampled before it happened.
+	// Revalidate once so the caller's dead arm decides on the FRESH mark
+	// instead of accepting on silence (#5174 review). A walk that ended on
+	// a server timeout does not stack a second deadline on the same silence.
+	if !paneDead && !walkTimedOut {
+		_, freshDead := t.paneLiveOrDeadNow()
+		paneDead = freshDead
+	}
 	return false, false, paneDead, "", ""
+}
+
+// paneLiveOrDeadNow re-reads #{pane_dead} once — the tri-state verdict a
+// caller is about to rely on, refreshed past whatever was cached earlier in
+// the walk. A short remain-on-exit command can exit between the opening
+// probe and the moment its evidence is consumed (#5174 review): "0" proves
+// live, "1" proves dead, and a timeout or non-answer proves neither.
+func (t *TmuxSession) paneLiveOrDeadNow() (live, dead bool) {
+	field, timedOut := t.paneFormatField("#{pane_dead}")
+	if timedOut {
+		return false, false
+	}
+	return field == "0", field == "1"
 }
 
 // paneShowsSpawnDirRefusal reads the dead pane's scrollback for the launch
@@ -417,12 +455,23 @@ func paneDirInside(dir string, want os.FileInfo) (inside, resolvable bool) {
 		info, serr := statSpawnDir(dir)
 		return serr == nil && os.SameFile(info, want), false
 	}
+	// A component the walk cannot stat is one it cannot rule OUT: the
+	// observed path or an ancestor may have been renamed or unlinked between
+	// EvalSymlinks and this stat, and the failed level might be the very
+	// directory that is `want`. Reaching the root only after skipping a
+	// failed stat is "cannot tell", not "outside" — convicting on it would
+	// tear down a pane that still holds the admitted inode (#5174 review).
+	walkFailed := false
 	for d := resolved; ; d = filepath.Dir(d) {
-		if info, err := statSpawnDir(d); err == nil && os.SameFile(info, want) {
-			return true, true
+		if info, err := statSpawnDir(d); err == nil {
+			if os.SameFile(info, want) {
+				return true, true
+			}
+		} else {
+			walkFailed = true
 		}
 		if parent := filepath.Dir(d); parent == d {
-			return false, true
+			return false, !walkFailed
 		}
 	}
 }

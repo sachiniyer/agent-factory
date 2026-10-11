@@ -101,6 +101,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 		return nil, fmt.Errorf("failed to prepare shell tab: %w", err)
 	}
 	if err := shellTmux.Start(worktreePath); err != nil {
+		i.retainFailedTabCleanup(tmuxName, err)
 		return nil, fmt.Errorf("failed to start shell tab: %w", err)
 	}
 
@@ -131,6 +132,7 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 		// spawned and are abandoning; no worktree action follows.
 		if _, cerr := shellTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add shell tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
+			i.retainFailedTabCleanup(tmuxName, fmt.Errorf("abandoned-spawn close unconfirmed: %w", cerr))
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
 	}
@@ -189,6 +191,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// held pane its exit status is unobservable (#4479).
 	procTmux.SetRemainOnExit()
 	if err := procTmux.Start(worktreePath); err != nil {
+		i.retainFailedTabCleanup(tmuxName, err)
 		return nil, fmt.Errorf("failed to start process tab: %w", err)
 	}
 	// Before remain-on-exit, a command that failed at once took its session
@@ -196,7 +199,9 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 	// (#4506 review).
 	exit := awaitImmediateProcessExit(procTmux)
 	if exit != nil && exit.StatusKnown && exit.Status != 0 {
-		return nil, failedProcessTabError(procTmux, command, exit.Status)
+		ferr := failedProcessTabError(procTmux, command, exit.Status)
+		i.retainFailedTabCleanup(tmuxName, ferr)
+		return nil, ferr
 	}
 
 	tab := &Tab{ID: newTabID(), Name: displayName, Kind: TabKindProcess, Command: command, tmux: procTmux,
@@ -220,6 +225,7 @@ func (i *Instance) AddProcessTab(command, requestedName string) (*Tab, error) {
 		// Pane state deliberately ignored: same abandoned-spawn cleanup as above.
 		if _, cerr := procTmux.Close(); cerr != nil {
 			log.WarningLog.Printf("add process tab to %q: closing orphaned tmux after kill/archive race: %v", title, cerr)
+			i.retainFailedTabCleanup(tmuxName, fmt.Errorf("abandoned-spawn close unconfirmed: %w", cerr))
 		}
 		return nil, fmt.Errorf("session was killed during tab creation")
 	}
@@ -398,15 +404,22 @@ func awaitImmediateProcessExit(ts *tmux.TmuxSession) *TabExit {
 
 // failedProcessTabError removes the held pane of a command that failed at once
 // and names the failure, with the command's last output, so tab-create fails
-// the way it did before remain-on-exit kept the pane.
+// the way it did before remain-on-exit kept the pane. A confirmed teardown
+// wraps ErrSessionNotStarted — the same "nothing can be running" contract
+// Start keeps — so the caller's cleanup retention keys on the usual sentinel
+// instead of a bespoke signal (#5174 review).
 func failedProcessTabError(ts *tmux.TmuxSession, command string, status int) error {
 	output := ts.FinishedPaneOutput(5)
 	msg := fmt.Sprintf("process tab command %q exited immediately with status %d", command, status)
 	if output != "" {
 		msg += ":\n" + output
 	}
-	if _, err := ts.Close(); err != nil {
-		msg += fmt.Sprintf("\n(its finished tmux session %s could not be removed: %v)", ts.SanitizedName(), err)
+	err := fmt.Errorf("failed to start process tab: %s", msg)
+	if state, cerr := ts.Close(); cerr == nil && state == tmux.PaneStateKnown {
+		return fmt.Errorf("%w: %w", tmux.ErrSessionNotStarted, err)
+	} else if cerr != nil {
+		return fmt.Errorf("%s\n(its finished tmux session %s could not be removed: %v)",
+			err.Error(), ts.SanitizedName(), cerr)
 	}
-	return fmt.Errorf("failed to start process tab: %s", msg)
+	return err
 }
