@@ -126,3 +126,21 @@ func (i *Instance) SendPromptWithEvidence(prompt string, now func() time.Time) (
 		return status, err
 	}
 }
+
+// NotePaneCaptureObserved stamps paneEvidenceFloorAt at the request-start of
+// this process's first successful pane capture (#5221 review): the quiet arm
+// measures silence from the later of the durable churn stamp and that floor,
+// so an interval the process did not observe — startup materialization,
+// sequential Start(false) calls, a process pause — can never count as quiet.
+// Later captures do not move the floor: from the first frame onward the poll
+// sees every churn itself, and lastPaneChurnAt carries the live signal.
+func (i *Instance) NotePaneCaptureObserved(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.paneEvidenceFloorAt.IsZero() {
+		i.paneEvidenceFloorAt = at
+	}
+}

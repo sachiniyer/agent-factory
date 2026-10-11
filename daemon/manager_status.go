@@ -445,6 +445,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if err != nil {
 		return
 	}
+	// First good frame of this process's life: the quiet arm's evidence floor
+	// starts here, not at row materialization (#5221 review).
+	instance.NotePaneCaptureObserved(capturedAt)
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
@@ -709,6 +712,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		)
 		return
 	}
+	// First good frame of this process's life: the quiet arm's evidence floor
+	// starts here, not at row materialization (#5221 review).
+	instance.NotePaneCaptureObserved(capturedAt)
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	settlementCheckpoint := false

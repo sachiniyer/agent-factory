@@ -133,6 +133,10 @@ func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
 
+	// The poll has been capturing since the send — the daemon stamps the
+	// evidence floor at the first good frame before any quiet evaluation.
+	inst.NotePaneCaptureObserved(attemptedAt)
+
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"post-attempt churn followed by a full grace of quiet may stand in for the chrome")
@@ -158,6 +162,7 @@ func TestTaskRunQuietFallbackReleaseLogsDistinctly(t *testing.T) {
 
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
+	inst.NotePaneCaptureObserved(attemptedAt)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive())
 	out := buf.String()
@@ -287,6 +292,7 @@ func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
 	// tracks it) but the task boundary must stay at the task's send.
 	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0.Add(taskRunCompletionQuietGrace+10*time.Second)))
 
+	inst.NotePaneCaptureObserved(t0)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"a refused manual send does not unsatisfy the window the task's churn already earned")
@@ -548,10 +554,11 @@ func TestTaskRunMachineryResendDoesNotRearmSatisfiedWindow(t *testing.T) {
 }
 
 // A daemon restart must not inherit elapsed quiet it never observed (#5221
-// review P1): churn after the first post-prompt edge is deliberately not
+// review): churn after the first post-prompt edge is deliberately not
 // re-checkpointed, so a restarted row can carry a lastPaneChurnAt far older
 // than the pane's true last output. The quiet arm's silence clock measures
-// from the later of the durable stamp and this process's evidence floor.
+// from the later of the durable stamp and the first capture this process
+// actually observed — startup materialization is not silence either.
 func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
 	inst := taskRunSession(t)
 	t0 := time.Now().Add(-2 * time.Minute)
@@ -568,9 +575,20 @@ func TestTaskRunQuietArmDoesNotInheritStaleChurnAcrossRestart(t *testing.T) {
 	reloaded, err := FromInstanceData(data.ForStorage())
 	require.NoError(t, err)
 
+	// Before any capture the process has observed nothing at all — however
+	// long materialization took, none of it counts as quiet.
 	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, reloaded.TaskRunActive(),
-		"a stale durable churn stamp is not a finished 30s of silence — the quiet arm measures from reload time")
+		"an unobserved pane is not a quiet pane — the clock has no floor until the first capture")
+
+	// The first post-restart capture lands (request-start stamp). Only now
+	// does the quiet clock have a floor — one unchanged frame cannot satisfy
+	// the whole 30s window.
+	reloaded.NotePaneCaptureObserved(time.Now())
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveRunning)))
+	require.NoError(t, reloaded.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, reloaded.TaskRunActive(),
+		"silence is measured from the first observed capture — the unobserved gap is not quiet")
 	require.True(t, reloaded.taskRunTurnGateHeld)
 }
 

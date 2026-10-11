@@ -316,9 +316,13 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 	}
 	// The durable churn stamp can be far older than the pane's true last
 	// output — churn after the first post-prompt edge is not re-checkpointed —
-	// so silence is measured from the later of the stamp and this process's
-	// evidence floor: a restart never inherits elapsed quiet it did not see
-	// (#5221 review).
+	// so silence is measured from the later of the stamp and the first pane
+	// capture this process actually observed. A zero floor means nothing has
+	// been observed since (re)start: unobserved time is not silence (#5221
+	// review).
+	if i.paneEvidenceFloorAt.IsZero() {
+		return false
+	}
 	base := i.lastPaneChurnAt
 	if i.paneEvidenceFloorAt.After(base) {
 		base = i.paneEvidenceFloorAt

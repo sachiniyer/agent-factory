@@ -199,12 +199,13 @@ type Instance struct {
 	// starts a new window the stale record cannot release.
 	taskRunTurnObservedAt time.Time
 	// paneEvidenceFloorAt is the earliest instant THIS daemon process can
-	// vouch for pane facts: stamped when FromInstanceData loads the row.
-	// Churn after the first post-prompt edge is deliberately not re-checkpointed,
-	// so a restart can hand back a lastPaneChurnAt far older than the pane's
-	// true last output — the quiet-release clock measures from the later of the
-	// durable stamp and this floor rather than treating a stale restart value
-	// as elapsed silence (#5221 review).
+	// vouch for pane facts: stamped at the request-start of the first
+	// successful pane capture, zero until one lands. Churn after the first
+	// post-prompt edge is deliberately not re-checkpointed, so a restart can
+	// hand back a lastPaneChurnAt far older than the pane's true last output —
+	// the quiet-release clock measures from the later of the durable stamp
+	// and this floor rather than treating an unobserved interval as elapsed
+	// silence (#5221 review).
 	paneEvidenceFloorAt time.Time
 	loadRuntimeReplaced bool
 	// stateEpoch is the generation counter for lifecycle state and prompt-observation
