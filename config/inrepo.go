@@ -578,7 +578,9 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	// relative repoRoot is resolved against this process's cwd — the same
 	// base any relative reference to it would use.
 	resolvedRepoRoot := ""
+	lexicalRepoRoot := ""
 	if absRoot, absErr := filepath.Abs(repoRoot); absErr == nil {
+		lexicalRepoRoot = absRoot
 		resolvedRepoRoot = pathutil.ResolveForCompare(absRoot)
 	}
 	for key, value := range cfg.ProgramOverrides {
@@ -624,9 +626,15 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		// program runs, not aim the grant at content it ships — refuse the
 		// value outright, the same line the cloud-selector refusal above
 		// draws. A RELATIVE override still loads: it simply earns no grant.
+		// The check is lexical as well as resolved: a spelling inside the
+		// repository is repository content even when the file it selects
+		// resolves out — an in-tree symlink to /bin/sh still lets a later
+		// commit repoint it before exec (#5265 review).
 		if executable := sessionenv.AgentCommandExecutable(value); filepath.IsAbs(executable) &&
 			resolvedRepoRoot != "" &&
-			pathutil.IsAtOrInside(pathutil.ResolveForCompare(executable), resolvedRepoRoot) {
+			(pathutil.IsAtOrInside(executable, lexicalRepoRoot) ||
+				pathutil.IsAtOrInside(executable, resolvedRepoRoot) ||
+				pathutil.IsAtOrInside(pathutil.ResolveForCompare(executable), resolvedRepoRoot)) {
 			return nil, nil, fmt.Errorf(
 				"in-repo config %s: program_overrides.%s names an executable inside this repository, which would "+
 					"hand the repository's own file your credentials. A checked-in config may name a bare agent or an "+

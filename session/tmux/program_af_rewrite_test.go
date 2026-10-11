@@ -120,18 +120,18 @@ func TestRestoreUsesTheDeclarationPreservingRewrite(t *testing.T) {
 // command with a declaration that does not describe it fails.
 func TestLaunchSnapshot_NeverTearsTheCommandFromItsDeclaration(t *testing.T) {
 	session := &TmuxSession{}
-	session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
+	session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{}, nil)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 500; i++ {
-			session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
+			session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{}, nil)
 			session.rewriteProgramCmdByAf(resumeProgram)
 		}
 	}()
 	for i := 0; i < 500; i++ {
-		program, proof, _, _, _, _, _ := session.launchSnapshot()
+		program, proof, _, _, _, _, _, _ := session.launchSnapshot()
 		// Every legal pair: bare with no declaration, or resumed with --continue
 		// declared. A torn read produces one without the other.
 		switch program {
@@ -154,18 +154,18 @@ func TestLaunchSnapshot_NeverTearsTrustedExecutableFromCommand(t *testing.T) {
 		TrustedExecutable: trusted,
 		GeneratedArgs:     []string{"--dangerously-skip-permissions"},
 	}
-	session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
+	session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{}, nil)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 500; i++ {
-			session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{})
-			session.SetLaunchProgram(trusted+" --dangerously-skip-permissions", detectedProof)
+			session.SetLaunchProgram("claude", sessionenv.AccountLaunchProof{}, nil)
+			session.SetLaunchProgram(trusted+" --dangerously-skip-permissions", detectedProof, nil)
 		}
 	}()
 	for i := 0; i < 500; i++ {
-		program, proof, _, _, _, _, _ := session.launchSnapshot()
+		program, proof, _, _, _, _, _, _ := session.launchSnapshot()
 		switch program {
 		case "claude":
 			require.Empty(t, proof.TrustedExecutable)
@@ -190,12 +190,12 @@ func TestSetProgram_ClearsAPreviousDeclaration(t *testing.T) {
 	session.SetLaunchProgram("claude --session-id sid-1 --plugin-dir /p", sessionenv.AccountLaunchProof{
 		TrustedExecutable: "/opt/af-detected/claude",
 		GeneratedArgs:     []string{"--session-id", "sid-1", "--plugin-dir", "/p"},
-	})
+	}, nil)
 
 	// A handoff target that happens to end in the very same words.
 	session.SetProgram("other-agent --session-id sid-1 --plugin-dir /p")
 
-	program, proof, _, _, _, _, _ := session.launchSnapshot()
+	program, proof, _, _, _, _, _, _ := session.launchSnapshot()
 	require.Equal(t, "other-agent --session-id sid-1 --plugin-dir /p", program)
 	require.Empty(t, proof.GeneratedArgs,
 		"the outgoing launch's declaration survived into the replacement, so af would vouch for "+

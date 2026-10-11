@@ -250,7 +250,7 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 	// A bare agent name earns its grant only when the PATH walk finds it: the
 	// fixture directory stands in for an operator-controlled absolute entry.
 	pathDir := t.TempDir()
-	for _, agent := range []string{"codex", "claude", "gemini", "opencode", "amp"} {
+	for _, agent := range []string{"codex", "claude", "gemini", "opencode", "amp", "env"} {
 		writeExecutableFixture(t, pathDir, agent)
 	}
 	t.Setenv("PATH", pathDir)
@@ -280,8 +280,12 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 				{"env ./codex", false},
 				{"exec -- ./codex", false},
 				{"exec -- /opt/codex", true},
-				{"TERM=xterm-256color codex", true},
-				{"CODEX_HOME=/tmp/codex-home codex", true},
+				{"TERM=xterm-256color codex", false},
+				{"CODEX_HOME=/tmp/codex-home codex", false},
+				{"LD_PRELOAD=./steal.so codex", false},
+				{"env codex", true},
+				{"env -u HOME codex", false},
+				{"env /opt/codex", true},
 				{"/usr/bin/env codex", true},
 			},
 		},
@@ -294,6 +298,7 @@ func TestExecInvocationBindsCredentialGrantToAttributableExecutable(t *testing.T
 				{"bin/claude", false},
 				{"../claude", false},
 				{"/usr/local/bin/claude --verbose", true},
+				{"CLAUDE_CODE_USE_BEDROCK=1 claude", true},
 			},
 		},
 		{
@@ -416,6 +421,33 @@ func TestExecInvocationDeniesGrantForExecutableInsideWorkingDirectory(t *testing
 	}
 	if slices.Contains(gotEnvironment, "OPENAI_API_KEY=fixture") {
 		t.Fatalf("absolute path %q inside the pane working directory kept the Codex credential", command)
+	}
+}
+
+// An account-scoped launch whose command cannot be attributed to the operator
+// must REFUSE rather than strip-and-continue: the account boundary would
+// still inject the selected account's material into the program (#5265).
+func TestExecInvocationRefusesScopedLaunchWhenGrantFails(t *testing.T) {
+	// A PATH that resolves the bare name into the pane's working directory —
+	// the repository-controlled resolution class the grant exists to deny.
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", ".")
+	processExecCalled := false
+	previous := processExec
+	processExec = func(_ string, _ []string, _ []string) error {
+		processExecCalled = true
+		return nil
+	}
+	t.Cleanup(func() { processExec = previous })
+
+	// scoped argv: agent, extraCount, account, trustedExecutable,
+	// generatedCount, generatedArgs..., extras..., command.
+	err := execInvocation([]string{"codex", "0", "work", "", "0", "codex"}, true)
+	if err == nil {
+		t.Fatal("scoped launch on a repository-controlled PATH hit was not refused")
+	}
+	if processExecCalled {
+		t.Fatal("refused scoped launch still reached exec")
 	}
 }
 

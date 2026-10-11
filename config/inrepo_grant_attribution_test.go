@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -62,6 +63,23 @@ func TestInRepoProgramOverrideCannotSelectExecutableInsideRepo(t *testing.T) {
 		inside := filepath.Join(repoRoot, "codex")
 		writeInRepoConfig(t, repoRoot,
 			fmt.Sprintf(`{"program_overrides": {"codex": %q}}`, "exec -- "+inside))
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "inside this repository")
+	})
+
+	// A spelling inside the repository is repository content even when the
+	// file it selects resolves out: an in-tree symlink to an outside binary
+	// can be repointed by a later commit before exec, so the lexical spelling
+	// is refused on the same line as a regular in-tree file (#5265 review).
+	t.Run("in-tree symlink resolving outside", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "codex")
+		link := filepath.Join(repoRoot, "codex")
+		require.NoError(t, os.Symlink(outside, link))
+		writeInRepoConfig(t, repoRoot,
+			fmt.Sprintf(`{"program_overrides": {"codex": %q}}`, link))
 
 		_, _, err := LoadInRepoConfig(repoRoot)
 		require.Error(t, err)
