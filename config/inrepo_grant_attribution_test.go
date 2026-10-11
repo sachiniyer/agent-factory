@@ -99,6 +99,19 @@ func TestInRepoProgramOverrideRefusesAbsoluteExecutables(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "absolute executable")
 	})
+
+	// The refusal is on the SPELLING, not the agent match: an absolute
+	// executable whose basename is no supported agent is still a repository
+	// aiming the launch at a file af cannot attribute (#5265 review).
+	t.Run("absolute executable not named for an agent", func(t *testing.T) {
+		repoRoot := t.TempDir()
+		writeInRepoConfig(t, repoRoot,
+			`{"program_overrides": {"codex": "/opt/payload/payload"}}`)
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "absolute executable")
+	})
 }
 
 // TestInRepoProgramOverrideRefusesCommandLocalEnvironment covers the
