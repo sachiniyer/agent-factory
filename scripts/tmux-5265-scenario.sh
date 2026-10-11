@@ -466,10 +466,10 @@ run_nohit_leg() {
     done
     wait "$create_pid" 2>/dev/null || true
     hits="$(sentinel_count "$evidir/session-env.txt")"
-    # The exec failure surfaces in the dead pane's scrollback AND in af's own
-    # readiness error, which quotes the last pane content verbatim — either is
-    # the "nothing ran" half of the evidence.
-    notfound="$( { grep -ci 'not found' "$evidir/pane.txt" 2>/dev/null; grep -ci 'not found' "$evidir/create.log" 2>/dev/null; } | awk '{s+=$1} END {print s+0}')"
+    # The exec failure surfaces as 'not found' in the dead pane's scrollback
+    # or as the 'Pane is dead (status 127)' marker af's readiness error quotes
+    # verbatim — either is the "nothing ran" half of the evidence.
+    notfound="$( { grep -ciE 'not found|Pane is dead' "$evidir/pane.txt" 2>/dev/null; grep -ciE 'not found|Pane is dead' "$evidir/create.log" 2>/dev/null; } | awk '{s+=$1} END {print s+0}')"
     if [ "$hits" -eq 3 ] && [ "$notfound" -ge 1 ]; then
         verdict=PASS
     else
