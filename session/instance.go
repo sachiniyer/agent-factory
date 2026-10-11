@@ -207,6 +207,12 @@ type Instance struct {
 	// an unobserved interval is never silence (#5221 review). Zero until
 	// this process has actually seen the pane.
 	paneObservationStreakAt time.Time
+	// paneObservationExpiresAt is when the streak goes stale: the last
+	// successful capture plus the gap slack its caller declared. A release
+	// arm evaluated past it has no current observation to release on — a
+	// run of failed captures cannot inherit a satisfied window the way a
+	// never-rebased streak would (#5221 review).
+	paneObservationExpiresAt time.Time
 	// lastPaneCaptureAt is the completion stamp of the latest successful
 	// capture, used to detect the observation holes that rebase
 	// paneObservationStreakAt.

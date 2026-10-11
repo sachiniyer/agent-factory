@@ -453,11 +453,16 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// Stamped when the capture RETURNS, not when the request left — a slow
 	// remote round-trip is not observed silence (#5221 review). The declared
 	// cadence is the backstop probe's own: captures arriving one probe period
-	// apart are scheduled, not a hole (#5221 review). The request-start
-	// `capturedAt` stays the turn-age bound below: that check needs the
-	// earliest instant the frame could exist, this one needs the moment its
-	// knowledge actually landed.
-	instance.NotePaneCaptureObserved(nowFunc(), taskRunPollBackstop)
+	// apart are scheduled, not a hole (#5221 review). An answered snapshot
+	// whose own pane probe failed (obs.Captured false — a local capture-pane
+	// can fail without surfacing an error) is no observation either: the
+	// streak must not extend across frames nobody captured (#5221 review).
+	// The request-start `capturedAt` stays the turn-age bound below: that
+	// check needs the earliest instant the frame could exist, this one needs
+	// the moment its knowledge actually landed.
+	if obs.Captured {
+		instance.NotePaneCaptureObserved(nowFunc(), taskRunPollBackstop)
+	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
@@ -726,9 +731,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// remote round-trip is not observed silence (#5221 review). The declared
 	// cadence is the configured tick: a slower operator-set poll interval is
 	// scheduled, not a hole, while a stall past its slack still rebases the
-	// observation streak.
-	pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
-	instance.NotePaneCaptureObserved(nowFunc(), pollInterval)
+	// observation streak. A snapshot that answered without capturing
+	// (obs.Captured false — the local backend swallows transient
+	// capture-pane failures into an all-false frame) is no observation:
+	// skipping the stamp leaves lastPaneCaptureAt aging until a real frame
+	// lands and rebases the streak (#5221 review).
+	if obs.Captured {
+		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
+		instance.NotePaneCaptureObserved(nowFunc(), pollInterval)
+	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	settlementCheckpoint := false

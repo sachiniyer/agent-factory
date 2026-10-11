@@ -317,10 +317,11 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 	// The durable churn stamp can be far older than the pane's true last
 	// output — churn after the first post-prompt edge is not re-checkpointed —
 	// so silence is measured from the later of the stamp and the START of the
-	// current uninterrupted capture streak. A zero streak means nothing has
-	// been observed since (re)start, and a hole mid-window means the churn it
-	// hid resets the clock: unobserved time is never silence (#5221 review).
-	if i.paneObservationStreakAt.IsZero() {
+	// current uninterrupted capture streak. A dead or never-born streak means
+	// nothing has been observed since (re)start or since the last capture
+	// aged out, and a hole mid-window means the churn it hid resets the
+	// clock: unobserved time is never silence (#5221 review).
+	if !i.paneObservationLiveLocked() {
 		return false
 	}
 	base := i.lastPaneChurnAt
@@ -347,7 +348,7 @@ func (i *Instance) taskRunSilentReleaseLocked() bool {
 		// output. The silent arm is only for a pane that never moved at all.
 		return false
 	}
-	if i.paneObservationStreakAt.IsZero() {
+	if !i.paneObservationLiveLocked() {
 		return false
 	}
 	base := i.taskRunPromptAttemptAt
@@ -355,6 +356,17 @@ func (i *Instance) taskRunSilentReleaseLocked() bool {
 		base = i.paneObservationStreakAt
 	}
 	return time.Since(base) >= taskRunCompletionSilentGrace
+}
+
+// paneObservationLiveLocked reports whether the observation streak is still
+// current — a confirmed capture landed within the gap slack its caller
+// declared. A run of failed or swallowed captures lets it lapse, and the
+// arms then hold rather than inheriting a satisfied window from a streak the
+// pane stopped confirming (#5221 review).
+//
+// Caller holds i.mu.
+func (i *Instance) paneObservationLiveLocked() bool {
+	return !i.paneObservationExpiresAt.IsZero() && time.Now().Before(i.paneObservationExpiresAt)
 }
 
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.

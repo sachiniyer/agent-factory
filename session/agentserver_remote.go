@@ -150,12 +150,22 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	if err := s.rc.call("/v1/agent/snapshot", struct{}{}, &resp); err != nil {
 		return Observation{}, err
 	}
+	// A pre-field sandbox reports no capture bit: its answered response was
+	// the observation contract, so resolve the absence to captured rather
+	// than starving a remote run's evidence bookkeeping during a mixed-
+	// version rollout. A server new enough to send the field is authoritative
+	// — including its honest no (#5221 review).
+	captured := true
+	if resp.Captured != nil {
+		captured = *resp.Captured
+	}
 	return Observation{
 		Updated:     resp.Updated,
 		Baseline:    resp.Baseline,
 		HasPrompt:   resp.HasPrompt,
 		Content:     resp.Content,
 		ModelChange: cloneAgentModelChange(resp.ModelChange),
+		Captured:    captured,
 	}, nil
 }
 
@@ -785,6 +795,11 @@ type agentSnapshotResp struct {
 	HasPrompt   bool              `json:"has_prompt"`
 	Content     string            `json:"content"`
 	ModelChange *AgentModelChange `json:"model_change,omitempty"`
+	// Captured is a pointer so "server predates the field" stays
+	// distinguishable from "server reports its capture failed" (#5221
+	// review): nil resolves to the legacy contract — an answered snapshot
+	// counted as observed.
+	Captured *bool `json:"captured,omitempty"`
 }
 
 type agentPreviewReq struct {

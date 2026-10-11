@@ -28,6 +28,17 @@ import (
 // devin's boot renders its prompt echo, ACP init, and skill discovery as
 // ordinary Updated captures seconds after Enter.
 
+// observeContinuously stamps a pane observation streak covering [from, now]
+// at the 1s live-poll cadence — the shape the daemon leaves when it has
+// watched the pane the whole window. A single backdated stamp is something
+// else under the streak-expiry contract: the pane was observed once and then
+// went unobserved, which the release arms must not count.
+func observeContinuously(inst *Instance, from time.Time) {
+	for at := from; !at.After(time.Now()); at = at.Add(5 * time.Second) {
+		inst.NotePaneCaptureObserved(at, time.Second)
+	}
+}
+
 // taskRunSession returns a task-spawned session with its run in flight,
 // running under a fake backend, at LiveRunning — the state a cron session is
 // in the moment the task prompt send returns.
@@ -133,9 +144,9 @@ func TestTaskRunSustainedQuietAfterChurnEndsRun(t *testing.T) {
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
 
-	// The poll has been capturing since the send — the daemon stamps the
-	// evidence floor at the first good frame before any quiet evaluation.
-	inst.NotePaneCaptureObserved(attemptedAt, time.Second)
+	// The poll has been capturing since the send — the observation streak
+	// covers the whole churn→quiet window before any release evaluates.
+	observeContinuously(inst, attemptedAt)
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
@@ -162,7 +173,7 @@ func TestTaskRunQuietFallbackReleaseLogsDistinctly(t *testing.T) {
 
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(taskRunCompletionQuietGrace), epoch))
-	inst.NotePaneCaptureObserved(attemptedAt, time.Second)
+	observeContinuously(inst, attemptedAt)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive())
 	out := buf.String()
@@ -292,7 +303,7 @@ func TestTaskRunFailedManualSendKeepsArmedWindow(t *testing.T) {
 	// tracks it) but the task boundary must stay at the task's send.
 	require.True(t, inst.RecordPromptAttempt(PromptNotDelivered, t0.Add(taskRunCompletionQuietGrace+10*time.Second)))
 
-	inst.NotePaneCaptureObserved(t0, time.Second)
+	observeContinuously(inst, t0)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"a refused manual send does not unsatisfy the window the task's churn already earned")
@@ -516,7 +527,7 @@ func TestTaskRunSilentTurnReleasesAfterLongGrace(t *testing.T) {
 	// with zero churn recorded at any point. The poll has been watching since
 	// the send — the window is elapsed OBSERVED silence, not wall time.
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now().Add(-10*time.Second)))
-	inst.NotePaneCaptureObserved(time.Now().Add(-10*time.Second), time.Second)
+	observeContinuously(inst, time.Now().Add(-10*time.Second))
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
@@ -666,6 +677,30 @@ func TestTaskRunQuietArmPreservesScheduledBackstopCadence(t *testing.T) {
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
 		"scheduled backstop probes are continuous observation — the quiet arm keeps its progress")
+}
+
+// The streak also EXPIRES: a satisfied window must not be inherited by a run
+// of failed captures. Local capture-pane failures surface as answered
+// observations with no frame, so the last confirmed stamp ages out under its
+// own gap slack — evaluated past it, the arms hold rather than releasing on
+// silence nobody watched (#5221 review).
+func TestTaskRunArmsHoldAfterObservationGoesStale(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now().Add(-2 * time.Minute)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(30*time.Second), epoch))
+
+	// One confirmed capture a minute back, then nothing that counts — failed
+	// probes leave no stamp. Churn-plus-grace is long satisfied on the
+	// calendar, but the observation is stale.
+	inst.NotePaneCaptureObserved(t0.Add(time.Minute), time.Second)
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"a lapsed streak is no observation — the arms hold until the pane is captured again")
+	require.True(t, inst.taskRunTurnGateHeld)
 }
 
 // The silent arm answers the same question the quiet arm does — "did the

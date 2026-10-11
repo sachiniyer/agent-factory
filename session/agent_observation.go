@@ -156,4 +156,5 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 		i.paneObservationStreakAt = at
 	}
 	i.lastPaneCaptureAt = at
+	i.paneObservationExpiresAt = at.Add(maxGap)
 }
