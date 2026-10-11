@@ -95,11 +95,13 @@ func TestConfigGetExplainKeepsBareGlobalContract(t *testing.T) {
 
 func TestConfigGetProjectPathResolvesExistingLayersWithoutRegistering(t *testing.T) {
 	home, repoRoot := setupConfigExplainCommandTest(t, "schema_version = 1\ndefault_program = \"codex\"\n")
+	// Relative spelling: in-repo program_overrides may not name absolute
+	// executables (#5265 review).
 	writeCommandTestInRepoConfig(t, repoRoot, `
 default_program = "aider"
 
 [program_overrides]
-codex = "/repo/codex"
+codex = "repo/codex"
 `)
 	subdir := filepath.Join(repoRoot, "nested")
 	require.NoError(t, os.Mkdir(subdir, 0755))
@@ -255,17 +257,19 @@ default_program = "claude"
 [program_overrides]
 codex = "/global/codex"
 `)
-	writeCommandTestInRepoConfig(t, repoRoot, "[program_overrides]\ncodex = \"/repo/codex\"\n")
+	// Relative spelling: in-repo program_overrides may not name absolute
+	// executables (#5265 review).
+	writeCommandTestInRepoConfig(t, repoRoot, "[program_overrides]\ncodex = \"repo/codex\"\n")
 	setConfigGetReadFlags(t, repoRoot, false, false)
 
 	output, err := runConfigGetForTest(t, "program_overrides.codex")
 	require.NoError(t, err)
-	assert.Equal(t, "/repo/codex\n", output)
+	assert.Equal(t, "repo/codex\n", output)
 
 	configGetExplainFlag = true
 	output, err = runConfigGetForTest(t, "program_overrides.codex")
 	require.NoError(t, err)
-	assert.Contains(t, output, "program_overrides.codex = /repo/codex")
+	assert.Contains(t, output, "program_overrides.codex = repo/codex")
 	assert.Contains(t, output, "global")
 	assert.Contains(t, output, "shadowed · leaf is overridden by higher-precedence repo-shared")
 	assert.Contains(t, output, "repo-shared")

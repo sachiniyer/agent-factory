@@ -214,9 +214,9 @@ func grantAgentForCommand(command string, environ []string, workDir string) stri
 // resolution selected in command — including through a trusted env wrapper —
 // for a caller that must judge the FILE, not only the attributed agent. It
 // answers "" when the command is not one literal supported-agent invocation.
-// LoadInRepoConfig uses it to refuse a checked-in program_overrides value
-// that points the credential grant at an absolute path inside the repository
-// itself (#5265).
+// LoadInRepoConfig uses it to refuse any checked-in program_overrides value
+// that selects an absolute executable: a repository spelling is not trusted
+// provenance for a file outside it (#5265).
 func AgentCommandExecutable(command string) string {
 	invocation, ok := literalAgentCommand(command, isTrustedEnvExecutable)
 	if !ok {
