@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -68,6 +69,16 @@ func boundWebListeners(t *testing.T, cfg *config.Config) (*Manager, *webListener
 // destination, and http.DefaultClient routes it through HTTP_PROXY on runners
 // that define one without a wildcard exemption (#5137 review). The wildcard
 // listener accepts loopback, so the same socket is exercised.
+//
+// loopbackHTTPClient closes the second half of that hole: ProxyFromEnvironment
+// can also route a literal loopback dial through HTTP_PROXY when the runner's
+// no_proxy lacks 127.0.0.1, and a proxied upgrade is a conn the test's own
+// server never accepts — the tracker asserts below then read a tracker no
+// client ever reached. A nil-Proxy transport guarantees the dial is direct.
+var loopbackHTTPClient = &http.Client{Transport: &http.Transport{Proxy: nil}}
+
+var loopbackDialOpts = &websocket.DialOptions{HTTPClient: loopbackHTTPClient}
+
 func loopbackDialAddr(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -83,7 +94,7 @@ func loopbackDialAddr(addr string) string {
 // getStatus issues a plain GET to http://addr/path and returns the status code.
 func getStatus(t *testing.T, addr, path string) int {
 	t.Helper()
-	resp, err := http.Get("http://" + loopbackDialAddr(addr) + path)
+	resp, err := loopbackHTTPClient.Get("http://" + loopbackDialAddr(addr) + path)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
