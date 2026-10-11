@@ -208,13 +208,42 @@ func TestLateFrameDropsTaskRunTurnWatch(t *testing.T) {
 // (#5221 review).
 type slowTransportBackend struct {
 	*session.FakeBackend
-	now   *time.Time
-	delay time.Duration
+	now     *time.Time
+	delay   time.Duration
+	updated bool
 }
 
 func (b *slowTransportBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
 	*b.now = b.now.Add(b.delay)
-	return false, false, "", false, true
+	return b.updated, false, "", false, true
+}
+
+// A stale frame is void WHOLESALE, not only at the capture bit (#5221
+// review): its Updated could otherwise stamp churn the pane never showed —
+// flipping a settled idle session back to Running and holding its
+// concurrency slot until the next real poll.
+func TestLateFrameDrivesNoStatusHandling(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	now := time.Now()
+	backend := &slowTransportBackend{FakeBackend: session.NewFakeBackend(), now: &now}
+	inst := registerStarted(t, manager, repoID, repoPath, "late-void", backend, true, session.Running)
+
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	// A fresh confirmed-unchanged frame settles the idle edge.
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"precondition: an on-time unchanged frame settles Ready")
+
+	// Now the transport runs long and the frame claims churn — all late.
+	now = now.Add(time.Second)
+	backend.delay = 2 * session.PaneObservationSlack
+	backend.updated = true
+	manager.refreshInstanceStatus(repoID, inst)
+	require.Equal(t, session.LiveReady, inst.GetLiveness(),
+		"a frame past the observation slack must not stamp churn or re-run the edge")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —

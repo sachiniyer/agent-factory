@@ -759,9 +759,12 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// frame that returns past the observation slack is stale the same way:
 	// it depicts a pane that may have churned inside the round trip, so the
 	// still-now evidence it carries cannot stand — the trip itself was the
-	// blind window, and nothing downstream may read it (#5221 review).
+	// blind window, and nothing downstream may read it (#5221 review). The
+	// whole frame is void, not just its capture bit: a stale Updated could
+	// stamp churn that suppresses idle settlement, so the late arrival takes
+	// the failed-capture shape exactly (#5221 review).
 	if obs.Captured && nowFunc().Sub(capturedAt) > session.PaneObservationSlack {
-		obs.Captured = false
+		obs = session.Observation{}
 	}
 	if obs.Captured {
 		pollInterval := time.Duration(m.Config().DaemonPollInterval) * time.Millisecond
