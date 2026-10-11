@@ -272,38 +272,104 @@ function listenerExposureIdentity(w: string): string {
 // listenerExposureDedup returns true when a write-side exposure forecast
 // (channel 1, exposureWarning) is the same hazard an apply-side notice (channel 2,
 // ListenerExposureNotice/PreviewListenerExposureNotice) already covers
-// authoritatively. It compares listenerExposureIdentity values, with one
-// relaxation: a configured address of port :0 (the ephemeral wildcard the OS
-// resolves to a concrete port on a successful rebind) matches the apply
-// channel's concrete bound port for the same listener and host. The apply
-// channel names the serving bound address (never a wildcard), so a :0 in the
-// forecast is the only direction the wildcard appears; the inverse — a concrete
-// forecast against a :0 notice — does not arise and is not relaxed. The
-// failed-rebind case where both addresses are concrete and differ is preserved:
+// authoritatively. It compares listenerExposureIdentity values, with two
+// relaxations for the same-listener case:
+//
+//   1. Wildcard host normalization: a configured 0.0.0.0 (IPv4 wildcard) and a
+//      serving [::] (IPv6 wildcard) are the same "all interfaces" bind on a
+//      dual-stack host — net.Listen("tcp", "0.0.0.0:0") can report its bound
+//      address as [::]:<port>, so channel 1's 0.0.0.0 and channel 2's [::] are
+//      the same listener. normalizeListenHost canonicalizes 0.0.0.0, ::, and the
+//      empty host (":8443") so they compare equal; a concrete host (loopback,
+//      LAN IP) is returned as-is.
+//   2. Ephemeral port: a configured port of :0 (the OS-assigned wildcard) matches
+//      any concrete serving port the kernel assigned for the same listener and
+//      host. The apply channel names the serving bound address (never a wildcard),
+//      so a :0 in the forecast is the only direction the wildcard appears; the
+//      inverse — a concrete forecast against a :0 notice — does not arise and is
+//      not relaxed.
+//
+// The failed-rebind case where both addresses are concrete and differ is preserved:
 // two different concrete ports for the same host do not match, and two different
 // hosts do not match regardless of the port (TestApplyConfigExposureNoticePerKey
 // OrderNamesServingAddress pins the serving-vs-configured split for a failed
-// rebind).
+// rebind). Zero-padded zero ports ("00", "000") and an omitted port ("0.0.0.0:")
+// are normalized to "0" (net.LookupPort resolves them to 0, the ephemeral wildcard).
 function listenerExposureDedup(writeId: string, applyId: string): boolean {
   if (writeId === applyId) {
     return true;
   }
-  // <key> <host>:<port> — the address always carries a port (ListenerExposureNotice
-  // and exposureWarning format a net.Addr, and the configured value is validated).
-  const wColon = writeId.lastIndexOf(":");
-  const aColon = applyId.lastIndexOf(":");
-  if (wColon < 0 || aColon < 0) {
+  // The identity is "<key> <address>"; the key (network.listen_addr or
+  // network.preview_listen_addr) has no spaces, so the address is the rest.
+  const wSpace = writeId.indexOf(" ");
+  const aSpace = applyId.indexOf(" ");
+  if (wSpace < 0 || aSpace < 0) {
     return false;
   }
-  if (writeId.slice(0, wColon) !== applyId.slice(0, aColon)) {
+  if (writeId.slice(0, wSpace) !== applyId.slice(0, aSpace)) {
     return false;
   }
-  const wPort = writeId.slice(wColon + 1);
-  const aPort = applyId.slice(aColon + 1);
+  const wAddr = splitListenHostPort(writeId.slice(wSpace + 1));
+  const aAddr = splitListenHostPort(applyId.slice(aSpace + 1));
+  if (!wAddr || !aAddr) {
+    return false;
+  }
+  if (normalizeListenHost(wAddr.host) !== normalizeListenHost(aAddr.host)) {
+    return false;
+  }
+  const wPort = normalizeListenPort(wAddr.port);
+  const aPort = normalizeListenPort(aAddr.port);
+  if (wPort === aPort) {
+    return true;
+  }
   // A :0 forecast (ephemeral) matches any concrete serving port for the same
   // listener and host. The apply channel never carries :0 (it names the serving
   // bound address), so only the forecast direction needs the wildcard.
   return wPort === "0" && aPort !== "0";
+}
+
+// splitListenHostPort splits a "<host>:<port>" or "[<host>]:<port>" address into
+// its host and port, mirroring net.SplitHostPort. The identity's address comes
+// from the daemon's %q formatting of a net.Addr, so an IPv6 wildcard is
+// "[::]:<port>". Returns null for an address that does not parse.
+function splitListenHostPort(addr: string): { host: string; port: string } | null {
+  // IPv6: [host]:port — the bracketed host is the part inside [], the port
+  // follows the closing bracket and a colon.
+  if (addr.startsWith("[")) {
+    const close = addr.indexOf("]");
+    if (close < 0) return null;
+    const after = addr.slice(close + 1);
+    if (!after.startsWith(":")) return null;
+    return { host: addr.slice(1, close), port: after.slice(1) };
+  }
+  // IPv4 or empty host: the last colon separates host and port. An empty host
+  // (":8443") is valid (binds all interfaces) and yields host "".
+  const colon = addr.lastIndexOf(":");
+  if (colon < 0) return null;
+  return { host: addr.slice(0, colon), port: addr.slice(colon + 1) };
+}
+
+// normalizeListenHost canonicalizes "all interfaces" wildcard hosts so a
+// configured 0.0.0.0 (IPv4) and a serving [::] (IPv6, which net.Listen("tcp",
+// "0.0.0.0:0") reports on dual-stack hosts) compare equal. An empty host (e.g.
+// ":8443") also binds every interface. A concrete host (loopback, LAN IP) is
+// returned as-is.
+function normalizeListenHost(host: string): string {
+  if (host === "" || host === "0.0.0.0" || host === "::") {
+    return "0.0.0.0";
+  }
+  return host;
+}
+
+// normalizeListenPort canonicalizes the port so zero-padded spellings ("00",
+// "000") and an omitted port ("") — all of which net.LookupPort resolves to 0
+// (the ephemeral wildcard) — compare equal to "0". A concrete port is returned
+// as-is (leading zeros stripped for numeric strings); a non-numeric service name
+// is returned unchanged (it is not an ephemeral port and the two channels would
+// format it identically if it were the same bind).
+function normalizeListenPort(port: string): string {
+  const n = Number(port);
+  return Number.isNaN(n) ? port : String(n);
 }
 
 export function saveNotice(resp: ConfigSetResponse): string {

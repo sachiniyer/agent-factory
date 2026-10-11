@@ -7663,17 +7663,50 @@ function listenerExposureDedup(writeId, applyId) {
   if (writeId === applyId) {
     return true;
   }
-  const wColon = writeId.lastIndexOf(":");
-  const aColon = applyId.lastIndexOf(":");
-  if (wColon < 0 || aColon < 0) {
+  const wSpace = writeId.indexOf(" ");
+  const aSpace = applyId.indexOf(" ");
+  if (wSpace < 0 || aSpace < 0) {
     return false;
   }
-  if (writeId.slice(0, wColon) !== applyId.slice(0, aColon)) {
+  if (writeId.slice(0, wSpace) !== applyId.slice(0, aSpace)) {
     return false;
   }
-  const wPort = writeId.slice(wColon + 1);
-  const aPort = applyId.slice(aColon + 1);
+  const wAddr = splitListenHostPort(writeId.slice(wSpace + 1));
+  const aAddr = splitListenHostPort(applyId.slice(aSpace + 1));
+  if (!wAddr || !aAddr) {
+    return false;
+  }
+  if (normalizeListenHost(wAddr.host) !== normalizeListenHost(aAddr.host)) {
+    return false;
+  }
+  const wPort = normalizeListenPort(wAddr.port);
+  const aPort = normalizeListenPort(aAddr.port);
+  if (wPort === aPort) {
+    return true;
+  }
   return wPort === "0" && aPort !== "0";
+}
+function splitListenHostPort(addr) {
+  if (addr.startsWith("[")) {
+    const close = addr.indexOf("]");
+    if (close < 0) return null;
+    const after = addr.slice(close + 1);
+    if (!after.startsWith(":")) return null;
+    return { host: addr.slice(1, close), port: after.slice(1) };
+  }
+  const colon = addr.lastIndexOf(":");
+  if (colon < 0) return null;
+  return { host: addr.slice(0, colon), port: addr.slice(colon + 1) };
+}
+function normalizeListenHost(host) {
+  if (host === "" || host === "0.0.0.0" || host === "::") {
+    return "0.0.0.0";
+  }
+  return host;
+}
+function normalizeListenPort(port) {
+  const n = Number(port);
+  return Number.isNaN(n) ? port : String(n);
 }
 function saveNotice(resp) {
   const parts = [];
