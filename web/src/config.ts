@@ -808,6 +808,28 @@ function normalizeListenPort(port: string, bindSucceeded: boolean): string {
   return resolved !== undefined ? String(resolved) : port;
 }
 
+// listenerRebindFailedFor reports whether a listener rebind failed during the
+// apply, by checking the apply warnings (channel 2) for the rebind failure
+// message the daemon's reconcile emits (listener_rebind.go:
+// "apply network.listen_addr ..." / "apply network.preview_listen_addr ...").
+// A failed rebind keeps the old listener serving, so the serving address channel
+// 2 names is the OLD bound address, not the configured one — the dedup
+// relaxations in listenerExposureDedup are unsafe (two different concrete
+// addresses, not the same bind in a different form). The exposure notice
+// ("... is reachable from the network ...") starts with the listener key, not
+// "apply ", so it does not match.
+//
+// On a non-listener save (e.g. network.require_token) the per-key
+// apply_outcome is "applied" for the saved key regardless of the listener
+// rebind, because StatusForKey reports the saved key's status and the saved
+// key is not a listener. The rebind failure warning in channel 2 is the only
+// signal the response carries that the listener's rebind did not land, so the
+// rebind status is derived from it rather than from the saved key.
+function listenerRebindFailedFor(warnings: string[], listenerKey: string): boolean {
+  const prefix = "apply " + listenerKey + " ";
+  return warnings.some((w) => w.startsWith(prefix));
+}
+
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
   const writeWarnings = resp.result.warnings ?? [];
@@ -824,10 +846,25 @@ export function saveNotice(resp: ConfigSetResponse): string {
   // the outcome: a prior failed rebind left the listener serving a different
   // address than the configured one, and a require_token flip's forecast for the
   // configured address must not be deduped against the serving address's notice.
-  const savedKey = resp.result.key;
-  const listenerRebindSucceeded =
-    (savedKey === "network.listen_addr" || savedKey === "network.preview_listen_addr") &&
-    resp.apply_outcome === "applied";
+  //
+  // A non-listener save can also retry a pending listener rebind (ApplyConfig
+  // reconciles every save, so a temporarily occupied bind that failed on the
+  // listener save can succeed when a require_token flip retried it). The
+  // per-key apply_outcome for the saved key (e.g. network.require_token) is
+  // "applied" because that key applied live; it does not reflect the listener
+  // rebind, whose outcome the daemon reports only via a per-listener rebind
+  // failure warning in channel 2 (applyWarnings). The rebind failure warning
+  // (listener_rebind.go: "apply network.listen_addr ... — daemon still
+  // serving ...") is absent when the rebind succeeded, so the per-listener
+  // rebind status is derived from the apply result rather than only from the
+  // saved key: a listener's rebind succeeded when apply_outcome is "applied"
+  // and channel 2 does NOT carry a rebind failure warning for that listener
+  // (the applyWarnings array is channel 2, which the daemon's reconcile
+  // populates with the error on a failed rebind). This also covers the
+  // listener-save case — a listener key whose rebind succeeded has
+  // apply_outcome "applied" and no rebind failure warning, and one whose
+  // rebind failed has apply_outcome "deferred" (so the gate fails on the
+  // outcome before the rebind-failure check) and the warning.
   // Merge both warning channels so independent per-write advisories (e.g. an
   // unregistered-account warning on a default_accounts write) survive even when
   // channel 2 carries an unrelated apply warning (e.g. a pending rebind retried
@@ -870,7 +907,36 @@ export function saveNotice(resp: ConfigSetResponse): string {
         }
         if (isListenerExposureWarning(w)) {
           const id = listenerExposureIdentity(w);
-          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), listenerRebindSucceeded))) {
+          // Derive the per-listener rebind status from the apply result for the
+          // listener that this forecast describes, rather than only from the key
+          // that initiated the save. A non-listener save (e.g.
+          // network.require_token) with apply_outcome "applied" can also retry a
+          // pending listener rebind: ApplyConfig reconciles every save, so a
+          // bind that failed on the listener save (port occupied) can succeed on
+          // the require_token flip that retried it. The per-key apply_outcome is
+          // "applied" for the saved key but does not reflect the listener rebind,
+          // whose outcome the daemon reports only via a rebind failure warning in
+          // channel 2 (listener_rebind.go: "apply network.listen_addr ... —
+          // daemon still serving on the previous address ..."). The absence of a
+          // rebind failure warning for this listener in channel 2 means the
+          // rebind either succeeded or was not needed (the listener is already at
+          // the configured address), and in both cases the serving address IS the
+          // resolved form of the configured address, so the dedup relaxations
+          // (wildcard host, resolved port, hostname) are safe. The presence of a
+          // rebind failure warning means the listener is still serving the old
+          // address, so the configured address is a future state the kernel has
+          // not resolved and the relaxations are unsafe (two different concrete
+          // addresses, not the same bind in a different form).
+          //
+          // For a listener key whose rebind succeeded, apply_outcome is "applied"
+          // and no rebind failure warning is present, so the rebind is recognized
+          // as succeeded here the same way. For a listener key whose rebind
+          // failed, apply_outcome is "deferred" (config/effect.go saveRules:
+          // ListenerRebindFailed → ApplyStatusDeferred), so the gate fails on the
+          // outcome before the rebind-failure check.
+          const wKey = id.indexOf(" ") >= 0 ? id.slice(0, id.indexOf(" ")) : "";
+          const rebindSucceeded = resp.apply_outcome === "applied" && !listenerRebindFailedFor(applyWarnings, wKey);
+          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded))) {
             return false;
           }
         }

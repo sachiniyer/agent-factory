@@ -7911,19 +7911,23 @@ function normalizeListenPort(port, bindSucceeded) {
   const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
   return resolved !== void 0 ? String(resolved) : port;
 }
+function listenerRebindFailedFor(warnings, listenerKey) {
+  const prefix = "apply " + listenerKey + " ";
+  return warnings.some((w) => w.startsWith(prefix));
+}
 function saveNotice(resp) {
   const parts = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
-  const savedKey = resp.result.key;
-  const listenerRebindSucceeded = (savedKey === "network.listen_addr" || savedKey === "network.preview_listen_addr") && resp.apply_outcome === "applied";
   const warnings = applyWarnings.length > 0 ? [...applyWarnings, ...writeWarnings.filter((w) => {
     if (applyWarnings.includes(w)) {
       return false;
     }
     if (isListenerExposureWarning(w)) {
       const id = listenerExposureIdentity(w);
-      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), listenerRebindSucceeded))) {
+      const wKey = id.indexOf(" ") >= 0 ? id.slice(0, id.indexOf(" ")) : "";
+      const rebindSucceeded = resp.apply_outcome === "applied" && !listenerRebindFailedFor(applyWarnings, wKey);
+      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureDedup(id, listenerExposureIdentity(aw), rebindSucceeded))) {
         return false;
       }
     }

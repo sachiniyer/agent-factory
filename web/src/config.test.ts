@@ -498,14 +498,15 @@ test("saveNotice deduplicates a dual-stack non-ephemeral rebind (configured 0.0.
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
 });
 
-test("saveNotice keeps the dual-stack exposure forecast when the saved key is not a listener (require_token flip)", () => {
+test("saveNotice keeps the dual-stack exposure forecast when the rebind status is unknown (no apply_outcome, require_token flip)", () => {
   // The cross-family wildcard equivalence (:: -> 0.0.0.0) is gated on
   // bindSucceeded: on a host with IPV6_V6ONLY, [::]:8443 and 0.0.0.0:8443 expose
-  // different address families. When the saved key is not a listener
-  // (network.require_token), no rebind happened on this save, so the browser
-  // cannot confirm the configured 0.0.0.0 and the serving [::] are the same
-  // bind. The strict host comparison keeps the IPv4 forecast (0.0.0.0:8443) and
-  // the IPv6 serving notice ([::]:8443) distinct, so both surface.
+  // different address families. This response carries no apply_outcome (an older
+  // daemon that predates the field), so the per-listener rebind status is unknown
+  // and the relaxation does not fire. The browser cannot confirm the configured
+  // 0.0.0.0 and the serving [::] are the same bind. The strict host comparison
+  // keeps the IPv4 forecast (0.0.0.0:8443) and the IPv6 serving notice
+  // ([::]:8443) distinct, so both surface.
   const configuredAddr = "0.0.0.0:8443";
   const servingAddr = "[::]:8443";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -633,19 +634,22 @@ test("saveNotice deduplicates a successful hostname rebind for the preview liste
   assert.equal(notice, `${restartNotice} · ${applyWarning}`);
 });
 
-test("saveNotice keeps the exposure forecast for a hostname when the saved key is not a listener (require_token flip)", () => {
-  // The hostname relaxation is gated on the saved key being a listener key
-  // (network.listen_addr / network.preview_listen_addr) and apply_outcome being
-  // "applied" — a successful rebind resolved the configured hostname to the
-  // serving IP. When the saved key is network.require_token the listener did not
-  // rebind on this save, so the browser cannot confirm the configured hostname
-  // resolved to the serving address (a prior rebind may have failed, leaving the
-  // listener serving a different address while config carries the hostname). The
-  // strict host comparison is kept, so a hostname forecast and a different serving
-  // IP both surface. This preserves the failed-rebind case (finding #5:
-  // TestApplyConfigExposureNoticePerKeyOrderNamesServingAddress pins the
-  // serving-vs-configured split) for a hostname the same way it does for a
-  // configured IP.
+test("saveNotice deduplicates a hostname forecast on a non-listener save with no rebind failure warning", () => {
+  // A non-listener save (network.require_token) with apply_outcome "applied" and
+  // no rebind failure warning in channel 2 means the listener is at the
+  // configured address — either no rebind was needed (the listener was already at
+  // the configured address) or ApplyConfig retried a pending rebind that
+  // succeeded (listener_rebind.go reconciles every save, so a bind that failed
+  // on the listener save can succeed on the require_token flip that retried it).
+  // In both cases the serving address (channel 2) IS the resolved form of the
+  // configured hostname (channel 1), so the hostname relaxation (a non-literal
+  // configured host matched to the literal serving IP) is safe: the rebind
+  // failure warning in channel 2 is absent, so listenerRebindFailedFor returns
+  // false and the rebind is recognized as succeeded. The per-key apply_outcome is
+  // "applied" for the saved key (network.require_token applies live) and does
+  // not reflect the listener rebind, whose outcome the daemon reports only via a
+  // rebind failure warning in channel 2; the absence of that warning is the
+  // signal that the rebind did not fail.
   const configuredAddr = "myhost:9443";
   const servingAddr = "192.0.2.1:9443";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -659,9 +663,48 @@ test("saveNotice keeps the exposure forecast for a hostname when the saved key i
       warnings: [applyWarning],
     }),
   );
-  // Both surface — the saved key is not a listener, so the rebind success signal
-  // is absent and the strict host comparison keeps the two addresses distinct.
-  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+  // Channel 2 (the serving IP the hostname resolved to) only; the channel-1
+  // forecast for the configured hostname is the same bind (the rebind either
+  // succeeded or was not needed, so the serving address is the resolved form of
+  // the configured hostname) and is suppressed by the hostname relaxation.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps the exposure forecast for a hostname when a non-listener save's rebind failed", () => {
+  // A non-listener save (network.require_token) can retry a pending listener
+  // rebind that fails again: ApplyConfig reconciles every save, so a bind that
+  // failed on the listener save is retried on the require_token flip. When the
+  // rebind fails again, the rebind failure warning ("apply network.listen_addr
+  // ... — daemon still serving on the previous address ...") is in channel 2, so
+  // listenerRebindFailedFor returns true and the rebind is NOT recognized as
+  // succeeded — the serving address (channel 2) is the OLD bound address, not
+  // the resolved form of the configured hostname, so the hostname relaxation
+  // (a non-literal configured host matched to the literal serving IP) is unsafe
+  // and both the forecast and the notice surface. This preserves the
+  // failed-rebind case (finding #5:
+  // TestApplyConfigExposureNoticePerKeyOrderNamesServingAddress pins the
+  // serving-vs-configured split) for a hostname the same way it does for a
+  // configured IP.
+  const configuredAddr = "myhost:9443";
+  const servingAddr = "192.0.2.1:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const rebindFailure = `apply network.listen_addr "${configuredAddr}": listen tcp ${configuredAddr}: bind: address already in use — daemon still serving on the previous address "${servingAddr}"`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [rebindFailure, applyWarning],
+    }),
+  );
+  // Both the rebind failure warning (channel 2) and the exposure notice (channel
+  // 2) surface before the forecast (channel 1): the rebind failure warning
+  // confirms the listener is still serving the old address, so the hostname
+  // relaxation is not applied and the configured hostname forecast is distinct
+  // from the serving IP notice.
+  assert.equal(notice, `${restartNotice} · ${rebindFailure} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice keeps the exposure forecast for a hostname when the rebind failed (deferred)", () => {
@@ -720,14 +763,15 @@ test("saveNotice keeps the :0 exposure forecast when the rebind failed (deferred
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
-test("saveNotice keeps the :0 exposure forecast when the saved key is not a listener", () => {
+test("saveNotice keeps the :0 exposure forecast when the rebind status is unknown (no apply_outcome, require_token flip)", () => {
   // The :0 resolved-port relaxation is gated on bindSucceeded, which requires
-  // the saved key to be a listener key (network.listen_addr /
-  // network.preview_listen_addr) AND apply_outcome "applied". When the saved
-  // key is network.require_token the listener did not rebind on this save, so a
-  // pending :0 configured address that a prior rebind left unbound is not the
-  // serving address, and the :0 forecast (the future bind) is distinct from the
-  // serving notice (the current concrete port) — both surface.
+  // apply_outcome "applied" and no rebind failure warning for the listener in
+  // channel 2. This response carries no apply_outcome (an older daemon that
+  // predates the field), so the per-listener rebind status is unknown and the
+  // relaxation does not fire: a pending :0 configured address that a prior rebind
+  // left unbound is not confirmed as the serving address, and the :0 forecast
+  // (the future bind) is distinct from the serving notice (the current concrete
+  // port) — both surface.
   const configuredAddr = "0.0.0.0:0";
   const servingAddr = "0.0.0.0:9443";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -740,9 +784,10 @@ test("saveNotice keeps the :0 exposure forecast when the saved key is not a list
       warnings: [applyWarning],
     }),
   );
-  // Both surface — the saved key is not a listener, so the rebind success signal
-  // is absent and the :0 relaxation does not fire; the future :0 forecast and
-  // the current concrete serving notice are different hazards.
+  // Both surface — apply_outcome is absent (an older daemon that predates the
+  // field), so the per-listener rebind status is unknown and the :0 relaxation
+  // does not fire; the future :0 forecast and the current concrete serving
+  // notice are different hazards.
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
@@ -971,10 +1016,11 @@ test("saveNotice keeps the exposure forecast when a service-name port is not res
   // Go's net.LookupPort augments its built-in service mappings from the daemon
   // host's /etc/services, so the browser-side WELL_KNOWN_TCP_SERVICES table is
   // not authoritative: a host can map "http" to a different port (e.g. 8080).
-  // On a require_token flip (not a listener rebind, so bindSucceeded is false)
-  // the serving address is the OLD bound port while the configured service name
-  // is a future state the kernel has not resolved, so the table is not used and
-  // the service-name forecast does not collapse to the well-known port — both
+  // This response carries no apply_outcome (an older daemon that predates the
+  // field), so the per-listener rebind status is unknown and bindSucceeded is
+  // false. The serving address is the OLD bound port while the configured service
+  // name is a future state the kernel has not resolved, so the table is not used
+  // and the service-name forecast does not collapse to the well-known port — both
   // the channel-2 notice (the serving port) and the channel-1 forecast (the
   // configured service name) surface. The configured 0.0.0.0:http and the serving
   // 0.0.0.0:80 are the same port on a host with the default /etc/services, but
@@ -993,9 +1039,10 @@ test("saveNotice keeps the exposure forecast when a service-name port is not res
       warnings: [applyWarning],
     }),
   );
-  // Both surface — the saved key is not a listener, so the rebind success signal
-  // is absent and the service-name table is not used; the configured 0.0.0.0:http
-  // forecast is not resolved to 80 and is distinct from the serving 0.0.0.0:80.
+  // Both surface — apply_outcome is absent (an older daemon that predates the
+  // field), so the per-listener rebind status is unknown and the service-name
+  // table is not used; the configured 0.0.0.0:http forecast is not resolved to 80
+  // and is distinct from the serving 0.0.0.0:80.
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
@@ -1054,6 +1101,76 @@ test("saveNotice keeps IPv4-compatible IPv6 distinct from IPv4 on a non-listener
   // Both surface — ::1.2.3.4 (IPv4-compatible) canonicalizes to ::102:304 (the
   // IPv6 form, not 1.2.3.4), so it does not compare equal to the serving 1.2.3.4.
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice deduplicates a service-name forecast when a non-listener save retried the rebind successfully", () => {
+  // A non-listener save (network.require_token) can retry a pending listener
+  // rebind that failed on the listener save (e.g. the port was occupied and is
+  // now free). The per-key apply_outcome is "applied" for the saved key
+  // (network.require_token applies live) even though the saved key is not the
+  // listener, so the old gate (savedKey is a listener key AND apply_outcome is
+  // "applied") left listenerRebindSucceeded false and the service-name
+  // relaxation was disabled — the channel-1 forecast (0.0.0.0:http-alt, the
+  // configured port the rebind just resolved) and the channel-2 notice
+  // (0.0.0.0:8080, the resolved serving port) both surfaced as if the rebind
+  // had failed. The rebind failure warning is absent from channel 2 when the
+  // rebind succeeds, so the per-listener rebind status is derived from the
+  // apply result: apply_outcome "applied" AND no rebind failure warning for the
+  // listener in channel 2 means the rebind landed and the serving address is
+  // the resolved form of the configured address. The resolved-port relaxation
+  // (bindSucceeded) matches the service-name forecast to the concrete serving
+  // port without the browser-side table (the rebind just resolved it).
+  const configuredAddr = "0.0.0.0:http-alt";
+  const servingAddr = "0.0.0.0:8080";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the concrete serving port 8080 the rebind just resolved) only;
+  // the http-alt forecast is the same exposure and is suppressed via the
+  // resolved-port relaxation (bindSucceeded), which is now gated on the
+  // per-listener rebind status (no rebind failure warning in channel 2 for
+  // network.listen_addr) rather than on the saved key being a listener key.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps the service-name forecast when a non-listener save retried the rebind but it failed again", () => {
+  // The other half of the non-listener rebind case: a pending listener rebind
+  // that the non-listener save retried but FAILED again. The rebind failure
+  // warning ("apply network.listen_addr ... — daemon still serving on the
+  // previous address ...") is in channel 2, so the per-listener rebind status
+  // is false — the serving address is the OLD bound port (not the resolved
+  // configured service name), and the service-name relaxation must not collapse
+  // them. The channel-1 forecast (the configured service name the rebind did not
+  // land) and the channel-2 notice (the old serving port) both surface.
+  const configuredAddr = "0.0.0.0:http-alt";
+  const servingAddr = "0.0.0.0:9443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const rebindFailure = `apply network.listen_addr "${configuredAddr}": listen tcp ${configuredAddr}: bind: address already in use — daemon still serving on the previous address "${servingAddr}"`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [rebindFailure, applyWarning],
+    }),
+  );
+  // Both the rebind failure warning (channel 2) and the exposure notice (channel
+  // 2) surface before the forecast (channel 1): the rebind failure warning
+  // confirms the listener is still serving the old address, so the per-listener
+  // rebind status is false and the service-name relaxation does not collapse
+  // the configured http-alt (a future state the rebind did not resolve) into the
+  // serving 9443.
+  assert.equal(notice, `${restartNotice} · ${rebindFailure} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice tolerates an older daemon that sends no address", () => {
