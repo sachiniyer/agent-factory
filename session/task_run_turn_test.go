@@ -391,6 +391,43 @@ func TestTaskRunStillEdgeRetiresCandidateOnChurn(t *testing.T) {
 		"the edge latches at the uninterrupted run's start")
 }
 
+// A blind window inside the still run — a failed capture, or a stall that
+// rebases the observation streak — breaks the continuity the candidate
+// claims: the pane may have churned unseen inside it, so the still run owes
+// a fresh window from the next confirmed capture (#5221 review).
+func TestTaskRunStillEdgeRetiresCandidateOnBlindWindow(t *testing.T) {
+	inst := taskRunSession(t)
+
+	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
+	t1 := t0.Add(20 * time.Second)
+	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
+	_, epoch = inst.InFlightOpAndEpoch()
+
+	// A failed capture inside the candidate's window ends the run — the
+	// blind interval could hide the churn that proves it was a pause.
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second), epoch))
+	inst.NotePaneCaptureFailed()
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second+taskRunStillGrace), epoch),
+		"the failed capture retires the candidate; this frame re-opens it")
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(10*time.Second+taskRunStillGrace+time.Second), epoch))
+	require.True(t, inst.taskRunStillBaseAt.IsZero(),
+		"stillness straddling a blind window never latches")
+
+	// The same holds for a stall past the gap horizon: the re-anchor clears
+	// the candidate before this frame's still stamp re-opens it.
+	inst.NotePaneCaptureObserved(t1.Add(30*time.Second), time.Second)
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second), epoch))
+	inst.NotePaneCaptureObserved(t1.Add(40*time.Second+2*paneObservationMinGap), time.Second)
+	require.True(t, inst.taskRunStillCandidateAt.IsZero(),
+		"a re-anchored streak clears the candidate it straddled")
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(40*time.Second+2*paneObservationMinGap), epoch))
+	require.Equal(t, t1.Add(40*time.Second+2*paneObservationMinGap), inst.taskRunStillCandidateAt,
+		"the post-hole still frame opens a fresh candidate")
+}
+
 // The same contended boundary releases on the quiet arm when the pane goes
 // still and then churns AGAIN — output after the still edge is attributable
 // to the redelivered prompt, not to whatever was running before it (#5221

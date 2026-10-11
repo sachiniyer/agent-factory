@@ -158,6 +158,9 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 	reanchored := i.lastPaneCaptureAt.IsZero() || at.Sub(i.lastPaneCaptureAt) > maxGap
 	if reanchored {
 		i.paneObservationStreakAt = at
+		// A stillness candidate open across the hole never saw the pane
+		// either — its "continuous" window would borrow unobserved time.
+		i.taskRunStillCandidateAt = time.Time{}
 	}
 	i.lastPaneCaptureAt = at
 	i.paneObservationExpiresAt = at.Add(maxGap)
@@ -172,11 +175,15 @@ func (i *Instance) NotePaneCaptureObserved(at time.Time, expectedInterval time.D
 // streak intact while the failed frame in between could have hidden active
 // churn (#5221 review). Clearing lastPaneCaptureAt makes the next success
 // re-anchor a fresh streak from its own instant; clearing the expiry keeps a
-// stale streak from staying live through the blind window.
+// stale streak from staying live through the blind window. An open stillness
+// candidate dies too: the still run owes CONTINUOUS sight, and the blind
+// interval inside it could hide the churn that proves it was a pause (#5221
+// review).
 func (i *Instance) NotePaneCaptureFailed() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.lastPaneCaptureAt = time.Time{}
 	i.paneObservationStreakAt = time.Time{}
 	i.paneObservationExpiresAt = time.Time{}
+	i.taskRunStillCandidateAt = time.Time{}
 }
