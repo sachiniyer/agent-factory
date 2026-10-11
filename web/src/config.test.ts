@@ -1102,23 +1102,19 @@ test("saveNotice keeps IPv4-compatible IPv6 distinct from IPv4 on a non-listener
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
-test("saveNotice deduplicates a service-name forecast when a non-listener save retried the rebind successfully", () => {
-  // A non-listener save (network.require_token) can retry a pending listener
-  // rebind that failed on the listener save (e.g. the port was occupied and is
-  // now free). The per-key apply_outcome is "applied" for the saved key
-  // (network.require_token applies live) even though the saved key is not the
-  // listener, so the old gate (savedKey is a listener key AND apply_outcome is
-  // "applied") left listenerRebindSucceeded false and the service-name
-  // relaxation was disabled — the channel-1 forecast (0.0.0.0:http-alt, the
-  // configured port the rebind just resolved) and the channel-2 notice
-  // (0.0.0.0:8080, the resolved serving port) both surfaced as if the rebind
-  // had failed. The rebind failure warning is absent from channel 2 when the
-  // rebind succeeds, so the per-listener rebind status is derived from the
-  // apply result: apply_outcome "applied" AND no rebind failure warning for the
-  // listener in channel 2 means the rebind landed and the serving address is
-  // the resolved form of the configured address. The resolved-port relaxation
-  // (bindSucceeded) matches the service-name forecast to the concrete serving
-  // port without the browser-side table (the rebind just resolved it).
+test("saveNotice keeps a service-name forecast on a non-listener save (no rebind, service DB may have changed)", () => {
+  // A non-listener save (network.require_token) with apply_outcome "applied" and
+  // no rebind failure warning in channel 2 does not confirm a listener rebind.
+  // The daemon only calls bindWebLocked when the configured address text differs
+  // from webConfigAddr, so a non-listener save does not rebind the listener at
+  // all — the listener is already at the configured address. If the host's
+  // /etc/services changed since the original bind (e.g. "http-alt" originally
+  // resolved to 8080 but now resolves to 9090), the serving port (channel 2,
+  // from the original bind) is the stale resolution while channel 1 names the
+  // configured service name that will resolve to a different port after restart.
+  // The resolved-port relaxation requires rebindAttempted (the saved key is the
+  // listener key), so a non-listener save does not collapse the service-name
+  // forecast onto the stale serving port and both surface.
   const configuredAddr = "0.0.0.0:http-alt";
   const servingAddr = "0.0.0.0:8080";
   const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
@@ -1132,12 +1128,11 @@ test("saveNotice deduplicates a service-name forecast when a non-listener save r
       warnings: [applyWarning],
     }),
   );
-  // Channel 2 (the concrete serving port 8080 the rebind just resolved) only;
-  // the http-alt forecast is the same exposure and is suppressed via the
-  // resolved-port relaxation (bindSucceeded), which is now gated on the
-  // per-listener rebind status (no rebind failure warning in channel 2 for
-  // network.listen_addr) rather than on the saved key being a listener key.
-  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+  // Both the channel-2 notice (the stale serving port 8080) and the channel-1
+  // forecast (the configured service name http-alt) surface: the saved key is
+  // not the listener key, so no rebind was attempted and the resolved-port
+  // relaxation does not fire.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 
 test("saveNotice keeps the service-name forecast when a non-listener save retried the rebind but it failed again", () => {
@@ -1386,6 +1381,88 @@ test("saveNotice keeps a hostname forecast on a non-listener save with a stale s
   // (the configured hostname that will re-resolve after restart) surface: the
   // saved key is not the listener key, so no rebind was attempted and the
   // hostname relaxation does not fire.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice keeps a zero-width IPv6 compression distinct (0:0:0:0:0:0::0.0.0.0)", () => {
+  // [0:0:0:0:0:0::0.0.0.0] has 6 head/tail groups + 2 IPv4 groups + :: expanding
+  // to 0 groups = 8, but :: must compress at least one group. Go rejects this
+  // address, but the config writer's SplitHostPort-only validation admits it
+  // syntactically. The old parser accepted it (head.length + tail.length + 2
+  // > 8 was false when the sum was exactly 8), expanded :: to 0 groups, and
+  // canonicalized it to :: (the wildcard). A failed-rebind forecast for this
+  // address would then deduplicate against a distinct serving [::]:8443
+  // notice. parseIPv6Groups now requires head + tail + 2 < 8 when :: is
+  // present with an IPv4 tail, so the address is rejected and treated as a
+  // hostname.
+  const configuredAddr = "[0:0:0:0:0:0::0.0.0.0]:8443";
+  const servingAddr = "[::]:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — the zero-width compression is not a valid IPv6 address, so
+  // canonicalizeIPv6Host returns it unchanged and the two do not compare equal.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice keeps leading-zero embedded IPv4 octets distinct (::ffff:000.0.0.0)", () => {
+  // Go rejects ::ffff:000.0.0.0 as an IP address (leading-zero octet 000), but
+  // the old parseIPv4Embedded accepted it (^\d+$ matches "000") and canonicalized
+  // it to the mapped IPv4 0.0.0.0. A failed-rebind forecast for
+  // [::ffff:000.0.0.0]:8443 would then deduplicate against a distinct serving
+  // 0.0.0.0:8443 notice. parseIPv4Embedded now applies the same no-leading-zero
+  // rule as isListenHostLiteral, so ::ffff:000.0.0.0 is rejected and the address
+  // is left unchanged.
+  const configuredAddr = "[::ffff:000.0.0.0]:8443";
+  const servingAddr = "0.0.0.0:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — ::ffff:000.0.0.0 is not a valid IPv6 address (leading-zero
+  // octet), so canonicalizeIPv6Host returns it unchanged and the two do not
+  // compare equal.
+  assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice keeps an empty IPv6 zone identifier distinct (::%)", () => {
+  // [::%]:8443 passes the config writer's SplitHostPort/port-only validation
+  // but Go cannot resolve or bind it because the zone identifier is empty. The
+  // old canonicalizeIPv6Host stripped the empty zone, parsed ::, and
+  // canonicalized it to :: (the wildcard). A failed-rebind forecast for
+  // [::%]:8443 would then deduplicate against a distinct serving [::]:8443
+  // notice. canonicalizeIPv6Host now rejects an empty zone (zone === "%"),
+  // returning the host unchanged, so the two do not compare equal.
+  const configuredAddr = "[::%]:8443";
+  const servingAddr = "[::]:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [applyWarning],
+    }),
+  );
+  // Both surface — ::% is not a valid IPv6 address (empty zone), so
+  // canonicalizeIPv6Host returns it unchanged and the two do not compare equal.
   assert.equal(notice, `${restartNotice} · ${applyWarning} · ${writeWarning}`);
 });
 

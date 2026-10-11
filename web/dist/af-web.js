@@ -7678,17 +7678,19 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded, rebindAttempted)
   if (!wAddr || !aAddr) {
     return false;
   }
-  if (normalizeListenHost(wAddr.host, bindSucceeded) !== normalizeListenHost(aAddr.host, bindSucceeded)) {
+  const wHost = normalizeListenHost(wAddr.host, bindSucceeded && rebindAttempted);
+  const aHost = normalizeListenHost(aAddr.host, bindSucceeded && rebindAttempted);
+  if (wHost !== aHost) {
     if (!(bindSucceeded && rebindAttempted && !isListenHostLiteral(wAddr.host) && isListenHostLiteral(aAddr.host))) {
       return false;
     }
   }
-  const wPort = normalizeListenPort(wAddr.port, bindSucceeded);
-  const aPort = normalizeListenPort(aAddr.port, bindSucceeded);
+  const wPort = normalizeListenPort(wAddr.port, bindSucceeded && rebindAttempted);
+  const aPort = normalizeListenPort(aAddr.port, bindSucceeded && rebindAttempted);
   if (wPort === aPort) {
     return true;
   }
-  if (bindSucceeded && aPort !== "0" && isDecimalPort(aPort)) {
+  if (bindSucceeded && rebindAttempted && aPort !== "0" && isDecimalPort(aPort)) {
     if (wPort === "0" || !isDecimalPort(wPort)) {
       return true;
     }
@@ -7734,6 +7736,7 @@ function canonicalizeIPv6Host(host) {
   if (pct >= 0) {
     zone = host.slice(pct);
     host = host.slice(0, pct);
+    if (zone === "%") return host + zone;
   }
   const groups = parseIPv6Groups(host);
   if (groups === null) {
@@ -7813,7 +7816,7 @@ function parseIPv6Groups(host) {
       ipv4Groups = parseIPv4Embedded(tail[tail.length - 1]);
       if (ipv4Groups === null) return null;
       tail = tail.slice(0, -1);
-      if (head.length + tail.length + 2 > 8) return null;
+      if (head.length + tail.length + 2 >= 8) return null;
     } else {
       if (head.length + tail.length >= 8) return null;
     }
@@ -7841,10 +7844,8 @@ function parseIPv4Embedded(s) {
   if (octets.length !== 4) return null;
   const vals = [];
   for (const o of octets) {
-    if (o.length === 0 || !/^\d+$/.test(o)) return null;
-    const v = parseInt(o, 10);
-    if (v > 255) return null;
-    vals.push(v);
+    if (!/^(0|[1-9]\d{0,2})$/.test(o) || Number(o) > 255) return null;
+    vals.push(Number(o));
   }
   return [vals[0] << 8 | vals[1], vals[2] << 8 | vals[3]];
 }

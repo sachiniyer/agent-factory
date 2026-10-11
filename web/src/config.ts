@@ -367,7 +367,19 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
   if (!wAddr || !aAddr) {
     return false;
   }
-  if (normalizeListenHost(wAddr.host, bindSucceeded) !== normalizeListenHost(aAddr.host, bindSucceeded)) {
+  // bindSucceeded (apply_outcome "applied" and no rebind failure warning) does
+  // not confirm a rebind happened — a non-listener save with no rebind failure
+  // also sets it true. The wildcard-host cross-family mapping (:: -> 0.0.0.0)
+  // and the resolved-port relaxation both assume the serving address is the
+  // fresh resolution of the configured address, which is only true after a
+  // confirmed rebind. Gating on rebindAttempted (the saved key is the listener
+  // key) ensures the relaxations fire only when the daemon actually rebound.
+  // The within-family IPv6 canonicalization (RFC 5952 form, IPv4-mapped -> IPv4)
+  // is NOT gated — it is a same-address comparison, not a cross-family or
+  // resolved-port equivalence.
+  const wHost = normalizeListenHost(wAddr.host, bindSucceeded && rebindAttempted);
+  const aHost = normalizeListenHost(aAddr.host, bindSucceeded && rebindAttempted);
+  if (wHost !== aHost) {
     // A successful listener rebind resolves a non-literal configured host (a
     // hostname the validator accepts, e.g. the machine's hostname) to the
     // literal serving address net.Addr().String() reports. The browser cannot
@@ -399,8 +411,8 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
       return false;
     }
   }
-  const wPort = normalizeListenPort(wAddr.port, bindSucceeded);
-  const aPort = normalizeListenPort(aAddr.port, bindSucceeded);
+  const wPort = normalizeListenPort(wAddr.port, bindSucceeded && rebindAttempted);
+  const aPort = normalizeListenPort(aAddr.port, bindSucceeded && rebindAttempted);
   if (wPort === aPort) {
     return true;
   }
@@ -411,17 +423,20 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
   //     net.LookupPort reading /etc/services — a set far larger than the
   //     WELL_KNOWN_TCP_SERVICES fallback in normalizeListenPort, so the table
   //     cannot cover every name the validator accepts (config/listen_addr.go).
-  // When the rebind SUCCEEDED (bindSucceeded), the configured port IS the
-  // serving port — the kernel resolved it — so a :0 or service-name forecast
-  // matches any concrete numeric serving port for the same listener and
-  // (normalized) host. This is gated on bindSucceeded: a failed rebind leaves
-  // the serving address as the OLD bound address, so a :0 or service-name
-  // forecast names a future bind distinct from the current serving notice, and
-  // both must surface (TestApplyConfigExposureNoticePerKeyOrderNamesServing
-  // Address pins the serving-vs-configured split for a failed rebind). The
-  // apply channel never carries :0 (it names the serving bound address), so
-  // only the forecast direction needs the relaxation; the inverse — a concrete
-  // forecast against a :0 notice — does not arise.
+  // When the rebind SUCCEEDED (bindSucceeded) and was actually attempted
+  // (rebindAttempted — the saved key is the listener key), the configured port
+  // IS the serving port — the kernel resolved it — so a :0 or service-name
+  // forecast matches any concrete numeric serving port for the same listener
+  // and (normalized) host. This is gated on bindSucceeded AND rebindAttempted:
+  // a failed rebind leaves the serving address as the OLD bound address, so a
+  // :0 or service-name forecast names a future bind distinct from the current
+  // serving notice; and a non-listener save does not rebind the listener when
+  // the configured address equals webConfigAddr, so the serving port is the
+  // stale resolution from the previous bind and the service-name forecast may
+  // name a different restart port (if /etc/services changed). The apply
+  // channel never carries :0 (it names the serving bound address), so only the
+  // forecast direction needs the relaxation; the inverse — a concrete forecast
+  // against a :0 notice — does not arise.
   //
   // isDecimalPort (not Number()) recognizes the same decimal port grammar Go's
   // net.LookupPort treats as numeric: a hex service name like "0x50" that
@@ -434,7 +449,7 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
   // port comparison (isDecimalPort only) keeps the distinct serving port
   // surfaced (normalizeListenPort returns the name unchanged when
   // bindSucceeded is false).
-  if (bindSucceeded && aPort !== "0" && isDecimalPort(aPort)) {
+  if (bindSucceeded && rebindAttempted && aPort !== "0" && isDecimalPort(aPort)) {
     if (wPort === "0" || !isDecimalPort(wPort)) {
       return true;
     }
@@ -585,6 +600,12 @@ function canonicalizeIPv6Host(host: string): string {
   if (pct >= 0) {
     zone = host.slice(pct);
     host = host.slice(0, pct);
+    // An empty zone identifier (e.g. "::%") is not a valid IPv6 address — Go
+    // cannot resolve or bind it — but the config writer's SplitHostPort-only
+    // validation admits it. Without this check the parser strips the empty
+    // zone, canonicalizes "::" to the wildcard, and a failed-rebind forecast
+    // for [::%]:8443 deduplicates against a distinct serving [::]:8443 notice.
+    if (zone === "%") return host + zone;
   }
   const groups = parseIPv6Groups(host);
   if (groups === null) {
@@ -703,7 +724,15 @@ function parseIPv6Groups(host: string): number[] | null {
       ipv4Groups = parseIPv4Embedded(tail[tail.length - 1]);
       if (ipv4Groups === null) return null;
       tail = tail.slice(0, -1);
-      if (head.length + tail.length + 2 > 8) return null;
+      // "::" must compress at least one group, so with an IPv4 tail (2 groups)
+      // the head + tail must leave room for at least one zero group: head +
+      // tail + 1 (::) + 2 (IPv4) = 8, so head + tail <= 5. Allowing head + tail
+      // = 6 would let "::" expand to 0 groups — e.g. [0:0:0:0:0:0::0.0.0.0]
+      // (6 head/tail groups + 2 IPv4 + 0 from :: = 8), which Go rejects but the
+      // config writer's SplitHostPort-only validation admits. The parser
+      // would then canonicalize it to :: and deduplicate a failed-rebind
+      // forecast against a distinct serving notice.
+      if (head.length + tail.length + 2 >= 8) return null;
     } else {
       if (head.length + tail.length >= 8) return null;
     }
@@ -732,16 +761,19 @@ function parseIPv6Groups(host: string): number[] | null {
 // parseIPv4Embedded parses a dotted-quad IPv4 address (e.g. "0.0.0.0",
 // "1.2.3.4") into two 16-bit groups (the high and low 16 bits), matching the
 // tail of an IPv4-mapped/compatible IPv6 address. Returns null for anything
-// that is not a valid dotted quad.
+// that is not a valid dotted quad. Each octet must be a canonical decimal
+// integer (no leading zero except "0" itself) at most 255, matching the form
+// Go's net.IP accepts — Go rejects ::ffff:000.0.0.0 as an IP address (leading-
+// zero octets), so a configured [::ffff:000.0.0.0]:8443 must not canonicalize
+// to the mapped IPv4 0.0.0.0 and deduplicate against a distinct serving
+// 0.0.0.0:8443 on a failed rebind.
 function parseIPv4Embedded(s: string): [number, number] | null {
   const octets = s.split(".");
   if (octets.length !== 4) return null;
   const vals: number[] = [];
   for (const o of octets) {
-    if (o.length === 0 || !/^\d+$/.test(o)) return null;
-    const v = parseInt(o, 10);
-    if (v > 255) return null;
-    vals.push(v);
+    if (!/^(0|[1-9]\d{0,2})$/.test(o) || Number(o) > 255) return null;
+    vals.push(Number(o));
   }
   return [(vals[0] << 8) | vals[1], (vals[2] << 8) | vals[3]];
 }
