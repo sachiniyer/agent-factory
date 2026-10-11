@@ -157,12 +157,14 @@ func (m *home) handleDefaultKeyPress(msg tea.KeyMsg, name keys.KeyName) (tea.Mod
 	}
 }
 
-// handleKill handles the kill/delete session action. The confirmation only
+// handleKill handles the kill/delete session action against the sidebar's
+// row-verb target — the cursor's row, or the ▾-marked resting row while the
+// cursor rests on its section header (#4755). The confirmation only
 // flips the row to Deleting; the slow teardown (remote delete_cmd over ssh,
 // tmux kill, worktree removal) runs in killInstanceCmd's background goroutine
 // so the event loop never blocks on it (#844).
 func (m *home) handleKill() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
 		return m, nil
 	}
@@ -365,8 +367,11 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 }
 
 // handleRestore is the restore verb (`r`, #1605): on an Archived/Lost/Dead row it
-// restores the session (non-destructive — no confirm). On a live row there is
-// nothing to restore, so `r` is a no-op — archive stays on `a` (handleArchive).
+// restores the session (non-destructive — no confirm). The target is the
+// sidebar's row-verb target — the cursor's row, or the ▾-marked resting row
+// while the cursor rests on the expanded Archived header (#4755). On a live
+// row there is nothing to restore, so `r` is a no-op — archive stays on `a`
+// (handleArchive).
 //
 // No confirmation: restore only moves the worktree back and re-spawns the agent.
 // Raise the optimistic OpRestoring op (mirroring how archive raises OpArchiving):
@@ -376,7 +381,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 // rebuild/re-Start (#1203). The reconcile rebuild clears the op by replacing the
 // row; a restore failure clears it in handleInstanceRestored.
 func (m *home) handleRestore() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
 		return m, nil
 	}
@@ -488,7 +493,7 @@ type limitRetriedMsg struct {
 // daemon RPC may re-spawn and delivers a prompt, so it runs off the event loop
 // like the kill/archive commands rather than freezing the TUI.
 func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
-	selected := m.sidebar.GetSelectedInstance()
+	selected := m.sidebar.RowVerbTarget()
 	if selected == nil {
 		return m, nil
 	}

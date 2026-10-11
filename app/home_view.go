@@ -97,9 +97,10 @@ func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 }
 
 // confirmActionWithDetail is confirmAction for a dialog whose copy splits into
-// consequences (message) and elaboration (detail). The overlay then guarantees
-// the consequences render or refuses the confirm outright, rather than clipping
-// the tail and collecting a 'y' for something it never showed (#1973).
+// consequences (message) and elaboration (detail). The overlay then keeps every
+// line reachable by scrolling — and refuses the confirm only when the window
+// cannot show even one body row — rather than clipping the tail and collecting
+// a 'y' for something it never showed (#1973, #5171).
 // The callback may return a follow-up tea.Cmd as its result; handleStateConfirm
 // schedules that command on the event loop instead of executing it inline.
 func (m *home) confirmActionWithDetail(message, detail string, action tea.Cmd) tea.Cmd {

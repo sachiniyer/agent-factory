@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import {
-  decodeKeyBytes, KEYBAR_ROWS, keyBytes, keyBytesDomain, KEY_BYTES_NAMED_KEYS, StickyModifiers, TerminalKeybar,
+  ARROW_SUFFIXES, decodeKeyBytes, KEYBAR_ROWS, keyBytes, SPECIAL_BYTES, StickyModifiers, TerminalKeybar,
   keybarPointerDown,
 } from "./terminal-keybar.js";
 import { TerminalSoftInput } from "./terminal-soft-input.js";
+
+const KEY_BYTES_NAMED_KEYS = Object.freeze([...Object.keys(ARROW_SUFFIXES), ...Object.keys(SPECIAL_BYTES)]);
+
+/** The complete intended keyBytes key domain: named keys plus one Unicode scalar. */
+function* keyBytesDomain(): Generator<string> {
+  yield* KEY_BYTES_NAMED_KEYS;
+  for (let codePoint = 0; codePoint <= 0x10ffff; codePoint++) {
+    if (codePoint < 0xd800 || codePoint > 0xdfff) yield String.fromCodePoint(codePoint);
+  }
+}
 
 test("terminal key bytes match physical keys", () => {
   for (const [key, bytes] of Object.entries({ Esc: "\x1b", Tab: "\t", "←": "\x1b[D", "↑": "\x1b[A", "↓": "\x1b[B", "→": "\x1b[C", "^C": "\x03" })) {
