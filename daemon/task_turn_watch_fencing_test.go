@@ -34,7 +34,7 @@ func TestNoteTaskRunTurnEvidenceDropsPreBoundaryCapture(t *testing.T) {
 
 	// The capture started before the attempt: whatever its content, it is not
 	// this window's evidence and must not create or mutate a watcher.
-	quiet := "\x1b[2J\x1b[H› \r\n\r\n"
+	quiet := session.Observation{Content: "\x1b[2J\x1b[H› \r\n\r\n", Captured: true}
 	require.False(t, m.noteTaskRunTurnEvidence(key, inst, quiet, boundary.Add(-time.Millisecond), epoch))
 	_, watched := m.taskRunTurnWatches[key]
 	require.False(t, watched, "a pre-boundary capture must not arm the new window's watcher")
@@ -44,4 +44,60 @@ func TestNoteTaskRunTurnEvidenceDropsPreBoundaryCapture(t *testing.T) {
 	require.False(t, m.noteTaskRunTurnEvidence(key, inst, quiet, boundary.Add(time.Millisecond), epoch))
 	_, watched = m.taskRunTurnWatches[key]
 	require.True(t, watched, "a post-boundary capture feeds the watcher")
+}
+
+// An unanswered capture is no pane evidence at all — but a CONFIRMED empty
+// frame is: the scoped agents arm on indicator-absent, so a clean capture of a
+// blank pane primes the contract a later chrome frame can satisfy (#5221
+// review).
+func TestNoteTaskRunTurnEvidenceDistinguishesConfirmedEmpty(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "turn-empty", Path: t.TempDir(), Program: "codex", TaskID: "task-1",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	require.True(t, inst.TaskRunActive(), "precondition: a task-spawned session starts with its run in flight")
+
+	boundary := time.Now()
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	_, epoch := inst.InFlightOpAndEpoch()
+
+	m := &Manager{taskRunTurnWatches: map[string]*taskRunTurnWatchEntry{}}
+	const key = "turn-empty"
+	at := boundary.Add(time.Millisecond)
+
+	// A failed capture — Captured false — feeds nothing.
+	require.False(t, m.noteTaskRunTurnEvidence(key, inst, session.Observation{Captured: false}, at, epoch))
+	_, watched := m.taskRunTurnWatches[key]
+	require.False(t, watched, "an unanswered capture must not arm the watcher")
+
+	// A confirmed capture of a genuinely empty pane arms the scoped watcher's
+	// absent→present contract — the absent half of the turn proof.
+	require.False(t, m.noteTaskRunTurnEvidence(key, inst, session.Observation{Captured: true}, at, epoch))
+	_, watched = m.taskRunTurnWatches[key]
+	require.True(t, watched, "a confirmed empty capture arms the scoped watcher")
+}
+
+// The streak's expected cadence must follow the serial sweep, not just the
+// configured tick: a fleet pass longer than its tick still captures every
+// session on schedule, and only a gap beyond that honest spacing may rebase
+// the observation streak (#5221 review).
+func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
+	old := lastStatusSweepNs.Load()
+	t.Cleanup(func() { lastStatusSweepNs.Store(old) })
+
+	lastStatusSweepNs.Store(0)
+	require.Equal(t, time.Second, statusSweepExpectedInterval(time.Second),
+		"no sweep history: the scheduled interval alone applies")
+
+	lastStatusSweepNs.Store(int64(500 * time.Millisecond))
+	require.Equal(t, time.Second, statusSweepExpectedInterval(time.Second),
+		"a sweep faster than the tick does not shorten the expected cadence")
+
+	lastStatusSweepNs.Store(int64(90 * time.Second))
+	require.Equal(t, 90*time.Second, statusSweepExpectedInterval(time.Second),
+		"a sweep slower than the tick becomes the expected cadence")
+	require.Equal(t, 90*time.Second, statusSweepExpectedInterval(taskRunPollBackstop),
+		"the paused backstop cadence floors at the sweep too")
 }
