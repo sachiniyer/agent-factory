@@ -1361,10 +1361,11 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/api.go:645 af tasks add/update --max-concurrent-runs"
+        "pointer": "api/api.go:767,785 af tasks add/update --max-concurrent-runs"
       },
-      "verdict": "unclear",
-      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns) added on master. The CLI sets it via --max-concurrent-runs; the TUI task form and web do not expose it. Same class as the other task-edit gaps: the TUI can edit tasks (so this is a missing FIELD, #1935-adjacent) and the web cannot edit tasks at all (#1935). Niche enough that whether the UIs should surface it is an owner call. Not filed pending that."
+      "verdict": "real-gap",
+      "issue": "#4180",
+      "notes": "A watch-task concurrency cap (task.Task/TaskUpdate.MaxConcurrentRuns). The CLI sets it via --max-concurrent-runs; neither task form exposes it. Was held 'unclear' awaiting an owner call; the owner called it in #4180 — it should be on both UIs, gated on the same task.capApplies predicate the daemon applies (watch trigger, no target_session). It is the only bound on a watch-task burst — #1892's DLQ watcher spawned five sessions in ten seconds — so the surface that built the task should be the surface that can bound it. Implementation in flight as PR #4536."
     },
     {
       "id": "task.on-complete",
