@@ -7654,7 +7654,9 @@ function shouldCloseSavedField(status, editing, statusIsNew) {
 }
 function saveNotice(resp) {
   const parts = [];
-  const warnings = resp.warnings ?? [];
+  const writeWarnings = resp.result.warnings ?? [];
+  const applyWarnings = resp.warnings ?? [];
+  const warnings = [...writeWarnings, ...applyWarnings.filter((w) => !writeWarnings.includes(w))];
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }

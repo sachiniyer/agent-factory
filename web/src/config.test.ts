@@ -164,6 +164,104 @@ test("saveNotice surfaces a failed live apply and its error", () => {
   assert.equal(notice, `${restartNotice} · ${writeWarning} · ${warning}`);
 });
 
+test("saveNotice surfaces a write-only warning the daemon applied silently (default_accounts)", () => {
+  // The two-channel contract: a `default_accounts.<agent>` write is
+  // EffectAppliedLive, so the daemon applies it without an apply-side warning —
+  // channel 2 (`resp.warnings`) is empty/absent — while channel 1
+  // (`resp.result.warnings`) carries the unregistered-account advisory the
+  // config writer authored at write time. The form MUST read channel 1 or the
+  // operator is never told, at save time, that the account they defaulted to is
+  // unregistered and how to fix it. The CLI reads channel 1 unconditionally; the
+  // TUI falls back to it when channel 2 is empty; this is the web's equivalent.
+  const warning =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [warning] },
+      restart_notice: "Applied — the running daemon is using the new value now.",
+      // channel 2 absent: apply is silent for an applied default_accounts write
+    }),
+  );
+  assert.equal(notice, `Applied — the running daemon is using the new value now. · ${warning}`);
+});
+
+test("saveNotice surfaces a write-only warning for an ordinarily-live key with no restart notice", () => {
+  // The same write-only warning, but with a daemon that omits the restart notice
+  // (e.g. a pre-#2480-era reply shape, or an agent that does not emit one). The
+  // warning still renders on its own — losing it here would be the silent
+  // regression that prompted reading channel 1 in the first place.
+  const warning =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [warning] },
+      restart_notice: "",
+    }),
+  );
+  // No restart notice is emitted, but the per-write warning still shows.
+  assert.equal(notice, warning);
+});
+
+test("saveNotice reads the deduped union when both channels are populated", () => {
+  // Sub-case (c) from the report: channel 2 is NON-empty (a rebind-failure
+  // warning) and channel 1 additionally carries a per-write advisory. A
+  // `??`-style fallback would lose the channel-1 notice here because channel 2
+  // is non-empty; only the deduped union (channel 1 first, then channel 2
+  // minus overlaps) surfaces both, matching the CLI which reads channel 1
+  // unconditionally then channel 2 deduped against it.
+  const writeWarning =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const applyWarning = "rebind failed: address already in use";
+  const restartNotice = "Saved — network.listen_addr could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "0.0.0.0:9443", path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      warnings: [applyWarning],
+      apply_outcome: "failed",
+    }),
+  );
+  // Channel 1 (per-write) first, then channel 2 (apply-time) — order matches the CLI.
+  assert.equal(notice, `${restartNotice} · ${writeWarning} · ${applyWarning}`);
+});
+
+test("saveNotice de-dupes a warning that rides both channels", () => {
+  // The tokenless-network-listener exposure case: the writer and the applier
+  // both describe the same hazard in different words; the daemon's
+  // completeConfigSaveWarnings keeps the authoritative apply-time copy on
+  // channel 2, and the writer's copy rides channel 1. A naive concat would
+  // show the hazard twice; the union's filter drops the overlap so it prints
+  // once. The dedup is by exact string match, so when the two surfaces phrase
+  // the warning identically it is collapsed; when they diverge both show.
+  const warning = "saved value exposes a tokenless network listener";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.require_token", value: "false", path: "/tmp/config.toml", requires_restart: false, warnings: [warning] },
+      restart_notice: "Applied — the running daemon is using the new value now.",
+      warnings: [warning],
+    }),
+  );
+  assert.equal(notice, `Applied — the running daemon is using the new value now. · ${warning}`);
+});
+
+test("saveNotice preserves channel order with multiple per-write and multiple apply warnings", () => {
+  // More than one warning per channel: channel 1 in its authored order, then
+  // channel 2 in its authored order, minus overlaps. Pins the ordering the
+  // union uses so a future edit cannot silently reverse the two channels.
+  const w1 = 'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const w2 = "saved value exposes a tokenless network listener";
+  const w3 = "rebind failed: address already in use";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: "0.0.0.0:9443", path: "/tmp/config.toml", requires_restart: false, warnings: [w1, w2] },
+      restart_notice: "Saved — could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).",
+      warnings: [w2, w3],
+    }),
+  );
+  // w2 appears on both channels; printed once (from channel 1). w3 is channel-2-only.
+  assert.equal(notice, `Saved — could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason). · ${w1} · ${w2} · ${w3}`);
+});
+
 test("saveNotice tolerates an older daemon that sends no address", () => {
   // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
   // form must not render "undefined" at the user.

@@ -176,6 +176,35 @@ export function shouldCloseSavedField(
  * says so, and a form that echoed what it typed would name an address nothing
  * answers precisely when the user most needs the real one.
  *
+ * Warnings come from TWO channels on the SetConfigValue response, both owned by
+ * the daemon:
+ *
+ *   - Channel 1, `resp.result.warnings` (config.SetResult.Warnings): per-write
+ *     notes authored by the config writer itself — e.g. a `default_accounts.<agent>`
+ *     write whose named account is not registered, or the tokenless-network-listener
+ *     exposure notice. Always present on the wire because the daemon sets
+ *     `resp.Result = result` before returning; `omitempty` drops the slice when
+ *     it is empty, so the browser sees `undefined`.
+ *   - Channel 2, `resp.warnings` (SetConfigValueResponse.Warnings): apply-time,
+ *     authoritative warnings the daemon maintains about the running config — a
+ *     failed live apply, a rebind failure, the post-apply exposure state.
+ *
+ * The two overlap only when both the writer and the applier describe the same
+ * hazard in different words (the tokenless-exposure case). For a write that
+ * succeeds and has no apply-side counterpart — exactly the `default_accounts`
+ * case, which is `EffectAppliedLive` and produces no apply warning — channel 1
+ * carries the only warning and channel 2 is silent. A surface that reads only
+ * channel 2 (as this form did before this fix) loses the per-write advisory in
+ * exactly that case, which is the one place that tells an operator, at save
+ * time, that the account they defaulted to is unregistered and how to fix it.
+ *
+ * The form therefore reads both channels, the same contract the CLI
+ * (`commands/configcmd.go`, channel 1 first then channel 2 deduped) and the TUI
+ * (`ui/config_target.go`, channel 1 as a fallback) already implement — so all
+ * three surfaces agree on what warnings a given write produces. Channel 1 is
+ * shown first, then channel 2 minus any string already shown from channel 1;
+ * a warning that rides both channels is printed once, not twice.
+ *
  * The restart notice is normally shown only for a key that requires a restart,
  * since "Applied" under every field is noise. A warning overrides that gate:
  * it is actionable for an ordinarily-live key, and both the warning and the
@@ -186,7 +215,15 @@ export function shouldCloseSavedField(
  */
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
-  const warnings = resp.warnings ?? [];
+  const writeWarnings = resp.result.warnings ?? [];
+  const applyWarnings = resp.warnings ?? [];
+  // Deduped union of both channels: channel 1 (per-write) first, then channel 2
+  // (apply-time) minus any string already shown from channel 1. Matches the CLI,
+  // which reads channel 1 unconditionally and then channel 2 deduped against it
+  // (commands/configcmd.go). A `??` fallback alone would lose the channel-1
+  // notice when channel 2 is non-empty with an unrelated warning (the rebind
+  // failure + exposure-notice case), so the union is read, not a fallback.
+  const warnings = [...writeWarnings, ...applyWarnings.filter((w) => !writeWarnings.includes(w))];
   // A warning makes the apply outcome actionable even for an ordinarily-live
   // key. In that case the restart notice must not be hidden by the key's static
   // requires-restart classification: it describes what happened to this save.

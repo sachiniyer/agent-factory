@@ -490,6 +490,15 @@ export interface ConfigSetResult {
   value: string;
   path: string;
   requires_restart: boolean;
+  /** Per-write warnings (channel 1): non-fatal notes about what the write
+   *  actually means, authored by the config writer itself (e.g. a
+   *  `default_accounts.<agent>` write whose named account is not registered,
+   *  or the tokenless-network-listener exposure notice). The daemon sets
+   *  `resp.Result = result` before returning, so this slice is on the wire as
+   *  `data.result.warnings`; `omitempty` drops it when empty. Apply-time
+   *  warnings ride separately on `ConfigSetResponse.warnings` (channel 2).
+   *  `saveNotice` reads the deduped union of both channels, matching the CLI. */
+  warnings?: string[];
 }
 
 /** SetConfigValueResponse (daemon/control_types.go). The restart notice rides
