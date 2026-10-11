@@ -123,9 +123,10 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 		"a configured cadence above the cap is preserved, not compressed")
 }
 
-// One pass's duration plus one position's worth of drift is the honest
-// spacing until the next capture of the same session: map iteration can
-// move a session from the start of one sweep to the end of the next
+// The honest spacing until the next capture of the same session is what is
+// LEFT of this pass plus this session's position in the next one: map
+// iteration can move a session from the start of one sweep to the end of the
+// next, but the time already spent inside this pass is consumed, not owed
 // (#5221 review).
 func TestStatusSweepExpectedIntervalCoversPositionDrift(t *testing.T) {
 	old := lastStatusSweepNs.Load()
@@ -141,24 +142,26 @@ func TestStatusSweepExpectedIntervalCoversPositionDrift(t *testing.T) {
 	nowFunc = func() time.Time { return now }
 
 	// A 20s completed sweep, this capture landing 15s into the next pass:
-	// pacing is 20s, position 15s, next-pass drift reserved 20s — 55s.
+	// 5s remain in it, and the next pass can hold this session as deep as
+	// 20s — 25s of reserve, not the 55s an additive position would declare.
 	lastStatusSweepNs.Store(int64(20 * time.Second))
 	statusSweepStartNs.Store(now.Add(-15 * time.Second).UnixNano())
-	require.Equal(t, 55*time.Second, statusSweepExpectedInterval(time.Second),
-		"the reserve covers this pass's pacing, position, and next-pass drift")
+	require.Equal(t, 25*time.Second, statusSweepExpectedInterval(time.Second),
+		"the reserve is the pass remainder plus next-pass position, not pacing plus position plus drift")
 
-	// A session near the pass's end gets nearly two capped sweeps of reserve,
-	// bounded by scheduled + two caps.
-	now = now.Add(19 * time.Second)
-	require.Equal(t, time.Second+2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"elapsed and drift terms each stay bounded, and the sum is bounded too")
+	// A session captured at the pass's own end owes only the next pass's
+	// position: the pass term is already fully spent.
+	now = now.Add(5 * time.Second)
+	require.Equal(t, 20*time.Second, statusSweepExpectedInterval(time.Second),
+		"a capture at position lastSweep leaves only the next-pass drift term")
 
-	// Each term stays capped: two stalled passes contribute at most the cap
-	// apiece, never normalizing their own blindness.
+	// Deep inside a stalled pass the pass term floors at zero — the capture
+	// is already late, so nothing of the current pass is owed, and the stall
+	// contributes only its capped next-position term.
 	lastStatusSweepNs.Store(int64(10 * time.Minute))
 	now = now.Add(10 * time.Minute)
-	require.Equal(t, time.Second+2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"stalled passes cannot stretch the reserve past scheduled + two capped terms")
+	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"a stalled pass owes only the capped position term, never its own blindness")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —

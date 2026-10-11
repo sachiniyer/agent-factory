@@ -504,25 +504,26 @@ var statusSweepFloorCap = 30 * time.Second
 
 // statusSweepExpectedInterval returns the expiry reserve a capture may
 // declare for the streak — the honest spacing until the NEXT capture of the
-// same session (#5221 review). Map iteration moves a session between
-// positions in consecutive serial passes, so the next gap can span the rest
-// of the in-flight pass plus a whole further pass's start spacing:
-// max(scheduled, lastSweep) paces the passes, elapsed is this capture's
-// position inside the current one, and a second lastSweep reserves for the
-// next pass's position outright. Each sweep term is floored at
-// statusSweepFloorCap — a pass slower than that is a stall that left panes
-// unwatched, not a schedule — and the whole span is bounded by
-// scheduled+2*cap, so an operator-set interval slower than the caps is the
-// pacing term, not compressed away.
+// same session (#5221 review). Passes run serially, so the next pass starts
+// max(scheduled, lastSweep) after this one began and lands this session at
+// position x ≤ lastSweep inside it: the gap is pass−elapsed+x, and the
+// elapsed already spent inside this pass REDUCES the reserve, never adds to
+// it — a late-capture's declared expiry must not stretch past the whole next
+// pass (#5221 review). Sweep terms stay capped at statusSweepFloorCap — a
+// pass slower than that is a stall that left panes genuinely unwatched, not
+// a schedule — so the total is bounded by max(scheduled, cap)+cap; an
+// operator-set interval slower than the cap is the pacing term, not
+// compressed away.
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
 	last := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
 	var elapsed time.Duration
 	if start := statusSweepStartNs.Load(); start > 0 {
 		if e := nowFunc().Sub(time.Unix(0, start)); e > 0 {
-			elapsed = min(e, statusSweepFloorCap)
+			elapsed = e
 		}
 	}
-	return min(max(scheduled, last)+elapsed+last, scheduled+2*statusSweepFloorCap)
+	pass := max(scheduled, last)
+	return max(pass-elapsed, 0) + last
 }
 
 // refreshInstanceStatus mirrors the old runMetadataTick body for one instance:
