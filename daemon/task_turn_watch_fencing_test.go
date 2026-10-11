@@ -190,7 +190,8 @@ func (b *promptWaitBackend) HasUpdatedObserved(*session.Instance) (bool, bool, s
 func TestPromptWaitRetiresTaskRunStillCandidate(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	backend := &promptWaitBackend{FakeBackend: session.NewFakeBackend(), captured: true}
-	inst := registerStarted(t, manager, repoID, repoPath, "wait-still", backend, true, session.Running)
+	inst := registerTaskRun(t, manager, repoID, repoPath, "wait-still")
+	inst.SetBackend(backend)
 	key := stableSessionKey(repoID, inst)
 
 	now := time.Now()
