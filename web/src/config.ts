@@ -395,8 +395,20 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
   // apply channel never carries :0 (it names the serving bound address), so
   // only the forecast direction needs the relaxation; the inverse — a concrete
   // forecast against a :0 notice — does not arise.
-  if (bindSucceeded && aPort !== "0" && !isNaN(Number(aPort))) {
-    if (wPort === "0" || isNaN(Number(wPort))) {
+  //
+  // isDecimalPort (not Number()) recognizes the same decimal port grammar Go's
+  // net.LookupPort treats as numeric: a hex service name like "0x50" that
+  // /etc/services maps to a different port must not be treated as the decimal
+  // port Number("0x50") would coerce it to. On a successful rebind the
+  // configured service name IS the serving port the kernel resolved it to, so
+  // the relaxation matches a non-decimal forecast (a service name like "0x50"
+  // or "http-alt") to any concrete numeric serving port; on a failed rebind the
+  // service name is a future state the kernel has not resolved, and the strict
+  // port comparison (isDecimalPort only) keeps the distinct serving port
+  // surfaced (normalizeListenPort returns the name unchanged when
+  // bindSucceeded is false).
+  if (bindSucceeded && aPort !== "0" && isDecimalPort(aPort)) {
+    if (wPort === "0" || !isDecimalPort(wPort)) {
       return true;
     }
   }
@@ -411,8 +423,14 @@ function listenerExposureDedup(writeId: string, applyId: string, bindSucceeded: 
 // literal. listenerExposureDedup uses this to distinguish the two when a
 // successful rebind resolved the hostname, so a hostname forecast and the literal
 // serving notice are the same bind rather than two different exposures.
-//   - IPv4: a dotted-quad of 1-3 digit octets, matching the form the validator
-//     and net.Listen accept (and net.Addr().String() reports verbatim).
+//   - IPv4: a dotted-quad of 1-3 digit octets, each at most 255, matching the
+//     form the validator and net.Listen accept (and net.Addr().String() reports
+//     verbatim). A dotted-quad whose octets are all 1-3 digits but are not all
+//     ≤255 (e.g. 256.1.1.1) is not a valid IPv4 address — Go's net.Listen treats
+//     it as a hostname and resolves it via DNS — so it must not be classified as
+//     a literal; the hostname relaxation then matches it to the serving IP on a
+//     successful rebind instead of treating it as a distinct literal that the
+//     strict host comparison can never equal.
 //   - IPv6: any host containing a colon — splitListenHostPort already stripped
 //     the brackets, so "::", "2001:db8::1" etc. are bare IPv6.
 //   - Everything else is a hostname (a name the resolver will look up), including
@@ -422,7 +440,9 @@ function isListenHostLiteral(host: string): boolean {
   if (host.includes(":")) {
     return true;
   }
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+  const octets = host.split(".");
+  if (octets.length !== 4) return false;
+  return octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
 }
 
 // splitListenHostPort splits a "<host>:<port>" or "[<host>]:<port>" address into
@@ -796,16 +816,39 @@ const WELL_KNOWN_TCP_SERVICES: ReadonlyMap<string, number> = new Map(
 // An unknown service name (which the validator would reject at config-set
 // time, or the table does not carry) is returned unchanged so a name the
 // server does not recognize never collapses two different addresses.
+//
+// Only a Go-style signed decimal port string is treated as numeric — Go's
+// net.LookupPort parses decimal digits only (strconv.Atoi on the service-name
+// fallback rejects hex and exponent spellings), so JavaScript's Number("0x50")
+// (hex) or Number("1e2") (exponent) must not be coerced to a decimal port: on
+// a host whose /etc/services maps "0x50" to a different port, the coercion
+// would make a failed-rebind forecast (a future state the kernel has not
+// resolved) compare equal to the old serving port and suppress a distinct
+// warning. isDecimalPort (shared with listenerExposureDedup's relaxation)
+// recognizes the same decimal grammar Go's port parser does.
 function normalizeListenPort(port: string, bindSucceeded: boolean): string {
-  const n = Number(port);
-  if (!Number.isNaN(n)) {
-    return String(n);
+  if (isDecimalPort(port)) {
+    return String(Number(port));
   }
   if (!bindSucceeded) {
     return port;
   }
   const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
   return resolved !== undefined ? String(resolved) : port;
+}
+
+// isDecimalPort reports whether a port string is a Go-style decimal port: a
+// non-empty run of ASCII digits (optionally zero-padded), matching the grammar
+// Go's net.LookupPort treats as a numeric port (strconv.Atoi, decimal only).
+// The empty string (an omitted port, e.g. "0.0.0.0:") is also a decimal port —
+// net.LookupPort resolves it to 0 (the ephemeral wildcard) — so it normalizes
+// to "0" via normalizeListenPort. JavaScript's Number("0x50") (hex) and
+// Number("1e2") (exponent) are NOT decimal ports: Go routes them through the
+// service-name database (net.LookupPort), where /etc/services may map them to
+// a different port than the hex/exponent value, so they must not be coerced to
+// a decimal port in the browser.
+function isDecimalPort(port: string): boolean {
+  return port === "" || /^\d+$/.test(port);
 }
 
 // listenerRebindFailedFor reports whether a listener rebind failed during the

@@ -1173,6 +1173,100 @@ test("saveNotice keeps the service-name forecast when a non-listener save retrie
   assert.equal(notice, `${restartNotice} · ${rebindFailure} · ${applyWarning} · ${writeWarning}`);
 });
 
+test("saveNotice deduplicates a successful rebind for a hostname that looks like an invalid IPv4 (256.1.1.1)", () => {
+  // A dotted-quad whose octets are all 1-3 digits but not all ≤255 (e.g.
+  // 256.1.1.1) is not a valid IPv4 address — Go's net.Listen treats it as a
+  // hostname and resolves it via DNS, so the serving address (channel 2, from
+  // net.Addr().String()) is a literal IP (e.g. 10.0.0.1). isListenHostLiteral
+  // must reject 256.1.1.1 as a literal so the hostname relaxation matches the
+  // configured hostname to the resolved serving IP on a successful rebind. The
+  // old regex /^\d{1,3}(\.\d{1,3}){3}$/ classified 256.1.1.1 as a literal
+  // (every octet is 1-3 digits), so the hostname relaxation was skipped and the
+  // strict host comparison (256.1.1.1 vs 10.0.0.1) surfaced both the forecast
+  // and the notice for the same successful bind.
+  const configuredAddr = "256.1.1.1:8443";
+  const servingAddr = "10.0.0.1:8443";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the resolved serving IP 10.0.0.1) only; 256.1.1.1 is not a valid
+  // IPv4 literal (octet 256 > 255), so isListenHostLiteral classifies it as a
+  // hostname and the hostname relaxation matches it to the serving IP on the
+  // successful rebind.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
+test("saveNotice keeps a hex-service-name port forecast on a failed rebind (0x50 is not a decimal port)", () => {
+  // JavaScript's Number("0x50") coerces the hex string to 80, but Go's
+  // net.LookupPort treats "0x50" as a service name (strconv.Atoi rejects hex),
+  // so on a host whose /etc/services maps "0x50" to a different port the hex
+  // value is not the decimal port 80. A failed rebind leaves the old port 80
+  // serving while the configured "0x50" forecasts the future port /etc/services
+  // resolves it to; coercing "0x50" to 80 (the old Number() behavior) would
+  // make the forecast compare equal to the serving port 80 and suppress a
+  // distinct future-state warning. isDecimalPort recognizes only decimal-digit
+  // strings as numeric (matching Go's port parser), so "0x50" is treated as a
+  // service name and normalizeListenPort returns it unchanged on a failed
+  // rebind; the strict port comparison keeps the forecast and the serving notice
+  // distinct.
+  const configuredAddr = "0.0.0.0:0x50";
+  const servingAddr = "0.0.0.0:80";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const rebindFailure = `apply network.listen_addr "${configuredAddr}": listen tcp ${configuredAddr}: bind: address already in use — daemon still serving on the previous address "${servingAddr}"`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "deferred",
+      warnings: [rebindFailure, applyWarning],
+    }),
+  );
+  // Both the rebind failure and the exposure notice surface alongside the
+  // forecast: 0x50 is a service name (not a decimal port), so normalizeListenPort
+  // returns it unchanged and the strict port comparison (0x50 vs 80) does not
+  // collapse the forecast onto the serving notice.
+  assert.equal(notice, `${restartNotice} · ${rebindFailure} · ${applyWarning} · ${writeWarning}`);
+});
+
+test("saveNotice deduplicates a hex-service-name forecast on a successful rebind (0x50 resolves to the serving port)", () => {
+  // The other half of the hex-service-name case: on a successful rebind the
+  // configured service name IS the serving port the kernel resolved it to, so
+  // the resolved-port relaxation (bindSucceeded) matches a non-decimal forecast
+  // (a service name like 0x50 that /etc/services maps to a port) to any
+  // concrete numeric serving port. isDecimalPort("0x50") is false (hex is not
+  // Go's decimal port grammar), so the relaxation's !isDecimalPort(wPort)
+  // branch treats 0x50 as a service name and matches it to the decimal serving
+  // port — the same path as http-alt or any other name the WELL_KNOWN_TCP_SERVICES
+  // table does not carry.
+  const configuredAddr = "0.0.0.0:0x50";
+  const servingAddr = "0.0.0.0:8080";
+  const writeWarning = `network.listen_addr "${configuredAddr}" is reachable from the network and network.require_token is false, which puts a plain-HTTP control plane with no authentication in front of anyone who can reach it — including DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. Run \`af config set network.require_token true\` to require a token (\`af token show\` prints it), or set network.listen_addr back to a loopback address such as 127.0.0.1:8443, or "" to turn the web server off.`;
+  const applyWarning = `network.listen_addr "${servingAddr}" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (\`af token show\` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only`;
+  const restartNotice = "Applied — the running daemon is using the new value now.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.listen_addr", value: configuredAddr, path: "/tmp/config.toml", requires_restart: false, warnings: [writeWarning] },
+      restart_notice: restartNotice,
+      apply_outcome: "applied",
+      warnings: [applyWarning],
+    }),
+  );
+  // Channel 2 (the resolved serving port 8080) only; the 0x50 forecast is a
+  // service name the rebind resolved, and the relaxation matches it to the
+  // concrete serving port on the successful rebind.
+  assert.equal(notice, `${restartNotice} · ${applyWarning}`);
+});
+
 test("saveNotice tolerates an older daemon that sends no address", () => {
   // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
   // form must not render "undefined" at the user.

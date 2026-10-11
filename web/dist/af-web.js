@@ -7686,8 +7686,8 @@ function listenerExposureDedup(writeId, applyId, bindSucceeded) {
   if (wPort === aPort) {
     return true;
   }
-  if (bindSucceeded && aPort !== "0" && !isNaN(Number(aPort))) {
-    if (wPort === "0" || isNaN(Number(wPort))) {
+  if (bindSucceeded && aPort !== "0" && isDecimalPort(aPort)) {
+    if (wPort === "0" || !isDecimalPort(wPort)) {
       return true;
     }
   }
@@ -7697,7 +7697,9 @@ function isListenHostLiteral(host) {
   if (host.includes(":")) {
     return true;
   }
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
+  const octets = host.split(".");
+  if (octets.length !== 4) return false;
+  return octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
 }
 function splitListenHostPort(addr) {
   if (addr.startsWith("[")) {
@@ -7901,15 +7903,17 @@ var WELL_KNOWN_TCP_SERVICES = new Map(
   })
 );
 function normalizeListenPort(port, bindSucceeded) {
-  const n = Number(port);
-  if (!Number.isNaN(n)) {
-    return String(n);
+  if (isDecimalPort(port)) {
+    return String(Number(port));
   }
   if (!bindSucceeded) {
     return port;
   }
   const resolved = WELL_KNOWN_TCP_SERVICES.get(port.toLowerCase());
   return resolved !== void 0 ? String(resolved) : port;
+}
+function isDecimalPort(port) {
+  return port === "" || /^\d+$/.test(port);
 }
 function listenerRebindFailedFor(warnings, listenerKey) {
   const prefix = "apply " + listenerKey + " ";
