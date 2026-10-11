@@ -382,7 +382,7 @@ codex = "/global/codex"
 default_program = "aider"
 
 [program_overrides]
-codex = "/repo/codex"
+codex = "repo/codex"
 `)
 	selector := filepath.Join(repoRoot, "nested")
 	require.NoError(t, os.Mkdir(selector, 0755))
