@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // statusPollLease bounds how long a single PauseStatusPoll silences an
@@ -405,12 +406,11 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
 	} else if obs.Captured && !obs.Baseline {
-		if obs.HasPrompt {
-			// A confirmation dialog is an active waiting state, not
-			// stillness (#5221 review): withhold the stamp and retire an
-			// open candidate — the still run must be prompt-free or a
-			// turn parked at a dialog would latch the edge and let its
-			// resumed output pass as the new prompt's churn.
+		if obs.HasPrompt || task.IsWorkingContent(obs.Content, instance.ResolvedAgent()) {
+			// A confirmation dialog or a static working indicator is an
+			// active state, not stillness (#5221 review): withhold the
+			// stamp and retire an open candidate — see the normal-poll
+			// branch for why a working frame can never stamp the edge.
 			instance.NotePaneWaitingAtEpoch(epoch)
 		} else if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
 			// A confirmed-unchanged frame is the stillness edge a boundary
@@ -776,12 +776,18 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// unanswered capture is all-false here — Updated AND Baseline — so it
 		// must be gated out explicitly or the blind frame would stamp the
 		// edge it cannot see (#5221 review).
-		if hasPrompt {
-			// A confirmation dialog is an active waiting state, not
-			// stillness (#5221 review): withhold the stamp and retire an
-			// open candidate — the still run must be prompt-free or a
-			// turn parked at a dialog would latch the edge and let its
-			// resumed output pass as the new prompt's churn.
+		if hasPrompt || task.IsWorkingContent(content, instance.ResolvedAgent()) {
+			// A confirmation dialog or a static working indicator is an
+			// active state, not stillness (#5221 review): withhold the
+			// stamp and retire an open candidate — the still run must be
+			// prompt-free or a turn parked at a dialog would latch the
+			// edge and let its resumed output pass as the new prompt's
+			// churn. Working content is affirmative mid-turn evidence even
+			// when the pane sits unchanged through an unbounded tool call
+			// (amp/opencode — resolveIdleLiveness reads it the same way):
+			// letting it stamp would latch the still base ON the old turn's
+			// own frame and prime the next boundary's watcher with evidence
+			// the previous prompt already produced.
 			instance.NotePaneWaitingAtEpoch(epoch)
 		} else if instance.NotePaneStillAtEpoch(nowFunc(), epoch) {
 			settlementCheckpoint = true

@@ -233,6 +233,78 @@ func TestPromptWaitRetiresTaskRunStillCandidate(t *testing.T) {
 		"an uninterrupted run past the grace latches the edge")
 }
 
+// workingWaitBackend answers HasUpdatedObserved with a confirmed-unchanged
+// frame showing amp's static mid-turn indicator — the shape a turn parked on
+// an unbounded tool call produces (#5221 review).
+type workingWaitBackend struct {
+	*session.FakeBackend
+	working bool
+}
+
+func (b *workingWaitBackend) HasUpdatedObserved(*session.Instance) (bool, bool, string, bool, bool) {
+	content := ampPaneIdle
+	if b.working {
+		content = ampPaneThinking
+	}
+	return false, false, content, false, true
+}
+
+// A visible working indicator is affirmative mid-turn evidence, not
+// stillness (#5221 review): an unchanged capture carrying one must withhold
+// the still stamp AND retire an open candidate, or a boundary bound over an
+// in-flight amp turn latches the still base ON that turn's own frame — and
+// noteTaskRunTurnEvidence then primes the redelivery's watcher with proof
+// the older prompt already produced.
+func TestWorkingFrameRetiresTaskRunStillCandidate(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &workingWaitBackend{FakeBackend: session.NewFakeBackend(), working: true}
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "work-still", Path: repoPath, Program: "amp", TaskID: "task-work-still",
+	})
+	require.NoError(t, err)
+	inst.SetBackend(backend)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstance(t, repoID, "work-still", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "work-still")] = inst
+	manager.mu.Unlock()
+	key := stableSessionKey(repoID, inst)
+
+	now := time.Now()
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	// A redelivery binds a contended boundary that owes the still edge.
+	boundary := now.Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, boundary))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(now.Add(-30*time.Second), epoch))
+	require.True(t, inst.RecordPromptAttempt(session.PromptSentUnverified, now.Add(-15*time.Second)))
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(), "precondition: a rebind owes the stillness edge")
+
+	// The old turn's static working frame holds unchanged for the whole
+	// stillness grace and more — it must never open the candidate.
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(),
+		"a working frame held past the grace must not latch the still edge")
+
+	// The turn ends: the bare frame stamps stillness, but the edge re-earns
+	// its own grace — it cannot borrow the working frames' elapsed time.
+	backend.working = false
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.True(t, inst.TaskRunStillBaseAt().IsZero(),
+		"the first idle frame after working ones re-opens, not latches")
+	now = now.Add(6 * time.Second)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+	require.False(t, inst.TaskRunStillBaseAt().IsZero(),
+		"an uninterrupted prompt-free working-free run latches the edge")
+}
+
 // The paused backstop probe must drop an unanswered capture whole: settling
 // the all-false frame would read the pane idle on no evidence, letting the
 // last confirmed capture's still-live streak release the quiet arm mid-outage

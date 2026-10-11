@@ -492,29 +492,46 @@ func TestTaskRunRedeliveryMidTurnReleasesOnPostStillChurn(t *testing.T) {
 		"churn that began after the observed still edge is the redelivery's own turn evidence")
 }
 
-// A redelivery onto an already-quiet pane is NOT contended: churn stale
-// beyond the quiet grace proves the prior activity ended before the send,
-// so the boundary seeds its stillness base at the attempt and ordinary
-// post-attempt churn counts immediately (#5221 review).
-func TestTaskRunRedeliveryOntoQuietPaneSeedsStillBase(t *testing.T) {
+// A redelivery never seeds its stillness base from the pane's stale churn
+// timestamp (#5221 review): an old churn stamp is not observed idleness —
+// an agent holding a static mid-turn indicator (amp/opencode) churns
+// nothing while it works, so the same stale-churn shape reads "prior turn
+// ended" and "turn parked on an unbounded tool call" alike. The base stays
+// owed until a confirmed-unchanged capture re-earns it; only churn begun
+// after that observed edge is attributable to the redelivery.
+func TestTaskRunRedeliveryOntoQuietPaneOwesStillBase(t *testing.T) {
 	inst := taskRunSession(t)
 
 	t0 := time.Now().Add(-3 * taskRunCompletionSilentGrace)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t0))
-	// The prior turn ended a full grace before the redelivery.
+	// The prior turn's bytes stopped a full grace before the redelivery —
+	// the stale-churn shape the old code seeded from.
 	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.RecordPaneChurnAtEpoch(t0.Add(10*time.Second), epoch))
 	t1 := t0.Add(10*time.Second + taskRunCompletionQuietGrace)
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, t1))
-	require.Equal(t, t1, inst.taskRunStillBaseAt,
-		"a pane already quiet at the redelivery seeds the stillness base at the send")
+	require.True(t, inst.taskRunStillBaseAt.IsZero(),
+		"a redelivery owes observed idleness, not an old churn timestamp")
 	_, epoch = inst.InFlightOpAndEpoch()
 
+	// Immediate post-rebind churn is still not attributable — the pane was
+	// never proven still under this boundary.
 	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(5*time.Second), epoch))
 	observeContinuously(inst, t0)
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
+	require.True(t, inst.TaskRunActive(),
+		"churn before the observed still edge is not the redelivery's evidence")
+
+	// Sustained confirmed stillness re-earns the edge; churn after it is
+	// attributable and the ordinary churn→quiet contract resumes.
+	_, epoch = inst.InFlightOpAndEpoch()
+	require.False(t, inst.NotePaneStillAtEpoch(t1.Add(20*time.Second), epoch))
+	require.True(t, inst.NotePaneStillAtEpoch(t1.Add(20*time.Second+taskRunStillGrace), epoch))
+	require.True(t, inst.RecordPaneChurnAtEpoch(t1.Add(21*time.Second+taskRunStillGrace), epoch))
+	observeContinuously(inst, t0)
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
-		"an uncontended redelivery keeps the ordinary churn→quiet contract")
+		"churn after the observed still edge releases on the quiet arm")
 }
 
 // Chrome observed while the boundary says the prompt never landed is not

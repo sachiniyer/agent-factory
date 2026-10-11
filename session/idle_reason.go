@@ -156,11 +156,6 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 	if i.lastPromptAttemptAt.Equal(attemptedAt) && i.lastPromptDeliveryStatus == status {
 		return false
 	}
-	// Churn within a quiet grace of this send is possibly an in-flight turn —
-	// evaluated BEFORE the fence below can clear the stamp, so a capture that
-	// raced the send counts as activity at the attempt, not as a clean pane.
-	churnNearAttempt := !i.lastPaneChurnAt.IsZero() &&
-		attemptedAt.Sub(i.lastPaneChurnAt) < taskRunCompletionQuietGrace
 	// The attempt and pane snapshots share their runtime's observation lock, while stateEpoch
 	// fences the apply after Snapshot returns. Retire a churn timestamp applied by
 	// an observation that completed immediately before this attempt acquired that
@@ -190,11 +185,12 @@ func (i *Instance) recordPromptAttemptLocked(status PromptDeliveryStatus, attemp
 		// Post-boundary churn may stand in for the turn only if the pane was
 		// observed still at-or-after the attempt (#5221 review). A first bind
 		// seeds the base at the send — boot/echo churn is the very window the
-		// quiet arm exists to absorb. A rebind seeds only when the pane had
-		// already gone still for a full grace: a redelivery landing on a
-		// churning pane may be mid-turn, so its churn must wait for the first
-		// confirmed-unchanged capture to be attributable.
-		if !rebind || !churnNearAttempt {
+		// quiet arm exists to absorb. A rebind never seeds: an old churn
+		// timestamp is not observed idleness — an agent holding a static
+		// mid-turn indicator (amp/opencode) churns nothing while it works —
+		// so the base stays owed until a confirmed-unchanged capture with no
+		// working or waiting content re-earns it (#5221 review).
+		if !rebind {
 			i.taskRunStillBaseAt = attemptedAt
 		} else {
 			i.taskRunStillBaseAt = time.Time{}
@@ -618,23 +614,17 @@ func taskRunPromptAttemptAtFromData(data InstanceData) time.Time {
 
 // taskRunStillBaseAtFromData restores the stillness edge the quiet arm's
 // churn must follow (#5221 review). A persisted value survives verbatim; a
-// zero one is re-derived exactly as the bind decides it — churn within the
-// quiet grace of the attempt is possibly an in-flight turn, so the edge
-// stays owed, while anything staler seeded the base at the send. Rows that
-// predate the field re-derive the same answer rather than inheriting a
-// blanket seed.
+// zero one STAYS zero — the bind owed it, and an old churn stamp cannot
+// re-seed what only observed idleness may prove: an agent holding a static
+// mid-turn indicator churns nothing while it works, so stale churn reads
+// "turn ended" and "turn parked" alike (#5221 review). Rows that predate
+// the field re-earn the edge from the next confirmed-still capture rather
+// than inheriting a blanket seed.
 func taskRunStillBaseAtFromData(data InstanceData, taskRunAttemptAt time.Time) time.Time {
 	if !data.TaskRunActive || taskRunAttemptAt.IsZero() {
 		return time.Time{}
 	}
-	if !data.TaskRunStillBaseAt.IsZero() {
-		return data.TaskRunStillBaseAt
-	}
-	if data.LastPaneChurnAt.IsZero() ||
-		taskRunAttemptAt.Sub(data.LastPaneChurnAt) >= taskRunCompletionQuietGrace {
-		return taskRunAttemptAt
-	}
-	return time.Time{}
+	return data.TaskRunStillBaseAt
 }
 
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in
