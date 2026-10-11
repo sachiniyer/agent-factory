@@ -1013,3 +1013,16 @@ func TestTaskRunStillCandidateRetiresOnPromptWait(t *testing.T) {
 		"an uninterrupted run past the grace latches the edge")
 	require.False(t, inst.TaskRunStillBaseAt().IsZero())
 }
+
+// The reverse transition is NOT symmetric (#5221 review): a slower cadence
+// may not extend what the previous capture vouched. The live poll's 1s tick
+// declares an 11s expiry, so a first backstop capture at +29s — inside the
+// backstop's own horizon — is still a hole: the pane went unobserved through
+// the attach, and churn-and-return in that window must not pass as silence.
+func TestNotePaneCaptureObservedSlowerCadenceDoesNotExtendExpiry(t *testing.T) {
+	inst := taskRunSession(t)
+	t0 := time.Now()
+	inst.NotePaneCaptureObserved(t0, time.Second) // live poll: expiry t0+11s
+	require.True(t, inst.NotePaneCaptureObserved(t0.Add(29*time.Second), 30*time.Second),
+		"a slower cadence cannot extend the window the previous capture vouched")
+}

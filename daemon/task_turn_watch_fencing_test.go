@@ -82,12 +82,16 @@ func TestNoteTaskRunTurnEvidenceDistinguishesConfirmedEmpty(t *testing.T) {
 	require.True(t, watched, "a confirmed empty capture arms the scoped watcher")
 }
 
-// The streak's expected cadence must follow the serial sweep, not just the
+// The streak's expiry reserve must follow the serial sweep, not just the
 // configured tick: a fleet pass longer than its tick still captures every
 // session on schedule, and only a gap beyond that honest spacing may rebase
-// the observation streak (#5221 review). The floor is CAPPED, though: a pass
-// slower than the cap is a stall that left panes genuinely unwatched, not a
-// schedule to normalize — blindness that long must rebase the streak.
+// the observation streak (#5221 review). The reserve also carries one
+// capped sweep outright — position drift can move a session from the start
+// of one pass to the end of the next, so the declared expiry anticipates it
+// at write time rather than re-judging at read time. Sweep terms stay
+// CAPPED: a pass slower than the cap is a stall that left panes genuinely
+// unwatched, not a schedule to normalize — blindness that long must rebase
+// the streak.
 func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 	old := lastStatusSweepNs.Load()
 	oldStart := statusSweepStartNs.Load()
@@ -99,31 +103,29 @@ func TestStatusSweepExpectedIntervalFloorsAtSweepDuration(t *testing.T) {
 		"no sweep history: the scheduled interval alone applies")
 
 	lastStatusSweepNs.Store(int64(500 * time.Millisecond))
-	require.Equal(t, time.Second, statusSweepExpectedInterval(time.Second),
-		"a sweep faster than the tick does not shorten the expected cadence")
+	require.Equal(t, time.Second+500*time.Millisecond, statusSweepExpectedInterval(time.Second),
+		"a fast sweep still reserves its own duration for next-pass drift")
 
 	lastStatusSweepNs.Store(int64(20 * time.Second))
-	require.Equal(t, 20*time.Second, statusSweepExpectedInterval(time.Second),
-		"an honest overrun within the cap becomes the expected cadence")
+	require.Equal(t, 40*time.Second, statusSweepExpectedInterval(time.Second),
+		"an honest overrun reserves lastSweep for pacing plus lastSweep for drift")
 
 	lastStatusSweepNs.Store(int64(10 * time.Minute))
-	require.Equal(t, statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"a stalled pass is not normalized as cadence: its blindness must rebase streaks")
-	require.Equal(t, taskRunPollBackstop, statusSweepExpectedInterval(taskRunPollBackstop),
-		"the paused backstop cadence is unaffected by a stalled pass")
+	require.Equal(t, 2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"a stalled pass is not normalized as cadence: only its capped terms count")
+	require.Equal(t, taskRunPollBackstop+statusSweepFloorCap, statusSweepExpectedInterval(taskRunPollBackstop),
+		"the backstop cadence paces the reserve; the stall adds only the drift term")
 
-	// An operator-set interval slower than the cap is itself the declared
-	// cadence: a sweep overrunning it stays within the operator's own bound,
-	// so the expected interval must not be compressed to the cap.
+	// An operator-set interval slower than the cap is the pacing term, so
+	// position drift ADDS to it rather than hiding inside it (#5221 review).
 	lastStatusSweepNs.Store(int64(3 * time.Minute))
-	require.Equal(t, 2*time.Minute, statusSweepExpectedInterval(2*time.Minute),
+	require.Equal(t, 2*time.Minute+statusSweepFloorCap, statusSweepExpectedInterval(2*time.Minute),
 		"a configured cadence above the cap is preserved, not compressed")
 }
 
-// One pass's duration alone understates a session's real capture spacing:
-// map iteration can move a session from the start of one sweep to the end of
-// the next, a gap of lastSweep + elapsed — so the expected interval credits
-// the in-flight pass's progress too, each term bounded by the stall cap
+// One pass's duration plus one position's worth of drift is the honest
+// spacing until the next capture of the same session: map iteration can
+// move a session from the start of one sweep to the end of the next
 // (#5221 review).
 func TestStatusSweepExpectedIntervalCoversPositionDrift(t *testing.T) {
 	old := lastStatusSweepNs.Load()
@@ -139,23 +141,24 @@ func TestStatusSweepExpectedIntervalCoversPositionDrift(t *testing.T) {
 	nowFunc = func() time.Time { return now }
 
 	// A 20s completed sweep, this capture landing 15s into the next pass:
-	// the session that was first last time and sits here now spanned ~35s.
+	// pacing is 20s, position 15s, next-pass drift reserved 20s — 55s.
 	lastStatusSweepNs.Store(int64(20 * time.Second))
 	statusSweepStartNs.Store(now.Add(-15 * time.Second).UnixNano())
-	require.Equal(t, 35*time.Second, statusSweepExpectedInterval(time.Second),
-		"first-in-last-pass to here is a 35s on-schedule gap, not a hole")
+	require.Equal(t, 55*time.Second, statusSweepExpectedInterval(time.Second),
+		"the reserve covers this pass's pacing, position, and next-pass drift")
 
-	// A session near the pass's end gets nearly two sweeps of honest spacing.
+	// A session near the pass's end gets nearly two capped sweeps of reserve,
+	// bounded by scheduled + two caps.
 	now = now.Add(19 * time.Second)
-	require.Equal(t, 20*time.Second+statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"position drift across two passes spans lastSweep + elapsed, each capped")
+	require.Equal(t, time.Second+2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"elapsed and drift terms each stay bounded, and the sum is bounded too")
 
 	// Each term stays capped: two stalled passes contribute at most the cap
 	// apiece, never normalizing their own blindness.
 	lastStatusSweepNs.Store(int64(10 * time.Minute))
 	now = now.Add(10 * time.Minute)
-	require.Equal(t, 2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
-		"stalled passes cannot stretch the honest span past two capped terms")
+	require.Equal(t, time.Second+2*statusSweepFloorCap, statusSweepExpectedInterval(time.Second),
+		"stalled passes cannot stretch the reserve past scheduled + two capped terms")
 }
 
 // flakyCaptureBackend answers HasUpdatedObserved with a FAILED capture —

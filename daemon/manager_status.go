@@ -502,32 +502,27 @@ func (m *Manager) RefreshStatuses() {
 // produce; capped at the backstop's own scale so that failure is bounded.
 var statusSweepFloorCap = 30 * time.Second
 
-// statusSweepExpectedInterval returns the cadence the pane-observation streak
-// may assume between consecutive captures of the same session: the larger of
-// the caller's scheduled interval and the honest spacing one session's
-// captures can legitimately span — the previous serial sweep's duration PLUS
-// the elapsed position of this capture inside the in-flight one, because map
-// iteration can move a session from the start of one pass to the end of the
-// next (#5221 review). Each sweep term is floored at statusSweepFloorCap: the
-// cap marks how much pass duration counts as schedule before the leftover is
-// a stall, so two capped spans bound the honest per-session spacing without
-// normalizing blindness — and the bound itself never goes below the caller's
-// declared cadence, since an operator-set interval slower than the caps
-// already accepts that much spacing (#5221 review). The first sweep after
-// daemon start has no predecessor and no in-flight pass, so the scheduled
-// interval alone applies.
+// statusSweepExpectedInterval returns the expiry reserve a capture may
+// declare for the streak — the honest spacing until the NEXT capture of the
+// same session (#5221 review). Map iteration moves a session between
+// positions in consecutive serial passes, so the next gap can span the rest
+// of the in-flight pass plus a whole further pass's start spacing:
+// max(scheduled, lastSweep) paces the passes, elapsed is this capture's
+// position inside the current one, and a second lastSweep reserves for the
+// next pass's position outright. Each sweep term is floored at
+// statusSweepFloorCap — a pass slower than that is a stall that left panes
+// unwatched, not a schedule — and the whole span is bounded by
+// scheduled+2*cap, so an operator-set interval slower than the caps is the
+// pacing term, not compressed away.
 func statusSweepExpectedInterval(scheduled time.Duration) time.Duration {
-	span := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
+	last := min(time.Duration(lastStatusSweepNs.Load()), statusSweepFloorCap)
+	var elapsed time.Duration
 	if start := statusSweepStartNs.Load(); start > 0 {
-		elapsed := nowFunc().Sub(time.Unix(0, start))
-		if elapsed > 0 {
-			span += min(elapsed, statusSweepFloorCap)
+		if e := nowFunc().Sub(time.Unix(0, start)); e > 0 {
+			elapsed = min(e, statusSweepFloorCap)
 		}
 	}
-	if span > scheduled {
-		return min(span, max(scheduled, 2*statusSweepFloorCap))
-	}
-	return scheduled
+	return min(max(scheduled, last)+elapsed+last, scheduled+2*statusSweepFloorCap)
 }
 
 // refreshInstanceStatus mirrors the old runMetadataTick body for one instance:
