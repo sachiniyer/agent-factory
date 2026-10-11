@@ -155,7 +155,7 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 		{name: "env unset", command: "env -u HOME codex"},
 		{name: "bare env attributed", command: "env codex", environ: []string{"PATH=" + with}, want: "codex"},
 		{name: "bare env unattributable", command: "env codex", environ: []string{"PATH=."}},
-		{name: "bare env no hit", command: "env codex", environ: []string{"PATH=" + without}},
+		{name: "bare env all-absolute no hit", command: "env codex", environ: []string{"PATH=" + without}, want: "codex"},
 		{name: "bare env absolute operand", command: "env /opt/codex", environ: []string{"PATH=" + with}, want: "codex"},
 		{name: "in-tree symlink absolute", command: inside, workDir: workDir},
 		{name: "bare agent dot PATH first", command: "codex", environ: []string{"PATH=.:" + with}},
@@ -164,7 +164,7 @@ func TestGrantAgentForCommandRequiresOperatorAttributableExecutable(t *testing.T
 		{name: "bare agent miss before relative PATH", command: "codex", environ: []string{"PATH=" + without + ":bin"}},
 		{name: "bare agent leading empty PATH", command: "codex", environ: []string{"PATH=:" + with}},
 		{name: "bare agent empty PATH", command: "codex", environ: []string{"PATH="}},
-		{name: "bare agent PATH without hit", command: "codex", environ: []string{"PATH=" + without}},
+		{name: "bare agent all-absolute PATH no hit", command: "codex", environ: []string{"PATH=" + without}, want: "codex"},
 		{name: "bare agent no PATH entry", command: "codex", environ: []string{"HOME=/h"}, want: "codex"},
 		{name: "claude bare", command: "claude", want: "claude"},
 		{name: "claude relative", command: "./claude"},
@@ -263,6 +263,7 @@ func TestGrantAgentForCommandWalksSearchPathLikeExecvp(t *testing.T) {
 	with := t.TempDir()
 	writeExecutableFixture(t, with, "codex")
 	without := t.TempDir()
+	without2 := t.TempDir()
 	tests := []struct {
 		name string
 		path string
@@ -274,6 +275,11 @@ func TestGrantAgentForCommandWalksSearchPathLikeExecvp(t *testing.T) {
 		{name: "absolute with hit then dot", path: with + ":.", want: "codex"},
 		{name: "miss then hit", path: without + ":" + with, want: "codex"},
 		{name: "miss then relative then hit", path: without + ":bin:" + with},
+		// All-absolute walk with no hit grants: execvp can then only fail,
+		// never land in the repository — denying would strip an operator's
+		// grant from a bare name that is simply not installed (#5265).
+		{name: "all-absolute no hit", path: without + ":" + without2, want: "codex"},
+		{name: "no hit then relative", path: without + ":" + without2 + ":bin"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
