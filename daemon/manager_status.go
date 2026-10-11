@@ -278,7 +278,7 @@ type taskRunTurnWatchEntry struct {
 // the same map — while the evidence write follows the observation epoch fence,
 // same as RecordPaneChurnCheckpointAtEpoch above.
 func (m *Manager) noteTaskRunTurnEvidence(key string, instance *session.Instance, content string, capturedAt time.Time, epoch uint64) bool {
-	if !instance.TaskRunActive() || content == "" {
+	if !instance.TaskRunActive() {
 		return false
 	}
 	// ResolvedAgent, not Program: the pane runs what the last handoff or
@@ -446,8 +446,12 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		return
 	}
 	// First good frame of this process's life: the quiet arm's evidence floor
-	// starts here, not at row materialization (#5221 review).
-	instance.NotePaneCaptureObserved(capturedAt)
+	// starts when the capture RETURNS, not when the request left — a slow
+	// remote round-trip is not observed silence (#5221 review). The
+	// request-start `capturedAt` stays the turn-age bound below: that check
+	// needs the earliest instant the frame could exist, this one needs the
+	// moment its knowledge actually landed.
+	instance.NotePaneCaptureObserved(nowFunc())
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	churnCheckpoint := false
 	if obs.Updated {
@@ -713,8 +717,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		return
 	}
 	// First good frame of this process's life: the quiet arm's evidence floor
-	// starts here, not at row materialization (#5221 review).
-	instance.NotePaneCaptureObserved(capturedAt)
+	// starts when the capture RETURNS, not when the request left — a slow
+	// remote round-trip is not observed silence (#5221 review).
+	instance.NotePaneCaptureObserved(nowFunc())
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
 	settlementCheckpoint := false

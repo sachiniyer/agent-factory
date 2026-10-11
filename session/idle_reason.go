@@ -332,9 +332,11 @@ func (i *Instance) taskRunQuietReleaseLocked() bool {
 
 // taskRunSilentReleaseLocked is the bounded release for a turn the poll can
 // miss completely: no chrome, and not even churn — the pane never changed
-// after the attempt. It measures from the ATTEMPT, not the last churn, and at
-// a grace an order of magnitude past the quiet arm so a slow boot cannot ride
-// it out (#5221 review).
+// after the attempt. It measures from the later of the ATTEMPT and this
+// process's first observed capture — elapsed wall time is not silence, and
+// unobserved restart/stall time cannot complete the window (#5221 review) —
+// at a grace an order of magnitude past the quiet arm so a slow boot cannot
+// ride it out.
 //
 // Caller holds i.mu.
 func (i *Instance) taskRunSilentReleaseLocked() bool {
@@ -344,7 +346,14 @@ func (i *Instance) taskRunSilentReleaseLocked() bool {
 		// output. The silent arm is only for a pane that never moved at all.
 		return false
 	}
-	return time.Since(i.taskRunPromptAttemptAt) >= taskRunCompletionSilentGrace
+	if i.paneEvidenceFloorAt.IsZero() {
+		return false
+	}
+	base := i.taskRunPromptAttemptAt
+	if i.paneEvidenceFloorAt.After(base) {
+		base = i.paneEvidenceFloorAt
+	}
+	return time.Since(base) >= taskRunCompletionSilentGrace
 }
 
 // ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.

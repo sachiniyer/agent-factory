@@ -513,8 +513,10 @@ func TestTaskRunSilentTurnReleasesAfterLongGrace(t *testing.T) {
 
 	inst := taskRunSession(t)
 	// Attempt far enough back that the compressed silent grace has elapsed,
-	// with zero churn recorded at any point.
+	// with zero churn recorded at any point. The poll has been watching since
+	// the send — the window is elapsed OBSERVED silence, not wall time.
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now().Add(-10*time.Second)))
+	inst.NotePaneCaptureObserved(time.Now().Add(-10 * time.Second))
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.False(t, inst.TaskRunActive(),
@@ -531,6 +533,7 @@ func TestTaskRunSilentArmDoesNotRideOutBoot(t *testing.T) {
 	inst := taskRunSession(t)
 	// Recent attempt, no churn — the 30s quiet arm can't fire either.
 	require.True(t, inst.RecordPromptAttempt(PromptSentUnverified, time.Now()))
+	inst.NotePaneCaptureObserved(time.Now())
 
 	require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 	require.True(t, inst.TaskRunActive(),
