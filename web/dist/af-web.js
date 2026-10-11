@@ -7655,12 +7655,26 @@ function shouldCloseSavedField(status, editing, statusIsNew) {
 function isListenerExposureWarning(w) {
   return w.includes("is reachable from the network");
 }
+function listenerExposureKey(w) {
+  const m = w.match(/^(\S+) "/);
+  return m ? m[1] : "";
+}
 function saveNotice(resp) {
   const parts = [];
   const writeWarnings = resp.result.warnings ?? [];
   const applyWarnings = resp.warnings ?? [];
-  const applyHasExposure = applyWarnings.some(isListenerExposureWarning);
-  const warnings = applyWarnings.length > 0 ? [...applyWarnings, ...writeWarnings.filter((w) => !(isListenerExposureWarning(w) && applyHasExposure))] : writeWarnings;
+  const warnings = applyWarnings.length > 0 ? [...applyWarnings, ...writeWarnings.filter((w) => {
+    if (applyWarnings.includes(w)) {
+      return false;
+    }
+    if (isListenerExposureWarning(w)) {
+      const key = listenerExposureKey(w);
+      if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureKey(aw) === key)) {
+        return false;
+      }
+    }
+    return true;
+  })] : writeWarnings;
   if ((resp.result.requires_restart || warnings.length > 0) && resp.restart_notice !== "") {
     parts.push(resp.restart_notice);
   }

@@ -295,6 +295,53 @@ test("saveNotice preserves channel 2 order with multiple apply warnings and appe
   assert.equal(notice, `Saved — could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason). · ${w2} · ${w3} · ${w1}`);
 });
 
+test("saveNotice does not duplicate a per-write advisory the server already merged into channel 2", () => {
+  // On a failed or unconfirmed apply the server's completeConfigSaveWarnings
+  // copies every result.warning into resp.warnings before returning, so a
+  // non-exposure advisory (e.g. an unregistered-account warning on a
+  // default_accounts write) that the write produced is already in channel 2
+  // verbatim. The form must not append channel 1's copy on top of it — the
+  // exposure-only filter would, rendering the advisory twice. A write warning
+  // already present in channel 2 is dropped verbatim.
+  const advisory =
+    'no claude account named "missing" is registered on this machine, so a session using this default will be refused rather than started. Register it with `af accounts add claude missing` and log in';
+  const applyError =
+    "saved config, but live apply failed: reload config: expected a top-level item to end with a newline";
+  const restartNotice =
+    "Saved — the running daemon could not apply the new configuration and is still using its previous value. Resolve the warning, then retry the save or restart the daemon before relying on the saved value.";
+  const notice = saveNotice(
+    setResp({
+      result: { key: "default_accounts.claude", value: "missing", path: "/tmp/config.toml", requires_restart: false, warnings: [advisory] },
+      restart_notice: restartNotice,
+      // completeConfigSaveWarnings merged the advisory into channel 2 on the
+      // failed apply, so it appears here verbatim alongside the apply error.
+      warnings: [advisory, applyError],
+      apply_outcome: "failed",
+    }),
+  );
+  assert.equal(notice, `${restartNotice} · ${advisory} · ${applyError}`);
+});
+
+test("saveNotice keeps a preview exposure forecast when channel 2 exposes a different listener", () => {
+  // The exposure dedup matches the listener, not the phrase: channel 2 can carry
+  // the control-plane exposure notice (network.listen_addr) while channel 1
+  // carries a failed preview bind's on-disk exposure forecast
+  // (network.preview_listen_addr). Both contain "is reachable from the
+  // network", but a notice for one listener is not an authoritative copy of a
+  // forecast for the other — the two listeners are independent — so the preview
+  // forecast is kept.
+  const previewForecast = 'network.preview_listen_addr "0.0.0.0:9444" is reachable from the network · it is the web-tab preview origin, kept separate from network.listen_addr so it never serves the daemon control API · it serves your previewed dev servers, each on its own hostname · a remote browser gains nothing from the bind: per-tab origins are *.localhost names, which a browser resolves to its own machine, so remote viewers keep the same-origin preview on network.listen_addr · but *.localhost is a browser convention, not a restriction — anything that reaches this address can send Host: <tab>.localhost itself, and a tab\'s hostname is the only credential this listener checks, so a hostname that leaks through a log, a screenshot, or browser history becomes readable from the network instead of only from this machine · editor tabs are withheld entirely while this is network-bound · set it to a loopback address such as 127.0.0.1:9444, or "" to disable it';
+  const listenNotice = 'network.listen_addr "0.0.0.0:9443" is reachable from the network and network.require_token is false, so af serves its full control API — including DeliverPrompt, which runs instructions through your agents — to anyone who can reach that address, with no authentication and no TLS · set network.require_token = true to require a bearer token (`af token show` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this machine only';
+  const notice = saveNotice(
+    setResp({
+      result: { key: "network.preview_listen_addr", value: "0.0.0.0:9444", path: "/tmp/config.toml", requires_restart: false, warnings: [previewForecast] },
+      restart_notice: "Applied — the running daemon is using the new value now.",
+      warnings: [listenNotice],
+    }),
+  );
+  assert.equal(notice, `Applied — the running daemon is using the new value now. · ${listenNotice} · ${previewForecast}`);
+});
+
 test("saveNotice tolerates an older daemon that sends no address", () => {
   // listener_addr is additive: a daemon predating #3722 omits it entirely, and the
   // form must not render "undefined" at the user.

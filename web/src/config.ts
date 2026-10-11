@@ -206,14 +206,15 @@ export function shouldCloseSavedField(
  * `default_accounts` write) produces a rebind failure on channel 2 while
  * channel 1 carries the unregistered-account advisory the write produced, and
  * a channel-2-only read would lose it. The form therefore MERGES both channels
- * rather than choosing one, with a single exception: the tokenless-exposure
- * forecast the writer emits (exposureWarning) is the same hazard the
- * apply-time notice (ListenerExposureNotice) describes in different words, and
- * the server keeps channel 2 authoritative for that one on a successful
- * exposure transition — the forecast is dropped when channel 2 already carries
- * the notice, so the hazard is shown once in the authoritative wording. Other
- * per-write advisories (the unregistered-account warning, the project-scoped
- * branch_prefix notice) have no apply-side counterpart and are always preserved.
+ * rather than choosing one, suppressing two kinds of duplication after channel
+ * 2: a write warning already copied into channel 2 verbatim by the server's
+ * failed/unconfirmed merge, and the tokenless-exposure forecast (exposureWarning)
+ * for a listener channel 2 already carries the authoritative notice
+ * (ListenerExposureNotice/PreviewListenerExposureNotice) for — matched by
+ * listener key, so a notice for network.listen_addr does not suppress a forecast
+ * for network.preview_listen_addr. Other per-write advisories (the
+ * unregistered-account warning, the project-scoped branch_prefix notice) have no
+ * apply-side counterpart and are always preserved.
  *
  * The restart notice is normally shown only for a key that requires a restart,
  * since "Applied" under every field is noise. A warning overrides that gate:
@@ -234,6 +235,22 @@ function isListenerExposureWarning(w: string): boolean {
   return w.includes("is reachable from the network");
 }
 
+// listenerExposureKey returns the listener key an exposure warning describes —
+// `network.listen_addr` or `network.preview_listen_addr` — so a forecast for one
+// listener is deduplicated only against an authoritative notice for the SAME
+// listener. Both channels format the exposure identically: the key, then a
+// quoted address, then "is reachable from the network ...", so the key is the
+// prefix before the first quoted address. Two different listeners can each
+// carry an exposure notice (a successful control-plane rebind on channel 2
+// while a preview rebind failed on channel 1, or the inverse), and a notice for
+// one is not an authoritative copy of a forecast for the other. Returns "" for a
+// warning that is not an exposure warning; callers gate on
+// isListenerExposureWarning first.
+function listenerExposureKey(w: string): string {
+  const m = w.match(/^(\S+) "/);
+  return m ? m[1] : "";
+}
+
 export function saveNotice(resp: ConfigSetResponse): string {
   const parts: string[] = [];
   const writeWarnings = resp.result.warnings ?? [];
@@ -241,20 +258,39 @@ export function saveNotice(resp: ConfigSetResponse): string {
   // Merge both warning channels so independent per-write advisories (e.g. an
   // unregistered-account warning on a default_accounts write) survive even when
   // channel 2 carries an unrelated apply warning (e.g. a pending rebind retried
-  // on that same save). The ONE exception is the tokenless-exposure forecast:
-  // both the writer (exposureWarning, channel 1) and the applier
-  // (ListenerExposureNotice, channel 2) describe that hazard in different words,
-  // and the server keeps channel 2 authoritative on a successful exposure
-  // transition. Suppress the forecast when channel 2 already carries the
-  // notice so the hazard shows once, in the authoritative wording. Other
-  // per-write advisories have no apply-side counterpart and are always shown.
-  // isListenerExposureWarning identifies the exposure notice by the phrase
-  // "... is reachable from the network ..." that exposureWarning and
-  // ListenerExposureNotice/PreviewListenerExposureNotice both use; neither the
-  // rebind-failure error nor the unregistered-account advisory contains it.
-  const applyHasExposure = applyWarnings.some(isListenerExposureWarning);
+  // on that same save). Two classes of duplication are suppressed after channel 2:
+  //
+  //   1. A write warning already in channel 2 verbatim. On a failed or
+  //      unconfirmed apply the server's completeConfigSaveWarnings copies every
+  //      result.warning into resp.warnings before returning, so an advisory the
+  //      write produced would otherwise render twice (once per channel) the
+  //      moment the apply also failed.
+  //   2. The tokenless-exposure forecast (channel 1, exposureWarning) for a
+  //      listener the apply also exposed (channel 2,
+  //      ListenerExposureNotice/PreviewListenerExposureNotice). Both channels
+  //      phrase that hazard differently and the server keeps channel 2
+  //      authoritative on a successful exposure transition, so the forecast is
+  //      dropped only when channel 2 carries the notice for the SAME listener —
+  //      network.listen_addr and network.preview_listen_addr are independent
+  //      listeners, and a notice for one is not an authoritative copy of a
+  //      forecast for the other. listenerExposureKey matches them.
+  //
+  // Other per-write advisories (the unregistered-account warning, the
+  // project-scoped branch_prefix notice) have no apply-side counterpart and are
+  // always preserved.
   const warnings = applyWarnings.length > 0
-    ? [...applyWarnings, ...writeWarnings.filter(w => !(isListenerExposureWarning(w) && applyHasExposure))]
+    ? [...applyWarnings, ...writeWarnings.filter((w) => {
+        if (applyWarnings.includes(w)) {
+          return false;
+        }
+        if (isListenerExposureWarning(w)) {
+          const key = listenerExposureKey(w);
+          if (applyWarnings.some((aw) => isListenerExposureWarning(aw) && listenerExposureKey(aw) === key)) {
+            return false;
+          }
+        }
+        return true;
+      })]
     : writeWarnings;
   // A warning makes the apply outcome actionable even for an ordinarily-live
   // key. In that case the restart notice must not be hidden by the key's static
